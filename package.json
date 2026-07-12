@@ -1,0 +1,10 @@
+{
+  "name": "fox-workspace",
+  "private": true,
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "dev": "pnpm --dir apps/desktop dev",
+    "build": "pnpm --dir apps/desktop build",
+    "tauri": "pnpm --dir apps/desktop tauri"
+  }
+}
