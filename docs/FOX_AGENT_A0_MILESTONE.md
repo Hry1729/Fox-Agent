@@ -1,6 +1,6 @@
 # Milestone：A0-Minimal-Work-Loop
 
-> GitHub 状态：仓库当前未配置 remote，且本机 `gh` 未登录，因此本文件作为可直接迁移到 GitHub 的 Milestone/Issue 定义。
+> GitHub Milestone：[A0-Minimal-Work-Loop](https://github.com/Hry1729/Fox-Agent/milestone/1)
 >
 > 详细规格：`docs/FOX_AGENT_A0_SPECIFICATION.md`
 
@@ -10,7 +10,7 @@
 
 ## Issue 清单
 
-### A0-01 数据模型与迁移
+### [A0-01 数据模型与迁移](https://github.com/Hry1729/Fox-Agent/issues/1)
 
 **范围**
 
@@ -27,7 +27,7 @@
 
 **依赖**：无。
 
-### A0-02 Repository 与状态机服务
+### [A0-02 Repository 与状态机服务](https://github.com/Hry1729/Fox-Agent/issues/2)
 
 **范围**
 
@@ -43,7 +43,7 @@
 
 **依赖**：A0-01。
 
-### A0-03 Runtime Host Tools 与事件协议
+### [A0-03 Runtime Host Tools 与事件协议](https://github.com/Hry1729/Fox-Agent/issues/3)
 
 **范围**
 
@@ -59,7 +59,7 @@
 
 **依赖**：A0-02。
 
-### A0-04 工作模式门控
+### [A0-04 工作模式门控](https://github.com/Hry1729/Fox-Agent/issues/4)
 
 **范围**
 
@@ -75,7 +75,7 @@
 
 **依赖**：A0-03。
 
-### A0-05 前端状态归并与恢复
+### [A0-05 前端状态归并与恢复](https://github.com/Hry1729/Fox-Agent/issues/5)
 
 **范围**
 
@@ -91,7 +91,7 @@
 
 **依赖**：A0-03。
 
-### A0-06 工作闭环 UI
+### [A0-06 工作闭环 UI](https://github.com/Hry1729/Fox-Agent/issues/6)
 
 **范围**
 
@@ -107,7 +107,7 @@
 
 **依赖**：A0-05。
 
-### A0-07 中断恢复与 Evidence 校验
+### [A0-07 中断恢复与 Evidence 校验](https://github.com/Hry1729/Fox-Agent/issues/7)
 
 **范围**
 
@@ -123,7 +123,7 @@
 
 **依赖**：A0-02、A0-05。
 
-### A0-08 自动化测试与真实任务验收
+### [A0-08 自动化测试与真实任务验收](https://github.com/Hry1729/Fox-Agent/issues/8)
 
 **范围**
 
@@ -140,7 +140,7 @@
 
 **依赖**：A0-01 至 A0-07。
 
-### A0-09 文档、诊断与发布检查
+### [A0-09 文档、诊断与发布检查](https://github.com/Hry1729/Fox-Agent/issues/9)
 
 **范围**
 
