@@ -17,6 +17,14 @@ use std::{
 };
 use uuid::Uuid;
 
+mod work_graph;
+
+#[allow(unused_imports)]
+pub use work_graph::{
+    AddEvidenceInput, CreateGoalInput, CreateTaskInput, GoalRepository, RepositoryError,
+    TaskEvidenceRepository, WorkTaskRepository,
+};
+
 const DEFAULT_AGENT_ID: &str = "fox-general";
 const INITIAL_HISTORY_MESSAGES: usize = 120;
 const MAX_STORED_TOOL_RESULT_BYTES: usize = 128 * 1024;
@@ -63,52 +71,19 @@ impl Database {
         })
     }
 
-    /// Atomically advances a work task while enforcing the A0 evidence invariant.
-    pub fn update_work_task_status(
-        &self,
-        task_id: &str,
-        expected_status: &str,
-        next_status: &str,
-        updated_at: &str,
-    ) -> Result<(), String> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "database lock is poisoned".to_owned())?;
-        let transaction = connection
-            .transaction()
-            .map_err(|error| error.to_string())?;
+    #[allow(dead_code)] // Consumed by the FOX-3 Host protocol in the next milestone.
+    pub fn goals(&self) -> GoalRepository {
+        GoalRepository::new(self.clone())
+    }
 
-        if next_status == "completed" {
-            let evidence_count: i64 = transaction
-                .query_row(
-                    "SELECT COUNT(*) FROM task_evidence WHERE task_id = ?1",
-                    [task_id],
-                    |row| row.get(0),
-                )
-                .map_err(|error| error.to_string())?;
-            if evidence_count == 0 {
-                return Err("completed work task requires at least one evidence record".to_owned());
-            }
-        }
+    #[allow(dead_code)] // Consumed by the FOX-3 Host protocol in the next milestone.
+    pub fn work_tasks(&self) -> WorkTaskRepository {
+        WorkTaskRepository::new(self.clone())
+    }
 
-        let changed = transaction
-            .execute(
-                "UPDATE work_tasks
-                 SET status = ?3, updated_at = ?4,
-                     finished_at = CASE
-                         WHEN ?3 IN ('completed', 'skipped') THEN ?4
-                         ELSE finished_at
-                     END
-                 WHERE id = ?1 AND status = ?2",
-                params![task_id, expected_status, next_status, updated_at],
-            )
-            .map_err(|error| error.to_string())?;
-        if changed == 0 {
-            return Err("work task was not found or its status changed".to_owned());
-        }
-
-        transaction.commit().map_err(|error| error.to_string())
+    #[allow(dead_code)] // Consumed by the FOX-3 Host protocol in the next milestone.
+    pub fn task_evidence(&self) -> TaskEvidenceRepository {
+        TaskEvidenceRepository::new(self.clone())
     }
 
     pub fn known_attachment_paths(&self) -> Result<Vec<String>, String> {
@@ -3517,75 +3492,6 @@ mod tests {
             created_at: 1,
             last_accessed_at,
         }
-    }
-
-    #[test]
-    fn completed_work_task_requires_evidence() {
-        let (database, path) = test_database();
-        let conversation = database
-            .create_conversation(DEFAULT_AGENT_ID, Some("A0"), None, None)
-            .expect("create conversation");
-        database
-            .with_connection(|connection| {
-                connection.execute(
-                    "INSERT INTO goals(
-                        id, conversation_id, title, objective, status, created_by,
-                        created_at, updated_at
-                     ) VALUES ('goal-a0', ?1, 'A0', 'A0', 'active', 'user', '1', '1')",
-                    [&conversation.id],
-                )?;
-                connection.execute(
-                    "INSERT INTO work_tasks(
-                        id, goal_id, ordinal, title, status, created_at, updated_at
-                     ) VALUES ('task-a0', 'goal-a0', 0, 'Task', 'in_progress', '1', '1')",
-                    [],
-                )?;
-                Ok(())
-            })
-            .expect("seed work task");
-
-        let error = database
-            .update_work_task_status("task-a0", "in_progress", "completed", "2")
-            .expect_err("completion without evidence must fail");
-        assert!(error.contains("requires at least one evidence"));
-        database
-            .with_connection(|connection| {
-                let status: String = connection.query_row(
-                    "SELECT status FROM work_tasks WHERE id = 'task-a0'",
-                    [],
-                    |row| row.get(0),
-                )?;
-                assert_eq!(status, "in_progress");
-                connection.execute(
-                    "INSERT INTO task_evidence(
-                        id, task_id, evidence_type, ref_kind, ref_id, summary, created_at
-                     ) VALUES ('evidence-a0', 'task-a0', 'external_reference', 'source',
-                               'https://example.invalid/evidence', 'verified result', '2')",
-                    [],
-                )?;
-                Ok(())
-            })
-            .expect("add evidence");
-
-        database
-            .update_work_task_status("task-a0", "in_progress", "completed", "3")
-            .expect("complete task with evidence");
-        database
-            .with_connection(|connection| {
-                connection.query_row(
-                    "SELECT status, finished_at FROM work_tasks WHERE id = 'task-a0'",
-                    [],
-                    |row| {
-                        assert_eq!(row.get::<_, String>(0)?, "completed");
-                        assert_eq!(row.get::<_, String>(1)?, "3");
-                        Ok(())
-                    },
-                )
-            })
-            .expect("verify completed task");
-
-        drop(database);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
