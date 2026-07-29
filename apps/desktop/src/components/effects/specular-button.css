@@ -1,0 +1,85 @@
+.specular-button {
+  --sb-radius: 18px;
+  --sb-tint: #ffffff;
+  --sb-tint-opacity: 0;
+  --sb-blur: 0px;
+  --sb-text-color: #f5f5f5;
+  --sb-line-color: #ffffff;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: visible;
+  border: 1px solid rgba(148, 163, 184, .42);
+  margin: 0;
+  border-radius: var(--sb-radius);
+  outline: none;
+  background: color-mix(in srgb, var(--sb-tint) calc(var(--sb-tint-opacity) * 100%), transparent);
+  color: var(--sb-text-color);
+  font-family: inherit;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0;
+  box-shadow: none;
+  backdrop-filter: blur(var(--sb-blur));
+  -webkit-backdrop-filter: blur(var(--sb-blur));
+  cursor: pointer;
+  transition: transform 150ms ease, filter 150ms ease;
+}
+
+.specular-button:hover { filter: brightness(1.04); }
+.specular-button:active { transform: scale(.97); }
+.specular-button:focus-visible { outline: 2px solid color-mix(in srgb, var(--sb-text-color) 62%, transparent); outline-offset: 3px; }
+.specular-button:disabled { opacity: .55; cursor: default; }
+.specular-button:disabled:active { transform: none; }
+.specular-button--sm { min-height: 32px; padding: 8px 16px; font-size: 12px; }
+.specular-button--md { min-height: 40px; padding: 11px 24px; font-size: 14px; }
+.specular-button--lg { min-height: 50px; padding: 15px 34px; font-size: 16px; }
+.specular-button__fx { position: absolute; z-index: 1; inset: -20px; pointer-events: none; }
+.specular-button__fx canvas { width: 100%; height: 100%; display: block; }
+.specular-button__label { position: relative; z-index: 2; display: inline-flex; align-items: center; gap: 6px; }
+
+.specular-border {
+  --sb-radius: 18px;
+  --sb-line-color: #ffffff;
+  position: absolute;
+  z-index: 4;
+  inset: 0;
+  overflow: visible;
+  border-radius: var(--sb-radius);
+  pointer-events: none;
+}
+
+.specular-border__fx { position: absolute; inset: -20px; pointer-events: none; }
+.specular-border__fx canvas { width: 100%; height: 100%; display: block; }
+
+/* Visible fallback while WebGL initializes or is unavailable. */
+.specular-button::after,
+.specular-border::after {
+  content: '';
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: linear-gradient(110deg, transparent 18%, var(--sb-line-color) 45%, transparent 72%);
+  background-size: 240% 100%;
+  animation: foxSpecularFallback 2.8s linear infinite;
+  pointer-events: none;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+
+.specular-button[data-specular-renderer]::after,
+.specular-border[data-specular-renderer]::after { opacity: 0; animation: none; }
+
+@keyframes foxSpecularFallback {
+  from { background-position: 160% 0; }
+  to { background-position: -80% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .specular-button::after,
+  .specular-border::after { animation: none; background-position: 50% 0; }
+}

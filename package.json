@@ -5,6 +5,15 @@
   "scripts": {
     "dev": "pnpm --dir apps/desktop dev",
     "build": "pnpm --dir apps/desktop build",
-    "tauri": "pnpm --dir apps/desktop tauri"
+    "runtime:test": "pnpm --dir services/agent-runtime test",
+    "runtime:build": "pnpm --dir services/agent-runtime build:sidecar",
+    "runtime:smoke": "pnpm --dir services/agent-runtime smoke:sidecar",
+    "knowledge:verify-preview": "node scripts/verify-knowledge-preview-contract.mjs",
+    "knowledge:verify-preview:test": "node --test scripts/verify-knowledge-preview-contract.test.mjs",
+    "tauri": "pnpm --dir apps/desktop tauri",
+    "tauri:build": "pnpm runtime:build && pnpm --dir apps/desktop tauri build"
+  },
+  "dependencies": {
+    "border-beam": "^1.3.0"
   }
 }

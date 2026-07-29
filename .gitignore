@@ -1,6 +1,27 @@
 node_modules/
 dist/
+!services/agent-runtime/dist/
+services/agent-runtime/dist/*
+!services/agent-runtime/dist/.gitkeep
 target/
+.runtime-*/
+
+# Local reference projects and design experiments are not product source.
+apps/desktop/public/mascot/Yuxi/
+apps/opendesign/
+apps/opendesign2/
+apps/*.pen
+
+# TypeScript/Vite generated files.
+*.tsbuildinfo
+apps/desktop/vite.config.js
+apps/desktop/vite.config.d.ts
+apps/desktop/tailwind.config.js
+apps/desktop/tailwind.config.d.ts
+
+# pnpm is the workspace package manager.
+package-lock.json
+
 .env
 .env.*
 !.env.example

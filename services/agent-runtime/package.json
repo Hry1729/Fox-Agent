@@ -1,0 +1,17 @@
+{
+  "name": "@fox/agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/pi-runtime.mjs",
+    "start:fake": "node src/fake-runtime.mjs",
+    "build:sidecar": "node scripts/build-sidecar.mjs",
+    "smoke:sidecar": "node scripts/smoke-sidecar.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.79.9",
+    "@earendil-works/pi-ai": "0.79.9"
+  }
+}

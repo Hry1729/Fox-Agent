@@ -505,6 +505,7 @@ export type PromptInputProps = Omit<
     code: "max_files" | "max_file_size" | "accept";
     message: string;
   }) => void;
+  onSubmitStart?: (message: PromptInputMessage) => void;
   onSubmit: (
     message: PromptInputMessage,
     event: FormEvent<HTMLFormElement>
@@ -520,6 +521,7 @@ export const PromptInput = ({
   maxFiles,
   maxFileSize,
   onError,
+  onSubmitStart,
   onSubmit,
   children,
   ...props
@@ -558,18 +560,23 @@ export const PromptInput = ({
         return true;
       }
 
+      const filename = f.name.toLowerCase();
+      const mediaType = f.type.toLowerCase();
       const patterns = accept
         .split(",")
-        .map((s) => s.trim())
+        .map((s) => s.trim().toLowerCase())
         .filter(Boolean);
 
       return patterns.some((pattern) => {
+        if (pattern.startsWith(".")) {
+          return filename.endsWith(pattern);
+        }
         if (pattern.endsWith("/*")) {
           // e.g: image/* -> image/
           const prefix = pattern.slice(0, -1);
-          return f.type.startsWith(prefix);
+          return mediaType.startsWith(prefix);
         }
-        return f.type === pattern;
+        return mediaType === pattern;
       });
     },
     [accept]
@@ -853,6 +860,13 @@ export const PromptInput = ({
             return (formData.get("message") as string) || "";
           })();
 
+      // Let the host render an optimistic user turn before attachment conversion
+      // or any asynchronous runtime bridge work begins.
+      onSubmitStart?.({
+        files: files.map(({ id: _id, ...item }) => item),
+        text,
+      });
+
       // Reset form immediately after capturing text to avoid race condition
       // where user input during async blob conversion would be lost
       if (!usingProvider) {
@@ -899,7 +913,7 @@ export const PromptInput = ({
         // Don't clear on error - user may want to retry
       }
     },
-    [usingProvider, controller, files, onSubmit, clear]
+    [usingProvider, controller, files, onSubmitStart, onSubmit, clear]
   );
 
   // Render with or without local provider
@@ -1279,7 +1293,7 @@ export const PromptInputSelectTrigger = ({
   <SelectTrigger
     className={cn(
       "border-none bg-transparent font-medium text-muted-foreground shadow-none transition-colors",
-      "hover:bg-accent hover:text-foreground aria-expanded:bg-accent aria-expanded:text-foreground",
+      "hover:bg-accent hover:text-accent-foreground aria-expanded:bg-accent aria-expanded:text-accent-foreground",
       className
     )}
     {...props}
@@ -1392,7 +1406,7 @@ export const PromptInputTabItem = ({
 }: PromptInputTabItemProps) => (
   <div
     className={cn(
-      "flex items-center gap-2 px-3 py-2 text-xs hover:bg-accent",
+      "flex items-center gap-2 px-3 py-2 text-xs hover:bg-accent hover:text-accent-foreground",
       className
     )}
     {...props}

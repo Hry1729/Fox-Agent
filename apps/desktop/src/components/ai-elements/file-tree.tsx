@@ -152,8 +152,9 @@ export const FileTreeFolder = ({
   }, [togglePath, path]);
 
   const handleSelect = useCallback(() => {
+    togglePath(path);
     onSelect?.(path);
-  }, [onSelect, path]);
+  }, [onSelect, path, togglePath]);
 
   const folderContextValue = useMemo(
     () => ({ isExpanded, name, path }),
@@ -171,8 +172,8 @@ export const FileTreeFolder = ({
         >
           <div
             className={cn(
-              "flex w-full items-center gap-1 rounded px-2 py-1 text-left transition-colors hover:bg-muted/50",
-              isSelected && "bg-muted"
+              "flex w-full items-center gap-1 rounded px-2 py-1 text-left transition-colors hover:bg-accent hover:text-accent-foreground",
+              isSelected && "bg-[#e8f4ff] dark:bg-[#233b53]"
             )}
           >
             <CollapsibleTrigger asChild>
@@ -258,8 +259,8 @@ export const FileTreeFile = ({
     <FileTreeFileContext.Provider value={fileContextValue}>
       <div
         className={cn(
-          "flex cursor-pointer items-center gap-1 rounded px-2 py-1 transition-colors hover:bg-muted/50",
-          isSelected && "bg-muted",
+          "flex cursor-pointer items-center gap-1 rounded px-2 py-1 transition-colors hover:bg-accent hover:text-accent-foreground",
+          isSelected && "bg-[#e8f4ff] dark:bg-[#233b53]",
           className
         )}
         onClick={handleClick}

@@ -1,0 +1,59 @@
+.shiny-text {
+  display: inline-block;
+  color: var(--shiny-text-color, currentColor);
+  background-image: linear-gradient(
+    108deg,
+    var(--shiny-text-color, currentColor) 0%,
+    var(--shiny-text-color, currentColor) 34%,
+    var(--shiny-text-accent, var(--shiny-text-highlight, currentColor)) 42%,
+    var(--shiny-text-highlight, currentColor) 48%,
+    var(--shiny-text-highlight, currentColor) 52%,
+    var(--shiny-text-accent, var(--shiny-text-highlight, currentColor)) 58%,
+    var(--shiny-text-color, currentColor) 66%,
+    var(--shiny-text-color, currentColor) 100%
+  );
+  background-size: 240% 100%;
+  background-position: 100% 0;
+  background-repeat: no-repeat;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shiny-text-shine 5s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.shiny-text.disabled {
+  animation: none;
+  background-image: none;
+  color: var(--shiny-text-color, currentColor);
+  -webkit-text-fill-color: currentColor;
+}
+
+@keyframes shiny-text-shine {
+  0%,
+  10% {
+    background-position: 100% 0;
+  }
+
+  90%,
+  100% {
+    background-position: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shiny-text {
+    animation: none;
+    background-image: none;
+    color: var(--shiny-text-color, currentColor);
+    -webkit-text-fill-color: currentColor;
+  }
+}
+
+@media (forced-colors: active) {
+  .shiny-text {
+    animation: none;
+    background-image: none;
+    color: CanvasText;
+    -webkit-text-fill-color: currentColor;
+  }
+}

@@ -5,14 +5,14 @@ import { cn } from "@/lib/utils";
 import type { UIMessage } from "ai";
 import { ArrowDownIcon, DownloadIcon } from "lucide-react";
 import type { ComponentProps } from "react";
-import { useCallback } from "react";
+import { useCallback, useLayoutEffect, useRef } from "react";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 
 export type ConversationProps = ComponentProps<typeof StickToBottom>;
 
 export const Conversation = ({ className, ...props }: ConversationProps) => (
   <StickToBottom
-    className={cn("relative flex-1 overflow-y-auto overscroll-contain", className)}
+    className={cn("relative min-h-0 flex-1 overflow-hidden", className)}
     initial="smooth"
     resize="smooth"
     role="log"
@@ -33,6 +33,44 @@ export const ConversationContent = ({
     {...props}
   />
 );
+
+export type ConversationAutoScrollProps = {
+  scrollKey?: string | null;
+};
+
+export const ConversationAutoScroll = ({
+  scrollKey,
+}: ConversationAutoScrollProps) => {
+  const { scrollToBottom } = useStickToBottomContext();
+  const previousKey = useRef<string | null>(null);
+
+  useLayoutEffect(() => {
+    if (!scrollKey || previousKey.current === scrollKey) return;
+    previousKey.current = scrollKey;
+    let firstFrame = 0;
+    let secondFrame = 0;
+    const timers: number[] = [];
+    const ensureVisible = () => {
+      void scrollToBottom({ animation: "instant", ignoreEscapes: true });
+    };
+
+    ensureVisible();
+    firstFrame = window.requestAnimationFrame(() => {
+      ensureVisible();
+      secondFrame = window.requestAnimationFrame(ensureVisible);
+    });
+    timers.push(window.setTimeout(ensureVisible, 80));
+    timers.push(window.setTimeout(ensureVisible, 220));
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+      for (const timer of timers) window.clearTimeout(timer);
+    };
+  }, [scrollKey, scrollToBottom]);
+
+  return null;
+};
 
 export type ConversationEmptyStateProps = ComponentProps<"div"> & {
   title?: string;

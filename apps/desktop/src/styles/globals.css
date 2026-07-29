@@ -1,13 +1,16 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
-@import "@fontsource-variable/inter";
+@import "../../node_modules/harmonyos-sans-sc-webfont-splitted/dist/Regular.css";
+@import "../../node_modules/harmonyos-sans-sc-webfont-splitted/dist/Medium.css";
+@import "../../node_modules/harmonyos-sans-sc-webfont-splitted/dist/Semibold.css";
+@import "../../node_modules/harmonyos-sans-sc-webfont-splitted/dist/Bold.css";
 @source "../**/*.{ts,tsx}";
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-sans: "Inter Variable", sans-serif;
+  --font-sans: "HarmonyOS Sans SC", "Segoe UI", system-ui, sans-serif;
   --font-heading: var(--font-sans);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -42,7 +45,7 @@
 }
 
 :root {
-  font-family: Inter, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  font-family: "HarmonyOS Sans SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   color: var(--foreground);
   background: var(--background);
   font-synthesis: none;
@@ -52,15 +55,19 @@
   --fox-card: var(--card);
   --fox-panel: var(--muted);
   --fox-elevated: color-mix(in oklch, var(--card) 94%, transparent);
-  --fox-hover: var(--accent);
+  --fox-blue: #3978c5;
+  --fox-blue-soft: #e8f4ff;
+  --fox-blue-soft-hover: #deefff;
+  --fox-hover: color-mix(in oklch, var(--fox-panel) 78%, var(--fox-card));
   --fox-border: var(--border);
   --fox-border-strong: color-mix(in oklch, var(--border) 72%, var(--foreground) 28%);
   --fox-text: var(--foreground);
   --fox-muted: var(--muted-foreground);
   --fox-faint: color-mix(in oklch, var(--muted-foreground) 72%, transparent);
-  --fox-accent: var(--primary);
-  --fox-accent-soft: color-mix(in oklch, var(--primary) 13%, transparent);
-  --fox-user: color-mix(in oklch, var(--primary) 8%, var(--card));
+  --fox-accent: var(--fox-blue);
+  --fox-accent-soft: var(--fox-blue-soft);
+  --fox-user: var(--primary);
+  --fox-user-foreground: var(--primary-foreground);
   --fox-shadow: 0 16px 45px color-mix(in oklch, var(--foreground) 12%, transparent);
 }
 
@@ -71,15 +78,19 @@
   --fox-card: var(--card);
   --fox-panel: var(--muted);
   --fox-elevated: color-mix(in oklch, var(--card) 96%, transparent);
-  --fox-hover: var(--accent);
+  --fox-blue: #78aee8;
+  --fox-blue-soft: #233b53;
+  --fox-blue-soft-hover: #294965;
+  --fox-hover: color-mix(in oklch, var(--fox-panel) 82%, var(--fox-card));
   --fox-border: var(--border);
   --fox-border-strong: color-mix(in oklch, var(--border) 65%, var(--foreground) 35%);
   --fox-text: var(--foreground);
   --fox-muted: var(--muted-foreground);
   --fox-faint: color-mix(in oklch, var(--muted-foreground) 75%, transparent);
-  --fox-accent: var(--primary);
-  --fox-accent-soft: color-mix(in oklch, var(--primary) 15%, transparent);
-  --fox-user: color-mix(in oklch, var(--primary) 10%, var(--card));
+  --fox-accent: var(--fox-blue);
+  --fox-accent-soft: var(--fox-blue-soft);
+  --fox-user: var(--primary);
+  --fox-user-foreground: var(--primary-foreground);
   --fox-shadow: 0 18px 55px color-mix(in oklch, black 35%, transparent);
 }
 
@@ -88,10 +99,29 @@ html, body, #root { margin: 0; width: 100%; height: 100%; overflow: hidden; }
 button, input, textarea { font: inherit; }
 button { color: inherit; }
 
+button:not(:disabled),
+a[href],
+[role="button"]:not([aria-disabled="true"]),
+[role="menuitem"]:not([data-disabled]),
+[role="option"]:not([data-disabled]),
+[role="tab"]:not([aria-disabled="true"]),
+[role="switch"]:not([aria-disabled="true"]),
+[role="checkbox"]:not([aria-disabled="true"]),
+[data-slot="select-trigger"]:not([data-disabled]),
+[data-slot="select-item"]:not([data-disabled]) {
+  cursor: pointer;
+}
+
+button:disabled,
+[aria-disabled="true"],
+[data-disabled] {
+  cursor: not-allowed;
+}
+
 @layer base {
   .theme {
     --font-heading: var(--font-sans);
-    --font-sans: 'Inter Variable', sans-serif;
+    --font-sans: 'HarmonyOS Sans SC', 'Segoe UI', system-ui, sans-serif;
   }
   :root {
     --background: oklch(1 0 0);
@@ -102,11 +132,11 @@ button { color: inherit; }
     --popover-foreground: oklch(0.148 0.004 228.8);
     --primary: oklch(0.488 0.243 264.376);
     --primary-foreground: oklch(0.97 0.014 254.604);
-    --secondary: oklch(0.967 0.001 286.375);
+    --secondary: oklch(0.972 0 0);
     --secondary-foreground: oklch(0.21 0.006 285.885);
     --muted: oklch(0.963 0.002 197.1);
     --muted-foreground: oklch(0.56 0.021 213.5);
-    --accent: oklch(0.963 0.002 197.1);
+    --accent: oklch(0.958 0 0);
     --accent-foreground: oklch(0.218 0.008 223.9);
     --destructive: oklch(0.577 0.245 27.325);
     --border: oklch(0.925 0.005 214.3);
@@ -122,7 +152,7 @@ button { color: inherit; }
     --sidebar-foreground: oklch(0.148 0.004 228.8);
     --sidebar-primary: oklch(0.546 0.245 262.881);
     --sidebar-primary-foreground: oklch(0.97 0.014 254.604);
-    --sidebar-accent: oklch(0.963 0.002 197.1);
+    --sidebar-accent: oklch(0.958 0 0);
     --sidebar-accent-foreground: oklch(0.218 0.008 223.9);
     --sidebar-border: oklch(0.925 0.005 214.3);
     --sidebar-ring: oklch(0.723 0.014 214.4);
@@ -136,11 +166,11 @@ button { color: inherit; }
     --popover-foreground: oklch(0.987 0.002 197.1);
     --primary: oklch(0.424 0.199 265.638);
     --primary-foreground: oklch(0.97 0.014 254.604);
-    --secondary: oklch(0.274 0.006 286.033);
+    --secondary: oklch(0.274 0 0);
     --secondary-foreground: oklch(0.985 0 0);
     --muted: oklch(0.275 0.011 216.9);
     --muted-foreground: oklch(0.723 0.014 214.4);
-    --accent: oklch(0.275 0.011 216.9);
+    --accent: oklch(0.275 0 0);
     --accent-foreground: oklch(0.987 0.002 197.1);
     --destructive: oklch(0.704 0.191 22.216);
     --border: oklch(1 0 0 / 10%);
@@ -155,7 +185,7 @@ button { color: inherit; }
     --sidebar-foreground: oklch(0.987 0.002 197.1);
     --sidebar-primary: oklch(0.623 0.214 259.815);
     --sidebar-primary-foreground: oklch(0.97 0.014 254.604);
-    --sidebar-accent: oklch(0.275 0.011 216.9);
+    --sidebar-accent: oklch(0.275 0 0);
     --sidebar-accent-foreground: oklch(0.987 0.002 197.1);
     --sidebar-border: oklch(1 0 0 / 10%);
     --sidebar-ring: oklch(0.56 0.021 213.5);

@@ -1,0 +1,163 @@
+use serde_json::{Map, Value};
+use std::path::{Path, PathBuf};
+
+const READ_ONLY_TOOLS: [&str; 4] = ["read", "grep", "find", "ls"];
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApprovedToolCall {
+    pub tool: String,
+    pub input: Value,
+    pub resolved_path: PathBuf,
+}
+
+pub fn approve_read_only_tool(
+    tool: &str,
+    input: &Value,
+    project_root: Option<&str>,
+) -> Result<ApprovedToolCall, String> {
+    if !READ_ONLY_TOOLS.contains(&tool) {
+        return Err(format!("tool is not allowed in read-only mode: {tool}"));
+    }
+    let root = project_root
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "this conversation has no authorized project folder".to_owned())?;
+    let canonical_root = canonical_directory(Path::new(root), "project folder")?;
+    let path = input
+        .as_object()
+        .and_then(|value| value.get("path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "tool input must contain a non-empty path".to_owned())?;
+    if path.contains('\0') {
+        return Err("tool path contains an invalid null byte".to_owned());
+    }
+
+    let requested = Path::new(path);
+    let joined = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        canonical_root.join(requested)
+    };
+    let canonical_target = joined
+        .canonicalize()
+        .map_err(|error| format!("tool path cannot be resolved: {error}"))?;
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err("tool path is outside the authorized project folder".to_owned());
+    }
+
+    let mut normalized = input
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "tool input must be an object".to_owned())?;
+    normalized.insert(
+        "path".to_owned(),
+        Value::String(canonical_target.to_string_lossy().into_owned()),
+    );
+    Ok(ApprovedToolCall {
+        tool: tool.to_owned(),
+        input: Value::Object(normalized),
+        resolved_path: canonical_target,
+    })
+}
+
+fn canonical_directory(path: &Path, label: &str) -> Result<PathBuf, String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("{label} cannot be resolved: {error}"))?;
+    if !canonical.is_dir() {
+        return Err(format!("{label} is not a directory"));
+    }
+    Ok(canonical)
+}
+
+pub fn preflight_payload(
+    tool: &str,
+    input: &Value,
+    project_root: Option<&str>,
+    permission_mode: &str,
+) -> (bool, Value) {
+    match approve_read_only_tool(tool, input, project_root) {
+        Ok(approved) => (
+            true,
+            Value::Object(Map::from_iter([
+                ("decision".to_owned(), Value::String("allow".to_owned())),
+                (
+                    "permissionMode".to_owned(),
+                    Value::String(permission_mode.to_owned()),
+                ),
+                ("tool".to_owned(), Value::String(approved.tool)),
+                ("input".to_owned(), approved.input),
+            ])),
+        ),
+        Err(message) => (
+            false,
+            Value::Object(Map::from_iter([
+                ("decision".to_owned(), Value::String("block".to_owned())),
+                ("message".to_owned(), Value::String(message)),
+            ])),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use uuid::Uuid;
+
+    fn test_project() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("fox-tool-guard-{}", Uuid::new_v4()));
+        fs::create_dir_all(root.join("src")).expect("create test project");
+        fs::write(root.join("src").join("note.txt"), "hello Fox").expect("write test file");
+        root
+    }
+
+    #[test]
+    fn allows_supported_tools_inside_the_project() {
+        let root = test_project();
+        let approved = approve_read_only_tool(
+            "read",
+            &serde_json::json!({"path": "src/note.txt"}),
+            root.to_str(),
+        )
+        .expect("approve project file");
+        assert!(approved
+            .resolved_path
+            .starts_with(root.canonicalize().unwrap()));
+        assert!(approved.input["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("note.txt"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn blocks_unknown_tools_and_missing_projects() {
+        let root = test_project();
+        assert!(approve_read_only_tool(
+            "bash",
+            &serde_json::json!({"path": "src/note.txt"}),
+            root.to_str(),
+        )
+        .is_err());
+        assert!(approve_read_only_tool("read", &serde_json::json!({"path": "."}), None).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn blocks_paths_outside_the_project() {
+        let root = test_project();
+        let outside = root
+            .parent()
+            .unwrap()
+            .join(format!("outside-{}.txt", Uuid::new_v4()));
+        fs::write(&outside, "outside").expect("write outside file");
+        let result =
+            approve_read_only_tool("read", &serde_json::json!({"path": outside}), root.to_str());
+        assert!(result.is_err());
+        let _ = fs::remove_file(outside);
+        let _ = fs::remove_dir_all(root);
+    }
+}

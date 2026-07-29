@@ -2,6 +2,11 @@
 
 import { Button } from "@/components/ui/button";
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -9,7 +14,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { CheckIcon, CopyIcon } from "lucide-react";
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
+  CopyIcon,
+  FileCode2Icon,
+} from "lucide-react";
 import type { ComponentProps, CSSProperties, HTMLAttributes } from "react";
 import {
   createContext,
@@ -22,12 +33,11 @@ import {
   useState,
 } from "react";
 import type {
-  BundledLanguage,
-  BundledTheme,
-  HighlighterGeneric,
+  HighlighterCore,
   ThemedToken,
-} from "shiki";
-import { createHighlighter } from "shiki";
+} from "shiki/types";
+import { createHighlighterCore } from "shiki/core";
+import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 
 // Shiki uses bitflags for font styles: 1=italic, 2=bold, 4=underline
 // oxlint-disable-next-line eslint(no-bitwise)
@@ -110,7 +120,7 @@ const LineSpan = ({
 // Types
 type CodeBlockProps = HTMLAttributes<HTMLDivElement> & {
   code: string;
-  language: BundledLanguage;
+  language: string;
   showLineNumbers?: boolean;
 };
 
@@ -129,11 +139,49 @@ const CodeBlockContext = createContext<CodeBlockContextType>({
   code: "",
 });
 
-// Highlighter cache (singleton per language)
-const highlighterCache = new Map<
-  string,
-  Promise<HighlighterGeneric<BundledLanguage, BundledTheme>>
->();
+const languageLoaders = {
+  css: () => import("@shikijs/langs/css"),
+  diff: () => import("@shikijs/langs/diff"),
+  html: () => import("@shikijs/langs/html"),
+  javascript: () => import("@shikijs/langs/javascript"),
+  json: () => import("@shikijs/langs/json"),
+  jsx: () => import("@shikijs/langs/jsx"),
+  markdown: () => import("@shikijs/langs/markdown"),
+  powershell: () => import("@shikijs/langs/powershell"),
+  python: () => import("@shikijs/langs/python"),
+  rust: () => import("@shikijs/langs/rust"),
+  shellscript: () => import("@shikijs/langs/shellscript"),
+  sql: () => import("@shikijs/langs/sql"),
+  tsx: () => import("@shikijs/langs/tsx"),
+  typescript: () => import("@shikijs/langs/typescript"),
+  yaml: () => import("@shikijs/langs/yaml"),
+} as const;
+
+type SupportedLanguage = keyof typeof languageLoaders | "plaintext";
+
+const languageAliases: Record<string, SupportedLanguage> = {
+  js: "javascript", md: "markdown", ps1: "powershell", py: "python",
+  rs: "rust", sh: "shellscript", shell: "shellscript", text: "plaintext",
+  ts: "typescript", yml: "yaml",
+};
+
+const normalizeLanguage = (language: string): SupportedLanguage => {
+  const normalized = language.trim().toLowerCase();
+  if (!normalized) return "plaintext";
+  if (normalized in languageAliases) return languageAliases[normalized];
+  return normalized in languageLoaders ? normalized as keyof typeof languageLoaders : "plaintext";
+};
+
+const highlighterPromise: Promise<HighlighterCore> = Promise.all([
+  import("@shikijs/themes/github-light"),
+  import("@shikijs/themes/github-dark"),
+]).then(([light, dark]) => createHighlighterCore({
+  engine: createJavaScriptRegexEngine(),
+  langs: [],
+  themes: [light.default, dark.default],
+}));
+
+const languageLoadCache = new Map<string, Promise<void>>();
 
 // Token cache
 const tokensCache = new Map<string, TokenizedCode>();
@@ -141,27 +189,28 @@ const tokensCache = new Map<string, TokenizedCode>();
 // Subscribers for async token updates
 const subscribers = new Map<string, Set<(result: TokenizedCode) => void>>();
 
-const getTokensCacheKey = (code: string, language: BundledLanguage) => {
+const getTokensCacheKey = (code: string, language: string) => {
   const start = code.slice(0, 100);
   const end = code.length > 100 ? code.slice(-100) : "";
   return `${language}:${code.length}:${start}:${end}`;
 };
 
-const getHighlighter = (
-  language: BundledLanguage
-): Promise<HighlighterGeneric<BundledLanguage, BundledTheme>> => {
-  const cached = highlighterCache.get(language);
-  if (cached) {
-    return cached;
+const getHighlighter = async (language: string) => {
+  const normalized = normalizeLanguage(language);
+  const highlighter = await highlighterPromise;
+  if (normalized === "plaintext" || highlighter.getLoadedLanguages().includes(normalized)) {
+    return { highlighter, language: normalized };
   }
 
-  const highlighterPromise = createHighlighter({
-    langs: [language],
-    themes: ["github-light", "github-dark"],
-  });
-
-  highlighterCache.set(language, highlighterPromise);
-  return highlighterPromise;
+  let loading = languageLoadCache.get(normalized);
+  if (!loading) {
+    loading = languageLoaders[normalized]().then((module) => {
+      highlighter.loadLanguage(...module.default);
+    });
+    languageLoadCache.set(normalized, loading);
+  }
+  await loading;
+  return { highlighter, language: normalized };
 };
 
 // Create raw tokens for immediate display while highlighting loads
@@ -183,7 +232,7 @@ const createRawTokens = (code: string): TokenizedCode => ({
 // Synchronous highlight with callback for async results
 export const highlightCode = (
   code: string,
-  language: BundledLanguage,
+  language: string,
   // oxlint-disable-next-line eslint-plugin-promise(prefer-await-to-callbacks)
   callback?: (result: TokenizedCode) => void
 ): TokenizedCode | null => {
@@ -206,10 +255,7 @@ export const highlightCode = (
   // Start highlighting in background - fire-and-forget async pattern
   getHighlighter(language)
     // oxlint-disable-next-line eslint-plugin-promise(prefer-await-to-then)
-    .then((highlighter) => {
-      const availableLangs = highlighter.getLoadedLanguages();
-      const langToUse = availableLangs.includes(language) ? language : "text";
-
+    .then(({ highlighter, language: langToUse }) => {
       const result = highlighter.codeToTokens(code, {
         lang: langToUse,
         themes: {
@@ -377,7 +423,7 @@ export const CodeBlockContent = ({
   showLineNumbers = false,
 }: {
   code: string;
-  language: BundledLanguage;
+  language: string;
   showLineNumbers?: boolean;
 }) => {
   // Memoized raw tokens for immediate display
@@ -445,6 +491,84 @@ export const CodeBlock = ({
           showLineNumbers={showLineNumbers}
         />
       </CodeBlockContainer>
+    </CodeBlockContext.Provider>
+  );
+};
+
+export type CollapsibleCodeBlockProps = CodeBlockProps & {
+  filename?: string;
+  previewLines?: number;
+  isIncomplete?: boolean;
+};
+
+export const CollapsibleCodeBlock = ({
+  code,
+  language,
+  filename,
+  previewLines = 6,
+  showLineNumbers = true,
+  isIncomplete = false,
+  className,
+  ...props
+}: CollapsibleCodeBlockProps) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const lines = useMemo(() => code.split("\n"), [code]);
+  const preview = useMemo(
+    () => lines.slice(0, previewLines).join("\n"),
+    [lines, previewLines]
+  );
+  const contextValue = useMemo(() => ({ code }), [code]);
+
+  return (
+    <CodeBlockContext.Provider value={contextValue}>
+      <Collapsible
+        className="fox-collapsible-code"
+        onOpenChange={setIsOpen}
+        open={isOpen}
+      >
+        <CodeBlockContainer
+          className={cn("fox-collapsible-code-block", className)}
+          language={language}
+          {...props}
+        >
+          <CodeBlockHeader className="fox-collapsible-code-header">
+            <CodeBlockTitle className="fox-collapsible-code-title">
+              <FileCode2Icon size={14} />
+              <CodeBlockFilename>{filename || language}</CodeBlockFilename>
+              <span>{isIncomplete ? "生成中" : `${lines.length} 行`}</span>
+            </CodeBlockTitle>
+            <CodeBlockActions className="fox-collapsible-code-actions">
+              <CodeBlockCopyButton title="复制代码" />
+              <CollapsibleTrigger asChild>
+                <Button size="sm" type="button" variant="ghost">
+                  {isOpen ? (
+                    <><ChevronUpIcon size={14} />收起代码</>
+                  ) : (
+                    <><ChevronDownIcon size={14} />展开代码</>
+                  )}
+                </Button>
+              </CollapsibleTrigger>
+            </CodeBlockActions>
+          </CodeBlockHeader>
+          {!isOpen && (
+            <div className="fox-collapsible-code-preview">
+              <CodeBlockContent
+                code={preview}
+                language={language}
+                showLineNumbers={showLineNumbers}
+              />
+              {lines.length > previewLines && <div className="fox-code-preview-fade" />}
+            </div>
+          )}
+          <CollapsibleContent className="fox-collapsible-code-content">
+            <CodeBlockContent
+              code={code}
+              language={language}
+              showLineNumbers={showLineNumbers}
+            />
+          </CollapsibleContent>
+        </CodeBlockContainer>
+      </Collapsible>
     </CodeBlockContext.Provider>
   );
 };
