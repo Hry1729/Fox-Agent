@@ -501,6 +501,84 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_document_annotations_document
     ON knowledge_document_annotations(knowledge_base_id, document_id, page, created_at);
 "#;
 
+const MIGRATION_14: &str = r#"
+CREATE TABLE goals (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    objective TEXT NOT NULL,
+    acceptance_summary TEXT,
+    status TEXT NOT NULL
+        CHECK(status IN ('proposed', 'active', 'blocked', 'completed', 'cancelled')),
+    version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    blocked_reason TEXT
+);
+
+CREATE INDEX idx_goals_conversation_updated
+    ON goals(conversation_id, updated_at DESC);
+CREATE UNIQUE INDEX idx_goals_active_per_conversation
+    ON goals(conversation_id)
+    WHERE status IN ('active', 'blocked');
+
+CREATE TABLE work_tasks (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+    parent_task_id TEXT REFERENCES work_tasks(id) ON DELETE SET NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    title TEXT NOT NULL,
+    detail TEXT,
+    status TEXT NOT NULL
+        CHECK(status IN ('queued', 'in_progress', 'completed', 'blocked', 'interrupted', 'skipped')),
+    owner_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+    attempt INTEGER NOT NULL DEFAULT 1 CHECK(attempt >= 1),
+    blocked_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+);
+
+CREATE INDEX idx_work_tasks_goal ON work_tasks(goal_id);
+CREATE INDEX idx_work_tasks_status ON work_tasks(status);
+CREATE UNIQUE INDEX idx_work_tasks_in_progress_per_goal
+    ON work_tasks(goal_id)
+    WHERE status = 'in_progress';
+
+CREATE TABLE task_evidence (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES work_tasks(id) ON DELETE CASCADE,
+    source_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+    evidence_type TEXT NOT NULL
+        CHECK(evidence_type IN ('tool_call', 'trace_span', 'test_result', 'file_diff', 'artifact', 'user_confirmation', 'external_reference')),
+    ref_kind TEXT NOT NULL
+        CHECK(ref_kind IN ('tool_call', 'artifact', 'run_event', 'message', 'source')),
+    ref_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    validity_status TEXT NOT NULL DEFAULT 'unverified'
+        CHECK(validity_status IN ('unverified', 'valid', 'stale', 'missing', 'invalid')),
+    trace_id TEXT,
+    span_id TEXT,
+    checked_at TEXT,
+    invalid_reason TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_task_evidence_task ON task_evidence(task_id);
+CREATE INDEX idx_task_evidence_validity ON task_evidence(validity_status);
+
+ALTER TABLE runs ADD COLUMN trace_id TEXT;
+ALTER TABLE runs ADD COLUMN root_span_id TEXT;
+ALTER TABLE run_events ADD COLUMN trace_id TEXT;
+ALTER TABLE run_events ADD COLUMN span_id TEXT;
+ALTER TABLE tool_calls ADD COLUMN trace_id TEXT;
+ALTER TABLE tool_calls ADD COLUMN span_id TEXT;
+"#;
+
 pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -524,6 +602,7 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     apply_migration(&transaction, 11, MIGRATION_11, now)?;
     apply_migration(&transaction, 12, MIGRATION_12, now)?;
     apply_migration(&transaction, 13, MIGRATION_13, now)?;
+    apply_migration(&transaction, 14, MIGRATION_14, now)?;
     transaction.commit()
 }
 
@@ -552,6 +631,37 @@ fn apply_migration(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run_pre_a0(connection: &mut Connection, now: i64) {
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("enable foreign keys");
+        let transaction = connection.transaction().expect("begin migration");
+        transaction.execute_batch(MIGRATION_1).expect("migration 1");
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
+                [now],
+            )
+            .expect("record migration 1");
+        for (version, sql) in [
+            (2, MIGRATION_2),
+            (3, MIGRATION_3),
+            (4, MIGRATION_4),
+            (5, MIGRATION_5),
+            (6, MIGRATION_6),
+            (7, MIGRATION_7),
+            (8, MIGRATION_8),
+            (9, MIGRATION_9),
+            (10, MIGRATION_10),
+            (11, MIGRATION_11),
+            (12, MIGRATION_12),
+            (13, MIGRATION_13),
+        ] {
+            apply_migration(&transaction, version, sql, now).expect("apply pre-A0 migration");
+        }
+        transaction.commit().expect("commit pre-A0 schema");
+    }
 
     #[test]
     fn creates_knowledge_preview_cache_settings_and_document_activity_schema() {
@@ -627,6 +737,209 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn upgrades_pre_a0_data_and_is_idempotent() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run_pre_a0(&mut connection, 1);
+        connection
+            .execute_batch(
+                "INSERT INTO agents(
+                    id, name, description, runtime_type, system_prompt, default_model,
+                    created_at, updated_at
+                 ) VALUES ('agent-a0', 'A0', '', 'pi', '', 'model', 1, 1);
+                 INSERT INTO conversations(
+                    id, agent_id, title, status, created_at, updated_at
+                 ) VALUES ('conversation-a0', 'agent-a0', 'A0', 'active', 1, 1);
+                 INSERT INTO runs(
+                    id, conversation_id, status, model, started_at, created_at
+                 ) VALUES ('run-a0', 'conversation-a0', 'running', 'model', 2, 2);
+                 INSERT INTO messages(
+                    id, conversation_id, run_id, role, kind, content, status, ordinal,
+                    created_at, updated_at
+                 ) VALUES ('message-a0', 'conversation-a0', 'run-a0', 'user', 'text',
+                           'keep me', 'completed', 1, 2, 2);
+                 INSERT INTO run_events(
+                    id, run_id, seq, event_type, event_json, created_at
+                 ) VALUES ('event-a0', 'run-a0', 1, 'run.failed',
+                           '{\"type\":\"run.failed\"}', 3);",
+            )
+            .expect("seed pre-A0 data");
+
+        run(&mut connection, 4).expect("upgrade to A0");
+        run(&mut connection, 5).expect("repeat A0 migration");
+
+        for (table, count) in [
+            ("conversations", 1_i64),
+            ("messages", 1),
+            ("runs", 1),
+            ("run_events", 1),
+            ("goals", 0),
+            ("work_tasks", 0),
+            ("task_evidence", 0),
+        ] {
+            let actual: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count migrated rows");
+            assert_eq!(actual, count, "unexpected row count for {table}");
+        }
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 14",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        for (table, column) in [
+            ("runs", "trace_id"),
+            ("runs", "root_span_id"),
+            ("run_events", "trace_id"),
+            ("run_events", "span_id"),
+            ("tool_calls", "trace_id"),
+            ("tool_calls", "span_id"),
+        ] {
+            let count = connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+                    [column],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "missing {table}.{column}");
+        }
+    }
+
+    #[test]
+    fn enforces_a0_status_and_single_active_work_constraints() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run(&mut connection, 1).expect("apply migrations");
+        connection
+            .execute_batch(
+                "INSERT INTO agents(
+                    id, name, description, runtime_type, system_prompt, default_model,
+                    created_at, updated_at
+                 ) VALUES ('agent-a0', 'A0', '', 'pi', '', 'model', 1, 1);
+                 INSERT INTO conversations(
+                    id, agent_id, title, status, created_at, updated_at
+                 ) VALUES ('conversation-a0', 'agent-a0', 'A0', 'active', 1, 1);
+                 INSERT INTO goals(
+                    id, conversation_id, title, objective, status, created_by, created_at, updated_at
+                 ) VALUES ('goal-a', 'conversation-a0', 'A', 'A', 'active', 'user', '1', '1');",
+            )
+            .expect("seed active goal");
+
+        assert!(connection
+            .execute(
+                "INSERT INTO goals(
+                    id, conversation_id, title, objective, status, created_by, created_at, updated_at
+                 ) VALUES ('goal-b', 'conversation-a0', 'B', 'B', 'blocked', 'user', '1', '1')",
+                [],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "INSERT INTO goals(
+                    id, conversation_id, title, objective, status, created_by, created_at, updated_at
+                 ) VALUES ('goal-invalid', 'conversation-a0', 'X', 'X', 'running', 'user', '1', '1')",
+                [],
+            )
+            .is_err());
+
+        connection
+            .execute(
+                "INSERT INTO work_tasks(
+                    id, goal_id, ordinal, title, status, created_at, updated_at
+                 ) VALUES ('task-a', 'goal-a', 0, 'A', 'in_progress', '1', '1')",
+                [],
+            )
+            .expect("insert active task");
+        assert!(connection
+            .execute(
+                "INSERT INTO work_tasks(
+                    id, goal_id, ordinal, title, status, created_at, updated_at
+                 ) VALUES ('task-b', 'goal-a', 1, 'B', 'in_progress', '1', '1')",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn failed_upgrade_can_restore_and_migrate_the_pre_a0_backup() {
+        let root = std::env::temp_dir().join(format!(
+            "fox-a0-migration-backup-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create test directory");
+        let original = root.join("fox.db");
+        let backup = root.join("fox-pre-a0.db");
+        let restored = root.join("fox-restored.db");
+
+        {
+            let mut connection = Connection::open(&original).expect("open original database");
+            run_pre_a0(&mut connection, 1);
+            connection
+                .execute_batch(
+                    "INSERT INTO agents(
+                        id, name, description, runtime_type, system_prompt, default_model,
+                        created_at, updated_at
+                     ) VALUES ('agent-backup', 'Backup', '', 'pi', '', 'model', 1, 1);
+                     INSERT INTO conversations(
+                        id, agent_id, title, status, created_at, updated_at
+                     ) VALUES ('conversation-backup', 'agent-backup', 'Backup', 'active', 1, 1);",
+                )
+                .expect("seed original database");
+            connection
+                .execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])
+                .expect("create pre-A0 backup");
+            connection
+                .execute("CREATE TABLE goals(id TEXT PRIMARY KEY)", [])
+                .expect("inject incompatible partial schema");
+            assert!(run(&mut connection, 2).is_err());
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM schema_migrations WHERE version = 14",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                0
+            );
+        }
+
+        std::fs::copy(&backup, &restored).expect("restore backup");
+        {
+            let mut connection = Connection::open(&restored).expect("open restored database");
+            run(&mut connection, 3).expect("migrate restored database");
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM conversations WHERE id = 'conversation-backup'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM schema_migrations WHERE version = 14",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                1
+            );
+        }
+
+        std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]

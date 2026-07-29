@@ -63,6 +63,54 @@ impl Database {
         })
     }
 
+    /// Atomically advances a work task while enforcing the A0 evidence invariant.
+    pub fn update_work_task_status(
+        &self,
+        task_id: &str,
+        expected_status: &str,
+        next_status: &str,
+        updated_at: &str,
+    ) -> Result<(), String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "database lock is poisoned".to_owned())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+
+        if next_status == "completed" {
+            let evidence_count: i64 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM task_evidence WHERE task_id = ?1",
+                    [task_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if evidence_count == 0 {
+                return Err("completed work task requires at least one evidence record".to_owned());
+            }
+        }
+
+        let changed = transaction
+            .execute(
+                "UPDATE work_tasks
+                 SET status = ?3, updated_at = ?4,
+                     finished_at = CASE
+                         WHEN ?3 IN ('completed', 'skipped') THEN ?4
+                         ELSE finished_at
+                     END
+                 WHERE id = ?1 AND status = ?2",
+                params![task_id, expected_status, next_status, updated_at],
+            )
+            .map_err(|error| error.to_string())?;
+        if changed == 0 {
+            return Err("work task was not found or its status changed".to_owned());
+        }
+
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
     pub fn known_attachment_paths(&self) -> Result<Vec<String>, String> {
         self.with_connection(|connection| {
             let mut statement = connection
@@ -2807,6 +2855,8 @@ fn create_run_in_transaction(
             error_code: None,
             error_message: None,
             last_seq: 0,
+            trace_id: None,
+            root_span_id: None,
         },
         user_message: MessageRecord {
             id: message_id,
@@ -2894,7 +2944,8 @@ fn query_runtime_events_window(
     before_ordinal: Option<i64>,
 ) -> rusqlite::Result<Vec<RunEventRecord>> {
     let mut statement = connection.prepare(
-        "SELECT e.run_id, e.seq, e.event_type, e.event_json, e.created_at
+        "SELECT e.run_id, e.seq, e.event_type, e.event_json, e.created_at,
+                e.trace_id, e.span_id
          FROM run_events e
          JOIN runs r ON r.id = e.run_id
          WHERE r.conversation_id = ?1
@@ -2924,6 +2975,8 @@ fn query_runtime_events_window(
                         })
                     }),
                     created_at: row.get(4)?,
+                    trace_id: row.get(5)?,
+                    span_id: row.get(6)?,
                 })
             },
         )?
@@ -2940,7 +2993,7 @@ fn query_tool_calls_window(
     let mut statement = connection.prepare(
         "SELECT id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
                 status, result_json, error_message, execution_location, requires_approval,
-                started_at, completed_at, updated_at
+                started_at, completed_at, updated_at, trace_id, span_id
          FROM tool_calls
          WHERE conversation_id = ?1
            AND EXISTS(SELECT 1 FROM messages m WHERE m.run_id = tool_calls.run_id AND m.role = 'user'
@@ -2968,6 +3021,8 @@ fn query_tool_calls_window(
                     started_at: row.get(11)?,
                     completed_at: row.get(12)?,
                     updated_at: row.get(13)?,
+                    trace_id: row.get(14)?,
+                    span_id: row.get(15)?,
                 })
             },
         )?
@@ -2983,7 +3038,7 @@ fn query_tool_call(
     connection.query_row(
         "SELECT id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
                 status, result_json, error_message, execution_location, requires_approval,
-                started_at, completed_at, updated_at
+                started_at, completed_at, updated_at, trace_id, span_id
          FROM tool_calls WHERE run_id = ?1 AND runtime_tool_call_id = ?2",
         params![run_id, runtime_tool_call_id],
         map_tool_call,
@@ -3008,6 +3063,8 @@ fn map_tool_call(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCallRecord> {
         started_at: row.get(11)?,
         completed_at: row.get(12)?,
         updated_at: row.get(13)?,
+        trace_id: row.get(14)?,
+        span_id: row.get(15)?,
     })
 }
 
@@ -3350,7 +3407,7 @@ fn query_last_run(connection: &Connection, id: &str) -> rusqlite::Result<Option<
     connection
         .query_row(
             "SELECT id, conversation_id, runtime_session_id, status, model, started_at,
-                    finished_at, error_code, error_message, last_seq
+                    finished_at, error_code, error_message, last_seq, trace_id, root_span_id
              FROM runs WHERE conversation_id = ?1 ORDER BY created_at DESC LIMIT 1",
             [id],
             |row| {
@@ -3365,6 +3422,8 @@ fn query_last_run(connection: &Connection, id: &str) -> rusqlite::Result<Option<
                     error_code: row.get(7)?,
                     error_message: row.get(8)?,
                     last_seq: row.get(9)?,
+                    trace_id: row.get(10)?,
+                    root_span_id: row.get(11)?,
                 })
             },
         )
@@ -3458,6 +3517,75 @@ mod tests {
             created_at: 1,
             last_accessed_at,
         }
+    }
+
+    #[test]
+    fn completed_work_task_requires_evidence() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, Some("A0"), None, None)
+            .expect("create conversation");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO goals(
+                        id, conversation_id, title, objective, status, created_by,
+                        created_at, updated_at
+                     ) VALUES ('goal-a0', ?1, 'A0', 'A0', 'active', 'user', '1', '1')",
+                    [&conversation.id],
+                )?;
+                connection.execute(
+                    "INSERT INTO work_tasks(
+                        id, goal_id, ordinal, title, status, created_at, updated_at
+                     ) VALUES ('task-a0', 'goal-a0', 0, 'Task', 'in_progress', '1', '1')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("seed work task");
+
+        let error = database
+            .update_work_task_status("task-a0", "in_progress", "completed", "2")
+            .expect_err("completion without evidence must fail");
+        assert!(error.contains("requires at least one evidence"));
+        database
+            .with_connection(|connection| {
+                let status: String = connection.query_row(
+                    "SELECT status FROM work_tasks WHERE id = 'task-a0'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(status, "in_progress");
+                connection.execute(
+                    "INSERT INTO task_evidence(
+                        id, task_id, evidence_type, ref_kind, ref_id, summary, created_at
+                     ) VALUES ('evidence-a0', 'task-a0', 'external_reference', 'source',
+                               'https://example.invalid/evidence', 'verified result', '2')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("add evidence");
+
+        database
+            .update_work_task_status("task-a0", "in_progress", "completed", "3")
+            .expect("complete task with evidence");
+        database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status, finished_at FROM work_tasks WHERE id = 'task-a0'",
+                    [],
+                    |row| {
+                        assert_eq!(row.get::<_, String>(0)?, "completed");
+                        assert_eq!(row.get::<_, String>(1)?, "3");
+                        Ok(())
+                    },
+                )
+            })
+            .expect("verify completed task");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
