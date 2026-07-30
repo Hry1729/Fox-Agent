@@ -30,6 +30,7 @@ pub fn run() {
 
             let database = Database::open(app_data_dir.join("fox.db"))?;
             database.repair_interrupted_runs()?;
+            database.audit_interrupted_tasks()?;
             let runtime_sessions_dir = app_data_dir.join("runtime-sessions");
             std::fs::create_dir_all(&runtime_sessions_dir)?;
             let attachments_dir = app_data_dir.join("attachments");

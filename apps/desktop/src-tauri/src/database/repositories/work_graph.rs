@@ -5,7 +5,7 @@ use crate::database::{
 };
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 use serde_json::Value;
-use std::{fmt, thread, time::Duration};
+use std::{fmt, path::Path, thread, time::Duration};
 use uuid::Uuid;
 
 const MAX_BUSY_ATTEMPTS: usize = 5;
@@ -692,6 +692,8 @@ impl TaskEvidenceRepository {
                 &input.evidence_type,
                 &input.ref_kind,
                 &input.ref_id,
+                input.trace_id.as_deref(),
+                input.span_id.as_deref(),
             )?;
             if let Some(source_run_id) = input.source_run_id.as_deref() {
                 ensure_run_matches_task_conversation(transaction, source_run_id, &input.task_id)?;
@@ -778,6 +780,8 @@ impl TaskEvidenceRepository {
                 &evidence.evidence_type,
                 &evidence.ref_kind,
                 &evidence.ref_id,
+                evidence.trace_id.as_deref(),
+                evidence.span_id.as_deref(),
             );
             let (status, reason) = match validation {
                 Ok(()) => (EvidenceValidityStatus::Valid, None),
@@ -892,6 +896,8 @@ fn validate_reference(
     evidence_type: &EvidenceType,
     ref_kind: &EvidenceReferenceKind,
     ref_id: &str,
+    expected_trace_id: Option<&str>,
+    expected_span_id: Option<&str>,
 ) -> Result<(), RepositoryError> {
     validate_evidence_pair(evidence_type, ref_kind)?;
     let conversation_id = task_conversation(connection, task_id)?;
@@ -916,15 +922,15 @@ fn validate_reference(
             }
         }
         EvidenceReferenceKind::Artifact => {
-            let target: Option<(String, String)> = connection
+            let target: Option<(String, String, String)> = connection
                 .query_row(
-                    "SELECT conversation_id, status FROM artifacts WHERE id = ?1",
+                    "SELECT conversation_id, status, storage_path FROM artifacts WHERE id = ?1",
                     [ref_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()
                 .map_err(RepositoryError::database)?;
-            let (target_conversation, status) = target.ok_or_else(|| {
+            let (target_conversation, status, storage_path) = target.ok_or_else(|| {
                 RepositoryError::MissingReference(format!("artifact '{ref_id}' was not found"))
             })?;
             ensure_same_conversation(&conversation_id, &target_conversation)?;
@@ -933,25 +939,54 @@ fn validate_reference(
                     "artifact '{ref_id}' is not accessible"
                 )));
             }
+            match std::fs::metadata(Path::new(&storage_path)) {
+                Ok(metadata) if metadata.is_file() => {}
+                Ok(_) => {
+                    return Err(RepositoryError::InvalidReference(format!(
+                        "artifact '{ref_id}' does not reference a file"
+                    )));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(RepositoryError::MissingReference(format!(
+                        "artifact file '{}' was not found",
+                        storage_path
+                    )));
+                }
+                Err(error) => {
+                    return Err(RepositoryError::InvalidReference(format!(
+                        "artifact '{ref_id}' is not accessible: {error}"
+                    )));
+                }
+            }
         }
         EvidenceReferenceKind::RunEvent => {
-            let target: Option<(String, Option<String>)> = connection
+            let target: Option<(String, Option<String>, Option<String>)> = connection
                 .query_row(
-                    "SELECT runs.conversation_id, run_events.span_id
+                    "SELECT runs.conversation_id, run_events.trace_id, run_events.span_id
                      FROM run_events JOIN runs ON runs.id = run_events.run_id
                      WHERE run_events.id = ?1",
                     [ref_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()
                 .map_err(RepositoryError::database)?;
-            let (target_conversation, span_id) = target.ok_or_else(|| {
+            let (target_conversation, trace_id, span_id) = target.ok_or_else(|| {
                 RepositoryError::MissingReference(format!("run event '{ref_id}' was not found"))
             })?;
             ensure_same_conversation(&conversation_id, &target_conversation)?;
             if matches!(evidence_type, EvidenceType::TraceSpan) && span_id.is_none() {
                 return Err(RepositoryError::InvalidReference(format!(
                     "run event '{ref_id}' has no span"
+                )));
+            }
+            if expected_trace_id.is_some_and(|expected| trace_id.as_deref() != Some(expected)) {
+                return Err(RepositoryError::InvalidReference(format!(
+                    "run event '{ref_id}' trace does not match the evidence"
+                )));
+            }
+            if expected_span_id.is_some_and(|expected| span_id.as_deref() != Some(expected)) {
+                return Err(RepositoryError::InvalidReference(format!(
+                    "run event '{ref_id}' span does not match the evidence"
                 )));
             }
         }
@@ -1538,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn task_state_machine_enforces_evidence_single_progress_and_retry_attempt() {
+    fn task_state_machine_increments_retry_attempt_without_overwriting_evidence() {
         let (database, path) = test_database();
         let conversation_id = conversation_id(&database);
         let goal = database
@@ -1562,7 +1597,7 @@ mod tests {
             tasks.complete(&first.id),
             Err(RepositoryError::EvidenceRequired { .. })
         ));
-        database
+        let original_evidence = database
             .task_evidence()
             .add(external_evidence(&first.id, "https://example.com/proof/1"))
             .unwrap();
@@ -1574,11 +1609,137 @@ mod tests {
         let interrupted = tasks.interrupt(&active.id).unwrap();
         let retried = tasks.retry(&interrupted.id, &run.id).unwrap();
         assert_eq!(retried.attempt, 2);
+        let retained = database
+            .task_evidence()
+            .list_by_task(&retried.id, 50)
+            .unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].id, original_evidence.id);
+        database
+            .task_evidence()
+            .add(external_evidence(
+                &retried.id,
+                "https://example.com/proof/attempt-2",
+            ))
+            .unwrap();
+        assert_eq!(
+            database
+                .task_evidence()
+                .list_by_task(&retried.id, 50)
+                .unwrap()
+                .len(),
+            2
+        );
         assert!(matches!(
             tasks.skip(&retried.id),
             Err(RepositoryError::InvalidTransition { .. })
         ));
         cleanup(database, path);
+    }
+
+    #[test]
+    fn startup_audit_interrupts_tasks_owned_by_terminal_runs() {
+        let (database, path) = test_database();
+        let conversation_id = conversation_id(&database);
+        let goal = database
+            .goals()
+            .create(goal_input(&conversation_id, GoalStatus::Active))
+            .unwrap();
+        let run = database
+            .create_run(&conversation_id, "execute", None)
+            .unwrap()
+            .run;
+        let task = database
+            .work_tasks()
+            .create(task_input(&goal.id, 0))
+            .unwrap();
+        let task = database.work_tasks().start(&task.id, &run.id).unwrap();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE runs SET status = 'failed', finished_at = 1 WHERE id = ?1",
+                    [&run.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        database.audit_interrupted_tasks().unwrap();
+
+        let audited = database.work_tasks().get(&task.id).unwrap().unwrap();
+        assert_eq!(audited.status, WorkTaskStatus::Interrupted);
+        assert!(audited.finished_at.is_some());
+        assert!(audited.version > task.version);
+        cleanup(database, path);
+    }
+
+    #[test]
+    fn mark_run_interrupted_cascades_without_completing_the_task() {
+        let (database, path) = test_database();
+        let conversation_id = conversation_id(&database);
+        let goal = database
+            .goals()
+            .create(goal_input(&conversation_id, GoalStatus::Active))
+            .unwrap();
+        let run = database
+            .create_run(&conversation_id, "execute", None)
+            .unwrap()
+            .run;
+        let task = database
+            .work_tasks()
+            .create(task_input(&goal.id, 0))
+            .unwrap();
+        let task = database.work_tasks().start(&task.id, &run.id).unwrap();
+
+        database
+            .mark_run_interrupted(&run.id, "runtime.timeout", "runtime timed out")
+            .unwrap();
+
+        let interrupted = database.work_tasks().get(&task.id).unwrap().unwrap();
+        assert_eq!(interrupted.status, WorkTaskStatus::Interrupted);
+        assert!(matches!(
+            database.work_tasks().complete(&interrupted.id),
+            Err(RepositoryError::InvalidTransition { .. })
+        ));
+        cleanup(database, path);
+    }
+
+    #[test]
+    fn failed_and_cancelled_run_events_interrupt_owned_tasks() {
+        for terminal_event in [
+            serde_json::json!({
+                "type": "run.failed",
+                "code": "runtime.process_crashed",
+                "message": "sidecar crashed"
+            }),
+            serde_json::json!({ "type": "run.cancelled" }),
+        ] {
+            let (database, path) = test_database();
+            let conversation_id = conversation_id(&database);
+            let goal = database
+                .goals()
+                .create(goal_input(&conversation_id, GoalStatus::Active))
+                .unwrap();
+            let run = database
+                .create_run(&conversation_id, "execute", None)
+                .unwrap()
+                .run;
+            let task = database
+                .work_tasks()
+                .create(task_input(&goal.id, 0))
+                .unwrap();
+            let task = database.work_tasks().start(&task.id, &run.id).unwrap();
+
+            database
+                .apply_runtime_event(&run.id, 1, &terminal_event)
+                .unwrap();
+
+            assert_eq!(
+                database.work_tasks().get(&task.id).unwrap().unwrap().status,
+                WorkTaskStatus::Interrupted
+            );
+            cleanup(database, path);
+        }
     }
 
     #[test]
@@ -1697,12 +1858,146 @@ mod tests {
         let stored = evidence_repository.get(&evidence.id).unwrap().unwrap();
         assert_eq!(stored.validity_status, EvidenceValidityStatus::Stale);
         assert_eq!(stored.invalid_reason.as_deref(), Some("workspace changed"));
+        assert!(stored.checked_at.is_some());
+        cleanup(database, path);
+    }
+
+    #[test]
+    fn deleted_tool_call_evidence_becomes_missing_and_keeps_history() {
+        let (database, path) = test_database();
+        let conversation_id = conversation_id(&database);
+        let goal = database
+            .goals()
+            .create(goal_input(&conversation_id, GoalStatus::Active))
+            .unwrap();
+        let task = database
+            .work_tasks()
+            .create(task_input(&goal.id, 0))
+            .unwrap();
+        let run = database
+            .create_run(&conversation_id, "collect evidence", None)
+            .unwrap()
+            .run;
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO tool_calls(
+                        id, runtime_tool_call_id, run_id, conversation_id, tool_name,
+                        status, result_json, started_at, completed_at, updated_at
+                     ) VALUES ('deleted-tool-proof', 'runtime-deleted-tool-proof', ?1, ?2,
+                               'test', 'completed', '{}', 1, 2, 2)",
+                    params![run.id, conversation_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let repository = database.task_evidence();
+        let evidence = repository
+            .add(AddEvidenceInput {
+                id: None,
+                task_id: task.id,
+                source_run_id: Some(run.id),
+                evidence_type: EvidenceType::ToolCall,
+                ref_kind: EvidenceReferenceKind::ToolCall,
+                ref_id: "deleted-tool-proof".to_owned(),
+                summary: "tool output".to_owned(),
+                metadata: serde_json::json!({}),
+                trace_id: None,
+                span_id: None,
+            })
+            .unwrap();
+        database
+            .with_connection(|connection| {
+                connection.execute("DELETE FROM tool_calls WHERE id = 'deleted-tool-proof'", [])?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            repository.validate(&evidence.id).unwrap(),
+            EvidenceValidityStatus::Missing
+        );
+        let retained = repository.get(&evidence.id).unwrap().unwrap();
+        assert_eq!(retained.validity_status, EvidenceValidityStatus::Missing);
+        assert!(retained.checked_at.is_some());
+        assert!(retained
+            .invalid_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("was not found")));
+        cleanup(database, path);
+    }
+
+    #[test]
+    fn deleted_artifact_file_becomes_missing_and_keeps_history() {
+        let (database, path) = test_database();
+        let artifact_path = path.with_extension("evidence-artifact");
+        std::fs::write(&artifact_path, b"proof").unwrap();
+        let conversation_id = conversation_id(&database);
+        let goal = database
+            .goals()
+            .create(goal_input(&conversation_id, GoalStatus::Active))
+            .unwrap();
+        let task = database
+            .work_tasks()
+            .create(task_input(&goal.id, 0))
+            .unwrap();
+        let run = database
+            .create_run(&conversation_id, "collect evidence", None)
+            .unwrap()
+            .run;
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO artifacts(
+                        id, conversation_id, run_id, display_name, artifact_type,
+                        storage_path, status, created_at, updated_at
+                     ) VALUES ('deleted-artifact-proof', ?1, ?2, 'report', 'test_result',
+                               ?3, 'ready', 1, 1)",
+                    params![
+                        conversation_id,
+                        run.id,
+                        artifact_path.to_string_lossy().as_ref()
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let repository = database.task_evidence();
+        let evidence = repository
+            .add(AddEvidenceInput {
+                id: None,
+                task_id: task.id,
+                source_run_id: Some(run.id),
+                evidence_type: EvidenceType::TestResult,
+                ref_kind: EvidenceReferenceKind::Artifact,
+                ref_id: "deleted-artifact-proof".to_owned(),
+                summary: "test report".to_owned(),
+                metadata: serde_json::json!({}),
+                trace_id: None,
+                span_id: None,
+            })
+            .unwrap();
+        std::fs::remove_file(&artifact_path).unwrap();
+
+        assert_eq!(
+            repository.validate(&evidence.id).unwrap(),
+            EvidenceValidityStatus::Missing
+        );
+        let retained = repository.get(&evidence.id).unwrap().unwrap();
+        assert_eq!(retained.validity_status, EvidenceValidityStatus::Missing);
+        assert!(retained.checked_at.is_some());
+        assert!(retained
+            .invalid_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("was not found")));
         cleanup(database, path);
     }
 
     #[test]
     fn evidence_accepts_every_supported_local_reference_kind() {
         let (database, path) = test_database();
+        let artifact_path = path.with_extension("artifact-proof");
+        std::fs::write(&artifact_path, b"proof").unwrap();
         let conversation_id = conversation_id(&database);
         let goal = database
             .goals()
@@ -1732,8 +2027,12 @@ mod tests {
                         id, conversation_id, run_id, display_name, artifact_type,
                         storage_path, status, created_at, updated_at
                      ) VALUES ('artifact-proof', ?1, ?2, 'report', 'test_result',
-                               'report.json', 'ready', 1, 1)",
-                    params![conversation_id, run.id],
+                               ?3, 'ready', 1, 1)",
+                    params![
+                        conversation_id,
+                        run.id,
+                        artifact_path.to_string_lossy().as_ref()
+                    ],
                 )?;
                 connection.execute(
                     "INSERT INTO run_events(
@@ -1800,6 +2099,7 @@ mod tests {
                 EvidenceValidityStatus::Valid
             );
         }
+        std::fs::remove_file(artifact_path).unwrap();
         cleanup(database, path);
     }
 

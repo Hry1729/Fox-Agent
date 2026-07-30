@@ -685,6 +685,14 @@ impl Database {
         })
     }
 
+    pub fn audit_interrupted_tasks(&self) -> Result<(), String> {
+        let now = now_ms().to_string();
+        self.with_connection(|connection| {
+            interrupt_tasks_owned_by_terminal_runs(connection, &now)?;
+            Ok(())
+        })
+    }
+
     pub fn list_agents(&self) -> Result<Vec<AgentRecord>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
@@ -2175,17 +2183,20 @@ impl Database {
     pub fn mark_run_failed(&self, run_id: &str, code: &str, message: &str) -> Result<(), String> {
         let now = now_ms();
         self.with_connection(|connection| {
-            connection.execute(
+            let transaction = connection.transaction()?;
+            transaction.execute(
                 "UPDATE runs SET status = 'failed', finished_at = ?2, error_code = ?3, error_message = ?4
                  WHERE id = ?1",
                 params![run_id, now, code, message],
             )?;
-            connection.execute(
+            transaction.execute(
                 "UPDATE tool_calls
                  SET status = 'interrupted', error_message = ?2, completed_at = ?3, updated_at = ?3
                  WHERE run_id = ?1 AND status IN ('pending', 'running')",
                 params![run_id, message, now],
             )?;
+            interrupt_tasks_owned_by_run(&transaction, run_id, &now.to_string())?;
+            transaction.commit()?;
             Ok(())
         })
     }
@@ -2198,23 +2209,26 @@ impl Database {
     ) -> Result<(), String> {
         let now = now_ms();
         self.with_connection(|connection| {
-            connection.execute(
+            let transaction = connection.transaction()?;
+            transaction.execute(
                 "UPDATE runs SET status = 'interrupted', finished_at = ?2,
                                  error_code = ?3, error_message = ?4
                  WHERE id = ?1 AND status IN ('queued', 'running', 'cancelling')",
                 params![run_id, now, code, message],
             )?;
-            connection.execute(
+            transaction.execute(
                 "UPDATE messages SET status = 'interrupted', updated_at = ?2
                  WHERE run_id = ?1 AND status = 'streaming'",
                 params![run_id, now],
             )?;
-            connection.execute(
+            transaction.execute(
                 "UPDATE tool_calls
                  SET status = 'interrupted', error_message = ?2, completed_at = ?3, updated_at = ?3
                  WHERE run_id = ?1 AND status IN ('pending', 'running')",
                 params![run_id, message, now],
             )?;
+            interrupt_tasks_owned_by_run(&transaction, run_id, &now.to_string())?;
+            transaction.commit()?;
             Ok(())
         })
     }
@@ -2691,6 +2705,7 @@ impl Database {
                          WHERE run_id = ?1 AND status IN ('pending', 'running')",
                         params![run_id, now],
                     )?;
+                    interrupt_tasks_owned_by_run(&transaction, run_id, &now.to_string())?;
                 }
                 "run.interrupted" => {
                     let code = payload.get("code").and_then(Value::as_str);
@@ -2712,6 +2727,7 @@ impl Database {
                          WHERE run_id = ?1 AND status IN ('pending', 'running')",
                         params![run_id, message, now],
                     )?;
+                    interrupt_tasks_owned_by_run(&transaction, run_id, &now.to_string())?;
                 }
                 "run.failed" => {
                     let code = payload.get("code").and_then(Value::as_str);
@@ -2733,6 +2749,7 @@ impl Database {
                          WHERE run_id = ?1 AND status IN ('pending', 'running')",
                         params![run_id, message, now],
                     )?;
+                    interrupt_tasks_owned_by_run(&transaction, run_id, &now.to_string())?;
                 }
                 _ => update_last_seq(&transaction, run_id, seq)?,
             }
@@ -2754,6 +2771,39 @@ impl Database {
             Ok(None)
         }
     }
+}
+
+fn interrupt_tasks_owned_by_terminal_runs(
+    connection: &Connection,
+    now: &str,
+) -> rusqlite::Result<usize> {
+    connection.execute(
+        "UPDATE work_tasks
+         SET status = 'interrupted', version = version + 1,
+             finished_at = COALESCE(finished_at, ?1), updated_at = ?1
+         WHERE status = 'in_progress'
+           AND owner_run_id IS NOT NULL
+           AND EXISTS (
+               SELECT 1 FROM runs
+               WHERE runs.id = work_tasks.owner_run_id
+                 AND runs.status NOT IN ('queued', 'running', 'cancelling')
+           )",
+        [now],
+    )
+}
+
+fn interrupt_tasks_owned_by_run(
+    connection: &Connection,
+    run_id: &str,
+    now: &str,
+) -> rusqlite::Result<usize> {
+    connection.execute(
+        "UPDATE work_tasks
+         SET status = 'interrupted', version = version + 1,
+             finished_at = COALESCE(finished_at, ?2), updated_at = ?2
+         WHERE owner_run_id = ?1 AND status = 'in_progress'",
+        params![run_id, now],
+    )
 }
 
 fn create_run_in_transaction(
