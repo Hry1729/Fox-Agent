@@ -1,7 +1,8 @@
 use crate::database::{
-    AddEvidenceInput, CreateGoalInput, CreateTaskInput, Database, EvidenceReferenceKind,
-    EvidenceType, GoalStatus, WorkEventRecord, WorkTaskStatus,
+    AddEvidenceInput, CreateTaskInput, Database, EvidenceReferenceKind, EvidenceType, GoalStatus,
+    WorkEventRecord, WorkTaskStatus,
 };
+use crate::work_mode_gate;
 use serde_json::{json, Value};
 
 pub const WORK_TOOLS: [&str; 7] = [
@@ -43,56 +44,30 @@ pub fn execute(
             snapshot(database, conversation_id)?
         }
         "goal_propose" => {
-            if database
-                .goals()
-                .get_active(conversation_id)
-                .map_err(|error| error.to_string())?
-                .is_some()
-            {
-                return Err("the conversation already has an active or blocked goal".to_owned());
-            }
-            let goal = database
-                .goals()
-                .create(CreateGoalInput {
-                    id: None,
-                    conversation_id: conversation_id.to_owned(),
-                    title: required_string(input, "title")?,
-                    objective: required_string(input, "objective")?,
-                    acceptance_summary: optional_string(input, "acceptanceSummary")?,
-                    status: GoalStatus::Proposed,
-                    created_by: format!("runtime:{run_id}"),
-                })
-                .map_err(|error| error.to_string())?;
-            if let Ok(event) = database.append_work_event(
-                "goal.proposed",
+            let applied = work_mode_gate::apply_runtime_proposal(
+                database,
                 conversation_id,
-                Some(&goal.id),
-                None,
-                Some(run_id),
-                json!({ "goal": goal }),
-            ) {
+                run_id,
+                required_string(input, "title")?,
+                required_string(input, "objective")?,
+                optional_string(input, "acceptanceSummary")?,
+            )?;
+            if let Some(event) = applied.event {
                 events.push(event);
             }
-            json!({ "goal": goal })
+            json!({
+                "goal": applied.goal,
+                "gateDecision": applied.evaluation.decision,
+                "gateReasons": applied.evaluation.reasons,
+            })
         }
         "goal_activate" => {
-            let goal_id = required_string(input, "goalId")?;
-            require_goal(database, conversation_id, &goal_id)?;
-            let goal = database
-                .goals()
-                .activate(&goal_id, required_version(input)?)
-                .map_err(|error| error.to_string())?;
-            if let Ok(event) = database.append_work_event(
-                "goal.activated",
-                conversation_id,
-                Some(&goal.id),
-                None,
-                Some(run_id),
-                json!({ "goal": goal }),
-            ) {
-                events.push(event);
-            }
-            json!({ "goal": goal })
+            let _ = required_string(input, "goalId")?;
+            let _ = required_version(input)?;
+            return Err(
+                "goal activation is controlled by the Host; resolve the work mode confirmation instead"
+                    .to_owned(),
+            );
         }
         "task_create_many" => {
             let goal_id = required_string(input, "goalId")?;
@@ -397,28 +372,33 @@ mod tests {
     }
 
     #[test]
-    fn all_seven_tools_enforce_host_owned_state_and_optimistic_versions() {
+    fn work_tools_enforce_host_owned_state_and_optimistic_versions() {
         let (database, path, conversation_id, run_id) = setup();
         let proposed = execute(
             &database,
             &conversation_id,
             &run_id,
             "goal_propose",
-            &json!({ "title": "A0", "objective": "Close the loop" }),
+            &json!({ "title": "A0", "objective": "修复跨文件问题并运行测试" }),
         )
         .expect("propose goal");
         let goal_id = proposed.result["details"]["goal"]["id"]
             .as_str()
             .expect("goal id")
             .to_owned();
-        execute(
+        let activation_error = execute(
             &database,
             &conversation_id,
             &run_id,
             "goal_activate",
             &json!({ "goalId": goal_id, "expectedVersion": 1 }),
         )
-        .expect("activate goal");
+        .expect_err("runtime must not activate a goal directly");
+        assert!(activation_error.contains("controlled by the Host"));
+        assert_eq!(
+            database.goals().get(&goal_id).unwrap().unwrap().status,
+            GoalStatus::Active
+        );
         let created = execute(
             &database,
             &conversation_id,
@@ -507,7 +487,7 @@ mod tests {
                 .len(),
             1
         );
-        assert!(database.list_work_events(&conversation_id).unwrap().len() >= 7);
+        assert!(database.list_work_events(&conversation_id).unwrap().len() >= 6);
         drop(database);
         let _ = std::fs::remove_file(path);
     }
