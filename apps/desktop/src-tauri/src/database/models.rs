@@ -138,6 +138,7 @@ pub struct WorkTaskRecord {
     pub status: WorkTaskStatus,
     pub owner_run_id: Option<String>,
     pub attempt: i64,
+    pub version: i64,
     pub blocked_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -194,6 +195,23 @@ pub struct TaskEvidenceRecord {
     pub checked_at: Option<String>,
     pub invalid_reason: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkEventRecord {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub schema_version: u32,
+    pub conversation_id: String,
+    pub goal_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
+    pub sequence: i64,
+    pub timestamp: String,
+    pub data: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]

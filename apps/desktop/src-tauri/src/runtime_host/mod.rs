@@ -1,4 +1,5 @@
 mod protocol;
+mod work_tools;
 
 use crate::database::{AttachmentRecord, Database, StartRunResult};
 use crate::yuxi::{get_access_token, YuxiClient};
@@ -1232,6 +1233,8 @@ impl RuntimeHost {
                                 &stdin,
                                 envelope,
                             )
+                        } else if work_tools::is_work_tool(tool) {
+                            handle_work_tool_request(&app, &database, &state, &stdin, envelope)
                         } else if is_knowledge_tool(tool) {
                             handle_knowledge_tool_request(
                                 &app,
@@ -1261,6 +1264,18 @@ impl RuntimeHost {
                     };
                     match database.apply_runtime_event(&run_id, seq, &payload) {
                         Ok(true) => {
+                            if payload.get("type").and_then(Value::as_str).is_some_and(
+                                |event_type| {
+                                    crate::database::WORK_EVENT_TYPES.contains(&event_type)
+                                },
+                            ) {
+                                if let Ok(event) = serde_json::from_value::<
+                                    crate::database::WorkEventRecord,
+                                >(payload.clone())
+                                {
+                                    let _ = database.apply_work_event(&event);
+                                }
+                            }
                             let notification = RuntimeEventNotification {
                                 conversation_id,
                                 runtime_session_id: envelope.runtime_session_id.clone(),
@@ -1703,6 +1718,88 @@ fn handle_host_tool_request(
     let response = HostResponse::for_request(&envelope, response_type, response);
     if let Err(error) = write_protocol_message(stdin, &response) {
         record_runtime_crash(app, database, state, error);
+    }
+}
+
+fn handle_work_tool_request(
+    app: &AppHandle,
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    stdin: &Arc<Mutex<ChildStdin>>,
+    envelope: RuntimeEnvelope,
+) {
+    let response = execute_work_tool_request(app, database, state, &envelope)
+        .unwrap_or_else(|error| json!({ "isError": true, "error": error }));
+    let response_type = if response
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "tool.execute_failed"
+    } else {
+        "tool.execute_completed"
+    };
+    let response = HostResponse::for_request(&envelope, response_type, response);
+    if let Err(error) = write_protocol_message(stdin, &response) {
+        record_runtime_crash(app, database, state, error);
+    }
+}
+
+fn execute_work_tool_request(
+    app: &AppHandle,
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    envelope: &RuntimeEnvelope,
+) -> Result<Value, String> {
+    let work_loop_enabled = state
+        .lock()
+        .map_err(|_| "runtime state lock is poisoned".to_owned())?
+        .capabilities
+        .clone();
+    let work_loop_enabled = serde_json::from_value::<RuntimeCapabilityManifest>(work_loop_enabled)
+        .ok()
+        .is_some_and(|manifest| manifest.work_loop_enabled());
+    if !work_loop_enabled {
+        return Err(
+            "work tools are unavailable; this runtime is running as a normal conversation"
+                .to_owned(),
+        );
+    }
+    let run_id = envelope
+        .run_id
+        .as_deref()
+        .ok_or_else(|| "work tool request is missing runId".to_owned())?;
+    let conversation_id = envelope
+        .conversation_id
+        .as_deref()
+        .ok_or_else(|| "work tool request is missing conversationId".to_owned())?;
+    let payload = envelope
+        .payload
+        .as_ref()
+        .ok_or_else(|| "work tool request is missing payload".to_owned())?;
+    let tool_call_id = payload
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "work tool request is missing toolCallId".to_owned())?;
+    let tool = payload
+        .get("tool")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "work tool request is missing tool".to_owned())?;
+    let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    database.create_host_tool_call(run_id, tool_call_id, tool, &input, "running", false)?;
+    match work_tools::execute(database, conversation_id, run_id, tool, &input) {
+        Ok(outcome) => {
+            database.complete_host_tool_call(run_id, tool_call_id, Some(&outcome.result), None)?;
+            for event in outcome.events {
+                let _ = app.emit("fox://work-event", event);
+            }
+            Ok(json!({ "isError": false, "result": outcome.result }))
+        }
+        Err(error) => {
+            database.complete_host_tool_call(run_id, tool_call_id, None, Some(&error))?;
+            Err(error)
+        }
     }
 }
 
@@ -2806,7 +2903,7 @@ mod attachment_tests {
             "runtime": "fox-pi-runtime",
             "runtimeVersion": "0.1.0",
             "capabilities": {
-                "manifestVersion": 1,
+                "manifestVersion": 2,
                 "streamingText": true,
                 "cancellation": true,
                 "reasoning": true,
@@ -2816,6 +2913,7 @@ mod attachment_tests {
                 "steering": false,
                 "contextCompaction": true,
                 "dynamicModelSwitch": false,
+                "workLoop": true,
                 "tools": [{
                     "name": "read",
                     "category": "project-read",
@@ -2828,7 +2926,34 @@ mod attachment_tests {
             parse_runtime_ready_payload(&payload).expect("valid handshake");
         assert_eq!(runtime, "fox-pi-runtime");
         assert_eq!(version.as_deref(), Some("0.1.0"));
+        assert_eq!(capabilities["manifestVersion"], 2);
+        assert_eq!(capabilities["workLoop"], true);
+    }
+
+    #[test]
+    fn accepts_a_v1_runtime_as_a_normal_conversation() {
+        let payload = json!({
+            "protocol": "fox-runtime-jsonl",
+            "protocolVersion": 1,
+            "runtime": "fox-legacy-runtime",
+            "capabilities": {
+                "manifestVersion": 1,
+                "streamingText": true,
+                "cancellation": true,
+                "reasoning": true,
+                "sessionResume": true,
+                "toolApproval": true,
+                "imageInput": false,
+                "steering": false,
+                "contextCompaction": true,
+                "dynamicModelSwitch": false,
+                "tools": []
+            }
+        });
+        let (_, _, capabilities) =
+            parse_runtime_ready_payload(&payload).expect("v1 degrades cleanly");
         assert_eq!(capabilities["manifestVersion"], 1);
+        assert!(capabilities.get("workLoop").is_none());
     }
 
     #[test]

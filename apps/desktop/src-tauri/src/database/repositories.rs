@@ -17,8 +17,10 @@ use std::{
 };
 use uuid::Uuid;
 
+mod work_events;
 mod work_graph;
 
+pub use work_events::WORK_EVENT_TYPES;
 #[allow(unused_imports)]
 pub use work_graph::{
     AddEvidenceInput, CreateGoalInput, CreateTaskInput, GoalRepository, RepositoryError,

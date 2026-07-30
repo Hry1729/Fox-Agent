@@ -579,6 +579,24 @@ ALTER TABLE tool_calls ADD COLUMN trace_id TEXT;
 ALTER TABLE tool_calls ADD COLUMN span_id TEXT;
 "#;
 
+const MIGRATION_15: &str = r#"
+ALTER TABLE work_tasks ADD COLUMN version INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1);
+
+CREATE TABLE work_events (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL CHECK(sequence >= 0),
+    event_type TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK(schema_version >= 1),
+    event_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(conversation_id, sequence)
+);
+
+CREATE INDEX idx_work_events_conversation_sequence
+    ON work_events(conversation_id, sequence);
+"#;
+
 pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -603,6 +621,7 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     apply_migration(&transaction, 12, MIGRATION_12, now)?;
     apply_migration(&transaction, 13, MIGRATION_13, now)?;
     apply_migration(&transaction, 14, MIGRATION_14, now)?;
+    apply_migration(&transaction, 15, MIGRATION_15, now)?;
     transaction.commit()
 }
 

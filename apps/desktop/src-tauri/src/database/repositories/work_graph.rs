@@ -82,7 +82,7 @@ impl fmt::Display for RepositoryError {
                 expected_version,
             } => write!(
                 formatter,
-                "goal '{id}' version no longer matches expected version {expected_version}"
+                "record '{id}' version no longer matches expected version {expected_version}"
             ),
             Self::ConstraintViolation(message) => formatter.write_str(message),
             Self::EvidenceRequired { task_id } => {
@@ -456,7 +456,7 @@ impl WorkTaskRepository {
             let mut statement = connection
                 .prepare(
                     "SELECT id, goal_id, parent_task_id, ordinal, title, detail, status,
-                            owner_run_id, attempt, blocked_reason, created_at, updated_at,
+                            owner_run_id, attempt, version, blocked_reason, created_at, updated_at,
                             started_at, finished_at
                      FROM work_tasks WHERE goal_id = ?1 ORDER BY ordinal, id",
                 )
@@ -478,24 +478,25 @@ impl WorkTaskRepository {
             Some(owner_run_id),
             None,
             false,
+            None,
         )
     }
 
     pub fn complete(&self, id: &str) -> Result<WorkTaskRecord, RepositoryError> {
-        self.transition(id, WorkTaskStatus::Completed, None, None, false)
+        self.transition(id, WorkTaskStatus::Completed, None, None, false, None)
     }
 
     pub fn block(&self, id: &str, reason: String) -> Result<WorkTaskRecord, RepositoryError> {
         validate_non_empty("blocked reason", &reason)?;
-        self.transition(id, WorkTaskStatus::Blocked, None, Some(reason), false)
+        self.transition(id, WorkTaskStatus::Blocked, None, Some(reason), false, None)
     }
 
     pub fn interrupt(&self, id: &str) -> Result<WorkTaskRecord, RepositoryError> {
-        self.transition(id, WorkTaskStatus::Interrupted, None, None, false)
+        self.transition(id, WorkTaskStatus::Interrupted, None, None, false, None)
     }
 
     pub fn skip(&self, id: &str) -> Result<WorkTaskRecord, RepositoryError> {
-        self.transition(id, WorkTaskStatus::Skipped, None, None, false)
+        self.transition(id, WorkTaskStatus::Skipped, None, None, false, None)
     }
 
     pub fn retry(&self, id: &str, owner_run_id: &str) -> Result<WorkTaskRecord, RepositoryError> {
@@ -506,11 +507,53 @@ impl WorkTaskRepository {
             Some(owner_run_id),
             None,
             true,
+            None,
         )
     }
 
     pub fn requeue(&self, id: &str) -> Result<WorkTaskRecord, RepositoryError> {
-        self.transition(id, WorkTaskStatus::Queued, None, None, false)
+        self.transition(id, WorkTaskStatus::Queued, None, None, false, None)
+    }
+
+    pub fn update(
+        &self,
+        id: &str,
+        expected_version: i64,
+        next_status: WorkTaskStatus,
+        owner_run_id: Option<&str>,
+        blocked_reason: Option<String>,
+    ) -> Result<WorkTaskRecord, RepositoryError> {
+        if expected_version < 1 {
+            return Err(RepositoryError::InvalidInput(
+                "expected task version must be at least 1".to_owned(),
+            ));
+        }
+        if next_status == WorkTaskStatus::InProgress && owner_run_id.is_none() {
+            return Err(RepositoryError::InvalidInput(
+                "an in-progress task requires the current run".to_owned(),
+            ));
+        }
+        if next_status == WorkTaskStatus::Blocked
+            && blocked_reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
+        {
+            return Err(RepositoryError::InvalidInput(
+                "blocked reason cannot be empty".to_owned(),
+            ));
+        }
+        let retry = self
+            .get(id)?
+            .is_some_and(|task| task.status == WorkTaskStatus::Interrupted)
+            && next_status == WorkTaskStatus::InProgress;
+        self.transition(
+            id,
+            next_status,
+            owner_run_id,
+            blocked_reason,
+            retry,
+            Some(expected_version),
+        )
     }
 
     fn transition(
@@ -520,10 +563,17 @@ impl WorkTaskRepository {
         owner_run_id: Option<&str>,
         blocked_reason: Option<String>,
         retry: bool,
+        expected_version: Option<i64>,
     ) -> Result<WorkTaskRecord, RepositoryError> {
         let now = timestamp();
         with_write_transaction(&self.database, |transaction| {
             let current = load_task(transaction, id)?.ok_or_else(|| not_found("work task", id))?;
+            if expected_version.is_some_and(|version| version != current.version) {
+                return Err(RepositoryError::OptimisticLockFailed {
+                    id: id.to_owned(),
+                    expected_version: expected_version.unwrap_or_default(),
+                });
+            }
             let valid = if retry {
                 current.status == WorkTaskStatus::Interrupted
                     && next_status == WorkTaskStatus::InProgress
@@ -581,6 +631,7 @@ impl WorkTaskRepository {
                              ELSE owner_run_id
                          END,
                          attempt = attempt + ?5,
+                         version = version + 1,
                          blocked_reason = CASE WHEN ?3 = 'blocked' THEN ?6 ELSE NULL END,
                          started_at = CASE
                              WHEN ?3 = 'in_progress' THEN COALESCE(started_at, ?7)
@@ -589,7 +640,7 @@ impl WorkTaskRepository {
                          END,
                          finished_at = CASE WHEN ?3 IN ('completed', 'interrupted', 'skipped') THEN ?7 ELSE NULL END,
                          updated_at = ?7
-                     WHERE id = ?1 AND status = ?2",
+                     WHERE id = ?1 AND status = ?2 AND (?8 IS NULL OR version = ?8)",
                     params![
                         id,
                         task_status_text(&current.status),
@@ -598,6 +649,7 @@ impl WorkTaskRepository {
                         i64::from(retry),
                         blocked_reason,
                         now,
+                        expected_version,
                     ],
                 )
                 .map_err(RepositoryError::database)?;
@@ -1124,7 +1176,7 @@ fn load_task(connection: &Connection, id: &str) -> Result<Option<WorkTaskRecord>
     connection
         .query_row(
             "SELECT id, goal_id, parent_task_id, ordinal, title, detail, status,
-                    owner_run_id, attempt, blocked_reason, created_at, updated_at,
+                    owner_run_id, attempt, version, blocked_reason, created_at, updated_at,
                     started_at, finished_at
              FROM work_tasks WHERE id = ?1",
             [id],
@@ -1179,11 +1231,12 @@ fn task_from_row(row: &Row<'_>) -> rusqlite::Result<WorkTaskRecord> {
         status: parse_task_status(row, 6)?,
         owner_run_id: row.get(7)?,
         attempt: row.get(8)?,
-        blocked_reason: row.get(9)?,
-        created_at: row.get(10)?,
-        updated_at: row.get(11)?,
-        started_at: row.get(12)?,
-        finished_at: row.get(13)?,
+        version: row.get(9)?,
+        blocked_reason: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+        started_at: row.get(13)?,
+        finished_at: row.get(14)?,
     })
 }
 

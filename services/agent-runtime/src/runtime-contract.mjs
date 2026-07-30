@@ -1,4 +1,4 @@
-export const CAPABILITY_MANIFEST_VERSION = 1
+export const CAPABILITY_MANIFEST_VERSION = 2
 
 export const RUNTIME_TOOL_CATALOG = Object.freeze([
   Object.freeze({ name: 'read', category: 'project-read', execution: 'runtime', approval: 'preflight' }),
@@ -9,6 +9,13 @@ export const RUNTIME_TOOL_CATALOG = Object.freeze([
   Object.freeze({ name: 'write_file', category: 'project-write', execution: 'host', approval: 'policy' }),
   Object.freeze({ name: 'edit_file', category: 'project-write', execution: 'host', approval: 'policy' }),
   Object.freeze({ name: 'run_command', category: 'process', execution: 'host', approval: 'always' }),
+  Object.freeze({ name: 'work_snapshot_get', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'goal_propose', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'goal_activate', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'task_create_many', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'task_update', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'task_evidence_add', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'task_evidence_validate', category: 'work', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'list_knowledge_bases', category: 'knowledge', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'search_knowledge', category: 'knowledge', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'read_knowledge_document', category: 'knowledge', execution: 'host', approval: 'none' }),
@@ -22,6 +29,10 @@ export function runtimeToolNames() {
 }
 
 export function createCapabilityManifest(overrides = {}) {
+  const workLoop = overrides.workLoop ?? true
+  const tools = overrides.tools ?? RUNTIME_TOOL_CATALOG
+    .filter((tool) => workLoop || tool.category !== 'work')
+    .map((tool) => ({ ...tool }))
   return {
     manifestVersion: CAPABILITY_MANIFEST_VERSION,
     streamingText: true,
@@ -33,14 +44,15 @@ export function createCapabilityManifest(overrides = {}) {
     steering: false,
     contextCompaction: true,
     dynamicModelSwitch: false,
-    tools: RUNTIME_TOOL_CATALOG.map((tool) => ({ ...tool })),
+    workLoop,
+    tools,
     ...overrides,
   }
 }
 
 export function validateCapabilityManifest(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 'capabilities must be an object'
-  if (value.manifestVersion !== CAPABILITY_MANIFEST_VERSION) return 'unsupported capability manifest version'
+  if (![1, CAPABILITY_MANIFEST_VERSION].includes(value.manifestVersion)) return 'unsupported capability manifest version'
   for (const field of [
     'streamingText',
     'cancellation',
@@ -54,24 +66,29 @@ export function validateCapabilityManifest(value) {
   ]) {
     if (typeof value[field] !== 'boolean') return `${field} must be a boolean`
   }
+  const workLoop = value.manifestVersion >= 2 ? value.workLoop : false
+  if (value.manifestVersion >= 2 && typeof value.workLoop !== 'boolean') return 'workLoop must be a boolean'
   if (!Array.isArray(value.tools)) return 'tools must be an array'
   for (const tool of value.tools) {
     if (!tool || typeof tool !== 'object' || Array.isArray(tool)) return 'tool entries must be objects'
     if (typeof tool.name !== 'string' || !tool.name) return 'tool name is required'
-    if (!['project-read', 'project-write', 'attachment', 'process', 'knowledge', 'skill', 'mcp'].includes(tool.category)) {
+    if (!['project-read', 'project-write', 'attachment', 'process', 'knowledge', 'skill', 'mcp', 'work'].includes(tool.category)) {
       return `unsupported tool category: ${tool.category}`
     }
     if (!['runtime', 'host', 'remote'].includes(tool.execution)) return `unsupported tool execution: ${tool.execution}`
     if (!['none', 'preflight', 'policy', 'always'].includes(tool.approval)) return `unsupported tool approval: ${tool.approval}`
+    if (tool.category === 'work' && !workLoop) return 'work tools require workLoop capability'
   }
   const names = value.tools.map(({ name }) => name)
   if (new Set(names).size !== names.length) return 'tools must not contain duplicates'
   return null
 }
 
-export function assertRegisteredToolsMatchCatalog(tools) {
+export function assertRegisteredToolsMatchCatalog(tools, { workLoop = true } = {}) {
   const registered = tools.map(({ name }) => name)
-  const expected = runtimeToolNames()
+  const expected = RUNTIME_TOOL_CATALOG
+    .filter((tool) => workLoop || tool.category !== 'work')
+    .map(({ name }) => name)
   if (registered.length !== expected.length || registered.some((name, index) => name !== expected[index])) {
     throw new Error(`Runtime tool registry does not match the capability catalog: ${registered.join(', ')}`)
   }

@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 pub const PROTOCOL_NAME: &str = "fox-runtime-jsonl";
 pub const PROTOCOL_VERSION: u32 = 1;
-pub const CAPABILITY_MANIFEST_VERSION: u32 = 1;
+pub const CAPABILITY_MANIFEST_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,12 +28,14 @@ pub struct RuntimeCapabilityManifest {
     pub steering: bool,
     pub context_compaction: bool,
     pub dynamic_model_switch: bool,
+    #[serde(default)]
+    pub work_loop: bool,
     pub tools: Vec<RuntimeToolCapability>,
 }
 
 impl RuntimeCapabilityManifest {
     pub fn validate(&self) -> Result<(), String> {
-        if self.manifest_version != CAPABILITY_MANIFEST_VERSION {
+        if !matches!(self.manifest_version, 1 | CAPABILITY_MANIFEST_VERSION) {
             return Err(format!(
                 "runtime capability manifest version mismatch: expected {}, got {}",
                 CAPABILITY_MANIFEST_VERSION, self.manifest_version
@@ -53,6 +55,7 @@ impl RuntimeCapabilityManifest {
                     | "knowledge"
                     | "skill"
                     | "mcp"
+                    | "work"
             ) {
                 return Err(format!(
                     "runtime capability tool {} has unsupported category {}",
@@ -80,6 +83,9 @@ impl RuntimeCapabilityManifest {
                     tool.name
                 ));
             }
+            if tool.category == "work" && !self.work_loop_enabled() {
+                return Err("runtime work tools require the workLoop capability".to_owned());
+            }
             if tool.execution == "host" && !host_tool_is_supported(&tool.name) {
                 return Err(format!(
                     "runtime capability tool {} declares host execution but Fox has no handler",
@@ -88,6 +94,10 @@ impl RuntimeCapabilityManifest {
             }
         }
         Ok(())
+    }
+
+    pub fn work_loop_enabled(&self) -> bool {
+        self.manifest_version >= 2 && self.work_loop
     }
 }
 
@@ -104,6 +114,13 @@ fn host_tool_is_supported(tool: &str) -> bool {
             | "query_knowledge_graph"
             | "list_mcp_tools"
             | "call_mcp_tool"
+            | "work_snapshot_get"
+            | "goal_propose"
+            | "goal_activate"
+            | "task_create_many"
+            | "task_update"
+            | "task_evidence_add"
+            | "task_evidence_validate"
     )
 }
 
@@ -239,6 +256,7 @@ mod tests {
             "steering": false,
             "contextCompaction": true,
             "dynamicModelSwitch": false,
+            "workLoop": true,
             "tools": [{
                 "name": "read",
                 "category": "project-read",
@@ -248,6 +266,7 @@ mod tests {
         }))
         .expect("deserialize capability manifest");
         manifest.validate().expect("valid manifest");
+        assert!(manifest.work_loop_enabled());
     }
 
     #[test]
@@ -263,12 +282,58 @@ mod tests {
             "steering": false,
             "contextCompaction": true,
             "dynamicModelSwitch": false,
+            "workLoop": true,
             "tools": [
                 { "name": "read", "category": "project-read", "execution": "runtime", "approval": "preflight" },
                 { "name": "read", "category": "project-read", "execution": "runtime", "approval": "preflight" }
             ]
         }))
         .expect("deserialize capability manifest");
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn version_one_runtime_degrades_without_work_tools() {
+        let manifest: RuntimeCapabilityManifest = serde_json::from_value(json!({
+            "manifestVersion": 1,
+            "streamingText": true,
+            "cancellation": true,
+            "reasoning": true,
+            "sessionResume": true,
+            "toolApproval": true,
+            "imageInput": false,
+            "steering": false,
+            "contextCompaction": true,
+            "dynamicModelSwitch": false,
+            "tools": []
+        }))
+        .expect("deserialize v1 manifest");
+        manifest.validate().expect("v1 remains compatible");
+        assert!(!manifest.work_loop_enabled());
+    }
+
+    #[test]
+    fn rejects_a_raw_database_host_surface() {
+        let manifest: RuntimeCapabilityManifest = serde_json::from_value(json!({
+            "manifestVersion": CAPABILITY_MANIFEST_VERSION,
+            "streamingText": true,
+            "cancellation": true,
+            "reasoning": true,
+            "sessionResume": true,
+            "toolApproval": true,
+            "imageInput": false,
+            "steering": false,
+            "contextCompaction": true,
+            "dynamicModelSwitch": false,
+            "workLoop": true,
+            "tools": [{
+                "name": "sqlite_execute",
+                "category": "work",
+                "execution": "host",
+                "approval": "none"
+            }]
+        }))
+        .expect("deserialize manifest");
         assert!(manifest.validate().is_err());
     }
 }
