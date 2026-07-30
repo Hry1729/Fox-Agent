@@ -8,6 +8,7 @@ mod runtime_host;
 mod skills;
 mod tool_guard;
 mod tool_host;
+mod work_diagnostics;
 mod work_mode_gate;
 mod yuxi;
 
@@ -70,6 +71,8 @@ pub fn run() {
             commands::runtime_status,
             commands::runtime_diagnostics,
             commands::diagnostics_export,
+            commands::diagnose_work_state,
+            commands::export_work_trace,
             commands::backup_create,
             commands::backup_restore,
             commands::data_cleanup,

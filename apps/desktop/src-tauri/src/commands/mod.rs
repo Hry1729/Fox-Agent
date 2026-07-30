@@ -513,6 +513,30 @@ pub fn diagnostics_export(
 }
 
 #[tauri::command]
+pub fn diagnose_work_state(
+    state: State<'_, AppState>,
+    request: crate::work_diagnostics::WorkStateRequest,
+) -> ApiResponse<crate::work_diagnostics::WorkStateDiagnosticReport> {
+    crate::work_diagnostics::diagnose_work_state(&state.database, &request.conversation_id)
+        .map(ApiResponse::success)
+        .unwrap_or_else(|error| ApiResponse::failure("work_state.diagnosis_failed", error, false))
+}
+
+#[tauri::command]
+pub fn export_work_trace(
+    state: State<'_, AppState>,
+    request: crate::work_diagnostics::WorkStateRequest,
+) -> ApiResponse<crate::maintenance::MaintenanceResult> {
+    crate::work_diagnostics::export_work_trace(
+        &state.database,
+        &state.data_dir,
+        &request.conversation_id,
+    )
+    .map(ApiResponse::success)
+    .unwrap_or_else(|error| ApiResponse::failure("work_trace.export_failed", error, false))
+}
+
+#[tauri::command]
 pub fn backup_create(
     state: State<'_, AppState>,
 ) -> ApiResponse<crate::maintenance::MaintenanceResult> {

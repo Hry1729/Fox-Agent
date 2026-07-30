@@ -3,7 +3,7 @@
 > 状态：当前注册表<br>
 > 适用版本：Fox 0.1.x<br>
 > 维护者：Fox 前后端工程师<br>
-> 最后更新：2026-07-29
+> 最后更新：2026-07-30
 
 ## 调用约定
 
@@ -30,7 +30,7 @@ type ApiResponse<T> =
 
 | 分组 | 命令 |
 |---|---|
-| Runtime/诊断 | `runtime_initialize`, `runtime_status`, `runtime_diagnostics`, `diagnostics_export` |
+| Runtime/诊断 | `runtime_initialize`, `runtime_status`, `runtime_diagnostics`, `diagnostics_export`, `diagnose_work_state`, `export_work_trace` |
 | 维护 | `backup_create`, `backup_restore`, `data_cleanup` |
 | Agent/扩展 | `agents_list`, `skills_list`, `skill_set_enabled`, `mcp_servers_list`, `mcp_server_save`, `mcp_server_test`, `mcp_server_set_enabled`, `mcp_server_delete` |
 | 用户/统计 | `usage_statistics`, `user_profile_get`, `user_profile_save` |
@@ -46,6 +46,13 @@ type ApiResponse<T> =
 | 模型 | `model_service_get/save/test`, `model_providers_list`, `model_provider_save/delete` |
 
 真实注册清单以 `src-tauri/src/lib.rs` 为准；前端封装以 `features/conversations/api/desktop-client.ts` 为准。
+
+### A0 工作状态诊断
+
+两个命令都接收 `{ conversationId }`：
+
+- `diagnose_work_state` 返回 Schema 版本、Event Schema 版本、Goal/Task/Evidence/Work Event 计数及结构化 findings。`healthy=false` 只表示存在破坏不变量的 error；未校验或失效 Evidence、旧 Runtime 缺少 Trace 等以 warning 报告。
+- `export_work_trace` 在 `<app-data>/exports/` 写入 `fox-work-trace-<conversation>-<timestamp>.json`，返回通用 `MaintenanceResult`。导出包含工作图、Work Event 以及 Run/Runtime Event/Tool Call 的脱敏 Trace 元数据；不包含事件正文、工具输入/结果、消息正文、项目文件或凭证。
 
 ## 窗口事件
 

@@ -1135,6 +1135,79 @@ impl Database {
         Ok(detail)
     }
 
+    #[allow(clippy::type_complexity)]
+    pub fn load_conversation_trace_records(
+        &self,
+        conversation_id: &str,
+    ) -> Result<(Vec<RunRecord>, Vec<RunEventRecord>, Vec<ToolCallRecord>), String> {
+        self.with_connection(|connection| {
+            query_conversation(connection, conversation_id)?;
+            let runs = {
+                let mut statement = connection.prepare(
+                    "SELECT id, conversation_id, runtime_session_id, status, model, started_at,
+                            finished_at, error_code, error_message, last_seq, trace_id, root_span_id
+                     FROM runs WHERE conversation_id = ?1 ORDER BY created_at ASC, rowid ASC",
+                )?;
+                let records = statement
+                    .query_map([conversation_id], |row| {
+                        Ok(RunRecord {
+                            id: row.get(0)?,
+                            conversation_id: row.get(1)?,
+                            runtime_session_id: row.get(2)?,
+                            status: row.get(3)?,
+                            model: row.get(4)?,
+                            started_at: row.get(5)?,
+                            finished_at: row.get(6)?,
+                            error_code: row.get(7)?,
+                            error_message: row.get(8)?,
+                            last_seq: row.get(9)?,
+                            trace_id: row.get(10)?,
+                            root_span_id: row.get(11)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                records
+            };
+            let runtime_events = {
+                let mut statement = connection.prepare(
+                    "SELECT e.run_id, e.seq, e.event_type, e.event_json, e.created_at,
+                            e.trace_id, e.span_id
+                     FROM run_events e JOIN runs r ON r.id = e.run_id
+                     WHERE r.conversation_id = ?1
+                     ORDER BY r.created_at ASC, e.seq ASC",
+                )?;
+                let records = statement
+                    .query_map([conversation_id], |row| {
+                        let event_json: String = row.get(3)?;
+                        Ok(RunEventRecord {
+                            run_id: row.get(0)?,
+                            seq: row.get(1)?,
+                            event_type: row.get(2)?,
+                            event: parse_json(&event_json),
+                            created_at: row.get(4)?,
+                            trace_id: row.get(5)?,
+                            span_id: row.get(6)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                records
+            };
+            let tool_calls = {
+                let mut statement = connection.prepare(
+                    "SELECT id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
+                            status, result_json, error_message, execution_location, requires_approval,
+                            started_at, completed_at, updated_at, trace_id, span_id
+                     FROM tool_calls WHERE conversation_id = ?1 ORDER BY started_at ASC, rowid ASC",
+                )?;
+                let records = statement
+                    .query_map([conversation_id], map_tool_call)?
+                    .collect::<Result<Vec<_>, _>>()?;
+                records
+            };
+            Ok((runs, runtime_events, tool_calls))
+        })
+    }
+
     pub fn conversation_knowledge_bindings(
         &self,
         conversation_id: &str,
