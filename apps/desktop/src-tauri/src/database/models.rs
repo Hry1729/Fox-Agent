@@ -227,6 +227,9 @@ pub struct ConversationDetail {
     pub knowledge_bindings: Vec<KnowledgeBindingRecord>,
     pub last_run: Option<RunRecord>,
     pub has_earlier_messages: bool,
+    pub goals: Vec<GoalRecord>,
+    pub tasks: Vec<WorkTaskRecord>,
+    pub evidence: Vec<TaskEvidenceRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]

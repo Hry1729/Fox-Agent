@@ -20,8 +20,12 @@ export function useGoalProgress(detail: ConversationDetail | null): GoalProgress
       return null
     }
 
-    // Find active or blocked Goal (only one should exist per conversation)
+    // Prefer the current Goal, then retain the newest completed graph after the
+    // final assistant response or an App restart.
     const activeGoal = detail.goals.find(g => g.status === 'active' || g.status === 'blocked')
+      ?? [...detail.goals]
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+        .find(g => g.status === 'completed')
 
     if (!activeGoal) {
       return null

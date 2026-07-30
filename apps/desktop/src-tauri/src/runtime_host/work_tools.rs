@@ -237,9 +237,8 @@ pub fn execute(
 }
 
 fn snapshot(database: &Database, conversation_id: &str) -> Result<Value, String> {
-    let goals = database
-        .goals()
-        .get_by_conversation(conversation_id)
+    let (goals, tasks, evidence) = database
+        .load_work_graph_snapshot(conversation_id)
         .map_err(|error| error.to_string())?;
     let goal = goals.into_iter().find(|goal| {
         matches!(
@@ -250,19 +249,18 @@ fn snapshot(database: &Database, conversation_id: &str) -> Result<Value, String>
     let Some(goal) = goal else {
         return Ok(json!({ "goal": null, "tasks": [], "evidence": [] }));
     };
-    let tasks = database
-        .work_tasks()
-        .list_by_goal(&goal.id)
-        .map_err(|error| error.to_string())?;
-    let mut evidence = Vec::new();
-    for task in &tasks {
-        evidence.extend(
-            database
-                .task_evidence()
-                .list_by_task(&task.id, 50)
-                .map_err(|error| error.to_string())?,
-        );
-    }
+    let tasks = tasks
+        .into_iter()
+        .filter(|task| task.goal_id == goal.id)
+        .collect::<Vec<_>>();
+    let task_ids = tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let evidence = evidence
+        .into_iter()
+        .filter(|item| task_ids.contains(item.task_id.as_str()))
+        .collect::<Vec<_>>();
     Ok(json!({ "goal": goal, "tasks": tasks, "evidence": evidence }))
 }
 
@@ -356,6 +354,7 @@ fn tool_result(details: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
     use uuid::Uuid;
 
     fn setup() -> (Database, std::path::PathBuf, String, String) {
@@ -369,6 +368,11 @@ mod tests {
             .expect("create run")
             .run;
         (database, path, conversation.id, run.id)
+    }
+
+    fn percentile_95(mut samples: Vec<Duration>) -> Duration {
+        samples.sort_unstable();
+        samples[(samples.len() * 95).div_ceil(100).saturating_sub(1)]
     }
 
     #[test]
@@ -488,6 +492,367 @@ mod tests {
             1
         );
         assert!(database.list_work_events(&conversation_id).unwrap().len() >= 6);
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cross_file_bug_workflow_restores_three_tasks_and_evidence_after_restart() {
+        let (database, path, conversation_id, run_id) = setup();
+        let artifact_root =
+            std::env::temp_dir().join(format!("fox-a0-cross-file-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&artifact_root).expect("create artifact fixture directory");
+
+        let proposed = execute(
+            &database,
+            &conversation_id,
+            &run_id,
+            "goal_propose",
+            &json!({
+                "title": "修复跨三文件状态恢复问题",
+                "objective": "定位、修改三个文件并验证重启恢复"
+            }),
+        )
+        .expect("create active goal");
+        let goal_id = proposed.result["details"]["goal"]["id"]
+            .as_str()
+            .expect("goal id")
+            .to_owned();
+        let created = execute(
+            &database,
+            &conversation_id,
+            &run_id,
+            "task_create_many",
+            &json!({
+                "goalId": goal_id,
+                "tasks": [
+                    { "title": "定位", "ordinal": 0 },
+                    { "title": "修改", "ordinal": 1 },
+                    { "title": "验证", "ordinal": 2 }
+                ]
+            }),
+        )
+        .expect("create acceptance tasks");
+        let task_ids = created.result["details"]["tasks"]
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .map(|task| task["id"].as_str().expect("task id").to_owned())
+            .collect::<Vec<_>>();
+
+        let locate_call = database
+            .create_host_tool_call(
+                &run_id,
+                "locate-cross-file-bug",
+                "grep",
+                &json!({ "pattern": "stale work graph" }),
+                "running",
+                false,
+            )
+            .expect("create locate tool call");
+        database
+            .complete_host_tool_call(
+                &run_id,
+                "locate-cross-file-bug",
+                Some(&json!({ "matches": 3 })),
+                None,
+            )
+            .expect("complete locate tool call");
+        execute(
+            &database,
+            &conversation_id,
+            &run_id,
+            "task_update",
+            &json!({ "taskId": task_ids[0], "status": "in_progress", "expectedVersion": 1 }),
+        )
+        .expect("start locate task");
+        execute(
+            &database,
+            &conversation_id,
+            &run_id,
+            "task_evidence_add",
+            &json!({
+                "taskId": task_ids[0],
+                "evidenceType": "tool_call",
+                "refKind": "tool_call",
+                "refId": locate_call.id,
+                "summary": "定位到状态模型、Host 查询和前端 Reducer 三处"
+            }),
+        )
+        .expect("add locate evidence");
+        execute(
+            &database,
+            &conversation_id,
+            &run_id,
+            "task_update",
+            &json!({ "taskId": task_ids[0], "status": "completed", "expectedVersion": 2 }),
+        )
+        .expect("complete locate task");
+
+        let fixture_files = ["state-model.rs", "runtime-host.rs", "goal-view.tsx"];
+        for (index, name) in fixture_files.iter().enumerate() {
+            let file = artifact_root.join(name);
+            std::fs::write(&file, format!("fixed fixture {index}\n")).expect("write fixture");
+            let runtime_tool_call_id = format!("edit-cross-file-{index}");
+            database
+                .create_host_tool_call(
+                    &run_id,
+                    &runtime_tool_call_id,
+                    "edit_file",
+                    &json!({ "path": file }),
+                    "running",
+                    false,
+                )
+                .expect("create edit tool call");
+            database
+                .complete_host_tool_call(
+                    &run_id,
+                    &runtime_tool_call_id,
+                    Some(&json!({
+                        "details": {
+                            "path": file.to_string_lossy(),
+                            "bytes": std::fs::metadata(&file).expect("fixture metadata").len()
+                        }
+                    })),
+                    None,
+                )
+                .expect("complete edit tool call");
+        }
+        let artifacts = database
+            .load_conversation(&conversation_id)
+            .expect("load artifacts")
+            .artifacts;
+        assert_eq!(artifacts.len(), 3);
+        execute(
+            &database,
+            &conversation_id,
+            &run_id,
+            "task_update",
+            &json!({ "taskId": task_ids[1], "status": "in_progress", "expectedVersion": 1 }),
+        )
+        .expect("start modify task");
+        for artifact in &artifacts {
+            execute(
+                &database,
+                &conversation_id,
+                &run_id,
+                "task_evidence_add",
+                &json!({
+                    "taskId": task_ids[1],
+                    "evidenceType": "file_diff",
+                    "refKind": "artifact",
+                    "refId": artifact.id,
+                    "summary": format!("修改 {}", artifact.display_name)
+                }),
+            )
+            .expect("add file diff evidence");
+        }
+        execute(
+            &database,
+            &conversation_id,
+            &run_id,
+            "task_update",
+            &json!({ "taskId": task_ids[1], "status": "completed", "expectedVersion": 2 }),
+        )
+        .expect("complete modify task");
+
+        let test_call = database
+            .create_host_tool_call(
+                &run_id,
+                "verify-cross-file-fix",
+                "shell_command",
+                &json!({ "command": "cargo test && bun test" }),
+                "running",
+                false,
+            )
+            .expect("create verification tool call");
+        database
+            .complete_host_tool_call(
+                &run_id,
+                "verify-cross-file-fix",
+                Some(&json!({ "passed": true })),
+                None,
+            )
+            .expect("complete verification tool call");
+        execute(
+            &database,
+            &conversation_id,
+            &run_id,
+            "task_update",
+            &json!({ "taskId": task_ids[2], "status": "in_progress", "expectedVersion": 1 }),
+        )
+        .expect("start verify task");
+        execute(
+            &database,
+            &conversation_id,
+            &run_id,
+            "task_evidence_add",
+            &json!({
+                "taskId": task_ids[2],
+                "evidenceType": "test_result",
+                "refKind": "tool_call",
+                "refId": test_call.id,
+                "summary": "Rust、前端和 Runtime 测试全部通过"
+            }),
+        )
+        .expect("add test evidence");
+        execute(
+            &database,
+            &conversation_id,
+            &run_id,
+            "task_update",
+            &json!({ "taskId": task_ids[2], "status": "completed", "expectedVersion": 2 }),
+        )
+        .expect("complete verify task");
+        let evidence_before_restart = database
+            .load_conversation(&conversation_id)
+            .expect("load evidence before restart")
+            .evidence;
+        assert_eq!(evidence_before_restart.len(), 5);
+        for item in evidence_before_restart {
+            assert_eq!(
+                database
+                    .task_evidence()
+                    .validate(&item.id)
+                    .expect("validate acceptance evidence"),
+                crate::database::EvidenceValidityStatus::Valid
+            );
+        }
+        database
+            .goals()
+            .complete(&goal_id, 1)
+            .expect("complete acceptance goal");
+
+        drop(database);
+        let restored = Database::open(path.clone()).expect("reopen database");
+        let detail = restored
+            .load_conversation(&conversation_id)
+            .expect("load restored conversation");
+        assert_eq!(detail.goals.len(), 1);
+        assert_eq!(detail.goals[0].status, GoalStatus::Completed);
+        assert_eq!(detail.tasks.len(), 3);
+        assert!(detail
+            .tasks
+            .iter()
+            .all(|task| task.status == WorkTaskStatus::Completed && task.attempt == 1));
+        assert_eq!(detail.evidence.len(), 5);
+        assert!(detail
+            .evidence
+            .iter()
+            .all(|item| item.source_run_id.as_deref() == Some(&run_id)));
+        assert!(detail.evidence.iter().all(|item| {
+            item.validity_status == crate::database::EvidenceValidityStatus::Valid
+        }));
+
+        drop(restored);
+        let _ = std::fs::remove_file(path);
+        std::fs::remove_dir_all(artifact_root).expect("remove artifact fixture directory");
+    }
+
+    #[test]
+    fn a0_snapshot_and_state_update_p95_stay_within_budget() {
+        let (database, path, conversation_id, run_id) = setup();
+        let goal = database
+            .goals()
+            .create(crate::database::CreateGoalInput {
+                id: None,
+                conversation_id: conversation_id.clone(),
+                title: "Performance baseline".to_owned(),
+                objective: "Measure a 500-task snapshot".to_owned(),
+                acceptance_summary: None,
+                status: GoalStatus::Active,
+                created_by: run_id.clone(),
+            })
+            .expect("create performance goal");
+        let tasks = database
+            .work_tasks()
+            .create_many(
+                (0..500)
+                    .map(|ordinal| crate::database::CreateTaskInput {
+                        id: None,
+                        goal_id: goal.id.clone(),
+                        parent_task_id: None,
+                        ordinal,
+                        title: format!("Task {ordinal}"),
+                        detail: None,
+                    })
+                    .collect(),
+            )
+            .expect("create 500 tasks");
+
+        database
+            .load_conversation(&conversation_id)
+            .expect("warm conversation snapshot");
+        let snapshot_samples = (0..60)
+            .map(|_| {
+                let started = Instant::now();
+                let detail = database
+                    .load_conversation(&conversation_id)
+                    .expect("load conversation snapshot");
+                assert_eq!(detail.tasks.len(), 500);
+                started.elapsed()
+            })
+            .collect::<Vec<_>>();
+        let snapshot_p95 = percentile_95(snapshot_samples);
+        assert!(
+            snapshot_p95 < Duration::from_millis(50),
+            "conversation snapshot P95 {snapshot_p95:?} exceeded 50ms"
+        );
+
+        let task_id = tasks[0].id.clone();
+        let mut version = tasks[0].version;
+        let mut transaction_samples = Vec::with_capacity(80);
+        let started = Instant::now();
+        let active = database
+            .work_tasks()
+            .update(
+                &task_id,
+                version,
+                WorkTaskStatus::InProgress,
+                Some(&run_id),
+                None,
+            )
+            .expect("start measured task");
+        transaction_samples.push(started.elapsed());
+        version = active.version;
+        for _ in 0..40 {
+            let started = Instant::now();
+            let blocked = database
+                .work_tasks()
+                .update(
+                    &task_id,
+                    version,
+                    WorkTaskStatus::Blocked,
+                    None,
+                    Some("performance cycle".to_owned()),
+                )
+                .expect("block measured task");
+            transaction_samples.push(started.elapsed());
+            version = blocked.version;
+
+            let started = Instant::now();
+            let next = database
+                .work_tasks()
+                .update(
+                    &task_id,
+                    version,
+                    WorkTaskStatus::InProgress,
+                    Some(&run_id),
+                    None,
+                )
+                .expect("resume measured task");
+            transaction_samples.push(started.elapsed());
+            version = next.version;
+        }
+        let transaction_p95 = percentile_95(transaction_samples);
+        eprintln!(
+            "A0 backend performance baseline: snapshot_p95={snapshot_p95:?}, transaction_p95={transaction_p95:?}"
+        );
+        assert!(
+            transaction_p95 < Duration::from_millis(20),
+            "state transaction P95 {transaction_p95:?} exceeded 20ms"
+        );
+
         drop(database);
         let _ = std::fs::remove_file(path);
     }

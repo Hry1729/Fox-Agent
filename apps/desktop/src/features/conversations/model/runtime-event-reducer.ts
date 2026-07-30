@@ -55,6 +55,12 @@ function mergeRecords<T>(persisted: T[], current: T[], key: (item: T) => string)
   return [...records.values()]
 }
 
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
 function mergeMessages(persisted: ConversationMessage[], current: ConversationMessage[]) {
   const persistedMessages = new Map(persisted.map((message) => [message.id, message]))
   const hasPersistedEquivalent = (message: ConversationMessage) => persisted.some((candidate) => (
@@ -209,14 +215,30 @@ export function applyRuntimeNotification(
   notification: RuntimeEventNotification,
 ) {
   if (!current || current.conversation.id !== notification.conversationId) return current
+  const event = notification.event
+  const eventData = objectValue(event.data)
+  const goalEvent = objectValue(eventData?.goal) ?? event
+  const taskEvent = objectValue(eventData?.task) ?? event
+  const evidenceEvent = objectValue(eventData?.evidence) ?? eventData ?? event
+  const goalId = typeof event.goalId === 'string'
+    ? event.goalId
+    : typeof goalEvent.id === 'string' ? goalEvent.id : null
+  const taskId = typeof event.taskId === 'string'
+    ? event.taskId
+    : typeof taskEvent.id === 'string' ? taskEvent.id : null
   const currentRun = current.lastRun
   const sameRun = currentRun?.id === notification.runId
   const replacesPendingRun = Boolean(currentRun?.id.startsWith('pending-run-'))
   const updatesActiveRun = !currentRun || sameRun || replacesPendingRun
+  const alreadyProcessed = processEventTypes.has(event.type)
+    && current.runtimeEvents.some((item) => (
+      item.runId === notification.runId && item.seq === notification.seq
+    ))
+  if (alreadyProcessed) return current
   if (sameRun && currentRun && notification.seq <= currentRun.lastSeq) return current
 
-  const event = notification.event
   const timestamp = Date.parse(notification.timestamp) || Date.now()
+  const workTimestamp = notification.timestamp
   let messages = current.messages
   if (updatesActiveRun && event.type === 'message.started') {
     messages = updateAssistantMessage(messages, notification, (message) => ({ ...message, status: 'streaming', updatedAt: timestamp }))
@@ -249,108 +271,166 @@ export function applyRuntimeNotification(
   let tasks = current.tasks
   let evidence = current.evidence
 
-  if (event.type === 'goal.proposed' && typeof event.goalId === 'string') {
-    const exists = goals.some((g) => g.id === event.goalId)
-    if (!exists) {
+  const goalStatus = event.type === 'goal.proposed'
+    ? 'proposed'
+    : event.type === 'goal.activated'
+      ? 'active'
+      : event.type === 'goal.blocked'
+        ? 'blocked'
+        : event.type === 'goal.completed'
+          ? 'completed'
+          : event.type === 'goal.cancelled'
+            ? 'cancelled'
+            : null
+
+  if (goalStatus && goalId && !goals.some((goal) => goal.id === goalId)) {
       goals = [...goals, {
-        id: event.goalId,
+        id: goalId,
         conversationId: notification.conversationId,
-        title: typeof event.title === 'string' ? event.title : '',
-        objective: typeof event.objective === 'string' ? event.objective : '',
-        acceptanceSummary: null,
-        status: 'proposed' as const,
-        version: typeof event.version === 'number' ? event.version : 1,
-        createdBy: notification.runId,
-        createdAt: timestamp,
-        updatedAt: timestamp,
-        completedAt: null,
-        blockedReason: null,
+        title: typeof goalEvent.title === 'string' ? goalEvent.title : '',
+        objective: typeof goalEvent.objective === 'string' ? goalEvent.objective : '',
+        acceptanceSummary: typeof goalEvent.acceptanceSummary === 'string'
+          ? goalEvent.acceptanceSummary
+          : null,
+        status: goalStatus as GoalRecord['status'],
+        version: typeof goalEvent.version === 'number' ? goalEvent.version : 1,
+        createdBy: typeof goalEvent.createdBy === 'string'
+          ? goalEvent.createdBy
+          : notification.runId,
+        createdAt: typeof goalEvent.createdAt === 'string'
+          ? goalEvent.createdAt
+          : workTimestamp,
+        updatedAt: typeof goalEvent.updatedAt === 'string'
+          ? goalEvent.updatedAt
+          : workTimestamp,
+        completedAt: goalStatus === 'completed'
+          ? (typeof goalEvent.completedAt === 'string' ? goalEvent.completedAt : workTimestamp)
+          : null,
+        blockedReason: typeof goalEvent.blockedReason === 'string'
+          ? goalEvent.blockedReason
+          : null,
       }]
-    }
-  } else if ((event.type === 'goal.activated' || event.type === 'goal.blocked' || event.type === 'goal.completed' || event.type === 'goal.cancelled') && typeof event.goalId === 'string') {
+  } else if (goalStatus && goalId) {
     goals = goals.map((goal) => {
-      if (goal.id !== event.goalId) return goal
-      const status = event.type === 'goal.activated' ? 'active' : event.type === 'goal.blocked' ? 'blocked' : event.type === 'goal.completed' ? 'completed' : 'cancelled'
+      if (goal.id !== goalId) return goal
       return {
         ...goal,
-        status: status as GoalRecord['status'],
-        version: typeof event.version === 'number' ? event.version : goal.version,
-        updatedAt: timestamp,
-        completedAt: status === 'completed' ? timestamp : goal.completedAt,
-        blockedReason: event.type === 'goal.blocked' && typeof event.blockedReason === 'string' ? event.blockedReason : goal.blockedReason,
+        status: goalStatus as GoalRecord['status'],
+        version: typeof goalEvent.version === 'number' ? goalEvent.version : goal.version,
+        updatedAt: typeof goalEvent.updatedAt === 'string'
+          ? goalEvent.updatedAt
+          : workTimestamp,
+        completedAt: goalStatus === 'completed'
+          ? (typeof goalEvent.completedAt === 'string' ? goalEvent.completedAt : workTimestamp)
+          : goal.completedAt,
+        blockedReason: event.type === 'goal.blocked' && typeof goalEvent.blockedReason === 'string'
+          ? goalEvent.blockedReason
+          : goal.blockedReason,
       }
     })
-  } else if (event.type === 'task.created' && typeof event.taskId === 'string' && typeof event.goalId === 'string') {
-    const exists = tasks.some((t) => t.id === event.taskId)
+  } else if (event.type === 'task.created' && taskId && goalId) {
+    const exists = tasks.some((task) => task.id === taskId)
     if (!exists) {
       tasks = [...tasks, {
-        id: event.taskId,
-        goalId: event.goalId,
-        parentTaskId: null,
-        ordinal: typeof event.ordinal === 'number' ? event.ordinal : 0,
-        title: typeof event.title === 'string' ? event.title : '',
-        detail: typeof event.detail === 'string' ? event.detail : null,
+        id: taskId,
+        goalId,
+        parentTaskId: typeof taskEvent.parentTaskId === 'string' ? taskEvent.parentTaskId : null,
+        ordinal: typeof taskEvent.ordinal === 'number' ? taskEvent.ordinal : 0,
+        title: typeof taskEvent.title === 'string' ? taskEvent.title : '',
+        detail: typeof taskEvent.detail === 'string' ? taskEvent.detail : null,
         status: 'queued' as const,
         ownerRunId: null,
-        attempt: 1,
+        attempt: typeof taskEvent.attempt === 'number' ? taskEvent.attempt : 1,
+        version: typeof taskEvent.version === 'number' ? taskEvent.version : 1,
         blockedReason: null,
-        createdAt: timestamp,
-        updatedAt: timestamp,
+        createdAt: typeof taskEvent.createdAt === 'string'
+          ? taskEvent.createdAt
+          : workTimestamp,
+        updatedAt: typeof taskEvent.updatedAt === 'string'
+          ? taskEvent.updatedAt
+          : workTimestamp,
         startedAt: null,
         finishedAt: null,
       }]
     }
-  } else if (event.type === 'task.started' && typeof event.taskId === 'string') {
+  } else if (event.type === 'task.started' && taskId) {
     tasks = tasks.map((task) => {
-      if (task.id !== event.taskId) return task
+      if (task.id !== taskId) return task
       return {
         ...task,
         status: 'in_progress' as const,
-        ownerRunId: typeof event.ownerRunId === 'string' ? event.ownerRunId : task.ownerRunId,
-        attempt: typeof event.attempt === 'number' ? event.attempt : task.attempt,
-        updatedAt: timestamp,
-        startedAt: task.startedAt ?? timestamp,
+        ownerRunId: typeof taskEvent.ownerRunId === 'string'
+          ? taskEvent.ownerRunId
+          : task.ownerRunId,
+        attempt: typeof taskEvent.attempt === 'number' ? taskEvent.attempt : task.attempt,
+        version: typeof taskEvent.version === 'number' ? taskEvent.version : task.version,
+        updatedAt: typeof taskEvent.updatedAt === 'string'
+          ? taskEvent.updatedAt
+          : workTimestamp,
+        startedAt: task.startedAt
+          ?? (typeof taskEvent.startedAt === 'string' ? taskEvent.startedAt : workTimestamp),
       }
     })
-  } else if ((event.type === 'task.completed' || event.type === 'task.blocked' || event.type === 'task.interrupted') && typeof event.taskId === 'string') {
+  } else if ((event.type === 'task.completed' || event.type === 'task.blocked' || event.type === 'task.interrupted') && taskId) {
     tasks = tasks.map((task) => {
-      if (task.id !== event.taskId) return task
+      if (task.id !== taskId) return task
       const status = event.type === 'task.completed' ? 'completed' : event.type === 'task.blocked' ? 'blocked' : 'interrupted'
       return {
         ...task,
         status: status as WorkTaskRecord['status'],
-        updatedAt: timestamp,
-        finishedAt: status === 'completed' ? timestamp : task.finishedAt,
-        blockedReason: event.type === 'task.blocked' && typeof event.blockedReason === 'string' ? event.blockedReason : task.blockedReason,
+        version: typeof taskEvent.version === 'number' ? taskEvent.version : task.version,
+        updatedAt: typeof taskEvent.updatedAt === 'string'
+          ? taskEvent.updatedAt
+          : workTimestamp,
+        finishedAt: status === 'completed'
+          ? (typeof taskEvent.finishedAt === 'string' ? taskEvent.finishedAt : workTimestamp)
+          : task.finishedAt,
+        blockedReason: event.type === 'task.blocked' && typeof taskEvent.blockedReason === 'string'
+          ? taskEvent.blockedReason
+          : task.blockedReason,
       }
     })
-  } else if (event.type === 'evidence.added' && typeof event.evidenceId === 'string' && typeof event.taskId === 'string') {
-    const exists = evidence.some((e) => e.id === event.evidenceId)
+  } else if (event.type === 'evidence.added' && typeof evidenceEvent.id === 'string' && taskId) {
+    const exists = evidence.some((item) => item.id === evidenceEvent.id)
     if (!exists) {
       evidence = [...evidence, {
-        id: event.evidenceId,
-        taskId: event.taskId,
-        sourceRunId: notification.runId,
-        evidenceType: typeof event.evidenceType === 'string' ? event.evidenceType as TaskEvidenceRecord['evidenceType'] : 'tool_call',
-        refKind: typeof event.refKind === 'string' ? event.refKind as TaskEvidenceRecord['refKind'] : 'tool_call',
-        refId: typeof event.refId === 'string' ? event.refId : '',
-        summary: typeof event.summary === 'string' ? event.summary : '',
-        metadataJson: '{}',
-        validityStatus: 'unverified' as const,
-        traceId: typeof event.traceId === 'string' ? event.traceId : null,
-        spanId: typeof event.spanId === 'string' ? event.spanId : null,
-        checkedAt: null,
-        invalidReason: null,
-        createdAt: timestamp,
+        id: evidenceEvent.id,
+        taskId,
+        sourceRunId: typeof evidenceEvent.sourceRunId === 'string'
+          ? evidenceEvent.sourceRunId
+          : notification.runId,
+        evidenceType: typeof evidenceEvent.evidenceType === 'string'
+          ? evidenceEvent.evidenceType as TaskEvidenceRecord['evidenceType']
+          : 'tool_call',
+        refKind: typeof evidenceEvent.refKind === 'string'
+          ? evidenceEvent.refKind as TaskEvidenceRecord['refKind']
+          : 'tool_call',
+        refId: typeof evidenceEvent.refId === 'string' ? evidenceEvent.refId : '',
+        summary: typeof evidenceEvent.summary === 'string' ? evidenceEvent.summary : '',
+        metadata: objectValue(evidenceEvent.metadata) ?? {},
+        validityStatus: typeof evidenceEvent.validityStatus === 'string'
+          ? evidenceEvent.validityStatus as TaskEvidenceRecord['validityStatus']
+          : 'unverified',
+        traceId: typeof evidenceEvent.traceId === 'string' ? evidenceEvent.traceId : null,
+        spanId: typeof evidenceEvent.spanId === 'string' ? evidenceEvent.spanId : null,
+        checkedAt: typeof evidenceEvent.checkedAt === 'string' ? evidenceEvent.checkedAt : null,
+        invalidReason: typeof evidenceEvent.invalidReason === 'string'
+          ? evidenceEvent.invalidReason
+          : null,
+        createdAt: typeof evidenceEvent.createdAt === 'string'
+          ? evidenceEvent.createdAt
+          : workTimestamp,
       }]
     }
-  } else if (event.type === 'evidence.validated' && typeof event.evidenceId === 'string') {
-    evidence = evidence.map((e) => {
-      if (e.id !== event.evidenceId) return e
+  } else if (event.type === 'evidence.validated' && typeof evidenceEvent.evidenceId === 'string') {
+    evidence = evidence.map((item) => {
+      if (item.id !== evidenceEvent.evidenceId) return item
       return {
-        ...e,
-        validityStatus: typeof event.validityStatus === 'string' ? event.validityStatus as TaskEvidenceRecord['validityStatus'] : e.validityStatus,
-        checkedAt: timestamp,
+        ...item,
+        validityStatus: typeof evidenceEvent.validityStatus === 'string'
+          ? evidenceEvent.validityStatus as TaskEvidenceRecord['validityStatus']
+          : item.validityStatus,
+        checkedAt: workTimestamp,
       }
     })
   }
@@ -370,5 +450,10 @@ export function reduceRuntimeNotifications(
   detail: ConversationDetail,
   notifications: RuntimeEventNotification[],
 ) {
-  return notifications.reduce<ConversationDetail | null>(applyRuntimeNotification, detail) ?? detail
+  const ordered = [...notifications].sort((left, right) => {
+    if (left.runId === right.runId) return left.seq - right.seq
+    const timestampDifference = Date.parse(left.timestamp) - Date.parse(right.timestamp)
+    return timestampDifference || left.runId.localeCompare(right.runId) || left.seq - right.seq
+  })
+  return ordered.reduce<ConversationDetail | null>(applyRuntimeNotification, detail) ?? detail
 }

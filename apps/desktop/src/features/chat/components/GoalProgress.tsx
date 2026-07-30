@@ -41,7 +41,13 @@ export function GoalProgress({ data, defaultExpanded = false, onEvidenceClick }:
                 variant={goal.status === 'active' ? 'default' : 'secondary'}
                 className="text-[10px] px-1.5 py-0"
               >
-                {goal.status === 'active' ? '进行中' : goal.status === 'blocked' ? '已阻塞' : goal.status}
+                {goal.status === 'active'
+                  ? '进行中'
+                  : goal.status === 'blocked'
+                    ? '已阻塞'
+                    : goal.status === 'completed'
+                      ? '已完成'
+                      : goal.status}
               </Badge>
             </div>
 

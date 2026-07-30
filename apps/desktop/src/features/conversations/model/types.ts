@@ -557,9 +557,9 @@ export interface GoalRecord {
   status: 'proposed' | 'active' | 'blocked' | 'completed' | 'cancelled'
   version: number
   createdBy: string
-  createdAt: number
-  updatedAt: number
-  completedAt: number | null
+  createdAt: string
+  updatedAt: string
+  completedAt: string | null
   blockedReason: string | null
 }
 
@@ -573,11 +573,12 @@ export interface WorkTaskRecord {
   status: 'queued' | 'in_progress' | 'completed' | 'blocked' | 'interrupted' | 'skipped'
   ownerRunId: string | null
   attempt: number
+  version: number
   blockedReason: string | null
-  createdAt: number
-  updatedAt: number
-  startedAt: number | null
-  finishedAt: number | null
+  createdAt: string
+  updatedAt: string
+  startedAt: string | null
+  finishedAt: string | null
 }
 
 export interface TaskEvidenceRecord {
@@ -588,11 +589,11 @@ export interface TaskEvidenceRecord {
   refKind: 'tool_call' | 'run_event' | 'artifact' | 'message' | 'source'
   refId: string
   summary: string
-  metadataJson: string
+  metadata: Record<string, unknown>
   validityStatus: 'unverified' | 'valid' | 'stale' | 'missing' | 'invalid'
   traceId: string | null
   spanId: string | null
-  checkedAt: number | null
+  checkedAt: string | null
   invalidReason: string | null
-  createdAt: number
+  createdAt: string
 }
