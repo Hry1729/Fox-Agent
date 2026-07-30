@@ -19,6 +19,10 @@ function detail(): ConversationDetail {
       id: 'run-1', conversationId: 'conversation-1', runtimeSessionId: null, status: 'queued',
       model: 'test-model', startedAt: null, finishedAt: null, errorCode: null, errorMessage: null, lastSeq: 0,
     },
+    hasEarlierMessages: false,
+    goals: [],
+    tasks: [],
+    evidence: [],
   }
 }
 
