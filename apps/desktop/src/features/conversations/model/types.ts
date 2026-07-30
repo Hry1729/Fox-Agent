@@ -597,3 +597,35 @@ export interface TaskEvidenceRecord {
   invalidReason: string | null
   createdAt: string
 }
+
+export interface WorkStateCounts {
+  goals: number
+  tasks: number
+  evidence: number
+  workEvents: number
+  runs: number
+  runtimeEvents: number
+  toolCalls: number
+  goalStatuses: Record<string, number>
+  taskStatuses: Record<string, number>
+  evidenceValidity: Record<string, number>
+}
+
+export interface WorkStateFinding {
+  severity: 'error' | 'warning'
+  code: string
+  message: string
+  goalId: string | null
+  taskId: string | null
+  evidenceId: string | null
+}
+
+export interface WorkStateDiagnosticReport {
+  schemaVersion: number
+  eventSchemaVersion: number
+  conversationId: string
+  checkedAt: string
+  healthy: boolean
+  counts: WorkStateCounts
+  findings: WorkStateFinding[]
+}

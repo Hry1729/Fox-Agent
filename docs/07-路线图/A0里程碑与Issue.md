@@ -1,9 +1,9 @@
 # Milestone：A0-Minimal-Work-Loop
 
-> 状态：待实施<br>
+> 状态：A0 Alpha 发布验收<br>
 > 适用版本：Fox `0.1.x`<br>
 > 维护范围：A0 GitHub Milestone 与 Issue<br>
-> 最后更新：2026-07-29
+> 最后更新：2026-07-30
 >
 > GitHub Milestone：[A0-Minimal-Work-Loop](https://github.com/Hry1729/Fox-Agent/milestone/1)
 >

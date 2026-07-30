@@ -24,6 +24,7 @@ import type {
   McpServerRecord,
   McpConnectionTest,
   MaintenanceResult,
+  WorkStateDiagnosticReport,
   ApprovalRecord,
   AttachmentRecord,
   KnowledgeBaseRecord,
@@ -56,6 +57,10 @@ export const desktopClient = {
   runtimeStatus: () => command<RuntimeStatus>('runtime_status'),
   runtimeDiagnostics: () => command<RuntimeDiagnostics>('runtime_diagnostics'),
   exportDiagnostics: () => command<MaintenanceResult>('diagnostics_export'),
+  diagnoseWorkState: (conversationId: string) =>
+    command<WorkStateDiagnosticReport>('diagnose_work_state', { conversationId }),
+  exportWorkTrace: (conversationId: string) =>
+    command<MaintenanceResult>('export_work_trace', { conversationId }),
   createBackup: () => command<MaintenanceResult>('backup_create'),
   restoreBackup: (backupPath: string) => command<MaintenanceResult>('backup_restore', { backupPath }),
   cleanupData: (runtimeSessionDays = 30) => command<MaintenanceResult>('data_cleanup', { runtimeSessionDays }),
