@@ -125,6 +125,12 @@ Runtime 只能经 `tool.execute` 提交以下命令，Host 校验当前 `convers
 
 Host 在状态提交后单独记录事件，事件记录失败不回滚工作状态。`work_events` 以 `(conversation_id, sequence)` 去重；未知工作事件类型安全忽略。恢复时 `goals`、`work_tasks`、`task_evidence` 是唯一事实源，事件只服务流式展示和诊断。
 
+`data` 载荷与事件类型一致：Goal 事件携带 `goal`，Task 事件携带 `task`，`evidence.added` 携带 `evidence`，`evidence.validated` 携带 `evidenceId` 与 `validityStatus`。前端必须按 `schemaVersion + type` 解析，不得从文本消息反推工作状态。
+
+## Host 诊断命令
+
+`diagnose_work_state` 与 `export_work_trace` 是 Tauri Host 管理命令，不属于七个 Runtime Work Tool，也不会授予 Runtime 额外写权限。前者只读检查工作图不变量；后者导出 Goal、Task、Evidence、Work Event 与诊断结论，不包含对话正文、项目文件或凭证。
+
 ## 能力清单
 
 Manifest 版本为 2，字段包括流式、取消、推理、Session 恢复、审批、图片、Steering、上下文压缩、动态模型切换、`workLoop` 和工具列表。工具条目含 `name/category/execution/approval`。Rust 与 Node 两端均校验版本、枚举、重复工具及 Host Handler 存在性。

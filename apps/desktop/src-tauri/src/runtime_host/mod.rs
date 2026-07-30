@@ -1,6 +1,9 @@
 mod protocol;
 mod work_tools;
 
+#[cfg(test)]
+pub(crate) use work_tools::WORK_TOOLS;
+
 use crate::database::{AttachmentRecord, Database, StartRunResult};
 use crate::yuxi::{get_access_token, YuxiClient};
 use flate2::read::DeflateDecoder;
