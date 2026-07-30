@@ -192,6 +192,9 @@ export interface ConversationDetail {
   knowledgeBindings: KnowledgeBindingRecord[]
   lastRun: RunRecord | null
   hasEarlierMessages: boolean
+  goals: GoalRecord[]
+  tasks: WorkTaskRecord[]
+  evidence: TaskEvidenceRecord[]
 }
 
 export interface ConversationHistoryPage {
@@ -542,4 +545,54 @@ export interface ModelProviderRecord {
   models: ProviderModelRecord[]
   createdAt: number
   updatedAt: number
+}
+
+// A0 Work Loop Types
+export interface GoalRecord {
+  id: string
+  conversationId: string
+  title: string
+  objective: string
+  acceptanceSummary: string | null
+  status: 'proposed' | 'active' | 'blocked' | 'completed' | 'cancelled'
+  version: number
+  createdBy: string
+  createdAt: number
+  updatedAt: number
+  completedAt: number | null
+  blockedReason: string | null
+}
+
+export interface WorkTaskRecord {
+  id: string
+  goalId: string
+  parentTaskId: string | null
+  ordinal: number
+  title: string
+  detail: string | null
+  status: 'queued' | 'in_progress' | 'completed' | 'blocked' | 'interrupted' | 'skipped'
+  ownerRunId: string | null
+  attempt: number
+  blockedReason: string | null
+  createdAt: number
+  updatedAt: number
+  startedAt: number | null
+  finishedAt: number | null
+}
+
+export interface TaskEvidenceRecord {
+  id: string
+  taskId: string
+  sourceRunId: string | null
+  evidenceType: 'tool_call' | 'trace_span' | 'test_result' | 'file_diff' | 'artifact' | 'user_confirmation' | 'external_reference'
+  refKind: 'tool_call' | 'run_event' | 'artifact' | 'message' | 'source'
+  refId: string
+  summary: string
+  metadataJson: string
+  validityStatus: 'unverified' | 'valid' | 'stale' | 'missing' | 'invalid'
+  traceId: string | null
+  spanId: string | null
+  checkedAt: number | null
+  invalidReason: string | null
+  createdAt: number
 }
