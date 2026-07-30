@@ -12,6 +12,88 @@ const MAX_BUSY_ATTEMPTS: usize = 5;
 const INITIAL_BUSY_DELAY_MS: u64 = 10;
 const DEFAULT_BUSY_TIMEOUT_MS: u64 = 5_000;
 
+impl Database {
+    pub(crate) fn load_work_graph_snapshot(
+        &self,
+        conversation_id: &str,
+    ) -> Result<
+        (
+            Vec<GoalRecord>,
+            Vec<WorkTaskRecord>,
+            Vec<TaskEvidenceRecord>,
+        ),
+        RepositoryError,
+    > {
+        with_read_connection(self, |connection| {
+            let goals = connection
+                .prepare(
+                    "SELECT id, conversation_id, title, objective, acceptance_summary, status,
+                            version, created_by, created_at, updated_at, completed_at, blocked_reason
+                     FROM goals WHERE conversation_id = ?1 ORDER BY updated_at DESC, id",
+                )
+                .map_err(RepositoryError::database)?
+                .query_map([conversation_id], goal_from_row)
+                .map_err(RepositoryError::database)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(RepositoryError::database)?;
+
+            let tasks = connection
+                .prepare(
+                    "SELECT work_tasks.id, work_tasks.goal_id, work_tasks.parent_task_id,
+                            work_tasks.ordinal, work_tasks.title, work_tasks.detail,
+                            work_tasks.status, work_tasks.owner_run_id, work_tasks.attempt,
+                            work_tasks.version, work_tasks.blocked_reason, work_tasks.created_at,
+                            work_tasks.updated_at, work_tasks.started_at, work_tasks.finished_at
+                     FROM work_tasks
+                     JOIN goals ON goals.id = work_tasks.goal_id
+                     WHERE goals.conversation_id = ?1
+                     ORDER BY work_tasks.goal_id, work_tasks.ordinal, work_tasks.id",
+                )
+                .map_err(RepositoryError::database)?
+                .query_map([conversation_id], task_from_row)
+                .map_err(RepositoryError::database)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(RepositoryError::database)?;
+
+            // Initial conversation loading follows the Evidence pagination contract:
+            // retain only the latest 50 records for each Task in one bounded query.
+            let evidence = connection
+                .prepare(
+                    "WITH ranked_evidence AS (
+                        SELECT task_evidence.id, task_evidence.task_id,
+                               task_evidence.source_run_id, task_evidence.evidence_type,
+                               task_evidence.ref_kind, task_evidence.ref_id,
+                               task_evidence.summary, task_evidence.metadata_json,
+                               task_evidence.validity_status, task_evidence.trace_id,
+                               task_evidence.span_id, task_evidence.checked_at,
+                               task_evidence.invalid_reason, task_evidence.created_at,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY task_evidence.task_id
+                                   ORDER BY task_evidence.created_at DESC, task_evidence.id
+                               ) AS evidence_rank
+                        FROM task_evidence
+                        JOIN work_tasks ON work_tasks.id = task_evidence.task_id
+                        JOIN goals ON goals.id = work_tasks.goal_id
+                        WHERE goals.conversation_id = ?1
+                     )
+                     SELECT id, task_id, source_run_id, evidence_type, ref_kind, ref_id,
+                            summary, metadata_json, validity_status, trace_id, span_id,
+                            checked_at, invalid_reason, created_at
+                     FROM ranked_evidence
+                     WHERE evidence_rank <= 50
+                     ORDER BY created_at DESC, id",
+                )
+                .map_err(RepositoryError::database)?
+                .query_map([conversation_id], evidence_from_row)
+                .map_err(RepositoryError::database)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(RepositoryError::database)?;
+
+            Ok((goals, tasks, evidence))
+        })
+    }
+}
+
 #[derive(Debug)]
 pub enum RepositoryError {
     NotFound {

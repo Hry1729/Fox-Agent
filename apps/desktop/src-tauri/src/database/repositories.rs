@@ -1094,7 +1094,7 @@ impl Database {
     }
 
     pub fn load_conversation(&self, id: &str) -> Result<ConversationDetail, String> {
-        self.with_connection(|connection| {
+        let mut detail = self.with_connection(|connection| {
             let conversation = query_conversation(connection, id)?;
             let messages = query_message_page(connection, id, None, INITIAL_HISTORY_MESSAGES)?;
             let oldest_ordinal = messages.first().map(|message| message.ordinal).unwrap_or(0);
@@ -1121,8 +1121,18 @@ impl Database {
                 knowledge_bindings,
                 last_run,
                 has_earlier_messages,
+                goals: Vec::new(),
+                tasks: Vec::new(),
+                evidence: Vec::new(),
             })
-        })
+        })?;
+        let (goals, tasks, evidence) = self
+            .load_work_graph_snapshot(id)
+            .map_err(|error| error.to_string())?;
+        detail.goals = goals;
+        detail.tasks = tasks;
+        detail.evidence = evidence;
+        Ok(detail)
     }
 
     pub fn conversation_knowledge_bindings(

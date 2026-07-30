@@ -686,6 +686,7 @@ mod tests {
     fn creates_knowledge_preview_cache_settings_and_document_activity_schema() {
         let mut connection = Connection::open_in_memory().expect("open database");
         run(&mut connection, 1).expect("apply migrations");
+        run(&mut connection, 2).expect("repeat empty-database migrations");
 
         assert_eq!(
             connection
@@ -774,6 +775,9 @@ mod tests {
                  INSERT INTO runs(
                     id, conversation_id, status, model, started_at, created_at
                  ) VALUES ('run-a0', 'conversation-a0', 'running', 'model', 2, 2);
+                 INSERT INTO runs(
+                    id, conversation_id, status, model, started_at, finished_at, created_at
+                 ) VALUES ('run-terminal', 'conversation-a0', 'completed', 'model', 2, 3, 2);
                  INSERT INTO messages(
                     id, conversation_id, run_id, role, kind, content, status, ordinal,
                     created_at, updated_at
@@ -782,7 +786,21 @@ mod tests {
                  INSERT INTO run_events(
                     id, run_id, seq, event_type, event_json, created_at
                  ) VALUES ('event-a0', 'run-a0', 1, 'run.failed',
-                           '{\"type\":\"run.failed\"}', 3);",
+                           '{\"type\":\"run.failed\"}', 3);
+                 INSERT INTO attachments(
+                    id, conversation_id, display_name, storage_path, status, created_at
+                 ) VALUES ('attachment-a0', 'conversation-a0', 'fixture.txt',
+                           'fixtures/fixture.txt', 'ready', 2);
+                 INSERT INTO service_connections(
+                    id, service_type, name, base_url, enabled, last_status,
+                    created_at, updated_at
+                 ) VALUES ('service-a0', 'knowledge', 'Fixture',
+                           'https://fixture.invalid', 1, 'ready', 2, 2);
+                 INSERT INTO knowledge_bindings(
+                    conversation_id, service_connection_id, knowledge_base_id,
+                    knowledge_base_name, enabled, created_at, updated_at
+                 ) VALUES ('conversation-a0', 'service-a0', 'knowledge-a0',
+                           'Fixture KB', 1, 2, 2);",
             )
             .expect("seed pre-A0 data");
 
@@ -792,8 +810,10 @@ mod tests {
         for (table, count) in [
             ("conversations", 1_i64),
             ("messages", 1),
-            ("runs", 1),
+            ("runs", 2),
             ("run_events", 1),
+            ("attachments", 1),
+            ("knowledge_bindings", 1),
             ("goals", 0),
             ("work_tasks", 0),
             ("task_evidence", 0),

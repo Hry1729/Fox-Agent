@@ -181,6 +181,58 @@ describe('runtime event reducer', () => {
     expect(next.conversation.id).toBe('conversation-1')
     expect(next.lastRun).toMatchObject({ id: 'run-1', status: 'queued' })
   })
+
+  test('reduces out-of-order duplicate work events deterministically', () => {
+    const events = [
+      notification(1, {
+        type: 'goal.activated', goalId: 'goal-1',
+        data: { goal: {
+          id: 'goal-1', title: 'Fix cross-file bug',
+          objective: 'Locate, modify and verify', status: 'active', version: 1,
+        } },
+      }),
+      notification(2, {
+        type: 'task.created', goalId: 'goal-1', taskId: 'task-1',
+        data: { task: {
+          id: 'task-1', goalId: 'goal-1', ordinal: 0, title: 'Locate', version: 1,
+        } },
+      }),
+      notification(3, {
+        type: 'task.started', goalId: 'goal-1', taskId: 'task-1',
+        data: { task: {
+          id: 'task-1', ownerRunId: 'run-1', attempt: 1, version: 2,
+        } },
+      }),
+      notification(4, {
+        type: 'evidence.added', goalId: 'goal-1', taskId: 'task-1',
+        data: { evidence: {
+          id: 'evidence-1', taskId: 'task-1', evidenceType: 'tool_call',
+          refKind: 'tool_call', refId: 'tool-1', summary: 'Located the defect',
+        } },
+      }),
+      notification(5, {
+        type: 'task.completed', goalId: 'goal-1', taskId: 'task-1',
+        data: { task: { id: 'task-1', version: 3 } },
+      }),
+    ]
+
+    const next = reduceRuntimeNotifications(detail(), [
+      events[4], events[3], events[2], events[1], events[0],
+      events[3], events[1],
+    ])
+
+    expect(next.goals).toEqual([
+      expect.objectContaining({ id: 'goal-1', status: 'active', version: 1 }),
+    ])
+    expect(next.tasks).toEqual([
+      expect.objectContaining({ id: 'task-1', status: 'completed', attempt: 1 }),
+    ])
+    expect(next.evidence).toEqual([
+      expect.objectContaining({ id: 'evidence-1', taskId: 'task-1' }),
+    ])
+    expect(next.runtimeEvents).toHaveLength(5)
+    expect(next.lastRun?.lastSeq).toBe(5)
+  })
 })
 
 describe('runtime event display queue', () => {
