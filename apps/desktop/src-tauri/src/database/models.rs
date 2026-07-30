@@ -84,6 +84,134 @@ pub struct RunRecord {
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub last_seq: i64,
+    pub trace_id: Option<String>,
+    pub root_span_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalStatus {
+    Proposed,
+    Active,
+    Blocked,
+    Completed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalRecord {
+    pub id: String,
+    pub conversation_id: String,
+    pub title: String,
+    pub objective: String,
+    pub acceptance_summary: Option<String>,
+    pub status: GoalStatus,
+    pub version: i64,
+    pub created_by: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub blocked_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkTaskStatus {
+    Queued,
+    InProgress,
+    Completed,
+    Blocked,
+    Interrupted,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkTaskRecord {
+    pub id: String,
+    pub goal_id: String,
+    pub parent_task_id: Option<String>,
+    pub ordinal: i64,
+    pub title: String,
+    pub detail: Option<String>,
+    pub status: WorkTaskStatus,
+    pub owner_run_id: Option<String>,
+    pub attempt: i64,
+    pub version: i64,
+    pub blocked_reason: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceType {
+    ToolCall,
+    TraceSpan,
+    TestResult,
+    FileDiff,
+    Artifact,
+    UserConfirmation,
+    ExternalReference,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceReferenceKind {
+    ToolCall,
+    Artifact,
+    RunEvent,
+    Message,
+    Source,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceValidityStatus {
+    Unverified,
+    Valid,
+    Stale,
+    Missing,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskEvidenceRecord {
+    pub id: String,
+    pub task_id: String,
+    pub source_run_id: Option<String>,
+    pub evidence_type: EvidenceType,
+    pub ref_kind: EvidenceReferenceKind,
+    pub ref_id: String,
+    pub summary: String,
+    pub metadata: Value,
+    pub validity_status: EvidenceValidityStatus,
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
+    pub checked_at: Option<String>,
+    pub invalid_reason: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkEventRecord {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub schema_version: u32,
+    pub conversation_id: String,
+    pub goal_id: Option<String>,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
+    pub sequence: i64,
+    pub timestamp: String,
+    pub data: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -218,6 +346,8 @@ pub struct ToolCallRecord {
     pub started_at: i64,
     pub completed_at: Option<i64>,
     pub updated_at: i64,
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -415,6 +545,8 @@ pub struct RunEventRecord {
     pub event_type: String,
     pub event: Value,
     pub created_at: i64,
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

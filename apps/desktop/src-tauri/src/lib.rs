@@ -8,6 +8,7 @@ mod runtime_host;
 mod skills;
 mod tool_guard;
 mod tool_host;
+mod work_mode_gate;
 mod yuxi;
 
 use app_state::AppState;
@@ -106,6 +107,7 @@ pub fn run() {
             commands::run_resume,
             commands::run_cancel,
             commands::approval_resolve,
+            commands::work_mode_confirmation_resolve,
             commands::yuxi_service_get,
             commands::yuxi_service_save,
             commands::yuxi_service_test,

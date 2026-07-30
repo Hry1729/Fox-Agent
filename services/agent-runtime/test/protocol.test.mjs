@@ -38,8 +38,22 @@ test('creates and validates the versioned capability manifest', () => {
   const manifest = createCapabilityManifest()
   assert.equal(manifest.manifestVersion, CAPABILITY_MANIFEST_VERSION)
   assert.equal(manifest.imageInput, false)
+  assert.equal(manifest.workLoop, true)
   assert.deepEqual(manifest.tools, RUNTIME_TOOL_CATALOG)
   assert.equal(validateCapabilityManifest(manifest), null)
+})
+
+test('accepts a v1 manifest as a normal conversation without work tools', () => {
+  const manifest = createCapabilityManifest({
+    manifestVersion: 1,
+    workLoop: undefined,
+    tools: RUNTIME_TOOL_CATALOG.filter(({ category }) => category !== 'work'),
+  })
+  assert.equal(validateCapabilityManifest(manifest), null)
+  assert.equal(
+    validateCapabilityManifest({ ...manifest, tools: RUNTIME_TOOL_CATALOG }),
+    'work tools require workLoop capability',
+  )
 })
 
 test('rejects invalid capability manifests and tool registry drift', () => {

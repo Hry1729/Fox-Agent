@@ -6,7 +6,8 @@ import {
   createEnvelope,
   validateEnvelope,
 } from './protocol.mjs'
-import { createCapabilityManifest } from './runtime-contract.mjs'
+import { createCapabilityManifest, RUNTIME_TOOL_CATALOG } from './runtime-contract.mjs'
+import { createWorkEvent } from './work-events.mjs'
 
 const sessions = new Map()
 const activeRuns = new Map()
@@ -83,6 +84,41 @@ async function streamPrompt(request) {
     })
   }
 
+  if (request.payload?.workLoopProbe) {
+    const probe = request.payload.workLoopProbe
+    emitRuntimeEvent(request, seq++, 'tool.started', {
+      toolCallId: 'fake-work-loop-probe',
+      tool: probe.tool,
+      input: probe.input,
+    })
+    const response = await requestHost(request, 'tool.execute', {
+      toolCallId: 'fake-work-loop-probe',
+      tool: probe.tool,
+      input: probe.input,
+    })
+    if (response.payload?.isError || !response.payload?.result) {
+      throw new Error(response.payload?.error || 'fake work-loop probe failed')
+    }
+    emitRuntimeEvent(request, seq++, 'tool.completed', {
+      toolCallId: 'fake-work-loop-probe',
+      tool: probe.tool,
+      isError: false,
+    })
+    const details = response.payload.result.details ?? {}
+    const goal = details.goal ?? null
+    if (probe.tool === 'goal_propose' && goal?.id) {
+      const event = details.workEvents?.[0] ?? createWorkEvent({
+          type: 'goal.proposed',
+          conversationId: request.conversationId,
+          goalId: goal.id,
+          runId: request.runId,
+          sequence: probe.sequence ?? 1,
+          data: { goal },
+        })
+      emitRuntimeEvent(request, seq++, 'goal.proposed', event)
+    }
+  }
+
   const words = fakeAnswer(request.payload?.text ?? '').split(' ')
   for (const word of words) {
     await new Promise((resolve) => setTimeout(resolve, 35))
@@ -114,6 +150,8 @@ async function handleRequest(request) {
 
   switch (request.type) {
     case 'initialize':
+      {
+      const workLoop = request.payload?.workLoop === true
       respond(request, 'ready', {
         protocol: PROTOCOL_NAME,
         protocolVersion: PROTOCOL_VERSION,
@@ -123,10 +161,14 @@ async function handleRequest(request) {
           reasoning: false,
           toolApproval: false,
           contextCompaction: false,
-          tools: [],
+          workLoop,
+          tools: workLoop
+            ? RUNTIME_TOOL_CATALOG.filter(({ category }) => category === 'work').map((tool) => ({ ...tool }))
+            : [],
         }),
       })
       break
+      }
     case 'create_session': {
       const runtimeSessionId = request.runtimeSessionId || `fake-session-${request.conversationId}`
       const session = { runtimeSessionId, conversationId: request.conversationId, updatedAt: new Date().toISOString() }

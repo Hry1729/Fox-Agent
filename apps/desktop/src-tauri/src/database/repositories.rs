@@ -17,6 +17,16 @@ use std::{
 };
 use uuid::Uuid;
 
+mod work_events;
+mod work_graph;
+
+pub use work_events::WORK_EVENT_TYPES;
+#[allow(unused_imports)]
+pub use work_graph::{
+    AddEvidenceInput, CreateGoalInput, CreateTaskInput, GoalRepository, RepositoryError,
+    TaskEvidenceRepository, WorkTaskRepository,
+};
+
 const DEFAULT_AGENT_ID: &str = "fox-general";
 const INITIAL_HISTORY_MESSAGES: usize = 120;
 const MAX_STORED_TOOL_RESULT_BYTES: usize = 128 * 1024;
@@ -61,6 +71,21 @@ impl Database {
                 |row| row.get(0),
             )
         })
+    }
+
+    #[allow(dead_code)] // Consumed by the FOX-3 Host protocol in the next milestone.
+    pub fn goals(&self) -> GoalRepository {
+        GoalRepository::new(self.clone())
+    }
+
+    #[allow(dead_code)] // Consumed by the FOX-3 Host protocol in the next milestone.
+    pub fn work_tasks(&self) -> WorkTaskRepository {
+        WorkTaskRepository::new(self.clone())
+    }
+
+    #[allow(dead_code)] // Consumed by the FOX-3 Host protocol in the next milestone.
+    pub fn task_evidence(&self) -> TaskEvidenceRepository {
+        TaskEvidenceRepository::new(self.clone())
     }
 
     pub fn known_attachment_paths(&self) -> Result<Vec<String>, String> {
@@ -2807,6 +2832,8 @@ fn create_run_in_transaction(
             error_code: None,
             error_message: None,
             last_seq: 0,
+            trace_id: None,
+            root_span_id: None,
         },
         user_message: MessageRecord {
             id: message_id,
@@ -2894,7 +2921,8 @@ fn query_runtime_events_window(
     before_ordinal: Option<i64>,
 ) -> rusqlite::Result<Vec<RunEventRecord>> {
     let mut statement = connection.prepare(
-        "SELECT e.run_id, e.seq, e.event_type, e.event_json, e.created_at
+        "SELECT e.run_id, e.seq, e.event_type, e.event_json, e.created_at,
+                e.trace_id, e.span_id
          FROM run_events e
          JOIN runs r ON r.id = e.run_id
          WHERE r.conversation_id = ?1
@@ -2924,6 +2952,8 @@ fn query_runtime_events_window(
                         })
                     }),
                     created_at: row.get(4)?,
+                    trace_id: row.get(5)?,
+                    span_id: row.get(6)?,
                 })
             },
         )?
@@ -2940,7 +2970,7 @@ fn query_tool_calls_window(
     let mut statement = connection.prepare(
         "SELECT id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
                 status, result_json, error_message, execution_location, requires_approval,
-                started_at, completed_at, updated_at
+                started_at, completed_at, updated_at, trace_id, span_id
          FROM tool_calls
          WHERE conversation_id = ?1
            AND EXISTS(SELECT 1 FROM messages m WHERE m.run_id = tool_calls.run_id AND m.role = 'user'
@@ -2968,6 +2998,8 @@ fn query_tool_calls_window(
                     started_at: row.get(11)?,
                     completed_at: row.get(12)?,
                     updated_at: row.get(13)?,
+                    trace_id: row.get(14)?,
+                    span_id: row.get(15)?,
                 })
             },
         )?
@@ -2983,7 +3015,7 @@ fn query_tool_call(
     connection.query_row(
         "SELECT id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
                 status, result_json, error_message, execution_location, requires_approval,
-                started_at, completed_at, updated_at
+                started_at, completed_at, updated_at, trace_id, span_id
          FROM tool_calls WHERE run_id = ?1 AND runtime_tool_call_id = ?2",
         params![run_id, runtime_tool_call_id],
         map_tool_call,
@@ -3008,6 +3040,8 @@ fn map_tool_call(row: &rusqlite::Row<'_>) -> rusqlite::Result<ToolCallRecord> {
         started_at: row.get(11)?,
         completed_at: row.get(12)?,
         updated_at: row.get(13)?,
+        trace_id: row.get(14)?,
+        span_id: row.get(15)?,
     })
 }
 
@@ -3350,7 +3384,7 @@ fn query_last_run(connection: &Connection, id: &str) -> rusqlite::Result<Option<
     connection
         .query_row(
             "SELECT id, conversation_id, runtime_session_id, status, model, started_at,
-                    finished_at, error_code, error_message, last_seq
+                    finished_at, error_code, error_message, last_seq, trace_id, root_span_id
              FROM runs WHERE conversation_id = ?1 ORDER BY created_at DESC LIMIT 1",
             [id],
             |row| {
@@ -3365,6 +3399,8 @@ fn query_last_run(connection: &Connection, id: &str) -> rusqlite::Result<Option<
                     error_code: row.get(7)?,
                     error_message: row.get(8)?,
                     last_seq: row.get(9)?,
+                    trace_id: row.get(10)?,
+                    root_span_id: row.get(11)?,
                 })
             },
         )

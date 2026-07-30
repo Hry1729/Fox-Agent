@@ -56,6 +56,98 @@ export function createHostTools(requestHost) {
       execute: (toolCallId, params, signal) =>
         executeHostTool(toolCallId, 'run_command', params, requestHost, signal),
     },
+    {
+      name: 'work_snapshot_get',
+      label: 'Get work snapshot',
+      description: 'Load the current goal, tasks, and evidence for this conversation from Fox.',
+      parameters: Type.Object({ conversationId: Type.String() }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'work_snapshot_get', params, requestHost, signal),
+    },
+    {
+      name: 'goal_propose',
+      label: 'Propose goal',
+      description: 'Propose one goal for the current conversation. Fox validates ownership and active-goal constraints.',
+      parameters: Type.Object({
+        title: Type.String(),
+        objective: Type.String(),
+        acceptanceSummary: Type.Optional(Type.String()),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'goal_propose', params, requestHost, signal),
+    },
+    {
+      name: 'goal_activate',
+      label: 'Activate goal',
+      description: 'Activate a proposed goal using its optimistic version.',
+      parameters: Type.Object({ goalId: Type.String(), expectedVersion: Type.Integer({ minimum: 1 }) }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'goal_activate', params, requestHost, signal),
+    },
+    {
+      name: 'task_create_many',
+      label: 'Create work tasks',
+      description: 'Atomically create ordered tasks under a non-terminal goal owned by this conversation.',
+      parameters: Type.Object({
+        goalId: Type.String(),
+        tasks: Type.Array(Type.Object({
+          title: Type.String(),
+          detail: Type.Optional(Type.String()),
+          ordinal: Type.Integer({ minimum: 0 }),
+        }), { minItems: 1 }),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'task_create_many', params, requestHost, signal),
+    },
+    {
+      name: 'task_update',
+      label: 'Update work task',
+      description: 'Apply a legal task state transition through Fox using optimistic concurrency.',
+      parameters: Type.Object({
+        taskId: Type.String(),
+        status: Type.Union([
+          Type.Literal('queued'),
+          Type.Literal('in_progress'),
+          Type.Literal('completed'),
+          Type.Literal('blocked'),
+          Type.Literal('interrupted'),
+          Type.Literal('skipped'),
+        ]),
+        expectedVersion: Type.Integer({ minimum: 1 }),
+        blockedReason: Type.Optional(Type.String()),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'task_update', params, requestHost, signal),
+    },
+    {
+      name: 'task_evidence_add',
+      label: 'Add task evidence',
+      description: 'Attach validated evidence to a task in this conversation.',
+      parameters: Type.Object({
+        taskId: Type.String(),
+        evidenceType: Type.Union([
+          Type.Literal('tool_call'), Type.Literal('trace_span'), Type.Literal('test_result'),
+          Type.Literal('file_diff'), Type.Literal('artifact'), Type.Literal('user_confirmation'),
+          Type.Literal('external_reference'),
+        ]),
+        refKind: Type.Union([
+          Type.Literal('tool_call'), Type.Literal('artifact'), Type.Literal('run_event'),
+          Type.Literal('message'), Type.Literal('source'),
+        ]),
+        refId: Type.String(),
+        summary: Type.String(),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'task_evidence_add', params, requestHost, signal),
+    },
+    {
+      name: 'task_evidence_validate',
+      label: 'Validate task evidence',
+      description: 'Revalidate one evidence reference and return its current validity status.',
+      parameters: Type.Object({ evidenceId: Type.String() }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'task_evidence_validate', params, requestHost, signal),
+    },
   ]
 }
 

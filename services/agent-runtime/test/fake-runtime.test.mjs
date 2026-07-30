@@ -167,3 +167,42 @@ test('pauses a tool until the host returns a preflight decision', async (context
   const completed = await runtime.waitFor((message) => message.runId === 'run-tool' && message.payload?.type === 'tool.completed')
   assert.equal(completed.payload.decision, 'allow')
 })
+
+test('exercises the A0 work loop through tool.execute and emits a versioned event', async (context) => {
+  const runtime = startRuntime()
+  context.after(() => runtime.close())
+
+  const initialize = runtime.send('initialize', { payload: { workLoop: true } })
+  const ready = await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+  assert.equal(ready.payload.capabilities.workLoop, true)
+  assert.ok(ready.payload.capabilities.tools.some(({ name }) => name === 'goal_propose'))
+
+  runtime.send('create_session', { conversationId: 'conversation-work', runtimeSessionId: 'session-work' })
+  runtime.send('prompt', {
+    conversationId: 'conversation-work',
+    runtimeSessionId: 'session-work',
+    runId: 'run-work',
+    payload: {
+      text: 'exercise the work loop',
+      workLoopProbe: {
+        tool: 'goal_propose',
+        input: { title: 'A0', objective: 'Close the loop' },
+        sequence: 4,
+      },
+    },
+  })
+
+  const execute = await runtime.waitFor((message) => message.kind === 'request' && message.type === 'tool.execute')
+  runtime.respond(execute, 'tool.execute_completed', {
+    isError: false,
+    result: {
+      content: [{ type: 'text', text: 'Goal proposed' }],
+      details: { goal: { id: 'goal-work', title: 'A0' } },
+    },
+  })
+  const event = await runtime.waitFor((message) => message.payload?.type === 'goal.proposed')
+  assert.equal(event.payload.schemaVersion, 1)
+  assert.equal(event.payload.conversationId, 'conversation-work')
+  assert.equal(event.payload.goalId, 'goal-work')
+  assert.equal(event.payload.sequence, 4)
+})

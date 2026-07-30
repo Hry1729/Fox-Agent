@@ -36,6 +36,7 @@ use crate::{
         YuxiServiceRecord, YuxiUserRecord,
     },
     runtime_host::{RuntimeDiagnostics, RuntimeStatus},
+    work_mode_gate::{self, ResolveWorkModeConfirmationRequest, WorkModeDecision},
 };
 use base64::Engine;
 use serde_json::{json, Value};
@@ -1253,6 +1254,7 @@ mod command_tests {
 
 #[tauri::command]
 pub fn run_start(
+    app: AppHandle,
     state: State<'_, AppState>,
     request: StartRunRequest,
 ) -> ApiResponse<StartRunResult> {
@@ -1316,6 +1318,50 @@ pub fn run_start(
             return ApiResponse::failure("attachment.bind_failed", error, false);
         }
     };
+
+    let applied_gate = match work_mode_gate::apply_user_request(
+        &state.database,
+        &request.conversation_id,
+        &started.run.id,
+        &request.text,
+    ) {
+        Ok(applied) => applied,
+        Err(error) => {
+            let _ =
+                state
+                    .database
+                    .mark_run_failed(&started.run.id, "work_mode.gate_failed", &error);
+            return ApiResponse::failure("work_mode.gate_failed", error, true);
+        }
+    };
+    if let Some(event) = applied_gate.event {
+        let _ = app.emit("fox://work-event", event);
+    }
+    // FOX-6 will replace this stage-specific mock with the confirmation card.
+    // Resolve through the real Host path before dispatch so Runtime never self-approves.
+    if applied_gate.evaluation.decision == WorkModeDecision::RequestConfirmation {
+        if let Some(goal) = applied_gate.goal {
+            let confirmation = ResolveWorkModeConfirmationRequest {
+                conversation_id: request.conversation_id.clone(),
+                goal_id: goal.id,
+                expected_version: goal.version,
+                approved: true,
+            };
+            match work_mode_gate::resolve_confirmation(&state.database, &confirmation) {
+                Ok((_, event)) => {
+                    let _ = app.emit("fox://work-event", event);
+                }
+                Err(error) => {
+                    let _ = state.database.mark_run_failed(
+                        &started.run.id,
+                        "work_mode.confirmation_failed",
+                        &error,
+                    );
+                    return ApiResponse::failure("work_mode.confirmation_failed", error, true);
+                }
+            }
+        }
+    }
 
     if runtime.runtime_type == "yuxi" {
         state
@@ -1533,6 +1579,21 @@ pub fn approval_resolve(
     {
         Ok(resolved) => ApiResponse::success(resolved),
         Err(error) => ApiResponse::failure("approval.resolve_failed", error, true),
+    }
+}
+
+#[tauri::command]
+pub fn work_mode_confirmation_resolve(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: ResolveWorkModeConfirmationRequest,
+) -> ApiResponse<crate::database::GoalRecord> {
+    match work_mode_gate::resolve_confirmation(&state.database, &request) {
+        Ok((goal, event)) => {
+            let _ = app.emit("fox://work-event", event);
+            ApiResponse::success(goal)
+        }
+        Err(error) => ApiResponse::failure("work_mode.confirmation_failed", error, false),
     }
 }
 
