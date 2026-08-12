@@ -3186,15 +3186,15 @@
 @keyframes foxGrainientFallback{0%{background-position:0% 12%}50%{background-position:72% 88%}100%{background-position:100% 20%}}
 @media(prefers-reduced-motion:reduce){.fox-onboarding-shell,.fox-onboarding-main,.fox-onboarding-visual-media,.fox-onboarding-enter{transition-duration:1ms!important;transition-delay:0s!important}}
 
-/* Unified Fox typography: 14px UI copy, 12px supporting and technical copy. */
+/* Unified Fox typography: scale UI and supporting copy from the saved preference. */
 .fox-shell,
 .fox-onboarding-screen {
-  font-size: 14px;
+  font-size: var(--fox-type-ui);
 }
 
 .fox-shell :where(div, section, article, header, footer, nav, aside, button, input, textarea, select, option, label, p, span, strong, b, em, a, li, dt, dd, th, td),
 .fox-onboarding-screen :where(div, section, article, header, footer, nav, aside, button, input, textarea, select, option, label, p, span, strong, b, em, a, li, dt, dd, th, td) {
-  font-size: 14px !important;
+  font-size: var(--fox-type-ui) !important;
 }
 
 .fox-shell :where(
@@ -3252,13 +3252,13 @@
   [class*='meta'],
   [class*='meta'] *
 ) {
-  font-size: 12px !important;
+  font-size: var(--fox-type-meta) !important;
 }
 
 .fox-shell .fox-message-meta,
 .fox-shell .fox-message-meta *,
 .fox-shell .fox-message-artifact-title p:last-child {
-  font-size: 12px !important;
+  font-size: var(--fox-type-meta) !important;
 }
 
 /* Settings controls use the Select default height as their shared control size. */

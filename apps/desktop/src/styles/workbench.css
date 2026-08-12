@@ -48,7 +48,7 @@
 }
 
 .fox-window-product > strong {
-  font-size: 12px;
+  font-size: var(--fox-type-chrome) !important;
   font-weight: 650;
 }
 
@@ -65,7 +65,7 @@
   background: transparent;
   padding: 0 9px;
   color: var(--fox-muted);
-  font-size: 12px;
+  font-size: var(--fox-type-chrome) !important;
   cursor: default;
 }
 
@@ -272,9 +272,9 @@
   gap: 1px;
 }
 
-.fox-sidebar-command,
-.fox-project-row,
-.fox-project-action {
+.fox-shell .fox-sidebar-command,
+.fox-shell .fox-project-row,
+.fox-shell .fox-project-action {
   width: 100%;
   min-height: 34px;
   display: flex;
@@ -285,7 +285,7 @@
   background: transparent;
   padding: 6px 10px;
   color: var(--fox-muted);
-  font-size: 12.5px;
+  font-size: var(--fox-type-control) !important;
   text-align: left;
   cursor: pointer;
   transition: background 130ms ease, color 130ms ease;
@@ -337,13 +337,14 @@
   box-shadow: inset 0 0 0 1px var(--fox-border);
 }
 
-.fox-sidebar-command span,
-.fox-project-row strong {
+.fox-shell .fox-sidebar-command span,
+.fox-shell .fox-project-row strong {
   min-width: 0;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: inherit !important;
   font-weight: 500;
 }
 
@@ -550,13 +551,13 @@
   text-align: left;
 }
 
-.fox-sidebar-tree-main span {
+.fox-shell .fox-sidebar-tree-main span {
   min-width: 0;
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: var(--fox-type-control) !important;
 }
 
 .fox-sidebar-row-time {
@@ -1382,7 +1383,7 @@
   color: var(--fox-muted);
   padding-inline: 13px;
   box-shadow: inset 0 1px 0 color-mix(in oklch, var(--fox-card) 70%, transparent);
-  font-size: 10.5px;
+  font-size: var(--fox-type-meta) !important;
 }
 
 .fox-starter-suggestions button:hover {

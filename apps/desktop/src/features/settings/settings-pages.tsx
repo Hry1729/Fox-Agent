@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Activity, Archive, Bell, Bot, Cable, Check, ChevronDown, ChevronRight, Download, ExternalLink, FileText, FileWarning, FolderOpen, HardDrive, Info, KeyRound, Keyboard, Laptop, LoaderCircle, LogIn, MessageSquare, Moon, MoreHorizontal, Pencil, Plus, Puzzle, RotateCcw, Server, Shield, ShieldCheck, Sparkles, Sun, Trash2, Wrench, Zap } from 'lucide-react'
+import { Activity, Archive, Bell, Bot, Cable, Check, ChevronDown, ChevronRight, Download, ExternalLink, FileText, FileWarning, FolderOpen, HardDrive, Info, KeyRound, Keyboard, Laptop, LoaderCircle, LogIn, MessageSquare, Minus, Moon, MoreHorizontal, Pencil, Plus, Puzzle, RotateCcw, Server, Shield, ShieldCheck, Sparkles, Sun, Trash2, Wrench, Zap } from 'lucide-react'
 import { toast } from 'sonner'
 import { AnimatePresence, motion } from 'motion/react'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -26,6 +26,7 @@ import type { KnowledgePreviewCacheStatistics, McpServerRecord, ModelProviderRec
 import { Grainient } from '@/components/effects/grainient'
 import { SpecularButton } from '@/components/effects/specular-button'
 import { UserProfileDialog, useUserProfile } from '@/features/profile/user-profile'
+import { normalizeTextScale, persistTextScale, readTextScale, TEXT_SCALE_MAX, TEXT_SCALE_MIN } from './text-scale'
 
 function serviceStatusLabel(status?: string) {
   if (status === 'connected') return '已连接'
@@ -74,17 +75,25 @@ export function SettingsPage({ sidebarCollapsed, onSidebar, navigate, dark, onDa
   const yuxiUser = useYuxiUser(Boolean(yuxi.service?.credentialConfigured))
   const [notifications, setNotifications] = useStoredPreference('fox.preferences.notifications', true)
   const [closeBehavior, setCloseBehavior] = useStoredPreference('fox.preferences.closeBehavior', 'ask')
+  const [textScale, setTextScale] = useState(() => readTextScale())
   const [profileDialogOpen, setProfileDialogOpen] = useState(false)
   const { profile, save: saveProfile } = useUserProfile({ name: yuxiUser.user?.username, avatar: yuxiUser.user?.avatar })
   const profileName = profile.name
   const profileDetail = yuxiUser.user?.departmentName ?? (yuxiUser.user ? `知识库账户 · ${yuxiUser.user.role}` : '本地用户')
   const profileFallback = profile.initial
+  useEffect(() => {
+    persistTextScale(textScale)
+  }, [textScale])
+
+  const changeTextScale = (next: number) => {
+    setTextScale(normalizeTextScale(next))
+  }
 
   return (
     <WorkspacePage title="设置" subtitle="应用与外观" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}>
       <SettingsScaffold kicker="桌面偏好" title="应用" description="调整 Fox 在这台设备上的显示、通知和窗口行为。">
           <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>个人资料</h2><p>设置 Fox 在这台设备上显示的头像与用户名。</p></div><div className="fox-profile-setting-actions"><Button variant="outline" size="sm" onClick={() => setProfileDialogOpen(true)}><Pencil />编辑资料</Button>{!yuxiUser.user && <Button variant="outline" size="sm" onClick={() => navigate('login')}>知识库登录</Button>}</div></div><div className="fox-profile-setting"><Avatar><AvatarImage src={profile.avatar} alt="" /><AvatarFallback>{profileFallback}</AvatarFallback></Avatar><span><b>{profileName}</b><small>{yuxiUser.user?.uid ?? 'fox-local'}</small><em>{profileDetail}</em></span></div></Card>
-          <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>外观</h2><p>保持 Fox 的主题、字体和界面密度一致。</p></div></div><div className="fox-theme-grid"><button className={!dark ? 'is-active' : ''} onClick={() => dark && onDark()}><span className="fox-theme-preview is-light"><i /><b /></span><em><Sun />浅色{!dark && <Check />}</em></button><button className={dark ? 'is-active' : ''} onClick={() => !dark && onDark()}><span className="fox-theme-preview is-dark"><i /><b /></span><em><Moon />深色{dark && <Check />}</em></button><button><span className="fox-theme-preview is-system"><i /><b /></span><em><Laptop />跟随系统</em></button></div></Card>
+          <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>外观</h2><p>保持 Fox 的主题、字体和界面密度一致。</p></div></div><div className="fox-theme-grid"><button className={!dark ? 'is-active' : ''} onClick={() => dark && onDark()}><span className="fox-theme-preview is-light"><i /><b /></span><em><Sun />浅色{!dark && <Check />}</em></button><button className={dark ? 'is-active' : ''} onClick={() => !dark && onDark()}><span className="fox-theme-preview is-dark"><i /><b /></span><em><Moon />深色{dark && <Check />}</em></button><button><span className="fox-theme-preview is-system"><i /><b /></span><em><Laptop />跟随系统</em></button></div><PreferenceRow title="文字大小" description="调整 Fox 各界面的文字显示比例"><div className="fox-text-scale-control"><span className="fox-text-scale-a is-small" aria-hidden="true">A</span><input type="range" min={TEXT_SCALE_MIN} max={TEXT_SCALE_MAX} step={1} value={textScale} aria-label="文字大小" onChange={(event) => changeTextScale(Number(event.target.value))} /><span className="fox-text-scale-a is-large" aria-hidden="true">A</span><div className="fox-text-scale-stepper"><Button type="button" variant="ghost" size="icon" aria-label="缩小文字" onClick={() => changeTextScale(textScale - 5)}><Minus /></Button><label><input type="number" min={TEXT_SCALE_MIN} max={TEXT_SCALE_MAX} step={1} value={textScale} aria-label="文字大小百分比" onChange={(event) => changeTextScale(Number(event.target.value))} /><span>%</span></label><Button type="button" variant="ghost" size="icon" aria-label="放大文字" onClick={() => changeTextScale(textScale + 5)}><Plus /></Button></div></div></PreferenceRow></Card>
           <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>首次设置向导</h2></div></div><PreferenceRow title="重新运行设置向导" description="检查模型服务、知识库连接和 Fox 的基础使用方式"><Button variant="outline" size="sm" onClick={() => navigate('onboarding')}><Sparkles />打开向导</Button></PreferenceRow></Card>
           <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>应用行为</h2><p>控制回复完成提醒和窗口关闭方式。</p></div><Bell /></div><PreferenceRow title="回复完成通知" description="Fox 在后台完成较长任务时发送系统提醒"><Switch checked={notifications} onCheckedChange={setNotifications} /></PreferenceRow><PreferenceRow title="关闭窗口" description="选择点击关闭按钮时的默认动作"><Select value={closeBehavior} onValueChange={setCloseBehavior}><SelectTrigger className="fox-settings-select"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="ask">每次询问</SelectItem><SelectItem value="tray">最小化到托盘</SelectItem><SelectItem value="quit">退出 Fox</SelectItem></SelectContent></Select></PreferenceRow></Card>
         <UserProfileDialog open={profileDialogOpen} onOpenChange={setProfileDialogOpen} profile={profile} detail={profileDetail} onSave={async (next) => { await saveProfile(next); toast.success('个人资料已更新') }} />

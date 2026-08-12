@@ -69,6 +69,17 @@
   --fox-user: var(--primary);
   --fox-user-foreground: var(--primary-foreground);
   --fox-shadow: 0 16px 45px color-mix(in oklch, var(--foreground) 12%, transparent);
+  --fox-text-scale: 1;
+  --fox-type-chrome: calc(13px * var(--fox-text-scale));
+  --fox-type-caption: calc(11.5px * var(--fox-text-scale));
+  --fox-type-meta: calc(12px * var(--fox-text-scale));
+  --fox-type-control: calc(13.5px * var(--fox-text-scale));
+  --fox-type-body: calc(13.5px * var(--fox-text-scale));
+  --fox-type-ui: calc(14px * var(--fox-text-scale));
+  --fox-type-title: calc(15px * var(--fox-text-scale));
+  --fox-weight-regular: 400;
+  --fox-weight-medium: 500;
+  --fox-weight-semibold: 600;
 }
 
 .dark {
