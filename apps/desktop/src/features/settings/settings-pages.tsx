@@ -26,6 +26,7 @@ import type { KnowledgePreviewCacheStatistics, McpServerRecord, ModelProviderRec
 import { Grainient } from '@/components/effects/grainient'
 import { SpecularButton } from '@/components/effects/specular-button'
 import { UserProfileDialog, useUserProfile } from '@/features/profile/user-profile'
+import { resolveYuxiLoginReturn, resolveYuxiServiceReturn, YUXI_LOGIN_RETURN_KEY, YUXI_SERVICE_RETURN_KEY } from '@/features/knowledge/knowledge-navigation'
 import { normalizeTextScale, persistTextScale, readTextScale, TEXT_SCALE_MAX, TEXT_SCALE_MIN } from './text-scale'
 
 function serviceStatusLabel(status?: string) {
@@ -110,14 +111,14 @@ export function OnboardingPage({ navigate, onExit }: { navigate: NavigateWorkspa
   const [isFinishing, setIsFinishing] = useState(false)
   const steps = [
     { title: '连接模型服务', description: '配置 Fox 原生 Agent 使用的模型、API 协议与上下文能力。', ready: Boolean(model.service), action: () => navigate('settings-models'), actionLabel: model.service ? '检查模型配置' : '配置模型服务' },
-    { title: '连接知识库服务', description: '连接本机或局域网服务，启用远程智能体、知识库和知识图谱。', ready: Boolean(yuxi.service), action: () => navigate('settings-yuxi'), actionLabel: yuxi.service ? '检查知识库连接' : '配置知识库服务' },
-    { title: '开始使用 Fox', description: '模型服务是原生智能体的必要条件；知识库服务可以稍后连接。', ready: Boolean(model.service), action: () => onExit('completed'), actionLabel: '进入 Fox' },
+    { title: '连接知识库服务', description: '连接本机或局域网服务，启用远程专家、知识库和知识图谱。', ready: Boolean(yuxi.service), action: () => navigate('settings-yuxi'), actionLabel: yuxi.service ? '检查知识库连接' : '配置知识库服务' },
+    { title: '开始使用 Fox', description: '模型服务是原生专家的必要条件；知识库服务可以稍后连接。', ready: Boolean(model.service), action: () => onExit('completed'), actionLabel: '进入 Fox' },
   ]
   const current = steps[step]
   const statusCopy = step === 0
-    ? model.service ? `${model.service.name} · ${model.service.modelId}` : '尚未配置模型服务，原生智能体无法发送消息'
+    ? model.service ? `${model.service.name} · ${model.service.modelId}` : '尚未配置模型服务，原生专家无法发送消息'
     : step === 1
-      ? yuxi.service ? `${knowledgeServiceName(yuxi.service.name)} · ${yuxi.service.baseUrl}` : '尚未配置知识库服务，知识库与远程智能体不可用'
+      ? yuxi.service ? `${knowledgeServiceName(yuxi.service.name)} · ${yuxi.service.baseUrl}` : '尚未配置知识库服务，知识库与远程专家不可用'
       : model.service ? '基础配置已完成，可以开始创建对话' : '你可以跳过，但需要配置模型服务后才能正常对话'
   const advance = () => {
     setStepDirection(1)
@@ -187,7 +188,7 @@ export function OnboardingPage({ navigate, onExit }: { navigate: NavigateWorkspa
         </main>
       </section>
       <aside className="fox-onboarding-visual">
-        <div className="fox-onboarding-visual-media"><img src="/mascot/fox/status/fox_sayhi.png" alt="Fox 卡通形象" /><div><strong>Fox Desktop</strong><span>轻量、高效的通用桌面智能体</span></div><SpecularButton className="fox-onboarding-enter" size="sm" radius={8} tint="#4f8fdf" tintOpacity={0} textColor="#4777a6" lineColor="#6f9fd2" baseColor="#6f9fd2" intensity={0.96} shineSize={12} shineFade={18} thickness={1.7} speed={1.35} followMouse={false} autoAnimate onClick={() => onExit(model.service ? 'completed' : 'skipped')}>进入 Fox<ChevronRight /></SpecularButton></div>
+        <div className="fox-onboarding-visual-media"><img src="/mascot/fox/status/fox_sayhi.png" alt="Fox 卡通形象" /><div><strong>Fox Desktop</strong><span>轻量、高效的桌面专家工作台</span></div><SpecularButton className="fox-onboarding-enter" size="sm" radius={8} tint="#4f8fdf" tintOpacity={0} textColor="#4777a6" lineColor="#6f9fd2" baseColor="#6f9fd2" intensity={0.96} shineSize={12} shineFade={18} thickness={1.7} speed={1.35} followMouse={false} autoAnimate onClick={() => onExit(model.service ? 'completed' : 'skipped')}>进入 Fox<ChevronRight /></SpecularButton></div>
       </aside>
     </div>
   </div>
@@ -202,7 +203,7 @@ export function AiSettingsPage({ sidebarCollapsed, onSidebar, navigate }: { side
     const [providerId, modelId] = value.split('::')
     const provider = providers.items.find((item) => item.id === providerId)
     if (!provider) return
-    const saved = await providers.save({ id: provider.id, name: provider.name, baseUrl: provider.baseUrl, apiType: provider.apiType, isDefault: true, models: provider.models.map((item) => ({ ...item, isDefault: item.modelId === modelId })) })
+    const saved = await providers.save({ id: provider.id, name: provider.name, icon: provider.icon, baseUrl: provider.baseUrl, apiType: provider.apiType, isDefault: true, models: provider.models.map((item) => ({ ...item, isDefault: item.modelId === modelId })) })
     if (saved) { await model.refresh(); toast.success('默认模型已更新') }
   }
   return <WorkspacePage title="模型偏好" subtitle="Fox Runtime" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="运行默认值" title="模型偏好" description="设置 Fox 原生 Agent 在新对话中的默认模型和推理方式。"><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>默认运行配置</h2></div></div><PreferenceRow title="默认模型" description={selected ? `${selected.provider.name} · ${selected.item.displayName}` : '尚未配置可用模型'}>{providers.items.length ? <Select value={selected ? `${selected.provider.id}::${selected.item.modelId}` : undefined} onValueChange={(value) => void selectModel(value)}><SelectTrigger className="fox-settings-select fox-model-select-adaptive"><SelectValue placeholder="选择默认模型" /></SelectTrigger><SelectContent>{providers.items.flatMap((provider) => provider.models.map((item) => <SelectItem key={`${provider.id}:${item.id}`} value={`${provider.id}::${item.modelId}`}>{provider.name} · {item.displayName}</SelectItem>))}</SelectContent></Select> : <Button variant="outline" size="sm" onClick={() => navigate('settings-models')}>配置供应商</Button>}</PreferenceRow><PreferenceRow title="推理深度" description="影响模型处理复杂问题时投入的思考量"><Select value={reasoning} onValueChange={setReasoning}><SelectTrigger className="fox-settings-select"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="low">较低</SelectItem><SelectItem value="medium">中等</SelectItem><SelectItem value="high">较高</SelectItem></SelectContent></Select></PreferenceRow></Card>{model.service && <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>当前模型</h2></div><Badge variant="secondary">{serviceStatusLabel(model.service.lastStatus)}</Badge></div><div className="fox-property-list fox-current-model-properties"><div><span>供应商</span><b>{model.service.name}</b></div><div><span>协议</span><b>{model.service.apiType === 'anthropic-messages' ? 'Anthropic Messages' : 'OpenAI-compatible'}</b></div><div><span>上下文</span><b>{model.service.contextWindow.toLocaleString()} tokens</b></div><div><span>多模态</span><b>{model.service.supportsImageInput ? '支持图片' : '仅文本'}</b></div></div></Card>}</SettingsScaffold></WorkspacePage>
@@ -247,7 +248,10 @@ const providerPresets: ProviderPreset[] = [
   { id: 'siliconflow', name: 'SiliconFlow (International)', icon: 'siliconflow.svg', baseUrl: 'https://api.siliconflow.com/v1', apiType: 'openai-completions', modelPlaceholder: 'deepseek-ai/DeepSeek-V4-Flash', contextWindow: 128000, maxOutputTokens: 8192, supportsImageInput: false },
 ]
 
-function providerIcon(name: string, baseUrl: string) {
+const providerIconOptions = Array.from(new Map(providerPresets.map((preset) => [preset.icon, preset])).values())
+
+function providerIcon(name: string, baseUrl: string, customIcon?: string | null) {
+  if (customIcon) return `/providers/${customIcon}`
   const preset = providerPresets.find((item) => item.baseUrl === baseUrl)
     ?? providerPresets.find((item) => name.toLowerCase().includes(item.id.split('-')[0]))
   return preset ? `/providers/${preset.icon}` : null
@@ -256,6 +260,7 @@ function providerIcon(name: string, baseUrl: string) {
 function providerPresetForm(preset: ProviderPreset, isDefault: boolean): ProviderForm {
   return {
     name: preset.name,
+    icon: preset.icon,
     baseUrl: preset.baseUrl,
     apiType: preset.apiType,
     isDefault,
@@ -274,13 +279,17 @@ function providerPresetForm(preset: ProviderPreset, isDefault: boolean): Provide
 
 function providerForm(provider?: ModelProviderRecord): ProviderForm {
   return provider ? {
-    id: provider.id, name: provider.name, baseUrl: provider.baseUrl, apiType: provider.apiType,
+    id: provider.id, name: provider.name, icon: provider.icon, baseUrl: provider.baseUrl, apiType: provider.apiType,
     isDefault: provider.isDefault, apiKey: '', clearApiKey: false,
     models: provider.models.map((item) => ({ ...item })),
   } : {
-    name: '', baseUrl: '', apiType: 'openai-completions', isDefault: true, apiKey: '', clearApiKey: false,
+    name: '', icon: null, baseUrl: '', apiType: 'openai-completions', isDefault: true, apiKey: '', clearApiKey: false,
     models: [{ modelId: '', displayName: '', contextWindow: 128000, maxOutputTokens: 8192, supportsImageInput: false, isDefault: true }],
   }
+}
+
+function ProviderIconEditor({ form, onChange }: { form: ProviderForm; onChange: (form: ProviderForm) => void }) {
+  return <div className="fox-provider-icon-field"><span>供应商图标</span><div className="fox-provider-icon-picker"><button type="button" className={!form.icon ? 'is-active' : ''} title="自动识别" aria-label="自动识别供应商图标" onClick={() => onChange({ ...form, icon: null })}><Server /></button>{providerIconOptions.map((option) => <button type="button" key={option.icon} className={form.icon === option.icon ? 'is-active' : ''} title={option.name} aria-label={`使用 ${option.name} 图标`} onClick={() => onChange({ ...form, icon: option.icon })}><img src={`/providers/${option.icon}`} alt="" /></button>)}</div><small>选择“自动识别”时，Fox 会根据供应商名称和 API 地址匹配图标。</small></div>
 }
 
 function ProviderEditor({ form, busy, credentialConfigured, error, onChange, onCancel, onSave, onDelete, onTest }: { form: ProviderForm; busy: boolean; credentialConfigured: boolean; error?: string | null; onChange: (form: ProviderForm) => void; onCancel: () => void; onSave: () => void; onDelete?: () => void; onTest: () => void }) {
@@ -313,7 +322,7 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
   const rename = async (provider: ModelProviderRecord) => {
     const name = window.prompt('供应商名称', provider.name)?.trim()
     if (!name || name === provider.name) return
-    const saved = await resource.save({ id: provider.id, name, baseUrl: provider.baseUrl, apiType: provider.apiType, isDefault: provider.isDefault, models: provider.models })
+    const saved = await resource.save({ id: provider.id, name, icon: provider.icon, baseUrl: provider.baseUrl, apiType: provider.apiType, isDefault: provider.isDefault, models: provider.models })
     if (saved) toast.success('供应商已重命名')
   }
   return (
@@ -329,13 +338,13 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
         <Dialog open={editingId === 'new'} onOpenChange={(open) => { if (!open) { setEditingId(null); setForm(null) } }}>
           <DialogContent className="fox-provider-dialog">
             <DialogHeader><DialogTitle>添加模型供应商</DialogTitle><DialogDescription>配置 API 连接和 Fox 可以使用的模型。保存后仍可随时编辑。</DialogDescription></DialogHeader>
-            {editingId === 'new' && form && <ProviderEditor form={form} busy={resource.busyId === 'new'} credentialConfigured={false} error={resource.error} onChange={setForm} onCancel={() => { setEditingId(null); setForm(null) }} onSave={() => void save()} onTest={() => void test()} />}
+            {editingId === 'new' && form && <><ProviderIconEditor form={form} onChange={setForm} /><ProviderEditor form={form} busy={resource.busyId === 'new'} credentialConfigured={false} error={resource.error} onChange={setForm} onCancel={() => { setEditingId(null); setForm(null) }} onSave={() => void save()} onTest={() => void test()} /></>}
           </DialogContent>
         </Dialog>
         {resource.loading && <Card className="fox-settings-section"><LoaderCircle className="animate-spin" />正在读取供应商…</Card>}
         <div className="fox-provider-list">
           {resource.items.map((provider) => {
-            const icon = providerIcon(provider.name, provider.baseUrl)
+            const icon = providerIcon(provider.name, provider.baseUrl, provider.icon)
             return <div className="fox-provider-entry" key={provider.id}>
               <Card className="fox-provider-card">
                 <div className="fox-provider-mark">{icon ? <img src={icon} alt="" /> : <Server />}</div>
@@ -347,7 +356,7 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
                 <div className="fox-provider-card-status"><i className={provider.lastStatus === 'connected' ? '' : 'is-muted'} /><span><b>{serviceStatusLabel(provider.lastStatus)}</b><small>{provider.lastLatencyMs != null ? `${provider.lastLatencyMs} ms` : `${provider.models.length} 个模型`}</small></span></div>
                 <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-provider-more" aria-label={`管理 ${provider.name}`}><MoreHorizontal size={18} /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => void rename(provider)}><Pencil />重命名</DropdownMenuItem><DropdownMenuItem onSelect={() => openEditor(provider)}><Wrench />编辑</DropdownMenuItem><DropdownMenuItem onSelect={() => void desktopClient.testModelService(provider.baseUrl, undefined, provider.apiType, provider.models.find((item) => item.isDefault)?.modelId ?? provider.models[0]?.modelId).then((result) => { void resource.refresh(); toast.success(`连接成功，发现 ${result.models.length} 个模型`) }).catch((cause) => toast.error(cause instanceof Error ? cause.message : String(cause)))}><Zap />验证连接</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" disabled={provider.isDefault} onSelect={() => void remove(provider)}><Trash2 />删除</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </Card>
-              {editingId === provider.id && form && <ProviderEditor form={form} busy={resource.busyId === provider.id} credentialConfigured={provider.credentialConfigured} error={resource.error} onChange={setForm} onCancel={() => { setEditingId(null); setForm(null) }} onSave={() => void save()} onDelete={() => void remove(provider)} onTest={() => void test()} />}
+              {editingId === provider.id && form && <><ProviderIconEditor form={form} onChange={setForm} /><ProviderEditor form={form} busy={resource.busyId === provider.id} credentialConfigured={provider.credentialConfigured} error={resource.error} onChange={setForm} onCancel={() => { setEditingId(null); setForm(null) }} onSave={() => void save()} onDelete={() => void remove(provider)} onTest={() => void test()} /></>}
             </div>
           })}
           {!resource.loading && unconfiguredPresets.map((preset) => <div className="fox-provider-entry" key={preset.id}>
@@ -371,7 +380,15 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
 export function YuxiSettingsPage({ sidebarCollapsed, onSidebar, navigate }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace }) {
   const yuxi = useYuxiService()
   const user = useYuxiUser(Boolean(yuxi.service?.credentialConfigured))
-  return <WorkspacePage title="知识库服务" subtitle="知识与远程智能体" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="服务连接" title="知识库服务" description="管理 Fox 使用的唯一知识库服务和账户身份。"><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>服务连接</h2><p>支持本机、局域网和远程 HTTPS 地址。</p></div><Badge variant="secondary">{yuxi.service ? serviceStatusLabel(yuxi.service.lastStatus) : '未配置'}</Badge></div><button className="fox-service-card" onClick={() => navigate('service')}><span><Server /></span><p><b>{yuxi.service ? knowledgeServiceName(yuxi.service.name) : '配置知识库服务'}</b><small>{yuxi.service?.baseUrl ?? '智能体、知识库和知识图谱能力的来源'}</small></p><em><b>{yuxi.service?.lastLatencyMs != null ? `${yuxi.service.lastLatencyMs} ms` : '--'}</b><small>{connectionTypeLabel(yuxi.service?.connectionType)}</small></em><ChevronRight /></button><div className="fox-setting-actions"><Button variant="outline" size="sm" disabled={!yuxi.service || yuxi.testing} onClick={() => void yuxi.test()}>{yuxi.testing && <LoaderCircle className="animate-spin" />}测试连接</Button><Button size="sm" onClick={() => navigate('service')}>{yuxi.service ? '编辑地址' : '开始配置'}</Button></div></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>账户</h2><p>Fox 与浏览器中的知识库登录态相互独立。</p></div>{user.user ? <Badge variant="secondary">已登录</Badge> : <Badge variant="outline">未登录</Badge>}</div>{user.user ? <div className="fox-profile-setting"><Avatar>{user.user.avatar && <AvatarImage src={user.user.avatar} alt="" />}<AvatarFallback>{user.user.username.charAt(0).toUpperCase()}</AvatarFallback></Avatar><span><b>{user.user.username}</b><small>{user.user.uid}</small><em>{[user.user.departmentName, user.user.role].filter(Boolean).join(' · ')}</em></span></div> : <Button variant="outline" onClick={() => navigate('login')}><LogIn />知识库登录</Button>}</Card></SettingsScaffold></WorkspacePage>
+  const openService = () => {
+    window.sessionStorage.setItem(YUXI_SERVICE_RETURN_KEY, 'settings-yuxi')
+    navigate('service')
+  }
+  const openLogin = () => {
+    window.sessionStorage.setItem(YUXI_LOGIN_RETURN_KEY, 'settings-yuxi')
+    navigate('login')
+  }
+  return <WorkspacePage title="知识库服务" subtitle="知识与远程专家" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="服务连接" title="知识库服务" description="管理 Fox 使用的唯一知识库服务和账户身份。"><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>服务连接</h2><p>支持本机、局域网和远程 HTTPS 地址。</p></div><Badge variant="secondary">{yuxi.service ? serviceStatusLabel(yuxi.service.lastStatus) : '未配置'}</Badge></div><button className="fox-service-card" onClick={openService}><span><Server /></span><p><b>{yuxi.service ? knowledgeServiceName(yuxi.service.name) : '配置知识库服务'}</b><small>{yuxi.service?.baseUrl ?? '专家、知识库和知识图谱能力的来源'}</small></p><em><b>{yuxi.service?.lastLatencyMs != null ? `${yuxi.service.lastLatencyMs} ms` : '--'}</b><small>{connectionTypeLabel(yuxi.service?.connectionType)}</small></em><ChevronRight /></button><div className="fox-setting-actions"><Button variant="outline" size="sm" disabled={!yuxi.service || yuxi.testing} onClick={() => void yuxi.test()}>{yuxi.testing && <LoaderCircle className="animate-spin" />}测试连接</Button><Button size="sm" onClick={openService}>{yuxi.service ? '编辑地址' : '开始配置'}</Button></div></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>账户</h2><p>Fox 与浏览器中的知识库登录态相互独立。</p></div>{user.user ? <Badge variant="secondary">已登录</Badge> : <Badge variant="outline">未登录</Badge>}</div>{user.user ? <div className="fox-profile-setting"><Avatar>{user.user.avatar && <AvatarImage src={user.user.avatar} alt="" />}<AvatarFallback>{user.user.username.charAt(0).toUpperCase()}</AvatarFallback></Avatar><span><b>{user.user.username}</b><small>{user.user.uid}</small><em>{[user.user.departmentName, user.user.role].filter(Boolean).join(' · ')}</em></span></div> : <Button variant="outline" onClick={openLogin}><LogIn />知识库登录</Button>}</Card></SettingsScaffold></WorkspacePage>
 }
 
 export function ProjectPermissionsPage({ sidebarCollapsed, onSidebar }: { sidebarCollapsed: boolean; onSidebar: () => void }) {
@@ -423,12 +440,13 @@ export function UsageStatisticsPage({ sidebarCollapsed, onSidebar }: { sidebarCo
     }
   }, [statistics])
   const maxAgentRuns = Math.max(1, ...(statistics?.agents.map((agent) => agent.runCount) ?? [1]))
-  return <WorkspacePage title="使用统计" subtitle="本地活动与 Token" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="本地统计" title="使用统计" description="查看 Fox 在这台设备上的对话、任务、智能体和 Token 使用情况；不包含费用估算。">
-    <div className="fox-usage-toolbar"><span>数据来自本地 Fox 历史记录</span><Button variant="outline" size="sm" onClick={refresh} disabled={loading}><RotateCcw className={loading ? 'animate-spin' : ''} />刷新</Button></div>
+  const cacheEligibleTokens = (statistics?.inputTokens ?? 0) + (statistics?.cacheReadTokens ?? 0)
+  const cacheHitRate = cacheEligibleTokens ? Math.round((statistics?.cacheReadTokens ?? 0) / cacheEligibleTokens * 100) : 0
+  return <WorkspacePage title="使用统计" subtitle="本地活动与 Token" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="本地统计" title="使用统计" description="查看 Fox 在这台设备上的对话、任务、专家和 Token 使用情况；不包含费用估算。">
     {error && <p className="fox-setting-error">{error}</p>}
     {!statistics && loading ? <Card className="fox-settings-section fox-usage-loading"><LoaderCircle className="animate-spin" /><span>正在汇总使用记录</span></Card> : statistics && <>
       <Card className="fox-agent-work-card fox-usage-record-card">
-        <div className="fox-agent-work-head"><h2>使用记录</h2></div>
+        <div className="fox-agent-work-head"><h2>使用记录</h2><Button className="fox-usage-refresh" variant="outline" size="sm" onClick={refresh} disabled={loading}><RotateCcw className={loading ? 'animate-spin' : ''} />刷新</Button></div>
         <div className="fox-agent-work-content">
           <div className="fox-agent-work-metrics">
             {[['对话数', statistics.conversationCount], ['完成任务', statistics.completedRunCount], ['活跃天数', statistics.activeDayCount], ['Token 总量', formatUsageNumber(statistics.totalTokens)]].map(([label, value]) => <div key={label}><strong>{value}</strong><span>{label} <Info /></span></div>)}
@@ -449,8 +467,8 @@ export function UsageStatisticsPage({ sidebarCollapsed, onSidebar }: { sidebarCo
         </div>
       </Card>
       <div className="fox-usage-columns">
-        <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>智能体使用</h2></div></div>{statistics.agents.length ? <div className="fox-usage-agents">{statistics.agents.map((agent, index) => <div key={agent.agentId}><span className="fox-usage-rank">{index + 1}</span><div><header><b>{agent.agentName}</b><small>{agent.runCount} 次运行</small></header><span><i style={{ width: `${agent.runCount / maxAgentRuns * 100}%` }} /></span><small>{agent.conversationCount} 个对话 · {formatUsageNumber(agent.totalTokens)} tokens</small></div></div>)}</div> : <p className="fox-settings-empty-copy">还没有智能体使用记录。</p>}</Card>
-        <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>Token 构成</h2></div></div><div className="fox-token-summary"><div><span>输入</span><strong>{formatUsageNumber(statistics.inputTokens)}</strong><i style={{ width: `${statistics.totalTokens ? statistics.inputTokens / statistics.totalTokens * 100 : 0}%` }} /></div><div><span>输出</span><strong>{formatUsageNumber(statistics.outputTokens)}</strong><i style={{ width: `${statistics.totalTokens ? statistics.outputTokens / statistics.totalTokens * 100 : 0}%` }} /></div></div><p className="fox-usage-note"><Activity />统计取每次运行最后一次上报的 usage，避免流式增量重复累计。</p></Card>
+        <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>专家使用</h2></div></div>{statistics.agents.length ? <div className="fox-usage-agents">{statistics.agents.map((agent, index) => <div key={agent.agentId}><span className="fox-usage-rank">{index + 1}</span><div><header><b>{agent.agentName}</b><small>{agent.runCount} 次运行</small></header><span><i style={{ width: `${agent.runCount / maxAgentRuns * 100}%` }} /></span><small>{agent.conversationCount} 个对话 · {formatUsageNumber(agent.totalTokens)} tokens</small></div></div>)}</div> : <p className="fox-settings-empty-copy">还没有专家使用记录。</p>}</Card>
+        <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>Token 构成</h2><p>Prompt 与工具目录共享同一供应商缓存口径。</p></div><Badge variant="secondary">命中 {cacheHitRate}%</Badge></div><div className="fox-token-summary"><div><span>输入</span><strong>{formatUsageNumber(statistics.inputTokens)}</strong><i style={{ width: `${statistics.totalTokens ? statistics.inputTokens / statistics.totalTokens * 100 : 0}%` }} /></div><div><span>输出</span><strong>{formatUsageNumber(statistics.outputTokens)}</strong><i style={{ width: `${statistics.totalTokens ? statistics.outputTokens / statistics.totalTokens * 100 : 0}%` }} /></div><div><span>缓存读取</span><strong>{formatUsageNumber(statistics.cacheReadTokens)}</strong><i style={{ width: `${statistics.totalTokens ? statistics.cacheReadTokens / statistics.totalTokens * 100 : 0}%` }} /></div><div><span>缓存写入</span><strong>{formatUsageNumber(statistics.cacheWriteTokens)}</strong><i style={{ width: `${statistics.totalTokens ? statistics.cacheWriteTokens / statistics.totalTokens * 100 : 0}%` }} /></div></div><p className="fox-usage-note"><Activity />命中率 = 缓存读取 /（普通输入 + 缓存读取）；统计取每次运行最后一次 usage，避免流式重复累计。</p></Card>
       </div>
     </>}
   </SettingsScaffold></WorkspacePage>
@@ -463,7 +481,7 @@ export function ExtensionsSettingsPage({ sidebarCollapsed, onSidebar, navigate }
 }
 
 export function AboutSettingsPage({ sidebarCollapsed, onSidebar }: { sidebarCollapsed: boolean; onSidebar: () => void }) {
-  return <WorkspacePage title="关于与更新" subtitle="Fox Desktop" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="应用信息" title="关于与更新" description="查看 Fox 版本、技术栈、许可证与更新状态。"><Card className="fox-settings-section fox-about-product"><img src="/mascot/fox/status/fox_sayhi.png" alt="" /><div><h2>Fox</h2><p>轻量、高效、可连接知识库服务的通用桌面智能体。</p><Badge className="fox-settings-status-pill" variant="secondary">0.1.0</Badge></div></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>版本与更新</h2><p>当前使用 Tauri 2、React、shadcn/ui、AI Elements 与 Fox Runtime。</p></div><Info /></div><PreferenceRow title="当前版本" description="开发预览版本"><code>0.1.0</code></PreferenceRow><PreferenceRow title="自动检查更新" description="正式发布渠道接入后启用"><Badge className="fox-settings-status-pill is-wide" variant="outline">尚未接入</Badge></PreferenceRow></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>开源与许可</h2><p>Fox 自身许可将在正式发布前确定；第三方依赖遵循各自许可证。</p></div><Archive /></div><PreferenceRow title="架构文档" description="项目 docs 目录包含三个阶段的设计与实施记录"><Badge className="fox-settings-status-pill is-wide" variant="secondary">本地文档</Badge></PreferenceRow></Card></SettingsScaffold></WorkspacePage>
+  return <WorkspacePage title="关于与更新" subtitle="Fox Desktop" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="应用信息" title="关于与更新" description="查看 Fox 版本、技术栈、许可证与更新状态。"><Card className="fox-settings-section fox-about-product"><img src="/mascot/fox/status/fox_sayhi.png" alt="" /><div><h2>Fox</h2><p>轻量、高效、可连接知识库服务的桌面专家工作台。</p><Badge className="fox-settings-status-pill" variant="secondary">0.1.0</Badge></div></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>版本与更新</h2><p>当前使用 Tauri 2、React、shadcn/ui、AI Elements 与 Fox Runtime。</p></div><Info /></div><PreferenceRow title="当前版本" description="开发预览版本"><code>0.1.0</code></PreferenceRow><PreferenceRow title="自动检查更新" description="正式发布渠道接入后启用"><Badge className="fox-settings-status-pill is-wide" variant="outline">尚未接入</Badge></PreferenceRow></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>开源与许可</h2><p>Fox 自身许可将在正式发布前确定；第三方依赖遵循各自许可证。</p></div><Archive /></div><PreferenceRow title="架构文档" description="项目 docs 目录包含三个阶段的设计与实施记录"><Badge className="fox-settings-status-pill is-wide" variant="secondary">本地文档</Badge></PreferenceRow></Card></SettingsScaffold></WorkspacePage>
 }
 
 export function SkillsPage({ sidebarCollapsed, onSidebar, navigate }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace }) {
@@ -610,6 +628,12 @@ export function ServicePage({ sidebarCollapsed, onSidebar, navigate }: { sidebar
   const [baseUrl, setBaseUrl] = useState('http://127.0.0.1:5050')
   const [token, setToken] = useState('')
 
+  const returnFromService = () => {
+    const returnView = window.sessionStorage.getItem(YUXI_SERVICE_RETURN_KEY)
+    window.sessionStorage.removeItem(YUXI_SERVICE_RETURN_KEY)
+    navigate(resolveYuxiServiceReturn(returnView))
+  }
+
   useEffect(() => {
     if (!yuxi.service) return
     setName(yuxi.service.name)
@@ -627,13 +651,13 @@ export function ServicePage({ sidebarCollapsed, onSidebar, navigate }: { sidebar
     await yuxi.test(saved.baseUrl)
     setToken('')
     toast.success('知识库服务配置已保存')
-    navigate('settings-yuxi')
+    returnFromService()
   }
 
   const result = yuxi.testResult
   return (
-    <WorkspacePage title="连接知识库" subtitle="服务配置" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('settings-yuxi')}>
-      <div className="fox-settings-layout"><main><header><span>服务连接</span><h1>知识库服务</h1><p>连接本机、局域网或远程知识库服务，为 Fox 提供远程智能体、知识库和知识图谱能力。</p></header><Card className="fox-settings-section fox-service-form"><div className="fox-settings-section-head"><div><h2>连接配置</h2><p>Fox 首版仅保存一个知识库服务地址。</p></div><Server /></div><div className="fox-settings-form-grid"><label>服务名称<Input value={name} onChange={(event) => setName(event.target.value)} /></label><label>API 地址 <b>*</b><Input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="http://127.0.0.1:5050" /></label><small className="fox-field-help">远程示例：https://knowledge.example.com，Fox 会检测 /api/system/health。</small><label>访问令牌<Input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={yuxi.service?.credentialConfigured ? '已保存，留空则保持不变' : '可选：API Key 或登录 Token'} /></label></div>{result ? <Card className="fox-connection-result"><span><Server /></span><p><b>{result.authenticated ? '凭证已验证' : '服务可达'}</b><small>{result.version ?? '未知版本'} · {result.latencyMs} ms · {connectionTypeLabel(result.connectionType)}</small></p><Badge variant="secondary">{result.authenticated ? '已鉴权' : '可用'}</Badge></Card> : yuxi.error ? <Card className="fox-connection-result is-error"><span><Server /></span><p><b>连接测试失败</b><small>{yuxi.error}</small></p><Badge variant="destructive">不可用</Badge></Card> : null}<div className="fox-setting-actions"><Button variant="outline" disabled={yuxi.testing || !baseUrl.trim()} onClick={() => void testConnection()}>{yuxi.testing && <LoaderCircle className="animate-spin" />}测试连接</Button><Button disabled={yuxi.saving || !name.trim() || !baseUrl.trim()} onClick={() => void saveConnection()}>{yuxi.saving && <LoaderCircle className="animate-spin" />}保存配置</Button></div><small className="fox-settings-security-note"><Shield />Token 使用系统凭证库保存，不写入 Fox 数据库。</small></Card></main></div>
+    <WorkspacePage title="连接知识库" subtitle="服务配置" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={returnFromService}>
+      <div className="fox-settings-layout"><main><header><span>服务连接</span><h1>知识库服务</h1><p>连接本机、局域网或远程知识库服务，为 Fox 提供远程专家、知识库和知识图谱能力。</p></header><Card className="fox-settings-section fox-service-form"><div className="fox-settings-section-head"><div><h2>连接配置</h2><p>Fox 首版仅保存一个知识库服务地址。</p></div><Server /></div><div className="fox-settings-form-grid"><label>服务名称<Input value={name} onChange={(event) => setName(event.target.value)} /></label><label>API 地址 <b>*</b><Input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="http://127.0.0.1:5050" /></label><small className="fox-field-help">远程示例：https://knowledge.example.com，Fox 会检测 /api/system/health。</small><label>访问令牌<Input type="password" value={token} onChange={(event) => setToken(event.target.value)} placeholder={yuxi.service?.credentialConfigured ? '已保存，留空则保持不变' : '可选：API Key 或登录 Token'} /></label></div>{result ? <Card className="fox-connection-result"><span><Server /></span><p><b>{result.authenticated ? '凭证已验证' : '服务可达'}</b><small>{result.version ?? '未知版本'} · {result.latencyMs} ms · {connectionTypeLabel(result.connectionType)}</small></p><Badge variant="secondary">{result.authenticated ? '已鉴权' : '可用'}</Badge></Card> : yuxi.error ? <Card className="fox-connection-result is-error"><span><Server /></span><p><b>连接测试失败</b><small>{yuxi.error}</small></p><Badge variant="destructive">不可用</Badge></Card> : null}<div className="fox-setting-actions"><Button variant="outline" disabled={yuxi.testing || !baseUrl.trim()} onClick={() => void testConnection()}>{yuxi.testing && <LoaderCircle className="animate-spin" />}测试连接</Button><Button disabled={yuxi.saving || !name.trim() || !baseUrl.trim()} onClick={() => void saveConnection()}>{yuxi.saving && <LoaderCircle className="animate-spin" />}保存配置</Button></div><small className="fox-settings-security-note"><Shield />Token 使用系统凭证库保存，不写入 Fox 数据库。</small></Card></main></div>
     </WorkspacePage>
   )
 }
@@ -689,15 +713,24 @@ export function LoginPage({ sidebarCollapsed, onSidebar, navigate }: { sidebarCo
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const returnFromLogin = () => {
+    const returnView = window.sessionStorage.getItem(YUXI_LOGIN_RETURN_KEY)
+    window.sessionStorage.removeItem(YUXI_LOGIN_RETURN_KEY)
+    navigate(resolveYuxiLoginReturn(returnView))
+  }
+  const openService = () => {
+    window.sessionStorage.setItem(YUXI_SERVICE_RETURN_KEY, 'login')
+    navigate('service')
+  }
   const login = async () => {
     setBusy(true); setError(null)
-    try { const user = await desktopClient.loginYuxi(username, password); window.dispatchEvent(new Event('fox:yuxi-user-changed')); toast.success(`欢迎回来，${user.username}`); const returnView = window.sessionStorage.getItem('fox:yuxi-login-return'); window.sessionStorage.removeItem('fox:yuxi-login-return'); navigate(returnView === 'knowledge' ? 'knowledge' : returnView === 'agents' ? 'agents' : 'settings-yuxi') }
+    try { const user = await desktopClient.loginYuxi(username, password); window.dispatchEvent(new Event('fox:yuxi-user-changed')); toast.success(`欢迎回来，${user.username}`); returnFromLogin() }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { setBusy(false) }
   }
   return (
-    <WorkspacePage title="知识库登录" subtitle="账户身份验证" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('service')}>
-      <div className="fox-login-page"><section><img src="/mascot/fox_magic.png" alt="" /><span>欢迎回来</span><h1>知识库登录</h1><p>登录后将同步你有权访问的远程智能体与知识库。</p></section><Card><header><span><LogIn /></span><div><h2>使用知识库账户</h2><p>连接到已配置的知识库服务</p></div></header><label>用户名<Input value={username} onChange={(event) => setUsername(event.target.value)} /></label><label>密码<Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void login() }} /></label><div className="fox-login-options"><label><Switch defaultChecked />保持登录</label><Button variant="link" size="sm"><KeyRound />忘记密码</Button></div>{error && <p className="fox-setting-error">{error}</p>}<Button disabled={busy || !username || !password} onClick={() => void login()}>{busy && <LoaderCircle className="animate-spin" />}登录并进入 Fox</Button><Separator /><Button variant="outline" onClick={() => navigate('service')}><ExternalLink />检查服务配置</Button></Card></div>
+    <WorkspacePage title="知识库登录" subtitle="账户身份验证" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={returnFromLogin}>
+      <div className="fox-login-page"><section><img src="/mascot/fox_magic.png" alt="" /><span>欢迎回来</span><h1>知识库登录</h1><p>登录后将同步你有权访问的远程专家与知识库。</p></section><Card><header><span><LogIn /></span><div><h2>使用知识库账户</h2><p>连接到已配置的知识库服务</p></div></header><label>用户名<Input value={username} onChange={(event) => setUsername(event.target.value)} /></label><label>密码<Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void login() }} /></label><div className="fox-login-options"><label><Switch defaultChecked />保持登录</label><Button variant="link" size="sm"><KeyRound />忘记密码</Button></div>{error && <p className="fox-setting-error">{error}</p>}<Button size="lg" disabled={busy || !username || !password} onClick={() => void login()}>{busy && <LoaderCircle className="animate-spin" />}登录并进入 Fox</Button><Separator /><Button variant="outline" size="lg" onClick={openService}><ExternalLink />检查服务配置</Button></Card></div>
     </WorkspacePage>
   )
 }

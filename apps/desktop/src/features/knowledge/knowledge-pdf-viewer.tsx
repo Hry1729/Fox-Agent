@@ -122,13 +122,16 @@ export default function KnowledgePdfViewer({
   }, [locatorQuery, sourceLocator?.page])
 
   useEffect(() => {
-    if (!requestedPosition?.page || requestedPosition.page === viewport.page) return
-    setViewport((current) => normalizePdfViewport({
-      ...current,
-      page: requestedPosition.page,
-      zoom: requestedPosition.zoom ?? current.zoom,
-    }))
-  }, [requestedPosition?.page, requestedPosition?.zoom, viewport.page])
+    if (!requestedPosition?.page) return
+    setViewport((current) => {
+      const next = normalizePdfViewport({
+        ...current,
+        page: requestedPosition.page,
+        zoom: requestedPosition.zoom ?? current.zoom,
+      })
+      return next.page === current.page && next.zoom === current.zoom ? current : next
+    })
+  }, [requestedPosition?.page, requestedPosition?.zoom])
 
   useEffect(() => {
     if (loading) return

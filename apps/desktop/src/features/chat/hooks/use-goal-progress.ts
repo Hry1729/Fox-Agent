@@ -1,10 +1,13 @@
 import { useMemo } from 'react'
-import type { ConversationDetail, GoalRecord, WorkTaskRecord, TaskEvidenceRecord } from '@/features/conversations/model/types'
+import type { AcceptanceRecord, ConversationDetail, GoalRecord, PlanRevisionRecord, ReviewFindingRecord, WorkTaskRecord, TaskEvidenceRecord } from '@/features/conversations/model/types'
 
 export interface GoalProgressData {
   goal: GoalRecord
   tasks: WorkTaskRecord[]
   evidence: TaskEvidenceRecord[]
+  planRevisions: PlanRevisionRecord[]
+  reviewFindings: ReviewFindingRecord[]
+  acceptances: AcceptanceRecord[]
   completedCount: number
   totalCount: number
   currentTask: WorkTaskRecord | null
@@ -20,10 +23,17 @@ export function useGoalProgress(detail: ConversationDetail | null): GoalProgress
       return null
     }
 
+    // Status-only live events may briefly arrive without the Goal payload. They
+    // are not renderable Goals and must not create an empty progress bar.
+    const renderableGoals = detail.goals.filter((goal) => (
+      goal.title.trim().length > 0 && goal.objective.trim().length > 0
+    ))
+
     // Prefer the current Goal, then retain the newest completed graph after the
     // final assistant response or an App restart.
-    const activeGoal = detail.goals.find(g => g.status === 'active' || g.status === 'blocked')
-      ?? [...detail.goals]
+    const activeGoal = renderableGoals.find(g => g.status === 'proposed')
+      ?? renderableGoals.find(g => g.status === 'active' || g.status === 'blocked')
+      ?? [...renderableGoals]
         .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
         .find(g => g.status === 'completed')
 
@@ -52,6 +62,9 @@ export function useGoalProgress(detail: ConversationDetail | null): GoalProgress
       goal: activeGoal,
       tasks: goalTasks,
       evidence: goalEvidence,
+      planRevisions: (detail.planRevisions || []).filter((item) => item.goalId === activeGoal.id),
+      reviewFindings: (detail.reviewFindings || []).filter((item) => item.goalId === activeGoal.id),
+      acceptances: (detail.acceptances || []).filter((item) => item.goalId === activeGoal.id),
       completedCount,
       totalCount,
       currentTask

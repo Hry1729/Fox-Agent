@@ -8,13 +8,45 @@ pub struct AgentRecord {
     pub name: String,
     pub description: String,
     pub runtime_type: String,
+    pub agent_kind: String,
+    pub invocation_mode: String,
+    pub visibility: String,
     pub default_model: String,
     pub icon: Option<String>,
+    pub category: String,
+    pub opening_suggestions: Vec<String>,
+    pub system_prompt: String,
+    pub is_builtin: bool,
+    pub package_version: String,
+    pub package_manifest: Value,
     pub capabilities: Value,
     pub resources: AgentResourcesRecord,
     pub configurable_items: Value,
     pub is_default: bool,
     pub available: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveAgentRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub description: String,
+    pub icon: Option<String>,
+    pub category: String,
+    pub system_prompt: String,
+    pub default_model: String,
+    #[serde(default)]
+    pub opening_suggestions: Vec<String>,
+    #[serde(default)]
+    pub package_manifest: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CopyAgentRequest {
+    pub agent_id: String,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -44,6 +76,8 @@ pub struct ConversationSummary {
     pub project_id: Option<String>,
     pub project_root: Option<String>,
     pub status: String,
+    pub pinned: bool,
+    pub archived: bool,
     pub created_at: i64,
     pub updated_at: i64,
     pub last_message_at: Option<i64>,
@@ -199,6 +233,55 @@ pub struct TaskEvidenceRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct PlanRevisionRecord {
+    pub id: String,
+    pub goal_id: String,
+    pub conversation_id: String,
+    pub revision: i64,
+    pub title: String,
+    pub summary: String,
+    pub tasks: Value,
+    pub status: String,
+    pub created_by: String,
+    pub created_at: String,
+    pub approved_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewFindingRecord {
+    pub id: String,
+    pub goal_id: String,
+    pub task_id: Option<String>,
+    pub plan_revision_id: Option<String>,
+    pub conversation_id: String,
+    pub severity: String,
+    pub category: String,
+    pub title: String,
+    pub detail: String,
+    pub status: String,
+    pub created_by: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptanceRecord {
+    pub id: String,
+    pub goal_id: String,
+    pub plan_revision_id: Option<String>,
+    pub conversation_id: String,
+    pub status: String,
+    pub summary: String,
+    pub checks: Value,
+    pub reviewer: String,
+    pub created_at: String,
+    pub resolved_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkEventRecord {
     #[serde(rename = "type")]
     pub event_type: String,
@@ -218,6 +301,7 @@ pub struct WorkEventRecord {
 #[serde(rename_all = "camelCase")]
 pub struct ConversationDetail {
     pub conversation: ConversationSummary,
+    pub expert_bindings: Vec<ConversationExpertBinding>,
     pub messages: Vec<MessageRecord>,
     pub runtime_events: Vec<RunEventRecord>,
     pub tool_calls: Vec<ToolCallRecord>,
@@ -230,7 +314,85 @@ pub struct ConversationDetail {
     pub goals: Vec<GoalRecord>,
     pub tasks: Vec<WorkTaskRecord>,
     pub evidence: Vec<TaskEvidenceRecord>,
+    pub plan_revisions: Vec<PlanRevisionRecord>,
+    pub review_findings: Vec<ReviewFindingRecord>,
+    pub acceptances: Vec<AcceptanceRecord>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationExpertBinding {
+    pub id: String,
+    pub conversation_id: String,
+    pub expert_id: String,
+    pub state: String,
+    pub activation_source: String,
+    pub expert_version: String,
+    pub package_hash: String,
+    pub package_snapshot: Value,
+    pub display_snapshot_json: Value,
+    pub activated_at: i64,
+    pub deactivated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationExpertBindingError {
+    ConversationNotFound,
+    ExpertNotFound,
+    InvalidRole,
+    RemoteUnavailable,
+    LockedArchived,
+    LockedByMessages,
+    LockedByActiveRun,
+    InvalidActivationSource,
+    Storage(String),
+}
+
+impl ConversationExpertBindingError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::ConversationNotFound => "conversation.not_found",
+            Self::ExpertNotFound => "expert.not_found",
+            Self::InvalidRole => "conversation.expert_invalid_role",
+            Self::RemoteUnavailable => "conversation.expert_remote_unavailable",
+            Self::LockedArchived | Self::LockedByMessages | Self::LockedByActiveRun => {
+                "conversation.expert_locked"
+            }
+            Self::InvalidActivationSource => "conversation.expert_invalid_source",
+            Self::Storage(_) => "storage.operation_failed",
+        }
+    }
+
+    pub fn retryable(&self) -> bool {
+        matches!(self, Self::RemoteUnavailable | Self::Storage(_))
+    }
+}
+
+impl std::fmt::Display for ConversationExpertBindingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConversationNotFound => formatter.write_str("conversation was not found"),
+            Self::ExpertNotFound => formatter.write_str("expert was not found"),
+            Self::InvalidRole => formatter.write_str("selected agent is not an inline expert"),
+            Self::RemoteUnavailable => formatter.write_str("remote expert is unavailable"),
+            Self::LockedArchived => {
+                formatter.write_str("conversation expert cannot change after conversation archive")
+            }
+            Self::LockedByMessages => formatter.write_str(
+                "conversation expert cannot change after user or assistant messages exist",
+            ),
+            Self::LockedByActiveRun => {
+                formatter.write_str("conversation expert cannot change while a run is active")
+            }
+            Self::InvalidActivationSource => {
+                formatter.write_str("expert activation source is required")
+            }
+            Self::Storage(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ConversationExpertBindingError {}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -293,6 +455,8 @@ pub struct UsageStatistics {
     pub active_day_count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
     pub total_tokens: i64,
     pub agents: Vec<UsageAgentStat>,
     pub days: Vec<UsageDayStat>,
@@ -564,6 +728,8 @@ pub struct RuntimeInitialization {
 #[serde(rename_all = "camelCase")]
 pub struct CreateConversationRequest {
     pub agent_id: String,
+    #[serde(default)]
+    pub expert_id: Option<String>,
     pub title: Option<String>,
     pub project_root: Option<String>,
     pub permission_mode: Option<String>,
@@ -574,6 +740,20 @@ pub struct CreateConversationRequest {
 pub struct RenameConversationRequest {
     pub conversation_id: String,
     pub title: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationExpertBindRequest {
+    pub conversation_id: String,
+    pub expert_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateConversationPinnedRequest {
+    pub conversation_id: String,
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -614,9 +794,22 @@ pub struct ConversationIdRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GoalIdRequest {
+    pub conversation_id: String,
+    pub goal_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateProjectPermissionRequest {
     pub project_id: String,
     pub permission_mode: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectIdRequest {
+    pub project_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -658,6 +851,39 @@ pub struct StartRunResult {
     pub run: RunRecord,
     pub user_message: MessageRecord,
     pub attachments: Vec<AttachmentRecord>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewindRunRequest {
+    pub conversation_id: String,
+    pub message_id: String,
+    pub text: String,
+    pub runtime_text: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetGoalRunningRequest {
+    pub conversation_id: String,
+    pub goal_id: String,
+    pub expected_version: i64,
+    pub running: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetGoalRunningResult {
+    pub goal: GoalRecord,
+    pub started_run: Option<StartRunResult>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingWorkModeDispatch {
+    pub goal_id: String,
+    pub runtime_text: String,
+    pub started: StartRunResult,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1158,6 +1384,7 @@ pub struct ProviderModelRecord {
 pub struct ModelProviderRecord {
     pub id: String,
     pub name: String,
+    pub icon: Option<String>,
     pub base_url: String,
     pub api_type: String,
     pub enabled: bool,
@@ -1191,6 +1418,7 @@ pub struct SaveProviderModelRequest {
 pub struct SaveModelProviderRequest {
     pub id: Option<String>,
     pub name: String,
+    pub icon: Option<String>,
     pub base_url: String,
     pub api_type: String,
     #[serde(default)]

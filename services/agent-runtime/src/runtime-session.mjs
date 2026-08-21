@@ -68,7 +68,13 @@ export function sanitizeProviderHistory(messages) {
       }
     }
     if (typeof message.content === 'string') {
-      return { role: message.role, content: message.content, timestamp: message.timestamp }
+      return {
+        role: message.role,
+        content: message.role === 'assistant'
+          ? (message.content ? [{ type: 'text', text: message.content }] : [])
+          : message.content,
+        timestamp: message.timestamp,
+      }
     }
     const content = Array.isArray(message.content)
       ? message.content.flatMap((block) => {

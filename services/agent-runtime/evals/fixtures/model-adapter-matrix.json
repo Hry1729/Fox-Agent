@@ -1,0 +1,66 @@
+{
+  "name": "Fox cross-model adapter matrix",
+  "description": "Representative provider and model families supported by the Fox Pi Runtime adapter.",
+  "cases": [
+    {
+      "id": "minimax-m3-anthropic",
+      "config": { "modelId": "MiniMax-M3", "baseUrl": "https://api.minimaxi.com/anthropic", "apiType": "anthropic-messages" },
+      "expected": { "id": "minimax-cn/minimax", "reasoning": true, "reasoningTransport": "mixed-text", "thinkingLevel": "medium", "supportsPromptCache": true }
+    },
+    {
+      "id": "deepseek-reasoner",
+      "config": { "modelId": "deepseek-reasoner", "baseUrl": "https://api.deepseek.com/v1", "apiType": "openai-completions" },
+      "expected": { "id": "deepseek/deepseek", "reasoning": true, "reasoningTransport": "native", "thinkingLevel": "medium" }
+    },
+    {
+      "id": "deepseek-chat",
+      "config": { "modelId": "deepseek-chat", "baseUrl": "https://api.deepseek.com/v1", "apiType": "openai-completions" },
+      "expected": { "id": "deepseek/deepseek", "reasoning": false, "thinkingLevel": "off" }
+    },
+    {
+      "id": "openai-gpt5-responses",
+      "config": { "modelId": "gpt-5.4", "baseUrl": "https://api.openai.com/v1", "apiType": "openai-responses" },
+      "expected": { "id": "openai/openai", "api": "openai-responses", "reasoning": true, "supportsPromptCache": true }
+    },
+    {
+      "id": "anthropic-claude4",
+      "config": { "modelId": "claude-sonnet-4-6", "baseUrl": "https://api.anthropic.com", "apiType": "anthropic-messages" },
+      "expected": { "id": "anthropic/claude", "api": "anthropic-messages", "reasoning": true, "supportsPromptCache": true }
+    },
+    {
+      "id": "alibaba-qwen-coder",
+      "config": { "modelId": "qwen3-coder-plus", "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1", "apiType": "openai-completions" },
+      "expected": { "id": "alibaba/qwen", "reasoning": false, "supportsTools": true }
+    },
+    {
+      "id": "zhipu-glm5",
+      "config": { "modelId": "glm-5", "baseUrl": "https://open.bigmodel.cn/api/paas/v4", "apiType": "openai-completions" },
+      "expected": { "id": "zhipu/glm", "reasoning": true, "reasoningTransport": "mixed-text" }
+    },
+    {
+      "id": "moonshot-kimi-k25",
+      "config": { "modelId": "kimi-k2.5", "baseUrl": "https://api.moonshot.cn/v1", "apiType": "openai-completions" },
+      "expected": { "id": "moonshot/kimi", "reasoning": true, "reasoningTransport": "mixed-text" }
+    },
+    {
+      "id": "google-gemini25",
+      "config": { "modelId": "gemini-2.5-pro", "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai", "apiType": "openai-completions" },
+      "expected": { "id": "google/gemini", "reasoning": true, "reasoningTransport": "native" }
+    },
+    {
+      "id": "xai-grok",
+      "config": { "modelId": "grok-4", "baseUrl": "https://api.x.ai/v1", "apiType": "openai-completions" },
+      "expected": { "id": "xai/grok", "reasoning": true }
+    },
+    {
+      "id": "openrouter-claude",
+      "config": { "modelId": "anthropic/claude-sonnet-4", "baseUrl": "https://openrouter.ai/api/v1", "apiType": "openai-completions" },
+      "expected": { "id": "openrouter/claude", "reasoning": true }
+    },
+    {
+      "id": "local-generic",
+      "config": { "modelId": "local-coder", "baseUrl": "http://127.0.0.1:11434/v1", "apiType": "openai-completions" },
+      "expected": { "id": "local/generic", "reasoning": false, "supportsPromptCache": false }
+    }
+  ]
+}

@@ -1,7 +1,8 @@
 const INTERNAL_PLANNING_PATTERN = /^(?:the user\s+(?:wants|asked|is asking|needs|provided|would like)\b|we\s+(?:need|should|must|have to)\b|i\s+(?:need|should|must|have to)\b|i(?:'ll| will)\s+(?:first|now|check|inspect|read|write|create|use|look|verify|figure|determine|handle|respond|explain|run)\b|let me\b|let's\b|looking at\s+(?:my|the)\b|now i\s+(?:have|need|can|should|will)\b|first,?\s+i\b|actually,?\b|wait,?\b|so i\s+(?:need|should|will|can)\b|the (?:task|request)\s+(?:is|asks|requires)\b)/i
 const INTERNAL_PLANNING_CONTEXT_PATTERN = /^this is (?:the )?(?:\*\*)?(?:first|second|third|fourth|fifth|\w+)(?:\*\*)? (?:round|pass|attempt)(?:\*\*)? of (?:tool )?testing\b/i
-const USER_FACING_ANSWER_PATTERN = /^(?:好的|好嘞|好，|当然|可以|没问题|已经|完成|以下是|这里是|结果如下|脚本已|文件已|我已经|我为你|done\b|sure\b|certainly\b|here(?:'s| is| are)\b|i(?:'ve| have)\s+(?:created|updated|finished|completed)\b|(?:created|updated|completed)\b|#{1,6}\s|```)/i
-const INLINE_USER_FACING_ANSWER_PATTERN = /(?:好的|好嘞|好，|当然|可以|没问题|已经|完成|以下是|这里是|结果如下|脚本已|文件已|我已经|我为你)/u
+const INTERNAL_PLANNING_ZH_PATTERN = /^(?:我(?:先|来|再|现在|需要|得|要|会先|准备|去|应该|必须|把|按守则|直接调用)|先(?:确认|看看|检查|读取|分析|验证|对照|创建|列出|处理|提议)|现在(?:去|先|来|需要|掌握|确认)|接下来|让我(?:先|再|来|看看|确认|验证|检查|读取|分析)|好，?(?:工作目录|现在|先|接下来)|好的，?本次测试|本次测试要测|测试设计|当前对话(?:没有|尚无)|目标(?:已经|已)(?:提议|提交)|快照里|Host\b|Gate\b|task_create_many\b|goal_(?:propose|complete)\b|work_snapshot_get\b|对照表|关键确认|两个观察|最后再|不过本任务)/u
+const USER_FACING_ANSWER_PATTERN = /^(?:好的|好嘞|当然|没问题|已经|完成|以下是|这里是|结果如下|结论(?:如下|是)?[：:]?|下面是|最终结果|汇总完毕|请你确认|脚本已|文件已|我已经|我为你|done\b|sure\b|certainly\b|here(?:'s| is| are)\b|i(?:'ve| have)\s+(?:created|updated|finished|completed)\b|(?:created|updated|completed)\b|#{1,6}\s|```)/i
+const INLINE_USER_FACING_ANSWER_PATTERN = /(?:好的|好嘞|当然|没问题|已经|完成|以下是|这里是|结果如下|结论(?:如下|是)?[：:]?|下面是|最终结果|汇总完毕|请你确认|脚本已|文件已|我已经|我为你)/u
 const REASONING_TAIL_CHARS = 160
 const STARTUP_CLASSIFICATION_CHARS = 220
 
@@ -18,22 +19,33 @@ function textUnits(text) {
 }
 
 function splitTaggedThinking(text) {
-  const match = text.match(/^\s*<(think|thinking|analysis)>[\s\S]*?<\/\1>\s*/i)
-  if (!match) return null
-  const reasoning = match[0]
-    .replace(/^\s*<(?:think|thinking|analysis)>/i, '')
-    .replace(/<\/(?:think|thinking|analysis)>\s*$/i, '')
-    .trim()
-  const answer = text.slice(match[0].length).trimStart()
-  return { reasoning, answer }
+  const tagged = text.match(/^\s*<((?:mm:)?(?:think|thinking|analysis))>[\s\S]*?<\/\1>\s*/i)
+  if (tagged) {
+    const reasoning = tagged[0]
+      .replace(/^\s*<(?:mm:)?(?:think|thinking|analysis)>/i, '')
+      .replace(/<\/(?:mm:)?(?:think|thinking|analysis)>\s*$/i, '')
+      .trim()
+    return { reasoning, answer: text.slice(tagged[0].length).trimStart() }
+  }
+
+  // Some compatible providers omit the opening marker but still emit the
+  // closing MiniMax marker. Treat the strongly signalled prefix as private.
+  const closingOnly = text.match(/^\s*([\s\S]*?)<\/(?:mm:)?(?:think|thinking|analysis)>\s*/i)
+  if (!closingOnly) return null
+  return {
+    reasoning: closingOnly[1].trim(),
+    answer: text.slice(closingOnly[0].length).trimStart(),
+  }
 }
 
 function looksLikeUserFacingAnswer(text) {
-  return USER_FACING_ANSWER_PATTERN.test(text) || /^[\u3400-\u9fff]/u.test(text)
+  return USER_FACING_ANSWER_PATTERN.test(text)
 }
 
 function looksLikeInternalPlanning(text) {
-  return INTERNAL_PLANNING_PATTERN.test(text) || INTERNAL_PLANNING_CONTEXT_PATTERN.test(text)
+  return INTERNAL_PLANNING_PATTERN.test(text)
+    || INTERNAL_PLANNING_CONTEXT_PATTERN.test(text)
+    || INTERNAL_PLANNING_ZH_PATTERN.test(text)
 }
 
 function answerStartInUnit(unit) {
@@ -44,7 +56,8 @@ function answerStartInUnit(unit) {
 }
 
 function mixedAnswerStart(text) {
-  const tagged = text.match(/^\s*<(think|thinking|analysis)>[\s\S]*?<\/\1>\s*/i)
+  const tagged = text.match(/^\s*<((?:mm:)?(?:think|thinking|analysis))>[\s\S]*?<\/\1>\s*/i)
+    || text.match(/^\s*[\s\S]*?<\/(?:mm:)?(?:think|thinking|analysis)>\s*/i)
   if (tagged) return tagged[0].length
 
   const units = textUnits(text)
@@ -97,11 +110,10 @@ export function sanitizeAssistantHistory(messages) {
 
     if (typeof message.content === 'string') {
       const split = splitMixedAssistantText(message.content)
-      if (!split.reasoning) return message
       return {
         ...message,
         content: [
-          { type: 'thinking', thinking: split.reasoning },
+          ...(split.reasoning ? [{ type: 'thinking', thinking: split.reasoning }] : []),
           ...(split.answer ? [{ type: 'text', text: split.answer }] : []),
         ],
       }
@@ -118,7 +130,7 @@ export function sanitizeAssistantHistory(messages) {
       if (!split.reasoning) return [block]
       return [
         { type: 'thinking', thinking: split.reasoning },
-        { ...block, text: split.answer },
+        ...(split.answer ? [{ ...block, text: split.answer }] : []),
       ]
     })
     return { ...message, content }
@@ -154,6 +166,7 @@ export function createPiEventMapper(emit, options = {}) {
   let messageStarted = false
   let finished = false
   let agentEnded = false
+  let pendingTerminal = null
   let pendingText = ''
   let textMode = 'undecided'
   let reasoningEmittedUntil = 0
@@ -217,7 +230,7 @@ export function createPiEventMapper(emit, options = {}) {
     const first = units[0]?.trimmed ?? pendingText.trimStart()
     if (textMode === 'undecided') {
       const internalSignals = units.filter((unit) => looksLikeInternalPlanning(unit.trimmed)).length
-      if (/^<(?:think|thinking|analysis)>/i.test(first) || internalSignals >= 2) {
+      if (/^<(?:mm:)?(?:think|thinking|analysis)>/i.test(first) || internalSignals >= 2) {
         textMode = 'reasoning'
       } else if (looksLikeInternalPlanning(first)) {
         return
@@ -311,23 +324,72 @@ export function createPiEventMapper(emit, options = {}) {
             reconcileProviderReasoning(event.message)
             flushPendingText(event.message)
             const usage = event.message.usage
-            if (usage) emit('usage.updated', { inputTokens: usage.input ?? 0, outputTokens: usage.output ?? 0, totalTokens: usage.totalTokens ?? 0 })
+            if (usage) emit('usage.updated', {
+              inputTokens: usage.input ?? 0,
+              outputTokens: usage.output ?? 0,
+              cacheReadTokens: usage.cacheRead ?? 0,
+              cacheWriteTokens: usage.cacheWrite ?? 0,
+              totalTokens: usage.totalTokens ?? 0,
+            })
             if (event.message.stopReason === 'error') {
-              emit('message.completed')
-              finished = true
-              emit('run.failed', { code: 'provider.request_failed', message: event.message.errorMessage || 'The model request failed.' })
+              pendingTerminal = {
+                type: 'run.failed',
+                code: 'provider.request_failed',
+                message: event.message.errorMessage || 'The model request failed.',
+              }
             } else if (event.message.stopReason === 'aborted') {
-              emit('message.completed')
-              finished = true
-              emit('run.cancelled')
+              pendingTerminal = { type: 'run.cancelled' }
             }
           }
           break
+        case 'auto_retry_start':
+          pendingTerminal = null
+          emit('run.retrying', {
+            attempt: event.attempt,
+            maxAttempts: event.maxAttempts,
+            delayMs: event.delayMs,
+            message: event.errorMessage,
+          })
+          emit('run.phase', { phase: 'recovering', attempt: event.attempt })
+          break
+        case 'auto_retry_end':
+          emit('run.retry.completed', {
+            success: Boolean(event.success),
+            attempt: event.attempt,
+            finalError: event.finalError,
+          })
+          if (event.success) emit('run.phase', { phase: 'model_streaming', attempt: event.attempt + 1 })
+          break
+        case 'compaction_start':
+          emit('context.compaction.started', { reason: event.reason })
+          emit('run.phase', { phase: 'compacting' })
+          break
+        case 'compaction_end':
+          emit('context.compaction.completed', {
+            reason: event.reason,
+            aborted: Boolean(event.aborted),
+            willRetry: Boolean(event.willRetry),
+            errorMessage: event.errorMessage,
+          })
+          if (!event.aborted) emit('run.phase', { phase: 'model_streaming' })
+          break
         case 'agent_end':
+          if (event.willRetry) {
+            pendingTerminal = null
+            emit('run.phase', { phase: 'recovering' })
+            break
+          }
           if (!finished) {
             ensureMessageStarted()
             emit('message.completed')
-            if (deferCompletion) {
+            if (pendingTerminal) {
+              finished = true
+              const terminal = pendingTerminal
+              pendingTerminal = null
+              emit(terminal.type, terminal.type === 'run.failed'
+                ? { code: terminal.code, message: terminal.message }
+                : {})
+            } else if (deferCompletion) {
               agentEnded = true
             } else {
               finished = true
@@ -342,7 +404,17 @@ export function createPiEventMapper(emit, options = {}) {
     fail(error) {
       if (finished) return
       finished = true
-      emit('run.failed', { code: 'runtime.pi_failed', message: error instanceof Error ? error.message : String(error) })
+      const pending = pendingTerminal
+      pendingTerminal = null
+      emit('run.failed', pending?.type === 'run.failed'
+        ? { code: pending.code, message: pending.message }
+        : { code: 'runtime.pi_failed', message: error instanceof Error ? error.message : String(error) })
+    },
+    cancel() {
+      if (finished) return
+      finished = true
+      pendingTerminal = null
+      emit('run.cancelled')
     },
     finish() {
       if (!deferCompletion || finished || !agentEnded) return

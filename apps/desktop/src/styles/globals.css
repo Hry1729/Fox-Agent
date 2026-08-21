@@ -45,6 +45,7 @@
 }
 
 :root {
+  font-size: 14px;
   font-family: "HarmonyOS Sans SC", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   color: var(--foreground);
   background: var(--background);
@@ -66,8 +67,8 @@
   --fox-faint: color-mix(in oklch, var(--muted-foreground) 72%, transparent);
   --fox-accent: var(--fox-blue);
   --fox-accent-soft: var(--fox-blue-soft);
-  --fox-user: var(--primary);
-  --fox-user-foreground: var(--primary-foreground);
+  --fox-user: #eaf5ff;
+  --fox-user-foreground: #243447;
   --fox-shadow: 0 16px 45px color-mix(in oklch, var(--foreground) 12%, transparent);
   --fox-text-scale: 1;
   --fox-type-chrome: calc(13px * var(--fox-text-scale));
@@ -100,8 +101,8 @@
   --fox-faint: color-mix(in oklch, var(--muted-foreground) 75%, transparent);
   --fox-accent: var(--fox-blue);
   --fox-accent-soft: var(--fox-blue-soft);
-  --fox-user: var(--primary);
-  --fox-user-foreground: var(--primary-foreground);
+  --fox-user: #203a50;
+  --fox-user-foreground: #eaf5ff;
   --fox-shadow: 0 18px 55px color-mix(in oklch, black 35%, transparent);
 }
 
@@ -141,8 +142,8 @@ button:disabled,
     --card-foreground: oklch(0.148 0.004 228.8);
     --popover: oklch(1 0 0);
     --popover-foreground: oklch(0.148 0.004 228.8);
-    --primary: oklch(0.488 0.243 264.376);
-    --primary-foreground: oklch(0.97 0.014 254.604);
+    --primary: #3978c5;
+    --primary-foreground: #ffffff;
     --secondary: oklch(0.972 0 0);
     --secondary-foreground: oklch(0.21 0.006 285.885);
     --muted: oklch(0.963 0.002 197.1);
@@ -152,7 +153,7 @@ button:disabled,
     --destructive: oklch(0.577 0.245 27.325);
     --border: oklch(0.925 0.005 214.3);
     --input: oklch(0.925 0.005 214.3);
-    --ring: oklch(0.723 0.014 214.4);
+    --ring: #8eb9e2;
     --chart-1: oklch(0.809 0.105 251.813);
     --chart-2: oklch(0.623 0.214 259.815);
     --chart-3: oklch(0.546 0.245 262.881);
@@ -161,8 +162,8 @@ button:disabled,
     --radius: 0.625rem;
     --sidebar: oklch(0.987 0.002 197.1);
     --sidebar-foreground: oklch(0.148 0.004 228.8);
-    --sidebar-primary: oklch(0.546 0.245 262.881);
-    --sidebar-primary-foreground: oklch(0.97 0.014 254.604);
+    --sidebar-primary: #3978c5;
+    --sidebar-primary-foreground: #ffffff;
     --sidebar-accent: oklch(0.958 0 0);
     --sidebar-accent-foreground: oklch(0.218 0.008 223.9);
     --sidebar-border: oklch(0.925 0.005 214.3);
@@ -175,8 +176,8 @@ button:disabled,
     --card-foreground: oklch(0.987 0.002 197.1);
     --popover: oklch(0.218 0.008 223.9);
     --popover-foreground: oklch(0.987 0.002 197.1);
-    --primary: oklch(0.424 0.199 265.638);
-    --primary-foreground: oklch(0.97 0.014 254.604);
+    --primary: #3978c5;
+    --primary-foreground: #ffffff;
     --secondary: oklch(0.274 0 0);
     --secondary-foreground: oklch(0.985 0 0);
     --muted: oklch(0.275 0.011 216.9);
@@ -186,7 +187,7 @@ button:disabled,
     --destructive: oklch(0.704 0.191 22.216);
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.56 0.021 213.5);
+    --ring: #6b9ed3;
     --chart-1: oklch(0.809 0.105 251.813);
     --chart-2: oklch(0.623 0.214 259.815);
     --chart-3: oklch(0.546 0.245 262.881);
@@ -194,8 +195,8 @@ button:disabled,
     --chart-5: oklch(0.424 0.199 265.638);
     --sidebar: oklch(0.218 0.008 223.9);
     --sidebar-foreground: oklch(0.987 0.002 197.1);
-    --sidebar-primary: oklch(0.623 0.214 259.815);
-    --sidebar-primary-foreground: oklch(0.97 0.014 254.604);
+    --sidebar-primary: #3978c5;
+    --sidebar-primary-foreground: #ffffff;
     --sidebar-accent: oklch(0.275 0 0);
     --sidebar-accent-foreground: oklch(0.987 0.002 197.1);
     --sidebar-border: oklch(1 0 0 / 10%);
@@ -210,4 +211,56 @@ button:disabled,
   html {
     @apply font-sans;
   }
+}
+
+/* Select menus are rendered in a portal; keep their text readable across pages and chat. */
+[data-slot="select-content"] [data-slot="select-item"] {
+  min-height: 32px;
+  font-size: var(--fox-type-control) !important;
+  line-height: 1.45;
+}
+
+[data-slot="select-content"] [data-slot="select-label"] {
+  font-size: var(--fox-type-meta) !important;
+  line-height: 1.45;
+}
+
+/* Portal overlays must remain readable regardless of the page that opened them. */
+[data-slot="dropdown-menu-content"] :where(
+  [data-slot="dropdown-menu-item"],
+  [data-slot="dropdown-menu-checkbox-item"],
+  [data-slot="dropdown-menu-radio-item"],
+  [data-slot="dropdown-menu-sub-trigger"]
+),
+[data-slot="dropdown-menu-sub-content"] :where(
+  [data-slot="dropdown-menu-item"],
+  [data-slot="dropdown-menu-checkbox-item"],
+  [data-slot="dropdown-menu-radio-item"],
+  [data-slot="dropdown-menu-sub-trigger"]
+),
+[data-slot="context-menu-content"] [data-slot="context-menu-item"] {
+  min-height: 32px;
+  font-size: var(--fox-type-control) !important;
+  line-height: 1.45;
+}
+
+[data-slot="dropdown-menu-label"] {
+  font-size: var(--fox-type-meta) !important;
+  line-height: 1.45;
+}
+
+[data-slot="dropdown-menu-shortcut"] {
+  font-size: var(--fox-type-caption) !important;
+}
+
+[data-slot="popover-content"],
+[data-slot="popover-header"],
+[data-slot="hover-card-content"] {
+  font-size: var(--fox-type-control) !important;
+  line-height: 1.5;
+}
+
+[data-slot="tooltip-content"] {
+  font-size: var(--fox-type-caption) !important;
+  line-height: 1.35;
 }

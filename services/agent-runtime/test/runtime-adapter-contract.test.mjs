@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -127,6 +127,49 @@ test('Pi Runtime pauses a protected tool until Fox approves it', async (context)
     runId: 'pi-approval-run',
     expectedPath: approvedFile,
   })
+})
+
+test('Pi Runtime rejects a fabricated approval demonstration when the model calls no tool', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-approval-truthfulness-'))
+  const runtime = startRuntimeProcess(piRuntimePath)
+  context.after(() => runtime.close())
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const initialize = runtime.send('initialize', {
+    payload: piConfig({ fauxResponses: ['三个敏感动作都被正确拦截了。'] }),
+  })
+  await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+  const conversationId = 'pi-approval-truthfulness-conversation'
+  const runtimeSessionId = 'pi-approval-truthfulness-session'
+  const sessionPath = join(directory, 'session.json')
+  const create = runtime.send('create_session', {
+    conversationId,
+    runtimeSessionId,
+    payload: { sessionPath },
+  })
+  await runtime.waitFor((message) => message.requestId === create.id && message.type === 'session_created')
+  const runId = 'pi-approval-truthfulness-run'
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId,
+    runId,
+    payload: {
+      text: '请触发几个审批弹窗让我看看',
+      messages: [{ role: 'user', content: '请触发几个审批弹窗让我看看' }],
+    },
+  })
+  await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
+  const events = runtime.messages.filter((message) => message.runId === runId && message.type === 'runtime_event')
+  const answer = events
+    .filter(({ payload }) => payload.type === 'message.delta')
+    .map(({ payload }) => payload.delta)
+    .join('')
+  assert.match(answer, /没有实际调用任何工具/)
+  assert.doesNotMatch(answer, /三个敏感动作都被正确拦截/)
+  assert.equal(events.some(({ payload }) => payload.type === 'tool.started'), false)
+  assert.equal(events.filter(({ payload }) => payload.type === 'message.completed').length, 1)
+  const persistedSession = await readFile(sessionPath, 'utf8')
+  assert.match(persistedSession, /没有实际调用任何工具/)
+  assert.doesNotMatch(persistedSession, /三个敏感动作都被正确拦截/)
 })
 
 test('Fake Runtime degrades cleanly when optional capabilities are absent', async (context) => {

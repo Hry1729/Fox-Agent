@@ -9,10 +9,12 @@ use crate::{
     app_state::AppState,
     database::{
         AgentIdRequest, AgentRecord, ApiResponse, AttachmentRecord, CancelRunRequest,
-        CleanupDataRequest, ConversationDetail, ConversationHistoryPage,
+        CleanupDataRequest, ConversationDetail, ConversationExpertBindRequest,
+        ConversationExpertBinding, ConversationExpertBindingError, ConversationHistoryPage,
         ConversationHistoryRequest, ConversationIdRequest, ConversationSearchRequest,
-        ConversationSummary, CreateConversationRequest, DeleteKnowledgeDocumentActivityItemRequest,
-        GraphQueryRequest, KnowledgeBaseRecord, KnowledgeDetailRecord, KnowledgeDocumentActivity,
+        ConversationSummary, CopyAgentRequest, CreateConversationRequest,
+        DeleteKnowledgeDocumentActivityItemRequest, GoalIdRequest, GraphQueryRequest,
+        KnowledgeBaseRecord, KnowledgeDetailRecord, KnowledgeDocumentActivity,
         KnowledgeDocumentAnnotation, KnowledgeDocumentBookmark, KnowledgeDocumentDownloadRequest,
         KnowledgeDocumentDownloadResult, KnowledgeDocumentRangeRequest,
         KnowledgeDocumentReadingState, KnowledgeDocumentRequest, KnowledgeDocumentSourceMetadata,
@@ -23,22 +25,24 @@ use crate::{
         KnowledgePreviewCacheReleaseRequest, KnowledgeQueryRequest, McpServerIdRequest,
         McpServerRecord, ModelConnectionTest, ModelProviderIdRequest, ModelProviderRecord,
         ModelServiceRecord, OpenDownloadedFileRequest, ProjectFileEntry, ProjectFilePreview,
-        ProjectFileReadRequest, ProjectFilesRequest, ProjectRecord, ProviderModelRecord,
-        RenameConversationRequest, ResolveApprovalRequest, RestoreBackupRequest,
-        ResumeYuxiRunRequest, RuntimeInitialization, SaveAttachmentsRequest,
-        SaveKnowledgeDocumentAnnotationRequest, SaveKnowledgeDocumentBookmarkRequest,
-        SaveKnowledgeDocumentReadingStateRequest, SaveMcpServerRequest, SaveModelProviderRequest,
-        SaveModelServiceRequest, SaveUserProfileRequest, SaveYuxiServiceRequest,
-        SetKnowledgeBindingsRequest, SetSkillEnabledRequest, SkillRecord, StartRunRequest,
-        StartRunResult, TestModelServiceRequest, TestYuxiServiceRequest,
-        UpdateMcpServerEnabledRequest, UpdateProjectPermissionRequest, UsageStatistics,
-        UserProfileRecord, YuxiAgentRecord, YuxiConnectionTest, YuxiLoginRequest, YuxiModelRecord,
-        YuxiServiceRecord, YuxiUserRecord,
+        ProjectFileReadRequest, ProjectFilesRequest, ProjectIdRequest, ProjectRecord,
+        ProviderModelRecord, RenameConversationRequest, ResolveApprovalRequest,
+        RestoreBackupRequest, ResumeYuxiRunRequest, RewindRunRequest, RuntimeInitialization,
+        SaveAgentRequest, SaveAttachmentsRequest, SaveKnowledgeDocumentAnnotationRequest,
+        SaveKnowledgeDocumentBookmarkRequest, SaveKnowledgeDocumentReadingStateRequest,
+        SaveMcpServerRequest, SaveModelProviderRequest, SaveModelServiceRequest,
+        SaveUserProfileRequest, SaveYuxiServiceRequest, SetGoalRunningRequest,
+        SetGoalRunningResult, SetKnowledgeBindingsRequest, SetSkillEnabledRequest, SkillRecord,
+        StartRunRequest, StartRunResult, TestModelServiceRequest, TestYuxiServiceRequest,
+        UpdateConversationPinnedRequest, UpdateMcpServerEnabledRequest,
+        UpdateProjectPermissionRequest, UsageStatistics, UserProfileRecord, YuxiAgentRecord,
+        YuxiConnectionTest, YuxiLoginRequest, YuxiModelRecord, YuxiServiceRecord, YuxiUserRecord,
     },
     runtime_host::{RuntimeDiagnostics, RuntimeStatus},
     work_mode_gate::{self, ResolveWorkModeConfirmationRequest, WorkModeDecision},
 };
 use base64::Engine;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -50,6 +54,70 @@ use std::{
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenExternalUrlRequest {
+    pub url: String,
+}
+
+fn validated_external_url(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    let parsed = url::Url::parse(value).map_err(|_| "链接地址无效".to_owned())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("只允许使用 HTTP 或 HTTPS 链接".to_owned());
+    }
+    Ok(parsed.into())
+}
+
+#[tauri::command]
+pub fn external_url_open(request: OpenExternalUrlRequest) -> ApiResponse<bool> {
+    let url = match validated_external_url(&request.url) {
+        Ok(url) => url,
+        Err(error) => return ApiResponse::failure("external_url.invalid", error, false),
+    };
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::{w, PCWSTR};
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let wide = std::ffi::OsStr::new(&url)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                PCWSTR(wide.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        if result.0 as isize <= 32 {
+            return ApiResponse::failure(
+                "external_url.open_failed",
+                format!(
+                    "无法调用系统默认浏览器（ShellExecuteW={}）",
+                    result.0 as isize
+                ),
+                true,
+            );
+        }
+        return ApiResponse::success(true);
+    }
+
+    #[cfg(not(windows))]
+    ApiResponse::failure(
+        "external_url.unsupported",
+        "当前平台暂不支持调用系统默认浏览器",
+        false,
+    )
+}
 
 #[cfg(windows)]
 fn pick_project_folder_windows() -> Result<Option<String>, String> {
@@ -629,6 +697,39 @@ pub fn agents_list(state: State<'_, AppState>) -> ApiResponse<Vec<AgentRecord>> 
 }
 
 #[tauri::command]
+pub fn agent_save(
+    state: State<'_, AppState>,
+    request: SaveAgentRequest,
+) -> ApiResponse<AgentRecord> {
+    state
+        .database
+        .save_agent(&request)
+        .map(ApiResponse::success)
+        .unwrap_or_else(storage_error)
+}
+
+#[tauri::command]
+pub fn agent_copy(
+    state: State<'_, AppState>,
+    request: CopyAgentRequest,
+) -> ApiResponse<AgentRecord> {
+    state
+        .database
+        .copy_agent(&request.agent_id, request.name.as_deref())
+        .map(ApiResponse::success)
+        .unwrap_or_else(storage_error)
+}
+
+#[tauri::command]
+pub fn agent_delete(state: State<'_, AppState>, request: AgentIdRequest) -> ApiResponse<bool> {
+    state
+        .database
+        .delete_agent(&request.agent_id)
+        .map(ApiResponse::success)
+        .unwrap_or_else(storage_error)
+}
+
+#[tauri::command]
 pub fn skills_list(
     state: State<'_, AppState>,
     request: AgentIdRequest,
@@ -834,6 +935,14 @@ pub fn project_permission_update(
 }
 
 #[tauri::command]
+pub fn project_delete(state: State<'_, AppState>, request: ProjectIdRequest) -> ApiResponse<bool> {
+    match state.database.delete_project(&request.project_id) {
+        Ok(deleted) => ApiResponse::success(deleted),
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
 pub async fn conversation_create(
     state: State<'_, AppState>,
     request: CreateConversationRequest,
@@ -855,6 +964,59 @@ pub async fn conversation_create(
             "项目权限模式不合法",
             false,
         ));
+    }
+    match state.database.agent_kind(&request.agent_id) {
+        Ok(Some(kind)) if kind == "assistant" => {}
+        Ok(Some(_)) => {
+            return Ok(ApiResponse::failure(
+                "conversation.assistant_required",
+                "基础会话必须选择助手类型智能体",
+                false,
+            ))
+        }
+        Ok(None) => {
+            return Ok(ApiResponse::failure(
+                "agent.not_found",
+                "未找到智能体",
+                false,
+            ))
+        }
+        Err(error) => return Ok(storage_error(error)),
+    }
+    if let Some(expert_id) = request.expert_id.as_deref() {
+        match state.database.get_agent(expert_id) {
+            Ok(Some(expert))
+                if expert.agent_kind == "expert"
+                    && expert.invocation_mode == "inline"
+                    && expert.visibility == "expert_center"
+                    && (expert.runtime_type != "yuxi" || expert.available) => {}
+            Ok(Some(expert))
+                if expert.agent_kind != "expert"
+                    || expert.invocation_mode != "inline"
+                    || expert.visibility != "expert_center" =>
+            {
+                return Ok(ApiResponse::failure(
+                    "conversation.expert_invalid_role",
+                    "会话专家必须选择可内联调用的专家类型智能体",
+                    false,
+                ))
+            }
+            Ok(Some(_)) => {
+                return Ok(ApiResponse::failure(
+                    "conversation.expert_remote_unavailable",
+                    "远程专家当前不可用",
+                    true,
+                ))
+            }
+            Ok(None) => {
+                return Ok(ApiResponse::failure(
+                    "expert.not_found",
+                    "未找到专家",
+                    false,
+                ))
+            }
+            Err(error) => return Ok(storage_error(error)),
+        }
     }
     let runtime = match state.database.agent_runtime(&request.agent_id) {
         Ok(Some(runtime)) => runtime,
@@ -882,6 +1044,16 @@ pub async fn conversation_create(
             ))
         }
     };
+    if let Some(expert_id) = request.expert_id.as_deref() {
+        if let Err(error) = state.database.bind_conversation_expert(
+            &conversation.id,
+            expert_id,
+            "conversation_create",
+        ) {
+            let _ = state.database.delete_conversation(&conversation.id);
+            return Ok(conversation_expert_error(error));
+        }
+    }
     if runtime.0 == "yuxi" {
         let Some(remote_agent_id) = runtime.1 else {
             let _ = state.database.delete_conversation(&conversation.id);
@@ -942,6 +1114,40 @@ pub async fn conversation_create(
         }
     }
     Ok(ApiResponse::success(conversation))
+}
+
+#[tauri::command]
+pub fn conversation_expert_bind(
+    state: State<'_, AppState>,
+    request: ConversationExpertBindRequest,
+) -> ApiResponse<ConversationExpertBinding> {
+    match state.database.bind_conversation_expert(
+        &request.conversation_id,
+        &request.expert_id,
+        "manual",
+    ) {
+        Ok(binding) => ApiResponse::success(binding),
+        Err(error) => conversation_expert_error(error),
+    }
+}
+
+#[tauri::command]
+pub fn conversation_expert_remove(
+    state: State<'_, AppState>,
+    request: ConversationIdRequest,
+) -> ApiResponse<ConversationExpertBinding> {
+    match state
+        .database
+        .remove_conversation_expert(&request.conversation_id)
+    {
+        Ok(Some(binding)) => ApiResponse::success(binding),
+        Ok(None) => ApiResponse::failure(
+            "conversation.expert_not_bound",
+            "当前会话没有活动专家",
+            false,
+        ),
+        Err(error) => conversation_expert_error(error),
+    }
 }
 
 #[tauri::command]
@@ -1019,6 +1225,36 @@ pub async fn conversation_rename(
             false,
         )),
         Err(error) => Ok(storage_error(error)),
+    }
+}
+
+#[tauri::command]
+pub fn conversation_pin(
+    state: State<'_, AppState>,
+    request: UpdateConversationPinnedRequest,
+) -> ApiResponse<ConversationSummary> {
+    match state
+        .database
+        .set_conversation_pinned(&request.conversation_id, request.pinned)
+    {
+        Ok(Some(conversation)) => ApiResponse::success(conversation),
+        Ok(None) => ApiResponse::failure("conversation.not_found", "未找到对话", false),
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
+pub fn conversation_archive(
+    state: State<'_, AppState>,
+    request: ConversationIdRequest,
+) -> ApiResponse<ConversationSummary> {
+    match state
+        .database
+        .archive_conversation(&request.conversation_id)
+    {
+        Ok(Some(conversation)) => ApiResponse::success(conversation),
+        Ok(None) => ApiResponse::failure("conversation.not_found", "未找到对话", false),
+        Err(error) => storage_error(error),
     }
 }
 
@@ -1161,11 +1397,68 @@ fn remove_managed_file(data_dir: &std::path::Path, path: &std::path::Path) -> Re
 #[cfg(test)]
 mod command_tests {
     use super::{
-        downloaded_file_can_open_directly, knowledge_preview_cache_key,
+        conversation_expert_error, downloaded_file_can_open_directly, knowledge_preview_cache_key,
         knowledge_preview_cache_path, managed_preview_cache_file, remove_managed_file,
+        validated_external_url, ApiResponse, ConversationExpertBindingError,
     };
     use std::path::Path;
     use uuid::Uuid;
+
+    #[test]
+    fn external_url_validation_only_allows_http_and_https() {
+        assert_eq!(
+            validated_external_url(" https://example.com/path ").unwrap(),
+            "https://example.com/path"
+        );
+        assert_eq!(
+            validated_external_url("http://example.com").unwrap(),
+            "http://example.com/"
+        );
+        assert!(validated_external_url("javascript:alert(1)").is_err());
+        assert!(validated_external_url("file:///C:/Windows/System32").is_err());
+        assert!(validated_external_url("not a url").is_err());
+    }
+
+    #[test]
+    fn expert_binding_errors_keep_stable_command_codes() {
+        for (error, expected_code, retryable) in [
+            (
+                ConversationExpertBindingError::ExpertNotFound,
+                "expert.not_found",
+                false,
+            ),
+            (
+                ConversationExpertBindingError::InvalidRole,
+                "conversation.expert_invalid_role",
+                false,
+            ),
+            (
+                ConversationExpertBindingError::RemoteUnavailable,
+                "conversation.expert_remote_unavailable",
+                true,
+            ),
+            (
+                ConversationExpertBindingError::LockedArchived,
+                "conversation.expert_locked",
+                false,
+            ),
+            (
+                ConversationExpertBindingError::LockedByMessages,
+                "conversation.expert_locked",
+                false,
+            ),
+            (
+                ConversationExpertBindingError::LockedByActiveRun,
+                "conversation.expert_locked",
+                false,
+            ),
+        ] {
+            let response: ApiResponse<bool> = conversation_expert_error(error);
+            let api_error = response.error.expect("structured expert error");
+            assert_eq!(api_error.code, expected_code);
+            assert_eq!(api_error.retryable, retryable);
+        }
+    }
 
     #[test]
     fn conversation_cleanup_removes_only_fox_managed_files() {
@@ -1343,47 +1636,83 @@ pub fn run_start(
         }
     };
 
-    let applied_gate = match work_mode_gate::apply_user_request(
-        &state.database,
-        &request.conversation_id,
-        &started.run.id,
-        &request.text,
-    ) {
-        Ok(applied) => applied,
-        Err(error) => {
-            let _ =
-                state
-                    .database
-                    .mark_run_failed(&started.run.id, "work_mode.gate_failed", &error);
-            return ApiResponse::failure("work_mode.gate_failed", error, true);
-        }
+    dispatch_started_run(
+        &app,
+        &state,
+        StartRunResult {
+            attachments,
+            ..started
+        },
+        runtime_text,
+        true,
+    )
+}
+
+fn dispatch_started_run(
+    app: &AppHandle,
+    state: &AppState,
+    started: StartRunResult,
+    runtime_text: String,
+    apply_work_gate: bool,
+) -> ApiResponse<StartRunResult> {
+    let runtime = match state
+        .database
+        .conversation_runtime(&started.run.conversation_id)
+    {
+        Ok(runtime) => runtime,
+        Err(error) => return ApiResponse::failure("runtime.resolve_failed", error, false),
     };
-    if let Some(event) = applied_gate.event {
-        let _ = app.emit("fox://work-event", event);
-    }
-    // FOX-6 will replace this stage-specific mock with the confirmation card.
-    // Resolve through the real Host path before dispatch so Runtime never self-approves.
-    if applied_gate.evaluation.decision == WorkModeDecision::RequestConfirmation {
-        if let Some(goal) = applied_gate.goal {
-            let confirmation = ResolveWorkModeConfirmationRequest {
-                conversation_id: request.conversation_id.clone(),
-                goal_id: goal.id,
-                expected_version: goal.version,
-                approved: true,
-            };
-            match work_mode_gate::resolve_confirmation(&state.database, &confirmation) {
-                Ok((_, event)) => {
-                    let _ = app.emit("fox://work-event", event);
-                }
-                Err(error) => {
-                    let _ = state.database.mark_run_failed(
-                        &started.run.id,
-                        "work_mode.confirmation_failed",
-                        &error,
-                    );
-                    return ApiResponse::failure("work_mode.confirmation_failed", error, true);
-                }
+    let attachments = started.attachments.clone();
+    if apply_work_gate {
+        let applied_gate = match work_mode_gate::apply_user_request(
+            &state.database,
+            &started.run.conversation_id,
+            &started.run.id,
+            &started.user_message.content,
+        ) {
+            Ok(applied) => applied,
+            Err(error) => {
+                let _ = state.database.mark_run_failed(
+                    &started.run.id,
+                    "work_mode.gate_failed",
+                    &error,
+                );
+                return ApiResponse::failure("work_mode.gate_failed", error, true);
             }
+        };
+        if applied_gate.evaluation.decision == WorkModeDecision::RequestConfirmation {
+            if let Some(goal) = applied_gate
+                .goal
+                .filter(|goal| goal.status == crate::database::GoalStatus::Proposed)
+            {
+                let started = StartRunResult {
+                    attachments,
+                    ..started
+                };
+                return match state.database.save_pending_work_mode_dispatch(
+                    &goal.id,
+                    &started,
+                    &runtime_text,
+                ) {
+                    Ok(pending) => {
+                        if let Some(event) = applied_gate.event {
+                            let _ = app.emit("fox://work-event", event);
+                        }
+                        ApiResponse::success(pending)
+                    }
+                    Err(error) => {
+                        let _ = state.database.mark_run_failed(
+                            &started.run.id,
+                            "work_mode.confirmation_failed",
+                            &error,
+                        );
+                        ApiResponse::failure("work_mode.confirmation_failed", error, true)
+                    }
+                };
+            }
+        }
+        if let Some(event) = applied_gate.event {
+            let _ = app.emit("fox://work-event", event);
         }
     }
 
@@ -1400,6 +1729,181 @@ pub fn run_start(
         attachments,
         ..started
     })
+}
+
+#[tauri::command]
+pub async fn run_rewind(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: RewindRunRequest,
+) -> Result<ApiResponse<StartRunResult>, String> {
+    let mut runtime_text = request
+        .runtime_text
+        .clone()
+        .unwrap_or_else(|| request.text.clone());
+    let runtime = match state
+        .database
+        .conversation_runtime(&request.conversation_id)
+    {
+        Ok(runtime) => runtime,
+        Err(error) => return Ok(ApiResponse::failure("runtime.resolve_failed", error, false)),
+    };
+    match state
+        .database
+        .conversation_has_active_run(&request.conversation_id)
+    {
+        Ok(true) => {
+            return Ok(ApiResponse::failure(
+                "run.rewind_active",
+                "请先停止当前生成，再重新编辑消息",
+                false,
+            ))
+        }
+        Ok(false) => {}
+        Err(error) => return Ok(storage_error(error)),
+    }
+
+    let mut replacement_thread: Option<(String, String, String, String)> = None;
+    if runtime.runtime_type == "yuxi" {
+        let prior_messages = match state.database.runtime_prompt_context_before_message(
+            &request.conversation_id,
+            &request.message_id,
+            80,
+        ) {
+            Ok(messages) => messages,
+            Err(error) => return Ok(storage_error(error)),
+        };
+        if !prior_messages.is_empty() {
+            let context = prior_messages
+                .into_iter()
+                .map(|message| {
+                    let speaker = if message.role == "assistant" {
+                        "助手"
+                    } else {
+                        "用户"
+                    };
+                    format!("{speaker}：{}", message.content)
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            runtime_text = format!(
+                "以下是本次重新编辑之前仍然保留的对话上下文：\n\n{context}\n\n用户当前消息：\n{runtime_text}"
+            );
+        }
+        let Some(remote_agent_id) = runtime.remote_agent_id.as_deref() else {
+            return Ok(ApiResponse::failure(
+                "yuxi.agent_mapping_missing",
+                "远程智能体映射缺失",
+                false,
+            ));
+        };
+        let service = match state.database.get_yuxi_service() {
+            Ok(Some(service)) => service,
+            Ok(None) => {
+                return Ok(ApiResponse::failure(
+                    "yuxi.not_configured",
+                    "请先配置知识库服务",
+                    false,
+                ))
+            }
+            Err(error) => return Ok(storage_error(error)),
+        };
+        let Some(token) = get_access_token(&service.base_url) else {
+            return Ok(ApiResponse::failure(
+                "yuxi.not_authenticated",
+                "请先登录知识库",
+                false,
+            ));
+        };
+        let title = match state.database.load_conversation(&request.conversation_id) {
+            Ok(detail) => detail.conversation.title,
+            Err(error) => return Ok(storage_error(error)),
+        };
+        let new_thread = match state
+            .yuxi_client
+            .create_thread(&service.base_url, &token, remote_agent_id, &title)
+            .await
+        {
+            Ok(thread) => thread,
+            Err(error) => {
+                return Ok(ApiResponse::failure(
+                    "yuxi.thread_create_failed",
+                    error,
+                    true,
+                ))
+            }
+        };
+        replacement_thread = Some((
+            service.base_url,
+            token,
+            runtime.remote_thread_id.unwrap_or_default(),
+            new_thread,
+        ));
+    } else if let Err(error) = state
+        .runtime_host
+        .remove_conversation(&request.conversation_id)
+    {
+        return Ok(ApiResponse::failure("runtime.reset_failed", error, true));
+    }
+
+    let started = match state.database.rewind_run(
+        &request.conversation_id,
+        &request.message_id,
+        &request.text,
+        request.model.as_deref(),
+    ) {
+        Ok(started) => started,
+        Err(error) => {
+            if let Some((base_url, token, _, new_thread)) = replacement_thread.as_ref() {
+                let _ = state
+                    .yuxi_client
+                    .delete_thread(base_url, token, new_thread)
+                    .await;
+            }
+            return Ok(ApiResponse::failure("run.rewind_failed", error, false));
+        }
+    };
+
+    if runtime.runtime_type != "yuxi" && !started.attachments.is_empty() {
+        let attachment_note = started
+            .attachments
+            .iter()
+            .map(|attachment| format!("- {}: {}", attachment.id, attachment.display_name))
+            .collect::<Vec<_>>()
+            .join("\n");
+        runtime_text.push_str(&format!(
+            "\n\nFox attachments available through read_attachment:\n{attachment_note}"
+        ));
+    }
+
+    if let Some((base_url, token, old_thread, new_thread)) = replacement_thread {
+        if let Err(error) = state.database.ensure_external_runtime_session(
+            &request.conversation_id,
+            "yuxi",
+            &new_thread,
+            None,
+        ) {
+            let _ =
+                state
+                    .database
+                    .mark_run_failed(&started.run.id, "yuxi.thread_bind_failed", &error);
+            return Ok(ApiResponse::failure("yuxi.thread_bind_failed", error, true));
+        }
+        if !old_thread.is_empty() && old_thread != new_thread {
+            let _ = state
+                .yuxi_client
+                .delete_thread(&base_url, &token, &old_thread)
+                .await;
+        }
+    }
+
+    Ok(dispatch_started_run(
+        &app,
+        &state,
+        started,
+        runtime_text,
+        true,
+    ))
 }
 
 #[tauri::command]
@@ -1612,17 +2116,259 @@ pub fn work_mode_confirmation_resolve(
     state: State<'_, AppState>,
     request: ResolveWorkModeConfirmationRequest,
 ) -> ApiResponse<crate::database::GoalRecord> {
+    let pending_dispatch = match state.database.pending_work_mode_dispatch(&request.goal_id) {
+        Ok(pending) => pending,
+        Err(error) => {
+            return ApiResponse::failure("work_mode.dispatch_restore_failed", error, true)
+        }
+    };
     match work_mode_gate::resolve_confirmation(&state.database, &request) {
         Ok((goal, event)) => {
             let _ = app.emit("fox://work-event", event);
+            if request.approved && pending_dispatch.is_some() {
+                let pending = match state
+                    .database
+                    .release_pending_work_mode_dispatch(&request.goal_id)
+                {
+                    Ok(pending) => pending,
+                    Err(error) => {
+                        return ApiResponse::failure(
+                            "work_mode.dispatch_restore_failed",
+                            error,
+                            true,
+                        )
+                    }
+                };
+                let runtime = match state
+                    .database
+                    .conversation_runtime(&request.conversation_id)
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = state.database.mark_run_failed(
+                            &pending.started.run.id,
+                            "runtime.resolve_failed",
+                            &error,
+                        );
+                        return ApiResponse::failure("runtime.resolve_failed", error, false);
+                    }
+                };
+                let attachments = pending.started.attachments.clone();
+                if runtime.runtime_type == "yuxi" {
+                    state.yuxi_runtime.start_run_detached(
+                        pending.started,
+                        pending.runtime_text,
+                        attachments,
+                    );
+                } else {
+                    state.runtime_host.start_run_detached(
+                        pending.started,
+                        pending.runtime_text,
+                        attachments,
+                    );
+                }
+            } else if !request.approved && pending_dispatch.is_some() {
+                if let Err(error) = state
+                    .database
+                    .reject_pending_work_mode_dispatch(&request.goal_id)
+                {
+                    return ApiResponse::failure("work_mode.reject_failed", error, true);
+                }
+            }
             ApiResponse::success(goal)
         }
         Err(error) => ApiResponse::failure("work_mode.confirmation_failed", error, false),
     }
 }
 
+#[tauri::command]
+pub fn goal_delete(state: State<'_, AppState>, request: GoalIdRequest) -> ApiResponse<bool> {
+    let goal = match state.database.goals().get(&request.goal_id) {
+        Ok(Some(goal)) => goal,
+        Ok(None) => return ApiResponse::success(false),
+        Err(error) => return storage_error(error.to_string()),
+    };
+    if goal.conversation_id != request.conversation_id {
+        return ApiResponse::failure("goal.not_found", "未找到目标", false);
+    }
+
+    if let Err(error) = state
+        .database
+        .reject_pending_work_mode_dispatch(&request.goal_id)
+    {
+        return storage_error(error);
+    }
+    match state
+        .database
+        .conversation_has_active_run(&request.conversation_id)
+    {
+        Ok(true) => {
+            return ApiResponse::failure("goal.run_active", "请先停止当前生成，再删除目标", false)
+        }
+        Ok(false) => {}
+        Err(error) => return storage_error(error),
+    }
+
+    match state
+        .database
+        .goals()
+        .delete(&request.goal_id, &request.conversation_id)
+    {
+        Ok(deleted) => ApiResponse::success(deleted),
+        Err(error) => storage_error(error.to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn goal_running_set(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: SetGoalRunningRequest,
+) -> Result<ApiResponse<SetGoalRunningResult>, String> {
+    let current = match state.database.goals().get(&request.goal_id) {
+        Ok(Some(goal)) if goal.conversation_id == request.conversation_id => goal,
+        Ok(_) => return Ok(ApiResponse::failure("goal.not_found", "未找到目标", false)),
+        Err(error) => return Ok(storage_error(error.to_string())),
+    };
+    let active_run_id = if request.running {
+        None
+    } else {
+        match state.database.active_run_id(&request.conversation_id) {
+            Ok(run_id) => run_id,
+            Err(error) => return Ok(storage_error(error)),
+        }
+    };
+    let result = if request.running {
+        state
+            .database
+            .goals()
+            .activate(&request.goal_id, request.expected_version)
+    } else {
+        state.database.goals().block(
+            &request.goal_id,
+            "Paused by user".to_owned(),
+            request.expected_version,
+        )
+    };
+    let goal = match result {
+        Ok(goal) => goal,
+        Err(error) => {
+            return Ok(ApiResponse::failure(
+                "goal.status_update_failed",
+                error.to_string(),
+                false,
+            ))
+        }
+    };
+    let event_type = if request.running {
+        "goal.activated"
+    } else {
+        "goal.blocked"
+    };
+    if let Ok(event) = state.database.append_work_event(
+        event_type,
+        &current.conversation_id,
+        Some(&goal.id),
+        None,
+        None,
+        json!({
+            "goal": goal.clone(),
+            "source": "user",
+            "paused": !request.running,
+        }),
+    ) {
+        let _ = app.emit("fox://work-event", event);
+    }
+    if let Some(run_id) = active_run_id {
+        let marked = match state.database.mark_run_cancelling(&run_id) {
+            Ok(marked) => marked.is_some(),
+            Err(error) => return Ok(storage_error(error)),
+        };
+        if marked {
+            let is_yuxi = state
+                .database
+                .external_run(&run_id)
+                .ok()
+                .flatten()
+                .is_some_and(|run| run.runtime_type == "yuxi");
+            let cancelled = if is_yuxi {
+                state.yuxi_runtime.cancel_run(&run_id).await
+            } else {
+                state.runtime_host.cancel_run(&run_id)
+            };
+            match cancelled {
+                Ok(true) => {}
+                Ok(false) => {
+                    let _ = state.database.mark_run_interrupted(
+                        &run_id,
+                        "runtime.cancel_not_active",
+                        "Runtime 未找到正在执行的任务",
+                    );
+                }
+                Err(error) => {
+                    let _ = state.database.mark_run_interrupted(
+                        &run_id,
+                        "runtime.cancel_failed",
+                        &error,
+                    );
+                    return Ok(ApiResponse::failure("runtime.cancel_failed", error, true));
+                }
+            }
+        }
+    }
+
+    if !request.running {
+        return Ok(ApiResponse::success(SetGoalRunningResult {
+            goal,
+            started_run: None,
+        }));
+    }
+
+    let runtime_text = format!(
+        "继续执行当前目标《{}》。读取当前工作快照，从尚未完成的任务继续，不要重复已经完成的工作。",
+        goal.title
+    );
+    let started = match state
+        .database
+        .create_goal_continuation_run(&request.conversation_id, &runtime_text)
+    {
+        Ok(started) => started,
+        Err(error) => {
+            let _ = state.database.goals().block(
+                &goal.id,
+                "Failed to resume goal".to_owned(),
+                goal.version,
+            );
+            return Ok(ApiResponse::failure("goal.resume_failed", error, true));
+        }
+    };
+    let dispatched = dispatch_started_run(&app, &state, started, runtime_text, false);
+    if !dispatched.ok {
+        let _ = state.database.goals().block(
+            &goal.id,
+            "Failed to resume goal".to_owned(),
+            goal.version,
+        );
+        return Ok(ApiResponse {
+            ok: false,
+            data: None,
+            error: dispatched.error,
+        });
+    }
+    Ok(ApiResponse::success(SetGoalRunningResult {
+        goal,
+        started_run: dispatched.data,
+    }))
+}
+
 fn storage_error<T: serde::Serialize>(error: String) -> ApiResponse<T> {
     ApiResponse::failure("storage.operation_failed", error, true)
+}
+
+fn conversation_expert_error<T: serde::Serialize>(
+    error: ConversationExpertBindingError,
+) -> ApiResponse<T> {
+    ApiResponse::failure(error.code(), error.to_string(), error.retryable())
 }
 
 #[tauri::command]
@@ -3274,6 +4020,33 @@ pub fn model_provider_save(
         Ok(url) => url,
         Err(error) => return ApiResponse::failure("model.invalid_url", error, false),
     };
+    const PROVIDER_ICONS: &[&str] = &[
+        "alibaba-cloud.svg",
+        "alibaba.svg",
+        "deepseek.svg",
+        "minimax.svg",
+        "modelscope.svg",
+        "moonshot.svg",
+        "openai.svg",
+        "opencode.svg",
+        "openrouter.svg",
+        "siliconflow.svg",
+        "xiaomi.svg",
+        "zai.svg",
+        "zhipu.svg",
+    ];
+    let icon = request
+        .icon
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if icon
+        .as_deref()
+        .is_some_and(|value| !PROVIDER_ICONS.contains(&value))
+    {
+        return ApiResponse::failure("model.invalid_provider_icon", "不支持此供应商图标", false);
+    }
     let provider_id = request.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let mut models = Vec::new();
     for (index, model) in request.models.into_iter().enumerate() {
@@ -3324,6 +4097,7 @@ pub fn model_provider_save(
     let provider = ModelProviderRecord {
         id: provider_id,
         name: name.to_owned(),
+        icon,
         base_url: base_url.clone(),
         api_type: request.api_type.clone(),
         enabled: true,

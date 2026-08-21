@@ -28,6 +28,18 @@
 | `Fox_0.1.0_x64-setup.exe` | `6295A9BD51DCF6FF293BCC0603147A6BB311043AE6078792CE24BBEA31405DA4` |
 | Runtime Sidecar | `D1F8ACC81C2B6A79462193FB182920D5E4AC8C1C5BFC052793A5AD731E5D361B` |
 
+### 2026-07-31 审查修复候选包
+
+本候选包包含迁移 16、待确认 Run 恢复、独立 Work Event 前端订阅、Evidence 跳转、Work Trace 脱敏和项目浏览路径状态修复。工程复验结果为 Rust 160 passed、前端 46 passed（500 Task P95 43.44ms）、Runtime 48 passed、知识预览契约 3 passed；格式、前端构建、Runtime 构建/冒烟、Tauri 打包和 `git diff --check` 均通过。
+
+| 产物 | 字节 | SHA-256 |
+| --- | ---: | --- |
+| `Fox_0.1.0_x64_en-US.msi` | 99,106,816 | `A076AEFA5AD9397399693166BCDC671047262F750E3C3097E4147B087555340E` |
+| `Fox_0.1.0_x64-setup.exe` | 84,427,961 | `55A5EAF9E16F10D2851E6AF1AA456B51F598462FBD7052E77D812DED6EAFA601` |
+| Runtime Sidecar | 99,972,096 | `D1F8ACC81C2B6A79462193FB182920D5E4AC8C1C5BFC052793A5AD731E5D361B` |
+
+录屏签收必须使用本节候选包，并记录最终提交号；上节 2026-07-30 哈希仅作为历史发布证据保留。
+
 ## A0 功能验收
 
 - [x] 跨三个文件的修复流程创建定位、修改、验证三个 Task。
@@ -41,7 +53,7 @@
 
 ## 数据升级与回滚
 
-- [x] 迁移 13 的 A0 前数据库可升级到迁移 15。
+- [x] 迁移 13 的 A0 前数据库可升级到迁移 16。
 - [x] 运行中 Run、终态 Run、异常 Event、附件和知识库绑定数量不变。
 - [x] 重复启动迁移幂等。
 - [x] 失败升级不登记迁移 14；可恢复升级前备份并重新升级。

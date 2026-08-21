@@ -1,9 +1,9 @@
 # Tauri 后端架构
 
-> 状态：当前实现基线<br>
+> 状态：生效<br>
 > 适用版本：Fox 0.1.x<br>
-> 维护者：Fox 后端工程师<br>
-> 最后更新：2026-07-29
+> 维护范围：Tauri Command、AppState、Repository、Host Service 和系统资源<br>
+> 最后更新：2026-08-07
 
 ## 定位
 
@@ -31,7 +31,7 @@ flowchart TD
 
 `lib.rs::run` 依次完成应用数据目录、待恢复数据、数据库、运行目录、客户端与 Runtime Host 初始化。应用退出时调用 `runtime_host.shutdown()`，避免遗留 Sidecar。
 
-`AppState` 持有可共享的数据库句柄、Runtime Host、知识库客户端、远程 Runtime、模型客户端、数据路径，以及下载/预览任务的取消注册表和锁。
+`AppState` 持有可共享的数据库句柄、Runtime Host、知识库客户端、远程 Runtime、模型客户端、数据路径，以及下载/预览任务的取消注册表和锁。AppState 管理基础设施引用，不应成为新的业务数据事实源。
 
 ## 命令层规则
 
@@ -81,3 +81,5 @@ Host 是安全边界而不是简单代理。写文件、编辑、命令和 MCP �
 ## 关键代码
 
 `apps/desktop/src-tauri/src/lib.rs`、`app_state.rs`、`commands/mod.rs`、`runtime_host/mod.rs`、`maintenance.rs`。
+
+领域边界分别见[对话系统架构](对话系统架构.md)、[Agent Runtime 架构](Agent运行时架构.md)、[项目与权限架构](项目与权限架构.md)、[知识库集成架构](知识库集成架构.md)和[数据架构](数据架构.md)。

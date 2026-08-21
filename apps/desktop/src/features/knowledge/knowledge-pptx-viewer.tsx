@@ -122,13 +122,13 @@ export default function KnowledgePptxViewer({
 
   useEffect(() => {
     const viewer = viewerRef.current
-    if (!viewer || loading || navigating || !requestedPosition?.page) return
+    if (!viewer || loading || !slideCount || !requestedPosition?.page) return
     const next = Math.min(slideCount - 1, Math.max(0, requestedPosition.page - 1))
-    if (next === slideIndex) return
+    if (next === viewer.currentSlideIndex) return
     void viewer.goToSlide(next).then(() => setSlideIndex(viewer.currentSlideIndex)).catch((cause) => {
       onFailure(cause instanceof Error ? cause.message : String(cause))
     })
-  }, [loading, navigating, onFailure, requestedPosition?.page, slideCount, slideIndex])
+  }, [loading, onFailure, requestedPosition?.page, slideCount])
 
   useEffect(() => {
     if (!loading && slideCount) onPositionChange?.({ page: slideIndex + 1 })

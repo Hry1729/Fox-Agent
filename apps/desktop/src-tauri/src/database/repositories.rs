@@ -1,15 +1,17 @@
 use super::{
     migrations, AgentRecord, AgentResourceRecord, AgentResourcesRecord, ArtifactRecord,
-    AttachmentRecord, ConversationDetail, ConversationRuntimeRecord, ConversationSummary,
+    AttachmentRecord, ConversationDetail, ConversationExpertBinding,
+    ConversationExpertBindingError, ConversationRuntimeRecord, ConversationSummary,
     ExternalRunRecord, KnowledgeBindingRecord, KnowledgeDocumentActivity,
     KnowledgeDocumentAnnotation, KnowledgeDocumentBookmark, KnowledgeDocumentReadingState,
     KnowledgePreviewCacheEntry, MessageRecord, ModelConnectionTest, ModelProviderRecord,
-    ModelServiceRecord, ProviderModelRecord, RecoverableExternalRunRecord, RunEventRecord,
-    RunRecord, RuntimePromptMessage, RuntimeSessionRecord, StartRunResult, ToolCallRecord,
-    YuxiAgentRecord, YuxiConnectionTest, YuxiServiceRecord,
+    ModelServiceRecord, PendingWorkModeDispatch, ProviderModelRecord, RecoverableExternalRunRecord,
+    RunEventRecord, RunRecord, RuntimePromptMessage, RuntimeSessionRecord, SaveAgentRequest,
+    StartRunResult, ToolCallRecord, YuxiAgentRecord, YuxiConnectionTest, YuxiServiceRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -17,6 +19,7 @@ use std::{
 };
 use uuid::Uuid;
 
+mod a1_workflow;
 mod work_events;
 mod work_graph;
 
@@ -28,10 +31,52 @@ pub use work_graph::{
 };
 
 const DEFAULT_AGENT_ID: &str = "fox-general";
+const BUILTIN_AGENTS: &[(&str, &str, &str, &str)] = &[
+    (
+        DEFAULT_AGENT_ID,
+        "Fox 通用助手",
+        "Fox 默认通用智能体",
+        "You are Fox, a careful general-purpose desktop assistant. Lead with the useful result, use evidence from tools, and make the smallest safe change that fully solves the user's request.",
+    ),
+    (
+        "fox-debugger",
+        "Fox 调试专家",
+        "定位根因、修复缺陷并补充回归验证",
+        r#"You are Fox's debugging specialist. Reproduce the problem when possible, collect concrete evidence, isolate the earliest root cause, and distinguish cause from symptom. Prefer the smallest complete fix, preserve unrelated behavior, and add or run focused regression checks. State uncertainty plainly. Do not claim a bug is fixed until the relevant verification succeeds."#,
+    ),
+    (
+        "fox-frontend",
+        "Fox 前端体验专家",
+        "优化桌面端界面、交互、可访问性与视觉一致性",
+        r#"You are Fox's frontend experience specialist. Work from the existing design system and product intent. Check layout, typography, spacing, responsive behavior, interaction states, accessibility, and visual consistency together. Reuse existing components and tokens before adding new abstractions. Keep changes scoped, protect working interactions, and verify both behavior and build output."#,
+    ),
+    (
+        "fox-reviewer",
+        "Fox 代码审查专家",
+        "按风险审查正确性、回归、测试与可维护性",
+        r#"You are Fox's code review specialist. When asked to review, inspect before proposing changes and do not edit files unless the user explicitly asks for a fix. Prioritize concrete correctness, security, data-loss, concurrency, compatibility, and regression risks over style preferences. Rank findings by severity, cite precise files or symbols, explain impact, and identify missing tests. Say clearly when no material finding is supported by evidence."#,
+    ),
+    (
+        "fox-security",
+        "Fox 安全审查专家",
+        "检查权限边界、注入、凭证、依赖与数据安全",
+        r#"You are Fox's application security specialist. Use a threat-informed, evidence-first review of trust boundaries, authorization, injection, secret handling, local file access, network calls, dependencies, and sensitive data. Stay within the authorized project and never perform destructive or exploitative actions merely to demonstrate risk. Recommend proportional mitigations and verification steps, and separate confirmed vulnerabilities from defense-in-depth suggestions."#,
+    ),
+    (
+        "fox-architect",
+        "Fox 架构规划专家",
+        "分析约束、拆分方案并规划可验证的增量实施",
+        r#"You are Fox's architecture and planning specialist. First understand the existing system, constraints, and acceptance criteria. Produce an incremental plan with explicit boundaries, dependencies, risks, migration strategy, and verification. Prefer adapting established project patterns over inventing parallel systems. Planning must remain actionable: when the user asks for implementation, proceed through the normal Fox tools and evidence workflow instead of stopping at a document."#,
+    ),
+];
 const INITIAL_HISTORY_MESSAGES: usize = 120;
 const MAX_STORED_TOOL_RESULT_BYTES: usize = 128 * 1024;
 const KNOWLEDGE_PREVIEW_CACHE_LIMIT_KEY: &str = "knowledge_preview_cache_limit_bytes";
 const USER_PROFILE_KEY: &str = "user_profile";
+const AGENT_RECORD_COLUMNS: &str =
+    "id, name, description, runtime_type, agent_kind, invocation_mode, visibility, default_model, \
+     system_prompt, icon, category, opening_suggestions_json, is_builtin, package_version, \
+     package_manifest_json";
 
 #[derive(Clone)]
 pub struct Database {
@@ -45,7 +90,7 @@ impl Database {
         let database = Self {
             connection: Arc::new(Mutex::new(connection)),
         };
-        database.seed_default_agent()?;
+        database.seed_builtin_agents()?;
         Ok(database)
     }
 
@@ -602,23 +647,54 @@ impl Database {
         operation(&mut connection).map_err(|error| error.to_string())
     }
 
-    fn seed_default_agent(&self) -> Result<(), String> {
+    fn seed_builtin_agents(&self) -> Result<(), String> {
         let now = now_ms();
         self.with_connection(|connection| {
-            connection.execute(
-                "INSERT OR IGNORE INTO agents(
-                    id, name, description, runtime_type, system_prompt, default_model, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
-                params![
-                    DEFAULT_AGENT_ID,
-                    "Fox 通用助手",
-                    "Fox 默认通用智能体",
-                    "pi",
-                    "You are Fox, a careful general-purpose desktop assistant.",
-                    "configured-model",
-                    now,
-                ],
-            )?;
+            for (index, (id, name, description, system_prompt)) in
+                BUILTIN_AGENTS.iter().enumerate()
+            {
+                let created_at = now + index as i64;
+                connection.execute(
+                    "INSERT OR IGNORE INTO agents(
+                        id, name, description, runtime_type, system_prompt, default_model, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, 'pi', ?4, 'configured-model', ?5, ?5)",
+                    params![id, name, description, system_prompt, created_at],
+                )?;
+                let category = match *id {
+                    "fox-debugger" => "engineering",
+                    "fox-frontend" => "design",
+                    "fox-reviewer" | "fox-security" => "review",
+                    "fox-architect" => "planning",
+                    _ => "general",
+                };
+                let manifest = json!({
+                    "version": "1.0.0",
+                    "prompt": system_prompt,
+                    "skills": [],
+                    "knowledge": [],
+                    "mcpServers": [],
+                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "write_file", "edit_file", "run_command", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit"]
+                });
+                let (agent_kind, invocation_mode, visibility) = if *id == DEFAULT_AGENT_ID {
+                    ("assistant", "primary", "chat_selector")
+                } else {
+                    ("expert", "inline", "expert_center")
+                };
+                connection.execute(
+                    "UPDATE agents SET is_builtin = 1, category = ?2,
+                         package_version = '1.0.0', package_manifest_json = ?3,
+                         agent_kind = ?4, invocation_mode = ?5, visibility = ?6
+                     WHERE id = ?1",
+                    params![
+                        id,
+                        category,
+                        manifest.to_string(),
+                        agent_kind,
+                        invocation_mode,
+                        visibility
+                    ],
+                )?;
+            }
             Ok(())
         })
     }
@@ -695,56 +771,163 @@ impl Database {
 
     pub fn list_agents(&self) -> Result<Vec<AgentRecord>, String> {
         self.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                "SELECT id, name, description, runtime_type, default_model, system_prompt,
-                        CASE WHEN runtime_type = 'yuxi' THEN
-                            COALESCE((SELECT last_status FROM yuxi_service WHERE singleton_id = 1), 'unknown')
-                        ELSE 'connected' END
-                 FROM agents ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, created_at ASC",
-            )?;
+            let sql = format!(
+                "SELECT {AGENT_RECORD_COLUMNS}
+                 FROM agents ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, created_at ASC"
+            );
+            let mut statement = connection.prepare(&sql)?;
             let records = statement
-                .query_map([DEFAULT_AGENT_ID], |row| {
-                    let id: String = row.get(0)?;
-                    let runtime_type: String = row.get(3)?;
-                    let metadata = parse_json(&row.get::<_, String>(5)?);
-                    Ok(AgentRecord {
-                        id: id.clone(),
-                        name: row.get(1)?,
-                        description: row.get(2)?,
-                        runtime_type: runtime_type.clone(),
-                        default_model: row.get(4)?,
-                        icon: metadata.get("icon").and_then(Value::as_str).map(str::to_owned),
-                        capabilities: metadata.get("capabilities").cloned().unwrap_or_else(|| {
-                            if runtime_type == "pi" { json!(["files", "tools", "reasoning"]) } else { json!([]) }
-                        }),
-                        resources: metadata
-                            .get("resources")
-                            .cloned()
-                            .and_then(|value| serde_json::from_value(value).ok())
-                            .unwrap_or_else(|| {
-                                if runtime_type == "pi" {
-                                    AgentResourcesRecord {
-                                        tools: vec![
-                                            AgentResourceRecord { id: "files".to_owned(), name: "文件读写".to_owned(), description: "读取和处理已授权项目文件".to_owned() },
-                                            AgentResourceRecord { id: "tools".to_owned(), name: "本地工具".to_owned(), description: "调用 Fox Runtime 提供的本地工具".to_owned() },
-                                            AgentResourceRecord { id: "reasoning".to_owned(), name: "任务推理".to_owned(), description: "规划并执行多步骤任务".to_owned() },
-                                        ],
-                                        ..AgentResourcesRecord::default()
-                                    }
-                                } else {
-                                    AgentResourcesRecord::default()
-                                }
-                            }),
-                        configurable_items: metadata.get("configurableItems").cloned().unwrap_or_else(|| json!({})),
-                        is_default: id == DEFAULT_AGENT_ID || metadata.get("isDefault").and_then(Value::as_bool).unwrap_or(false),
-                        available: runtime_type != "yuxi" || (
-                            row.get::<_, String>(6)? == "connected"
-                                && metadata.get("remoteAvailable").and_then(Value::as_bool).unwrap_or(true)
-                        ),
-                    })
-                })?
+                .query_map([DEFAULT_AGENT_ID], agent_record_from_row)?
                 .collect();
             records
+        })
+    }
+
+    pub fn get_agent(&self, agent_id: &str) -> Result<Option<AgentRecord>, String> {
+        self.with_connection(|connection| query_agent_record(connection, agent_id))
+    }
+
+    pub fn save_agent(&self, request: &SaveAgentRequest) -> Result<AgentRecord, String> {
+        let name = request.name.trim();
+        let prompt = request.system_prompt.trim();
+        if name.is_empty() || prompt.is_empty() {
+            return Err("expert name and system prompt are required".to_owned());
+        }
+        let id = request
+            .id
+            .clone()
+            .unwrap_or_else(|| format!("fox-user-{}", Uuid::new_v4().simple()));
+        let now = now_ms();
+        let suggestions = request
+            .opening_suggestions
+            .iter()
+            .map(|item| item.trim())
+            .filter(|item| !item.is_empty())
+            .take(6)
+            .collect::<Vec<_>>();
+        let mut manifest = request.package_manifest.clone();
+        if !manifest.is_object() {
+            manifest = json!({});
+        }
+        let object = manifest.as_object_mut().expect("manifest object");
+        object.insert("version".to_owned(), json!("1.0.0"));
+        object.insert("prompt".to_owned(), json!(prompt));
+        object
+            .entry("skills".to_owned())
+            .or_insert_with(|| json!([]));
+        object
+            .entry("knowledge".to_owned())
+            .or_insert_with(|| json!([]));
+        object
+            .entry("mcpServers".to_owned())
+            .or_insert_with(|| json!([]));
+        object.entry("allowedTools".to_owned()).or_insert_with(|| {
+            json!([
+                "read",
+                "ls",
+                "find",
+                "grep",
+                "read_attachment",
+                "write_file",
+                "edit_file",
+                "run_command",
+                "list_knowledge_bases",
+                "search_knowledge",
+                "read_knowledge_document",
+                "query_knowledge_graph",
+                "list_mcp_tools",
+                "call_mcp_tool",
+                "work_snapshot_get",
+                "goal_propose",
+                "goal_complete",
+                "task_create_many",
+                "task_update",
+                "task_evidence_add",
+                "task_evidence_validate",
+                "plan_revision_create",
+                "review_finding_add",
+                "review_finding_resolve",
+                "acceptance_submit"
+            ])
+        });
+        self.with_connection(|connection| {
+            if request.id.is_some() {
+                let builtin = connection.query_row("SELECT is_builtin FROM agents WHERE id = ?1 AND runtime_type = 'pi'", [&id], |row| row.get::<_, i64>(0))?;
+                if builtin != 0 { return Err(rusqlite::Error::InvalidQuery); }
+                connection.execute(
+                    "UPDATE agents SET name = ?2, description = ?3, icon = ?4, category = ?5,
+                         system_prompt = ?6, default_model = ?7, opening_suggestions_json = ?8,
+                         package_version = '1.0.0', package_manifest_json = ?9, updated_at = ?10,
+                         agent_kind = 'expert', invocation_mode = 'inline', visibility = 'expert_center'
+                     WHERE id = ?1",
+                    params![id, name, request.description.trim(), request.icon.as_deref().filter(|value| !value.trim().is_empty()), request.category.trim(), prompt, request.default_model.trim(), serde_json::to_string(&suggestions).unwrap_or_else(|_| "[]".to_owned()), manifest.to_string(), now],
+                )?;
+            } else {
+                connection.execute(
+                    "INSERT INTO agents(id, name, description, runtime_type, system_prompt, default_model,
+                         created_at, updated_at, icon, category, opening_suggestions_json, is_builtin,
+                         package_version, package_manifest_json, agent_kind, invocation_mode, visibility)
+                     VALUES (?1, ?2, ?3, 'pi', ?4, ?5, ?6, ?6, ?7, ?8, ?9, 0, '1.0.0', ?10,
+                             'expert', 'inline', 'expert_center')",
+                    params![id, name, request.description.trim(), prompt, request.default_model.trim(), now, request.icon.as_deref().filter(|value| !value.trim().is_empty()), request.category.trim(), serde_json::to_string(&suggestions).unwrap_or_else(|_| "[]".to_owned()), manifest.to_string()],
+                )?;
+            }
+            Ok(())
+        })?;
+        self.get_agent(&id)?
+            .ok_or_else(|| "saved expert was not found".to_owned())
+    }
+
+    pub fn copy_agent(&self, agent_id: &str, name: Option<&str>) -> Result<AgentRecord, String> {
+        let source = self
+            .get_agent(agent_id)?
+            .ok_or_else(|| "expert was not found".to_owned())?;
+        if source.runtime_type != "pi" {
+            return Err("only local experts can be copied".to_owned());
+        }
+        self.save_agent(&SaveAgentRequest {
+            id: None,
+            name: name
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{} 副本", source.name)),
+            description: source.description,
+            icon: source.icon,
+            category: source.category,
+            system_prompt: source.system_prompt,
+            default_model: source.default_model,
+            opening_suggestions: source.opening_suggestions,
+            package_manifest: source.package_manifest,
+        })
+    }
+
+    pub fn delete_agent(&self, agent_id: &str) -> Result<bool, String> {
+        if agent_id == DEFAULT_AGENT_ID {
+            return Err("the default expert cannot be deleted".to_owned());
+        }
+        self.with_connection(|connection| {
+            let builtin = connection
+                .query_row(
+                    "SELECT is_builtin FROM agents WHERE id = ?1 AND runtime_type = 'pi'",
+                    [agent_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            let Some(builtin) = builtin else {
+                return Ok(false);
+            };
+            if builtin != 0 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let in_use = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE agent_id = ?1)",
+                [agent_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if in_use {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            Ok(connection.execute("DELETE FROM agents WHERE id = ?1", [agent_id])? > 0)
         })
     }
 
@@ -753,11 +936,13 @@ impl Database {
             let mut statement = connection.prepare(
                 "SELECT c.id, c.agent_id, a.name, c.title, c.project_id,
                         COALESCE(p.root_path, c.project_root), c.status,
+                        c.pinned, c.archived,
                         c.created_at, c.updated_at, c.last_message_at
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
-                 ORDER BY COALESCE(c.last_message_at, c.created_at) DESC",
+                 WHERE c.archived = 0
+                 ORDER BY c.pinned DESC, COALESCE(c.last_message_at, c.created_at) DESC",
             )?;
             let records = statement.query_map([], map_conversation)?.collect();
             records
@@ -787,7 +972,7 @@ impl Database {
                 [],
                 |row| row.get(0),
             )?;
-            let (input_tokens, output_tokens, total_tokens) = connection.query_row(
+            let (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens) = connection.query_row(
                 "WITH latest_usage AS (
                     SELECT e.event_json,
                            ROW_NUMBER() OVER (PARTITION BY e.run_id ORDER BY e.seq DESC) AS position
@@ -796,14 +981,26 @@ impl Database {
                  SELECT
                     COALESCE(SUM(CAST(json_extract(event_json, '$.inputTokens') AS INTEGER)), 0),
                     COALESCE(SUM(CAST(json_extract(event_json, '$.outputTokens') AS INTEGER)), 0),
+                    COALESCE(SUM(CAST(COALESCE(json_extract(event_json, '$.cacheReadTokens'), 0) AS INTEGER)), 0),
+                    COALESCE(SUM(CAST(COALESCE(json_extract(event_json, '$.cacheWriteTokens'), 0) AS INTEGER)), 0),
                     COALESCE(SUM(MAX(
                         CAST(COALESCE(json_extract(event_json, '$.totalTokens'), 0) AS INTEGER),
                         CAST(COALESCE(json_extract(event_json, '$.inputTokens'), 0) AS INTEGER) +
-                        CAST(COALESCE(json_extract(event_json, '$.outputTokens'), 0) AS INTEGER)
+                        CAST(COALESCE(json_extract(event_json, '$.outputTokens'), 0) AS INTEGER) +
+                        CAST(COALESCE(json_extract(event_json, '$.cacheReadTokens'), 0) AS INTEGER) +
+                        CAST(COALESCE(json_extract(event_json, '$.cacheWriteTokens'), 0) AS INTEGER)
                     )), 0)
                  FROM latest_usage WHERE position = 1",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )?;
 
             let mut agent_statement = connection.prepare(
@@ -826,7 +1023,9 @@ impl Database {
                            SUM(MAX(
                              CAST(COALESCE(json_extract(event_json, '$.totalTokens'), 0) AS INTEGER),
                              CAST(COALESCE(json_extract(event_json, '$.inputTokens'), 0) AS INTEGER) +
-                             CAST(COALESCE(json_extract(event_json, '$.outputTokens'), 0) AS INTEGER)
+                             CAST(COALESCE(json_extract(event_json, '$.outputTokens'), 0) AS INTEGER) +
+                             CAST(COALESCE(json_extract(event_json, '$.cacheReadTokens'), 0) AS INTEGER) +
+                             CAST(COALESCE(json_extract(event_json, '$.cacheWriteTokens'), 0) AS INTEGER)
                            )) AS total_tokens
                     FROM latest_usage WHERE position = 1 GROUP BY agent_id
                  )
@@ -867,7 +1066,9 @@ impl Database {
                            SUM(MAX(
                              CAST(COALESCE(json_extract(e.event_json, '$.totalTokens'), 0) AS INTEGER),
                              CAST(COALESCE(json_extract(e.event_json, '$.inputTokens'), 0) AS INTEGER) +
-                             CAST(COALESCE(json_extract(e.event_json, '$.outputTokens'), 0) AS INTEGER)
+                             CAST(COALESCE(json_extract(e.event_json, '$.outputTokens'), 0) AS INTEGER) +
+                             CAST(COALESCE(json_extract(e.event_json, '$.cacheReadTokens'), 0) AS INTEGER) +
+                             CAST(COALESCE(json_extract(e.event_json, '$.cacheWriteTokens'), 0) AS INTEGER)
                            )) AS total_tokens
                     FROM run_events e
                     WHERE e.event_type = 'usage.updated'
@@ -901,6 +1102,8 @@ impl Database {
                 active_day_count,
                 input_tokens,
                 output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
                 total_tokens,
                 agents,
                 days,
@@ -938,11 +1141,13 @@ impl Database {
             let mut statement = connection.prepare(
                 "SELECT DISTINCT c.id, c.agent_id, a.name, c.title, c.project_id,
                         COALESCE(p.root_path, c.project_root), c.status,
+                        c.pinned, c.archived,
                         c.created_at, c.updated_at, c.last_message_at
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
-                 WHERE c.title LIKE ?1 ESCAPE '\\'
+                 WHERE c.archived = 0 AND (
+                       c.title LIKE ?1 ESCAPE '\\'
                     OR COALESCE(p.root_path, c.project_root, '') LIKE ?1 ESCAPE '\\'
                     OR a.name LIKE ?1 ESCAPE '\\'
                     OR EXISTS(SELECT 1 FROM messages m
@@ -951,7 +1156,8 @@ impl Database {
                                 WHERE conversation_fts MATCH ?2)
                     OR c.id IN (SELECT conversation_id FROM message_fts
                                 WHERE message_fts MATCH ?2)
-                 ORDER BY COALESCE(c.last_message_at, c.created_at) DESC
+                 )
+                 ORDER BY c.pinned DESC, COALESCE(c.last_message_at, c.created_at) DESC
                  LIMIT ?3",
             )?;
             let records = statement
@@ -1052,6 +1258,162 @@ impl Database {
         })
     }
 
+    pub fn delete_project(&self, project_id: &str) -> Result<bool, String> {
+        self.with_connection(|connection| {
+            Ok(connection.execute("DELETE FROM projects WHERE id = ?1", [project_id])? > 0)
+        })
+    }
+
+    pub fn list_conversation_expert_bindings(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<ConversationExpertBinding>, String> {
+        self.with_connection(|connection| {
+            query_conversation(connection, conversation_id)?;
+            query_conversation_expert_bindings(connection, conversation_id)
+        })
+    }
+
+    pub fn current_conversation_expert_binding(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ConversationExpertBinding>, String> {
+        self.with_connection(|connection| {
+            query_conversation_expert_binding_by_state(connection, conversation_id, "active")
+                .optional()
+        })
+    }
+
+    pub fn bind_conversation_expert(
+        &self,
+        conversation_id: &str,
+        expert_id: &str,
+        activation_source: &str,
+    ) -> Result<ConversationExpertBinding, ConversationExpertBindingError> {
+        let activation_source = activation_source.trim();
+        if activation_source.is_empty() {
+            return Err(ConversationExpertBindingError::InvalidActivationSource);
+        }
+        let mut connection = self.connection.lock().map_err(|_| {
+            ConversationExpertBindingError::Storage("database lock is poisoned".to_owned())
+        })?;
+        let transaction = connection.transaction()?;
+        let conversation_exists = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?1)",
+            [conversation_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !conversation_exists {
+            return Err(ConversationExpertBindingError::ConversationNotFound);
+        }
+        if let Some(reason) =
+            conversation_expert_binding_lock_reason(&transaction, conversation_id)?
+        {
+            return Err(reason);
+        }
+
+        let Some(expert) = query_agent_record(&transaction, expert_id)? else {
+            return Err(ConversationExpertBindingError::ExpertNotFound);
+        };
+        if (
+            expert.agent_kind.as_str(),
+            expert.invocation_mode.as_str(),
+            expert.visibility.as_str(),
+        ) != ("expert", "inline", "expert_center")
+        {
+            return Err(ConversationExpertBindingError::InvalidRole);
+        }
+        if expert.runtime_type == "yuxi" && !expert.available {
+            return Err(ConversationExpertBindingError::RemoteUnavailable);
+        }
+
+        let now = now_ms();
+        transaction.execute(
+            "UPDATE conversation_expert_bindings
+             SET state = 'replaced', deactivated_at = ?2
+             WHERE conversation_id = ?1 AND state = 'active'",
+            params![conversation_id, now],
+        )?;
+        let id = Uuid::new_v4().to_string();
+        let package_snapshot = agent_package_snapshot(&expert);
+        let package_hash = package_snapshot_hash(&package_snapshot);
+        let display_snapshot_json = json!({
+            "id": expert_id,
+            "name": expert.name,
+            "description": expert.description,
+            "icon": expert.icon,
+            "category": expert.category,
+            "agentKind": expert.agent_kind,
+            "invocationMode": expert.invocation_mode,
+            "visibility": expert.visibility,
+            "packageVersion": expert.package_version,
+        });
+        transaction.execute(
+            "INSERT INTO conversation_expert_bindings(
+                id, conversation_id, expert_id, state, activation_source, expert_version,
+                package_hash, package_snapshot_json, display_snapshot_json, activated_at,
+                deactivated_at
+             ) VALUES (?1, ?2, ?3, 'active', ?4, ?5, ?6, ?7, ?8, ?9, NULL)",
+            params![
+                id,
+                conversation_id,
+                expert_id,
+                activation_source,
+                expert.package_version,
+                package_hash,
+                package_snapshot.to_string(),
+                display_snapshot_json.to_string(),
+                now
+            ],
+        )?;
+        let binding = query_conversation_expert_binding(&transaction, &id)?;
+        transaction.commit()?;
+        Ok(binding)
+    }
+
+    pub fn remove_conversation_expert(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ConversationExpertBinding>, ConversationExpertBindingError> {
+        let mut connection = self.connection.lock().map_err(|_| {
+            ConversationExpertBindingError::Storage("database lock is poisoned".to_owned())
+        })?;
+        let transaction = connection.transaction()?;
+        let conversation_exists = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?1)",
+            [conversation_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !conversation_exists {
+            return Err(ConversationExpertBindingError::ConversationNotFound);
+        }
+        if let Some(reason) =
+            conversation_expert_binding_lock_reason(&transaction, conversation_id)?
+        {
+            return Err(reason);
+        }
+        let active_id = transaction
+            .query_row(
+                "SELECT id FROM conversation_expert_bindings
+                 WHERE conversation_id = ?1 AND state = 'active'",
+                [conversation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(active_id) = active_id else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        transaction.execute(
+            "UPDATE conversation_expert_bindings
+             SET state = 'removed', deactivated_at = ?2 WHERE id = ?1",
+            params![active_id, now_ms()],
+        )?;
+        let binding = query_conversation_expert_binding(&transaction, &active_id)?;
+        transaction.commit()?;
+        Ok(Some(binding))
+    }
+
     pub fn create_conversation(
         &self,
         agent_id: &str,
@@ -1072,7 +1434,13 @@ impl Database {
 
         self.with_connection(|connection| {
             let agent_exists = connection
-                .query_row("SELECT 1 FROM agents WHERE id = ?1", [agent_id], |_| Ok(()))
+                .query_row(
+                    "SELECT 1 FROM agents
+                     WHERE id = ?1 AND agent_kind = 'assistant'
+                       AND invocation_mode = 'primary' AND visibility = 'chat_selector'",
+                    [agent_id],
+                    |_| Ok(()),
+                )
                 .optional()?
                 .is_some();
             if !agent_exists {
@@ -1104,6 +1472,7 @@ impl Database {
             let attachments = query_attachments_window(connection, id, oldest_ordinal, None)?;
             let artifacts = query_artifacts_window(connection, id, oldest_ordinal, None)?;
             let knowledge_bindings = query_knowledge_bindings(connection, id)?;
+            let expert_bindings = query_conversation_expert_bindings(connection, id)?;
             let last_run = query_last_run(connection, id)?;
             let has_earlier_messages = oldest_ordinal > 0 && connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id = ?1 AND ordinal < ?2)",
@@ -1112,6 +1481,7 @@ impl Database {
             )?;
             Ok(ConversationDetail {
                 conversation,
+                expert_bindings,
                 messages,
                 runtime_events,
                 tool_calls,
@@ -1124,6 +1494,9 @@ impl Database {
                 goals: Vec::new(),
                 tasks: Vec::new(),
                 evidence: Vec::new(),
+                plan_revisions: Vec::new(),
+                review_findings: Vec::new(),
+                acceptances: Vec::new(),
             })
         })?;
         let (goals, tasks, evidence) = self
@@ -1132,6 +1505,10 @@ impl Database {
         detail.goals = goals;
         detail.tasks = tasks;
         detail.evidence = evidence;
+        let (plan_revisions, review_findings, acceptances) = self.load_a1_snapshot(id)?;
+        detail.plan_revisions = plan_revisions;
+        detail.review_findings = review_findings;
+        detail.acceptances = acceptances;
         Ok(detail)
     }
 
@@ -1309,6 +1686,14 @@ impl Database {
                 .collect::<Vec<_>>();
             for agent in agents {
                 let id = format!("yuxi:{}", agent.slug);
+                let is_subagent = agent.backend_id == "SubAgentBackend";
+                let (agent_kind, invocation_mode, visibility) = if is_subagent {
+                    ("worker", "child", "hidden")
+                } else if agent.is_default {
+                    ("assistant", "primary", "chat_selector")
+                } else {
+                    ("expert", "inline", "expert_center")
+                };
                 let system_prompt = serde_json::to_string(&json!({
                     "remoteAgentId": agent.slug,
                     "backendId": agent.backend_id,
@@ -1316,24 +1701,33 @@ impl Database {
                     "capabilities": agent.capabilities,
                     "resources": agent.resources,
                     "configurableItems": agent.configurable_items,
+                    "isSubagent": is_subagent,
                     "isDefault": agent.is_default,
+                    "chatVisible": agent.is_default,
                     "remoteAvailable": agent.available,
                 }))
                 .unwrap_or_else(|_| "{}".to_owned());
                 transaction.execute(
                     "INSERT INTO agents(id, name, description, runtime_type, system_prompt,
-                                        default_model, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, 'yuxi', ?4, ?5, ?6, ?6)
+                                        default_model, created_at, updated_at, agent_kind,
+                                        invocation_mode, visibility)
+                     VALUES (?1, ?2, ?3, 'yuxi', ?4, ?5, ?6, ?6, ?7, ?8, ?9)
                      ON CONFLICT(id) DO UPDATE SET name = excluded.name,
                         description = excluded.description, system_prompt = excluded.system_prompt,
-                        default_model = excluded.default_model, updated_at = excluded.updated_at",
+                        default_model = excluded.default_model, updated_at = excluded.updated_at,
+                        agent_kind = excluded.agent_kind,
+                        invocation_mode = excluded.invocation_mode,
+                        visibility = excluded.visibility",
                     params![
                         id,
                         agent.name,
                         agent.description,
                         system_prompt,
                         agent.default_model,
-                        now
+                        now,
+                        agent_kind,
+                        invocation_mode,
+                        visibility
                     ],
                 )?;
             }
@@ -1410,6 +1804,18 @@ impl Database {
         })
     }
 
+    pub fn agent_kind(&self, agent_id: &str) -> Result<Option<String>, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT agent_kind FROM agents WHERE id = ?1",
+                    [agent_id],
+                    |row| row.get(0),
+                )
+                .optional()
+        })
+    }
+
     pub fn rename_conversation(
         &self,
         id: &str,
@@ -1424,6 +1830,40 @@ impl Database {
             let updated = connection.execute(
                 "UPDATE conversations SET title = ?2, updated_at = ?3 WHERE id = ?1",
                 params![id, title, now],
+            )?;
+            if updated == 0 {
+                return Ok(None);
+            }
+            query_conversation(connection, id).optional()
+        })
+    }
+
+    pub fn set_conversation_pinned(
+        &self,
+        id: &str,
+        pinned: bool,
+    ) -> Result<Option<ConversationSummary>, String> {
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let updated = connection.execute(
+                "UPDATE conversations SET pinned = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, pinned, now],
+            )?;
+            if updated == 0 {
+                return Ok(None);
+            }
+            query_conversation(connection, id).optional()
+        })
+    }
+
+    pub fn archive_conversation(&self, id: &str) -> Result<Option<ConversationSummary>, String> {
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let updated = connection.execute(
+                "UPDATE conversations
+                 SET archived = 1, pinned = 0, updated_at = ?2
+                 WHERE id = ?1",
+                params![id, now],
             )?;
             if updated == 0 {
                 return Ok(None);
@@ -2007,13 +2447,27 @@ impl Database {
             connection
                 .query_row(
                     "SELECT 1 FROM runs
-                     WHERE conversation_id = ?1 AND status IN ('queued', 'running', 'cancelling')
+                     WHERE conversation_id = ?1 AND status IN ('queued', 'running', 'cancelling', 'awaiting_confirmation')
                      LIMIT 1",
                     [conversation_id],
                     |_| Ok(()),
                 )
                 .optional()
                 .map(|value| value.is_some())
+        })
+    }
+
+    pub fn active_run_id(&self, conversation_id: &str) -> Result<Option<String>, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT id FROM runs
+                     WHERE conversation_id = ?1 AND status IN ('queued', 'running')
+                     ORDER BY created_at DESC LIMIT 1",
+                    [conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()
         })
     }
 
@@ -2044,6 +2498,373 @@ impl Database {
             )?;
             transaction.commit()?;
             Ok(started)
+        })
+    }
+
+    pub fn create_goal_continuation_run(
+        &self,
+        conversation_id: &str,
+        prompt: &str,
+    ) -> Result<StartRunResult, String> {
+        let clean_prompt = prompt.trim();
+        if clean_prompt.is_empty() {
+            return Err("continuation prompt cannot be empty".to_owned());
+        }
+
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let mut started =
+                create_run_in_transaction(&transaction, conversation_id, clean_prompt, None)?;
+            transaction.execute(
+                "UPDATE messages SET role = 'system', kind = 'internal' WHERE id = ?1",
+                [started.user_message.id.as_str()],
+            )?;
+            started.user_message.role = "system".to_owned();
+            started.user_message.kind = "internal".to_owned();
+            transaction.commit()?;
+            Ok(started)
+        })
+    }
+
+    pub fn rewind_run(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        text: &str,
+        requested_model: Option<&str>,
+    ) -> Result<StartRunResult, String> {
+        let clean_text = text.trim();
+        if clean_text.is_empty() {
+            return Err("message text cannot be empty".to_owned());
+        }
+
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let (target_ordinal, target_created_at, target_role): (i64, i64, String) = transaction
+                .query_row(
+                    "SELECT ordinal, created_at, role FROM messages
+                     WHERE id = ?1 AND conversation_id = ?2",
+                    params![message_id, conversation_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+            if target_role != "user" {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+
+            let active_run = transaction
+                .query_row(
+                    "SELECT 1 FROM runs
+                     WHERE conversation_id = ?1
+                       AND status IN ('queued', 'running', 'cancelling', 'awaiting_confirmation')
+                     LIMIT 1",
+                    [conversation_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if active_run {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+
+            let attachment_ids = {
+                let mut statement = transaction.prepare(
+                    "SELECT id FROM attachments WHERE conversation_id = ?1 AND message_id = ?2
+                     ORDER BY created_at ASC",
+                )?;
+                let records = statement
+                    .query_map(params![conversation_id, message_id], |row| {
+                        row.get::<_, String>(0)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                records
+            };
+
+            transaction.execute(
+                "DELETE FROM attachments
+                 WHERE conversation_id = ?1 AND message_id IN (
+                   SELECT id FROM messages WHERE conversation_id = ?1 AND ordinal > ?2
+                 )",
+                params![conversation_id, target_ordinal],
+            )?;
+            transaction.execute(
+                "UPDATE attachments SET message_id = NULL
+                 WHERE conversation_id = ?1 AND message_id = ?2",
+                params![conversation_id, message_id],
+            )?;
+
+            transaction.execute(
+                "DELETE FROM work_tasks WHERE id IN (
+                   SELECT json_extract(event_json, '$.taskId') FROM work_events
+                   WHERE conversation_id = ?1 AND created_at >= ?2
+                     AND event_type = 'task.created'
+                     AND json_extract(event_json, '$.taskId') IS NOT NULL
+                 )",
+                params![conversation_id, target_created_at],
+            )?;
+            transaction.execute(
+                "DELETE FROM goals WHERE conversation_id = ?1 AND id IN (
+                   SELECT json_extract(event_json, '$.goalId') FROM work_events
+                   WHERE conversation_id = ?1 AND created_at >= ?2
+                     AND event_type = 'goal.proposed'
+                     AND json_extract(event_json, '$.goalId') IS NOT NULL
+                 )",
+                params![conversation_id, target_created_at],
+            )?;
+            transaction.execute(
+                "UPDATE goals SET
+                   status = (
+                     SELECT json_extract(previous.event_json, '$.data.goal.status')
+                     FROM work_events previous
+                     WHERE previous.conversation_id = ?1
+                       AND json_extract(previous.event_json, '$.goalId') = goals.id
+                       AND previous.created_at < ?2
+                       AND json_extract(previous.event_json, '$.data.goal.status') IS NOT NULL
+                     ORDER BY previous.created_at DESC, previous.sequence DESC LIMIT 1
+                   ),
+                   version = COALESCE((
+                     SELECT json_extract(previous.event_json, '$.data.goal.version')
+                     FROM work_events previous
+                     WHERE previous.conversation_id = ?1
+                       AND json_extract(previous.event_json, '$.goalId') = goals.id
+                       AND previous.created_at < ?2
+                       AND json_extract(previous.event_json, '$.data.goal.version') IS NOT NULL
+                     ORDER BY previous.created_at DESC, previous.sequence DESC LIMIT 1
+                   ), version),
+                   updated_at = COALESCE((
+                     SELECT json_extract(previous.event_json, '$.data.goal.updatedAt')
+                     FROM work_events previous
+                     WHERE previous.conversation_id = ?1
+                       AND json_extract(previous.event_json, '$.goalId') = goals.id
+                       AND previous.created_at < ?2
+                       AND json_extract(previous.event_json, '$.data.goal.updatedAt') IS NOT NULL
+                     ORDER BY previous.created_at DESC, previous.sequence DESC LIMIT 1
+                   ), updated_at),
+                   completed_at = NULL,
+                   blocked_reason = NULL
+                 WHERE conversation_id = ?1
+                   AND id IN (
+                     SELECT json_extract(event_json, '$.goalId') FROM work_events
+                     WHERE conversation_id = ?1 AND created_at >= ?2
+                       AND json_extract(event_json, '$.goalId') IS NOT NULL
+                   )
+                   AND EXISTS (
+                     SELECT 1 FROM work_events previous
+                     WHERE previous.conversation_id = ?1
+                       AND json_extract(previous.event_json, '$.goalId') = goals.id
+                       AND previous.created_at < ?2
+                       AND json_extract(previous.event_json, '$.data.goal.status') IS NOT NULL
+                   )",
+                params![conversation_id, target_created_at],
+            )?;
+            transaction.execute(
+                "UPDATE work_tasks SET
+                   status = (
+                     SELECT json_extract(previous.event_json, '$.data.task.status')
+                     FROM work_events previous
+                     WHERE previous.conversation_id = ?1
+                       AND json_extract(previous.event_json, '$.taskId') = work_tasks.id
+                       AND previous.created_at < ?2
+                       AND json_extract(previous.event_json, '$.data.task.status') IS NOT NULL
+                     ORDER BY previous.created_at DESC, previous.sequence DESC LIMIT 1
+                   ),
+                   version = COALESCE((
+                     SELECT json_extract(previous.event_json, '$.data.task.version')
+                     FROM work_events previous
+                     WHERE previous.conversation_id = ?1
+                       AND json_extract(previous.event_json, '$.taskId') = work_tasks.id
+                       AND previous.created_at < ?2
+                       AND json_extract(previous.event_json, '$.data.task.version') IS NOT NULL
+                     ORDER BY previous.created_at DESC, previous.sequence DESC LIMIT 1
+                   ), version),
+                   updated_at = COALESCE((
+                     SELECT json_extract(previous.event_json, '$.data.task.updatedAt')
+                     FROM work_events previous
+                     WHERE previous.conversation_id = ?1
+                       AND json_extract(previous.event_json, '$.taskId') = work_tasks.id
+                       AND previous.created_at < ?2
+                       AND json_extract(previous.event_json, '$.data.task.updatedAt') IS NOT NULL
+                     ORDER BY previous.created_at DESC, previous.sequence DESC LIMIT 1
+                   ), updated_at),
+                   owner_run_id = NULL,
+                   blocked_reason = NULL,
+                   finished_at = NULL
+                 WHERE id IN (
+                   SELECT json_extract(event_json, '$.taskId') FROM work_events
+                   WHERE conversation_id = ?1 AND created_at >= ?2
+                     AND json_extract(event_json, '$.taskId') IS NOT NULL
+                 )
+                   AND EXISTS (
+                     SELECT 1 FROM work_events previous
+                     WHERE previous.conversation_id = ?1
+                       AND json_extract(previous.event_json, '$.taskId') = work_tasks.id
+                       AND previous.created_at < ?2
+                       AND json_extract(previous.event_json, '$.data.task.status') IS NOT NULL
+                   )",
+                params![conversation_id, target_created_at],
+            )?;
+            transaction.execute(
+                "DELETE FROM work_events WHERE conversation_id = ?1 AND created_at >= ?2",
+                params![conversation_id, target_created_at],
+            )?;
+            transaction.execute(
+                "DELETE FROM artifacts WHERE conversation_id = ?1 AND run_id IN (
+                   SELECT DISTINCT run_id FROM messages
+                   WHERE conversation_id = ?1 AND ordinal >= ?2 AND run_id IS NOT NULL
+                 )",
+                params![conversation_id, target_ordinal],
+            )?;
+            transaction.execute(
+                "DELETE FROM runs WHERE conversation_id = ?1 AND id IN (
+                   SELECT DISTINCT run_id FROM messages
+                   WHERE conversation_id = ?1 AND ordinal >= ?2 AND run_id IS NOT NULL
+                 )",
+                params![conversation_id, target_ordinal],
+            )?;
+            transaction.execute(
+                "DELETE FROM messages WHERE conversation_id = ?1 AND ordinal >= ?2",
+                params![conversation_id, target_ordinal],
+            )?;
+            transaction.execute(
+                "DELETE FROM runtime_sessions WHERE conversation_id = ?1",
+                [conversation_id],
+            )?;
+            if target_ordinal == 1 {
+                transaction.execute(
+                    "UPDATE conversations SET title = '新对话' WHERE id = ?1",
+                    [conversation_id],
+                )?;
+            }
+
+            let mut started = create_run_in_transaction(
+                &transaction,
+                conversation_id,
+                clean_text,
+                requested_model,
+            )?;
+            for attachment_id in &attachment_ids {
+                transaction.execute(
+                    "UPDATE attachments SET message_id = ?2 WHERE id = ?1 AND conversation_id = ?3",
+                    params![attachment_id, started.user_message.id, conversation_id],
+                )?;
+            }
+            if !attachment_ids.is_empty() {
+                let mut statement = transaction.prepare(
+                    "SELECT id, conversation_id, message_id, display_name, storage_path, media_type,
+                            byte_size, sha256, status, created_at
+                     FROM attachments WHERE conversation_id = ?1 AND message_id = ?2
+                     ORDER BY created_at ASC",
+                )?;
+                started.attachments = statement
+                    .query_map(
+                        params![conversation_id, started.user_message.id],
+                        map_attachment,
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+            }
+            transaction.commit()?;
+            Ok(started)
+        })
+    }
+
+    pub fn save_pending_work_mode_dispatch(
+        &self,
+        goal_id: &str,
+        started: &StartRunResult,
+        runtime_text: &str,
+    ) -> Result<StartRunResult, String> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let updated = transaction.execute(
+                "UPDATE runs SET status = 'awaiting_confirmation'
+                 WHERE id = ?1 AND conversation_id = ?2 AND status = 'queued'",
+                params![started.run.id, started.run.conversation_id],
+            )?;
+            if updated != 1 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            transaction.execute(
+                "INSERT INTO pending_work_mode_dispatches(
+                    goal_id, run_id, conversation_id, runtime_text, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    goal_id,
+                    started.run.id,
+                    started.run.conversation_id,
+                    runtime_text,
+                    now_ms()
+                ],
+            )?;
+            transaction.commit()?;
+            let mut pending = started.clone();
+            pending.run.status = "awaiting_confirmation".to_owned();
+            Ok(pending)
+        })
+    }
+
+    pub fn pending_work_mode_dispatch(
+        &self,
+        goal_id: &str,
+    ) -> Result<Option<PendingWorkModeDispatch>, String> {
+        self.with_connection(|connection| query_pending_work_mode_dispatch(connection, goal_id))
+    }
+
+    pub fn release_pending_work_mode_dispatch(
+        &self,
+        goal_id: &str,
+    ) -> Result<PendingWorkModeDispatch, String> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let mut pending = query_pending_work_mode_dispatch(&transaction, goal_id)?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+            if pending.goal_id != goal_id {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let updated = transaction.execute(
+                "UPDATE runs SET status = 'queued'
+                 WHERE id = ?1 AND status = 'awaiting_confirmation'",
+                [pending.started.run.id.as_str()],
+            )?;
+            if updated != 1 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            transaction.execute(
+                "DELETE FROM pending_work_mode_dispatches WHERE goal_id = ?1",
+                [goal_id],
+            )?;
+            transaction.commit()?;
+            pending.started.run.status = "queued".to_owned();
+            Ok(pending)
+        })
+    }
+
+    pub fn reject_pending_work_mode_dispatch(&self, goal_id: &str) -> Result<bool, String> {
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let run_id = transaction
+                .query_row(
+                    "SELECT run_id FROM pending_work_mode_dispatches WHERE goal_id = ?1",
+                    [goal_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            let Some(run_id) = run_id else {
+                return Ok(false);
+            };
+            transaction.execute(
+                "UPDATE runs
+                 SET status = 'cancelled', finished_at = ?2,
+                     error_code = 'work_mode.declined',
+                     error_message = 'User declined work mode execution.'
+                 WHERE id = ?1 AND status = 'awaiting_confirmation'",
+                params![run_id, now],
+            )?;
+            transaction.execute(
+                "DELETE FROM pending_work_mode_dispatches WHERE goal_id = ?1",
+                [goal_id],
+            )?;
+            transaction.commit()?;
+            Ok(true)
         })
     }
 
@@ -2144,6 +2965,66 @@ impl Database {
                 })?
                 .collect();
             messages
+        })
+    }
+
+    pub fn run_user_message_content(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+    ) -> Result<Option<String>, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT content FROM messages
+                     WHERE conversation_id = ?1
+                       AND run_id = ?2
+                       AND role = 'user'
+                       AND kind = 'text'
+                     ORDER BY ordinal DESC
+                     LIMIT 1",
+                    params![conversation_id, run_id],
+                    |row| row.get(0),
+                )
+                .optional()
+        })
+    }
+
+    pub fn runtime_prompt_context_before_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        limit: usize,
+    ) -> Result<Vec<RuntimePromptMessage>, String> {
+        self.with_connection(|connection| {
+            let target_ordinal: i64 = connection.query_row(
+                "SELECT ordinal FROM messages WHERE id = ?1 AND conversation_id = ?2",
+                params![message_id, conversation_id],
+                |row| row.get(0),
+            )?;
+            let mut statement = connection.prepare(
+                "SELECT role, content FROM (
+                    SELECT role, content, ordinal FROM messages
+                    WHERE conversation_id = ?1
+                      AND ordinal < ?2
+                      AND role IN ('user', 'assistant')
+                      AND kind = 'text'
+                      AND status IN ('completed', 'streaming')
+                    ORDER BY ordinal DESC LIMIT ?3
+                 ) ORDER BY ordinal ASC",
+            )?;
+            let records = statement
+                .query_map(
+                    params![conversation_id, target_ordinal, limit as i64],
+                    |row| {
+                        Ok(RuntimePromptMessage {
+                            role: row.get(0)?,
+                            content: row.get(1)?,
+                        })
+                    },
+                )?
+                .collect();
+            records
         })
     }
 
@@ -2531,14 +3412,14 @@ impl Database {
     pub fn list_model_providers(&self) -> Result<Vec<ModelProviderRecord>, String> {
         self.with_connection(|connection| {
             let mut provider_statement = connection.prepare(
-                "SELECT id, name, base_url, api_type, enabled, is_default, last_status,
+                "SELECT id, name, icon, base_url, api_type, enabled, is_default, last_status,
                         last_latency_ms, last_checked_at, created_at, updated_at
                  FROM model_providers ORDER BY is_default DESC, created_at ASC",
             )?;
             let providers = provider_statement
                 .query_map([], |row| {
                     let id: String = row.get(0)?;
-                    let base_url: String = row.get(2)?;
+                    let base_url: String = row.get(3)?;
                     let mut model_statement = connection.prepare(
                         "SELECT id, model_id, display_name, context_window, max_output_tokens,
                                 supports_image_input, is_default
@@ -2561,18 +3442,19 @@ impl Database {
                     Ok(ModelProviderRecord {
                         id,
                         name: row.get(1)?,
+                        icon: row.get(2)?,
                         connection_type: connection_type(&base_url),
                         base_url,
-                        api_type: row.get(3)?,
-                        enabled: row.get::<_, i64>(4)? != 0,
-                        is_default: row.get::<_, i64>(5)? != 0,
+                        api_type: row.get(4)?,
+                        enabled: row.get::<_, i64>(5)? != 0,
+                        is_default: row.get::<_, i64>(6)? != 0,
                         credential_configured: false,
-                        last_status: row.get(6)?,
-                        last_latency_ms: row.get(7)?,
-                        last_checked_at: row.get(8)?,
+                        last_status: row.get(7)?,
+                        last_latency_ms: row.get(8)?,
+                        last_checked_at: row.get(9)?,
                         models,
-                        created_at: row.get(9)?,
-                        updated_at: row.get(10)?,
+                        created_at: row.get(10)?,
+                        updated_at: row.get(11)?,
                     })
                 })?
                 .collect();
@@ -2592,17 +3474,17 @@ impl Database {
             }
             transaction.execute(
                 "INSERT INTO model_providers(
-                    id, name, base_url, api_type, enabled, is_default, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?6)
+                    id, name, icon, base_url, api_type, enabled, is_default, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?7)
                  ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name, base_url = excluded.base_url,
+                    name = excluded.name, icon = excluded.icon, base_url = excluded.base_url,
                     api_type = excluded.api_type, enabled = 1,
                     is_default = excluded.is_default,
                     last_status = CASE WHEN model_providers.base_url = excluded.base_url THEN model_providers.last_status ELSE 'unknown' END,
                     last_latency_ms = CASE WHEN model_providers.base_url = excluded.base_url THEN model_providers.last_latency_ms ELSE NULL END,
                     last_checked_at = CASE WHEN model_providers.base_url = excluded.base_url THEN model_providers.last_checked_at ELSE NULL END,
                     updated_at = excluded.updated_at",
-                params![provider.id, provider.name, provider.base_url, provider.api_type, provider.is_default as i64, now],
+                params![provider.id, provider.name, provider.icon, provider.base_url, provider.api_type, provider.is_default as i64, now],
             )?;
             transaction.execute("DELETE FROM provider_models WHERE provider_id = ?1", [&provider.id])?;
             for model in &provider.models {
@@ -2915,7 +3797,7 @@ fn create_run_in_transaction(
     let active_run = transaction
         .query_row(
             "SELECT id FROM runs
-             WHERE conversation_id = ?1 AND status IN ('queued', 'running', 'cancelling')
+             WHERE conversation_id = ?1 AND status IN ('queued', 'running', 'cancelling', 'awaiting_confirmation')
              LIMIT 1",
             [conversation_id],
             |row| row.get::<_, String>(0),
@@ -2993,9 +3875,249 @@ fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationSum
         project_id: row.get(4)?,
         project_root: row.get(5)?,
         status: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
-        last_message_at: row.get(9)?,
+        pinned: row.get(7)?,
+        archived: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+        last_message_at: row.get(11)?,
+    })
+}
+
+impl From<rusqlite::Error> for ConversationExpertBindingError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.to_string())
+    }
+}
+
+pub(crate) fn query_agent_record(
+    connection: &Connection,
+    agent_id: &str,
+) -> rusqlite::Result<Option<AgentRecord>> {
+    let sql = format!("SELECT {AGENT_RECORD_COLUMNS} FROM agents WHERE id = ?1");
+    connection
+        .query_row(&sql, [agent_id], agent_record_from_row)
+        .optional()
+}
+
+fn agent_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRecord> {
+    let id: String = row.get(0)?;
+    let runtime_type: String = row.get(3)?;
+    let system_prompt: String = row.get(8)?;
+    let metadata = if runtime_type == "yuxi" {
+        parse_json(&system_prompt)
+    } else {
+        json!({})
+    };
+    Ok(AgentRecord {
+        id: id.clone(),
+        name: row.get(1)?,
+        description: row.get(2)?,
+        runtime_type: runtime_type.clone(),
+        agent_kind: row.get(4)?,
+        invocation_mode: row.get(5)?,
+        visibility: row.get(6)?,
+        default_model: row.get(7)?,
+        icon: row.get::<_, Option<String>>(9)?.or_else(|| {
+            metadata
+                .get("icon")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }),
+        category: row.get(10)?,
+        opening_suggestions: serde_json::from_str(&row.get::<_, String>(11)?).unwrap_or_default(),
+        system_prompt: if runtime_type == "pi" {
+            system_prompt
+        } else {
+            String::new()
+        },
+        is_builtin: row.get::<_, i64>(12)? != 0,
+        package_version: row.get(13)?,
+        package_manifest: parse_json(&row.get::<_, String>(14)?),
+        capabilities: metadata.get("capabilities").cloned().unwrap_or_else(|| {
+            if runtime_type == "pi" {
+                json!(["files", "tools", "reasoning"])
+            } else {
+                json!([])
+            }
+        }),
+        resources: metadata
+            .get("resources")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_else(|| {
+                if runtime_type == "pi" {
+                    AgentResourcesRecord {
+                        tools: vec![
+                            AgentResourceRecord {
+                                id: "files".to_owned(),
+                                name: "文件读写".to_owned(),
+                                description: "读取和处理已授权项目文件".to_owned(),
+                            },
+                            AgentResourceRecord {
+                                id: "tools".to_owned(),
+                                name: "本地工具".to_owned(),
+                                description: "调用 Fox Runtime 提供的本地工具".to_owned(),
+                            },
+                            AgentResourceRecord {
+                                id: "reasoning".to_owned(),
+                                name: "任务推理".to_owned(),
+                                description: "规划并执行多步骤任务".to_owned(),
+                            },
+                        ],
+                        ..AgentResourcesRecord::default()
+                    }
+                } else {
+                    AgentResourcesRecord::default()
+                }
+            }),
+        configurable_items: metadata
+            .get("configurableItems")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        is_default: id == DEFAULT_AGENT_ID
+            || metadata
+                .get("isDefault")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        available: runtime_type != "yuxi"
+            || metadata
+                .get("remoteAvailable")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+    })
+}
+
+pub(crate) fn agent_package_snapshot(agent: &AgentRecord) -> Value {
+    json!({
+        "id": agent.id,
+        "name": agent.name,
+        "description": agent.description,
+        "runtimeType": agent.runtime_type,
+        "agentKind": agent.agent_kind,
+        "invocationMode": agent.invocation_mode,
+        "visibility": agent.visibility,
+        "defaultModel": agent.default_model,
+        "systemPrompt": if agent.runtime_type == "pi" {
+            Value::String(agent.system_prompt.clone())
+        } else {
+            Value::Null
+        },
+        "category": agent.category,
+        "isBuiltin": agent.is_builtin,
+        "openingSuggestions": agent.opening_suggestions,
+        "packageVersion": agent.package_version,
+        "packageManifest": agent.package_manifest,
+        "capabilities": agent.capabilities,
+        "resources": agent.resources,
+    })
+}
+
+pub(crate) fn package_snapshot_hash(package_snapshot: &Value) -> String {
+    hex::encode(Sha256::digest(package_snapshot.to_string().as_bytes()))
+}
+
+fn conversation_expert_binding_lock_reason(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Option<ConversationExpertBindingError>> {
+    let archived = connection.query_row(
+        "SELECT archived != 0 FROM conversations WHERE id = ?1",
+        [conversation_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if archived {
+        return Ok(Some(ConversationExpertBindingError::LockedArchived));
+    }
+    let has_messages = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM messages
+            WHERE conversation_id = ?1 AND role IN ('user', 'assistant')
+         )",
+        [conversation_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if has_messages {
+        return Ok(Some(ConversationExpertBindingError::LockedByMessages));
+    }
+    let has_active_run = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM runs
+            WHERE conversation_id = ?1
+              AND status IN ('queued', 'running', 'cancelling', 'awaiting_confirmation')
+         )",
+        [conversation_id],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if has_active_run {
+        return Ok(Some(ConversationExpertBindingError::LockedByActiveRun));
+    }
+    Ok(None)
+}
+
+fn query_conversation_expert_bindings(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Vec<ConversationExpertBinding>> {
+    let mut statement = connection.prepare(
+        "SELECT id, conversation_id, expert_id, state, activation_source, expert_version,
+                package_hash, package_snapshot_json, display_snapshot_json, activated_at,
+                deactivated_at
+         FROM conversation_expert_bindings
+         WHERE conversation_id = ?1
+         ORDER BY activated_at ASC, rowid ASC",
+    )?;
+    let bindings = statement
+        .query_map([conversation_id], conversation_expert_binding_from_row)?
+        .collect();
+    bindings
+}
+
+fn query_conversation_expert_binding_by_state(
+    connection: &Connection,
+    conversation_id: &str,
+    state: &str,
+) -> rusqlite::Result<ConversationExpertBinding> {
+    connection.query_row(
+        "SELECT id, conversation_id, expert_id, state, activation_source, expert_version,
+                package_hash, package_snapshot_json, display_snapshot_json, activated_at,
+                deactivated_at
+         FROM conversation_expert_bindings
+         WHERE conversation_id = ?1 AND state = ?2
+         ORDER BY activated_at DESC, rowid DESC LIMIT 1",
+        params![conversation_id, state],
+        conversation_expert_binding_from_row,
+    )
+}
+
+fn query_conversation_expert_binding(
+    connection: &Connection,
+    id: &str,
+) -> rusqlite::Result<ConversationExpertBinding> {
+    connection.query_row(
+        "SELECT id, conversation_id, expert_id, state, activation_source, expert_version,
+                package_hash, package_snapshot_json, display_snapshot_json, activated_at,
+                deactivated_at
+         FROM conversation_expert_bindings WHERE id = ?1",
+        [id],
+        conversation_expert_binding_from_row,
+    )
+}
+
+fn conversation_expert_binding_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ConversationExpertBinding> {
+    Ok(ConversationExpertBinding {
+        id: row.get(0)?,
+        conversation_id: row.get(1)?,
+        expert_id: row.get(2)?,
+        state: row.get(3)?,
+        activation_source: row.get(4)?,
+        expert_version: row.get(5)?,
+        package_hash: row.get(6)?,
+        package_snapshot: parse_json(&row.get::<_, String>(7)?),
+        display_snapshot_json: parse_json(&row.get::<_, String>(8)?),
+        activated_at: row.get(9)?,
+        deactivated_at: row.get(10)?,
     })
 }
 
@@ -3003,6 +4125,7 @@ fn query_conversation(connection: &Connection, id: &str) -> rusqlite::Result<Con
     connection.query_row(
         "SELECT c.id, c.agent_id, a.name, c.title, c.project_id,
                 COALESCE(p.root_path, c.project_root), c.status,
+                c.pinned, c.archived,
                 c.created_at, c.updated_at, c.last_message_at
          FROM conversations c
          JOIN agents a ON a.id = c.agent_id
@@ -3062,7 +4185,11 @@ fn query_runtime_events_window(
            AND EXISTS(SELECT 1 FROM messages m WHERE m.run_id = r.id AND m.role = 'user'
                       AND m.ordinal >= ?2 AND (?3 IS NULL OR m.ordinal < ?3))
            AND e.event_type IN (
-               'run.started', 'message.started', 'reasoning.delta',
+               'run.started', 'run.request_snapshot', 'run.phase',
+               'run.retrying', 'run.retry.completed',
+               'context.compaction.started', 'context.compaction.completed',
+               'planner.started', 'planner.completed', 'planner.failed',
+               'message.started', 'reasoning.delta',
                'tool.started', 'tool.updated', 'tool.completed',
                'user.question.requested', 'user.question.responded',
                'source.added', 'usage.updated', 'message.completed',
@@ -3540,6 +4667,77 @@ fn query_last_run(connection: &Connection, id: &str) -> rusqlite::Result<Option<
         .optional()
 }
 
+fn query_pending_work_mode_dispatch(
+    connection: &Connection,
+    goal_id: &str,
+) -> rusqlite::Result<Option<PendingWorkModeDispatch>> {
+    let pending = connection
+        .query_row(
+            "SELECT p.goal_id, p.runtime_text,
+                    r.id, r.conversation_id, r.runtime_session_id, r.status, r.model,
+                    r.started_at, r.finished_at, r.error_code, r.error_message, r.last_seq,
+                    r.trace_id, r.root_span_id,
+                    m.id, m.role, m.kind, m.content, m.status, m.ordinal,
+                    m.created_at, m.updated_at
+             FROM pending_work_mode_dispatches p
+             JOIN runs r ON r.id = p.run_id
+             JOIN messages m ON m.run_id = r.id AND m.role = 'user'
+             WHERE p.goal_id = ?1
+             ORDER BY m.ordinal ASC LIMIT 1",
+            [goal_id],
+            |row| {
+                let conversation_id: String = row.get(3)?;
+                let run_id: String = row.get(2)?;
+                Ok(PendingWorkModeDispatch {
+                    goal_id: row.get(0)?,
+                    runtime_text: row.get(1)?,
+                    started: StartRunResult {
+                        run: RunRecord {
+                            id: run_id.clone(),
+                            conversation_id: conversation_id.clone(),
+                            runtime_session_id: row.get(4)?,
+                            status: row.get(5)?,
+                            model: row.get(6)?,
+                            started_at: row.get(7)?,
+                            finished_at: row.get(8)?,
+                            error_code: row.get(9)?,
+                            error_message: row.get(10)?,
+                            last_seq: row.get(11)?,
+                            trace_id: row.get(12)?,
+                            root_span_id: row.get(13)?,
+                        },
+                        user_message: MessageRecord {
+                            id: row.get(14)?,
+                            conversation_id,
+                            run_id: Some(run_id),
+                            role: row.get(15)?,
+                            kind: row.get(16)?,
+                            content: row.get(17)?,
+                            status: row.get(18)?,
+                            ordinal: row.get(19)?,
+                            created_at: row.get(20)?,
+                            updated_at: row.get(21)?,
+                        },
+                        attachments: Vec::new(),
+                    },
+                })
+            },
+        )
+        .optional()?;
+    let Some(mut pending) = pending else {
+        return Ok(None);
+    };
+    let mut statement = connection.prepare(
+        "SELECT id, conversation_id, message_id, display_name, storage_path, media_type,
+                byte_size, sha256, status, created_at
+         FROM attachments WHERE message_id = ?1 AND status = 'ready' ORDER BY created_at ASC",
+    )?;
+    pending.started.attachments = statement
+        .query_map([pending.started.user_message.id.as_str()], map_attachment)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(pending))
+}
+
 fn update_last_seq(
     transaction: &rusqlite::Transaction<'_>,
     run_id: &str,
@@ -3598,6 +4796,7 @@ fn connection_type(base_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::GoalStatus;
 
     fn test_database() -> (Database, PathBuf) {
         let path = std::env::temp_dir().join(format!("fox-test-{}.db", Uuid::new_v4()));
@@ -3627,6 +4826,452 @@ mod tests {
             created_at: 1,
             last_accessed_at,
         }
+    }
+
+    #[test]
+    fn seeds_builtin_experts_on_existing_database_open() {
+        let (database, path) = test_database();
+        let agents = database.list_agents().expect("list builtin experts");
+        assert_eq!(
+            agents.first().map(|agent| agent.id.as_str()),
+            Some(DEFAULT_AGENT_ID)
+        );
+        assert_eq!(
+            agents.first().map(|agent| {
+                (
+                    agent.agent_kind.as_str(),
+                    agent.invocation_mode.as_str(),
+                    agent.visibility.as_str(),
+                )
+            }),
+            Some(("assistant", "primary", "chat_selector"))
+        );
+        for id in [
+            "fox-debugger",
+            "fox-frontend",
+            "fox-reviewer",
+            "fox-security",
+            "fox-architect",
+        ] {
+            let expert = agents
+                .iter()
+                .find(|agent| agent.id == id)
+                .unwrap_or_else(|| panic!("missing {id}"));
+            assert_eq!(expert.agent_kind, "expert");
+            assert_eq!(expert.invocation_mode, "inline");
+            assert_eq!(expert.visibility, "expert_center");
+        }
+
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create assistant conversation");
+        let binding = database
+            .bind_conversation_expert(&conversation.id, "fox-debugger", "test")
+            .expect("bind debugger expert");
+        assert_eq!(binding.expert_id, "fox-debugger");
+
+        drop(database);
+        let reopened = Database::open(path.clone()).expect("reopen expert database");
+        assert_eq!(
+            reopened
+                .list_agents()
+                .expect("list experts after reopen")
+                .iter()
+                .filter(|agent| agent.id.starts_with("fox-"))
+                .count(),
+            BUILTIN_AGENTS.len(),
+        );
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn creates_copies_updates_and_deletes_user_expert_packages() {
+        let (database, path) = test_database();
+        let created = database
+            .save_agent(&SaveAgentRequest {
+                id: None,
+                name: "项目诊断专家".to_owned(),
+                description: "诊断项目问题".to_owned(),
+                icon: Some("/icons/diagnostic.png".to_owned()),
+                category: "engineering".to_owned(),
+                system_prompt: "Inspect evidence before changing files.".to_owned(),
+                default_model: "configured-model".to_owned(),
+                opening_suggestions: vec!["检查项目".to_owned()],
+                package_manifest: json!({ "allowedTools": ["read", "grep"] }),
+            })
+            .expect("create expert");
+        assert!(!created.is_builtin);
+        assert_eq!(created.agent_kind, "expert");
+        assert_eq!(created.invocation_mode, "inline");
+        assert_eq!(created.visibility, "expert_center");
+        assert_eq!(created.package_version, "1.0.0");
+        assert_eq!(
+            created.package_manifest["allowedTools"],
+            json!(["read", "grep"])
+        );
+
+        let copied = database.copy_agent(&created.id, None).expect("copy expert");
+        assert_ne!(copied.id, created.id);
+        assert!(copied.name.ends_with("副本"));
+
+        let updated = database
+            .save_agent(&SaveAgentRequest {
+                id: Some(created.id.clone()),
+                name: "项目根因专家".to_owned(),
+                description: created.description.clone(),
+                icon: created.icon.clone(),
+                category: created.category.clone(),
+                system_prompt: created.system_prompt.clone(),
+                default_model: created.default_model.clone(),
+                opening_suggestions: created.opening_suggestions.clone(),
+                package_manifest: created.package_manifest.clone(),
+            })
+            .expect("update expert");
+        assert_eq!(updated.name, "项目根因专家");
+        assert!(database.delete_agent(&created.id).expect("delete original"));
+        assert!(database.delete_agent(&copied.id).expect("delete copy"));
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_invalid_assistant_and_expert_roles() {
+        let (database, path) = test_database();
+        assert!(database
+            .create_conversation("fox-debugger", None, None, None)
+            .is_err());
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create assistant conversation");
+        assert_eq!(
+            database
+                .bind_conversation_expert(&conversation.id, DEFAULT_AGENT_ID, "test")
+                .unwrap_err(),
+            ConversationExpertBindingError::InvalidRole
+        );
+        assert_eq!(
+            database
+                .bind_conversation_expert(&conversation.id, "missing-expert", "test")
+                .unwrap_err(),
+            ConversationExpertBindingError::ExpertNotFound
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_unavailable_remote_experts_with_stable_error() {
+        let (database, path) = test_database();
+        database
+            .upsert_yuxi_agents(&[YuxiAgentRecord {
+                id: "remote-offline".to_owned(),
+                slug: "remote-offline".to_owned(),
+                name: "离线专家".to_owned(),
+                description: "暂不可用".to_owned(),
+                icon: None,
+                backend_id: "ChatAgentBackend".to_owned(),
+                default_model: "remote-model".to_owned(),
+                capabilities: json!(["knowledge"]),
+                resources: AgentResourcesRecord::default(),
+                configurable_items: json!({}),
+                is_default: false,
+                available: false,
+            }])
+            .expect("save unavailable remote expert");
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create assistant conversation");
+
+        let error = database
+            .bind_conversation_expert(&conversation.id, "yuxi:remote-offline", "test")
+            .unwrap_err();
+        assert_eq!(error, ConversationExpertBindingError::RemoteUnavailable);
+        assert_eq!(error.code(), "conversation.expert_remote_unavailable");
+        assert!(error.retryable());
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn replaces_recovers_removes_and_cascades_expert_bindings() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create assistant conversation");
+        let first = database
+            .bind_conversation_expert(&conversation.id, "fox-debugger", "conversation_create")
+            .expect("bind first expert");
+        assert_eq!(first.package_snapshot["id"], "fox-debugger");
+        assert_eq!(first.package_snapshot["runtimeType"], "pi");
+        assert_eq!(first.package_snapshot["agentKind"], "expert");
+        assert!(first.package_snapshot["systemPrompt"].is_string());
+        assert!(first.package_snapshot["packageManifest"].is_object());
+        assert!(first.package_snapshot["resources"].is_object());
+        assert_eq!(
+            first.package_hash,
+            package_snapshot_hash(&first.package_snapshot)
+        );
+        let second = database
+            .bind_conversation_expert(&conversation.id, "fox-reviewer", "manual")
+            .expect("replace expert");
+        assert_ne!(first.id, second.id);
+        assert_eq!(
+            database
+                .current_conversation_expert_binding(&conversation.id)
+                .expect("load current binding")
+                .expect("active binding")
+                .expert_id,
+            "fox-reviewer"
+        );
+
+        drop(database);
+        let reopened = Database::open(path.clone()).expect("reopen binding database");
+        assert_eq!(
+            reopened
+                .list_conversation_expert_bindings(&conversation.id)
+                .expect("list restored bindings")
+                .len(),
+            2
+        );
+        let detail = reopened
+            .load_conversation(&conversation.id)
+            .expect("restore conversation detail");
+        assert_eq!(detail.expert_bindings.len(), 2);
+        assert_eq!(detail.expert_bindings[0].state, "replaced");
+        assert!(detail.expert_bindings[0].deactivated_at.is_some());
+        assert_eq!(detail.expert_bindings[1].state, "active");
+        assert_eq!(detail.expert_bindings[1].expert_id, "fox-reviewer");
+
+        let removed = reopened
+            .remove_conversation_expert(&conversation.id)
+            .expect("remove expert")
+            .expect("removed binding");
+        assert_eq!(removed.state, "removed");
+        assert!(reopened
+            .current_conversation_expert_binding(&conversation.id)
+            .expect("load cleared binding")
+            .is_none());
+        reopened
+            .delete_conversation(&conversation.id)
+            .expect("delete conversation");
+        reopened
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT COUNT(*) FROM conversation_expert_bindings WHERE conversation_id = ?1",
+                    [&conversation.id],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .map(|count| assert_eq!(count, 0))
+            .expect("verify binding cascade");
+
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn package_snapshot_remains_static_after_expert_definition_changes() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create assistant conversation");
+        let binding = database
+            .bind_conversation_expert(&conversation.id, "fox-debugger", "test")
+            .expect("bind expert");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE agents
+                     SET system_prompt = 'changed prompt', package_manifest_json = '{\"changed\":true}'
+                     WHERE id = 'fox-debugger'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("change expert definition");
+
+        let restored = database
+            .current_conversation_expert_binding(&conversation.id)
+            .expect("load binding")
+            .expect("active binding");
+        assert_eq!(restored.package_snapshot, binding.package_snapshot);
+        assert_eq!(restored.package_hash, binding.package_hash);
+        assert_eq!(
+            restored.package_hash,
+            package_snapshot_hash(&restored.package_snapshot)
+        );
+        assert_ne!(
+            restored.package_snapshot["systemPrompt"],
+            Value::String("changed prompt".to_owned())
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn locks_expert_changes_only_for_dialog_messages_active_runs_or_archive() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create assistant conversation");
+        database
+            .with_connection(|connection| {
+                for (ordinal, role) in ["system", "tool"].into_iter().enumerate() {
+                    connection.execute(
+                        "INSERT INTO messages(
+                            id, conversation_id, role, kind, content, status, ordinal,
+                            created_at, updated_at
+                         ) VALUES (?1, ?2, ?3, 'text', '', 'completed', ?4, 1, 1)",
+                        params![
+                            format!("non-dialog-{role}"),
+                            conversation.id,
+                            role,
+                            ordinal as i64
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .expect("insert non-dialog messages");
+        database
+            .bind_conversation_expert(&conversation.id, "fox-debugger", "test")
+            .expect("non-dialog messages do not lock binding");
+        database
+            .remove_conversation_expert(&conversation.id)
+            .expect("non-dialog messages do not lock removal")
+            .expect("removed binding");
+
+        database
+            .archive_conversation(&conversation.id)
+            .expect("archive conversation")
+            .expect("archived conversation");
+        assert_eq!(
+            database
+                .bind_conversation_expert(&conversation.id, "fox-debugger", "test")
+                .unwrap_err(),
+            ConversationExpertBindingError::LockedArchived
+        );
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE conversations SET archived = 0 WHERE id = ?1",
+                    [&conversation.id],
+                )?;
+                Ok(())
+            })
+            .expect("unarchive conversation");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO runs(id, conversation_id, status, model, last_seq, created_at)
+                     VALUES ('active-run', ?1, 'queued', '', 0, 1)",
+                    [&conversation.id],
+                )?;
+                Ok(())
+            })
+            .expect("insert active run without messages");
+        assert_eq!(
+            database
+                .bind_conversation_expert(&conversation.id, "fox-debugger", "test")
+                .unwrap_err(),
+            ConversationExpertBindingError::LockedByActiveRun
+        );
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE runs SET status = 'completed', finished_at = 2 WHERE id = 'active-run'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .expect("finish active run");
+        database
+            .bind_conversation_expert(&conversation.id, "fox-debugger", "test")
+            .expect("bind after run finishes");
+        database
+            .archive_conversation(&conversation.id)
+            .expect("archive bound conversation")
+            .expect("bound conversation archived");
+        assert_eq!(
+            database
+                .remove_conversation_expert(&conversation.id)
+                .unwrap_err(),
+            ConversationExpertBindingError::LockedArchived
+        );
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE conversations SET archived = 0 WHERE id = ?1",
+                    [&conversation.id],
+                )?;
+                Ok(())
+            })
+            .expect("unarchive bound conversation");
+        database
+            .remove_conversation_expert(&conversation.id)
+            .expect("remove expert after unarchive")
+            .expect("active expert removed");
+        for role in ["user", "assistant"] {
+            let dialog = database
+                .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+                .expect("create dialog conversation");
+            database
+                .bind_conversation_expert(&dialog.id, "fox-debugger", "test")
+                .expect("bind dialog expert");
+            database
+                .with_connection(|connection| {
+                    connection.execute(
+                        "INSERT INTO messages(
+                            id, conversation_id, role, kind, content, status, ordinal,
+                            created_at, updated_at
+                         ) VALUES (?1, ?2, ?3, 'text', 'hello', 'completed', 0, 3, 3)",
+                        params![format!("dialog-{role}"), dialog.id, role],
+                    )?;
+                    Ok(())
+                })
+                .expect("insert dialog message");
+            assert_eq!(
+                database.remove_conversation_expert(&dialog.id).unwrap_err(),
+                ConversationExpertBindingError::LockedByMessages
+            );
+        }
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn get_agent_uses_primary_key_lookup() {
+        let (database, path) = test_database();
+        let agent = database
+            .get_agent("fox-debugger")
+            .expect("query expert")
+            .expect("expert exists");
+        assert_eq!(agent.id, "fox-debugger");
+
+        let details = database
+            .with_connection(|connection| {
+                let sql = format!(
+                    "EXPLAIN QUERY PLAN SELECT {AGENT_RECORD_COLUMNS} FROM agents WHERE id = ?1"
+                );
+                let mut statement = connection.prepare(&sql)?;
+                let details = statement
+                    .query_map(["fox-debugger"], |row| row.get::<_, String>(3))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(details)
+            })
+            .expect("inspect get_agent query plan");
+        assert!(details
+            .iter()
+            .any(|detail| detail.contains("SEARCH agents")));
+        assert!(details.iter().all(|detail| !detail.contains("SCAN agents")));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -3881,6 +5526,60 @@ mod tests {
             detail.tool_calls[0].result,
             Some(serde_json::json!({"content": []}))
         );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn restores_runtime_diagnostics_without_assistant_text() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        let started = database
+            .create_run(&conversation.id, "diagnose runtime", None)
+            .expect("create run");
+        for (seq, event) in [
+            serde_json::json!({"type": "run.request_snapshot", "model": "model-1", "provider": "provider-1"}),
+            serde_json::json!({"type": "run.phase", "phase": "preparing"}),
+            serde_json::json!({"type": "run.retrying", "attempt": 1, "maxAttempts": 2}),
+            serde_json::json!({"type": "run.retry.completed", "success": true, "attempt": 1}),
+            serde_json::json!({"type": "context.compaction.started", "reason": "threshold"}),
+            serde_json::json!({"type": "context.compaction.completed", "reason": "threshold", "aborted": false}),
+            serde_json::json!({"type": "planner.started", "model": "model-1"}),
+            serde_json::json!({"type": "planner.completed", "stepCount": 3, "planHash": "plan-hash"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            database
+                .apply_runtime_event(&started.run.id, seq as i64 + 1, &event)
+                .expect("apply runtime diagnostic event");
+        }
+
+        let detail = database
+            .load_conversation(&conversation.id)
+            .expect("load conversation");
+        assert_eq!(
+            detail
+                .runtime_events
+                .iter()
+                .map(|event| event.event_type.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "run.request_snapshot",
+                "run.phase",
+                "run.retrying",
+                "run.retry.completed",
+                "context.compaction.started",
+                "context.compaction.completed",
+                "planner.started",
+                "planner.completed",
+            ]
+        );
+        assert_eq!(detail.messages.len(), 1);
+        assert_eq!(detail.messages[0].role, "user");
 
         drop(database);
         let _ = std::fs::remove_file(path);
@@ -4161,6 +5860,85 @@ mod tests {
         assert_eq!(context[1].role, "assistant");
         assert_eq!(context[1].content, "first answer");
         assert_eq!(context[2].content, "second question");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rewinds_a_message_and_restarts_from_the_same_ordinal() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        let first = database
+            .create_run(&conversation.id, "first question", None)
+            .expect("create first run");
+        for (seq, event) in [
+            serde_json::json!({"type": "run.started"}),
+            serde_json::json!({"type": "message.started"}),
+            serde_json::json!({"type": "message.delta", "delta": "first answer"}),
+            serde_json::json!({"type": "message.completed"}),
+            serde_json::json!({"type": "run.completed"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            database
+                .apply_runtime_event(&first.run.id, seq as i64 + 1, &event)
+                .expect("complete first run");
+        }
+        let second = database
+            .create_run(&conversation.id, "second question", None)
+            .expect("create second run");
+        for (seq, event) in [
+            serde_json::json!({"type": "run.started"}),
+            serde_json::json!({"type": "message.started"}),
+            serde_json::json!({"type": "message.delta", "delta": "obsolete answer"}),
+            serde_json::json!({"type": "message.completed"}),
+            serde_json::json!({"type": "run.completed"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            database
+                .apply_runtime_event(&second.run.id, seq as i64 + 1, &event)
+                .expect("complete second run");
+        }
+
+        let prior = database
+            .runtime_prompt_context_before_message(&conversation.id, &second.user_message.id, 20)
+            .expect("load prior context");
+        assert_eq!(prior.len(), 2);
+        assert_eq!(prior[0].content, "first question");
+        assert_eq!(prior[1].content, "first answer");
+
+        let replacement = database
+            .rewind_run(
+                &conversation.id,
+                &second.user_message.id,
+                "edited second question",
+                None,
+            )
+            .expect("rewind run");
+        assert_eq!(
+            replacement.user_message.ordinal,
+            second.user_message.ordinal
+        );
+
+        let detail = database
+            .load_conversation(&conversation.id)
+            .expect("load rewound conversation");
+        assert_eq!(detail.messages.len(), 3);
+        assert_eq!(detail.messages[2].content, "edited second question");
+        assert!(!detail
+            .messages
+            .iter()
+            .any(|message| message.content == "obsolete answer"));
+        assert_eq!(
+            detail.last_run.as_ref().map(|run| run.id.as_str()),
+            Some(replacement.run.id.as_str())
+        );
 
         drop(database);
         let _ = std::fs::remove_file(path);
@@ -4680,6 +6458,34 @@ mod tests {
     }
 
     #[test]
+    fn creates_hidden_goal_continuation_run_without_polluting_prompt_history() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        let started = database
+            .create_goal_continuation_run(&conversation.id, "continue the current goal")
+            .expect("create continuation run");
+
+        assert_eq!(started.user_message.role, "system");
+        assert_eq!(started.user_message.kind, "internal");
+        assert_eq!(
+            database
+                .active_run_id(&conversation.id)
+                .expect("load active run")
+                .as_deref(),
+            Some(started.run.id.as_str())
+        );
+        assert!(database
+            .runtime_prompt_context(&conversation.id, 20)
+            .expect("load prompt history")
+            .is_empty());
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn only_active_runs_can_enter_cancelling() {
         let (database, path) = test_database();
         let conversation = database
@@ -4699,6 +6505,104 @@ mod tests {
             .mark_run_cancelling(&started.run.id)
             .expect("reject repeated cancel")
             .is_none());
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_work_mode_dispatch_survives_restart_and_resolves_the_same_run() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        let started = database
+            .create_run(&conversation.id, "优化一下登录逻辑", None)
+            .expect("create run");
+        let goal = database
+            .goals()
+            .create(CreateGoalInput {
+                id: None,
+                conversation_id: conversation.id.clone(),
+                title: "登录优化".to_owned(),
+                objective: "优化登录逻辑".to_owned(),
+                acceptance_summary: None,
+                status: GoalStatus::Proposed,
+                created_by: "test".to_owned(),
+            })
+            .expect("create proposed goal");
+        let pending = database
+            .save_pending_work_mode_dispatch(&goal.id, &started, "runtime enriched text")
+            .expect("persist pending dispatch");
+        assert_eq!(pending.run.id, started.run.id);
+        assert_eq!(pending.run.status, "awaiting_confirmation");
+        assert!(database
+            .conversation_has_active_run(&conversation.id)
+            .expect("pending confirmation blocks another run"));
+
+        drop(database);
+        let database = Database::open(path.clone()).expect("reopen database after restart");
+        database.repair_interrupted_runs().expect("repair startup");
+        let restored = database
+            .pending_work_mode_dispatch(&goal.id)
+            .expect("load pending dispatch")
+            .expect("pending dispatch remains");
+        assert_eq!(restored.started.run.id, started.run.id);
+        assert_eq!(restored.started.run.status, "awaiting_confirmation");
+        assert_eq!(restored.runtime_text, "runtime enriched text");
+
+        let released = database
+            .release_pending_work_mode_dispatch(&goal.id)
+            .expect("release pending dispatch");
+        assert_eq!(released.started.run.id, started.run.id);
+        assert_eq!(released.started.run.status, "queued");
+        assert!(database
+            .pending_work_mode_dispatch(&goal.id)
+            .expect("reload released dispatch")
+            .is_none());
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejecting_work_mode_cancels_the_undispatched_run() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        let started = database
+            .create_run(&conversation.id, "删除所有生产环境数据", None)
+            .expect("create run");
+        let goal = database
+            .goals()
+            .create(CreateGoalInput {
+                id: None,
+                conversation_id: conversation.id.clone(),
+                title: "高风险任务".to_owned(),
+                objective: "等待用户确认".to_owned(),
+                acceptance_summary: None,
+                status: GoalStatus::Proposed,
+                created_by: "test".to_owned(),
+            })
+            .expect("create proposed goal");
+        database
+            .save_pending_work_mode_dispatch(&goal.id, &started, "do not dispatch")
+            .expect("persist pending dispatch");
+        assert!(database
+            .reject_pending_work_mode_dispatch(&goal.id)
+            .expect("reject pending dispatch"));
+        let detail = database
+            .load_conversation(&conversation.id)
+            .expect("reload conversation");
+        let run = detail.last_run.expect("last run");
+        assert_eq!(run.id, started.run.id);
+        assert_eq!(run.status, "cancelled");
+        assert_eq!(run.error_code.as_deref(), Some("work_mode.declined"));
+        assert_eq!(
+            detail.messages.last().expect("user message").status,
+            "completed"
+        );
 
         drop(database);
         let _ = std::fs::remove_file(path);
@@ -4761,7 +6665,7 @@ mod tests {
                 .apply_runtime_event(
                     &started.run.id,
                     seq,
-                    &json!({"type":"usage.updated","inputTokens":10,"outputTokens":15,"totalTokens":total}),
+                    &json!({"type":"usage.updated","inputTokens":10,"outputTokens":15,"cacheReadTokens":8,"cacheWriteTokens":2,"totalTokens":total}),
                 )
                 .expect("append usage event");
         }
@@ -4769,8 +6673,10 @@ mod tests {
         assert_eq!(statistics.conversation_count, 1);
         assert_eq!(statistics.input_tokens, 10);
         assert_eq!(statistics.output_tokens, 15);
-        assert_eq!(statistics.total_tokens, 25);
-        assert_eq!(statistics.agents[0].total_tokens, 25);
+        assert_eq!(statistics.cache_read_tokens, 8);
+        assert_eq!(statistics.cache_write_tokens, 2);
+        assert_eq!(statistics.total_tokens, 35);
+        assert_eq!(statistics.agents[0].total_tokens, 35);
 
         drop(database);
         let _ = std::fs::remove_file(path);

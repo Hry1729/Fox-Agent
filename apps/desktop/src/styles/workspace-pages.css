@@ -1477,7 +1477,7 @@
 .fox-document-activity-error {
   margin-left: auto;
   color: var(--destructive);
-  font-size: 11px;
+  font-size: var(--fox-type-caption);
 }
 
 .fox-document-activity-popover {
@@ -1545,7 +1545,7 @@
 .fox-document-activity-list span {
   display: -webkit-box;
   color: var(--fox-muted);
-  font-size: 12px;
+  font-size: var(--fox-type-meta);
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
 }
@@ -1553,7 +1553,7 @@
 .fox-document-activity-list small,
 .fox-document-activity-list > p {
   color: var(--fox-faint);
-  font-size: 11px;
+  font-size: var(--fox-type-caption);
 }
 
 .fox-document-activity-list > p {
@@ -4067,4 +4067,510 @@
 .fox-shadcn-kb-card .fox-shadcn-kb-types b {
   font-size: 10px;
   line-height: 14px;
+}
+.fox-shadcn-kb-card .fox-shadcn-kb-types b {
+  font-size: 10px;
+  line-height: 14px;
+}
+
+/* Compact expert and knowledge cards, kept last to override legacy card rules. */
+.fox-page-content.fox-agent-list-page {
+  width: 100%;
+}
+
+.fox-agent-list-page .fox-shadcn-entity-grid,
+.fox-knowledge-list-page .fox-knowledge-grid {
+  grid-template-columns: repeat(auto-fill, minmax(260px, 318px));
+  gap: 12px;
+}
+
+.fox-agent-list-page .fox-shadcn-entity-grid {
+  width: 100%;
+  grid-template-columns: repeat(auto-fill, minmax(252px, 1fr));
+}
+
+.fox-shadcn-kb-card {
+  width: 100%;
+  max-width: 318px;
+  height: 178px;
+}
+
+.fox-shadcn-agent-card {
+  position: relative;
+  max-width: none;
+  height: 150px;
+  border-color: color-mix(in oklch, var(--fox-border) 90%, white) !important;
+  transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+}
+
+.fox-shadcn-kb-card .fox-shadcn-kb-head {
+  min-height: 66px;
+  grid-template-columns: 40px minmax(0, 1fr) !important;
+  gap: 10px !important;
+  padding: 9px 13px 4px !important;
+}
+
+.fox-shadcn-agent-card .fox-shadcn-kb-head {
+  min-height: 65px;
+  padding: 10px 66px 4px 12px !important;
+}
+
+.fox-shadcn-agent-card .fox-shadcn-kb-heading {
+  grid-template-rows: 20px 16px;
+  gap: 2px;
+}
+
+.fox-shadcn-agent-card .fox-agent-alias {
+  height: 16px;
+  max-height: 16px;
+  display: block;
+  overflow: hidden;
+  color: var(--fox-muted);
+  font-size: 10px !important;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-shadcn-kb-icon {
+  width: 40px;
+  height: 40px;
+}
+
+.fox-shadcn-agent-icon {
+  border-radius: 50%;
+}
+
+.fox-shadcn-agent-icon img {
+  padding: 2px;
+}
+
+.fox-shadcn-kb-head .fox-shadcn-kb-heading strong {
+  font-size: 16px;
+  line-height: 21px;
+}
+
+.fox-shadcn-kb-head .fox-shadcn-kb-heading small {
+  max-height: 30px;
+  font-size: 10.5px;
+  line-height: 15px;
+}
+
+.fox-shadcn-kb-card .fox-shadcn-kb-content {
+  min-height: 66px;
+  flex: 0 0 66px;
+  gap: 8px;
+  padding: 0 13px 8px !important;
+}
+
+.fox-shadcn-agent-card .fox-shadcn-kb-content {
+  min-height: 84px;
+  flex-basis: 84px;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 3px 12px 3px !important;
+}
+
+.fox-shadcn-agent-card .fox-agent-description {
+  height: 30px;
+  min-height: 30px;
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0;
+  color: var(--fox-muted);
+  font-size: 10.5px !important;
+  line-height: 15px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.fox-shadcn-agent-card .fox-shadcn-kb-stats {
+  gap: 8px;
+  justify-items: center;
+}
+
+.fox-shadcn-agent-card .fox-shadcn-kb-stats > span {
+  row-gap: 2px;
+  justify-self: center;
+  justify-content: center;
+  justify-items: center;
+}
+
+.fox-shadcn-kb-footer {
+  height: 40px;
+  padding: 5px 9px 5px 13px !important;
+}
+
+.fox-agent-summon {
+  position: absolute;
+  top: 10px;
+  right: 11px;
+  z-index: 2;
+  width: 48px;
+  height: 28px;
+  padding: 0;
+  border-radius: calc(var(--radius) - 2px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease;
+  box-shadow: none;
+  font-size: 11px;
+}
+
+.fox-agent-manage {
+  position: absolute;
+  top: 10px;
+  right: 64px;
+  z-index: 2;
+  width: 28px;
+  height: 28px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease;
+}
+
+.fox-agent-manage svg { width: 14px; height: 14px; }
+
+.fox-shadcn-agent-card:hover .fox-agent-manage,
+.fox-shadcn-agent-card:focus-within .fox-agent-manage,
+.fox-shadcn-agent-card:focus-visible .fox-agent-manage {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.fox-agent-editor-dialog { width: min(720px, calc(100vw - 32px)); max-width: 720px; }
+.fox-agent-editor-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; max-height:min(610px,70vh); overflow:auto; padding:2px 3px 4px; }
+.fox-agent-editor-grid label { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.fox-agent-editor-grid label>span { color:var(--fox-muted); font-size:11px; font-weight:600; }
+.fox-agent-editor-grid .is-wide { grid-column:1/-1; }
+.fox-agent-editor-grid textarea { min-height:72px; resize:vertical; }
+.fox-agent-editor-grid .fox-agent-prompt-input { min-height:170px; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:11px; line-height:1.55; }
+.fox-agent-package-summary { grid-column:1/-1; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid var(--fox-border); border-radius:var(--radius); background:var(--fox-panel); }
+.fox-agent-package-summary b { font-size:11px; }
+.fox-agent-package-summary span { color:var(--fox-muted); font-size:10px; }
+.fox-agent-editor-actions { display:grid; grid-template-columns:auto auto 1fr auto auto; width:100%; }
+
+@media(max-width:640px) {
+  .fox-agent-editor-grid { grid-template-columns:1fr; }
+  .fox-agent-editor-grid .is-wide,.fox-agent-package-summary { grid-column:1; }
+}
+
+.fox-shadcn-agent-card:hover .fox-agent-summon,
+.fox-shadcn-agent-card:focus-within .fox-agent-summon,
+.fox-shadcn-agent-card:focus-visible .fox-agent-summon {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.fox-shadcn-agent-card:hover,
+.fox-shadcn-agent-card:focus-within,
+.fox-shadcn-agent-card:focus-visible {
+  transform: none !important;
+  border-color: color-mix(in oklch, #60a5fa 48%, var(--fox-border)) !important;
+  background: #eef6ff !important;
+  box-shadow: 0 7px 20px color-mix(in oklch, #60a5fa 15%, transparent) !important;
+}
+
+.fox-shadcn-agent-card.is-unavailable {
+  cursor: default;
+  opacity: 1;
+}
+
+.dark .fox-shadcn-agent-card:hover,
+.dark .fox-shadcn-agent-card:focus-within,
+.dark .fox-shadcn-agent-card:focus-visible {
+  background: color-mix(in srgb, var(--fox-card) 88%, #60a5fa) !important;
+}
+
+@media(max-width:960px) {
+  .fox-agent-list-page .fox-shadcn-entity-grid,
+  .fox-knowledge-list-page .fox-knowledge-grid {
+    grid-template-columns: repeat(auto-fill, minmax(248px, 1fr));
+  }
+
+  .fox-shadcn-kb-card {
+    max-width: none;
+  }
+}
+
+/* Knowledge cards match the compact expert card layout. */
+.fox-shadcn-knowledge-card {
+  position: relative;
+  max-width: none;
+  height: 150px;
+  border-color: color-mix(in oklch, var(--fox-border) 90%, white) !important;
+  transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+}
+
+.fox-shadcn-knowledge-card .fox-shadcn-kb-content {
+  min-height: 84px;
+  flex-basis: 84px;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 3px 12px 3px !important;
+}
+
+.fox-shadcn-knowledge-card .fox-agent-description {
+  height: 30px;
+  min-height: 30px;
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0;
+  color: var(--fox-muted);
+  font-size: 10.5px !important;
+  line-height: 15px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.fox-shadcn-knowledge-card .fox-shadcn-kb-stats {
+  gap: 8px;
+  justify-items: center;
+}
+
+.fox-shadcn-knowledge-card .fox-shadcn-kb-stats > span {
+  row-gap: 2px;
+  justify-self: center;
+  justify-content: center;
+  justify-items: center;
+}
+
+.fox-shadcn-agent-card .fox-shadcn-kb-stats svg,
+.fox-shadcn-agent-card .fox-shadcn-kb-stats b,
+.fox-shadcn-knowledge-card .fox-shadcn-kb-stats svg,
+.fox-shadcn-knowledge-card .fox-shadcn-kb-stats b {
+  color: var(--fox-muted);
+}
+
+.fox-agent-name-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fox-agent-name-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-agent-source {
+  flex: 0 0 auto;
+  height: 14px;
+  padding-inline: 5px;
+  border-radius: 999px;
+  font-size: 8px !important;
+  line-height: 14px;
+}
+
+.fox-agent-source.is-local {
+  color: var(--fox-muted);
+  background: color-mix(in oklch, var(--fox-panel) 62%, var(--fox-card));
+  border-color: color-mix(in oklch, var(--fox-border) 70%, transparent);
+}
+
+.fox-agent-source.is-knowledge {
+  color: #2563eb;
+  background: #eef4ff;
+  border-color: color-mix(in oklch, #60a5fa 34%, transparent);
+}
+
+.dark .fox-agent-source.is-local {
+  color: var(--fox-muted);
+  background: color-mix(in srgb, var(--fox-card) 88%, #94a3b8);
+}
+
+.dark .fox-agent-source.is-knowledge {
+  color: #93c5fd;
+  background: color-mix(in srgb, #1e3a8a 72%, #0b1220);
+  border-color: color-mix(in srgb, #60a5fa 42%, transparent);
+}
+
+.fox-agent-subtitle {
+  height: 16px;
+  max-height: 16px;
+  display: block;
+  overflow: hidden;
+  color: var(--fox-muted);
+  font-size: 10px !important;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-shadcn-agent-card .fox-shadcn-kb-heading,
+.fox-shadcn-knowledge-card .fox-shadcn-kb-heading {
+  grid-template-rows: 20px 16px;
+  gap: 2px;
+}
+
+.fox-knowledge-list-page .fox-knowledge-grid {
+  width: 100%;
+  grid-template-columns: repeat(auto-fill, minmax(252px, 1fr));
+}
+
+.fox-shadcn-knowledge-card .fox-shadcn-kb-head {
+  min-height: 65px;
+  padding: 10px 12px 4px !important;
+}
+
+.fox-shadcn-knowledge-card:hover,
+.fox-shadcn-knowledge-card:focus-within,
+.fox-shadcn-knowledge-card:focus-visible {
+  transform: none !important;
+  border-color: color-mix(in oklch, #60a5fa 48%, var(--fox-border)) !important;
+  background: #eef6ff !important;
+  box-shadow: 0 7px 20px color-mix(in oklch, #60a5fa 15%, transparent) !important;
+}
+
+.dark .fox-shadcn-knowledge-card:hover,
+.dark .fox-shadcn-knowledge-card:focus-within,
+.dark .fox-shadcn-knowledge-card:focus-visible {
+  background: color-mix(in srgb, var(--fox-card) 88%, #60a5fa) !important;
+}
+
+/* Management pages start directly with their primary heading and content. */
+.fox-page-shell {
+  position: relative;
+}
+
+.fox-page-floating-actions {
+  position: absolute;
+  z-index: 5;
+  top: 18px;
+  right: 22px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fox-page-shell .fox-page-content {
+  padding-top: 18px !important;
+}
+
+.fox-page-shell .fox-settings-layout > main {
+  padding-top: 29px !important;
+}
+
+.fox-page-shell:has(.fox-page-floating-actions) .fox-settings-layout > main > header {
+  padding-right: 160px;
+}
+
+/* Expert and knowledge cards use a subtle tint without a lifted shadow. */
+.fox-shadcn-agent-card:hover,
+.fox-shadcn-agent-card:focus-within,
+.fox-shadcn-agent-card:focus-visible,
+.fox-shadcn-knowledge-card:hover,
+.fox-shadcn-knowledge-card:focus-within,
+.fox-shadcn-knowledge-card:focus-visible {
+  transform: none !important;
+  background: #edf5ff !important;
+  border-color: #adc9e8 !important;
+  box-shadow: none !important;
+}
+
+.dark .fox-shadcn-agent-card:hover,
+.dark .fox-shadcn-agent-card:focus-within,
+.dark .fox-shadcn-agent-card:focus-visible,
+.dark .fox-shadcn-knowledge-card:hover,
+.dark .fox-shadcn-knowledge-card:focus-within,
+.dark .fox-shadcn-knowledge-card:focus-visible {
+  background: #24384c !important;
+  border-color: #4f7398 !important;
+  box-shadow: none !important;
+}
+
+.fox-list-page-intro {
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.fox-list-page-intro h1 {
+  margin: 0;
+}
+
+.fox-list-page-search {
+  width: min(300px, 44%);
+  height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  padding-left: 10px;
+  border: 1px solid var(--fox-border);
+  border-radius: 8px;
+  background: var(--fox-canvas);
+  color: var(--fox-faint);
+}
+
+.fox-list-page-search input {
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Avoid OKLCH hue drift in Windows WebView for selected file rows. */
+.fox-sidebar-file-browser .fox-file-tree-node > button.is-active {
+  background: #f2f3f5 !important;
+  color: var(--fox-text) !important;
+}
+
+.dark .fox-sidebar-file-browser .fox-file-tree-node > button.is-active {
+  background: #2a2f35 !important;
+  color: var(--fox-text) !important;
+}
+
+/* Knowledge page actions occupy their own row instead of overlaying page content. */
+.fox-knowledge-detail-page > .fox-page-floating-actions,
+.fox-knowledge-graph-page > .fox-page-floating-actions {
+  position: static;
+  width: 100%;
+  min-height: 48px;
+  flex: 0 0 48px;
+  justify-content: flex-end;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--fox-border);
+  background: var(--fox-canvas);
+}
+
+.fox-knowledge-detail-page > .fox-page-floating-actions [data-slot='button'],
+.fox-knowledge-graph-page > .fox-page-floating-actions [data-slot='button'] {
+  height: 32px;
+  min-height: 32px;
+}
+
+.fox-knowledge-detail-page > .fox-page-floating-actions {
+  justify-content: flex-start;
+}
+
+.fox-knowledge-document-heading {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.fox-knowledge-document-heading strong {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--fox-text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-knowledge-document-heading .fox-document-title-more {
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
+  flex: none;
 }

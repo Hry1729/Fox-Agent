@@ -326,6 +326,61 @@ impl GoalRepository {
         })
     }
 
+    pub fn delete(&self, id: &str, conversation_id: &str) -> Result<bool, RepositoryError> {
+        validate_non_empty("id", id)?;
+        validate_non_empty("conversation_id", conversation_id)?;
+        with_write_transaction(&self.database, |transaction| {
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM goals WHERE id = ?1 AND conversation_id = ?2",
+                    params![id, conversation_id],
+                )
+                .map_err(RepositoryError::database)?;
+            Ok(deleted > 0)
+        })
+    }
+
+    pub fn refine_host_placeholder(
+        &self,
+        id: &str,
+        title: String,
+        objective: String,
+        acceptance_summary: Option<String>,
+    ) -> Result<Option<GoalRecord>, RepositoryError> {
+        validate_non_empty("id", id)?;
+        validate_non_empty("title", &title)?;
+        validate_non_empty("objective", &objective)?;
+        let now = timestamp();
+        with_write_transaction(&self.database, |transaction| {
+            let current = load_goal(transaction, id)?.ok_or_else(|| not_found("goal", id))?;
+            if current.created_by != "host:work-mode-gate"
+                || !matches!(current.status, GoalStatus::Proposed | GoalStatus::Active)
+            {
+                return Ok(None);
+            }
+            let task_count: i64 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM work_tasks WHERE goal_id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .map_err(RepositoryError::database)?;
+            if task_count > 0 {
+                return Ok(None);
+            }
+            transaction
+                .execute(
+                    "UPDATE goals
+                     SET title = ?2, objective = ?3, acceptance_summary = ?4,
+                         version = version + 1, updated_at = ?5
+                     WHERE id = ?1",
+                    params![id, title, objective, acceptance_summary, now],
+                )
+                .map_err(RepositoryError::database)?;
+            load_goal(transaction, id)
+        })
+    }
+
     pub fn activate(&self, id: &str, expected_version: i64) -> Result<GoalRecord, RepositoryError> {
         self.transition(id, expected_version, GoalStatus::Active, None)
     }
@@ -386,6 +441,25 @@ impl GoalRepository {
                 if incomplete > 0 {
                     return Err(RepositoryError::ConstraintViolation(
                         "a goal cannot complete while required tasks remain unfinished".to_owned(),
+                    ));
+                }
+                let completed_without_valid_evidence: i64 = transaction
+                    .query_row(
+                        "SELECT COUNT(*) FROM work_tasks task
+                         WHERE task.goal_id = ?1 AND task.status = 'completed'
+                           AND NOT EXISTS(
+                               SELECT 1 FROM task_evidence evidence
+                               WHERE evidence.task_id = task.id
+                                 AND evidence.validity_status = 'valid'
+                           )",
+                        [id],
+                        |row| row.get(0),
+                    )
+                    .map_err(RepositoryError::database)?;
+                if completed_without_valid_evidence > 0 {
+                    return Err(RepositoryError::ConstraintViolation(
+                        "a goal cannot complete until every completed task has valid evidence"
+                            .to_owned(),
                     ));
                 }
             }

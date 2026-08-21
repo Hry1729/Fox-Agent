@@ -48,6 +48,16 @@ test('strips provider-only fields before replaying history', () => {
   assert.deepEqual(messages[1].details, {})
 })
 
+test('uses Pi content blocks when replaying a legacy assistant string', () => {
+  const messages = sanitizeProviderHistory([
+    { role: 'user', content: '同意目标', timestamp: 1 },
+    { role: 'assistant', content: '目标已提交，等待确认。', timestamp: 2 },
+  ])
+
+  assert.equal(messages[0].content, '同意目标')
+  assert.deepEqual(messages[1].content, [{ type: 'text', text: '目标已提交，等待确认。' }])
+})
+
 test('falls back to SQLite history when a runtime transcript is empty', () => {
   const messages = transcriptFromSession({ messages: [] }, [{ role: 'assistant', content: 'restored reply' }])
   assert.equal(messages[0].content, 'restored reply')

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { desktopClient, desktopRuntimeAvailable } from '@/features/conversations/api/desktop-client'
-import type { AgentRecord } from '@/features/conversations/model/types'
+import { normalizeAgentClassification, type ClassifiedAgentRecord } from './agent-classification'
 
 export function useAgents() {
-  const [agents, setAgents] = useState<AgentRecord[]>([])
+  const [agents, setAgents] = useState<ClassifiedAgentRecord[]>([])
   const [loading, setLoading] = useState(desktopRuntimeAvailable)
   const [error, setError] = useState<string | null>(null)
 
@@ -11,16 +11,13 @@ export function useAgents() {
     if (!desktopRuntimeAvailable) return
     setLoading(true)
     try {
-      let knowledgeServiceOnline = true
       if (sync) {
         try {
           await desktopClient.syncYuxiAgents()
-        } catch {
-          knowledgeServiceOnline = false
-        }
+        } catch {}
       }
       const records = await desktopClient.listAgents()
-      setAgents(knowledgeServiceOnline ? records : records.filter((agent) => agent.runtimeType !== 'yuxi'))
+      setAgents(records.map(normalizeAgentClassification))
       setError(null)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))

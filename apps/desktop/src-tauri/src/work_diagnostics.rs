@@ -1,6 +1,6 @@
 use crate::database::{
-    Database, EvidenceValidityStatus, GoalRecord, GoalStatus, TaskEvidenceRecord, WorkEventRecord,
-    WorkTaskRecord, WorkTaskStatus, WORK_EVENT_TYPES,
+    Database, EvidenceValidityStatus, GoalRecord, GoalStatus, TaskEvidenceRecord, WorkTaskRecord,
+    WorkTaskStatus, WORK_EVENT_TYPES,
 };
 use crate::maintenance::MaintenanceResult;
 use serde::{Deserialize, Serialize};
@@ -62,13 +62,74 @@ struct WorkTraceExport {
     generated_at: String,
     conversation_id: String,
     diagnosis: WorkStateDiagnosticReport,
-    goals: Vec<GoalRecord>,
-    tasks: Vec<WorkTaskRecord>,
-    evidence: Vec<TaskEvidenceRecord>,
-    work_events: Vec<WorkEventRecord>,
+    goals: Vec<TraceGoalSummary>,
+    tasks: Vec<TraceTaskSummary>,
+    evidence: Vec<TraceEvidenceSummary>,
+    work_events: Vec<TraceWorkEventSummary>,
     runs: Vec<TraceRunSummary>,
     runtime_events: Vec<TraceRuntimeEventSummary>,
     tool_calls: Vec<TraceToolCallSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceGoalSummary {
+    id: String,
+    status: GoalStatus,
+    version: i64,
+    created_at: String,
+    updated_at: String,
+    completed_at: Option<String>,
+    has_blocked_reason: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceTaskSummary {
+    id: String,
+    goal_id: String,
+    parent_task_id: Option<String>,
+    ordinal: i64,
+    status: WorkTaskStatus,
+    version: i64,
+    owner_run_id: Option<String>,
+    created_at: String,
+    updated_at: String,
+    started_at: Option<String>,
+    finished_at: Option<String>,
+    has_blocked_reason: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceEvidenceSummary {
+    id: String,
+    task_id: String,
+    source_run_id: Option<String>,
+    evidence_type: crate::database::EvidenceType,
+    ref_kind: crate::database::EvidenceReferenceKind,
+    has_reference: bool,
+    validity_status: EvidenceValidityStatus,
+    trace_id: Option<String>,
+    span_id: Option<String>,
+    checked_at: Option<String>,
+    created_at: String,
+    has_invalid_reason: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceWorkEventSummary {
+    event_type: String,
+    schema_version: u32,
+    conversation_id: String,
+    goal_id: Option<String>,
+    task_id: Option<String>,
+    run_id: Option<String>,
+    trace_id: Option<String>,
+    span_id: Option<String>,
+    sequence: i64,
+    timestamp: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -448,10 +509,71 @@ pub fn export_work_trace(
         generated_at,
         conversation_id: conversation_id.to_owned(),
         diagnosis,
-        goals: detail.goals,
-        tasks: detail.tasks,
-        evidence: detail.evidence,
-        work_events: database.list_work_events(conversation_id)?,
+        goals: detail
+            .goals
+            .into_iter()
+            .map(|goal| TraceGoalSummary {
+                id: goal.id,
+                status: goal.status,
+                version: goal.version,
+                created_at: goal.created_at,
+                updated_at: goal.updated_at,
+                completed_at: goal.completed_at,
+                has_blocked_reason: goal.blocked_reason.is_some(),
+            })
+            .collect(),
+        tasks: detail
+            .tasks
+            .into_iter()
+            .map(|task| TraceTaskSummary {
+                id: task.id,
+                goal_id: task.goal_id,
+                parent_task_id: task.parent_task_id,
+                ordinal: task.ordinal,
+                status: task.status,
+                version: task.version,
+                owner_run_id: task.owner_run_id,
+                created_at: task.created_at,
+                updated_at: task.updated_at,
+                started_at: task.started_at,
+                finished_at: task.finished_at,
+                has_blocked_reason: task.blocked_reason.is_some(),
+            })
+            .collect(),
+        evidence: detail
+            .evidence
+            .into_iter()
+            .map(|evidence| TraceEvidenceSummary {
+                id: evidence.id,
+                task_id: evidence.task_id,
+                source_run_id: evidence.source_run_id,
+                evidence_type: evidence.evidence_type,
+                ref_kind: evidence.ref_kind,
+                has_reference: !evidence.ref_id.is_empty(),
+                validity_status: evidence.validity_status,
+                trace_id: evidence.trace_id,
+                span_id: evidence.span_id,
+                checked_at: evidence.checked_at,
+                created_at: evidence.created_at,
+                has_invalid_reason: evidence.invalid_reason.is_some(),
+            })
+            .collect(),
+        work_events: database
+            .list_work_events(conversation_id)?
+            .into_iter()
+            .map(|event| TraceWorkEventSummary {
+                event_type: event.event_type,
+                schema_version: event.schema_version,
+                conversation_id: event.conversation_id,
+                goal_id: event.goal_id,
+                task_id: event.task_id,
+                run_id: event.run_id,
+                trace_id: event.trace_id,
+                span_id: event.span_id,
+                sequence: event.sequence,
+                timestamp: event.timestamp,
+            })
+            .collect(),
         runs: runs
             .into_iter()
             .map(|run| TraceRunSummary {
@@ -605,7 +727,9 @@ fn count_evidence(evidence: &[TaskEvidenceRecord]) -> BTreeMap<String, usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::{CreateGoalInput, CreateTaskInput};
+    use crate::database::{
+        AddEvidenceInput, CreateGoalInput, CreateTaskInput, EvidenceReferenceKind, EvidenceType,
+    };
     use crate::runtime_host::WORK_TOOLS;
     use uuid::Uuid;
 
@@ -664,11 +788,11 @@ mod tests {
                 created_by: "test".to_owned(),
             })
             .expect("create goal");
-        let run = database
+        let started = database
             .create_run(&conversation.id, "diagnose work state", None)
-            .expect("create run")
-            .run;
-        database
+            .expect("create run");
+        let run = started.run.clone();
+        let tasks = database
             .work_tasks()
             .create_many(vec![CreateTaskInput {
                 id: None,
@@ -679,6 +803,30 @@ mod tests {
                 detail: None,
             }])
             .expect("create task");
+        let evidence = database
+            .task_evidence()
+            .add(AddEvidenceInput {
+                id: None,
+                task_id: tasks[0].id.clone(),
+                source_run_id: Some(run.id.clone()),
+                evidence_type: EvidenceType::UserConfirmation,
+                ref_kind: EvidenceReferenceKind::Message,
+                ref_id: started.user_message.id.clone(),
+                summary: "PRIVATE_EVIDENCE_SUMMARY_SENTINEL".to_owned(),
+                metadata: serde_json::json!({
+                    "private": "PRIVATE_EVIDENCE_METADATA_SENTINEL"
+                }),
+                trace_id: None,
+                span_id: None,
+            })
+            .expect("create evidence");
+        database
+            .task_evidence()
+            .mark_invalid(
+                &evidence.id,
+                "PRIVATE_EVIDENCE_INVALID_REASON_SENTINEL".to_owned(),
+            )
+            .expect("mark evidence invalid");
         database
             .append_work_event(
                 "goal.activated",
@@ -692,7 +840,10 @@ mod tests {
 
         let diagnosis = diagnose_work_state(&database, &conversation.id).expect("diagnose");
         assert!(diagnosis.healthy);
-        assert_eq!(diagnosis.schema_version, 15);
+        assert_eq!(
+            diagnosis.schema_version,
+            crate::database::DATABASE_SCHEMA_VERSION
+        );
         assert_eq!(diagnosis.counts.goals, 1);
         assert_eq!(diagnosis.counts.tasks, 1);
         assert_eq!(diagnosis.counts.work_events, 1);
@@ -706,6 +857,8 @@ mod tests {
         assert_eq!(value["exportVersion"], 1);
         assert_eq!(value["diagnosis"]["healthy"], true);
         assert_eq!(value["workEvents"].as_array().unwrap().len(), 1);
+        assert_eq!(value["evidence"].as_array().unwrap().len(), 1);
+        assert!(value["evidence"][0].get("refId").is_none());
         assert_eq!(value["runs"].as_array().unwrap().len(), 1);
         assert!(value["runs"][0].get("model").is_none());
         assert!(value["runtimeEvents"]
@@ -713,6 +866,17 @@ mod tests {
             .unwrap()
             .iter()
             .all(|event| event.get("event").is_none()));
+        let serialized = serde_json::to_string(&value).expect("serialize exported trace");
+        for private_content in [
+            "诊断 A0",
+            "确认工作状态与事件可导出",
+            "检查状态",
+            "PRIVATE_EVIDENCE_SUMMARY_SENTINEL",
+            "PRIVATE_EVIDENCE_METADATA_SENTINEL",
+            "PRIVATE_EVIDENCE_INVALID_REASON_SENTINEL",
+        ] {
+            assert!(!serialized.contains(private_content));
+        }
 
         drop(database);
         fs::remove_dir_all(root).expect("remove diagnostics root");

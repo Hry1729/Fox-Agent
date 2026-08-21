@@ -5,7 +5,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 pub const WORK_EVENT_SCHEMA_VERSION: u32 = 1;
-pub const WORK_EVENT_TYPES: [&str; 12] = [
+pub const WORK_EVENT_TYPES: [&str; 16] = [
     "goal.proposed",
     "goal.activated",
     "goal.blocked",
@@ -18,6 +18,10 @@ pub const WORK_EVENT_TYPES: [&str; 12] = [
     "task.interrupted",
     "evidence.added",
     "evidence.validated",
+    "plan.revised",
+    "review.finding_added",
+    "review.finding_resolved",
+    "acceptance.completed",
 ];
 
 impl Database {

@@ -134,6 +134,8 @@ async function streamPrompt(request) {
   emitRuntimeEvent(request, seq++, 'usage.updated', {
     inputTokens: Math.max(1, Math.ceil((request.payload?.text?.length ?? 0) / 4)),
     outputTokens: words.length * 2,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
   })
   emitRuntimeEvent(request, seq++, 'run.completed')
   activeRuns.delete(request.runId)

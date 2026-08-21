@@ -6,6 +6,7 @@
     "dev": "pnpm --dir apps/desktop dev",
     "build": "pnpm --dir apps/desktop build",
     "runtime:test": "pnpm --dir services/agent-runtime test",
+    "runtime:eval": "pnpm --dir services/agent-runtime eval:offline",
     "runtime:build": "pnpm --dir services/agent-runtime build:sidecar",
     "runtime:smoke": "pnpm --dir services/agent-runtime smoke:sidecar",
     "knowledge:verify-preview": "node scripts/verify-knowledge-preview-contract.mjs",

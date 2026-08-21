@@ -114,14 +114,7 @@ fn host_tool_is_supported(tool: &str) -> bool {
             | "query_knowledge_graph"
             | "list_mcp_tools"
             | "call_mcp_tool"
-            | "work_snapshot_get"
-            | "goal_propose"
-            | "goal_activate"
-            | "task_create_many"
-            | "task_update"
-            | "task_evidence_add"
-            | "task_evidence_validate"
-    )
+    ) || super::work_tools::is_work_tool(tool)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -240,7 +233,7 @@ pub fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeCapabilityManifest, CAPABILITY_MANIFEST_VERSION};
+    use super::{host_tool_is_supported, RuntimeCapabilityManifest, CAPABILITY_MANIFEST_VERSION};
     use serde_json::json;
 
     #[test]
@@ -267,6 +260,16 @@ mod tests {
         .expect("deserialize capability manifest");
         manifest.validate().expect("valid manifest");
         assert!(manifest.work_loop_enabled());
+    }
+
+    #[test]
+    fn every_registered_work_tool_has_a_host_handler() {
+        for tool in super::super::work_tools::WORK_TOOLS {
+            assert!(
+                host_tool_is_supported(tool),
+                "registered work tool {tool} must be accepted by capability validation"
+            );
+        }
     }
 
     #[test]

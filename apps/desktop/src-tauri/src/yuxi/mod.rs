@@ -154,21 +154,6 @@ impl YuxiClient {
             .map_err(|_| "知识库服务返回了无法解析的 JSON 数据".to_owned())
     }
 
-    pub async fn delete_json<T: DeserializeOwned>(
-        &self,
-        base_url: &str,
-        path: &str,
-        access_token: Option<&str>,
-    ) -> Result<T, String> {
-        let response = self
-            .request(Method::DELETE, base_url, path, access_token, None)
-            .await?;
-        response
-            .json::<T>()
-            .await
-            .map_err(|_| "知识库服务返回了无法解析的 JSON 数据".to_owned())
-    }
-
     async fn request(
         &self,
         method: Method,
@@ -195,18 +180,7 @@ impl YuxiClient {
             .map_err(|error| connection_error(&error))?;
         let status = response.status();
         if !status.is_success() {
-            let detail = response.json::<Value>().await.ok().and_then(|body| {
-                body.get("detail")
-                    .or_else(|| body.get("message"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            });
-            return Err(match status.as_u16() {
-                401 => "访问凭证无效或已过期".to_owned(),
-                403 => "当前用户无权访问该知识库资源".to_owned(),
-                423 => "当前知识库用户已被锁定".to_owned(),
-                _ => detail.unwrap_or_else(|| format!("知识库服务返回 HTTP {status}")),
-            });
+            return Err(response_error(response).await);
         }
         Ok(response)
     }
@@ -715,14 +689,19 @@ impl YuxiClient {
         token: &str,
         thread_id: &str,
     ) -> Result<(), String> {
-        let _: Value = self
-            .delete_json(
-                base_url,
-                &format!("/api/chat/thread/{thread_id}"),
-                Some(token),
-            )
-            .await?;
-        Ok(())
+        let normalized = normalize_base_url(base_url)?;
+        let endpoint = api_url(&normalized, &format!("/api/chat/thread/{thread_id}"))?;
+        let response = self
+            .http
+            .delete(endpoint)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|error| connection_error(&error))?;
+        if response.status().is_success() || response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        Err(response_error(response).await)
     }
 
     pub async fn create_run(
@@ -888,6 +867,22 @@ impl YuxiClient {
         } else {
             Err(format!("知识库任务事件流返回 HTTP {}", response.status()))
         }
+    }
+}
+
+async fn response_error(response: Response) -> String {
+    let status = response.status();
+    let detail = response.json::<Value>().await.ok().and_then(|body| {
+        body.get("detail")
+            .or_else(|| body.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    match status.as_u16() {
+        401 => "访问凭证无效或已过期".to_owned(),
+        403 => "当前用户无权访问该知识库资源".to_owned(),
+        423 => "当前知识库用户已被锁定".to_owned(),
+        _ => detail.unwrap_or_else(|| format!("知识库服务返回 HTTP {status}")),
     }
 }
 
@@ -1684,6 +1679,40 @@ mod tests {
         assert_eq!(result.auth_status, "not_configured");
         assert_eq!(result.version.as_deref(), Some("0.7.0"));
         assert_eq!(result.connection_type, "local");
+        server.join().expect("join test server");
+    }
+
+    #[test]
+    fn deleting_an_already_missing_thread_is_idempotent() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("read test address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test request");
+            let mut request = [0_u8; 2048];
+            let length = stream.read(&mut request).expect("read request");
+            let request = String::from_utf8_lossy(&request[..length]);
+            assert!(request.starts_with("DELETE /api/chat/thread/missing-thread HTTP/1.1"));
+            assert!(request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("authorization: Bearer test-token")));
+            let body = r#"{"detail":"对话线程不存在"}"#;
+            let response = format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+
+        let client = YuxiClient::new().expect("create Yuxi client");
+        tauri::async_runtime::block_on(client.delete_thread(
+            &format!("http://{address}"),
+            "test-token",
+            "missing-thread",
+        ))
+        .expect("missing remote thread should already count as deleted");
         server.join().expect("join test server");
     }
 

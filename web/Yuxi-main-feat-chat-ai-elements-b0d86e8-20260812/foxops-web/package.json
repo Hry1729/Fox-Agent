@@ -1,0 +1,150 @@
+{
+  "name": "foxops-web",
+  "version": "0.7.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.19.0",
+    "pnpm": ">=8.8.0"
+  },
+  "scripts": {
+    "dev": "vite --open",
+    "server": "vite serve --host 0.0.0.0",
+    "build": "vue-tsc --noEmit && vite build",
+    "serve": "vite preview",
+    "lint": "eslint",
+    "fix": "eslint --fix",
+    "lint:prettier": "prettier --write \"**/*.{js,cjs,ts,json,tsx,css,less,scss,vue,html,md}\"",
+    "lint:stylelint": "stylelint  \"**/*.{css,scss,vue}\" --fix",
+    "lint:lint-staged": "lint-staged",
+    "prepare": "husky",
+    "commit": "git-cz",
+    "clean:dev": "tsx scripts/clean-dev.ts"
+  },
+  "config": {
+    "commitizen": {
+      "path": "node_modules/cz-git"
+    }
+  },
+  "lint-staged": {
+    "*.{js,ts,mjs,mts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{cjs,json,jsonc}": [
+      "prettier --write"
+    ],
+    "*.vue": [
+      "eslint --fix",
+      "stylelint --fix --allow-empty-input",
+      "prettier --write"
+    ],
+    "*.{html,htm}": [
+      "prettier --write"
+    ],
+    "*.{scss,css,less}": [
+      "stylelint --fix --allow-empty-input",
+      "prettier --write"
+    ],
+    "*.{md,mdx}": [
+      "prettier --write"
+    ],
+    "*.{yaml,yml}": [
+      "prettier --write"
+    ]
+  },
+  "dependencies": {
+    "@antv/g6": "5.1.1",
+    "@element-plus/icons-vue": "^2.3.2",
+    "@iconify/vue": "^5.0.0",
+    "@lucide/vue": "^1.24.0",
+    "@tailwindcss/vite": "^4.1.14",
+    "@vscode/markdown-it-katex": "^1.1.2",
+    "@vue/reactivity": "^3.5.21",
+    "@vueuse/core": "^13.9.0",
+    "@wangeditor/editor": "^5.1.23",
+    "@wangeditor/editor-for-vue": "next",
+    "ai": "^7.0.22",
+    "axios": "^1.12.2",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "crypto-js": "^4.2.0",
+    "dompurify": "^3.4.11",
+    "echarts": "^6.0.0",
+    "element-plus": "^2.11.2",
+    "file-saver": "^2.0.5",
+    "highlight.js": "^11.10.0",
+    "katex": "^0.17.0",
+    "lucide-vue-next": "^1.0.0",
+    "markdown-it": "^14.3.0",
+    "markmap-lib": "0.18.12",
+    "markmap-view": "0.18.12",
+    "mitt": "^3.0.1",
+    "motion-v": "^2.3.0",
+    "nanoid": "^5.1.6",
+    "nprogress": "^0.2.0",
+    "ohash": "^2.0.11",
+    "pinia": "^3.0.3",
+    "pinia-plugin-persistedstate": "^4.3.0",
+    "qrcode.vue": "^3.6.0",
+    "reka-ui": "^2.10.1",
+    "shadcn-vue": "^2.7.4",
+    "shiki": "^4.3.1",
+    "shiki-stream": "^0.1.5",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.1.14",
+    "tw-animate-css": "^1.4.0",
+    "vue": "^3.5.21",
+    "vue-draggable-plus": "^0.6.0",
+    "vue-element-plus-x": "^2.0.3",
+    "vue-i18n": "^9.14.0",
+    "vue-router": "^4.5.1",
+    "vue-stick-to-bottom": "^1.0.0",
+    "vue-stream-markdown": "1.0.1-beta.1",
+    "x-markdown-vue": "^0.0.200",
+    "xgplayer": "^3.0.20",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.4.1",
+    "@commitlint/config-conventional": "^19.4.1",
+    "@eslint/js": "^9.9.1",
+    "@iconify-json/ri": "^1.2.10",
+    "@types/node": "^24.0.5",
+    "@typescript-eslint/eslint-plugin": "^8.3.0",
+    "@typescript-eslint/parser": "^8.3.0",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "@vue/compiler-sfc": "^3.0.5",
+    "commitizen": "^4.3.0",
+    "cz-git": "^1.11.1",
+    "eslint": "^9.9.1",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-prettier": "^5.2.1",
+    "eslint-plugin-vue": "^9.27.0",
+    "globals": "^15.9.0",
+    "husky": "^9.1.5",
+    "less": "^4.6.7",
+    "lint-staged": "^15.5.2",
+    "prettier": "^3.5.3",
+    "rollup-plugin-visualizer": "^5.12.0",
+    "sass": "^1.81.0",
+    "stylelint": "^16.20.0",
+    "stylelint-config-html": "^1.1.0",
+    "stylelint-config-recess-order": "^4.6.0",
+    "stylelint-config-recommended-scss": "^14.1.0",
+    "stylelint-config-recommended-vue": "^1.5.0",
+    "stylelint-config-standard": "^36.0.1",
+    "terser": "^5.36.0",
+    "tsx": "^4.20.3",
+    "typescript": "~5.6.3",
+    "typescript-eslint": "^8.9.0",
+    "unplugin-auto-import": "^20.2.0",
+    "unplugin-element-plus": "^0.10.0",
+    "unplugin-vue-components": "^29.1.0",
+    "vite": "^7.1.5",
+    "vite-plugin-compression": "^0.5.1",
+    "vite-plugin-vue-devtools": "^7.7.6",
+    "vue-demi": "^0.14.9",
+    "vue-img-cutter": "^3.0.5",
+    "vue-tsc": "~2.1.6"
+  }
+}

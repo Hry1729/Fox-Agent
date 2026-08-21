@@ -8,10 +8,12 @@
     "start:fake": "node src/fake-runtime.mjs",
     "build:sidecar": "node scripts/build-sidecar.mjs",
     "smoke:sidecar": "node scripts/smoke-sidecar.mjs",
+    "eval:offline": "node evals/run-offline-evals.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.79.9",
-    "@earendil-works/pi-ai": "0.79.9"
+    "@earendil-works/pi-ai": "0.79.9",
+    "@earendil-works/pi-coding-agent": "0.79.9"
   }
 }

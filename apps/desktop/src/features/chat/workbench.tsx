@@ -10,10 +10,10 @@ import {
   Brain,
   Check,
   ChevronDown,
+  ChevronUp,
   ChevronRight,
   CircleStop,
   ClipboardList,
-  Code2,
   Copy,
   ExternalLink,
   File,
@@ -31,18 +31,17 @@ import {
   Library,
   ListTodo,
   LoaderCircle,
-  Maximize2,
   MessageCircleMore,
   MessageSquarePlus,
   Mic,
   Minus,
   MoreHorizontal,
-  PanelLeftClose,
-  PanelLeftOpen,
-  PanelRightClose,
-  PanelRightOpen,
+  PanelLeft,
+  PanelRight,
   Pause,
   Paperclip,
+  Pin,
+  PinOff,
   Play,
   Plus,
   Puzzle,
@@ -69,6 +68,7 @@ import { flushSync } from 'react-dom'
 import { toast } from 'sonner'
 import { BorderBeam } from 'border-beam'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
+import { selectProjectRoot, validPickedProjectFolder } from './project-access-dialog-state'
 import { Button } from '@/components/ui/button'
 import { ShinyText } from '@/components/effects/shiny-text'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -79,6 +79,7 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Sheet, SheetContent } from '@/components/ui/sheet'
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   Dialog,
   DialogContent,
@@ -97,6 +98,13 @@ import {
   DropdownMenuShortcut,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger
+} from '@/components/ui/context-menu'
 import {
   Conversation,
   ConversationAutoScroll,
@@ -165,14 +173,6 @@ import { KnowledgeResourceExplorer } from '@/features/knowledge/knowledge-resour
 import { normalizeKnowledgeSourceLocator } from '@/features/knowledge/knowledge-source-locator'
 import { Suggestion, Suggestions } from '@/components/ai-elements/suggestion'
 import {
-  Context as AIContext,
-  ContextContent as AIContextContent,
-  ContextContentBody as AIContextContentBody,
-  ContextContentFooter as AIContextContentFooter,
-  ContextContentHeader as AIContextContentHeader,
-  ContextTrigger as AIContextTrigger
-} from '@/components/ai-elements/context'
-import {
   Queue,
   QueueItem,
   QueueItemActions,
@@ -223,16 +223,21 @@ import { useYuxiUser } from '@/features/settings/use-yuxi-user'
 import { useModelService } from '@/features/settings/use-model-service'
 import { useYuxiModels } from '@/features/settings/use-yuxi-models'
 import { useAgents } from '@/features/agents/use-agents'
+import { chatSelectableAgents, normalizeAgentClassification } from '@/features/agents/agent-classification'
 import { useKnowledgeBases } from '@/features/knowledge/use-knowledge'
 import { latestMessage, runIsActive, useDesktopConversation } from '@/features/conversations/hooks/use-desktop-conversation'
 import { pendingRuntimeQuestion } from '@/features/conversations/model/pending-interactions'
 import type { RuntimeQuestion, RuntimeQuestionRequest } from '@/features/conversations/model/pending-interactions'
-import type { AgentRecord, ApprovalRecord, ArtifactRecord, AttachmentRecord, ConversationDetail, ConversationMessage, ConversationSummary, KnowledgeBaseRecord, KnowledgeBindingRecord, ModelServiceRecord, ProjectFileEntry, ProjectRecord, RunEventRecord, ToolCallRecord, YuxiModelRecord, YuxiUserRecord } from '@/features/conversations/model/types'
+import type { AgentRecord, ApprovalRecord, ArtifactRecord, AttachmentRecord, ConversationDetail, ConversationMessage, ConversationSummary, DesktopErrorDetails, KnowledgeBaseRecord, KnowledgeBindingRecord, ModelServiceRecord, ProjectFileEntry, ProjectRecord, RunEventRecord, TaskEvidenceRecord, ToolCallRecord, YuxiModelRecord, YuxiUserRecord } from '@/features/conversations/model/types'
 import type { KnowledgeSourceLocator, NavigateWorkspace, WorkspaceView } from '@/features/workspace/types'
+import { captureManagementReturnRoutes, managementExitRoute, SETTINGS_WORKSPACE_VIEWS, type ManagementReturnRoutes } from '@/features/workspace/management-navigation'
 import { idleMascots, mascotAt, mascotLibrary, workingMascots } from './mascot-library'
 import { GoalProgress } from './components/GoalProgress'
-import { useGoalProgress } from './hooks/use-goal-progress'
+import { ExpertActivationCard, ExpertBindingChip, type ExpertBindingView } from './components/ExpertBindingChip'
+import { expertErrorMessage, expertErrorPresentation, expertInteractionLocked, latestExpertToolAvailability, mergeExpertBindingsIntoTimeline, type ExpertToolAvailability } from './components/expert-binding-ui'
+import { useGoalProgress, type GoalProgressData } from './hooks/use-goal-progress'
 import type { MessageResponseProps } from '@/components/ai-elements/message-response'
+import { normalizeAssistantMarkdown } from '@/features/conversations/model/assistant-presentation'
 import { UserProfileDialog, useUserProfile } from '@/features/profile/user-profile'
 
 const AgentListPage = lazy(() => import('@/features/agents/agent-pages').then((module) => ({ default: module.AgentListPage })))
@@ -259,9 +264,10 @@ const OnboardingPage = lazy(() => import('@/features/settings/settings-pages').t
 const MessageResponse = lazy(() => import('@/components/ai-elements/message-response').then((module) => ({ default: module.MessageResponse })))
 
 function MarkdownResponse({ children, ...props }: MessageResponseProps) {
+  const normalizedChildren = typeof children === 'string' ? normalizeAssistantMarkdown(children) : children
   return (
     <Suspense fallback={<div className="fox-markdown-loading">{typeof children === 'string' ? children : ''}</div>}>
-      <MessageResponse {...props}>{children}</MessageResponse>
+      <MessageResponse {...props}>{normalizedChildren}</MessageResponse>
     </Suspense>
   )
 }
@@ -291,8 +297,8 @@ const layoutStorage = {
   rightSidebarCollapsed: 'fox.layout.rightSidebarCollapsed',
   rightWidth: 'fox.layout.rightWidth',
   theme: 'fox.theme',
-  focusMode: 'fox.focusMode',
-  terminalHeight: 'fox.layout.terminalHeight'
+  terminalHeight: 'fox.layout.terminalHeight',
+  seenChanges: 'fox.layout.seenChanges'
 } as const
 
 const terminalOutput = '\u001b[36mPS D:\\python\\projects\\Fox>\u001b[0m pnpm tauri dev\n\u001b[90mFox desktop is running on http://127.0.0.1:1421\u001b[0m'
@@ -315,8 +321,6 @@ const licenseAnswerMarkdown = `### 企业内部使用
 type RightMode = 'todo' | 'changes' | 'browser' | 'files' | 'knowledge' | 'agents'
 type ChatState = 'complete' | 'running' | 'question' | 'approval' | 'error' | 'denied'
 type AssistantMode = 'assistant' | 'knowledge'
-const settingsWorkspaceViews: WorkspaceView[] = ['settings', 'onboarding', 'settings-ai', 'settings-models', 'settings-yuxi', 'settings-projects', 'settings-conversation', 'settings-usage', 'settings-extensions', 'settings-about', 'model-service', 'service', 'skills', 'mcp', 'maintenance', 'login']
-
 function knowledgeServiceDisplayName(name?: string | null) {
   const value = name?.trim()
   if (!value || /^yuxi(?:\s*(?:service|服务))?$/i.test(value)) return '知识库服务'
@@ -326,6 +330,8 @@ function knowledgeServiceDisplayName(name?: string | null) {
 interface ConversationUsage {
   inputTokens: number
   outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
   totalTokens: number
 }
 
@@ -345,8 +351,16 @@ function latestConversationUsage(events: RunEventRecord[]): ConversationUsage {
   const usage = [...events].reverse().find((item) => item.eventType === 'usage.updated')?.event
   const inputTokens = typeof usage?.inputTokens === 'number' ? usage.inputTokens : 0
   const outputTokens = typeof usage?.outputTokens === 'number' ? usage.outputTokens : 0
+  const cacheReadTokens = typeof usage?.cacheReadTokens === 'number' ? usage.cacheReadTokens : 0
+  const cacheWriteTokens = typeof usage?.cacheWriteTokens === 'number' ? usage.cacheWriteTokens : 0
   const reportedTotal = typeof usage?.totalTokens === 'number' ? usage.totalTokens : 0
-  return { inputTokens, outputTokens, totalTokens: Math.max(reportedTotal, inputTokens + outputTokens) }
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    totalTokens: Math.max(reportedTotal, inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens),
+  }
 }
 
 function compactTokenCount(value: number) {
@@ -434,7 +448,8 @@ function WorkMascot({ busy = false, size = 'sm' }: { busy?: boolean; size?: 'sm'
   )
 }
 
-function WindowTitlebar({ onNewChat, onOpenProject, onSettings, onToggleSidebar, onToggleTerminal, onZoom }: {
+function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSettings, onToggleSidebar, onToggleTerminal, onZoom }: {
+  leftSidebarCollapsed: boolean
   onNewChat: () => void
   onOpenProject: () => void
   onSettings: () => void
@@ -487,6 +502,9 @@ function WindowTitlebar({ onNewChat, onOpenProject, onSettings, onToggleSidebar,
       <div className="fox-window-product" data-tauri-drag-region>
         <img src={mascotAssets.brand} alt="" />
         <strong>Fox</strong>
+        <div className="fox-titlebar-sidebar-controls" aria-label="侧边栏控制">
+          <button type="button" aria-label={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} title={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} aria-pressed={!leftSidebarCollapsed} onClick={onToggleSidebar}><PanelLeft /></button>
+        </div>
         <nav aria-label="应用菜单">
           <WindowMenu label="文件">
             <DropdownMenuItem onSelect={onNewChat}><MessageSquarePlus />新建对话<DropdownMenuShortcut>Ctrl N</DropdownMenuShortcut></DropdownMenuItem>
@@ -504,7 +522,7 @@ function WindowTitlebar({ onNewChat, onOpenProject, onSettings, onToggleSidebar,
             <DropdownMenuItem onSelect={() => document.execCommand('paste')}>粘贴<DropdownMenuShortcut>Ctrl V</DropdownMenuShortcut></DropdownMenuItem>
           </WindowMenu>
           <WindowMenu label="视图">
-            <DropdownMenuItem onSelect={onToggleSidebar}><PanelLeftClose />切换侧边栏<DropdownMenuShortcut>Ctrl B</DropdownMenuShortcut></DropdownMenuItem>
+            <DropdownMenuItem onSelect={onToggleSidebar}><PanelLeft />切换侧边栏<DropdownMenuShortcut>Ctrl B</DropdownMenuShortcut></DropdownMenuItem>
             <DropdownMenuItem onSelect={onToggleTerminal}><Terminal />切换终端<DropdownMenuShortcut>Ctrl J</DropdownMenuShortcut></DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onSelect={() => onZoom(0.1)}>放大<DropdownMenuShortcut>Ctrl +</DropdownMenuShortcut></DropdownMenuItem>
@@ -512,7 +530,7 @@ function WindowTitlebar({ onNewChat, onOpenProject, onSettings, onToggleSidebar,
           </WindowMenu>
           <WindowMenu label="帮助">
             <DropdownMenuItem onSelect={() => toast('Fox 文档将在帮助中心开放')}><BookOpen />Fox 文档</DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => toast('Fox 0.1.0 · 通用桌面智能体')}><Sparkles />关于 Fox</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => toast('Fox 0.1.0 · 桌面专家工作台')}><Sparkles />关于 Fox</DropdownMenuItem>
           </WindowMenu>
         </nav>
       </div>
@@ -537,14 +555,15 @@ function WindowMenu({ label, children }: { label: string; children: ReactNode })
 function Sidebar({
   collapsed,
   assistantMode,
-  onCollapse,
   onModeChange,
   onNewChat,
   onNewProjectChat,
   onAddProject,
   onOpenConversation,
   onRenameConversation,
-  onDeleteConversation,
+  onPinConversation,
+  onArchiveConversation,
+  onDeleteProject,
   onNavigate,
   onExitManagement,
   onTheme,
@@ -560,14 +579,15 @@ function Sidebar({
 }: {
   collapsed: boolean
   assistantMode: AssistantMode
-  onCollapse: () => void
   onModeChange: (mode: AssistantMode) => void
   onNewChat: () => void
   onNewProjectChat: (projectRoot?: string) => void
   onAddProject: () => void
   onOpenConversation: (conversationId?: string) => void
-  onRenameConversation: (conversation: { id: string; title: string }) => void
-  onDeleteConversation: (conversation: { id: string; title: string }) => void
+  onRenameConversation: (conversation: ConversationSummary) => void
+  onPinConversation: (conversation: ConversationSummary) => void
+  onArchiveConversation: (conversation: ConversationSummary) => void
+  onDeleteProject: (project: { name: string; root: string; items: Array<{ id: string; title: string }> }) => void
   onNavigate: NavigateWorkspace
   onExitManagement: () => void
   onTheme: () => void
@@ -587,8 +607,20 @@ function Sidebar({
   const [searchResults, setSearchResults] = useState<ConversationSummary[] | null>(null)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const [profileDialogOpen, setProfileDialogOpen] = useState(false)
+  const searchButtonRef = useRef<HTMLButtonElement | null>(null)
+  const searchPanelRef = useRef<HTMLLabelElement | null>(null)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
   const normalizedSearch = search.trim().toLocaleLowerCase()
+  useEffect(() => {
+    if (!searchOpen) return
+    const closeSearchOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node | null
+      if (!target || searchButtonRef.current?.contains(target) || searchPanelRef.current?.contains(target)) return
+      setSearchOpen(false)
+    }
+    document.addEventListener('pointerdown', closeSearchOnOutsidePointer)
+    return () => document.removeEventListener('pointerdown', closeSearchOnOutsidePointer)
+  }, [searchOpen])
   useEffect(() => {
     if (!normalizedSearch || !onSearchConversations) {
       setSearchResults(null)
@@ -607,9 +639,7 @@ function Sidebar({
     }
   }, [normalizedSearch, onSearchConversations, search])
   const conversationItems = (searchResults ?? runtimeConversations)?.map((item) => ({
-    id: item.id,
-    title: item.title,
-    projectRoot: item.projectRoot,
+    ...item,
     time: item.lastMessageAt ? new Date(item.lastMessageAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
     active: item.id === activeConversationId
   })) ?? []
@@ -654,7 +684,7 @@ function Sidebar({
   const agentViews: WorkspaceView[] = ['agents', 'agent-detail']
   const knowledgeViews: WorkspaceView[] = ['knowledge', 'knowledge-detail', 'knowledge-graph']
   const knowledgeDetailViews: WorkspaceView[] = ['knowledge-detail', 'knowledge-graph']
-  const sidebarMode = settingsWorkspaceViews.includes(activeView)
+  const sidebarMode = SETTINGS_WORKSPACE_VIEWS.includes(activeView)
     ? 'settings'
     : activeView === 'agent-detail'
       ? 'agent'
@@ -699,7 +729,7 @@ function Sidebar({
   return (
     <aside className={`fox-sidebar ${collapsed ? 'is-collapsed' : ''} ${sidebarMode !== 'chat' ? 'is-management' : ''}`}>
       <div className="fox-sidebar-title-safe">
-        {collapsed ? <IconButton label="展开侧边栏" tooltipSide="bottom" onClick={onCollapse}><PanelLeftOpen size={16} /></IconButton> : sidebarMode !== 'chat' ? <button type="button" className="fox-management-back" onClick={sidebarMode === 'agent' ? () => onNavigate('agents') : onExitManagement}><ArrowLeft size={16} /><span>返回</span></button> : <span className="fox-window-safe" />}
+        {!collapsed && sidebarMode !== 'chat' ? <button type="button" className="fox-management-back" onClick={sidebarMode === 'agent' ? () => onNavigate('agents') : onExitManagement}><ArrowLeft size={16} /><span>返回</span></button> : <span className="fox-window-safe" />}
       </div>
 
       {sidebarMode === 'chat' && !collapsed && (
@@ -713,13 +743,13 @@ function Sidebar({
 
       {sidebarMode === 'chat' ? <><div className="fox-sidebar-primary">
         <button className="fox-sidebar-command is-emphasis" onClick={onNewChat}><MessageSquarePlus size={16} /><span>新建对话</span><kbd>Ctrl N</kbd></button>
-        <button className={`fox-sidebar-command ${searchOpen ? 'is-active' : ''}`} onClick={toggleSearch}><Search size={16} /><span>搜索</span><kbd>Ctrl K</kbd></button>
-        {!collapsed && searchOpen && <label className="fox-sidebar-search fox-sidebar-global-search">
+        <button ref={searchButtonRef} className={`fox-sidebar-command ${searchOpen ? 'is-active' : ''}`} onClick={toggleSearch}><Search size={16} /><span>搜索</span><kbd>Ctrl K</kbd></button>
+        {!collapsed && searchOpen && <label ref={searchPanelRef} className="fox-sidebar-search fox-sidebar-global-search">
           <Search size={14} />
           <input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索项目和对话" />
           {search && <button type="button" onClick={() => setSearch('')} aria-label="清除"><X size={13} /></button>}
         </label>}
-        <button className={`fox-sidebar-command ${agentViews.includes(activeView) ? 'is-active' : ''}`} onClick={() => onNavigate('agents')}><Bot size={16} /><span>智能体</span></button>
+        <button className={`fox-sidebar-command ${agentViews.includes(activeView) ? 'is-active' : ''}`} onClick={() => onNavigate('agents')}><Bot size={16} /><span>专家</span></button>
         <button className={`fox-sidebar-command ${knowledgeViews.includes(activeView) ? 'is-active' : ''}`} onClick={() => onNavigate('knowledge')}><Library size={16} /><span>知识库</span></button>
       </div>
 
@@ -730,38 +760,94 @@ function Sidebar({
             {projectGroups.length ? projectGroups.map((project) => {
               const open = projectOpen[project.key] ?? true
               return <div className="fox-project-group" key={project.key}>
-                <div className={`fox-project-row ${project.items.some((item) => item.active) ? 'is-active' : ''}`}>
-                  <button type="button" className="fox-project-row-main" title={project.root} onClick={() => setProjectOpen((current) => ({ ...current, [project.key]: !open }))}>
-                    {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    <FolderOpen size={15} />
-                    <strong>{project.name}</strong>
-                  </button>
-                  <IconButton label={`在 ${project.name} 中新建对话`} className="fox-project-add" onClick={() => onNewProjectChat(project.root)}><Plus size={13} /></IconButton>
-                  <small>{project.items.length}</small>
-                </div>
-                {open && <div className="fox-project-children">{project.items.map((item) => <button type="button" key={item.id} className={`fox-project-conversation ${item.active ? 'is-active' : ''}`} onClick={() => onOpenConversation(item.id)}><FileText size={14} /><span>{item.title}</span><small>{item.time}</small></button>)}</div>}
+                <ContextMenu>
+                  <ContextMenuTrigger asChild>
+                    <div className={`fox-project-row ${project.items.some((item) => item.active) ? 'is-active' : ''}`}>
+                      <button type="button" className="fox-project-row-main" title={project.root} aria-expanded={open} onClick={() => setProjectOpen((current) => ({ ...current, [project.key]: !open }))}>
+                        {open ? <FolderOpen size={15} /> : <Folder size={15} />}
+                        <strong>{project.name}</strong>
+                      </button>
+                      <span className="fox-project-row-actions">
+                        <IconButton label={`在 ${project.name} 中新建对话`} className="fox-project-add" onClick={() => onNewProjectChat(project.root)}><Plus size={13} /></IconButton>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label={`更多 ${project.name} 项目操作`}><MoreHorizontal size={13} /></Button></DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" side="right" sideOffset={5} className="fox-project-menu">
+                            <DropdownMenuItem onSelect={() => onNewProjectChat(project.root)}><MessageSquarePlus />新建对话</DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => onNavigate('settings-projects')}><ShieldCheck />项目与权限</DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem variant="destructive" onSelect={() => onDeleteProject(project)}><Trash2 />删除项目</DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </span>
+                    </div>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent className="fox-project-menu">
+                    <ContextMenuItem onSelect={() => onNewProjectChat(project.root)}><MessageSquarePlus />新建对话</ContextMenuItem>
+                    <ContextMenuItem onSelect={() => onNavigate('settings-projects')}><ShieldCheck />项目与权限</ContextMenuItem>
+                    <ContextMenuSeparator />
+                    <ContextMenuItem variant="destructive" onSelect={() => onDeleteProject(project)}><Trash2 />删除项目</ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
+                {open && <div className="fox-project-children">{project.items.map((item) => (
+                  <ContextMenu key={item.id}>
+                    <ContextMenuTrigger asChild>
+                      <div className={`fox-sidebar-tree-row fox-project-conversation-row ${item.active ? 'is-active' : ''}`}>
+                        <button type="button" className="fox-sidebar-tree-main" onClick={() => onOpenConversation(item.id)}><span>{item.title}</span></button>
+                        <span className="fox-sidebar-row-time">{item.time}</span>
+                        <span className="fox-sidebar-row-actions">
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="更多项目对话操作"><MoreHorizontal size={13} /></Button></DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" side="right" sideOffset={5} className="fox-conversation-menu">
+                              <DropdownMenuItem onSelect={() => onPinConversation(item)}>{item.pinned ? <PinOff /> : <Pin />}{item.pinned ? '取消置顶' : '置顶对话'}</DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => onRenameConversation(item)}><FileEdit />重命名对话</DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem onSelect={() => onArchiveConversation(item)}><Archive />归档对话</DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </span>
+                      </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className="fox-conversation-menu">
+                      <ContextMenuItem onSelect={() => onPinConversation(item)}>{item.pinned ? <PinOff /> : <Pin />}{item.pinned ? '取消置顶' : '置顶对话'}</ContextMenuItem>
+                      <ContextMenuItem onSelect={() => onRenameConversation(item)}><FileEdit />重命名对话</ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem onSelect={() => onArchiveConversation(item)}><Archive />归档对话</ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
+                ))}</div>}
               </div>
             }) : <p className="fox-project-empty">暂无项目对话</p>}
           </section>
 
           <section className="fox-sidebar-section fox-conversation-section">
-            <div className="fox-section-head"><span>对话</span><span><IconButton label="新建会话" onClick={onNewChat}><Plus size={14} /></IconButton><IconButton label="归档会话"><Archive size={14} /></IconButton></span></div>
+            <div className="fox-section-head"><span>对话</span><span><IconButton label="新建会话" onClick={onNewChat}><Plus size={14} /></IconButton></span></div>
             <div className="fox-conversation-list">
               {visibleConversations.map((item) => (
-                <div key={item.id} className={`fox-sidebar-tree-row ${item.active ? 'is-active' : ''}`}>
-                  <button type="button" className="fox-sidebar-tree-main" onClick={() => onOpenConversation(item.id)}><MessageCircleMore size={14} /><span>{item.title}</span></button>
-                  <span className="fox-sidebar-row-time">{item.time}</span>
-                  <span className="fox-sidebar-row-actions">
-                    <DropdownMenu>
-                      <Tooltip><TooltipTrigger asChild><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="更多会话操作"><MoreHorizontal size={13} /></Button></DropdownMenuTrigger></TooltipTrigger><TooltipContent side="right"><p>更多会话操作</p></TooltipContent></Tooltip>
-                      <DropdownMenuContent align="end" side="right" sideOffset={5} className="fox-conversation-menu">
-                        <DropdownMenuItem onSelect={() => onRenameConversation(item)}><FileEdit />重命名</DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem variant="destructive" onSelect={() => onDeleteConversation(item)}><Trash2 />删除对话</DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </span>
-                </div>
+                <ContextMenu key={item.id}>
+                  <ContextMenuTrigger asChild>
+                    <div className={`fox-sidebar-tree-row ${item.active ? 'is-active' : ''}`}>
+                      <button type="button" className="fox-sidebar-tree-main" onClick={() => onOpenConversation(item.id)}><MessageCircleMore size={14} /><span>{item.title}</span></button>
+                      <span className="fox-sidebar-row-time">{item.time}</span>
+                      <span className="fox-sidebar-row-actions">
+                        <DropdownMenu>
+                          <Tooltip><TooltipTrigger asChild><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="更多会话操作"><MoreHorizontal size={13} /></Button></DropdownMenuTrigger></TooltipTrigger><TooltipContent side="right"><p>更多会话操作</p></TooltipContent></Tooltip>
+                          <DropdownMenuContent align="end" side="right" sideOffset={5} className="fox-conversation-menu">
+                            <DropdownMenuItem onSelect={() => onPinConversation(item)}>{item.pinned ? <PinOff /> : <Pin />}{item.pinned ? '取消置顶' : '置顶对话'}</DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => onRenameConversation(item)}><FileEdit />重命名对话</DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem onSelect={() => onArchiveConversation(item)}><Archive />归档对话</DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </span>
+                    </div>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent className="fox-conversation-menu">
+                  <ContextMenuItem onSelect={() => onPinConversation(item)}>{item.pinned ? <PinOff /> : <Pin />}{item.pinned ? '取消置顶' : '置顶对话'}</ContextMenuItem>
+                  <ContextMenuItem onSelect={() => onRenameConversation(item)}><FileEdit />重命名对话</ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem onSelect={() => onArchiveConversation(item)}><Archive />归档对话</ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
               ))}
             </div>
           </section>
@@ -789,7 +875,7 @@ function Sidebar({
               <DropdownMenuTrigger asChild>
                 <button type="button" className="fox-profile" aria-label="打开用户菜单">
                   <Avatar><AvatarImage src={profile.avatar} alt="" /><AvatarFallback>{profileInitial}</AvatarFallback></Avatar>
-                  <span className="fox-profile-copy"><strong>{profileName}</strong><small><i className={yuxiUser ? '' : 'is-muted'} />{yuxiUser ? '知识库已登录' : yuxiService?.status === 'connected' ? '知识库已连接 · 未登录' : 'Fox 本地用户'}</small></span>
+                  <span className="fox-profile-copy"><strong>{profileName}</strong></span>
                 </button>
               </DropdownMenuTrigger>
             </TooltipTrigger>
@@ -936,12 +1022,22 @@ function DeniedPrompt() {
   )
 }
 
-function errorPresentation(error?: string | null) {
+function errorPresentation(error?: string | null, details?: DesktopErrorDetails | null) {
   const detail = error?.trim() ?? ''
+  const expertError = expertErrorPresentation(details ?? error)
+  if (expertError) {
+    return {
+      title: expertError.title,
+      description: expertError.description,
+      detail: '',
+      retryable: expertError.retryable,
+      retryLabel: expertError.retryLabel,
+    }
+  }
   if (/Pi Runtime dependencies|Fox Runtime|runtime (?:script|executable)|Node\.js is required/i.test(detail)) {
     return {
       title: 'Fox 本地运行时不可用',
-      description: '本地智能体运行环境未能启动。请确认 Fox 依赖完整，并在重启应用后重试。',
+      description: '本地专家运行环境未能启动。请确认 Fox 依赖完整，并在重启应用后重试。',
       detail,
     }
   }
@@ -959,13 +1055,13 @@ function errorPresentation(error?: string | null) {
   }
 }
 
-function ErrorPrompt({ onRetry, error }: { onRetry: () => void; error?: string | null }) {
-  const presentation = errorPresentation(error)
+function ErrorPrompt({ onRetry, error, errorDetails }: { onRetry: () => void; error?: string | null; errorDetails?: DesktopErrorDetails | null }) {
+  const presentation = errorPresentation(error, errorDetails)
   return (
     <div className="fox-error-prompt" role="alert">
       <span className="fox-prompt-figure"><img src={mascotAssets.offline} alt="" /></span>
       <div><strong>{presentation.title}</strong><p>{presentation.description}</p>{presentation.detail && <small>{presentation.detail}</small>}</div>
-      <Button size="sm" variant="outline" onClick={onRetry}><RotateCcw size={14} />重试</Button>
+      {presentation.retryable !== false && <Button size="sm" variant="outline" onClick={onRetry}><RotateCcw size={14} />{presentation.retryLabel ?? '重试'}</Button>}
     </div>
   )
 }
@@ -1035,13 +1131,6 @@ type RuntimeToolStep = {
   awaitingUser: boolean
 }
 
-type RuntimeReasoningStep = {
-  id: string
-  seq: number
-  label: string
-  detail: string
-}
-
 type RuntimeSource = {
   id: string
   title: string
@@ -1072,43 +1161,6 @@ function toolActivity(tool: RuntimeToolStep) {
   if (tool.name === 'grep') return `${tool.completed ? '已搜索' : 'Fox 正在搜索'}${query ? ` ${query}` : '文件内容'}${path ? ` · ${path}` : ''}`
   if (/web|browser|search/i.test(tool.name)) return `${tool.completed ? '已搜索' : 'Fox 正在搜索'}${subject ? ` ${subject}` : '网页'}`
   return `${tool.completed ? verb : `Fox ${verb}`} ${tool.name}${subject ? ` · ${subject}` : ''}`
-}
-
-function reasoningLabel(text: string, index: number, total: number) {
-  const normalized = text.toLowerCase()
-  if (/final|respond|response|answer|consolidat|summar|organize|整理|总结|回复/.test(normalized)) return '组织最终回答'
-  if (/issue|problem|bug|risk|edge case|potential|permission|error|问题|风险|异常/.test(normalized)) return '评估潜在问题'
-  if (/inspect|check|review|examine|read|look|verify|检查|读取|确认/.test(normalized)) return '检查现有实现'
-  if (/improve|suggest|recommend|optimi|改进|优化|建议/.test(normalized)) return '整理改进方案'
-  if (index === 0) return '理解任务'
-  if (index === total - 1) return '形成处理结论'
-  return `分析任务 ${index + 1}`
-}
-
-function splitReasoningSteps(text: string, prefix: string) {
-  const paragraphs = text.split(/\n\s*\n+/).map((item) => item.trim()).filter(Boolean)
-  if (paragraphs.length === 0) return []
-
-  const maxSteps = 4
-  const targetLength = Math.max(420, Math.ceil(text.length / Math.min(maxSteps, paragraphs.length)))
-  const groups: string[] = []
-  let current = ''
-  for (const paragraph of paragraphs) {
-    if (current && current.length + paragraph.length > targetLength && groups.length < maxSteps - 1) {
-      groups.push(current)
-      current = paragraph
-    } else {
-      current = current ? `${current}\n\n${paragraph}` : paragraph
-    }
-  }
-  if (current) groups.push(current)
-
-  return groups.map((detail, index) => ({
-    id: `${prefix}-${index}`,
-    seq: Number(prefix.split('-').at(-1) ?? 0) + index / 100,
-    label: reasoningLabel(detail, index, groups.length),
-    detail,
-  }))
 }
 
 function runtimeProcess(events: RunEventRecord[]) {
@@ -1163,12 +1215,37 @@ function runtimeProcess(events: RunEventRecord[]) {
     }
     tools.set(toolCallId, current)
   }
-  const reasoning = reasoningGroups.flatMap((group) => splitReasoningSteps(group.text, `reasoning-${group.seq}`))
-  const timeline = [
-    ...reasoning.map((step) => ({ kind: 'reasoning' as const, seq: step.seq, step })),
-    ...[...tools.values()].map((tool) => ({ kind: 'tool' as const, seq: tool.seq, tool })),
-  ].sort((left, right) => left.seq - right.seq)
-  return { reasoning, tools: [...tools.values()], sources: [...sources.values()], timeline }
+  const reasoning = reasoningGroups.map((group) => group.text.trim()).filter(Boolean).join('\n\n')
+  return {
+    reasoning,
+    tools: [...tools.values()].sort((left, right) => left.seq - right.seq),
+    sources: [...sources.values()],
+  }
+}
+
+function latestRuntimeDiagnostics(events: RunEventRecord[]) {
+  const snapshot = [...events].reverse().find((item) => item.eventType === 'run.request_snapshot')?.event
+  const phase = [...events].reverse().find((item) => item.eventType === 'run.phase')?.event.phase
+  const retries = events.filter((item) => item.eventType === 'run.retrying').length
+  const compactions = events.filter((item) => item.eventType === 'context.compaction.completed').length
+  const planner = [...events].reverse().find((item) => (
+    item.eventType === 'planner.completed' || item.eventType === 'planner.failed'
+  ))
+  const toolNames = Array.isArray(snapshot?.toolNames)
+    ? snapshot.toolNames.filter((name): name is string => typeof name === 'string')
+    : []
+  return {
+    provider: typeof snapshot?.provider === 'string' ? snapshot.provider : '',
+    apiType: typeof snapshot?.apiType === 'string' ? snapshot.apiType : '',
+    baseUrl: typeof snapshot?.baseUrl === 'string' ? snapshot.baseUrl : '',
+    phase: typeof phase === 'string' ? phase : '',
+    retries,
+    compactions,
+    plannerStatus: planner?.eventType === 'planner.completed'
+      ? '计划已生成'
+      : planner?.eventType === 'planner.failed' ? '计划已回退' : '',
+    toolCount: toolNames.length,
+  }
 }
 
 function RuntimeSources({ sources, knowledgeBindings = [], onOpenSource }: { sources: RuntimeSource[]; knowledgeBindings?: KnowledgeBindingRecord[]; onOpenSource?: (source: RuntimeSource) => void }) {
@@ -1227,7 +1304,7 @@ function RuntimeAssistantMessage({ message, processEvents, running, artifacts, a
     <div className="fox-turn-anchor">
       <Message from="assistant" className="fox-message fox-assistant-message">
         <MessageContent className="fox-assistant-content">
-          <RuntimeProcess events={processEvents} running={running} />
+          <RuntimeProcess events={processEvents} running={running} answerStarted={Boolean(parsed.answer)} />
           {parsed.answer && <div className="fox-answer-body"><MarkdownResponse className="fox-answer-response">{parsed.answer}</MarkdownResponse></div>}
           <RuntimeArtifacts artifacts={artifacts} />
           <RuntimeSources sources={runtimeProcess(processEvents).sources} knowledgeBindings={knowledgeBindings} onOpenSource={onOpenSource} />
@@ -1245,9 +1322,23 @@ function RuntimeAssistantMessage({ message, processEvents, running, artifacts, a
   )
 }
 
-function RuntimeReasoningItem({ step, running }: { step: RuntimeReasoningStep; running: boolean }) {
+function RuntimeReasoningItem({ detail, running = false }: { detail: string; running?: boolean }) {
   return (
-    <ChainOfThoughtStep icon={Brain} label={<RuntimeStepDetail label={step.label} active={running}><div className="fox-chain-detail"><MarkdownResponse>{step.detail}</MarkdownResponse></div></RuntimeStepDetail>} status={running ? 'active' : 'complete'} />
+    <ChainOfThoughtStep icon={Brain} label={<RuntimeStepDetail label="深度思考" active={running}><div className="fox-chain-detail fox-reasoning-card"><MarkdownResponse>{detail}</MarkdownResponse></div></RuntimeStepDetail>} status={running ? 'active' : 'complete'} />
+  )
+}
+
+function LiveReasoning({ detail }: { detail: string }) {
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const node = scrollRef.current
+    if (node) node.scrollTop = node.scrollHeight
+  }, [detail])
+  return (
+    <div className="fox-live-reasoning" aria-label="深度思考">
+      <div className="fox-live-reasoning-head"><Brain size={14} /><span>深度思考</span><small>进行中</small></div>
+      <div ref={scrollRef} className="fox-live-reasoning-scroll"><MarkdownResponse>{detail}</MarkdownResponse></div>
+    </div>
   )
 }
 
@@ -1265,7 +1356,7 @@ function RuntimeToolItem({ tool }: { tool: RuntimeToolStep }) {
           : CircleDot
   return (
     <ChainOfThoughtStep icon={ToolIcon} label={
-      <RuntimeStepDetail label={toolActivity(tool)} active={!tool.completed} defaultOpen={tool.isError}>
+      <RuntimeStepDetail label={toolActivity(tool)} active={!tool.completed}>
         <AIToolInput className="fox-runtime-tool-detail" input={tool.input as never} />
         {tool.completed && <AIToolOutput className="fox-runtime-tool-detail" output={tool.output as never} errorText={tool.isError ? '工具执行失败' : undefined} />}
       </RuntimeStepDetail>
@@ -1273,9 +1364,9 @@ function RuntimeToolItem({ tool }: { tool: RuntimeToolStep }) {
   )
 }
 
-function RuntimeStepDetail({ label, active = false, defaultOpen = false, children }: { label: string; active?: boolean; defaultOpen?: boolean; children: ReactNode }) {
+function RuntimeStepDetail({ label, active = false, children }: { label: string; active?: boolean; children: ReactNode }) {
   return (
-    <Collapsible defaultOpen={defaultOpen} className="fox-runtime-step-detail">
+    <Collapsible defaultOpen={false} className="fox-runtime-step-detail">
       <CollapsibleTrigger className="fox-runtime-step-trigger">
         {active ? <ShinyText text={label} speed={2.05} className="fox-runtime-step-shiny" /> : <span>{label}</span>}{active && <small>处理中</small>}<ChevronRight />
       </CollapsibleTrigger>
@@ -1284,7 +1375,7 @@ function RuntimeStepDetail({ label, active = false, defaultOpen = false, childre
   )
 }
 
-function RuntimeProcess({ events, running }: { events: RunEventRecord[]; running: boolean }) {
+function RuntimeProcess({ events, running, answerStarted = false }: { events: RunEventRecord[]; running: boolean; answerStarted?: boolean }) {
   const [open, setOpen] = useState(false)
   const process = runtimeProcess(events)
   const terminalEvent = [...events].reverse().find((item) => [
@@ -1293,10 +1384,11 @@ function RuntimeProcess({ events, running }: { events: RunEventRecord[]; running
   const hasLifecycle = running || Boolean(terminalEvent) || events.some((item) => (
     item.eventType === 'run.started' || item.eventType === 'message.started'
   ))
-  const lifecycleOnly = process.timeline.length === 0 && hasLifecycle
-  const stepCount = lifecycleOnly ? 1 : process.timeline.length
-  const latestStep = process.timeline.at(-1)
-  const activeTool = latestStep?.kind === 'tool' && !latestStep.tool.completed ? latestStep.tool : undefined
+  const processStepCount = process.tools.length + (process.reasoning ? 1 : 0)
+  const lifecycleOnly = processStepCount === 0 && hasLifecycle
+  const stepCount = lifecycleOnly ? 1 : processStepCount
+  const activeTool = [...process.tools].reverse().find((tool) => !tool.completed)
+  const showLiveReasoning = running && Boolean(process.reasoning) && !answerStarted
   const lifecycleFailed = terminalEvent?.eventType === 'run.failed' || terminalEvent?.eventType === 'run.interrupted'
   const lifecycleCancelled = terminalEvent?.eventType === 'run.cancelled'
   const awaitingUser = terminalEvent?.eventType === 'run.completed'
@@ -1313,7 +1405,7 @@ function RuntimeProcess({ events, running }: { events: RunEventRecord[]; running
   const processTitle = activeTool
     ? toolActivity(activeTool)
     : running
-      ? latestStep?.kind === 'reasoning' ? `Fox ${latestStep.step.label}` : 'Fox 正在思考'
+      ? 'Fox 正在思考'
       : awaitingUser
         ? '等待你的回答'
       : lifecycleFailed
@@ -1332,11 +1424,12 @@ function RuntimeProcess({ events, running }: { events: RunEventRecord[]; running
           {running ? <ShinyText text={processTitle} speed={2.05} className="fox-runtime-status-text" /> : <span>{processTitle}</span>}
         </span>
       </ChainOfThoughtHeader>
+      {showLiveReasoning && <LiveReasoning detail={process.reasoning} />}
       <ChainOfThoughtContent className="fox-chain-of-thought-content">
-        {process.timeline.length > 0 ? process.timeline.map((item, index) => item.kind === 'reasoning'
-          ? <RuntimeReasoningItem key={item.step.id} step={item.step} running={running && index === process.timeline.length - 1 && !activeTool} />
-          : <RuntimeToolItem key={item.tool.id} tool={item.tool} />
-        ) : <ChainOfThoughtStep
+        {processStepCount > 0 ? <>
+          {process.reasoning && !showLiveReasoning && <RuntimeReasoningItem detail={process.reasoning} running={running && !activeTool} />}
+          {process.tools.map((tool) => <RuntimeToolItem key={tool.id} tool={tool} />)}
+        </> : <ChainOfThoughtStep
           className={`fox-runtime-empty-step ${running ? 'is-running' : 'is-complete'}`}
           icon={running ? LoaderCircle : awaitingUser ? CircleHelp : lifecycleFailed ? AlertTriangle : Check}
           label={lifecycleLabel}
@@ -1349,12 +1442,12 @@ function RuntimeProcess({ events, running }: { events: RunEventRecord[]; running
 
 function splitAssistantContent(content: string) {
   const reasoning: string[] = []
-  const answer = content.replace(/<think>([\s\S]*?)<\/think>|<think>([\s\S]*)$/g, (_match, closed: string | undefined, open: string | undefined) => {
+  const answer = normalizeAssistantMarkdown(content.replace(/<((?:mm:)?(?:think|thinking|analysis))>([\s\S]*?)<\/\1>|<(?:(?:mm:)?(?:think|thinking|analysis))>([\s\S]*)$|^[\s\S]*?<\/(?:(?:mm:)?(?:think|thinking|analysis))>\s*/gi, (_match, _tag: string | undefined, closed: string | undefined, open: string | undefined) => {
     const value = (closed ?? open ?? '').trim()
     if (value) reasoning.push(value)
     return ''
-  }).trim()
-  return { answer, reasoning: reasoning.join('\n\n') }
+  }).replace(/<\/(?:(?:mm:)?(?:think|thinking|analysis))>/gi, '').trim())
+  return { answer, reasoning: normalizeAssistantMarkdown(reasoning.join('\n\n')) }
 }
 
 function SentMessageAttachments({ attachments }: { attachments: AttachmentRecord[] }) {
@@ -1375,11 +1468,13 @@ function SentMessageAttachments({ attachments }: { attachments: AttachmentRecord
   </Attachments>
 }
 
-function RuntimeTimeline({ messages, attachments, artifacts, pendingMessage, events, approvals, activeRunId, activeRunModel, runtimeRunning, state, streamingText, runtimeError, assistantName = 'Fox 默认助手', hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onRetry, onResolveApproval, onOpenSource, detail }: { messages: ConversationMessage[]; attachments: AttachmentRecord[]; artifacts: ArtifactRecord[]; pendingMessage?: ConversationMessage | null; events: RunEventRecord[]; approvals: ApprovalRecord[]; activeRunId?: string; activeRunModel?: string; runtimeRunning: boolean; state: ChatState; streamingText: string; runtimeError?: string | null; assistantName?: string; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onRetry: () => void; onResolveApproval: (approvalId: string, approved: boolean) => void | Promise<boolean>; onOpenSource?: (source: RuntimeSource) => void; detail?: ConversationDetail | null }) {
+function RuntimeTimeline({ messages, attachments, artifacts, expertBindings = [], agents = [], pendingMessage, events, activeRunId, activeRunModel, runtimeRunning, state, streamingText, runtimeError, runtimeErrorDetails, assistantName = 'Fox 默认助手', hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onRetry, onRerun, onOpenSource, onViewExpert }: { messages: ConversationMessage[]; attachments: AttachmentRecord[]; artifacts: ArtifactRecord[]; expertBindings?: ExpertBindingView[]; agents?: AgentRecord[]; pendingMessage?: ConversationMessage | null; events: RunEventRecord[]; activeRunId?: string; activeRunModel?: string; runtimeRunning: boolean; state: ChatState; streamingText: string; runtimeError?: string | null; runtimeErrorDetails?: DesktopErrorDetails | null; assistantName?: string; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onRetry: () => void; onRerun: (messageId: string, prompt: string) => Promise<boolean>; onOpenSource?: (source: RuntimeSource) => void; onViewExpert?: (expertId: string) => void }) {
   const runtimeContext = useContext(ComposerRuntimeContext)
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
+  const [editingText, setEditingText] = useState('')
+  const [rerunning, setRerunning] = useState(false)
   const resolvedAssistantName = runtimeContext.assistantName ?? assistantName
   const resolvedRunModel = runtimeContext.runModel ?? activeRunModel
-  const goalProgressData = useGoalProgress(detail ?? null)
   const storedMessages = messages.filter((message) => message.role === 'user' || message.role === 'assistant')
   const pendingAlreadyStored = Boolean(pendingMessage && storedMessages.some((message) =>
     message.role === 'user' && message.content === pendingMessage.content && message.createdAt >= pendingMessage.createdAt - 3000
@@ -1405,7 +1500,42 @@ function RuntimeTimeline({ messages, attachments, artifacts, pendingMessage, eve
       updatedAt: now,
     })
   }
+  const timelineEntries = mergeExpertBindingsIntoTimeline(visibleMessages, expertBindings)
   const latestUserMessageId = [...visibleMessages].reverse().find((message) => message.role === 'user')?.id
+  useEffect(() => {
+    if (editingMessageId && editingMessageId !== latestUserMessageId) {
+      setEditingMessageId(null)
+      setEditingText('')
+    }
+  }, [editingMessageId, latestUserMessageId])
+  const beginEditing = (message: ConversationMessage) => {
+    if (runtimeRunning) return
+    setEditingMessageId(message.id)
+    setEditingText(message.content)
+  }
+  const cancelEditing = () => {
+    if (rerunning) return
+    setEditingMessageId(null)
+    setEditingText('')
+  }
+  const rerunEditedMessage = async () => {
+    const prompt = editingText.trim()
+    if (!prompt) {
+      toast.error('消息内容不能为空')
+      return
+    }
+    if (runtimeRunning || rerunning || !editingMessageId) return
+    setRerunning(true)
+    try {
+      const started = await onRerun(editingMessageId, prompt)
+      if (started) {
+        setEditingMessageId(null)
+        setEditingText('')
+      }
+    } finally {
+      setRerunning(false)
+    }
+  }
   const currentAssistantActivity = activeRunId
     ? visibleMessages.find((message) => message.role === 'assistant' && message.runId === activeRunId)
     : undefined
@@ -1415,7 +1545,6 @@ function RuntimeTimeline({ messages, attachments, artifacts, pendingMessage, eve
   const autoScrollKey = runtimeRunning
     ? [latestUserMessageId, activeRunId, currentRunLastSeq > 0 || currentAssistantActivity ? 'active' : 'waiting'].join(':')
     : latestUserMessageId
-  const pendingApprovals = approvals.filter((approval) => approval.status === 'pending')
   return (
     <Conversation className="fox-conversation">
       <ConversationAutoScroll scrollKey={autoScrollKey} />
@@ -1423,10 +1552,50 @@ function RuntimeTimeline({ messages, attachments, artifacts, pendingMessage, eve
       <ConversationContent className="fox-conversation-content" scrollClassName="fox-conversation-scroll">
         {hasEarlierMessages && <div className="fox-history-loader"><Button variant="ghost" size="sm" disabled={loadingEarlierMessages} onClick={onLoadEarlierMessages}>{loadingEarlierMessages && <LoaderCircle className="animate-spin" />}加载更早消息</Button></div>}
         <div className="fox-thread-date"><span>今天</span></div>
-        {visibleMessages.map((message) => {
+        {timelineEntries.map((entry) => {
+          if (entry.kind === 'expert') {
+            const expert = agents.find((item) => item.id === entry.binding.expertId)
+            return <ExpertActivationCard key={`expert-binding-${entry.binding.id}`} binding={entry.binding} expert={expert} onView={(expertId) => onViewExpert?.(expertId)} />
+          }
+          const message = entry.message
           if (message.role === 'user') {
             const messageAttachments = attachments.filter((attachment) => attachment.messageId === message.id)
-            return <div id={`fox-turn-${message.id}`} key={message.id} className="fox-turn-anchor" data-turn-message-id={message.id}><Message from="user" className="fox-message fox-user-message"><MessageContent className="fox-user-bubble">{message.content}</MessageContent><SentMessageAttachments attachments={messageAttachments} /><div className="fox-user-meta"><span>Fox · {message.status === 'completed' ? '已发送' : message.status === 'sending' ? '发送中' : message.status}</span><span><MessageAction tooltip="复制" onClick={() => void copyTextWithFeedback(message.content, '已复制消息')}><Copy size={13} /></MessageAction></span></div></Message></div>
+            const latest = message.id === latestUserMessageId
+            const editing = latest && editingMessageId === message.id
+            return <div id={`fox-turn-${message.id}`} key={message.id} className="fox-turn-anchor" data-turn-message-id={message.id}>
+              <Message from="user" className={`fox-message fox-user-message ${editing ? 'is-editing' : ''}`}>
+                {editing ? <MessageContent className="fox-user-edit">
+                  <textarea
+                    autoFocus
+                    aria-label="编辑最新消息"
+                    value={editingText}
+                    onChange={(event) => setEditingText(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') cancelEditing()
+                      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                        event.preventDefault()
+                        void rerunEditedMessage()
+                      }
+                    }}
+                  />
+                  <div className="fox-user-edit-actions">
+                    <Button className="fox-user-edit-cancel" variant="ghost" size="sm" disabled={rerunning} onClick={cancelEditing}>取消</Button>
+                    <Button className="fox-user-edit-send" size="sm" disabled={rerunning || !editingText.trim()} onClick={() => void rerunEditedMessage()}>
+                      {rerunning ? <LoaderCircle className="animate-spin" size={13} /> : <ArrowUp size={13} />}
+                      发送
+                    </Button>
+                  </div>
+                </MessageContent> : <MessageContent className="fox-user-bubble">{message.content}</MessageContent>}
+                <SentMessageAttachments attachments={messageAttachments} />
+                {!editing && <div className="fox-user-meta">
+                  <span>Fox · {message.status === 'completed' ? '已发送' : message.status === 'sending' ? '发送中' : message.status}</span>
+                  <span className={`fox-user-actions ${latest ? 'is-latest' : ''}`}>
+                    <MessageAction tooltip="复制" onClick={() => void copyTextWithFeedback(message.content, '已复制消息')}><Copy size={13} /></MessageAction>
+                    {latest && <MessageAction tooltip={runtimeRunning ? '运行完成后可编辑' : '编辑并重新发送'} disabled={runtimeRunning} onClick={() => beginEditing(message)}><FileEdit size={13} /></MessageAction>}
+                  </span>
+                </div>}
+              </Message>
+            </div>
           }
           const isCurrentRun = Boolean(activeRunId && message.runId === activeRunId)
           const rawContent = isCurrentRun ? streamingText || message.content : message.content
@@ -1445,23 +1614,24 @@ function RuntimeTimeline({ messages, attachments, artifacts, pendingMessage, eve
           const running = isCurrentRun && runtimeRunning
           const messageArtifacts = artifacts.filter((artifact) => Boolean(message.runId) && artifact.runId === message.runId)
           const eventModel = processEvents.find((item) => item.eventType === 'run.started' && typeof item.event.model === 'string')?.event.model as string | undefined
-          return <RuntimeAssistantMessage key={`assistant-turn-${message.runId ?? message.id}`} message={{ ...message, content: rawContent }} processEvents={processEvents} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} />
+          return <div id={`fox-turn-${message.id}`} key={`assistant-turn-${message.runId ?? message.id}`} className="fox-turn-anchor" data-turn-message-id={message.id}><RuntimeAssistantMessage message={{ ...message, content: rawContent }} processEvents={processEvents} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} /></div>
         })}
-        {goalProgressData && (
-          <div className="fox-turn-anchor" style={{ marginTop: '1rem' }}>
-            <GoalProgress data={goalProgressData} defaultExpanded={false} />
-          </div>
-        )}
-        {pendingApprovals.map((approval) => <div key={approval.id} className="fox-turn-anchor"><Message from="assistant" className="fox-message fox-assistant-message"><MessageContent className="fox-assistant-content"><RuntimeApprovalPrompt approval={approval} onResolve={onResolveApproval} /></MessageContent></Message></div>)}
-        {state === 'error' && <div className="fox-turn-anchor"><Message from="assistant" className="fox-message fox-assistant-message"><MessageContent className="fox-assistant-content"><ErrorPrompt onRetry={onRetry} error={runtimeError} /></MessageContent></Message></div>}
+        {state === 'error' && <div className="fox-turn-anchor"><Message from="assistant" className="fox-message fox-assistant-message"><MessageContent className="fox-assistant-content"><ErrorPrompt onRetry={onRetry} error={runtimeError} errorDetails={runtimeErrorDetails} /></MessageContent></Message></div>}
       </ConversationContent>
       <ConversationScrollButton className="fox-scroll-button" />
     </Conversation>
   )
 }
 
-function Timeline({ empty, state, prompt, mascotSrc, mascotActive = false, runtimeMessages, runtimeAttachments, runtimeArtifacts, pendingMessage, runtimeEvents, runtimeApprovals, runtimeRunId, runtimeRunModel, runtimeRunning = false, runtimeReply, runtimeError, assistantName, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onApprove, onDeny, onRetry, onAnswer, onStart, onResolveApproval, onOpenSource, detail }: { empty: boolean; state: ChatState; prompt: string; mascotSrc?: string; mascotActive?: boolean; runtimeMessages?: ConversationMessage[]; runtimeAttachments?: AttachmentRecord[]; runtimeArtifacts?: ArtifactRecord[]; pendingMessage?: ConversationMessage | null; runtimeEvents?: RunEventRecord[]; runtimeApprovals?: ApprovalRecord[]; runtimeRunId?: string; runtimeRunModel?: string; runtimeRunning?: boolean; runtimeReply?: string; runtimeError?: string | null; assistantName?: string; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onApprove: () => void; onDeny: () => void; onRetry: () => void; onAnswer: (answer: string) => void; onStart: (suggestion: string) => void; onResolveApproval: (approvalId: string, approved: boolean) => void | Promise<boolean>; onOpenSource?: (source: RuntimeSource) => void; detail?: ConversationDetail | null }) {
+function Timeline({ empty, state, prompt, mascotSrc, mascotActive = false, openingSuggestions, runtimeMessages, runtimeAttachments, runtimeArtifacts, expertBindings, agents, pendingMessage, runtimeEvents, runtimeRunId, runtimeRunModel, runtimeRunning = false, runtimeReply, runtimeError, runtimeErrorDetails, assistantName, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onApprove, onDeny, onRetry, onRerun, onAnswer, onStart, onOpenSource, onViewExpert }: { empty: boolean; state: ChatState; prompt: string; mascotSrc?: string; mascotActive?: boolean; openingSuggestions?: string[]; runtimeMessages?: ConversationMessage[]; runtimeAttachments?: AttachmentRecord[]; runtimeArtifacts?: ArtifactRecord[]; expertBindings?: ExpertBindingView[]; agents?: AgentRecord[]; pendingMessage?: ConversationMessage | null; runtimeEvents?: RunEventRecord[]; runtimeRunId?: string; runtimeRunModel?: string; runtimeRunning?: boolean; runtimeReply?: string; runtimeError?: string | null; runtimeErrorDetails?: DesktopErrorDetails | null; assistantName?: string; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onApprove: () => void; onDeny: () => void; onRetry: () => void; onRerun: (messageId: string, prompt: string) => Promise<boolean>; onAnswer: (answer: string) => void; onStart: (suggestion: string) => void; onOpenSource?: (source: RuntimeSource) => void; onViewExpert?: (expertId: string) => void }) {
   const running = state === 'running'
+  const starterSuggestions = openingSuggestions?.map((item) => item.trim()).filter(Boolean).slice(0, 6)
+  const visibleSuggestions = starterSuggestions?.length ? starterSuggestions : [
+    '整理这个项目中的文档',
+    '从知识库查找相关资料',
+    '读取一个文件并帮我分析',
+    '帮我规划并完成一个任务',
+  ]
 
   if (empty) {
     return (
@@ -1472,17 +1642,14 @@ function Timeline({ empty, state, prompt, mascotSrc, mascotActive = false, runti
             <div className="fox-empty-heading-copy"><h2>今天想一起做点什么？</h2><p>Fox 可以和你对话、处理本地文件，也可以从知识库中检索资料。</p></div>
           </div>
           <Suggestions className="fox-starter-suggestions">
-            <Suggestion suggestion="整理这个项目中的文档" onClick={onStart} />
-            <Suggestion suggestion="从知识库查找相关资料" onClick={onStart} />
-            <Suggestion suggestion="读取一个文件并帮我分析" onClick={onStart} />
-            <Suggestion suggestion="帮我规划并完成一个任务" onClick={onStart} />
+            {visibleSuggestions.map((suggestion) => <Suggestion key={suggestion} suggestion={suggestion} onClick={onStart} />)}
           </Suggestions>
         </ConversationEmptyState>
       </Conversation>
     )
   }
   if (runtimeMessages) {
-    return <RuntimeTimeline messages={runtimeMessages} attachments={runtimeAttachments ?? []} artifacts={runtimeArtifacts ?? []} pendingMessage={pendingMessage} events={runtimeEvents ?? []} approvals={runtimeApprovals ?? []} activeRunId={runtimeRunId} activeRunModel={runtimeRunModel} runtimeRunning={runtimeRunning} state={state} streamingText={runtimeReply ?? ''} runtimeError={runtimeError} assistantName={assistantName} hasEarlierMessages={hasEarlierMessages} loadingEarlierMessages={loadingEarlierMessages} onLoadEarlierMessages={onLoadEarlierMessages} onRetry={onRetry} onResolveApproval={onResolveApproval} onOpenSource={onOpenSource} detail={detail} />
+    return <RuntimeTimeline messages={runtimeMessages} attachments={runtimeAttachments ?? []} artifacts={runtimeArtifacts ?? []} expertBindings={expertBindings} agents={agents} pendingMessage={pendingMessage} events={runtimeEvents ?? []} activeRunId={runtimeRunId} activeRunModel={runtimeRunModel} runtimeRunning={runtimeRunning} state={state} streamingText={runtimeReply ?? ''} runtimeError={runtimeError} runtimeErrorDetails={runtimeErrorDetails} assistantName={assistantName} hasEarlierMessages={hasEarlierMessages} loadingEarlierMessages={loadingEarlierMessages} onLoadEarlierMessages={onLoadEarlierMessages} onRetry={onRetry} onRerun={onRerun} onOpenSource={onOpenSource} onViewExpert={onViewExpert} />
   }
   return (
     <Conversation className="fox-conversation">
@@ -1498,7 +1665,7 @@ function Timeline({ empty, state, prompt, mascotSrc, mascotActive = false, runti
         <Message from="assistant" className="fox-message fox-assistant-message">
           <MessageContent className="fox-assistant-content">
             {(state === 'running' || state === 'complete') && <AssistantProcess running={running} />}
-            {state === 'question' ? <QuestionPrompt onAnswer={onAnswer} /> : state === 'approval' ? <ApprovalPrompt onApprove={onApprove} onDeny={onDeny} /> : state === 'error' ? <ErrorPrompt onRetry={onRetry} /> : state === 'denied' ? <DeniedPrompt /> : running ? (
+            {state === 'question' ? null : state === 'error' ? <ErrorPrompt onRetry={onRetry} /> : state === 'denied' ? <DeniedPrompt /> : state === 'approval' ? null : running ? (
               <div className="fox-live-response"><WorkMascot busy /><ShinyText text="正在连接知识库并整理结果" speed={2.05} className="fox-runtime-status-text" /><i><b /><b /><b /></i></div>
             ) : <>
               <div className="fox-answer-body">
@@ -1647,33 +1814,97 @@ const goalStateCopy: Record<ChatState, { label: string; detail: string; time: st
   denied: { label: '已取消', detail: '已取消本次写入，工作区没有变更', time: '刚刚' }
 }
 
-function GoalFloater({ chatState }: { chatState: ChatState }) {
-  const [paused, setPaused] = useState(false)
-  const goalState = paused ? { label: '已暂停', detail: '目标已暂停，继续后会回到当前任务', time: '暂停中' } : goalStateCopy[chatState]
+function formatGoalElapsed(start: string, end?: string | null) {
+  const startTime = Date.parse(start)
+  const endTime = end ? Date.parse(end) : Date.now()
+  if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) return ''
+  const seconds = Math.max(0, Math.floor((endTime - startTime) / 1000))
+  if (seconds < 60) return `${seconds}秒`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}分钟`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}小时 ${String(minutes % 60).padStart(2, '0')}分`
+}
 
+function isFileChangeTool(toolName: string) {
+  return toolName === 'write_file' || toolName === 'edit_file'
+}
+
+function readStoredSeenChanges() {
+  if (typeof window === 'undefined') return {} as Record<string, number>
+  try {
+    const value: unknown = JSON.parse(window.localStorage.getItem(layoutStorage.seenChanges) ?? '{}')
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+    return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, number] => Number.isFinite(entry[1]) && entry[1] >= 0))
+  } catch {
+    return {}
+  }
+}
+
+function GoalFloater({ chatState, data, onDelete, onRunningChange, onEvidenceClick, onResolveConfirmation }: { chatState: ChatState; data?: GoalProgressData | null; onDelete?: (goalId: string) => Promise<boolean> | void; onRunningChange?: (goalId: string, expectedVersion: number, running: boolean) => Promise<boolean> | void; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onResolveConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean> | void }) {
+  const [open, setOpen] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [changingRunning, setChangingRunning] = useState(false)
+  const [, setClock] = useState(0)
+  useEffect(() => {
+    if (!data || !['active', 'blocked'].includes(data.goal.status)) return
+    const timer = window.setInterval(() => setClock((value) => value + 1), 1000)
+    return () => window.clearInterval(timer)
+  }, [data?.goal.id, data?.goal.status])
+  const visualState = data?.goal.status === 'active'
+    ? 'running'
+    : data?.goal.status === 'blocked'
+      ? 'paused'
+      : data?.goal.status === 'completed'
+        ? 'complete'
+        : data?.goal.status === 'proposed'
+          ? 'question'
+          : chatState
   return (
-    <div className={`fox-goal-floater is-${paused ? 'paused' : chatState}`}>
-      <span className="fox-goal-icon"><Target size={15} /></span>
-      <span className="fox-goal-copy">
-        <span><strong>当前目标</strong><Badge>{goalState.label}</Badge></span>
-        <small>{goalState.detail}</small>
-      </span>
-      <span className="fox-goal-time">{goalState.time}</span>
-      <span className="fox-goal-actions">
-        <IconButton label="编辑目标"><FileEdit size={13} /></IconButton>
-        <IconButton label={paused ? '继续目标' : '暂停目标'} onClick={() => setPaused(!paused)}>{paused ? <Play size={13} /> : <Pause size={13} />}</IconButton>
-        <IconButton label="清除目标"><Trash2 size={13} /></IconButton>
-      </span>
-    </div>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverAnchor asChild>
+        <div className={`fox-goal-floater is-${visualState}`}>
+          <PopoverTrigger asChild>
+            <button type="button" className="fox-goal-trigger" aria-label={open ? '收起当前目标详情' : '打开当前目标详情'}>
+              <span className="fox-goal-icon"><Target size={14} /></span>
+              <strong>{data?.goal.title || goalStateCopy[chatState].label}</strong>
+              {data && <span className="fox-goal-time">{formatGoalElapsed(data.goal.createdAt, ['completed', 'cancelled'].includes(data.goal.status) ? data.goal.completedAt ?? data.goal.updatedAt : null)}</span>}
+            </button>
+          </PopoverTrigger>
+          {data && onRunningChange && ['active', 'blocked'].includes(data.goal.status) && <button type="button" className="fox-goal-running" disabled={changingRunning} aria-label={data.goal.status === 'active' ? '暂停目标并停止当前运行' : '继续目标并唤醒专家'} title={data.goal.status === 'active' ? '暂停目标并停止当前运行' : '继续目标并唤醒专家'} onClick={async () => {
+            setChangingRunning(true)
+            const changed = await onRunningChange(data.goal.id, data.goal.version, data.goal.status !== 'active')
+            setChangingRunning(false)
+            if (!changed) toast.error('目标状态更新失败')
+          }}>{changingRunning ? <LoaderCircle className="animate-spin" size={13} /> : data.goal.status === 'active' ? <Pause size={13} /> : <Play size={13} />}</button>}
+          <button type="button" className="fox-goal-expand" aria-label={open ? '收起当前目标详情' : '打开当前目标详情'} title={open ? '收起' : '展开'} onClick={() => setOpen((value) => !value)}>{open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button>
+          {data && onDelete && <button type="button" className="fox-goal-delete" disabled={deleting} aria-label="删除目标" title="删除目标" onClick={async () => {
+            setDeleting(true)
+            const deleted = await onDelete(data.goal.id)
+            setDeleting(false)
+            if (deleted) {
+              setOpen(false)
+              toast.success('目标已删除')
+            } else {
+              toast.error('目标删除失败，请先停止当前生成后重试')
+            }
+          }}><Trash2 size={13} /></button>}
+        </div>
+      </PopoverAnchor>
+      {data && <PopoverContent align="start" side="top" sideOffset={8} className="fox-goal-popover">
+        <GoalProgress data={data} defaultExpanded onEvidenceClick={onEvidenceClick} onResolveConfirmation={onResolveConfirmation} />
+      </PopoverContent>}
+    </Popover>
   )
 }
 
-function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, centered = false, runtimeControlled = false, projectRoot, projectPermissionMode, activeAgent, agents = [], modelService, runtimeCapabilities, yuxiModels = [], usage, knowledgeBindings = [], questionRequest, mascotSrc, mascotActive = false, onProject, onKnowledge, onAgentChange, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onStatusChange, onCancel }: { resetKey: number; suggestedPrompt?: string; chatState: ChatState; showGoal?: boolean; centered?: boolean; runtimeControlled?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; usage?: ConversationUsage; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; mascotSrc?: string; mascotActive?: boolean; onProject?: () => void; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => void | Promise<void> }) {
+function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, centered = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], usage, knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], mascotSrc, mascotActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onDeleteGoal, onGoalRunningChange, onEvidenceClick, onStatusChange, onCancel }: { resetKey: number; suggestedPrompt?: string; chatState: ChatState; showGoal?: boolean; centered?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; usage?: ConversationUsage; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; mascotSrc?: string; mascotActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, approved: boolean) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onDeleteGoal?: (goalId: string) => Promise<boolean>; onGoalRunningChange?: (goalId: string, expectedVersion: number, running: boolean) => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => void | Promise<void> }) {
   const runtimeContext = useContext(ComposerRuntimeContext)
   const activeQuestionRequest = questionRequest ?? runtimeContext.questionRequest
   const submitQuestion = onSubmitQuestion ?? runtimeContext.onSubmitQuestion
   const activeKnowledgeBindings = knowledgeBindings.length ? knowledgeBindings : runtimeContext.knowledgeBindings
   const enabledKnowledgeBindings = activeKnowledgeBindings.filter((binding) => binding.enabled !== false)
+  const selectableAgents = chatSelectableAgents(agents)
   const openKnowledge = onKnowledge ?? runtimeContext.onKnowledge
   const [status, setStatus] = useState<'ready' | 'streaming'>('ready')
   const [focused, setFocused] = useState(false)
@@ -1696,6 +1927,7 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
     : modelService?.modelId ?? activeAgent?.defaultModel ?? '未配置模型'
   const [model, setModel] = useState(defaultModel)
   const [draft, setDraft] = useState('')
+  const [questionFreeform, setQuestionFreeform] = useState('')
   const [questionSelections, setQuestionSelections] = useState<Record<string, string[]>>({})
   const [questionOtherAnswers, setQuestionOtherAnswers] = useState<Record<string, string>>({})
   const [commandOpen, setCommandOpen] = useState(false)
@@ -1727,6 +1959,7 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
   useEffect(() => {
     setQuestionSelections({})
     setQuestionOtherAnswers({})
+    setQuestionFreeform('')
     questionSubmittingRef.current = false
     if (activeQuestionRequest) setStatus('ready')
   }, [activeQuestionRequest?.runId])
@@ -1822,15 +2055,47 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
     return { answers, text: lines.join('\n') }
   }
 
+  const submitQuestionAnswer = async () => {
+    if (!activeQuestionRequest || questionSubmittingRef.current) return
+    const answer = buildQuestionAnswer(questionFreeform)
+    if (!answer) {
+      toast.error('请先完成需要补充的事项')
+      return
+    }
+    questionSubmittingRef.current = true
+    setStatus('streaming')
+    const submitted = await submitQuestion?.(answer.text, answer.answers)
+    if (!submitted) {
+      questionSubmittingRef.current = false
+      setStatus('ready')
+      return
+    }
+    setQuestionFreeform('')
+    setQuestionSelections({})
+    setQuestionOtherAnswers({})
+    onStatusChange?.('streaming')
+  }
+
+  const pendingApprovals = runtimeApprovals.filter((approval) => approval.status === 'pending')
+  const demoApprovalPending = !runtimeControlled && chatState === 'approval' && Boolean(onApprove && onDeny)
+  const demoQuestionPending = !runtimeControlled && chatState === 'question' && Boolean(onAnswer)
+  const goalConfirmationPending = goalProgressData?.goal.status === 'proposed' && Boolean(onResolveWorkModeConfirmation)
+  const decisionPending = demoApprovalPending || demoQuestionPending || pendingApprovals.length > 0 || Boolean(activeQuestionRequest) || goalConfirmationPending
+
   return (
     <div ref={composerRef} className={`fox-composer-wrap ${centered ? 'is-empty' : ''}`}>
-      {showGoal && <GoalFloater chatState={chatState} />}
-      {mascotSrc && <div className={`fox-composer-mascot ${mascotActive ? 'is-active' : ''}`} aria-hidden="true"><img key={mascotSrc} src={mascotSrc} alt="" /></div>}
-      <Collapsible open={Boolean(activeQuestionRequest)}>
-        <CollapsibleContent className="fox-question-drawer">
-          {activeQuestionRequest && <div className="fox-question-drawer-content">
+      {(showGoal || goalProgressData) && <GoalFloater chatState={chatState} data={goalProgressData} onDelete={onDeleteGoal} onRunningChange={onGoalRunningChange} onEvidenceClick={onEvidenceClick} onResolveConfirmation={onResolveWorkModeConfirmation} />}
+      <div ref={promptRef} className={`fox-prompt-shell ${decisionPending ? 'is-decision' : ''}`} onFocusCapture={() => setFocused(true)} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false) }}>
+        {mascotSrc && <div className={`fox-composer-mascot ${mascotActive ? 'is-active' : ''}`} aria-hidden="true"><img key={mascotSrc} src={mascotSrc} alt="" /></div>}
+        {decisionPending ? <div className="fox-decision-card">
+          {demoApprovalPending && onApprove && onDeny && <ApprovalPrompt onApprove={onApprove} onDeny={onDeny} />}
+          {pendingApprovals.length > 0 && onResolveApproval && <div className="fox-decision-approval-list">
+            {pendingApprovals.map((approval) => <RuntimeApprovalPrompt key={approval.id} approval={approval} onResolve={onResolveApproval} />)}
+          </div>}
+          {pendingApprovals.length === 0 && !demoApprovalPending && demoQuestionPending && onAnswer && <QuestionPrompt onAnswer={onAnswer} />}
+          {pendingApprovals.length === 0 && !demoApprovalPending && !demoQuestionPending && activeQuestionRequest && <div className="fox-question-decision-content">
             <header><span><CircleHelp size={15} /></span><div><strong>需要你补充一点信息</strong><small>回答后 Fox 会继续刚才的任务</small></div></header>
-            <div className="fox-question-drawer-list">
+            <div className="fox-question-decision-list">
               {activeQuestionRequest.questions.map((question, index) => isConfirmationQuestion(question) ? (
                 <Confirmation key={question.questionId} approval={{ id: question.questionId }} state="approval-requested" className="fox-question-confirmation">
                   <ConfirmationRequest>
@@ -1850,12 +2115,15 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
                 </section>
               ))}
             </div>
-            {activeQuestionRequest.questions.some((question) => question.allowOther) && <p>也可以直接在下方输入框补充自己的答案。</p>}
+            <div className="fox-question-decision-actions">
+              {activeQuestionRequest.questions.length === 1 && activeQuestionRequest.questions[0]?.allowOther && <Input disabled={questionSubmitting} value={questionFreeform} onChange={(event) => setQuestionFreeform(event.currentTarget.value)} placeholder="也可以输入自己的答案" />}
+              <Button disabled={questionSubmitting} onClick={() => void submitQuestionAnswer()}>{questionSubmitting ? '正在提交…' : '确认并继续'}</Button>
+            </div>
           </div>}
-        </CollapsibleContent>
-      </Collapsible>
-      <div ref={promptRef} className="fox-prompt-shell" onFocusCapture={() => setFocused(true)} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false) }}>
-        <BorderBeam
+          {pendingApprovals.length === 0 && !demoApprovalPending && !demoQuestionPending && !activeQuestionRequest && goalConfirmationPending && goalProgressData && <div className="fox-goal-decision-content">
+            <GoalProgress data={goalProgressData} defaultExpanded={false} onEvidenceClick={onEvidenceClick} onResolveConfirmation={onResolveWorkModeConfirmation} />
+          </div>}
+        </div> : <BorderBeam
           active={centered && focused}
           borderRadius={24}
           brightness={1.06}
@@ -1882,11 +2150,13 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
             else toast.error('不支持这个附件格式')
           }}
           onSubmitStart={({ text, files }) => {
+            if (runtimeInitializing) return
             const prompt = text.trim() || (files.length ? '请分析这些附件' : '')
             if (!prompt && !activeQuestionRequest) return
             if (!activeQuestionRequest) flushSync(() => onPromptCommit?.(prompt))
           }}
           onSubmit={async ({ text, files: submittedFiles }) => {
+          if (runtimeInitializing) return
           if (activeQuestionRequest) {
             if (questionSubmittingRef.current) return
             const answer = buildQuestionAnswer(text)
@@ -1983,48 +2253,32 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
               <PromptInputActionMenuContent className="fox-add-menu">
                 <PromptInputActionAddAttachments label="添加文件" />
                 {supportsImageInput && <PromptInputActionAddAttachments label="添加图片" />}
+                <PromptInputActionMenuItem disabled={!runtimeControlled} onSelect={() => onProject?.()}><FolderOpen />{projectRoot ? '更换项目' : '选择项目'}</PromptInputActionMenuItem>
                 <PromptInputActionMenuItem onSelect={openKnowledge}><Library />{enabledKnowledgeBindings.length ? `知识库（已选 ${enabledKnowledgeBindings.length}）` : '选择知识库'}</PromptInputActionMenuItem>
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
-            <PromptInputSelect value={projectPermissionMode ?? 'read_only'} onValueChange={() => onProject?.()} disabled={!runtimeControlled}>
-              <PromptInputSelectTrigger className="fox-execution-control"><Terminal size={14} /><PromptInputSelectValue /></PromptInputSelectTrigger>
-              <PromptInputSelectContent>
-                <PromptInputSelectItem value="ask">执行前询问</PromptInputSelectItem>
-                <PromptInputSelectItem value="allow">自动执行</PromptInputSelectItem>
-                <PromptInputSelectItem value="read_only">只读模式</PromptInputSelectItem>
-              </PromptInputSelectContent>
-            </PromptInputSelect>
+            <PromptInputActionMenu>
+              <PromptInputActionMenuTrigger className="fox-execution-control" disabled={!runtimeControlled} tooltip="执行方式"><Terminal size={14} /><span>{{ ask: '执行前询问', allow: '自动执行', read_only: '只读模式' }[projectPermissionMode ?? 'ask']}</span><ChevronDown size={13} /></PromptInputActionMenuTrigger>
+              <PromptInputActionMenuContent className="fox-add-menu fox-execution-menu">
+                {([['ask', '执行前询问'], ['allow', '自动执行'], ['read_only', '只读模式']] as const).map(([value, label]) => (
+                  <PromptInputActionMenuItem key={value} onSelect={() => void onPermissionModeChange?.(value)}><Terminal /><span>{label}</span>{(projectPermissionMode ?? 'ask') === value && <Check className="fox-menu-check" />}</PromptInputActionMenuItem>
+                ))}
+              </PromptInputActionMenuContent>
+            </PromptInputActionMenu>
+            {activeExpert && onViewExpert && onChangeExpert && onRemoveExpert && <ExpertBindingChip expert={activeExpert} readOnly={expertReadOnly} toolAvailability={expertToolAvailability} onView={onViewExpert} onChange={onChangeExpert} onRemove={onRemoveExpert} />}
           </PromptInputTools>
           <div className="fox-composer-submit">
-            <AIContext usedTokens={usage?.totalTokens ?? 0} maxTokens={modelService?.contextWindow ?? 1}>
-              <AIContextTrigger>
-                <button type="button" className="fox-context-capacity" aria-label={`上下文已使用 ${Math.min(100, Math.round(((usage?.totalTokens ?? 0) / Math.max(1, modelService?.contextWindow ?? 1)) * 100))}%`} style={{ '--fox-context-used': `${Math.min(100, Math.round(((usage?.totalTokens ?? 0) / Math.max(1, modelService?.contextWindow ?? 1)) * 100))}%` } as React.CSSProperties}><span /></button>
-              </AIContextTrigger>
-              <AIContextContent side="top" align="end" sideOffset={10} className="fox-context-popover">
-                <AIContextContentHeader />
-                <AIContextContentBody className="fox-context-breakdown">
-                  <div><span>输入</span><strong>{compactTokenCount(usage?.inputTokens ?? 0)} tokens</strong></div>
-                  <div><span>输出</span><strong>{compactTokenCount(usage?.outputTokens ?? 0)} tokens</strong></div>
-                  <div><span>可用</span><strong>{compactTokenCount(Math.max(0, (modelService?.contextWindow ?? 0) - (usage?.totalTokens ?? 0)))} tokens</strong></div>
-                </AIContextContentBody>
-                <AIContextContentFooter className="fox-context-popover-footer">
-                  <span>{model}</span><span>{Math.min(100, Math.round(((usage?.totalTokens ?? 0) / Math.max(1, modelService?.contextWindow ?? 1)) * 100))}%</span>
-                </AIContextContentFooter>
-              </AIContextContent>
-            </AIContext>
-            {supportsDynamicModelSwitch ? <PromptInputSelect value={model} onValueChange={setModel} disabled={modelOptions.length === 0}>
-            <PromptInputSelectTrigger className="fox-model-control"><PromptInputSelectValue /></PromptInputSelectTrigger>
-              <PromptInputSelectContent>{modelOptions.length ? modelOptions.map((item) => <PromptInputSelectItem key={item.spec} value={item.spec}>{item.displayName || item.modelId}</PromptInputSelectItem>) : <PromptInputSelectItem value={model}>{model}</PromptInputSelectItem>}</PromptInputSelectContent>
-            </PromptInputSelect> : <span className="fox-model-control fox-model-static" title="当前 Runtime 不支持会话中动态切换模型">{model}</span>}
             <PromptInputSelect value={activeAgent?.id ?? ''} onValueChange={(value) => value !== activeAgent?.id && onAgentChange?.(value)} disabled={!activeAgent}>
               <PromptInputSelectTrigger className="fox-agent-control"><Sparkles size={14} /><PromptInputSelectValue /></PromptInputSelectTrigger>
-              <PromptInputSelectContent>
-                {agents.map((item) => <PromptInputSelectItem key={item.id} value={item.id} disabled={!item.available}>{item.name}</PromptInputSelectItem>)}
+              <PromptInputSelectContent position="popper" side="top" align="end" sideOffset={6}>
+                {selectableAgents.map((item) => <PromptInputSelectItem key={item.id} value={item.id} disabled={!item.available}>{item.name}</PromptInputSelectItem>)}
               </PromptInputSelectContent>
             </PromptInputSelect>
             {voiceEnabled && <PromptInputButton className="fox-voice-button" tooltip="语音输入"><Mic size={17} /></PromptInputButton>}
             <PromptInputSubmit
               status={status}
+              disabled={runtimeInitializing && status === 'ready'}
+              title={runtimeInitializing ? '正在准备默认专家' : undefined}
               onStop={() => {
                 if (submitTimer.current !== null) {
                   window.clearTimeout(submitTimer.current)
@@ -2036,59 +2290,14 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
               }}
               className="fox-send-button"
             >
-              {status === 'streaming' ? <CircleStop size={17} /> : <ArrowUp size={18} />}
+              {runtimeInitializing ? <LoaderCircle className="animate-spin" size={17} /> : status === 'streaming' ? <CircleStop size={17} /> : <ArrowUp size={18} />}
             </PromptInputSubmit>
           </div>
         </PromptInputFooter>
         </PromptInput>
-        </BorderBeam>
+        </BorderBeam>}
       </div>
-      <div className="fox-composer-meta"><span><i />{projectRoot ? `已授权 · ${projectRoot}` : '未授权项目目录'} · 知识库可选</span><span>{compactTokenCount(usage?.totalTokens ?? 0)} tokens · 上下文 {Math.min(100, Math.round(((usage?.totalTokens ?? 0) / Math.max(1, modelService?.contextWindow ?? 1)) * 100))}%</span><span>Fox 可能会出错，请核对重要信息。</span></div>
     </div>
-  )
-}
-
-function ProjectAccessDialog({ open, currentRoot, projects, busy, browsing, error, onOpenChange, onBrowse, onConfirm }: { open: boolean; currentRoot?: string | null; projects: ProjectRecord[]; busy: boolean; browsing: boolean; error?: string | null; onOpenChange: (open: boolean) => void; onBrowse: () => Promise<string | null>; onConfirm: (path: string, permissionMode: ProjectRecord['permissionMode']) => void }) {
-  const [path, setPath] = useState(currentRoot ?? '')
-  const currentProject = projects.find((project) => project.rootPath === currentRoot)
-  const storedDefaultPermission = typeof window === 'undefined'
-    ? 'ask'
-    : window.localStorage.getItem('fox.preferences.defaultPermission')
-  const defaultPermission = storedDefaultPermission === 'read_only' || storedDefaultPermission === 'allow'
-    ? storedDefaultPermission
-    : 'ask'
-  const [permissionMode, setPermissionMode] = useState<ProjectRecord['permissionMode']>(currentProject?.permissionMode ?? defaultPermission)
-
-  useEffect(() => {
-    if (!open) return
-    const project = projects.find((item) => item.rootPath === currentRoot)
-    setPath(currentRoot ?? '')
-    setPermissionMode(project?.permissionMode ?? defaultPermission)
-  }, [currentRoot, defaultPermission, open, projects])
-
-  const selectProject = (project: ProjectRecord) => {
-    setPath(project.rootPath)
-    setPermissionMode(project.permissionMode)
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="fox-project-dialog">
-        <DialogHeader>
-          <DialogTitle>授权项目文件夹</DialogTitle>
-          <DialogDescription>Fox 会把此目录加入当前对话草稿；发送第一条消息后才会创建并保存会话。所有文件工具都受项目边界和所选权限模式约束。</DialogDescription>
-        </DialogHeader>
-        {projects.length > 0 && <div className="fox-project-dialog-existing"><span>已有项目</span><div>{projects.map((project) => <button type="button" key={project.id} className={path === project.rootPath ? 'is-selected' : ''} onClick={() => selectProject(project)}><FolderOpen size={14} /><span><strong>{project.name}</strong><small>{project.rootPath}</small></span><Badge variant="outline">{{ read_only: '只读', ask: '询问', allow: '允许' }[project.permissionMode]}</Badge></button>)}</div></div>}
-        <label><span>本机文件夹路径</span><div className="fox-project-path-control"><Input autoFocus value={path} onChange={(event) => setPath(event.target.value)} placeholder="D:\\projects\\my-project" onKeyDown={(event) => { if (event.key === 'Enter' && path.trim()) onConfirm(path.trim(), permissionMode) }} /><Button type="button" variant="outline" disabled={browsing} onClick={() => void onBrowse().then((selected) => selected && setPath(selected))}>{browsing ? <LoaderCircle className="animate-spin" /> : <FolderOpen />}浏览</Button></div></label>
-        <div className="fox-project-dialog-permissions"><span>执行方式</span><div>{([
-          ['read_only', '只读', '只允许读取、搜索和分析'],
-          ['ask', '询问', '写入或执行前请求批准'],
-          ['allow', '允许', '在授权范围内自动执行']
-        ] as const).map(([value, label, description]) => <button type="button" key={value} className={permissionMode === value ? 'is-selected' : ''} onClick={() => setPermissionMode(value)}><strong>{label}</strong><small>{description}</small></button>)}</div><p>当前版本尚未注册写入和命令工具；“询问”和“允许”会先保存策略，待安全执行链路启用后生效。</p></div>
-        {error && <p className="fox-project-dialog-error">{error}</p>}
-        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button disabled={busy || !path.trim()} onClick={() => onConfirm(path.trim(), permissionMode)}>{busy && <LoaderCircle className="animate-spin" />}使用此项目</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
   )
 }
 
@@ -2128,7 +2337,7 @@ function KnowledgeBindingDialog({ open, items, bindings, busy, error, onOpenChan
   )
 }
 
-function ConversationManagementDialogs({ conversation, mode, busy, onClose, onRename, onDelete }: { conversation: { id: string; title: string } | null; mode: 'rename' | 'delete' | null; busy: boolean; onClose: () => void; onRename: (title: string) => void; onDelete: () => void }) {
+function ConversationManagementDialogs({ conversation, mode, busy, error, onClose, onRename, onDelete }: { conversation: { id: string; title: string } | null; mode: 'rename' | 'delete' | null; busy: boolean; error: string | null; onClose: () => void; onRename: (title: string) => void; onDelete: () => void }) {
   const [title, setTitle] = useState('')
   useEffect(() => { if (conversation && mode === 'rename') setTitle(conversation.title) }, [conversation, mode])
   return <>
@@ -2140,12 +2349,25 @@ function ConversationManagementDialogs({ conversation, mode, busy, onClose, onRe
       </DialogContent>
     </Dialog>
     <Dialog open={mode === 'delete'} onOpenChange={(open) => { if (!open) onClose() }}>
-      <DialogContent className="fox-conversation-dialog">
+      <DialogContent className="fox-conversation-dialog fox-delete-dialog">
         <DialogHeader><DialogTitle>删除对话？</DialogTitle><DialogDescription>“{conversation?.title}”及其消息、工具与审批记录、Fox 内部附件和未导出产物、Runtime Session，以及对应的远程线程（如有）将被删除。已导出到项目目录的文件不会受影响。此操作无法撤销。</DialogDescription></DialogHeader>
+        {error && <p className="fox-conversation-dialog-error" role="alert">{error}</p>}
         <DialogFooter><Button variant="outline" onClick={onClose}>取消</Button><Button variant="destructive" disabled={busy} onClick={onDelete}>{busy && <LoaderCircle className="animate-spin" />}删除</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   </>
+}
+
+function ProjectDeleteDialog({ project, busy, onClose, onDelete }: { project: { name: string; root: string; items: Array<{ id: string; title: string }> } | null; busy: boolean; onClose: () => void; onDelete: () => void }) {
+  return <Dialog open={Boolean(project)} onOpenChange={(open) => { if (!open) onClose() }}>
+    <DialogContent className="fox-conversation-dialog">
+      <DialogHeader>
+        <DialogTitle>删除项目？</DialogTitle>
+        <DialogDescription>“{project?.name}”及其 {project?.items.length ?? 0} 个对话、消息、工具记录和 Fox 内部产物将被删除。这里只会移除 Fox 中的项目记录，不会删除本机文件夹“{project?.root}”。此操作无法撤销。</DialogDescription>
+      </DialogHeader>
+      <DialogFooter><Button variant="outline" onClick={onClose}>取消</Button><Button variant="destructive" disabled={busy} onClick={onDelete}>{busy && <LoaderCircle className="animate-spin" />}删除项目</Button></DialogFooter>
+    </DialogContent>
+  </Dialog>
 }
 
 function formatFileSize(bytes: number) {
@@ -2238,7 +2460,7 @@ function ContextContent({ mode, detail }: { mode: RightMode; detail: Conversatio
     return <ScrollArea className="fox-source-list">{items.map((item, index) => <button type="button" key={item.id}><span>{index + 1}</span><div><strong>{item.title}</strong><small>{item.kind} · {item.detail}</small></div></button>)}</ScrollArea>
   }
   if (mode === 'changes') {
-    const changeFiles = (detail?.toolCalls ?? []).filter((item) => /write|edit|patch|create/i.test(item.toolName))
+    const changeFiles = (detail?.toolCalls ?? []).filter((item) => isFileChangeTool(item.toolName))
     const activeChange = changeFiles.find((item) => item.id === selectedChange) ?? changeFiles.at(-1)
     const diffLines = activeChange ? toolDiff(activeChange, detail?.approvals ?? []).split('\n').map((line) => [line.startsWith('+') ? 'added' : line.startsWith('-') ? 'removed' : line.startsWith('@@') ? 'meta' : 'context', line]) : []
     if (!changeFiles.length) return <div className="fox-empty-panel"><FileEdit size={29} /><strong>当前会话没有文件更改</strong><span>Fox 的写入和编辑工具记录会显示在这里。</span></div>
@@ -2255,23 +2477,37 @@ function ContextContent({ mode, detail }: { mode: RightMode; detail: Conversatio
     )
   }
   if (mode === 'todo') {
-    const tasks = detail?.toolCalls ?? []
-    const completed = tasks.filter((item) => item.status === 'completed').length
-    const running = tasks.filter((item) => !['completed', 'failed', 'denied', 'cancelled'].includes(item.status)).length
-    const pending = tasks.length - completed - running
-    if (!tasks.length) return <div className="fox-empty-panel"><ListTodo size={29} /><strong>当前会话暂无执行步骤</strong><span>工具调用开始后，这里会像 Kun 一样持续更新任务状态。</span></div>
-    return <div className="fox-todo-panel"><div className="fox-todo-stats"><span><strong>{pending}</strong><small>待处理</small></span><span><strong>{running}</strong><small>进行中</small></span><span><strong>{completed}</strong><small>已完成</small></span></div><Queue className="fox-ai-queue"><QueueList className="fox-ai-queue-list">{tasks.map((item) => { const done = item.status === 'completed'; const active = !done && !['failed', 'denied', 'cancelled'].includes(item.status); return <QueueItem key={item.id} className="fox-ai-queue-item"><div className="fox-ai-queue-row"><QueueItemIndicator completed={done} className={active ? 'is-progress' : ''} /><QueueItemContent completed={done}>{toolActivity({ id: item.id, seq: 0, name: item.toolName, input: item.input, output: item.result, isError: item.status === 'failed', completed: done, awaitingUser: false })}</QueueItemContent><QueueItemActions><Badge variant={item.status === 'failed' ? 'destructive' : done ? 'secondary' : 'outline'}>{item.status === 'failed' ? '失败' : done ? '已完成' : active ? '进行中' : '待处理'}</Badge></QueueItemActions></div><QueueItemDescription completed={done}>{toolTarget(item)}</QueueItemDescription></QueueItem> })}</QueueList></Queue></div>
+    const workTasks = detail?.tasks ?? []
+    const toolCalls = detail?.toolCalls ?? []
+    if (!workTasks.length && !toolCalls.length) return <div className="fox-empty-panel"><ListTodo size={29} /><strong>当前会话暂无待办</strong><span>创建计划任务或开始调用工具后，执行状态会显示在这里。</span></div>
+    return (
+      <div className="fox-todo-panel">
+        <Queue className="fox-ai-queue">
+          <QueueList className="fox-ai-queue-list">
+            {workTasks.length > 0
+              ? workTasks.map((item) => {
+                  const done = item.status === 'completed' || item.status === 'skipped'
+                  const active = item.status === 'in_progress'
+                  const failed = item.status === 'blocked' || item.status === 'interrupted'
+                  const statusLabel = item.status === 'completed' ? '已完成' : item.status === 'skipped' ? '已跳过' : active ? '进行中' : item.status === 'blocked' ? '已阻塞' : item.status === 'interrupted' ? '已中断' : '待处理'
+                  return <QueueItem key={item.id} className="fox-ai-queue-item"><div className="fox-ai-queue-row"><QueueItemIndicator completed={done} className={active ? 'is-progress' : ''} /><QueueItemContent completed={done}>{item.title}</QueueItemContent><QueueItemActions><Badge variant={failed ? 'destructive' : done ? 'secondary' : 'outline'}>{statusLabel}</Badge></QueueItemActions></div>{(item.detail || item.blockedReason) && <QueueItemDescription completed={done}>{item.detail || item.blockedReason}</QueueItemDescription>}</QueueItem>
+                })
+              : toolCalls.map((item) => { const done = item.status === 'completed'; const active = !done && !['failed', 'denied', 'cancelled'].includes(item.status); return <QueueItem key={item.id} className="fox-ai-queue-item"><div className="fox-ai-queue-row"><QueueItemIndicator completed={done} className={active ? 'is-progress' : ''} /><QueueItemContent completed={done}>{toolActivity({ id: item.id, seq: 0, name: item.toolName, input: item.input, output: item.result, isError: item.status === 'failed', completed: done, awaitingUser: false })}</QueueItemContent><QueueItemActions><Badge variant={item.status === 'failed' ? 'destructive' : done ? 'secondary' : 'outline'}>{item.status === 'failed' ? '失败' : done ? '已完成' : active ? '进行中' : '待处理'}</Badge></QueueItemActions></div><QueueItemDescription completed={done}>{toolTarget(item)}</QueueItemDescription></QueueItem> })}
+          </QueueList>
+        </Queue>
+      </div>
+    )
   }
   if (mode === 'browser') {
     return <WebPreview defaultUrl="https://fox.local/preview" className="fox-browser-panel"><div className="fox-browser-tabs"><button type="button" className="is-active"><Globe2 size={13} />预览</button><Plus size={14} /></div><WebPreviewNavigation className="fox-browser-address"><WebPreviewNavigationButton tooltip="刷新"><RotateCcw size={13} /></WebPreviewNavigationButton><WebPreviewUrl aria-label="预览地址" /><WebPreviewNavigationButton tooltip="在浏览器中打开" onClick={() => toast('浏览器能力将在后端接入阶段启用')}><ExternalLink size={13} /></WebPreviewNavigationButton></WebPreviewNavigation><div className="fox-browser-empty"><img className="fox-panel-mascot" src={mascotAssets.search} alt="" /><strong>浏览器预览尚未启动</strong><span>接入网页工具后，这里会显示 Agent 正在访问的页面。</span><Button size="sm" variant="outline" onClick={() => toast('浏览器能力将在后端接入阶段启用')}>启动预览</Button></div></WebPreview>
   }
   if (mode === 'agents') {
-    return <AIAgent className="fox-agent-panel"><div className="fox-agent-summary"><div className="fox-agent-avatars"><span><img src={mascotAssets.laptop} alt="" /></span><span><img src={mascotAssets.search} alt="" /></span><span><Check size={11} /></span></div><div className="fox-agent-heading"><AIAgentHeader name="子 Agent" model="知识库服务" /><small>0 个运行中 · 1 个已完成</small></div></div><AIAgentContent className="fox-agent-content"><button type="button" className="fox-agent-create" onClick={() => toast('子智能体将复用知识库服务的编排能力')}><Plus size={15} />新建子任务</button><div className="fox-agent-section-label"><span>最近任务</span><small>1</small></div><button type="button" className="fox-agent-history" onClick={() => toast('子任务详情将在接入知识库服务后显示')}><span className="fox-agent-state"><Check size={12} /></span><p><strong>审查 Kun 工作台结构</strong><small>UI 结构、组件复用与响应式检查</small></p><span className="fox-agent-metrics"><strong>3 分钟</strong><small>7 步</small></span><ChevronRight size={14} /></button></AIAgentContent></AIAgent>
+    return <AIAgent className="fox-agent-panel"><div className="fox-agent-summary"><div className="fox-agent-avatars"><span><img src={mascotAssets.laptop} alt="" /></span><span><img src={mascotAssets.search} alt="" /></span><span><Check size={11} /></span></div><div className="fox-agent-heading"><AIAgentHeader name="子专家" model="知识库服务" /><small>0 个运行中 · 1 个已完成</small></div></div><AIAgentContent className="fox-agent-content"><button type="button" className="fox-agent-create" onClick={() => toast('子专家将复用知识库服务的编排能力')}><Plus size={15} />新建子任务</button><div className="fox-agent-section-label"><span>最近任务</span><small>1</small></div><button type="button" className="fox-agent-history" onClick={() => toast('子任务详情将在接入知识库服务后显示')}><span className="fox-agent-state"><Check size={12} /></span><p><strong>审查 Kun 工作台结构</strong><small>UI 结构、组件复用与响应式检查</small></p><span className="fox-agent-metrics"><strong>3 分钟</strong><small>7 步</small></span><ChevronRight size={14} /></button></AIAgentContent></AIAgent>
   }
   const labels: Record<Exclude<RightMode, 'files' | 'knowledge' | 'changes'>, [string, string]> = {
     todo: ['暂无待办', 'Fox 创建的待办会显示在这里'],
     browser: ['浏览器未启动', '网页预览会显示在这里'],
-    agents: ['暂无子 Agent', '后续阶段将接入远程子智能体']
+    agents: ['暂无子专家', '后续阶段将接入远程子专家']
   }
   return <div className="fox-empty-panel"><ClipboardList size={29} /><strong>{labels[mode][0]}</strong><span>{labels[mode][1]}</span></div>
 }
@@ -2290,22 +2526,23 @@ function RightPanel({ mode, detail, width, compact = false, onClose }: { mode: R
   const detailLabel = mode === 'files'
     ? detail?.conversation.projectRoot?.split(/[\\/]/).at(-1) ?? '未选择项目'
     : mode === 'changes'
-      ? `${detail?.toolCalls.filter((tool) => /write|edit|patch|create/i.test(tool.toolName)).length ?? 0} 个更改`
+      ? `${detail?.toolCalls.filter((tool) => isFileChangeTool(tool.toolName)).length ?? 0} 个更改`
       : '当前会话'
   return (
     <aside className={`fox-context-panel ${compact ? 'is-compact' : ''}`} style={compact ? undefined : { width }}>
-      <div className="fox-context-head"><IconButton label="关闭右侧面板" onClick={onClose}><PanelRightClose size={16} /></IconButton><div><strong>{item?.[1]}</strong><small>{detailLabel}</small></div></div>
+      <div className="fox-context-head"><IconButton label="关闭右侧面板" onClick={onClose}><X size={15} /></IconButton><div><strong>{item?.[1]}</strong><small>{detailLabel}</small></div></div>
       <ContextContent mode={mode} detail={detail} />
     </aside>
   )
 }
 
-function SideRail({ mode, changeCount, onMode, onCollapse, onSettings }: { mode: RightMode | null; changeCount: number; onMode: (mode: RightMode) => void; onCollapse: () => void; onSettings: () => void }) {
+function SideRail({ mode, changeCount, terminalOpen, onMode, onCollapse, onTerminal, onSettings }: { mode: RightMode | null; changeCount: number; terminalOpen: boolean; onMode: (mode: RightMode) => void; onCollapse: () => void; onTerminal: () => void; onSettings: () => void }) {
   return (
     <nav className="fox-side-rail" aria-label="工作台工具">
-      <div className="fox-rail-slot"><IconButton label="收起右侧边栏" tooltipSide="left" onClick={onCollapse}><PanelRightClose size={16} /></IconButton></div>
+      <IconButton label="收起右侧边栏" tooltipSide="left" onClick={onCollapse}><PanelRight size={16} /></IconButton>
       {rightItems.map(([id, label, icon]) => <div key={id} className="fox-rail-slot"><IconButton label={label} tooltipSide="left" active={mode === id} onClick={() => onMode(id)}>{icon}</IconButton>{id === 'changes' && changeCount > 0 && <span className="fox-rail-count">{changeCount}</span>}</div>)}
       <span />
+      <div className="fox-rail-slot"><IconButton label={terminalOpen ? '关闭终端' : '打开终端'} tooltipSide="left" active={terminalOpen} onClick={onTerminal}><Terminal size={16} /></IconButton></div>
       <div className="fox-rail-slot"><IconButton label="设置" tooltipSide="left" onClick={onSettings}><Settings size={16} /></IconButton></div>
     </nav>
   )
@@ -2336,31 +2573,71 @@ function TerminalResizeDivider({ onResize }: { onResize: (delta: number) => void
   return <div className="fox-terminal-resize-divider" role="separator" aria-label="调整终端高度" aria-orientation="horizontal" onPointerDown={(event) => { start.current = { y: event.clientY }; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={(event) => { if (!start.current) return; const delta = start.current.y - event.clientY; start.current = { y: event.clientY }; onResize(delta) }} onPointerUp={() => { start.current = null }} />
 }
 
-function ChatTopbar({ collapsed, onCollapse, rightSidebarCollapsed, onRightSidebarExpand, title, agentName, dark, focusMode, terminalOpen, state, onDark, onFocusMode, onTerminal }: { collapsed: boolean; onCollapse: () => void; rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; title?: string; agentName?: string; dark: boolean; focusMode: boolean; terminalOpen: boolean; state: ChatState; onDark: () => void; onFocusMode: () => void; onTerminal: () => void }) {
+function ConversationSummaryPopover({ detail, modelName, usage, contextWindow }: { detail: ConversationDetail | null; modelName: string; usage: ConversationUsage; contextWindow: number }) {
+  const contextPercent = Math.min(100, Math.round((usage.totalTokens / Math.max(1, contextWindow)) * 100))
+  const cacheEligibleTokens = usage.inputTokens + usage.cacheReadTokens
+  const cacheHitRate = cacheEligibleTokens ? Math.round(usage.cacheReadTokens / cacheEligibleTokens * 100) : 0
+  const artifacts = detail?.artifacts ?? []
+  const tasks = detail?.tasks ?? []
+  const activeProcesses = (detail?.toolCalls ?? []).filter((tool) => !['completed', 'failed', 'denied', 'cancelled'].includes(tool.status))
+  const subAgents = (detail?.toolCalls ?? []).filter((tool) => /sub.?agent|spawn_agent|delegate/i.test(tool.toolName))
+  const sources = runtimeProcess(detail?.runtimeEvents ?? []).sources
+  const diagnostics = latestRuntimeDiagnostics(detail?.runtimeEvents ?? [])
+  const diagnosticDetail = [
+    diagnostics.provider || diagnostics.apiType,
+    diagnostics.phase ? `阶段 ${diagnostics.phase}` : '',
+    diagnostics.retries ? `重试 ${diagnostics.retries}` : '',
+    diagnostics.compactions ? `压缩 ${diagnostics.compactions}` : '',
+    diagnostics.plannerStatus,
+  ].filter(Boolean).join(' · ')
+  const summaryItems = [
+    { icon: <FileText size={15} />, label: '文件输出', count: artifacts.length, detail: artifacts.slice(0, 2).map((item) => item.displayName).join('、') },
+    { icon: <ListTodo size={15} />, label: '任务计划', count: tasks.length, detail: tasks.slice(0, 2).map((item) => item.title).join('、') },
+    { icon: <Terminal size={15} />, label: '后台进程', count: activeProcesses.length, detail: activeProcesses.slice(0, 2).map((item) => item.toolName).join('、') },
+    { icon: <Bot size={15} />, label: '子专家', count: subAgents.length, detail: subAgents.slice(0, 2).map((item) => item.toolName).join('、') },
+    { icon: <BookOpen size={15} />, label: '来源', count: sources.length, detail: sources.slice(0, 2).map((item) => item.title).join('、') },
+    { icon: <Wrench size={15} />, label: '运行诊断', count: diagnostics.toolCount, detail: diagnosticDetail },
+  ]
+  return (
+    <Popover>
+      <Tooltip>
+        <TooltipTrigger asChild><PopoverTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="对话摘要"><Activity size={16} /></Button></PopoverTrigger></TooltipTrigger>
+        <TooltipContent side="bottom"><p>对话摘要</p></TooltipContent>
+      </Tooltip>
+      <PopoverContent align="end" sideOffset={8} className="fox-conversation-summary">
+        <div className="fox-summary-model">
+          <div><span>模型</span><strong title={modelName}>{modelName}</strong></div>
+          <div className="fox-summary-context-copy"><span>上下文</span><strong>{compactTokenCount(usage.totalTokens)} / {compactTokenCount(contextWindow)}</strong></div>
+          <div className="fox-summary-context-track"><span style={{ width: `${contextPercent}%` }} /></div>
+          <small>{contextPercent}% 已使用 · 输入 {compactTokenCount(usage.inputTokens)} · 输出 {compactTokenCount(usage.outputTokens)}</small>
+          <small>缓存读取 {compactTokenCount(usage.cacheReadTokens)} · 写入 {compactTokenCount(usage.cacheWriteTokens)} · 命中率 {cacheHitRate}%</small>
+          {(diagnostics.provider || diagnostics.apiType) && <small title={diagnostics.baseUrl || undefined}>{[diagnostics.provider, diagnostics.apiType].filter(Boolean).join(' · ')}</small>}
+        </div>
+        <div className="fox-summary-list">
+          {summaryItems.map((item) => <div key={item.label} className="fox-summary-item">
+            <span className="fox-summary-icon">{item.icon}</span>
+            <span><strong>{item.label}</strong><small>{item.detail || '暂无'}</small></span>
+            <b>{item.count}</b>
+          </div>)}
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, conversation, detail, modelName, usage, contextWindow, state, onPinConversation, onRenameConversation, onArchiveConversation }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; usage: ConversationUsage; contextWindow: number; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void }) {
   return (
     <header className="fox-chat-topbar">
       <div className="fox-workspace-heading">
-        {!collapsed && <IconButton label="收起侧边栏" tooltipSide="bottom" onClick={onCollapse}><PanelLeftClose size={16} /></IconButton>}
-        <div><strong>{title || '新对话'}</strong><span>Fox · {agentName || 'Agent'} · 刚刚</span></div>
+        <div><strong>{conversation?.title || '新对话'}</strong></div>
       </div>
       <div className="fox-chat-top-actions">
-        <DropdownMenu>
-          <Tooltip>
-            <TooltipTrigger asChild><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="选择编辑器"><Code2 size={16} /></Button></DropdownMenuTrigger></TooltipTrigger>
-            <TooltipContent side="bottom"><p>选择编辑器</p></TooltipContent>
-          </Tooltip>
-          <DropdownMenuContent align="end" className="fox-editor-menu">
-            <DropdownMenuLabel>在编辑器中打开</DropdownMenuLabel>
-            <DropdownMenuItem><Code2 />Visual Studio Code<Check className="fox-menu-check" /></DropdownMenuItem>
-            <DropdownMenuItem><Terminal />Cursor</DropdownMenuItem>
-            <DropdownMenuItem><ExternalLink />系统默认应用</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-        <IconButton label={terminalOpen ? '关闭终端' : '打开终端'} tooltipSide="bottom" active={terminalOpen} onClick={onTerminal}><Terminal size={16} /></IconButton>
+        {rightSidebarCollapsed && <IconButton label="展开右侧边栏" tooltipSide="bottom" onClick={onRightSidebarExpand}><PanelRight size={16} /></IconButton>}
+        <ConversationSummaryPopover detail={detail} modelName={modelName} usage={usage} contextWindow={contextWindow} />
         {state === 'running' && <Badge className="fox-running-badge"><span />运行中</Badge>}
         {state === 'question' && <Badge className="fox-question-badge"><CircleHelp size={12} />等待回答</Badge>}
         {state === 'approval' && <Badge className="fox-approval-badge"><ShieldCheck size={12} />等待批准</Badge>}
-        {state === 'error' && <Badge className="fox-error-badge"><AlertTriangle size={12} />连接错误</Badge>}
+        {state === 'error' && <Badge className="fox-error-badge"><AlertTriangle size={12} />运行错误</Badge>}
         {state === 'denied' && <Badge className="fox-denied-badge"><CircleStop size={12} />已取消</Badge>}
         <DropdownMenu>
           <Tooltip>
@@ -2369,15 +2646,12 @@ function ChatTopbar({ collapsed, onCollapse, rightSidebarCollapsed, onRightSideb
           </Tooltip>
           <DropdownMenuContent align="end" className="fox-top-menu">
             <DropdownMenuLabel>当前对话</DropdownMenuLabel>
-            <DropdownMenuItem onSelect={onFocusMode}><Maximize2 />{focusMode ? '退出专注模式' : '专注模式'}</DropdownMenuItem>
-            <DropdownMenuItem onSelect={onDark}><SunMoon />{dark ? '切换到浅色' : '切换到深色'}</DropdownMenuItem>
-            <DropdownMenuItem><UserRound />邀请协作</DropdownMenuItem>
-            <DropdownMenuItem><Copy />复制链接</DropdownMenuItem>
+            <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onPinConversation(conversation)}>{conversation?.pinned ? <PinOff /> : <Pin />}{conversation?.pinned ? '取消置顶' : '置顶对话'}</DropdownMenuItem>
+            <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onRenameConversation(conversation)}><FileEdit />重命名对话</DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem><Archive />归档对话</DropdownMenuItem>
+            <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onArchiveConversation(conversation)}><Archive />归档对话</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        {rightSidebarCollapsed && <IconButton label="展开右侧边栏" tooltipSide="bottom" onClick={onRightSidebarExpand}><PanelRightOpen size={16} /></IconButton>}
       </div>
     </header>
   )
@@ -2396,18 +2670,24 @@ export function Workbench() {
   const [activeEntityId, setActiveEntityId] = useState<string | null>(null)
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null)
   const [activeSourceLocator, setActiveSourceLocator] = useState<KnowledgeSourceLocator | null>(null)
-  const managementReturnRoute = useRef<{ view: WorkspaceView; entityId: string | null; documentId: string | null }>({ view: 'chat', entityId: null, documentId: null })
+  const managementReturnRoutes = useRef<ManagementReturnRoutes>({
+    settings: { view: 'chat', entityId: null, documentId: null },
+    knowledge: { view: 'chat', entityId: null, documentId: null },
+  })
   const onboardingReturnRoute = useRef<{ view: WorkspaceView; entityId: string | null; documentId: string | null }>({ view: 'chat', entityId: null, documentId: null })
   useEffect(() => {
     void desktopConversation.refreshRuntimeStatus()
   }, [desktopConversation.refreshRuntimeStatus, modelService.service?.supportsImageInput])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readStoredBoolean(layoutStorage.sidebarCollapsed, false))
-  const [sidebarWidth, setSidebarWidth] = useState(() => readStoredNumber(layoutStorage.sidebarWidth, 304, 280, 480))
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const storedWidth = readStoredNumber(layoutStorage.sidebarWidth, 236, 220, 456)
+    return [304, 292, 280, 268, 256].includes(storedWidth) ? 236 : storedWidth
+  })
   const [rightMode, setRightMode] = useState<RightMode | null>(readStoredRightMode)
-  const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(() => readStoredBoolean(layoutStorage.rightSidebarCollapsed, false))
+  const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(true)
   const [rightWidth, setRightWidth] = useState(() => readStoredNumber(layoutStorage.rightWidth, 360, 280, 760))
+  const [seenChangeCounts, setSeenChangeCounts] = useState<Record<string, number>>(readStoredSeenChanges)
   const [dark, setDark] = useState(() => typeof window !== 'undefined' && window.localStorage.getItem(layoutStorage.theme) === 'dark')
-  const [focusMode, setFocusMode] = useState(() => readStoredBoolean(layoutStorage.focusMode, false))
   const [mascotIndex, setMascotIndex] = useState(0)
   const [mascotCelebrating, setMascotCelebrating] = useState(false)
   const [compactLayout, setCompactLayout] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 1180px)').matches)
@@ -2416,16 +2696,14 @@ export function Workbench() {
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [terminalHeight, setTerminalHeight] = useState(() => readStoredNumber(layoutStorage.terminalHeight, 250, 180, 720))
   const [composerHeight, setComposerHeight] = useState(180)
-  const [projectDialogOpen, setProjectDialogOpen] = useState(false)
-  const [projectDialogBusy, setProjectDialogBusy] = useState(false)
-  const [projectDialogBrowsing, setProjectDialogBrowsing] = useState(false)
-  const [projectDialogInitialRoot, setProjectDialogInitialRoot] = useState<string | null>(null)
-  const [projectDialogError, setProjectDialogError] = useState<string | null>(null)
   const [knowledgeDialogOpen, setKnowledgeDialogOpen] = useState(false)
   const [knowledgeDialogBusy, setKnowledgeDialogBusy] = useState(false)
   const [knowledgeDialogError, setKnowledgeDialogError] = useState<string | null>(null)
   const [conversationDialog, setConversationDialog] = useState<{ conversation: { id: string; title: string }; mode: 'rename' | 'delete' } | null>(null)
   const [conversationDialogBusy, setConversationDialogBusy] = useState(false)
+  const [conversationDialogError, setConversationDialogError] = useState<string | null>(null)
+  const [projectDeleteDialog, setProjectDeleteDialog] = useState<{ name: string; root: string; items: Array<{ id: string; title: string }> } | null>(null)
+  const [projectDeleteBusy, setProjectDeleteBusy] = useState(false)
   const [projects, setProjects] = useState<ProjectRecord[]>([])
   const [chatState, setChatState] = useState<ChatState>('complete')
   const [activePrompt, setActivePrompt] = useState('Kun 的协议是什么协议，我可以拿来二次开发并且企业内部使用吗？')
@@ -2444,15 +2722,35 @@ export function Workbench() {
     : undefined
   const desktopRunning = desktopConversation.enabled && runIsActive(desktopConversation.detail)
   const desktopRunStatus = desktopConversation.detail?.lastRun?.status
-  const activeAgent = agentResource.agents.find((item) => item.id === desktopConversation.selectedAgentId) ?? null
+  const selectableAgents = chatSelectableAgents(agentResource.agents)
+  const activeAgent = selectableAgents.find((item) => item.id === desktopConversation.selectedAgentId)
+    ?? selectableAgents.find((item) => item.isDefault)
+    ?? selectableAgents[0]
+    ?? null
+  const activeExpert = agentResource.agents.find((item) => item.id === desktopConversation.selectedExpertId) ?? null
+  const expertToolAvailability = useMemo(() => activeExpert
+    ? latestExpertToolAvailability(desktopConversation.detail?.runtimeEvents ?? [], activeExpert)
+    : undefined, [activeExpert, desktopConversation.detail?.runtimeEvents])
   const activeProject = projects.find((item) => item.id === desktopConversation.detail?.conversation.projectId)
     ?? projects.find((item) => item.rootPath === desktopConversation.draftProjectRoot)
     ?? null
   const conversationUsage = useMemo(() => latestConversationUsage(desktopConversation.detail?.runtimeEvents ?? []), [desktopConversation.detail?.runtimeEvents])
   const runtimeQuestion = useMemo(() => pendingRuntimeQuestion(desktopConversation.detail), [desktopConversation.detail])
+  const goalProgressData = useGoalProgress(desktopConversation.detail)
+  const conversationAgentId = desktopConversation.detail?.conversation.agentId
   const timelineAssistantName = desktopConversation.detail?.conversation.agentName ?? activeAgent?.name ?? 'Fox 默认助手'
+  useEffect(() => {
+    if (!conversationAgentId) return
+    const conversationAgent = agentResource.agents.find((item) => item.id === conversationAgentId)
+    if (conversationAgent) setAssistantMode(conversationAgent.runtimeType === 'yuxi' ? 'knowledge' : 'assistant')
+  }, [agentResource.agents, conversationAgentId])
   const timelineRunModel = desktopConversation.detail?.lastRun?.model
   const pendingRuntimeApproval = desktopConversation.detail?.approvals.find((approval) => approval.status === 'pending')
+  const expertReadOnly = expertInteractionLocked({
+    running: desktopRunning || chatState === 'running',
+    approvalPending: Boolean(pendingRuntimeApproval) || chatState === 'approval',
+    questionPending: Boolean(runtimeQuestion) || chatState === 'question',
+  })
   const visiblePrompt = desktopConversation.enabled ? pendingUserMessage?.content ?? desktopUserMessage?.content ?? activePrompt : activePrompt
   const visibleReply = desktopConversation.enabled
     ? desktopConversation.streamingText || desktopCurrentRunAssistantMessage?.content || ''
@@ -2462,6 +2760,9 @@ export function Workbench() {
     if (!runId) return []
     return desktopConversation.detail?.runtimeEvents.filter((event) => event.runId === runId) ?? []
   }, [desktopConversation.detail?.lastRun?.id, desktopConversation.detail?.runtimeEvents])
+  const activeConversationId = desktopConversation.detail?.conversation.id ?? null
+  const totalChangeCount = desktopConversation.detail?.toolCalls.filter((tool) => isFileChangeTool(tool.toolName)).length ?? 0
+  const unseenChangeCount = activeConversationId ? Math.max(0, totalChangeCount - (seenChangeCounts[activeConversationId] ?? 0)) : 0
   const sidebarMascot = mascotCelebrating
     ? mascotAt(mascotLibrary.success, mascotIndex, mascotAssets.cheer)
     : desktopConversation.error
@@ -2472,10 +2773,6 @@ export function Workbench() {
         ? mascotAt(workingMascots, mascotIndex, mascotAssets.work)
         : mascotAt(idleMascots, mascotIndex, mascotAssets.idle)
 
-  useEffect(() => {
-    if (!activeAgent) return
-    setAssistantMode(activeAgent.runtimeType === 'yuxi' ? 'knowledge' : 'assistant')
-  }, [activeAgent])
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', dark)
@@ -2486,8 +2783,12 @@ export function Workbench() {
   useEffect(() => { window.localStorage.setItem(layoutStorage.rightWidth, String(Math.round(rightWidth))) }, [rightWidth])
   useEffect(() => { window.localStorage.setItem(layoutStorage.rightMode, rightMode ?? 'closed') }, [rightMode])
   useEffect(() => { window.localStorage.setItem(layoutStorage.rightSidebarCollapsed, rightSidebarCollapsed ? '1' : '0') }, [rightSidebarCollapsed])
-  useEffect(() => { window.localStorage.setItem(layoutStorage.focusMode, focusMode ? '1' : '0') }, [focusMode])
   useEffect(() => { window.localStorage.setItem(layoutStorage.terminalHeight, String(Math.round(terminalHeight))) }, [terminalHeight])
+  useEffect(() => { window.localStorage.setItem(layoutStorage.seenChanges, JSON.stringify(seenChangeCounts)) }, [seenChangeCounts])
+  useEffect(() => {
+    if (!activeConversationId || rightMode !== 'changes' || rightSidebarCollapsed) return
+    setSeenChangeCounts((current) => current[activeConversationId] === totalChangeCount ? current : { ...current, [activeConversationId]: totalChangeCount })
+  }, [activeConversationId, rightMode, rightSidebarCollapsed, totalChangeCount])
   useEffect(() => {
     if (!desktopConversation.enabled) return
     void desktopClient.listProjects().then(setProjects).catch(() => undefined)
@@ -2552,6 +2853,9 @@ export function Workbench() {
 
   const selectRightMode = (mode: RightMode) => {
     setRightSidebarCollapsed(false)
+    if (mode === 'changes' && activeConversationId) {
+      setSeenChangeCounts((current) => current[activeConversationId] === totalChangeCount ? current : { ...current, [activeConversationId]: totalChangeCount })
+    }
     if (compactLayout) {
       if (compactRightOpen && rightMode === mode) {
         setCompactRightOpen(false)
@@ -2564,9 +2868,41 @@ export function Workbench() {
     }
     setRightMode((current) => current === mode ? null : mode)
   }
-  const toggleFocusMode = (value = !focusMode) => {
-    setFocusMode(value)
-    if (value) setCompactRightOpen(false)
+  const openEvidence = (evidence: TaskEvidenceRecord) => {
+    const scrollToMessage = (messageId: string) => {
+      const element = document.getElementById(`fox-turn-${messageId}`)
+      if (!element) return false
+      element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      element.animate(
+        [{ backgroundColor: 'transparent' }, { backgroundColor: 'rgba(191, 219, 254, 0.42)' }, { backgroundColor: 'transparent' }],
+        { duration: 1200, easing: 'ease-out' },
+      )
+      return true
+    }
+    if (evidence.refKind === 'message' && scrollToMessage(evidence.refId)) return
+    if (evidence.refKind === 'artifact') {
+      const artifact = desktopConversation.detail?.artifacts.find((item) => item.id === evidence.refId)
+      const message = artifact?.runId
+        ? desktopConversation.detail?.messages.find((item) => item.role === 'assistant' && item.runId === artifact.runId)
+        : null
+      if (message && scrollToMessage(message.id)) return
+    }
+    if (evidence.refKind === 'source') {
+      const knowledgeBaseId = typeof evidence.metadata.knowledgeBaseId === 'string' ? evidence.metadata.knowledgeBaseId : null
+      const documentId = typeof evidence.metadata.documentId === 'string' ? evidence.metadata.documentId : evidence.refId
+      if (knowledgeBaseId && typeof documentId === 'string' && documentId) {
+        navigate('knowledge-detail', knowledgeBaseId, { documentId })
+        return
+      }
+    }
+    if (evidence.refKind === 'tool_call' || evidence.refKind === 'run_event') {
+      setRightSidebarCollapsed(false)
+      setRightMode(evidence.evidenceType === 'file_diff' ? 'changes' : 'todo')
+      if (compactLayout) setCompactRightOpen(true)
+      toast.info('已打开相关执行记录')
+      return
+    }
+    toast.info('该证据的原始对象已不可用')
   }
   const clearWorkflowTimer = () => {
     if (workflowTimer.current === null) return
@@ -2629,6 +2965,7 @@ export function Workbench() {
     prepareDraft(knowledgeAgent.id, 'knowledge', undefined, undefined, [knowledgeBase])
   }
   const switchAssistantMode = (mode: AssistantMode) => {
+    setAssistantMode(mode)
     if (mode === 'assistant') {
       const localAgent = agentResource.agents.find((agent) => agent.id === 'fox-general')
         ?? agentResource.agents.find((agent) => agent.runtimeType !== 'yuxi' && agent.isDefault)
@@ -2644,6 +2981,7 @@ export function Workbench() {
       ?? agentResource.agents.find((agent) => agent.runtimeType === 'yuxi')
     if (!knowledgeAgent) {
       toast.error(yuxi.service?.credentialConfigured ? '知识库服务暂无可用的默认智能助手' : '请先登录知识库，再使用知识模式')
+      navigate('knowledge')
       return
     }
     prepareDraft(knowledgeAgent.id, mode)
@@ -2656,61 +2994,59 @@ export function Workbench() {
     const requestedProject = requestedProjectRoot
       ? projects.find((project) => project.rootPath.replace(/[\\/]+$/, '').toLocaleLowerCase() === requestedProjectRoot.replace(/[\\/]+$/, '').toLocaleLowerCase())
       : activeProject
-    const permissionMode = requestedProject?.permissionMode ?? desktopConversation.draftPermissionMode ?? undefined
+    const permissionMode = requestedProject?.permissionMode ?? desktopConversation.draftPermissionMode ?? 'ask'
     if (!projectRoot) {
-      openProjectDialog()
+      void addProject()
       return
     }
     const agentId = desktopConversation.selectedAgentId ?? (assistantMode === 'assistant' ? 'fox-general' : null)
     if (!agentId) {
-      toast.error('请先选择一个智能体')
+      toast.error('请先选择一个专家')
       return
     }
     prepareDraft(agentId, assistantMode, projectRoot, permissionMode)
   }
-  const openProjectDialog = () => {
-    setProjectDialogError(null)
-    setProjectDialogInitialRoot(desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot ?? null)
-    setProjectDialogOpen(true)
-    if (!desktopConversation.enabled) return
-    void desktopClient.listProjects()
-      .then(setProjects)
-      .catch((cause) => setProjectDialogError(cause instanceof Error ? cause.message : String(cause)))
-  }
   const pickProjectFolder = async () => {
-    setProjectDialogBrowsing(true)
-    setProjectDialogError(null)
     try {
-      return await desktopClient.pickProjectFolder()
+      return validPickedProjectFolder(await desktopClient.pickProjectFolder())
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)
-      setProjectDialogError(message)
       toast.error(message)
       return null
-    } finally {
-      setProjectDialogBrowsing(false)
     }
   }
   const addProject = async () => {
     const selected = await pickProjectFolder()
     if (!selected) return
-    setProjectDialogInitialRoot(selected)
-    setProjectDialogOpen(true)
-    if (desktopConversation.enabled) void desktopClient.listProjects().then(setProjects).catch(() => undefined)
-  }
-  const authorizeProject = async (projectRoot: string, permissionMode: ProjectRecord['permissionMode']) => {
-    setProjectDialogBusy(true)
-    setProjectDialogError(null)
-    const created = await desktopConversation.createConversation(projectRoot, permissionMode)
-    setProjectDialogBusy(false)
+    const projectSelection = selectProjectRoot(selected, projects, desktopConversation.draftPermissionMode ?? 'ask')
+    const projectAgentId = desktopConversation.defaultAgentId
+      ?? agentResource.agents.find((agent) => agent.runtimeType !== 'yuxi' && agent.isDefault)?.id
+      ?? 'fox-general'
+    const created = await desktopConversation.createConversationForAgent(projectAgentId, projectSelection.path, projectSelection.permissionMode)
     if (!created) {
-      setProjectDialogError(desktopConversation.error ?? '无法创建项目会话，请检查文件夹路径')
+      toast.error(desktopConversation.error ?? '无法创建项目会话，请检查文件夹路径')
       return
     }
-    setProjectDialogOpen(false)
     setActiveView('chat')
-    const modeLabel = { read_only: '只读', ask: '询问', allow: '允许' }[permissionMode]
-    toast.success(`项目文件夹已加入对话草稿，执行方式：${modeLabel}`)
+    toast.success(`项目“${selected.split(/[\\/]/).filter(Boolean).at(-1) ?? selected}”已加入当前对话`)
+  }
+  const changeProjectPermission = async (permissionMode: ProjectRecord['permissionMode']) => {
+    desktopConversation.setDraftPermission(permissionMode)
+    const projectId = desktopConversation.detail?.conversation.projectId ?? activeProject?.id
+    if (projectId) {
+      setProjects((current) => current.map((project) => project.id === projectId ? { ...project, permissionMode } : project))
+      try {
+        const updated = await desktopClient.updateProjectPermission(projectId, permissionMode)
+        setProjects((current) => current.some((project) => project.id === updated.id)
+          ? current.map((project) => project.id === updated.id ? updated : project)
+          : [...current, updated])
+      } catch (cause) {
+        void desktopClient.listProjects().then(setProjects).catch(() => undefined)
+        toast.error(cause instanceof Error ? cause.message : String(cause))
+        return
+      }
+    }
+    toast.success(`执行方式已切换为${{ ask: '“执行前询问”', allow: '“自动执行”', read_only: '“只读模式”' }[permissionMode]}`)
   }
   const saveKnowledgeBindings = async (items: KnowledgeBaseRecord[]) => {
     setKnowledgeDialogBusy(true)
@@ -2733,37 +3069,89 @@ export function Workbench() {
     setConversationDialog(null)
     toast.success('对话已重命名')
   }
+  const pinManagedConversation = async (conversation: ConversationSummary) => {
+    const pinned = !conversation.pinned
+    if (!await desktopConversation.setConversationPinned(conversation.id, pinned)) {
+      toast.error(desktopConversation.error ?? '无法更新对话置顶状态')
+      return
+    }
+    toast.success(pinned ? '对话已置顶' : '已取消置顶')
+  }
+  const archiveManagedConversation = async (conversation: ConversationSummary) => {
+    if (!await desktopConversation.archiveConversation(conversation.id)) {
+      toast.error(desktopConversation.error ?? '无法归档对话')
+      return
+    }
+    setPendingUserMessage(null)
+    setEmptyConversation(true)
+    toast.success('对话已归档')
+  }
   const deleteManagedConversation = async () => {
     if (!conversationDialog) return
     setConversationDialogBusy(true)
-    const deleted = await desktopConversation.deleteConversation(conversationDialog.conversation.id)
+    setConversationDialogError(null)
+    const result = await desktopConversation.deleteConversation(conversationDialog.conversation.id)
     setConversationDialogBusy(false)
-    if (!deleted) return
+    if (!result.deleted) {
+      setConversationDialogError(result.error ?? '无法删除对话，请稍后重试')
+      return
+    }
     setConversationDialog(null)
+    setConversationDialogError(null)
     toast.success('对话已删除')
   }
-  useEffect(() => {
-    if (projectDialogOpen && desktopConversation.error) setProjectDialogError(desktopConversation.error)
-  }, [desktopConversation.error, projectDialogOpen])
+  const deleteManagedProject = async () => {
+    if (!projectDeleteDialog) return
+    setProjectDeleteBusy(true)
+    for (const conversation of projectDeleteDialog.items) {
+      const result = await desktopConversation.deleteConversation(conversation.id)
+      if (!result.deleted) {
+        setProjectDeleteBusy(false)
+        toast.error(result.error ?? '项目删除未完成，请先停止正在运行的对话后重试')
+        return
+      }
+    }
+    const normalizedRoot = projectDeleteDialog.root.replace(/[\\/]+$/, '').replace(/\//g, '\\').toLocaleLowerCase()
+    const projectRecord = projects.find((project) => project.rootPath.replace(/[\\/]+$/, '').replace(/\//g, '\\').toLocaleLowerCase() === normalizedRoot)
+    if (projectRecord) {
+      try {
+        await desktopClient.deleteProject(projectRecord.id)
+        setProjects((current) => current.filter((project) => project.id !== projectRecord.id))
+      } catch (cause) {
+        setProjectDeleteBusy(false)
+        toast.error(cause instanceof Error ? cause.message : String(cause))
+        return
+      }
+    }
+    setProjectDeleteBusy(false)
+    setProjectDeleteDialog(null)
+    toast.success('项目已从 Fox 删除，本机文件夹未受影响')
+  }
   const navigate: NavigateWorkspace = (view, entityId, context) => {
     if (view === 'onboarding' && activeView !== 'onboarding') {
       onboardingReturnRoute.current = { view: activeView, entityId: activeEntityId, documentId: activeDocumentId }
     }
-    if (view === 'chat' && entityId && entityId !== desktopConversation.detail?.conversation.agentId) {
-      void desktopConversation.createConversationForAgent(entityId).then((created) => {
-        if (!created) toast.error(desktopConversation.error ?? '无法使用这个智能体')
-      })
+    if (view === 'chat' && entityId) {
+      const targetAgent = agentResource.agents.find((item) => item.id === entityId)
+      if (!targetAgent) return
+      const targetKind = normalizeAgentClassification(targetAgent).agentKind
+      if (targetKind === 'worker') return
+      if (targetKind === 'expert' && entityId !== desktopConversation.selectedExpertId) {
+        void desktopConversation.createConversationForExpert(entityId).then((result) => {
+          if (!result.success) toast.error(expertErrorMessage(result.error, '无法召唤这个专家'))
+        })
+      }
+      if (targetKind === 'assistant' && entityId !== desktopConversation.detail?.conversation.agentId) {
+        void desktopConversation.createConversationForAgent(entityId).then((created) => {
+          if (!created) toast.error(desktopConversation.error ?? '无法切换这个助手')
+        })
+      }
     }
-    const managementSection = (value: WorkspaceView) => settingsWorkspaceViews.includes(value)
-      ? 'settings'
-      : value === 'knowledge' || value === 'knowledge-detail' || value === 'knowledge-graph'
-        ? 'knowledge'
-        : null
-    if (activeView === 'onboarding' && view !== 'onboarding') {
-      managementReturnRoute.current = { view: 'onboarding', entityId: null, documentId: null }
-    } else if (managementSection(view) && managementSection(view) !== managementSection(activeView)) {
-      managementReturnRoute.current = { view: activeView, entityId: activeEntityId, documentId: activeDocumentId }
-    }
+    managementReturnRoutes.current = captureManagementReturnRoutes(
+      managementReturnRoutes.current,
+      { view: activeView, entityId: activeEntityId, documentId: activeDocumentId },
+      view,
+    )
     if (entityId) setActiveEntityId(entityId)
     setActiveDocumentId(context?.documentId ?? null)
     setActiveSourceLocator(context?.sourceLocator ?? null)
@@ -2773,7 +3161,7 @@ export function Workbench() {
     setRightMode(null)
   }
   const exitManagement = () => {
-    const previous = managementReturnRoute.current
+    const previous = managementExitRoute(activeView, managementReturnRoutes.current)
     setActiveView(previous.view)
     setActiveEntityId(previous.entityId)
     setActiveDocumentId(previous.documentId)
@@ -2837,28 +3225,33 @@ export function Workbench() {
   const workspacePage = rawWorkspacePage
     ? <Suspense fallback={<div className="fox-route-loading"><span /><p>正在载入页面</p></div>}>{rawWorkspacePage}</Suspense>
     : null
-  const timelineEmpty = desktopConversation.enabled ? !desktopUserMessage && !pendingUserMessage : emptyConversation
-  const showConversationRightSidebar = activeView === 'chat'
+  const timelineEmpty = emptyConversation || (desktopConversation.enabled ? !desktopUserMessage && !pendingUserMessage : false)
+  useEffect(() => {
+    if (activeView !== 'chat' || !timelineEmpty) return
+    setRightSidebarCollapsed(true)
+    setCompactRightOpen(false)
+  }, [activeView, timelineEmpty])
+  const showConversationRightSidebar = activeView === 'chat' && !timelineEmpty
 
   if (activeView === 'onboarding') return <Suspense fallback={<div className="fox-app-loading"><img src={mascotAssets.brand} alt="" /><p>Fox 正在准备引导页</p></div>}><OnboardingPage navigate={navigate} onExit={finishOnboarding} /></Suspense>
 
   return (
-    <main className={`fox-shell ${focusMode ? 'is-focus-mode' : ''}`} style={shellStyle}>
-      <WindowTitlebar onNewChat={() => switchAssistantMode(assistantMode)} onOpenProject={() => void addProject()} onSettings={() => navigate('settings')} onToggleSidebar={() => setSidebarCollapsed((value) => !value)} onToggleTerminal={() => { if (activeView !== 'chat') navigate('chat'); setTerminalOpen((value) => !value) }} onZoom={(delta) => { const current = Number(document.documentElement.dataset.foxZoom ?? '1'); const next = Math.min(1.4, Math.max(.8, Math.round((current + delta) * 10) / 10)); document.documentElement.dataset.foxZoom = String(next); document.documentElement.style.zoom = String(next) }} />
+    <main className="fox-shell" style={shellStyle}>
+      <WindowTitlebar leftSidebarCollapsed={sidebarCollapsed || compactLayout} onNewChat={() => switchAssistantMode(assistantMode)} onOpenProject={() => void addProject()} onSettings={() => navigate('settings')} onToggleSidebar={() => setSidebarCollapsed((value) => !value)} onToggleTerminal={() => { if (activeView !== 'chat') navigate('chat'); setTerminalOpen((value) => !value) }} onZoom={(delta) => { const current = Number(document.documentElement.dataset.foxZoom ?? '1'); const next = Math.min(1.4, Math.max(.8, Math.round((current + delta) * 10) / 10)); document.documentElement.dataset.foxZoom = String(next); document.documentElement.style.zoom = String(next) }} />
       <div className="fox-workbench">
-        <Sidebar collapsed={sidebarCollapsed || compactLayout} assistantMode={assistantMode} onCollapse={() => setSidebarCollapsed(!sidebarCollapsed)} onModeChange={switchAssistantMode} onNewChat={() => switchAssistantMode(assistantMode)} onNewProjectChat={createProjectDraft} onAddProject={() => void addProject()} onOpenConversation={(conversationId) => { setPendingUserMessage(null); if (desktopConversation.enabled && conversationId) void desktopConversation.openConversation(conversationId); setEmptyConversation(false); navigate('chat') }} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onDeleteConversation={(conversation) => setConversationDialog({ conversation, mode: 'delete' })} onNavigate={navigate} onExitManagement={exitManagement} onTheme={() => setDark(!dark)} onSettings={() => navigate('settings')} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} onSearchConversations={desktopConversation.enabled ? desktopConversation.searchConversations : undefined} activeConversationId={desktopConversation.detail?.conversation.id} yuxiService={yuxi.service ? { name: yuxi.service.name, status: yuxi.service.lastStatus, connectionType: yuxi.service.connectionType } : null} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
-        {!sidebarCollapsed && !compactLayout && <SidebarResizeDivider onResize={(delta) => setSidebarWidth((value) => Math.min(480, Math.max(280, value + delta)))} />}
+        <Sidebar collapsed={sidebarCollapsed || compactLayout} assistantMode={assistantMode} onModeChange={switchAssistantMode} onNewChat={() => switchAssistantMode(assistantMode)} onNewProjectChat={createProjectDraft} onAddProject={() => void addProject()} onOpenConversation={(conversationId) => { setPendingUserMessage(null); if (desktopConversation.enabled && conversationId) void desktopConversation.openConversation(conversationId); setEmptyConversation(false); navigate('chat') }} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} onDeleteProject={(project) => { const normalizedRoot = project.root.replace(/[\\/]+$/, '').replace(/\//g, '\\').toLocaleLowerCase(); setProjectDeleteDialog({ ...project, items: desktopConversation.conversations.filter((conversation) => conversation.projectRoot?.replace(/[\\/]+$/, '').replace(/\//g, '\\').toLocaleLowerCase() === normalizedRoot).map((conversation) => ({ id: conversation.id, title: conversation.title })) }) }} onNavigate={navigate} onExitManagement={exitManagement} onTheme={() => setDark(!dark)} onSettings={() => navigate('settings')} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} onSearchConversations={desktopConversation.enabled ? desktopConversation.searchConversations : undefined} activeConversationId={desktopConversation.detail?.conversation.id} yuxiService={yuxi.service ? { name: yuxi.service.name, status: yuxi.service.lastStatus, connectionType: yuxi.service.connectionType } : null} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
+        {!sidebarCollapsed && !compactLayout && <SidebarResizeDivider onResize={(delta) => setSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
         <div className="fox-content-card">
         <div className="fox-content-surface">
         <section className="fox-chat-pane">
           <ComposerRuntimeContext.Provider value={{ knowledgeBindings: desktopConversation.knowledgeBindings, assistantName: timelineAssistantName, runModel: timelineRunModel, onOpenSource: (source) => navigate('knowledge-detail', source.knowledgeBaseId, { documentId: source.documentId, sourceLocator: source.locator }), questionRequest: runtimeQuestion, onSubmitQuestion: async (text, answers) => { if (!runtimeQuestion) return false; clearWorkflowTimer(); setActivePrompt(text); setChatState('running'); const started = await desktopConversation.resumeQuestion(runtimeQuestion.runId, text, answers); if (!started) { setChatState('error'); return false } return true }, onKnowledge: () => { setKnowledgeDialogError(null); setKnowledgeDialogOpen(true); void knowledge.refresh() } }}>
-          {workspacePage ?? <><ChatTopbar collapsed={sidebarCollapsed || compactLayout} onCollapse={() => setSidebarCollapsed(!sidebarCollapsed)} rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={() => setRightSidebarCollapsed(false)} title={desktopConversation.detail?.conversation.title} agentName={desktopConversation.detail?.conversation.agentName ?? activeAgent?.name} dark={dark} focusMode={focusMode} terminalOpen={terminalOpen} state={chatState} onDark={() => setDark(!dark)} onFocusMode={() => toggleFocusMode()} onTerminal={() => setTerminalOpen(!terminalOpen)} />
-          <div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Timeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={() => void desktopConversation.loadEarlierMessages()} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} mascotSrc={sidebarMascot} mascotActive={desktopRunning || mascotCelebrating} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? [] : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? [] : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? [] : undefined} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeApprovals={desktopConversation.enabled ? desktopConversation.detail?.approvals : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} onApprove={() => finishWorkflow()} onDeny={() => { clearWorkflowTimer(); setChatState('denied') }} onRetry={() => desktopConversation.enabled && visiblePrompt ? void desktopConversation.send(visiblePrompt) : finishWorkflow()} onAnswer={(answer) => { toast.success(`已选择：${answer}`); finishWorkflow(2600) }} onStart={(suggestion) => resetConversation(suggestion)} onResolveApproval={(approvalId, approved) => void desktopConversation.resolveApproval(approvalId, approved)} detail={desktopConversation.detail} /><Composer resetKey={composerResetKey} suggestedPrompt={suggestedPrompt} chatState={chatState} centered={timelineEmpty} runtimeControlled={desktopConversation.enabled} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} mascotSrc={timelineEmpty ? undefined : sidebarMascot} mascotActive={desktopRunning || mascotCelebrating} onProject={openProjectDialog} onAgentChange={(agentId) => { void desktopConversation.createConversationForAgent(agentId).then((created) => { if (created) toast.success('已切换智能体，发送消息后创建对话') }) }} onHeightChange={setComposerHeight} onPromptCommit={(prompt) => { const now = Date.now(); setActivePrompt(prompt); setSuggestedPrompt(''); setEmptyConversation(false); setChatState('running'); setPendingUserMessage({ id: `ui-pending-${now}`, conversationId: desktopConversation.detail?.conversation.id ?? 'pending', runId: null, role: 'user', kind: 'text', content: prompt, status: 'sending', ordinal: (desktopConversation.detail?.messages.at(-1)?.ordinal ?? 0) + 1, createdAt: now, updatedAt: now }) }} onSubmitPrompt={async (prompt, model, submittedFiles) => { clearWorkflowTimer(); setActivePrompt(prompt); setSuggestedPrompt(''); setEmptyConversation(false); if (desktopConversation.enabled) { setChatState('running'); const started = await desktopConversation.send(prompt, model, submittedFiles); if (!started) { setPendingUserMessage((message) => message ? { ...message, status: 'failed', updatedAt: Date.now() } : message); setChatState('error'); return 'error' } return 'complete' } if (/询问我|让我选择|需要确认方案|怎么处理/.test(prompt)) { setChatState('question'); return 'question' } if (/修改|写入|删除|重命名|创建文件/.test(prompt)) { setChatState('approval'); return 'approval' } if (/失败|错误|连接测试|检查连接/.test(prompt)) { setChatState('error'); return 'error' } setChatState('running'); return 'complete' }} onStatusChange={(status) => { if (!desktopConversation.enabled && status === 'ready' && chatState === 'running') setChatState('complete') }} onCancel={desktopConversation.enabled ? desktopConversation.cancel : undefined} /></div>
+          {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={() => setRightSidebarCollapsed(false)} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || activeAgent?.defaultModel || modelService.service?.modelId || '未配置模型'} usage={conversationUsage} contextWindow={modelService.service?.contextWindow ?? 0} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
+<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Timeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={() => void desktopConversation.loadEarlierMessages()} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} mascotSrc={sidebarMascot} mascotActive={desktopRunning || mascotCelebrating} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? [] : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? [] : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? [] : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} onApprove={() => finishWorkflow()} onDeny={() => { clearWorkflowTimer(); setChatState('denied') }} onRetry={() => desktopConversation.enabled && visiblePrompt ? void desktopConversation.send(visiblePrompt) : finishWorkflow()} onRerun={async (messageId, prompt) => { clearWorkflowTimer(); setActivePrompt(prompt); setSuggestedPrompt(''); setPendingUserMessage(null); setEmptyConversation(false); setChatState('running'); if (!desktopConversation.enabled) { finishWorkflow(); return true } const started = await desktopConversation.rerunFromMessage(messageId, prompt, desktopConversation.detail?.lastRun?.model); if (!started) setChatState('error'); return started }} onAnswer={(answer) => { toast.success(`已选择：${answer}`); finishWorkflow(2600) }} onStart={(suggestion) => resetConversation(suggestion)} onViewExpert={(expertId) => navigate('agent-detail', expertId)} /><Composer resetKey={composerResetKey} suggestedPrompt={suggestedPrompt} chatState={chatState} centered={timelineEmpty} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? desktopConversation.detail?.approvals ?? [] : []} mascotSrc={timelineEmpty ? undefined : sidebarMascot} mascotActive={desktopRunning || mascotCelebrating} onProject={() => void addProject()} onPermissionModeChange={changeProjectPermission} onAgentChange={(agentId) => { void desktopConversation.createConversationForAgent(agentId).then((created) => { if (created) toast.success('已切换助手，发送消息后创建对话') }) }} onViewExpert={() => activeExpert && navigate('agent-detail', activeExpert.id)} onChangeExpert={() => navigate('agents')} onRemoveExpert={async () => { const result = await desktopConversation.removeExpert(); if (!result.success) { toast.error(expertErrorMessage(result.error, '无法移除专家，请稍后重试')); return } toast.success('已移除专家') }} onHeightChange={setComposerHeight} onPromptCommit={(prompt) => { const now = Date.now(); setActivePrompt(prompt); setSuggestedPrompt(''); setEmptyConversation(false); setChatState('running'); setPendingUserMessage({ id: `ui-pending-${now}`, conversationId: desktopConversation.detail?.conversation.id ?? 'pending', runId: null, role: 'user', kind: 'text', content: prompt, status: 'sending', ordinal: (desktopConversation.detail?.messages.at(-1)?.ordinal ?? 0) + 1, createdAt: now, updatedAt: now }) }} onSubmitPrompt={async (prompt, model, submittedFiles) => { clearWorkflowTimer(); setActivePrompt(prompt); setSuggestedPrompt(''); setEmptyConversation(false); if (desktopConversation.enabled) { setChatState('running'); const started = await desktopConversation.send(prompt, model, submittedFiles); if (!started) { setPendingUserMessage((message) => message ? { ...message, status: 'failed', updatedAt: Date.now() } : message); setChatState('error'); return 'error' } return 'complete' } if (/询问我|让我选择|需要确认方案|怎么处理/.test(prompt)) { setChatState('question'); return 'question' } if (/修改|写入|删除|重命名|创建文件/.test(prompt)) { setChatState('approval'); return 'approval' } if (/失败|错误|连接测试|检查连接/.test(prompt)) { setChatState('error'); return 'error' } setChatState('running'); return 'complete' }} onApprove={() => finishWorkflow()} onDeny={() => { clearWorkflowTimer(); setChatState('denied') }} onAnswer={(answer) => { toast.success(`已选择：${answer}`); finishWorkflow(2600) }} onResolveApproval={(approvalId, approved) => desktopConversation.resolveApproval(approvalId, approved)} onResolveWorkModeConfirmation={desktopConversation.resolveWorkModeConfirmation} onDeleteGoal={desktopConversation.deleteGoal} onGoalRunningChange={desktopConversation.setGoalRunning} onEvidenceClick={openEvidence} onStatusChange={(status) => { if (!desktopConversation.enabled && status === 'ready' && chatState === 'running') setChatState('complete') }} onCancel={desktopConversation.enabled ? desktopConversation.cancel : undefined} /></div>
           {terminalOpen && <><TerminalResizeDivider onResize={(delta) => setTerminalHeight((value) => Math.min(720, Math.max(180, value + delta)))} /><AITerminal output={terminalOutput} isStreaming className="fox-terminal-drawer" style={{ height: terminalHeight }}><AITerminalHeader className="fox-terminal-head"><AITerminalTitle className="fox-terminal-title">powershell</AITerminalTitle><div className="fox-terminal-head-actions"><AITerminalStatus className="fox-terminal-status"><i />已连接</AITerminalStatus><AITerminalActions><AITerminalCopyButton className="fox-terminal-action" onCopy={() => toast.success('已复制终端输出')} /><IconButton label="关闭终端" onClick={() => setTerminalOpen(false)}><X size={14} /></IconButton></AITerminalActions></div></AITerminalHeader><AITerminalContent className="fox-terminal-content" /></AITerminal></>}</>}
           </ComposerRuntimeContext.Provider>
         </section>
         {showConversationRightSidebar && rightMode && !rightSidebarCollapsed && !compactLayout && <><ResizeDivider onResize={(delta) => setRightWidth((value) => Math.min(760, Math.max(280, value + delta)))} /><RightPanel mode={rightMode} detail={desktopConversation.detail} width={rightWidth} onClose={() => setRightMode(null)} /></>}
-        {showConversationRightSidebar && !rightSidebarCollapsed && <SideRail mode={compactLayout && !compactRightOpen ? null : rightMode} changeCount={desktopConversation.detail?.toolCalls.filter((tool) => /write|edit|patch|create/i.test(tool.toolName)).length ?? 0} onMode={selectRightMode} onCollapse={() => { setRightSidebarCollapsed(true); setCompactRightOpen(false) }} onSettings={() => navigate('settings')} />}
+        {showConversationRightSidebar && !rightSidebarCollapsed && <SideRail mode={compactLayout && !compactRightOpen ? null : rightMode} changeCount={unseenChangeCount} terminalOpen={terminalOpen} onMode={selectRightMode} onCollapse={() => { setRightSidebarCollapsed(true); setCompactRightOpen(false) }} onTerminal={() => setTerminalOpen((value) => !value)} onSettings={() => navigate('settings')} />}
         </div>
         </div>
       </div>
@@ -2867,9 +3260,9 @@ export function Workbench() {
           {rightMode && <RightPanel compact mode={rightMode} detail={desktopConversation.detail} width={rightWidth} onClose={() => { setCompactRightOpen(false); setRightMode(null) }} />}
         </SheetContent>
       </Sheet>
-      <ProjectAccessDialog open={projectDialogOpen} currentRoot={projectDialogInitialRoot} projects={projects} busy={projectDialogBusy} browsing={projectDialogBrowsing} error={projectDialogError} onOpenChange={setProjectDialogOpen} onBrowse={pickProjectFolder} onConfirm={(path, permissionMode) => void authorizeProject(path, permissionMode)} />
       <KnowledgeBindingDialog open={knowledgeDialogOpen} items={knowledge.items} bindings={desktopConversation.knowledgeBindings} busy={knowledgeDialogBusy || knowledge.loading} error={knowledgeDialogError ?? knowledge.error} onOpenChange={setKnowledgeDialogOpen} onConfirm={(items) => void saveKnowledgeBindings(items)} />
-      <ConversationManagementDialogs conversation={conversationDialog?.conversation ?? null} mode={conversationDialog?.mode ?? null} busy={conversationDialogBusy} onClose={() => setConversationDialog(null)} onRename={(title) => void renameManagedConversation(title)} onDelete={() => void deleteManagedConversation()} />
+      <ConversationManagementDialogs conversation={conversationDialog?.conversation ?? null} mode={conversationDialog?.mode ?? null} busy={conversationDialogBusy} error={conversationDialogError} onClose={() => { setConversationDialog(null); setConversationDialogError(null) }} onRename={(title) => void renameManagedConversation(title)} onDelete={() => void deleteManagedConversation()} />
+      <ProjectDeleteDialog project={projectDeleteDialog} busy={projectDeleteBusy} onClose={() => setProjectDeleteDialog(null)} onDelete={() => void deleteManagedProject()} />
     </main>
   )
 }

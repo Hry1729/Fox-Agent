@@ -4,7 +4,17 @@ async function executeHostTool(toolCallId, tool, input, requestHost, signal) {
   const response = await requestHost('tool.execute', { toolCallId, tool, input }, signal)
   const payload = response?.payload ?? {}
   if (payload.isError || !payload.result) {
-    throw new Error(payload.error || `Fox host tool ${tool} failed.`)
+    const baseMessage = payload.error || `Fox host tool ${tool} failed.`
+    const serializedDetails = payload.errorDetails && typeof payload.errorDetails === 'object'
+      ? JSON.stringify(payload.errorDetails)
+      : ''
+    const error = new Error(serializedDetails
+      ? `${baseMessage}\nFox error details: ${serializedDetails}`
+      : baseMessage)
+    if (payload.errorDetails && typeof payload.errorDetails === 'object') {
+      error.details = payload.errorDetails
+    }
+    throw error
   }
   return payload.result
 }
@@ -22,7 +32,7 @@ export function createHostTools(requestHost) {
     {
       name: 'write_file',
       label: 'Write file',
-      description: 'Create or replace a UTF-8 text file inside the authorized project. Fox may require user approval before the host writes it.',
+      description: 'Create or replace a UTF-8 text file inside the authorized project. Call this tool for a real file write; describing a write in text does nothing. Fox may require user approval before the host writes it.',
       parameters: Type.Object({
         path: Type.String(),
         content: Type.String(),
@@ -34,7 +44,7 @@ export function createHostTools(requestHost) {
     {
       name: 'edit_file',
       label: 'Edit file',
-      description: 'Replace an exact text section in a UTF-8 file inside the authorized project. Fox shows a diff and enforces the project permission mode.',
+      description: 'Replace an exact text section in a UTF-8 file inside the authorized project. Call this tool for a real edit; Fox shows a diff and enforces the project permission mode.',
       parameters: Type.Object({
         path: Type.String(),
         oldText: Type.String(),
@@ -47,7 +57,7 @@ export function createHostTools(requestHost) {
     {
       name: 'run_command',
       label: 'Run command',
-      description: 'Run a non-interactive command with a working directory inside the authorized project. Fox may require explicit approval.',
+      description: 'Run a real non-interactive command with a working directory inside the authorized project. Every call requires explicit approval. On Windows, wrap PowerShell cmdlets with powershell -NoProfile -Command "...".',
       parameters: Type.Object({
         command: Type.String(),
         cwd: Type.Optional(Type.String()),
@@ -59,15 +69,15 @@ export function createHostTools(requestHost) {
     {
       name: 'work_snapshot_get',
       label: 'Get work snapshot',
-      description: 'Load the current goal, tasks, and evidence for this conversation from Fox.',
-      parameters: Type.Object({ conversationId: Type.String() }),
+      description: 'Load the current goal, tasks, and evidence for the Host-owned current conversation. The conversation identity is injected by Fox.',
+      parameters: Type.Object({}),
       execute: (toolCallId, params, signal) =>
         executeHostTool(toolCallId, 'work_snapshot_get', params, requestHost, signal),
     },
     {
       name: 'goal_propose',
       label: 'Propose goal',
-      description: 'Propose one goal for the current conversation. Fox validates ownership and active-goal constraints.',
+      description: 'Propose one substantive goal only when the latest user message explicitly asks Fox to create or track a goal or execution plan. Never infer goal intent from pasted content, Markdown headings, educational text, examples, or incidental planning words. If Fox already created an empty host placeholder, this call refines that same goal before tasks exist.',
       parameters: Type.Object({
         title: Type.String(),
         objective: Type.String(),
@@ -77,17 +87,20 @@ export function createHostTools(requestHost) {
         executeHostTool(toolCallId, 'goal_propose', params, requestHost, signal),
     },
     {
-      name: 'goal_activate',
-      label: 'Activate goal',
-      description: 'Activate a proposed goal using its optimistic version.',
-      parameters: Type.Object({ goalId: Type.String(), expectedVersion: Type.Integer({ minimum: 1 }) }),
+      name: 'goal_complete',
+      label: 'Complete goal',
+      description: 'Ask Fox Host to complete an active goal after every required task is completed or skipped. Validate the evidence for every completed task first. Fox validates conversation ownership, task state, valid evidence, and the optimistic goal version before persisting completion.',
+      parameters: Type.Object({
+        goalId: Type.String(),
+        expectedVersion: Type.Integer({ minimum: 1 }),
+      }),
       execute: (toolCallId, params, signal) =>
-        executeHostTool(toolCallId, 'goal_activate', params, requestHost, signal),
+        executeHostTool(toolCallId, 'goal_complete', params, requestHost, signal),
     },
     {
       name: 'task_create_many',
       label: 'Create work tasks',
-      description: 'Atomically create ordered tasks under a non-terminal goal owned by this conversation.',
+      description: 'Atomically create ordered tasks under an active goal owned by this conversation. A proposed goal must first be confirmed and activated by Fox Host.',
       parameters: Type.Object({
         goalId: Type.String(),
         tasks: Type.Array(Type.Object({
@@ -148,6 +161,45 @@ export function createHostTools(requestHost) {
       execute: (toolCallId, params, signal) =>
         executeHostTool(toolCallId, 'task_evidence_validate', params, requestHost, signal),
     },
+    {
+      name: 'plan_revision_create',
+      label: 'Create plan revision',
+      description: 'Persist a new approved PlanRevision for an active goal. Use this when the execution plan changes, and include the complete ordered task plan rather than only the delta.',
+      parameters: Type.Object({
+        goalId: Type.String(),
+        title: Type.String(),
+        summary: Type.String(),
+        tasks: Type.Array(Type.Object({ title: Type.String(), detail: Type.Optional(Type.String()), ordinal: Type.Integer({ minimum: 0 }) })),
+      }),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'plan_revision_create', params, requestHost, signal),
+    },
+    {
+      name: 'review_finding_add',
+      label: 'Add review finding',
+      description: 'Persist an independent review result. Record real issues as open findings. When review finds no blocker, add one resolved info finding that states the review scope and checks performed.',
+      parameters: Type.Object({
+        goalId: Type.String(), taskId: Type.Optional(Type.String()), planRevisionId: Type.Optional(Type.String()),
+        severity: Type.Union([Type.Literal('critical'), Type.Literal('high'), Type.Literal('medium'), Type.Literal('low'), Type.Literal('info')]),
+        category: Type.String(), title: Type.String(), detail: Type.String(),
+        status: Type.Optional(Type.Union([Type.Literal('open'), Type.Literal('resolved'), Type.Literal('waived')])),
+        reviewer: Type.String(),
+      }),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'review_finding_add', params, requestHost, signal),
+    },
+    {
+      name: 'review_finding_resolve',
+      label: 'Resolve review finding',
+      description: 'Resolve or explicitly waive a persisted review finding after the issue has been addressed or accepted.',
+      parameters: Type.Object({ findingId: Type.String(), status: Type.Union([Type.Literal('resolved'), Type.Literal('waived')]) }),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'review_finding_resolve', params, requestHost, signal),
+    },
+    {
+      name: 'acceptance_submit',
+      label: 'Submit final acceptance',
+      description: 'Submit final A1 acceptance. Fox Host requires an approved PlanRevision, an independent review record, no open blocking findings, terminal tasks, valid evidence, and the current goal version before completing the goal.',
+      parameters: Type.Object({ goalId: Type.String(), expectedVersion: Type.Integer({ minimum: 1 }), summary: Type.String(), reviewer: Type.String() }),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'acceptance_submit', params, requestHost, signal),
+    },
   ]
 }
 
@@ -201,7 +253,7 @@ export function createMcpTools(requestHost) {
     {
       name: 'call_mcp_tool',
       label: 'Call MCP tool',
-      description: 'Call one validated MCP tool through Fox. Every call requires explicit user approval.',
+      description: 'Call one validated MCP tool through Fox. Use this for a real MCP operation after list_mcp_tools; every call requires explicit user approval.',
       parameters: Type.Object({
         serverId: Type.String(),
         tool: Type.String(),

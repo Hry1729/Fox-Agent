@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
-import { mergeConversationDetail, reduceRuntimeNotifications } from '../src/features/conversations/model/runtime-event-reducer'
+import { applyWorkEvent, mergeConversationDetail, reduceRuntimeNotifications } from '../src/features/conversations/model/runtime-event-reducer'
 import { pendingRuntimeQuestion } from '../src/features/conversations/model/pending-interactions'
 import { enqueueRuntimeEvent, takeRuntimeEventFrame } from '../src/features/conversations/model/runtime-event-queue'
-import type { ConversationDetail, RuntimeEventNotification } from '../src/features/conversations/model/types'
+import type { ConversationDetail, RuntimeEventNotification, WorkEventRecord } from '../src/features/conversations/model/types'
 
 function detail(): ConversationDetail {
   return {
@@ -232,6 +232,104 @@ describe('runtime event reducer', () => {
     ])
     expect(next.runtimeEvents).toHaveLength(5)
     expect(next.lastRun?.lastSeq).toBe(5)
+  })
+
+  test('persists runtime diagnostics without creating assistant text', () => {
+    const next = reduceRuntimeNotifications(detail(), [
+      notification(1, { type: 'run.request_snapshot', model: 'model-1', provider: 'provider-1', toolNames: ['read'] }),
+      notification(2, { type: 'run.phase', phase: 'preparing' }),
+      notification(3, { type: 'run.retrying', attempt: 1, maxAttempts: 2 }),
+      notification(4, { type: 'run.retry.completed', success: true, attempt: 1 }),
+      notification(5, { type: 'context.compaction.started', reason: 'threshold' }),
+      notification(6, { type: 'context.compaction.completed', reason: 'threshold', aborted: false }),
+      notification(7, { type: 'planner.started', model: 'model-1' }),
+      notification(8, { type: 'planner.completed', stepCount: 3, planHash: 'plan-hash' }),
+    ])
+
+    expect(next.runtimeEvents.map((event) => event.eventType)).toEqual([
+      'run.request_snapshot',
+      'run.phase',
+      'run.retrying',
+      'run.retry.completed',
+      'context.compaction.started',
+      'context.compaction.completed',
+      'planner.started',
+      'planner.completed',
+    ])
+    expect(next.messages.filter((message) => message.role === 'assistant')).toHaveLength(0)
+  })
+
+  test('does not create an empty goal from a status-only live event', () => {
+    const next = reduceRuntimeNotifications(detail(), [
+      notification(1, {
+        type: 'goal.activated',
+        goalId: 'goal-without-payload',
+      }),
+    ])
+
+    expect(next.goals).toEqual([])
+    expect(next.runtimeEvents).toHaveLength(1)
+  })
+
+  test('updates a host placeholder when the runtime refines the active goal', () => {
+    const placeholder = reduceRuntimeNotifications(detail(), [
+      notification(1, {
+        type: 'goal.activated', goalId: 'goal-1',
+        data: { goal: {
+          id: 'goal-1', title: '列个目标，再制定计划，依次修改这几个问题',
+          objective: '列个目标，再制定计划，依次修改这几个问题', status: 'active', version: 1,
+        } },
+      }),
+    ])
+    const refined = reduceRuntimeNotifications(placeholder, [
+      notification(2, {
+        type: 'goal.activated', goalId: 'goal-1',
+        data: { goal: {
+          id: 'goal-1', title: '修复 AI Essentials 文档问题',
+          objective: '按优先级修正 README 与源码中的六项问题',
+          acceptanceSummary: '逐项修改并验证', status: 'active', version: 2,
+        } },
+      }),
+    ])
+
+    expect(refined.goals).toEqual([
+      expect.objectContaining({
+        id: 'goal-1', title: '修复 AI Essentials 文档问题',
+        objective: '按优先级修正 README 与源码中的六项问题',
+        acceptanceSummary: '逐项修改并验证', status: 'active', version: 2,
+      }),
+    ])
+  })
+
+  test('applies the dedicated Work Event stream without advancing Runtime sequence or messages', () => {
+    const current = detail()
+    current.lastRun = { ...current.lastRun!, status: 'awaiting_confirmation', lastSeq: 0 }
+    const event: WorkEventRecord = {
+      type: 'goal.proposed',
+      schemaVersion: 1,
+      conversationId: 'conversation-1',
+      goalId: 'goal-1',
+      taskId: null,
+      runId: 'run-1',
+      traceId: null,
+      spanId: null,
+      sequence: 7,
+      timestamp: new Date(7000).toISOString(),
+      data: {
+        goal: {
+          id: 'goal-1', title: 'Confirm work mode', objective: 'Wait for the user',
+          status: 'proposed', version: 1,
+        },
+      },
+    }
+
+    const next = applyWorkEvent(current, event)!
+    expect(next.goals).toEqual([
+      expect.objectContaining({ id: 'goal-1', status: 'proposed', version: 1 }),
+    ])
+    expect(next.lastRun).toEqual(current.lastRun)
+    expect(next.messages).toEqual(current.messages)
+    expect(next.runtimeEvents).toEqual([])
   })
 })
 

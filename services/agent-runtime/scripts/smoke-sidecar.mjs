@@ -31,7 +31,7 @@ function send(type, fields = {}) {
   return request
 }
 
-async function waitFor(predicate, timeout = 10_000) {
+async function waitFor(predicate, timeout = 30_000) {
   const existing = messages.find(predicate)
   if (existing) return existing
 

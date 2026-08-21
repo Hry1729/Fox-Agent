@@ -19,6 +19,7 @@ import {
   ChevronDownIcon,
   ChevronUpIcon,
   CopyIcon,
+  DownloadIcon,
   FileCode2Icon,
 } from "lucide-react";
 import type { ComponentProps, CSSProperties, HTMLAttributes } from "react";
@@ -518,6 +519,36 @@ export const CollapsibleCodeBlock = ({
     [lines, previewLines]
   );
   const contextValue = useMemo(() => ({ code }), [code]);
+  const canExpand = lines.length > previewLines;
+  const downloadCode = useCallback(() => {
+    if (typeof document === "undefined") return;
+    const extensionByLanguage: Record<string, string> = {
+      bash: "sh",
+      bat: "bat",
+      cmd: "cmd",
+      console: "txt",
+      javascript: "js",
+      jsx: "jsx",
+      markdown: "md",
+      output: "txt",
+      plaintext: "txt",
+      powershell: "ps1",
+      python: "py",
+      shell: "sh",
+      shellscript: "sh",
+      terminal: "txt",
+      typescript: "ts",
+    };
+    const baseName = filename?.trim() || `output.${extensionByLanguage[language] || language || "txt"}`;
+    const url = URL.createObjectURL(new Blob([code], { type: "text/plain;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = baseName;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }, [code, filename, language]);
 
   return (
     <CodeBlockContext.Provider value={contextValue}>
@@ -539,7 +570,10 @@ export const CollapsibleCodeBlock = ({
             </CodeBlockTitle>
             <CodeBlockActions className="fox-collapsible-code-actions">
               <CodeBlockCopyButton title="复制代码" />
-              <CollapsibleTrigger asChild>
+              <Button aria-label="下载代码" onClick={downloadCode} size="icon" title="下载代码" type="button" variant="ghost">
+                <DownloadIcon size={14} />
+              </Button>
+              {canExpand && <CollapsibleTrigger asChild>
                 <Button size="sm" type="button" variant="ghost">
                   {isOpen ? (
                     <><ChevronUpIcon size={14} />收起代码</>
@@ -547,7 +581,7 @@ export const CollapsibleCodeBlock = ({
                     <><ChevronDownIcon size={14} />展开代码</>
                   )}
                 </Button>
-              </CollapsibleTrigger>
+              </CollapsibleTrigger>}
             </CodeBlockActions>
           </CodeBlockHeader>
           {!isOpen && (
@@ -592,14 +626,30 @@ export const CodeBlockCopyButton = ({
   const { code } = useContext(CodeBlockContext);
 
   const copyToClipboard = useCallback(async () => {
-    if (typeof window === "undefined" || !navigator?.clipboard?.writeText) {
-      onError?.(new Error("Clipboard API not available"));
-      return;
-    }
+    if (typeof window === "undefined") return;
 
     try {
       if (!isCopied) {
-        await navigator.clipboard.writeText(code);
+        let copiedWithClipboardApi = false;
+        if (navigator?.clipboard?.writeText) {
+          try {
+            await navigator.clipboard.writeText(code);
+            copiedWithClipboardApi = true;
+          } catch {
+            copiedWithClipboardApi = false;
+          }
+        }
+        if (!copiedWithClipboardApi) {
+          const textarea = document.createElement("textarea");
+          textarea.value = code;
+          textarea.style.position = "fixed";
+          textarea.style.opacity = "0";
+          document.body.append(textarea);
+          textarea.select();
+          const copied = document.execCommand("copy");
+          textarea.remove();
+          if (!copied) throw new Error("Clipboard API not available");
+        }
         setIsCopied(true);
         onCopy?.();
         timeoutRef.current = window.setTimeout(

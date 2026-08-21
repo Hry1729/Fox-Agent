@@ -1,0 +1,8 @@
+/**
+ * 对话主区 AI Elements「样式岛」作用域。
+ * shadcn CSS Variables 已写入 core/tailwind.css；此处仅做局部限定，避免污染全站 Element UI。
+ */
+.chat-ai-elements {
+  color-scheme: inherit;
+  isolation: isolate;
+}

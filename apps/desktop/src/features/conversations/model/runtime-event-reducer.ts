@@ -4,8 +4,12 @@ import type {
   GoalRecord,
   WorkTaskRecord,
   TaskEvidenceRecord,
+  PlanRevisionRecord,
+  ReviewFindingRecord,
+  AcceptanceRecord,
   RunRecord,
   RuntimeEventNotification,
+  WorkEventRecord,
 } from './types'
 
 export function runRecordIsActive(run: RunRecord | null) {
@@ -144,11 +148,23 @@ export function mergeConversationDetail(persisted: ConversationDetail, current: 
     goals: mergeRecords(persisted.goals, current.goals, (goal) => goal.id),
     tasks: mergeRecords(persisted.tasks, current.tasks, (task) => task.id),
     evidence: mergeRecords(persisted.evidence, current.evidence, (evidence) => evidence.id),
+    planRevisions: mergeRecords(persisted.planRevisions ?? [], current.planRevisions ?? [], (item) => item.id),
+    reviewFindings: mergeRecords(persisted.reviewFindings ?? [], current.reviewFindings ?? [], (item) => item.id),
+    acceptances: mergeRecords(persisted.acceptances ?? [], current.acceptances ?? [], (item) => item.id),
   }
 }
 
 const processEventTypes = new Set([
   'run.started',
+  'run.request_snapshot',
+  'run.phase',
+  'run.retrying',
+  'run.retry.completed',
+  'context.compaction.started',
+  'context.compaction.completed',
+  'planner.started',
+  'planner.completed',
+  'planner.failed',
   'message.started',
   'reasoning.delta',
   'tool.started',
@@ -176,6 +192,10 @@ const processEventTypes = new Set([
   'task.interrupted',
   'evidence.added',
   'evidence.validated',
+  'plan.revised',
+  'review.finding_added',
+  'review.finding_resolved',
+  'acceptance.completed',
 ])
 
 function updateAssistantMessage(
@@ -220,6 +240,9 @@ export function applyRuntimeNotification(
   const goalEvent = objectValue(eventData?.goal) ?? event
   const taskEvent = objectValue(eventData?.task) ?? event
   const evidenceEvent = objectValue(eventData?.evidence) ?? eventData ?? event
+  const planRevisionEvent = objectValue(eventData?.planRevision)
+  const reviewFindingEvent = objectValue(eventData?.finding)
+  const acceptanceEvent = objectValue(eventData?.acceptance)
   const goalId = typeof event.goalId === 'string'
     ? event.goalId
     : typeof goalEvent.id === 'string' ? goalEvent.id : null
@@ -270,6 +293,9 @@ export function applyRuntimeNotification(
   let goals = current.goals
   let tasks = current.tasks
   let evidence = current.evidence
+  let planRevisions = current.planRevisions ?? []
+  let reviewFindings = current.reviewFindings ?? []
+  let acceptances = current.acceptances ?? []
 
   const goalStatus = event.type === 'goal.proposed'
     ? 'proposed'
@@ -277,13 +303,18 @@ export function applyRuntimeNotification(
       ? 'active'
       : event.type === 'goal.blocked'
         ? 'blocked'
-        : event.type === 'goal.completed'
+        : event.type === 'goal.completed' || event.type === 'acceptance.completed'
           ? 'completed'
           : event.type === 'goal.cancelled'
             ? 'cancelled'
             : null
 
-  if (goalStatus && goalId && !goals.some((goal) => goal.id === goalId)) {
+  const hasRenderableGoalPayload = typeof goalEvent.title === 'string'
+    && goalEvent.title.trim().length > 0
+    && typeof goalEvent.objective === 'string'
+    && goalEvent.objective.trim().length > 0
+
+  if (goalStatus && goalId && !goals.some((goal) => goal.id === goalId) && hasRenderableGoalPayload) {
       goals = [...goals, {
         id: goalId,
         conversationId: notification.conversationId,
@@ -310,11 +341,18 @@ export function applyRuntimeNotification(
           ? goalEvent.blockedReason
           : null,
       }]
-  } else if (goalStatus && goalId) {
+  } else if (goalStatus && goalId && goals.some((goal) => goal.id === goalId)) {
     goals = goals.map((goal) => {
       if (goal.id !== goalId) return goal
       return {
         ...goal,
+        ...(hasRenderableGoalPayload ? {
+          title: goalEvent.title as string,
+          objective: goalEvent.objective as string,
+          acceptanceSummary: typeof goalEvent.acceptanceSummary === 'string'
+            ? goalEvent.acceptanceSummary
+            : null,
+        } : {}),
         status: goalStatus as GoalRecord['status'],
         version: typeof goalEvent.version === 'number' ? goalEvent.version : goal.version,
         updatedAt: typeof goalEvent.updatedAt === 'string'
@@ -433,6 +471,12 @@ export function applyRuntimeNotification(
         checkedAt: workTimestamp,
       }
     })
+  } else if (event.type === 'plan.revised' && planRevisionEvent && typeof planRevisionEvent.id === 'string') {
+    planRevisions = [...planRevisions.filter((item) => item.id !== planRevisionEvent.id), planRevisionEvent as unknown as PlanRevisionRecord]
+  } else if ((event.type === 'review.finding_added' || event.type === 'review.finding_resolved') && reviewFindingEvent && typeof reviewFindingEvent.id === 'string') {
+    reviewFindings = [...reviewFindings.filter((item) => item.id !== reviewFindingEvent.id), reviewFindingEvent as unknown as ReviewFindingRecord]
+  } else if (event.type === 'acceptance.completed' && acceptanceEvent && typeof acceptanceEvent.id === 'string') {
+    acceptances = [acceptanceEvent as unknown as AcceptanceRecord, ...acceptances.filter((item) => item.id !== acceptanceEvent.id)]
   }
 
   return {
@@ -443,7 +487,41 @@ export function applyRuntimeNotification(
     goals,
     tasks,
     evidence,
+    planRevisions,
+    reviewFindings,
+    acceptances,
   }
+}
+
+export function applyWorkEvent(
+  current: ConversationDetail | null,
+  workEvent: WorkEventRecord,
+) {
+  if (!current || current.conversation.id !== workEvent.conversationId) return current
+  const reduced = applyRuntimeNotification(
+    { ...current, lastRun: null, messages: current.messages, runtimeEvents: [] },
+    {
+      conversationId: workEvent.conversationId,
+      runtimeSessionId: null,
+      runId: workEvent.runId ?? `work:${workEvent.conversationId}`,
+      seq: workEvent.sequence,
+      timestamp: workEvent.timestamp,
+      event: {
+        type: workEvent.type,
+        goalId: workEvent.goalId,
+        taskId: workEvent.taskId,
+        traceId: workEvent.traceId,
+        spanId: workEvent.spanId,
+        data: workEvent.data,
+      },
+    },
+  )
+  return reduced ? {
+    ...reduced,
+    messages: current.messages,
+    runtimeEvents: current.runtimeEvents,
+    lastRun: current.lastRun,
+  } : current
 }
 
 export function reduceRuntimeNotifications(

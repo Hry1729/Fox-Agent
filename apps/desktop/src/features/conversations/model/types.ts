@@ -1,6 +1,17 @@
+export interface DesktopErrorDetails {
+  code: string
+  message: string
+  retryable: boolean
+}
+
+export interface ExpertOperationResult {
+  success: boolean
+  error: DesktopErrorDetails | null
+}
+
 export type ApiResponse<T> =
   | { ok: true; data: T }
-  | { ok: false; error: { code: string; message: string; retryable: boolean } }
+  | { ok: false; error: DesktopErrorDetails }
 
 export interface RuntimeInitialization {
   databaseReady: boolean
@@ -8,13 +19,26 @@ export interface RuntimeInitialization {
   defaultAgentId: string
 }
 
+export type AgentKind = 'assistant' | 'expert' | 'worker'
+export type AgentInvocationMode = 'primary' | 'inline' | 'child'
+export type AgentVisibility = 'chat_selector' | 'expert_center' | 'hidden'
+
 export interface AgentRecord {
   id: string
   name: string
   description: string
   runtimeType: string
+  agentKind?: AgentKind
+  invocationMode?: AgentInvocationMode
+  visibility?: AgentVisibility
   defaultModel: string
   icon: string | null
+  category: string
+  openingSuggestions: string[]
+  systemPrompt: string
+  isBuiltin: boolean
+  packageVersion: string
+  packageManifest: ExpertPackageManifest
   capabilities: unknown
   resources: {
     tools: AgentResourceRecord[]
@@ -120,6 +144,8 @@ export interface UsageStatistics {
   activeDayCount: number
   inputTokens: number
   outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
   totalTokens: number
   agents: UsageAgentStat[]
   days: UsageDayStat[]
@@ -150,6 +176,8 @@ export interface ConversationSummary {
   projectId: string | null
   projectRoot: string | null
   status: string
+  pinned?: boolean
+  archived?: boolean
   createdAt: number
   updatedAt: number
   lastMessageAt: number | null
@@ -166,6 +194,34 @@ export interface ConversationMessage {
   ordinal: number
   createdAt: number
   updatedAt: number
+}
+
+export interface ExpertDisplaySnapshot {
+  id?: string
+  name: string
+  description: string
+  icon: string | null
+  category: string
+  agentKind?: AgentKind
+  invocationMode?: AgentInvocationMode
+  visibility?: AgentVisibility
+  packageVersion?: string
+}
+
+export type ExpertPackageSnapshot = Record<string, unknown>
+
+export interface ConversationExpertBinding {
+  id: string
+  conversationId: string
+  expertId: string
+  state: 'active' | 'replaced' | 'removed'
+  activationSource: string
+  expertVersion?: string
+  packageHash?: string
+  displaySnapshot: ExpertDisplaySnapshot
+  packageSnapshot: ExpertPackageSnapshot
+  activatedAt: number
+  deactivatedAt?: number | null
 }
 
 export interface RunRecord {
@@ -190,11 +246,15 @@ export interface ConversationDetail {
   attachments: AttachmentRecord[]
   artifacts: ArtifactRecord[]
   knowledgeBindings: KnowledgeBindingRecord[]
+  expertBindings: ConversationExpertBinding[]
   lastRun: RunRecord | null
   hasEarlierMessages: boolean
   goals: GoalRecord[]
   tasks: WorkTaskRecord[]
   evidence: TaskEvidenceRecord[]
+  planRevisions: PlanRevisionRecord[]
+  reviewFindings: ReviewFindingRecord[]
+  acceptances: AcceptanceRecord[]
 }
 
 export interface ConversationHistoryPage {
@@ -299,6 +359,11 @@ export interface StartRunResult {
   attachments: AttachmentRecord[]
 }
 
+export interface SetGoalRunningResult {
+  goal: GoalRecord
+  startedRun: StartRunResult | null
+}
+
 export interface RuntimeStatus {
   state: string
   runtime: string
@@ -333,6 +398,20 @@ export interface RuntimeEventNotification {
     message?: string
     [key: string]: unknown
   }
+}
+
+export interface WorkEventRecord {
+  type: string
+  schemaVersion: number
+  conversationId: string
+  goalId: string | null
+  taskId: string | null
+  runId: string | null
+  traceId: string | null
+  spanId: string | null
+  sequence: number
+  timestamp: string
+  data: Record<string, unknown>
 }
 
 export interface YuxiServiceRecord {
@@ -533,6 +612,13 @@ export interface ProviderModelRecord {
 export interface ModelProviderRecord {
   id: string
   name: string
+  icon: string | null
+  category: string
+  openingSuggestions: string[]
+  systemPrompt: string
+  isBuiltin: boolean
+  packageVersion: string
+  packageManifest: ExpertPackageManifest
   baseUrl: string
   apiType: 'openai-completions' | 'anthropic-messages'
   enabled: boolean
@@ -545,6 +631,28 @@ export interface ModelProviderRecord {
   models: ProviderModelRecord[]
   createdAt: number
   updatedAt: number
+}
+
+export interface ExpertPackageManifest {
+  version?: string
+  prompt?: string
+  skills?: string[]
+  knowledge?: string[]
+  mcpServers?: string[]
+  allowedTools?: string[]
+  [key: string]: unknown
+}
+
+export interface SaveAgentInput {
+  id?: string
+  name: string
+  description: string
+  icon?: string | null
+  category: string
+  systemPrompt: string
+  defaultModel: string
+  openingSuggestions: string[]
+  packageManifest: ExpertPackageManifest
 }
 
 // A0 Work Loop Types
@@ -596,6 +704,49 @@ export interface TaskEvidenceRecord {
   checkedAt: string | null
   invalidReason: string | null
   createdAt: string
+}
+
+export interface PlanRevisionRecord {
+  id: string
+  goalId: string
+  conversationId: string
+  revision: number
+  title: string
+  summary: string
+  tasks: unknown[]
+  status: 'proposed' | 'approved' | 'rejected' | 'superseded'
+  createdBy: string
+  createdAt: string
+  approvedAt: string | null
+}
+
+export interface ReviewFindingRecord {
+  id: string
+  goalId: string
+  taskId: string | null
+  planRevisionId: string | null
+  conversationId: string
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  category: string
+  title: string
+  detail: string
+  status: 'open' | 'resolved' | 'waived'
+  createdBy: string
+  createdAt: string
+  resolvedAt: string | null
+}
+
+export interface AcceptanceRecord {
+  id: string
+  goalId: string
+  planRevisionId: string | null
+  conversationId: string
+  status: 'pending' | 'accepted' | 'rejected'
+  summary: string
+  checks: Record<string, unknown>
+  reviewer: string
+  createdAt: string
+  resolvedAt: string | null
 }
 
 export interface WorkStateCounts {

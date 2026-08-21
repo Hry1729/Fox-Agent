@@ -4,12 +4,13 @@ mod work_tools;
 #[cfg(test)]
 pub(crate) use work_tools::WORK_TOOLS;
 
-use crate::database::{AttachmentRecord, Database, StartRunResult};
+use crate::database::{AgentRecord, AttachmentRecord, Database, StartRunResult};
 use crate::yuxi::{get_access_token, YuxiClient};
 use flate2::read::DeflateDecoder;
 use protocol::{HostResponse, RuntimeCapabilityManifest, RuntimeEnvelope, RuntimeRequest};
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
@@ -36,6 +37,142 @@ const MAX_ATTACHMENT_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_IMAGE_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u64 = 25_000_000;
 const MAX_IMAGES_PER_MESSAGE: usize = 4;
+
+fn structured_runtime_error(message: &str) -> (&str, &str) {
+    let Some(rest) = message.strip_prefix('[') else {
+        return ("runtime.start_failed", message);
+    };
+    let Some((code, detail)) = rest.split_once(']') else {
+        return ("runtime.start_failed", message);
+    };
+    if code.is_empty()
+        || !code.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'.' || byte == b'_'
+        })
+    {
+        return ("runtime.start_failed", message);
+    }
+    (code, detail.trim_start())
+}
+
+fn runtime_agent_package(
+    agent: &AgentRecord,
+    enabled_skills: &[String],
+    enabled_mcps: &[String],
+    bound_knowledge: &[String],
+) -> Value {
+    let system_prompt = (agent.runtime_type == "pi").then(|| agent.system_prompt.clone());
+    let mut package_manifest = agent.package_manifest.clone();
+    if let Some(object) = package_manifest.as_object_mut() {
+        object.insert("skills".to_owned(), json!(enabled_skills));
+        if agent.is_builtin {
+            object.insert("mcpServers".to_owned(), json!(enabled_mcps));
+        }
+        object.insert("knowledge".to_owned(), json!(bound_knowledge));
+    }
+    json!({
+        "id": agent.id,
+        "name": agent.name,
+        "description": agent.description,
+        "runtimeType": agent.runtime_type,
+        "agentKind": agent.agent_kind,
+        "invocationMode": agent.invocation_mode,
+        "visibility": agent.visibility,
+        "defaultModel": agent.default_model,
+        "systemPrompt": system_prompt,
+        "category": agent.category,
+        "isBuiltin": agent.is_builtin,
+        "openingSuggestions": agent.opening_suggestions,
+        "packageVersion": agent.package_version,
+        "packageManifest": package_manifest,
+        "capabilities": agent.capabilities,
+        "resources": agent.resources,
+        "enabledSkills": enabled_skills,
+    })
+}
+
+fn package_string_list(package: &Value, key: &str) -> Vec<String> {
+    package
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn validate_expert_package_snapshot(snapshot: &Value, expected_hash: &str) -> Result<(), String> {
+    let actual_hash = hex::encode(Sha256::digest(snapshot.to_string().as_bytes()));
+    if expected_hash != actual_hash {
+        return Err(
+            "[conversation.expert_snapshot_invalid] Expert package snapshot hash does not match; choose the expert again."
+                .to_owned(),
+        );
+    }
+    if snapshot.get("agentKind").and_then(Value::as_str) != Some("expert")
+        || snapshot.get("invocationMode").and_then(Value::as_str) != Some("inline")
+        || snapshot.get("visibility").and_then(Value::as_str) != Some("expert_center")
+    {
+        return Err(
+            "[conversation.expert_snapshot_invalid] Expert package snapshot classification is invalid; choose the expert again."
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn runtime_expert_package(
+    snapshot: &Value,
+    expected_hash: &str,
+    enabled_skills: &[String],
+    enabled_mcps: &[String],
+    bound_knowledge: &[String],
+) -> Result<Value, String> {
+    validate_expert_package_snapshot(snapshot, expected_hash)?;
+
+    let mut package = snapshot.clone();
+    let package_object = package.as_object_mut().ok_or_else(|| {
+        "[conversation.expert_snapshot_invalid] Expert package snapshot is invalid; choose the expert again."
+            .to_owned()
+    })?;
+    let is_builtin = package_object
+        .get("isBuiltin")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let manifest = package_object
+        .get_mut("packageManifest")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            "[conversation.expert_snapshot_invalid] Expert package manifest is invalid; choose the expert again."
+                .to_owned()
+        })?;
+    let declared_skills = manifest
+        .get("skills")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<HashSet<_>>()
+        });
+    let effective_skills = enabled_skills
+        .iter()
+        .filter(|skill| {
+            declared_skills
+                .as_ref()
+                .is_none_or(|declared| declared.contains(skill.as_str()))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    manifest.insert("skills".to_owned(), json!(effective_skills));
+    if is_builtin {
+        manifest.insert("mcpServers".to_owned(), json!(enabled_mcps));
+    }
+    manifest.insert("knowledge".to_owned(), json!(bound_knowledge));
+    package_object.insert("enabledSkills".to_owned(), json!(effective_skills));
+    Ok(package)
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -495,11 +632,12 @@ impl RuntimeHost {
     }
 
     fn record_start_failure(&self, started: &StartRunResult, message: String) {
+        let (code, detail) = structured_runtime_error(&message);
         let seq = self.database.next_run_seq(&started.run.id).unwrap_or(1);
         let payload = json!({
             "type": "run.failed",
-            "code": "runtime.start_failed",
-            "message": message,
+            "code": code,
+            "message": detail,
         });
         match self
             .database
@@ -528,8 +666,8 @@ impl RuntimeHost {
             Err(error) => {
                 let _ = self.database.mark_run_failed(
                     &started.run.id,
-                    "runtime.start_failed",
-                    &format!("{message}; failed to persist runtime event: {error}"),
+                    code,
+                    &format!("{detail}; failed to persist runtime event: {error}"),
                 );
             }
         }
@@ -570,15 +708,94 @@ impl RuntimeHost {
         let agent_id = self
             .database
             .conversation_agent_id(&started.run.conversation_id)?;
-        let enabled_skills = self.database.enabled_agent_skills(&agent_id)?;
+        let assistant = self
+            .database
+            .get_agent(&agent_id)?
+            .ok_or_else(|| "conversation assistant was not found".to_owned())?;
+        let expert_binding = self
+            .database
+            .current_conversation_expert_binding(&started.run.conversation_id)?;
+        let assistant_skills = self.database.enabled_agent_skills(&assistant.id)?;
+        let configured_expert_skills = expert_binding
+            .as_ref()
+            .map(|binding| self.database.enabled_agent_skills(&binding.expert_id))
+            .transpose()?
+            .unwrap_or_default();
+        let enabled_mcps = self
+            .database
+            .list_mcp_servers()?
+            .into_iter()
+            .filter(|server| server.enabled)
+            .map(|server| server.id)
+            .collect::<Vec<_>>();
+        let bound_knowledge = self
+            .database
+            .conversation_knowledge_bindings(&started.run.conversation_id)?
+            .into_iter()
+            .filter(|binding| binding.enabled)
+            .map(|binding| binding.knowledge_base_id)
+            .collect::<Vec<_>>();
+        let assistant_package = runtime_agent_package(
+            &assistant,
+            &assistant_skills,
+            &enabled_mcps,
+            &bound_knowledge,
+        );
+        let expert_package = expert_binding
+            .as_ref()
+            .map(|binding| {
+                runtime_expert_package(
+                    &binding.package_snapshot,
+                    &binding.package_hash,
+                    &configured_expert_skills,
+                    &enabled_mcps,
+                    &bound_knowledge,
+                )
+            })
+            .transpose()?;
+        let effective_expert_skills = expert_package
+            .as_ref()
+            .map(|package| package_string_list(package, "enabledSkills"))
+            .unwrap_or_default();
+        let mut seen_skills = HashSet::new();
+        let enabled_skills = assistant_skills
+            .iter()
+            .chain(effective_expert_skills.iter())
+            .filter(|skill| seen_skills.insert((*skill).clone()))
+            .cloned()
+            .collect::<Vec<_>>();
         let skill_prompt = crate::skills::enabled_skill_prompt(&self.skills_dir, &enabled_skills)?;
         let system_prompt = if skill_prompt.is_empty() {
             system_prompt
         } else {
             format!(
-                "{system_prompt}\n\n# Enabled Fox Skills\nThe following instruction-only Skills are enabled for this Agent. Follow them when relevant; they do not grant additional tool permissions.\n\n{skill_prompt}"
+                "{system_prompt}\n\n# Enabled Assistant and Expert Skills\nThe following instruction-only Skills are enabled for the current assistant and expert. Follow them when relevant; they do not grant additional tool permissions.\n\n{skill_prompt}"
             )
         };
+        let expert_binding_payload = expert_binding.as_ref().map(|binding| {
+            json!({
+                "bindingId": binding.id,
+                "expertId": binding.expert_id,
+                "version": binding.expert_version,
+                "packageHash": binding.package_hash,
+                "activationSource": binding.activation_source,
+                "activatedAt": binding.activated_at,
+            })
+        });
+        let project_access = self
+            .database
+            .conversation_project_access(&started.run.conversation_id)?;
+        let project_context = match project_access {
+            Some((project_root, permission_mode)) => json!({
+                "projectRoot": project_root,
+                "permissionMode": permission_mode,
+            }),
+            None => json!({
+                "projectRoot": null,
+                "permissionMode": "read_only",
+            }),
+        };
+        let work_snapshot = work_tools::snapshot(&self.database, &started.run.conversation_id)?;
 
         let _transition = self
             .run_transition
@@ -608,6 +825,11 @@ impl RuntimeHost {
                 "messages": messages,
                 "systemPrompt": system_prompt,
                 "images": images,
+                "assistantPackage": assistant_package,
+                "expertBinding": expert_binding_payload,
+                "expertPackage": expert_package,
+                "projectContext": project_context,
+                "workSnapshot": work_snapshot,
             }));
         let prompt_response = self.send_request(prompt_request, RESPONSE_TIMEOUT)?;
         if prompt_response.r#type != "request_succeeded" {
@@ -1194,12 +1416,28 @@ impl RuntimeHost {
                         .as_ref()
                         .map(|(root, mode)| (Some(root.as_str()), mode.as_str()))
                         .unwrap_or((None, "read_only"));
-                    let (allowed, payload) = crate::tool_guard::preflight_payload(
-                        tool,
-                        &input,
-                        project_root,
-                        permission_mode,
-                    );
+                    let expert_guard = envelope
+                        .conversation_id
+                        .as_deref()
+                        .map(|conversation_id| {
+                            ensure_expert_tool_allowed(&database, conversation_id, tool)
+                        })
+                        .transpose();
+                    let (allowed, payload) = match expert_guard {
+                        Ok(_) => crate::tool_guard::preflight_payload(
+                            tool,
+                            &input,
+                            project_root,
+                            permission_mode,
+                        ),
+                        Err(error) => (
+                            false,
+                            json!({
+                                "code": "expert_tool_not_allowed",
+                                "reason": error,
+                            }),
+                        ),
+                    };
                     let response_type = if allowed {
                         "tool.preflight_allowed"
                     } else {
@@ -1731,8 +1969,17 @@ fn handle_work_tool_request(
     stdin: &Arc<Mutex<ChildStdin>>,
     envelope: RuntimeEnvelope,
 ) {
-    let response = execute_work_tool_request(app, database, state, &envelope)
-        .unwrap_or_else(|error| json!({ "isError": true, "error": error }));
+    let response = match execute_work_tool_request(app, database, state, &envelope) {
+        Ok(response) => response,
+        Err(error) => json!({
+            "isError": true,
+            "error": error.message,
+            "errorDetails": {
+                "code": error.code,
+                "details": error.details,
+            },
+        }),
+    };
     let response_type = if response
         .get("isError")
         .and_then(Value::as_bool)
@@ -1753,7 +2000,7 @@ fn execute_work_tool_request(
     database: &Database,
     state: &Arc<Mutex<RuntimeHostState>>,
     envelope: &RuntimeEnvelope,
-) -> Result<Value, String> {
+) -> Result<Value, work_tools::WorkToolError> {
     let work_loop_enabled = state
         .lock()
         .map_err(|_| "runtime state lock is poisoned".to_owned())?
@@ -1764,8 +2011,7 @@ fn execute_work_tool_request(
         .is_some_and(|manifest| manifest.work_loop_enabled());
     if !work_loop_enabled {
         return Err(
-            "work tools are unavailable; this runtime is running as a normal conversation"
-                .to_owned(),
+            "work tools are unavailable; this runtime is running as a normal conversation".into(),
         );
     }
     let run_id = envelope
@@ -1789,6 +2035,8 @@ fn execute_work_tool_request(
         .get("tool")
         .and_then(Value::as_str)
         .ok_or_else(|| "work tool request is missing tool".to_owned())?;
+    ensure_expert_tool_allowed(database, conversation_id, tool)
+        .map_err(work_tools::WorkToolError::from)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
     database.create_host_tool_call(run_id, tool_call_id, tool, &input, "running", false)?;
     match work_tools::execute(database, conversation_id, run_id, tool, &input) {
@@ -1800,7 +2048,8 @@ fn execute_work_tool_request(
             Ok(json!({ "isError": false, "result": outcome.result }))
         }
         Err(error) => {
-            database.complete_host_tool_call(run_id, tool_call_id, None, Some(&error))?;
+            let message = error.to_string();
+            database.complete_host_tool_call(run_id, tool_call_id, None, Some(&message))?;
             Err(error)
         }
     }
@@ -1818,6 +2067,106 @@ fn is_knowledge_tool(tool: &str) -> bool {
 
 fn is_mcp_tool(tool: &str) -> bool {
     matches!(tool, "list_mcp_tools" | "call_mcp_tool")
+}
+
+fn ensure_agent_tool_allowed(agent: &AgentRecord, role: &str, tool: &str) -> Result<(), String> {
+    ensure_package_tool_allowed(&agent.package_manifest, &agent.name, role, tool)
+}
+
+fn ensure_package_tool_allowed(
+    package_manifest: &Value,
+    package_name: &str,
+    role: &str,
+    tool: &str,
+) -> Result<(), String> {
+    let Some(allowed_tools) = package_manifest
+        .get("allowedTools")
+        .and_then(Value::as_array)
+    else {
+        return Ok(());
+    };
+    if allowed_tools.iter().any(|item| item.as_str() == Some(tool)) {
+        return Ok(());
+    }
+    Err(format!(
+        "{role} '{}' is not allowed to use tool '{}'",
+        package_name, tool
+    ))
+}
+
+fn agent_mcp_server_scope(agent: &AgentRecord) -> Option<HashSet<String>> {
+    (!agent.is_builtin).then(|| {
+        agent
+            .package_manifest
+            .get("mcpServers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    })
+}
+
+fn expert_package_manifest(package: &Value) -> Result<&Value, String> {
+    package.get("packageManifest").ok_or_else(|| {
+        "[conversation.expert_snapshot_invalid] Expert package manifest is missing; choose the expert again."
+            .to_owned()
+    })
+}
+
+fn expert_package_mcp_server_scope(package: &Value) -> Result<Option<HashSet<String>>, String> {
+    let is_builtin = package
+        .get("isBuiltin")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if is_builtin {
+        return Ok(None);
+    }
+    Ok(Some(
+        expert_package_manifest(package)?
+            .get("mcpServers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+    ))
+}
+
+fn intersect_mcp_server_scopes(
+    left: Option<HashSet<String>>,
+    right: Option<HashSet<String>>,
+) -> Option<HashSet<String>> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(scope), None) | (None, Some(scope)) => Some(scope),
+        (Some(left), Some(right)) => Some(left.intersection(&right).cloned().collect()),
+    }
+}
+
+fn ensure_expert_tool_allowed(
+    database: &Database,
+    conversation_id: &str,
+    tool: &str,
+) -> Result<(), String> {
+    let agent_id = database.conversation_agent_id(conversation_id)?;
+    let assistant = database
+        .get_agent(&agent_id)?
+        .ok_or_else(|| "conversation assistant was not found".to_owned())?;
+    ensure_agent_tool_allowed(&assistant, "assistant", tool)?;
+    if let Some(binding) = database.current_conversation_expert_binding(conversation_id)? {
+        validate_expert_package_snapshot(&binding.package_snapshot, &binding.package_hash)?;
+        let manifest = expert_package_manifest(&binding.package_snapshot)?;
+        let name = binding
+            .package_snapshot
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("bound expert");
+        ensure_package_tool_allowed(manifest, name, "expert", tool)?;
+    }
+    Ok(())
 }
 
 fn handle_mcp_tool_request(
@@ -1854,6 +2203,24 @@ fn execute_mcp_tool_request(
         .run_id
         .as_deref()
         .ok_or_else(|| "MCP tool request is missing runId".to_owned())?;
+    let conversation_id = envelope
+        .conversation_id
+        .as_deref()
+        .ok_or_else(|| "MCP tool request is missing conversationId".to_owned())?;
+    let agent_id = database.conversation_agent_id(conversation_id)?;
+    let assistant = database
+        .get_agent(&agent_id)?
+        .ok_or_else(|| "conversation assistant was not found".to_owned())?;
+    let expert_scope = database
+        .current_conversation_expert_binding(conversation_id)?
+        .map(|binding| {
+            validate_expert_package_snapshot(&binding.package_snapshot, &binding.package_hash)?;
+            expert_package_mcp_server_scope(&binding.package_snapshot)
+        })
+        .transpose()?
+        .flatten();
+    let allowed_mcp_servers =
+        intersect_mcp_server_scopes(agent_mcp_server_scope(&assistant), expert_scope);
     let payload = envelope
         .payload
         .as_ref()
@@ -1866,6 +2233,7 @@ fn execute_mcp_tool_request(
         .get("tool")
         .and_then(Value::as_str)
         .ok_or_else(|| "MCP tool request is missing tool".to_owned())?;
+    ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
     let requires_approval = tool == "call_mcp_tool";
     let tool_call = database.create_host_tool_call(
@@ -1891,6 +2259,11 @@ fn execute_mcp_tool_request(
             .list_mcp_servers()?
             .into_iter()
             .filter(|item| item.enabled)
+            .filter(|item| {
+                allowed_mcp_servers
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(&item.id))
+            })
         {
             match crate::mcp::list_tools(&server) {
                 Ok(tools) => {
@@ -1916,6 +2289,12 @@ fn execute_mcp_tool_request(
             .get("serverId")
             .and_then(Value::as_str)
             .ok_or_else(|| "serverId is required".to_owned())?;
+        if allowed_mcp_servers
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(server_id))
+        {
+            return Err("this MCP server is not enabled in the expert package".to_owned());
+        }
         let remote_tool = input
             .get("tool")
             .and_then(Value::as_str)
@@ -2046,6 +2425,7 @@ fn execute_attachment_tool_request(
         .get("toolCallId")
         .and_then(Value::as_str)
         .ok_or_else(|| "attachment tool request is missing toolCallId".to_owned())?;
+    ensure_expert_tool_allowed(database, conversation_id, "read_attachment")?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
     let attachment_id = input
         .get("attachmentId")
@@ -2461,6 +2841,7 @@ async fn execute_knowledge_tool_request(
         .get("tool")
         .and_then(Value::as_str)
         .ok_or_else(|| "knowledge tool request is missing tool".to_owned())?;
+    ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
     let tool_call =
         database.create_host_tool_call(run_id, tool_call_id, tool, &input, "running", false)?;
@@ -2613,6 +2994,7 @@ fn execute_host_tool_request(
         .get("tool")
         .and_then(Value::as_str)
         .ok_or_else(|| "host tool request is missing tool".to_owned())?;
+    ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
     let (project_root, permission_mode) = database
         .conversation_project_access(conversation_id)?
@@ -2778,13 +3160,20 @@ mod attachment_tests {
     use super::{
         attachment_image_media_type, attachment_is_docx, attachment_is_text,
         attachment_looks_like_image, bounded_knowledge_tool_result, extract_docx_text,
-        node_dependency_is_available, parse_runtime_ready_payload, pending_approval_ids_for_run,
-        redact_diagnostic_line, should_attempt_recovery, PendingApproval,
+        intersect_mcp_server_scopes, node_dependency_is_available, parse_runtime_ready_payload,
+        pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package,
+        should_attempt_recovery, structured_runtime_error, PendingApproval,
     };
     use crate::database::AttachmentRecord;
     use flate2::{write::DeflateEncoder, Compression};
     use serde_json::json;
-    use std::{collections::HashMap, fs, io::Write, sync::mpsc};
+    use sha2::{Digest, Sha256};
+    use std::{
+        collections::{HashMap, HashSet},
+        fs,
+        io::Write,
+        sync::mpsc,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -2809,6 +3198,68 @@ mod attachment_tests {
         ));
 
         fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn intersects_assistant_and_expert_mcp_scopes() {
+        let assistant = HashSet::from(["docs".to_owned(), "git".to_owned()]);
+        let expert = HashSet::from(["docs".to_owned(), "browser".to_owned()]);
+
+        assert_eq!(
+            intersect_mcp_server_scopes(Some(assistant), Some(expert)),
+            Some(HashSet::from(["docs".to_owned()]))
+        );
+        assert_eq!(intersect_mcp_server_scopes(None, None), None);
+    }
+
+    #[test]
+    fn expert_runtime_package_uses_the_bound_snapshot_and_validates_its_hash() {
+        let snapshot = json!({
+            "id": "fox-reviewer",
+            "name": "Reviewer",
+            "agentKind": "expert",
+            "invocationMode": "inline",
+            "visibility": "expert_center",
+            "isBuiltin": false,
+            "packageManifest": {
+                "skills": ["review"],
+                "mcpServers": ["docs"],
+                "allowedTools": ["read"]
+            }
+        });
+        let package_hash = hex::encode(Sha256::digest(snapshot.to_string().as_bytes()));
+        let package = runtime_expert_package(
+            &snapshot,
+            &package_hash,
+            &["review".to_owned(), "new-skill".to_owned()],
+            &["docs".to_owned(), "browser".to_owned()],
+            &["kb-1".to_owned()],
+        )
+        .expect("valid bound expert package");
+
+        assert_eq!(package.get("enabledSkills"), Some(&json!(["review"])));
+        assert_eq!(
+            package.pointer("/packageManifest/skills"),
+            Some(&json!(["review"]))
+        );
+        assert!(runtime_expert_package(&snapshot, "invalid-hash", &[], &[], &[],).is_err());
+    }
+
+    #[test]
+    fn preserves_structured_start_failure_codes() {
+        assert_eq!(
+            structured_runtime_error(
+                "[conversation.expert_snapshot_invalid] choose the expert again"
+            ),
+            (
+                "conversation.expert_snapshot_invalid",
+                "choose the expert again"
+            )
+        );
+        assert_eq!(
+            structured_runtime_error("ordinary failure"),
+            ("runtime.start_failed", "ordinary failure")
+        );
     }
 
     #[test]

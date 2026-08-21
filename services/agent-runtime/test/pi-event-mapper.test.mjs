@@ -18,13 +18,21 @@ test('maps Pi streaming, tool and completion events to stable Fox events', () =>
   })
   mapper.handle({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'read', args: { path: 'a.txt' } })
   mapper.handle({ type: 'tool_execution_end', toolCallId: 'tool-1', toolName: 'read', result: {}, isError: false })
-  mapper.handle({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'hello' }], stopReason: 'stop', usage: { input: 2, output: 3, totalTokens: 5 } } })
+  mapper.handle({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'hello' }], stopReason: 'stop', usage: { input: 2, output: 3, cacheRead: 4, cacheWrite: 1, totalTokens: 10 } } })
   mapper.handle({ type: 'agent_end', messages: [] })
   assert.deepEqual(events.map((event) => event.type), [
     'message.started', 'message.delta', 'reasoning.delta', 'tool.started', 'tool.completed',
     'usage.updated', 'message.completed', 'run.completed',
   ])
   assert.equal(events.find((event) => event.type === 'reasoning.delta')?.providerField, 'reasoning_content')
+  assert.deepEqual(events.find((event) => event.type === 'usage.updated'), {
+    type: 'usage.updated',
+    inputTokens: 2,
+    outputTokens: 3,
+    cacheReadTokens: 4,
+    cacheWriteTokens: 1,
+    totalTokens: 10,
+  })
 })
 
 test('moves text from tool-calling turns into the reasoning stream', () => {
@@ -155,6 +163,73 @@ test('separates a strongly signalled planning preamble from the final answer', (
   assert.equal(split.answer, '好的，脚本已经创建完成，运行后会生成文件统计.csv。')
 })
 
+test('separates Chinese process narration from a concise final answer', () => {
+  const text = [
+    '我先确认一下当前的工作目录，然后看看项目里到底有哪些文档。',
+    '',
+    '现在去验证文档里的具体数字和事实声明。',
+    '',
+    '让我再快速核实最后两个容易出错的点。',
+    '',
+    '结论如下：README 中的 legacy 目录声明与实际文件系统不一致。',
+  ].join('\n')
+
+  const split = splitMixedAssistantText(text)
+  assert.match(split.reasoning, /^我先确认一下当前的工作目录/)
+  assert.equal(split.answer, '结论如下：README 中的 legacy 目录声明与实际文件系统不一致。')
+})
+
+test('keeps a planning-only Chinese turn out of the assistant answer', () => {
+  const text = [
+    '我来建一个目标，然后拆成可执行的任务。',
+    '',
+    '先看看当前有没有已激活的目标状态。',
+    '',
+    '当前对话没有现存的目标快照，那我直接新建一个。',
+    '',
+    'Gate 仍然要求确认，我需要再检查目标状态。',
+  ].join('\n')
+
+  assert.deepEqual(splitMixedAssistantText(text), { reasoning: text, answer: '' })
+})
+
+test('keeps Goal gate and Host contract narration out of the assistant answer', () => {
+  const text = [
+    '好的，本次测试要测的是目标验收：部分子任务完成、部分未完成时，结案目标是否会报错。',
+    '',
+    '测试设计：创建三个任务，完成前两个，把第三个保持 queued。',
+    '',
+    '先提议目标并等待 Host 确认。目标已提议，状态 proposed，等待 Host 确认。',
+    '',
+    '快照里仍是 goal: null，我按守则停在这里。',
+    '',
+    '我直接调用 task_create_many，让 Host 来判定。',
+  ].join('\n')
+
+  assert.deepEqual(splitMixedAssistantText(text), { reasoning: text, answer: '' })
+})
+
+test('keeps an ordinary Chinese explanation in the answer stream', () => {
+  const text = '这个问题的根因是路径状态没有在选择文件夹后同步更新。'
+  assert.deepEqual(splitMixedAssistantText(text), { reasoning: '', answer: text })
+})
+
+test('separates MiniMax mm:think tags from the final answer', () => {
+  const text = '<mm:think>I need to inspect the persisted goal first.</mm:think>目标已经确认，可以继续创建任务。'
+  assert.deepEqual(splitMixedAssistantText(text), {
+    reasoning: 'I need to inspect the persisted goal first.',
+    answer: '目标已经确认，可以继续创建任务。',
+  })
+})
+
+test('handles a MiniMax closing marker without an opening marker', () => {
+  const text = 'I should not expose this planning note.</mm:think>任务已经创建。'
+  assert.deepEqual(splitMixedAssistantText(text), {
+    reasoning: 'I should not expose this planning note.',
+    answer: '任务已经创建。',
+  })
+})
+
 test('keeps ordinary explanatory wording in the final answer', () => {
   const text = 'Let me explain how this works.\n\nThe function scans the current directory and writes a CSV file.'
   assert.deepEqual(splitMixedAssistantText(text), { reasoning: '', answer: text })
@@ -184,6 +259,24 @@ test('maps mixed final text into reasoning and answer streams', () => {
 
   assert.match(events.find((event) => event.type === 'reasoning.delta')?.delta, /^The user asked/)
   assert.equal(events.find((event) => event.type === 'message.delta')?.delta, '好的，代码已经写好。')
+})
+
+test('streams Chinese planning as reasoning before its final answer', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  const planning = '我先确认当前目录。\n\n现在去核对项目文件。\n\n让我再验证一次。\n\n'
+  const answer = '最终结果：项目结构已经核对完成。'
+
+  mapper.handle({ type: 'message_start', message: { role: 'assistant', content: [] } })
+  mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: planning } })
+  mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: answer } })
+  mapper.handle({
+    type: 'message_end',
+    message: { role: 'assistant', content: [{ type: 'text', text: planning + answer }], stopReason: 'stop', usage: {} },
+  })
+
+  assert.equal(events.filter((event) => event.type === 'message.delta').map((event) => event.delta).join(''), answer)
+  assert.match(events.filter((event) => event.type === 'reasoning.delta').map((event) => event.delta).join(''), /^我先确认当前目录/)
 })
 
 test('keeps a tool-testing planning list out of the final answer', () => {
@@ -249,6 +342,15 @@ test('sanitizes leaked planning from legacy string history', () => {
   assert.equal(messages[0].content[1].text, '好的，脚本已经完成。')
 })
 
+test('normalizes plain legacy assistant strings to Pi text blocks', () => {
+  const messages = sanitizeAssistantHistory([{
+    role: 'assistant',
+    content: '目标已提交，等待确认。',
+  }])
+
+  assert.deepEqual(messages[0].content, [{ type: 'text', text: '目标已提交，等待确认。' }])
+})
+
 test('maps Pi errors and aborts to terminal Fox events only once', () => {
   const events = []
   const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
@@ -256,6 +358,65 @@ test('maps Pi errors and aborts to terminal Fox events only once', () => {
   mapper.handle({ type: 'agent_end', messages: [] })
   assert.equal(events.filter((event) => event.type === 'run.cancelled').length, 1)
   assert.equal(events.filter((event) => event.type === 'run.completed').length, 0)
+})
+
+test('defers a provider error while Pi retries and completes only once after recovery', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  mapper.handle({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: 'temporary outage', usage: {} } })
+  mapper.handle({ type: 'agent_end', messages: [], willRetry: true })
+  mapper.handle({ type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 50, errorMessage: 'temporary outage' })
+  mapper.handle({ type: 'auto_retry_end', success: true, attempt: 1 })
+  mapper.handle({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Recovered.' }], stopReason: 'stop', usage: {} } })
+  mapper.handle({ type: 'agent_end', messages: [], willRetry: false })
+
+  assert.equal(events.filter((event) => event.type === 'run.retrying').length, 1)
+  assert.equal(events.filter((event) => event.type === 'run.retry.completed').length, 1)
+  assert.equal(events.filter((event) => event.type === 'run.failed').length, 0)
+  assert.equal(events.filter((event) => event.type === 'run.completed').length, 1)
+})
+
+test('emits one final failure after retry exhaustion', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  mapper.handle({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: 'first failure', usage: {} } })
+  mapper.handle({ type: 'agent_end', messages: [], willRetry: true })
+  mapper.handle({ type: 'auto_retry_start', attempt: 1, maxAttempts: 2, delayMs: 50, errorMessage: 'first failure' })
+  mapper.handle({ type: 'auto_retry_end', success: false, attempt: 1, finalError: 'final failure' })
+  mapper.handle({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: 'final failure', usage: {} } })
+  mapper.handle({ type: 'agent_end', messages: [], willRetry: false })
+  mapper.fail(new Error('duplicate'))
+
+  const failures = events.filter((event) => event.type === 'run.failed')
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].message, 'final failure')
+  assert.equal(events.filter((event) => event.type === 'run.completed').length, 0)
+})
+
+test('maps a host cancellation to one terminal event even if cleanup also fails', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  mapper.cancel()
+  mapper.cancel()
+  mapper.fail(new Error('cleanup failure'))
+
+  assert.equal(events.filter((event) => event.type === 'run.cancelled').length, 1)
+  assert.equal(events.filter((event) => event.type === 'run.failed').length, 0)
+})
+
+test('maps context compaction without creating assistant text', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  mapper.handle({ type: 'compaction_start', reason: 'threshold' })
+  mapper.handle({ type: 'compaction_end', reason: 'threshold', aborted: false, willRetry: false })
+
+  assert.deepEqual(events.map((event) => event.type), [
+    'context.compaction.started',
+    'run.phase',
+    'context.compaction.completed',
+    'run.phase',
+  ])
+  assert.equal(events.some((event) => event.type.startsWith('message.')), false)
 })
 
 test('projects knowledge search results into stable source events', () => {

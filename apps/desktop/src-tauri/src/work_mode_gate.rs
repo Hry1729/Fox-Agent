@@ -150,6 +150,7 @@ const READ_ONLY_PHRASES: &[&str] = &[
     "列出",
     "查看",
     "几点",
+    "什么是",
     "是什么",
     "为什么",
     "explain",
@@ -194,17 +195,17 @@ pub fn evaluate(input: WorkModeGateInput<'_>) -> GateEvaluation {
     let tracked_work = contains_any(&normalized, TRACKED_WORK_PHRASES);
     let complex_action = contains_any(&normalized, COMPLEX_ACTION_PHRASES);
     let multi_step = contains_any(&normalized, MULTI_STEP_PHRASES);
-    if estimated_cross_file
-        || input.requires_verification
-        || tracked_work
-        || (complex_action && multi_step)
-    {
+    if tracked_work {
+        return evaluation(
+            WorkModeDecision::RequestConfirmation,
+            "user_requested_tracked_work",
+        );
+    }
+    if estimated_cross_file || input.requires_verification || (complex_action && multi_step) {
         let reason = if estimated_cross_file {
             "estimated_cross_file_change"
         } else if input.requires_verification {
             "change_requires_verification"
-        } else if tracked_work {
-            "user_requested_tracked_work"
         } else {
             "explicit_multi_step_change"
         };
@@ -336,10 +337,10 @@ fn apply(
     acceptance_summary: Option<String>,
     created_by: String,
 ) -> Result<AppliedGate, String> {
-    let evaluation = evaluate(input);
-    if evaluation.decision == WorkModeDecision::StayConversation {
+    let initial_evaluation = evaluate(input);
+    if initial_evaluation.decision == WorkModeDecision::StayConversation {
         return Ok(AppliedGate {
-            evaluation,
+            evaluation: initial_evaluation,
             goal: None,
             event: None,
         });
@@ -356,14 +357,82 @@ fn apply(
             )
         })
     {
+        if input.runtime_proposed {
+            if let Some(refined) = database
+                .goals()
+                .refine_host_placeholder(&goal.id, title, objective, acceptance_summary)
+                .map_err(|error| error.to_string())?
+            {
+                let (decision, reason, event_type) = if refined.status == GoalStatus::Proposed {
+                    (
+                        WorkModeDecision::RequestConfirmation,
+                        "runtime_refined_proposed_goal",
+                        "goal.proposed",
+                    )
+                } else {
+                    (
+                        WorkModeDecision::AutoActivate,
+                        "runtime_refined_host_goal",
+                        "goal.activated",
+                    )
+                };
+                let evaluation = evaluation(decision, reason);
+                let event = database.append_work_event(
+                    event_type,
+                    conversation_id,
+                    Some(&refined.id),
+                    None,
+                    run_id,
+                    json!({
+                        "goal": refined,
+                        "gateDecision": evaluation.decision,
+                        "gateReasons": evaluation.reasons,
+                        "source": "runtime_refinement",
+                    }),
+                )?;
+                return Ok(AppliedGate {
+                    evaluation,
+                    goal: Some(refined),
+                    event: Some(event),
+                });
+            }
+        }
+        let evaluation = if goal.status == GoalStatus::Proposed {
+            evaluation(
+                WorkModeDecision::RequestConfirmation,
+                "existing_proposed_goal_reused",
+            )
+        } else {
+            evaluation(
+                WorkModeDecision::AutoActivate,
+                "existing_active_goal_reused",
+            )
+        };
+        let event = if goal.status == GoalStatus::Proposed {
+            Some(database.append_work_event(
+                "goal.proposed",
+                conversation_id,
+                Some(&goal.id),
+                None,
+                run_id,
+                json!({
+                    "goal": goal,
+                    "gateDecision": evaluation.decision,
+                    "gateReasons": evaluation.reasons,
+                    "source": "runtime_reuse",
+                }),
+            )?)
+        } else {
+            None
+        };
         return Ok(AppliedGate {
             evaluation,
             goal: Some(goal),
-            event: None,
+            event,
         });
     }
 
-    let status = match evaluation.decision {
+    let status = match initial_evaluation.decision {
         WorkModeDecision::AutoActivate => GoalStatus::Active,
         WorkModeDecision::RequestConfirmation => GoalStatus::Proposed,
         WorkModeDecision::StayConversation => unreachable!(),
@@ -393,12 +462,12 @@ fn apply(
         run_id,
         json!({
             "goal": goal,
-            "gateDecision": evaluation.decision,
-            "gateReasons": evaluation.reasons,
+            "gateDecision": initial_evaluation.decision,
+            "gateReasons": initial_evaluation.reasons,
         }),
     )?;
     Ok(AppliedGate {
-        evaluation,
+        evaluation: initial_evaluation,
         goal: Some(goal),
         event: Some(event),
     })
@@ -472,8 +541,12 @@ mod tests {
     #[test]
     fn explanation_and_one_shot_read_only_requests_stay_in_chat() {
         let (database, path, conversation_id) = setup();
-        for request in ["解释这个函数做什么", "列出这个目录的文件", "现在几点？"]
-        {
+        for request in [
+            "解释这个函数做什么",
+            "列出这个目录的文件",
+            "现在几点？",
+            "### 3. 什么是数据泄漏\n\n如果训练过程看到了本不该获得的信息，离线分数会虚高。\n\n- 根据测试集分数反复选择参数；\n- 先做全数据特征选择，再交叉验证。\n\n正确顺序通常是：先划分，再只在训练集上 fit 预处理器；对验证/测试只调用 transform。",
+        ] {
             let applied = apply_user_request(&database, &conversation_id, "unused-run", request)
                 .expect("apply gate");
             assert_eq!(
@@ -567,6 +640,59 @@ mod tests {
         .expect("approve proposal");
         assert_eq!(active.status, GoalStatus::Active);
         assert_eq!(event.event_type, "goal.activated");
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn runtime_proposal_refines_tracked_work_goal_before_confirmation() {
+        let (database, path, conversation_id) = setup();
+        let request = "列个目标，再制定计划，依次修改这几个问题";
+        let run = database
+            .create_run(&conversation_id, request, None)
+            .expect("create run")
+            .run;
+        let host_applied =
+            apply_user_request(&database, &conversation_id, &run.id, request).expect("apply gate");
+        let placeholder = host_applied.goal.expect("host placeholder goal");
+        assert_eq!(placeholder.status, GoalStatus::Proposed);
+        assert_eq!(placeholder.title, request);
+
+        let refined = apply_runtime_proposal(
+            &database,
+            &conversation_id,
+            &run.id,
+            "修复 AI Essentials 文档问题".to_owned(),
+            "按优先级修正 README 与源码中的六项文档问题".to_owned(),
+            Some("逐项修改并验证引用与说明一致".to_owned()),
+        )
+        .expect("refine host goal");
+
+        assert_eq!(
+            refined.evaluation.decision,
+            WorkModeDecision::RequestConfirmation
+        );
+        assert_eq!(
+            refined.evaluation.reasons,
+            vec!["runtime_refined_proposed_goal"]
+        );
+        let goal = refined.goal.expect("refined goal");
+        assert_eq!(goal.id, placeholder.id);
+        assert_eq!(goal.status, GoalStatus::Proposed);
+        assert_eq!(goal.title, "修复 AI Essentials 文档问题");
+        assert_eq!(goal.version, placeholder.version + 1);
+        assert_eq!(
+            refined.event.expect("refinement event").event_type,
+            "goal.proposed"
+        );
+        assert_eq!(
+            database
+                .goals()
+                .get_by_conversation(&conversation_id)
+                .unwrap()
+                .len(),
+            1
+        );
         drop(database);
         let _ = std::fs::remove_file(path);
     }

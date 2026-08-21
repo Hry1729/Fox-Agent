@@ -1,4 +1,10 @@
+use super::{
+    repositories::{agent_package_snapshot, package_snapshot_hash, query_agent_record},
+    DATABASE_SCHEMA_VERSION,
+};
 use rusqlite::{Connection, Result};
+use serde_json::json;
+use sha2::{Digest, Sha256};
 
 const MIGRATION_1: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -597,6 +603,167 @@ CREATE INDEX idx_work_events_conversation_sequence
     ON work_events(conversation_id, sequence);
 "#;
 
+const MIGRATION_16: &str = r#"
+CREATE TABLE pending_work_mode_dispatches (
+    goal_id TEXT PRIMARY KEY REFERENCES goals(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    runtime_text TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX idx_pending_work_mode_dispatches_conversation
+    ON pending_work_mode_dispatches(conversation_id);
+"#;
+
+const MIGRATION_17: &str = r#"
+ALTER TABLE conversations ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0
+    CHECK(pinned IN (0, 1));
+ALTER TABLE conversations ADD COLUMN archived INTEGER NOT NULL DEFAULT 0
+    CHECK(archived IN (0, 1));
+
+CREATE INDEX idx_conversations_archived_pinned_activity
+    ON conversations(archived, pinned, last_message_at, created_at);
+"#;
+
+const MIGRATION_18: &str = r#"
+ALTER TABLE model_providers ADD COLUMN icon TEXT;
+"#;
+
+const MIGRATION_19: &str = r#"
+ALTER TABLE agents ADD COLUMN icon TEXT;
+ALTER TABLE agents ADD COLUMN category TEXT NOT NULL DEFAULT 'general';
+ALTER TABLE agents ADD COLUMN opening_suggestions_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE agents ADD COLUMN is_builtin INTEGER NOT NULL DEFAULT 0 CHECK(is_builtin IN (0, 1));
+ALTER TABLE agents ADD COLUMN package_version TEXT NOT NULL DEFAULT '1.0.0';
+ALTER TABLE agents ADD COLUMN package_manifest_json TEXT NOT NULL DEFAULT '{}';
+CREATE TABLE plan_revisions (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    tasks_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('proposed', 'approved', 'rejected', 'superseded')),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    approved_at TEXT,
+    UNIQUE(goal_id, revision)
+);
+CREATE INDEX idx_plan_revisions_goal_revision ON plan_revisions(goal_id, revision DESC);
+
+CREATE TABLE review_findings (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+    task_id TEXT REFERENCES work_tasks(id) ON DELETE SET NULL,
+    plan_revision_id TEXT REFERENCES plan_revisions(id) ON DELETE SET NULL,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    severity TEXT NOT NULL CHECK(severity IN ('critical', 'high', 'medium', 'low', 'info')),
+    category TEXT NOT NULL,
+    title TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('open', 'resolved', 'waived')),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+CREATE INDEX idx_review_findings_goal_status ON review_findings(goal_id, status, severity);
+
+CREATE TABLE acceptances (
+    id TEXT PRIMARY KEY,
+    goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
+    plan_revision_id TEXT REFERENCES plan_revisions(id) ON DELETE SET NULL,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'accepted', 'rejected')),
+    summary TEXT NOT NULL,
+    checks_json TEXT NOT NULL,
+    reviewer TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+CREATE INDEX idx_acceptances_goal_created ON acceptances(goal_id, created_at DESC);
+"#;
+
+const AGENT_CLASSIFICATION_SCHEMA: &str = r#"
+ALTER TABLE agents ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'expert';
+ALTER TABLE agents ADD COLUMN invocation_mode TEXT NOT NULL DEFAULT 'inline';
+ALTER TABLE agents ADD COLUMN visibility TEXT NOT NULL DEFAULT 'expert_center'
+    CHECK(
+        (agent_kind = 'assistant' AND invocation_mode = 'primary' AND visibility = 'chat_selector') OR
+        (agent_kind = 'expert' AND invocation_mode = 'inline' AND visibility = 'expert_center') OR
+        (agent_kind = 'worker' AND invocation_mode = 'child' AND visibility = 'hidden')
+    );
+
+UPDATE agents
+SET agent_kind = 'assistant', invocation_mode = 'primary', visibility = 'chat_selector'
+WHERE id = 'fox-general';
+
+UPDATE agents
+SET agent_kind = CASE
+        WHEN json_valid(system_prompt) AND COALESCE(
+            json_extract(system_prompt, '$.isSubagent'),
+            json_extract(system_prompt, '$.is_subagent'),
+            0
+        ) = 1 THEN 'worker'
+        WHEN json_valid(system_prompt) AND (
+            COALESCE(json_extract(system_prompt, '$.isDefault'), json_extract(system_prompt, '$.is_default'), 0) = 1 OR
+            COALESCE(json_extract(system_prompt, '$.chatVisible'), json_extract(system_prompt, '$.chat_visible'), 0) = 1
+        ) THEN 'assistant'
+        ELSE 'expert'
+    END,
+    invocation_mode = CASE
+        WHEN json_valid(system_prompt) AND COALESCE(
+            json_extract(system_prompt, '$.isSubagent'),
+            json_extract(system_prompt, '$.is_subagent'),
+            0
+        ) = 1 THEN 'child'
+        WHEN json_valid(system_prompt) AND (
+            COALESCE(json_extract(system_prompt, '$.isDefault'), json_extract(system_prompt, '$.is_default'), 0) = 1 OR
+            COALESCE(json_extract(system_prompt, '$.chatVisible'), json_extract(system_prompt, '$.chat_visible'), 0) = 1
+        ) THEN 'primary'
+        ELSE 'inline'
+    END,
+    visibility = CASE
+        WHEN json_valid(system_prompt) AND COALESCE(
+            json_extract(system_prompt, '$.isSubagent'),
+            json_extract(system_prompt, '$.is_subagent'),
+            0
+        ) = 1 THEN 'hidden'
+        WHEN json_valid(system_prompt) AND (
+            COALESCE(json_extract(system_prompt, '$.isDefault'), json_extract(system_prompt, '$.is_default'), 0) = 1 OR
+            COALESCE(json_extract(system_prompt, '$.chatVisible'), json_extract(system_prompt, '$.chat_visible'), 0) = 1
+        ) THEN 'chat_selector'
+        ELSE 'expert_center'
+    END
+WHERE runtime_type = 'yuxi';
+"#;
+
+const CONVERSATION_EXPERT_BINDINGS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS conversation_expert_bindings (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    expert_id TEXT NOT NULL REFERENCES agents(id),
+    state TEXT NOT NULL CHECK(state IN ('active', 'replaced', 'removed')),
+    activation_source TEXT NOT NULL,
+    expert_version TEXT NOT NULL,
+    package_hash TEXT NOT NULL,
+    display_snapshot_json TEXT NOT NULL,
+    activated_at INTEGER NOT NULL,
+    deactivated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_expert_bindings_history
+    ON conversation_expert_bindings(conversation_id, activated_at, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_expert_bindings_single_active
+    ON conversation_expert_bindings(conversation_id) WHERE state = 'active';
+"#;
+
+const AGENT_EXPERT_SCHEMA_VERSION: i64 = 20;
+const EXPERT_PACKAGE_SNAPSHOT_SCHEMA: &str = r#"
+ALTER TABLE conversation_expert_bindings
+ADD COLUMN package_snapshot_json TEXT NOT NULL DEFAULT '{}';
+"#;
+
 pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
@@ -622,7 +789,177 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     apply_migration(&transaction, 13, MIGRATION_13, now)?;
     apply_migration(&transaction, 14, MIGRATION_14, now)?;
     apply_migration(&transaction, 15, MIGRATION_15, now)?;
+    apply_migration(&transaction, 16, MIGRATION_16, now)?;
+    apply_migration(&transaction, 17, MIGRATION_17, now)?;
+    apply_migration(&transaction, 18, MIGRATION_18, now)?;
+    apply_migration(&transaction, 19, MIGRATION_19, now)?;
+    apply_agent_expert_migration(&transaction, now)?;
+    apply_expert_package_snapshot_migration(&transaction, now)?;
     transaction.commit()
+}
+
+fn apply_agent_expert_migration(transaction: &rusqlite::Transaction<'_>, now: i64) -> Result<()> {
+    let applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
+        [AGENT_EXPERT_SCHEMA_VERSION],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if applied {
+        return Ok(());
+    }
+    ensure_agent_classification_and_expert_bindings(transaction)?;
+    migrate_builtin_expert_conversations(transaction)?;
+    transaction.execute(
+        "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+        rusqlite::params![AGENT_EXPERT_SCHEMA_VERSION, now],
+    )?;
+    Ok(())
+}
+
+fn apply_expert_package_snapshot_migration(
+    transaction: &rusqlite::Transaction<'_>,
+    now: i64,
+) -> Result<()> {
+    let applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
+        [DATABASE_SCHEMA_VERSION],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if applied {
+        return Ok(());
+    }
+    let snapshot_column_exists = transaction.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM pragma_table_info('conversation_expert_bindings')
+            WHERE name = 'package_snapshot_json'
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !snapshot_column_exists {
+        transaction.execute_batch(EXPERT_PACKAGE_SNAPSHOT_SCHEMA)?;
+    }
+
+    let bindings = {
+        let mut statement = transaction
+            .prepare("SELECT id, expert_id FROM conversation_expert_bindings ORDER BY rowid ASC")?;
+        let bindings = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        bindings
+    };
+    for (binding_id, expert_id) in bindings {
+        let expert = query_agent_record(transaction, &expert_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let package_snapshot = agent_package_snapshot(&expert);
+        let package_hash = package_snapshot_hash(&package_snapshot);
+        transaction.execute(
+            "UPDATE conversation_expert_bindings
+             SET package_snapshot_json = ?2, package_hash = ?3
+             WHERE id = ?1",
+            rusqlite::params![binding_id, package_snapshot.to_string(), package_hash],
+        )?;
+    }
+    transaction.execute(
+        "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+        rusqlite::params![DATABASE_SCHEMA_VERSION, now],
+    )?;
+    Ok(())
+}
+
+fn ensure_agent_classification_and_expert_bindings(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<()> {
+    let classification_exists = transaction.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM pragma_table_info('agents') WHERE name = 'agent_kind'
+         )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !classification_exists {
+        transaction.execute_batch(AGENT_CLASSIFICATION_SCHEMA)?;
+    }
+    transaction.execute_batch(CONVERSATION_EXPERT_BINDINGS_SCHEMA)
+}
+
+fn migrate_builtin_expert_conversations(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
+    let legacy = {
+        let mut statement = transaction.prepare(
+            "SELECT c.id, c.created_at, a.id, a.name, a.description, a.icon, a.category,
+                    a.package_version, a.package_manifest_json
+             FROM conversations c
+             JOIN agents a ON a.id = c.agent_id
+             WHERE a.id IN (
+                'fox-debugger', 'fox-frontend', 'fox-reviewer', 'fox-security', 'fox-architect'
+             )",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        rows
+    };
+
+    for (
+        conversation_id,
+        activated_at,
+        expert_id,
+        name,
+        description,
+        icon,
+        category,
+        expert_version,
+        package_manifest_json,
+    ) in legacy
+    {
+        let binding_id = format!("migration:{conversation_id}:{expert_id}");
+        let package_hash = hex::encode(Sha256::digest(package_manifest_json.as_bytes()));
+        let display_snapshot = json!({
+            "id": expert_id,
+            "name": name,
+            "description": description,
+            "icon": icon,
+            "category": category,
+            "agentKind": "expert",
+            "invocationMode": "inline",
+            "visibility": "expert_center",
+            "packageVersion": expert_version,
+        });
+        transaction.execute(
+            "INSERT OR IGNORE INTO conversation_expert_bindings(
+                id, conversation_id, expert_id, state, activation_source, expert_version,
+                package_hash, display_snapshot_json, activated_at, deactivated_at
+             ) VALUES (?1, ?2, ?3, 'active', 'migration', ?4, ?5, ?6, ?7, NULL)",
+            rusqlite::params![
+                binding_id,
+                conversation_id,
+                expert_id,
+                expert_version,
+                package_hash,
+                display_snapshot.to_string(),
+                activated_at,
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE conversations SET agent_id = 'fox-general' WHERE id = ?1",
+            [conversation_id],
+        )?;
+    }
+    Ok(())
 }
 
 fn apply_migration(
@@ -760,6 +1097,345 @@ mod tests {
     }
 
     #[test]
+    fn adds_persisted_model_provider_icon_column() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run(&mut connection, 1).expect("apply migrations");
+        run(&mut connection, 2).expect("repeat migrations");
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('model_providers') WHERE name = 'icon'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 18",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn classifies_existing_agents_and_enforces_binding_constraints() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run_pre_a0(&mut connection, 1);
+        for (index, (id, runtime_type, system_prompt)) in [
+            ("fox-general", "pi", ""),
+            ("fox-debugger", "pi", ""),
+            ("fox-user-local", "pi", "Local expert"),
+            (
+                "yuxi:worker",
+                "yuxi",
+                r#"{"isSubagent":true,"isDefault":true}"#,
+            ),
+            ("yuxi:assistant", "yuxi", r#"{"chatVisible":true}"#),
+            ("yuxi:expert", "yuxi", "{}"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            connection
+                .execute(
+                    "INSERT INTO agents(
+                        id, name, description, runtime_type, system_prompt, default_model,
+                        created_at, updated_at
+                     ) VALUES (?1, ?1, '', ?2, ?3, '', ?4, ?4)",
+                    rusqlite::params![id, runtime_type, system_prompt, index as i64 + 10],
+                )
+                .expect("insert legacy agent");
+        }
+
+        let transaction = connection.transaction().expect("begin legacy v19 upgrade");
+        for (version, sql) in [
+            (14, MIGRATION_14),
+            (15, MIGRATION_15),
+            (16, MIGRATION_16),
+            (17, MIGRATION_17),
+            (18, MIGRATION_18),
+            (19, MIGRATION_19),
+        ] {
+            apply_migration(&transaction, version, sql, 19).expect("apply legacy v19 migration");
+        }
+        transaction.commit().expect("commit legacy v19 schema");
+        connection
+            .execute(
+                "INSERT INTO conversations(
+                    id, agent_id, title, status, created_at, updated_at
+                 ) VALUES ('legacy-expert-conversation', 'fox-debugger', 'Legacy expert', 'active', 19, 19)",
+                [],
+            )
+            .expect("insert legacy expert conversation");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('agents') WHERE name = 'agent_kind'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+
+        run(&mut connection, 20).expect("upgrade legacy agents");
+        run(&mut connection, 21).expect("repeat upgraded migrations");
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT agent_id FROM conversations WHERE id = 'legacy-expert-conversation'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "fox-general"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT expert_id FROM conversation_expert_bindings
+                     WHERE conversation_id = 'legacy-expert-conversation' AND state = 'active'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "fox-debugger"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 20",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 21",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        let (package_snapshot_json, package_hash) = connection
+            .query_row(
+                "SELECT package_snapshot_json, package_hash
+                 FROM conversation_expert_bindings
+                 WHERE conversation_id = 'legacy-expert-conversation'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .expect("load migrated package snapshot");
+        let package_snapshot: serde_json::Value =
+            serde_json::from_str(&package_snapshot_json).expect("parse migrated package snapshot");
+        assert_eq!(package_snapshot["id"], "fox-debugger");
+        assert_eq!(
+            package_hash,
+            package_snapshot_hash(&package_snapshot),
+            "v21 must hash the canonical package snapshot"
+        );
+
+        for (id, expected) in [
+            ("fox-general", ("assistant", "primary", "chat_selector")),
+            ("fox-debugger", ("expert", "inline", "expert_center")),
+            ("fox-user-local", ("expert", "inline", "expert_center")),
+            ("yuxi:worker", ("worker", "child", "hidden")),
+            ("yuxi:assistant", ("assistant", "primary", "chat_selector")),
+            ("yuxi:expert", ("expert", "inline", "expert_center")),
+        ] {
+            let actual = connection
+                .query_row(
+                    "SELECT agent_kind, invocation_mode, visibility FROM agents WHERE id = ?1",
+                    [id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .expect("load migrated classification");
+            assert_eq!(
+                actual,
+                (
+                    expected.0.to_owned(),
+                    expected.1.to_owned(),
+                    expected.2.to_owned()
+                ),
+                "classification mismatch for {id}"
+            );
+        }
+        assert!(connection
+            .execute(
+                "UPDATE agents SET agent_kind = 'assistant' WHERE id = 'fox-debugger'",
+                [],
+            )
+            .is_err());
+
+        connection
+            .execute(
+                "INSERT INTO conversations(
+                    id, agent_id, title, status, created_at, updated_at
+                 ) VALUES ('conversation-1', 'fox-general', 'Legacy', 'active', 30, 30)",
+                [],
+            )
+            .expect("insert conversation");
+        connection
+            .execute(
+                "INSERT INTO conversation_expert_bindings(
+                    id, conversation_id, expert_id, state, activation_source, expert_version,
+                    package_hash, display_snapshot_json, activated_at
+                 ) VALUES (
+                    'binding-1', 'conversation-1', 'fox-debugger', 'active', 'migration-test',
+                    '1.0.0', 'hash-1', '{}', 31
+                 )",
+                [],
+            )
+            .expect("insert active binding");
+        assert!(connection
+            .execute(
+                "INSERT INTO conversation_expert_bindings(
+                    id, conversation_id, expert_id, state, activation_source, expert_version,
+                    package_hash, display_snapshot_json, activated_at
+                 ) VALUES (
+                    'binding-2', 'conversation-1', 'fox-debugger', 'active', 'migration-test',
+                    '1.0.0', 'hash-2', '{}', 32
+                 )",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn upgrades_v20_bindings_with_static_package_snapshots() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run_pre_a0(&mut connection, 1);
+        let transaction = connection.transaction().expect("begin v19 schema setup");
+        for (version, sql) in [
+            (14, MIGRATION_14),
+            (15, MIGRATION_15),
+            (16, MIGRATION_16),
+            (17, MIGRATION_17),
+            (18, MIGRATION_18),
+            (19, MIGRATION_19),
+        ] {
+            apply_migration(&transaction, version, sql, 19).expect("apply v19 schema");
+        }
+        transaction.commit().expect("commit v19 schema");
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO agents(
+                    id, name, description, runtime_type, system_prompt, default_model,
+                    category, opening_suggestions_json, is_builtin, package_version,
+                    package_manifest_json, created_at, updated_at
+                ) VALUES
+                    ('fox-general', 'General', 'Base assistant', 'pi', 'base prompt', 'base-model',
+                     'general', '[]', 1, '1.0.0', '{}', 1, 1),
+                    ('local-expert', 'Local', 'Local expert', 'pi', 'local prompt', 'local-model',
+                     'engineering', '["Start local"]', 0, '2.1.0', '{"allowedTools":["read"]}', 2, 2),
+                    ('yuxi:remote-expert', 'Remote', 'Remote expert', 'yuxi',
+                     '{"remoteAvailable":true,"capabilities":["knowledge"],"resources":{"tools":[],"knowledges":[],"mcps":[],"skills":[]}}',
+                     'remote-model', 'knowledge', '["Start remote"]', 0, '3.0.0',
+                     '{"allowedTools":["search_knowledge"]}', 3, 3);
+                INSERT INTO conversations(
+                    id, agent_id, title, status, created_at, updated_at
+                ) VALUES
+                    ('local-conversation', 'fox-general', 'Local', 'active', 4, 4),
+                    ('remote-conversation', 'fox-general', 'Remote', 'active', 5, 5);
+                "#,
+            )
+            .expect("seed v19 agents and conversations");
+        let transaction = connection.transaction().expect("begin v20 migration");
+        apply_agent_expert_migration(&transaction, 20).expect("apply v20 migration");
+        transaction.commit().expect("commit v20 migration");
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO conversation_expert_bindings(
+                    id, conversation_id, expert_id, state, activation_source, expert_version,
+                    package_hash, display_snapshot_json, activated_at
+                ) VALUES
+                    ('local-binding', 'local-conversation', 'local-expert', 'active', 'test',
+                     '2.1.0', 'legacy-local-hash', '{}', 6),
+                    ('remote-binding', 'remote-conversation', 'yuxi:remote-expert', 'active', 'test',
+                     '3.0.0', 'legacy-remote-hash', '{}', 7);
+                "#,
+            )
+            .expect("seed v20 bindings");
+
+        run(&mut connection, 21).expect("upgrade v20 bindings to v21");
+        run(&mut connection, 22).expect("repeat v21 migration");
+
+        for (binding_id, expected_prompt) in [
+            ("local-binding", Some("local prompt")),
+            ("remote-binding", None),
+        ] {
+            let (snapshot_json, package_hash) = connection
+                .query_row(
+                    "SELECT package_snapshot_json, package_hash
+                     FROM conversation_expert_bindings WHERE id = ?1",
+                    [binding_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .expect("load upgraded binding");
+            let snapshot: serde_json::Value =
+                serde_json::from_str(&snapshot_json).expect("parse upgraded snapshot");
+            assert_eq!(package_hash, package_snapshot_hash(&snapshot));
+            match expected_prompt {
+                Some(prompt) => assert_eq!(snapshot["systemPrompt"], prompt),
+                None => assert!(snapshot["systemPrompt"].is_null()),
+            }
+            for field in [
+                "id",
+                "name",
+                "description",
+                "runtimeType",
+                "agentKind",
+                "invocationMode",
+                "visibility",
+                "defaultModel",
+                "systemPrompt",
+                "category",
+                "isBuiltin",
+                "openingSuggestions",
+                "packageVersion",
+                "packageManifest",
+                "capabilities",
+                "resources",
+            ] {
+                assert!(
+                    snapshot.get(field).is_some(),
+                    "missing snapshot field {field}"
+                );
+            }
+        }
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 21",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn upgrades_pre_a0_data_and_is_idempotent() {
         let mut connection = Connection::open_in_memory().expect("open database");
         run_pre_a0(&mut connection, 1);
@@ -817,6 +1493,7 @@ mod tests {
             ("goals", 0),
             ("work_tasks", 0),
             ("task_evidence", 0),
+            ("pending_work_mode_dispatches", 0),
         ] {
             let actual: i64 = connection
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -829,6 +1506,28 @@ mod tests {
             connection
                 .query_row(
                     "SELECT COUNT(*) FROM schema_migrations WHERE version = 14",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 16",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'index'
+                       AND name = 'idx_pending_work_mode_dispatches_conversation'",
                     [],
                     |row| row.get::<_, i64>(0),
                 )

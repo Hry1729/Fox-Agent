@@ -74,6 +74,123 @@ test('runs the real Pi Agent loop through Fox JSONL with a faux provider', async
   await runtime.waitFor((message) => message.runId === 'run-1' && message.payload?.type === 'run.completed')
 })
 
+test('records tool and prompt diagnostics while allowing a text-only run with no tools', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-no-tools-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const runtime = startRuntime()
+  context.after(() => runtime.close())
+
+  const initialize = runtime.send('initialize', {
+    payload: {
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+        fauxResponses: ['Text-only response.'],
+      },
+    },
+  })
+  await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+
+  const sessionId = 'pi-no-tools-session'
+  const conversationId = 'pi-no-tools-conversation'
+  const create = runtime.send('create_session', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    payload: { sessionPath: join(directory, 'session.json') },
+  })
+  await runtime.waitFor((message) => message.requestId === create.id && message.type === 'session_created')
+
+  const runId = 'pi-no-tools-run'
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    runId,
+    payload: {
+      text: 'Answer without tools.',
+      messages: [{ role: 'user', content: 'Answer without tools.' }],
+      assistantPackage: { packageManifest: { allowedTools: [] } },
+      expertPackage: { packageManifest: { allowedTools: ['unknown_tool'] } },
+      promptBudget: { maxPromptChars: 5_000, charsPerToken: 4 },
+    },
+  })
+
+  const snapshot = await runtime.waitFor((message) => (
+    message.runId === runId && message.payload?.type === 'run.request_snapshot'
+  ))
+  assert.deepEqual(snapshot.payload.assistantDeclaredToolNames, [])
+  assert.deepEqual(snapshot.payload.expertDeclaredToolNames, ['unknown_tool'])
+  assert.deepEqual(snapshot.payload.effectiveToolNames, [])
+  assert.deepEqual(snapshot.payload.toolNames, [])
+  assert.ok(snapshot.payload.excludedTools.some((tool) => tool.reason === 'assistant'))
+  assert.deepEqual(
+    snapshot.payload.excludedTools.find((tool) => tool.name === 'unknown_tool'),
+    { name: 'unknown_tool', reason: 'unregistered', declaredBy: ['expert'] },
+  )
+  assert.ok(snapshot.payload.promptDiagnostics.totalChars <= snapshot.payload.promptDiagnostics.maxPromptChars)
+  assert.equal('prompt' in snapshot.payload.promptDiagnostics, false)
+
+  const answer = await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'message.delta')
+  assert.match(answer.payload.delta, /^Text-only/)
+  await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
+})
+
+test('keeps a forced Planner session separate from the Executor transcript', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-planner-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const runtime = startRuntime()
+  context.after(() => runtime.close())
+
+  const initialize = runtime.send('initialize', {
+    payload: {
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+        plannerMode: 'always',
+        fauxResponses: [
+          '{"summary":"Inspect and update","steps":["Inspect files","Apply change","Run tests"],"risks":[],"needsGoal":false}',
+          'Executor completed the requested change.',
+        ],
+      },
+    },
+  })
+  await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+
+  const sessionId = 'pi-planner-session'
+  const conversationId = 'pi-planner-conversation'
+  const create = runtime.send('create_session', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    payload: { sessionPath: join(directory, 'session.json') },
+  })
+  await runtime.waitFor((message) => message.requestId === create.id && message.type === 'session_created')
+
+  const runId = 'pi-planner-run'
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    runId,
+    payload: {
+      text: 'Inspect the project, update the implementation, then run tests.',
+      messages: [{ role: 'user', content: 'Inspect the project, update the implementation, then run tests.' }],
+      projectContext: { projectRoot: directory, permissionMode: 'read_only' },
+      workSnapshot: { goal: null, tasks: [], evidence: [] },
+    },
+  })
+
+  const planned = await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'planner.completed')
+  assert.equal(planned.payload.stepCount, 3)
+  const answer = await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'message.delta')
+  assert.match(answer.payload.delta, /^Executor/)
+  assert.doesNotMatch(answer.payload.delta, /Inspect and update/)
+  await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
+})
+
 test('maps Anthropic thinking blocks separately from the final answer', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-anthropic-'))
   context.after(() => rm(directory, { recursive: true, force: true }))

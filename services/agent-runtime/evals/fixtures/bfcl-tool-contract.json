@@ -1,0 +1,15 @@
+{
+  "name": "BFCL-inspired Fox tool contract subset",
+  "source": "Berkeley Function Calling Leaderboard",
+  "sourceUrl": "https://github.com/ShishirPatil/gorilla/tree/main/berkeley-function-call-leaderboard",
+  "scope": "Offline tool availability, routing, and approval metadata. This is not an official BFCL accuracy score.",
+  "cases": [
+    { "id": "inspect-file", "utterance": "Read package.json from the authorized project.", "expectedTool": "read", "category": "project-read", "execution": "runtime", "approval": "preflight" },
+    { "id": "list-directory", "utterance": "List the source directory.", "expectedTool": "ls", "category": "project-read", "execution": "runtime", "approval": "preflight" },
+    { "id": "edit-file", "utterance": "Update the version in package.json.", "expectedTool": "edit_file", "category": "project-write", "execution": "host", "approval": "policy" },
+    { "id": "run-tests", "utterance": "Run the unit tests.", "expectedTool": "run_command", "category": "process", "execution": "host", "approval": "always" },
+    { "id": "search-knowledge", "utterance": "Search the selected knowledge base.", "expectedTool": "search_knowledge", "category": "knowledge", "execution": "host", "approval": "none" },
+    { "id": "call-mcp", "utterance": "Call an external MCP tool.", "expectedTool": "call_mcp_tool", "category": "mcp", "execution": "host", "approval": "always" },
+    { "id": "propose-goal", "utterance": "Create a goal for this coding task.", "expectedTool": "goal_propose", "category": "work", "execution": "host", "approval": "none" }
+  ]
+}

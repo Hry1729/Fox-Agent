@@ -4,6 +4,7 @@ import type {
   AgentRecord,
   ApiResponse,
   ConversationDetail,
+  ConversationExpertBinding,
   ConversationSummary,
   ConversationHistoryPage,
   RuntimeEventNotification,
@@ -25,6 +26,9 @@ import type {
   McpConnectionTest,
   MaintenanceResult,
   WorkStateDiagnosticReport,
+  WorkEventRecord,
+  GoalRecord,
+  SetGoalRunningResult,
   ApprovalRecord,
   AttachmentRecord,
   KnowledgeBaseRecord,
@@ -42,14 +46,57 @@ import type {
   YuxiAgentRecord,
   YuxiUserRecord,
   YuxiModelRecord,
+  ExpertDisplaySnapshot,
+  DesktopErrorDetails,
 } from '../model/types'
 
 export const desktopRuntimeAvailable = isTauri()
 
+export class DesktopCommandError extends Error {
+  readonly code: string
+  readonly retryable: boolean
+
+  constructor(details: DesktopErrorDetails) {
+    super(details.message)
+    this.name = 'DesktopCommandError'
+    this.code = details.code
+    this.retryable = details.retryable
+  }
+}
+
+export function desktopErrorDetails(cause: unknown): DesktopErrorDetails {
+  if (cause instanceof DesktopCommandError) {
+    return { code: cause.code, message: cause.message, retryable: cause.retryable }
+  }
+  if (cause && typeof cause === 'object') {
+    const value = cause as { code?: unknown; message?: unknown; retryable?: unknown }
+    if (typeof value.code === 'string' && typeof value.message === 'string') {
+      return { code: value.code, message: value.message, retryable: value.retryable === true }
+    }
+  }
+  return {
+    code: 'unknown',
+    message: cause instanceof Error ? cause.message : String(cause),
+    retryable: false,
+  }
+}
+
 async function command<T>(name: string, request?: unknown): Promise<T> {
   const response = await invoke<ApiResponse<T>>(name, request === undefined ? {} : { request })
-  if (!response.ok) throw new Error(response.error.message)
+  if (!response.ok) throw new DesktopCommandError(response.error)
   return response.data
+}
+
+function normalizeExpertBinding(binding: ConversationExpertBinding): ConversationExpertBinding {
+  const legacy = binding as ConversationExpertBinding & {
+    displaySnapshotJson?: ExpertDisplaySnapshot
+    packageSnapshotJson?: Record<string, unknown>
+  }
+  return {
+    ...binding,
+    displaySnapshot: binding.displaySnapshot ?? legacy.displaySnapshotJson,
+    packageSnapshot: binding.packageSnapshot ?? legacy.packageSnapshotJson ?? {},
+  }
 }
 
 export const desktopClient = {
@@ -71,6 +118,9 @@ export const desktopClient = {
   clearKnowledgePreviewCache: () =>
     command<MaintenanceResult>('knowledge_preview_cache_clear'),
   listAgents: () => command<AgentRecord[]>('agents_list'),
+  saveAgent: (request: import('../model/types').SaveAgentInput) => command<AgentRecord>('agent_save', request),
+  copyAgent: (agentId: string, name?: string) => command<AgentRecord>('agent_copy', { agentId, name }),
+  deleteAgent: (agentId: string) => command<boolean>('agent_delete', { agentId }),
   listSkills: (agentId: string) => command<SkillRecord[]>('skills_list', { agentId }),
   setSkillEnabled: (agentId: string, skillId: string, enabled: boolean) =>
     command<SkillRecord[]>('skill_set_enabled', { agentId, skillId, enabled }),
@@ -94,29 +144,49 @@ export const desktopClient = {
   readProjectFile: (conversationId: string, path: string) =>
     command<ProjectFilePreview>('project_file_read', { conversationId, path }),
   pickProjectFolder: () => command<string | null>('project_folder_pick'),
+  openExternalUrl: (url: string) => command<boolean>('external_url_open', { url }),
   updateProjectPermission: (projectId: string, permissionMode: ProjectRecord['permissionMode']) =>
     command<ProjectRecord>('project_permission_update', { projectId, permissionMode }),
-  createConversation: (request: { agentId: string; title?: string; projectRoot?: string; permissionMode?: ProjectRecord['permissionMode'] }) =>
+  deleteProject: (projectId: string) => command<boolean>('project_delete', { projectId }),
+  createConversation: (request: { agentId: string; expertId?: string; title?: string; projectRoot?: string; permissionMode?: ProjectRecord['permissionMode'] }) =>
     command<ConversationSummary>('conversation_create', request),
-  loadConversation: (conversationId: string) =>
-    command<ConversationDetail>('conversation_load', { conversationId }),
+  loadConversation: async (conversationId: string) => {
+    const detail = await command<ConversationDetail>('conversation_load', { conversationId })
+    return { ...detail, expertBindings: (detail.expertBindings ?? []).map(normalizeExpertBinding) }
+  },
+  bindConversationExpert: async (conversationId: string, expertId: string) =>
+    normalizeExpertBinding(await command<ConversationExpertBinding>('conversation_expert_bind', { conversationId, expertId })),
+  removeConversationExpert: async (conversationId: string) =>
+    normalizeExpertBinding(await command<ConversationExpertBinding>('conversation_expert_remove', { conversationId })),
   loadConversationHistory: (conversationId: string, beforeOrdinal: number, limit = 100) =>
     command<ConversationHistoryPage>('conversation_history', { conversationId, beforeOrdinal, limit }),
   deleteConversation: (conversationId: string) =>
     command<boolean>('conversation_delete', { conversationId }),
   renameConversation: (conversationId: string, title: string) =>
     command<ConversationSummary>('conversation_rename', { conversationId, title }),
+  setConversationPinned: (conversationId: string, pinned: boolean) =>
+    command<ConversationSummary>('conversation_pin', { conversationId, pinned }),
+  archiveConversation: (conversationId: string) =>
+    command<ConversationSummary>('conversation_archive', { conversationId }),
   saveAttachments: (conversationId: string, files: Array<{ filename: string; mediaType?: string; dataUrl: string }>, messageId?: string) =>
     command<AttachmentRecord[]>('attachments_save', { conversationId, messageId, files }),
   setKnowledgeBindings: (conversationId: string, knowledgeBases: Array<{ id: string; name: string }>) =>
     command<KnowledgeBindingRecord[]>('knowledge_bindings_set', { conversationId, knowledgeBases }),
   startRun: (request: { conversationId: string; text: string; runtimeText?: string; model?: string; attachmentIds?: string[] }) =>
     command<StartRunResult>('run_start', request),
+  rewindRun: (request: { conversationId: string; messageId: string; text: string; runtimeText?: string; model?: string }) =>
+    command<StartRunResult>('run_rewind', request),
   resumeRun: (request: { conversationId: string; parentRunId: string; text: string; answers: Record<string, string | string[]> }) =>
     command<StartRunResult>('run_resume', request),
   cancelRun: (runId: string) => command<boolean>('run_cancel', { runId }),
   resolveApproval: (approvalId: string, approved: boolean) =>
     command<boolean>('approval_resolve', { approvalId, approved }),
+  resolveWorkModeConfirmation: (conversationId: string, goalId: string, expectedVersion: number, approved: boolean) =>
+    command<GoalRecord>('work_mode_confirmation_resolve', { conversationId, goalId, expectedVersion, approved }),
+  deleteGoal: (conversationId: string, goalId: string) =>
+    command<boolean>('goal_delete', { conversationId, goalId }),
+  setGoalRunning: (conversationId: string, goalId: string, expectedVersion: number, running: boolean) =>
+    command<SetGoalRunningResult>('goal_running_set', { conversationId, goalId, expectedVersion, running }),
   getYuxiService: () => command<YuxiServiceRecord | null>('yuxi_service_get'),
   saveYuxiService: (request: { name: string; baseUrl: string; accessToken?: string; clearAccessToken?: boolean }) =>
     command<YuxiServiceRecord>('yuxi_service_save', request),
@@ -184,11 +254,13 @@ export const desktopClient = {
   testModelService: (baseUrl?: string, apiKey?: string, apiType?: 'openai-completions' | 'anthropic-messages', modelId?: string) =>
     command<ModelConnectionTest>('model_service_test', { baseUrl, apiKey, apiType, modelId }),
   listModelProviders: () => command<ModelProviderRecord[]>('model_providers_list'),
-  saveModelProvider: (request: { id?: string; name: string; baseUrl: string; apiType: 'openai-completions' | 'anthropic-messages'; isDefault: boolean; models: Array<{ id?: string; modelId: string; displayName: string; contextWindow: number; maxOutputTokens: number; supportsImageInput: boolean; isDefault: boolean }>; apiKey?: string; clearApiKey?: boolean }) =>
+  saveModelProvider: (request: { id?: string; name: string; icon?: string | null; baseUrl: string; apiType: 'openai-completions' | 'anthropic-messages'; isDefault: boolean; models: Array<{ id?: string; modelId: string; displayName: string; contextWindow: number; maxOutputTokens: number; supportsImageInput: boolean; isDefault: boolean }>; apiKey?: string; clearApiKey?: boolean }) =>
     command<ModelProviderRecord>('model_provider_save', request),
   deleteModelProvider: (providerId: string) => command<boolean>('model_provider_delete', { providerId }),
   listenRuntimeEvents: (handler: (event: RuntimeEventNotification) => void): Promise<UnlistenFn> =>
     listen<RuntimeEventNotification>('fox://runtime-event', ({ payload }) => handler(payload)),
+  listenWorkEvents: (handler: (event: WorkEventRecord) => void): Promise<UnlistenFn> =>
+    listen<WorkEventRecord>('fox://work-event', ({ payload }) => handler(payload)),
   listenApprovalRequests: (handler: (approval: ApprovalRecord) => void): Promise<UnlistenFn> =>
     listen<ApprovalRecord>('fox://approval-requested', ({ payload }) => handler(payload)),
   listenApprovalResolved: (handler: (approval: ApprovalRecord) => void): Promise<UnlistenFn> =>

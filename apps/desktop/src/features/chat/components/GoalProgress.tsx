@@ -6,16 +6,20 @@ import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { TaskItem } from './TaskItem'
+import { Button } from '@/components/ui/button'
 
 interface GoalProgressProps {
   data: GoalProgressData
+  className?: string
   defaultExpanded?: boolean
   onEvidenceClick?: (evidence: TaskEvidenceRecord) => void
+  onResolveConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean> | void
 }
 
-export function GoalProgress({ data, defaultExpanded = false, onEvidenceClick }: GoalProgressProps) {
+export function GoalProgress({ data, className, defaultExpanded = false, onEvidenceClick, onResolveConfirmation }: GoalProgressProps) {
   const [isExpanded, setIsExpanded] = useState(defaultExpanded)
-  const { goal, tasks, evidence, completedCount, totalCount, currentTask } = data
+  const [resolving, setResolving] = useState(false)
+  const { goal, tasks, evidence, planRevisions = [], reviewFindings = [], acceptances = [], completedCount, totalCount, currentTask } = data
 
   // Group evidence by taskId for quick lookup
   const evidenceByTask = new Map<string, TaskEvidenceRecord[]>()
@@ -26,8 +30,8 @@ export function GoalProgress({ data, defaultExpanded = false, onEvidenceClick }:
   })
 
   return (
-    <Collapsible open={isExpanded} onOpenChange={setIsExpanded}>
-      <div className="border rounded-lg bg-card overflow-hidden">
+    <Collapsible open={isExpanded} onOpenChange={setIsExpanded} className={cn('fox-goal-progress', className)}>
+      <div className="fox-goal-progress-card border rounded-lg bg-card overflow-hidden">
         {/* Header */}
         <div className="flex items-center gap-3 p-4 bg-accent/30">
           <Target className="h-5 w-5 text-blue-600 flex-shrink-0" />
@@ -47,6 +51,8 @@ export function GoalProgress({ data, defaultExpanded = false, onEvidenceClick }:
                     ? '已阻塞'
                     : goal.status === 'completed'
                       ? '已完成'
+                      : goal.status === 'proposed'
+                        ? '待确认'
                       : goal.status}
               </Badge>
             </div>
@@ -81,6 +87,31 @@ export function GoalProgress({ data, defaultExpanded = false, onEvidenceClick }:
           </CollapsibleTrigger>
         </div>
 
+        {goal.status === 'proposed' && onResolveConfirmation && (
+          <div className="border-t bg-card px-4 py-3">
+            <p className="mb-3 text-sm text-muted-foreground">Fox 将为这项工作跟踪任务、执行过程和证据。是否进入工作模式并继续执行？</p>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={resolving}
+                onClick={async () => {
+                  setResolving(true)
+                  try { await onResolveConfirmation(goal.id, goal.version, false) } finally { setResolving(false) }
+                }}
+              >暂不执行</Button>
+              <Button
+                size="sm"
+                disabled={resolving}
+                onClick={async () => {
+                  setResolving(true)
+                  try { await onResolveConfirmation(goal.id, goal.version, true) } finally { setResolving(false) }
+                }}
+              >继续执行</Button>
+            </div>
+          </div>
+        )}
+
         {/* Task List */}
         <CollapsibleContent>
           <div className="p-4 space-y-2 max-h-[500px] overflow-y-auto">
@@ -104,6 +135,13 @@ export function GoalProgress({ data, defaultExpanded = false, onEvidenceClick }:
                   onEvidenceClick={onEvidenceClick}
                 />
               ))
+            )}
+            {(planRevisions.length > 0 || reviewFindings.length > 0 || acceptances.length > 0) && (
+              <div className="fox-goal-a1-status">
+                <div><b>计划修订</b><span>{planRevisions.length ? `v${Math.max(...planRevisions.map((item) => item.revision))}` : '未建立'}</span></div>
+                <div><b>独立审查</b><span>{reviewFindings.length ? `${reviewFindings.filter((item) => item.status === 'open').length} 个待处理` : '未审查'}</span></div>
+                <div><b>最终验收</b><span>{acceptances[0]?.status === 'accepted' ? '已通过' : acceptances[0]?.status === 'rejected' ? '未通过' : '待验收'}</span></div>
+              </div>
             )}
           </div>
         </CollapsibleContent>

@@ -5,6 +5,7 @@ import type { ModelProviderRecord } from '@/features/conversations/model/types'
 export type SaveModelProviderInput = {
   id?: string
   name: string
+  icon?: string | null
   baseUrl: string
   apiType: 'openai-completions' | 'anthropic-messages'
   isDefault: boolean

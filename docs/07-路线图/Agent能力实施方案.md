@@ -1,9 +1,9 @@
 # Fox Agent A0-A6 实施方案
 
-> 状态：A0 规格已批准，尚未进入代码实施<br>
+> 状态：A0 工程实现完成，等待 Alpha 发布人工签收；A1-A6 尚未实施<br>
 > 适用版本：Fox `0.1.x` 及后续版本<br>
 > 维护范围：A0-A6 Agent 能力演进<br>
-> 最后更新：2026-07-29
+> 最后更新：2026-08-06
 >
 > 范围：A0 最小工作闭环、A1 完整工作图、A3 会话生命周期、A2 长期记忆、A4 可观测性与评估、A5 原生子 Agent、A6 扩展源协议<br>
 > 明确不包含：A7 模型路由、A8 自动化/后台任务、A9 远程 Fox Runtime，以及本轮已冻结的知识库和文档预览增强<br>
@@ -31,8 +31,8 @@ Fox 不应把六项能力做成彼此独立的页面或工具，而应建立一�
 1. 保持 SQLite 为 Fox 产品状态的唯一事实源；Pi、知识库智能体和未来 Runtime 只负责执行，不拥有计划、记忆、分支、评估等产品状态。
 2. 不展示或依赖模型隐藏思考。用户可见的是计划、步骤摘要、工具调用、文件变更、来源、审查与验收证据。
 3. 继续使用现有 `runs`、`run_events`、`tool_calls`、`approvals` 作为执行底座，以增量表和版本化事件扩展，不重写已经稳定的流式链路。
-4. 先实施 A0，只验证 Goal、Task、Evidence 和恢复；A4 的基础 trace 字段在 A0 一并埋入。
-5. A0 通过后补全 A1，再按 A3、A2、A4、A5、A6 推进；会话 lineage 必须先于 Memory 来源治理稳定。
+4. A0 已完成 Goal、Task、Evidence、确认恢复和基础 Trace 字段的工程实现；发布签收后进入 A1。
+5. A1 完成后再按 A3、A2、A4、A5、A6 推进；会话 lineage 必须先于 Memory 来源治理稳定。
 6. A5 不直接复制复杂 Agent Team。首版先做串行 Child Run，验证父子协议后再引入有限并发。
 7. A6 先统一扩展源抽象，再增加 Streamable HTTP MCP、SSE 兼容、OpenAPI 和生命周期 Hook；域名白名单、限流、流式大小限制和全调用审计均为首版硬约束。
 
@@ -44,7 +44,31 @@ Fox 不应把六项能力做成彼此独立的页面或工具，而应建立一�
 - A5 拆为串行 Child Run 和有限并发两步。
 - Evidence 增加有效性状态、校验时间和失效原因。
 - 每阶段增加状态机、失败矩阵、迁移 Fixture、性能基线和真实任务验收。
-- GitHub Milestone 暂以仓库文档维护，待配置 remote 与 `gh` 登录后再同步为线上 Issue。
+- A0 Milestone 与 #1-#9 已同步到 GitHub；工程实现已合入基线，发布签收仍以仓库清单为准。
+
+### 1.2 2026-07-31 A0 落地状态
+
+- 迁移 14-16 已落地工作图、Work Event、乐观版本和待确认 Run 恢复。
+- 前端已订阅独立 Work Event，支持 Goal/Task/Evidence 实时更新与 Evidence 定位。
+- 含糊或高风险任务不会自动批准；确认前 Runtime 不启动，刷新或重启后仍可继续或取消同一 Run。
+- Work Trace 使用脱敏 DTO，默认不导出工作内容、Evidence refId/metadata/失效原因或事件 data。
+- 自动化工程门禁完成后仍需按 Alpha 发布验收清单完成人工安装、录屏和回滚签收。
+
+### 1.3 2026-08-06 Harness 决策
+
+- Fox 使用 Pi `createAgentSession` 承载模型与工具循环，但 Goal、Task、Evidence、审批和恢复仍由 Host + SQLite 持有。
+- 不安装会维护独立 plan/todo 文件或 Session 状态的通用 Pi 扩展。所需规划能力通过 Fox Host Tool 接入现有 Work Graph，避免出现第二套事实源。
+- Guardian 只作为高风险或规则无法确定时的独立 Reviewer Session，输出结构化 `allow|ask|deny` 建议；Host 的确定性权限规则、路径边界和用户决定始终拥有最终权威，Reviewer 不得执行工具或自行批准。
+- 子 Agent 不进入当前 Harness 稳定性改造，保持 A5 后置顺序。先建立单 Agent 的回归评测、缓存观测和错误基线，再实施串行 Child Run。
+- `usage.updated` 记录 input/output/cacheRead/cacheWrite/total token。缓存命中率按 `cacheRead / (input + cacheRead)` 计算；Prompt 稳定前缀与工具目录共享 provider 缓存口径。
+
+### 1.4 2026-08-06 跨模型适配基线
+
+- 采用“统一 Harness -> Provider Adapter -> Model Capability Profile -> 少量家族 Quirk”的结构，不为每个模型复制系统提示词。
+- Profile 自动识别 MiniMax、DeepSeek、Claude、OpenAI、Qwen、GLM、Kimi、Gemini、Grok、OpenRouter、本地和通用兼容端点；私有模型可通过 `modelProfile` 显式覆盖已知能力。
+- Profile 统一驱动 Pi transport provider、reasoning transport、thinking level、Planner、图片/工具/并行/缓存能力、上下文压缩和重试预算，并进入 `ready` 与 `run.request_snapshot` 诊断快照。
+- 当前离线适配评测包含模型矩阵、BFCL 风格工具契约、AgentDojo 风格注入隔离和 Fox Planner/Goal 回归，基线为 `30/30`。该结果只证明 Harness 契约，不代表官方模型质量分数。
+- SWE-bench Verified/Multilingual、Aider Polyglot 和 Terminal-Bench 用于后续真实编码执行；BFCL 用于真实函数选择和参数准确率；AgentDojo 用于端到端效用/安全联合评分；RAGAS 与 Fox 脱敏真实问答集用于知识库。所有 live eval 必须记录模型、Profile、Prompt hash、工具目录 hash 和构建版本。
 
 ## 2. Fox 当前基线
 
@@ -384,7 +408,7 @@ Fork 规则：
 1. **Observability**：生产 Run 的 trace、span、metric、错误与脱敏诊断。
 2. **Evaluation**：固定用例、环境快照、确定性断言、模型 rubric、人工标签与版本对比。
 
-不把 Token 费用统计纳入产品范围；保留 input/output/total token，用于上下文和性能诊断。
+不把 Token 费用统计纳入产品范围；保留 input/output/cacheRead/cacheWrite/total token，用于上下文、Prompt/工具目录缓存和性能诊断。
 
 ### 9.4 Trace 与指标
 
@@ -394,7 +418,7 @@ Fork 规则：
 - provider 首字节、首 Token、最后 Token、总生成时长。
 - 工具排队、审批等待、执行和结果回传时长。
 - 重试次数、错误类型、取消来源、恢复次数。
-- 输入/输出 Token、上下文裁剪与压缩次数。
+- 输入/输出/缓存读写 Token、缓存命中率、稳定 Prompt/动态上下文/工具目录哈希、上下文裁剪与压缩次数。
 - 事件接收、UI 合并和轮询补偿数量，用于防止流式回归。
 - 子 Agent 深度、并发峰值、预算消耗和结果大小。
 
@@ -414,6 +438,7 @@ Fork 规则：
 - 一键导出脱敏诊断包；默认不含 Prompt、文件正文、记忆正文和工具完整输出。
 - 评估页支持运行固定场景、对比两个构建/模型快照、查看失败证据。
 - 首批回归集必须覆盖曾发生的消息延迟、终态不刷新、reasoning 混入回答、工具等待用户、长回复截断、附件读取和知识检索。
+- 外部评测按能力分层接入：SWE-bench Verified/Multilingual 与 Aider Polyglot 覆盖编码，Terminal-Bench 覆盖终端任务，BFCL 覆盖工具调用，tau-bench 覆盖多轮业务工具，AgentDojo 覆盖 Prompt Injection，RAGAS 配合 Fox 脱敏真实问答集覆盖知识库。OSWorld/WebArena 留到桌面与浏览器工具成为稳定产品能力后再接入。
 
 ### 9.7 验收标准
 
@@ -604,7 +629,7 @@ flowchart LR
 
 ## 13. 迁移与兼容策略
 
-1. 每阶段单独增加 SQLite migration，不修改或重排已有 migration 1-13。
+1. 每阶段单独增加 SQLite migration；A0 当前最高为 migration 16，后续不修改或重排已有 migration 1-16。
 2. 旧会话默认 `lifecycle_state=active`，不自动创建 Goal 或 Memory。
 3. 旧 Runtime Event 原样保留；新事件使用 `schemaVersion`，Reducer 对未知事件忽略但持久化。
 4. Capability Manifest 用明确版本升级；Host 和 Sidecar 必须同时支持新版本后才启用对应能力。
@@ -641,6 +666,8 @@ A1-A6 全部完成需要满足：
 ## 16. 明确不采用的方案
 
 - 不把 Goal、Plan、Todo 全部塞进消息 metadata 或单个 JSON blob；查询、恢复、版本和评估会失去稳定边界。
+- 不启用会在 Runtime Session、Markdown 或 JSON 中另存 plan/todo 状态的通用 Pi 扩展；Pi 扩展只能通过 Fox Host Tool 投影和更新 SQLite Work Graph。
+- 不让 Guardian 或模型 Reviewer 覆盖 Host 的确定性权限规则，也不让 Reviewer 执行被审查的操作。
 - 不让 Agent 仅凭自然语言声明把 Goal 标记为最终完成；Agent 提交 Evidence，Acceptance 规则或用户完成最终确认。
 - 不默认记忆全部对话，也不无上限注入用户级 Memory。
 - 不只依赖 provider-native fork；它是精确分支增强，不是跨 Runtime 的产品基础。

@@ -1,0 +1,12 @@
+{
+  "name": "Fox planner and Goal-intent regressions",
+  "scope": "Deterministic Planner routing checks plus prompt-contract checks for Host-owned Goals.",
+  "cases": [
+    { "id": "multi-step-code-change", "text": "请分析项目，然后修改代码并运行测试", "expectedPlanner": true },
+    { "id": "explicit-goal-request", "text": "列个目标，再制定计划，依次修改这几个问题", "expectedPlanner": true },
+    { "id": "knowledge-question", "text": "轨道吊起升怎么赋值", "expectedPlanner": false },
+    { "id": "markdown-explanation", "text": "### 3. 什么是数据泄漏\n\n如果训练过程看到了本不该获得的信息，离线分数会虚高。正确顺序通常是：先划分，再只在训练集上 fit 预处理器。", "expectedPlanner": false },
+    { "id": "plain-explanation", "text": "请解释为什么要先划分训练集和测试集", "expectedPlanner": false },
+    { "id": "approval-demo", "text": "触发一个审批弹窗让我看看", "expectedPlanner": false, "approvalDemo": true }
+  ]
+}
