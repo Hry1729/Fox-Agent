@@ -1,0 +1,17 @@
+[
+  {
+    "id": "fox-default",
+    "name": "Fox 默认",
+    "src": "/mascot/fox_magic.png"
+  },
+  {
+    "id": "fox-confident",
+    "name": "自信专家",
+    "src": "/expert-icons/fox_confident.png"
+  },
+  {
+    "id": "fox-thinking",
+    "name": "思考专家",
+    "src": "/expert-icons/fox_thinking.png"
+  }
+]

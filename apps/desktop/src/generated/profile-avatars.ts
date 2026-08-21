@@ -1,0 +1,21 @@
+export const profileAvatarUrls: readonly string[] = [
+  "/avatars/defaults/fox_angry.png",
+  "/avatars/defaults/fox_big_smile.png",
+  "/avatars/defaults/fox_calm.png",
+  "/avatars/defaults/fox_celebrate.png",
+  "/avatars/defaults/fox_coffee.png",
+  "/avatars/defaults/fox_confident.png",
+  "/avatars/defaults/fox_confused.png",
+  "/avatars/defaults/fox_determined.png",
+  "/avatars/defaults/fox_excited.png",
+  "/avatars/defaults/fox_laughing.png",
+  "/avatars/defaults/fox_listen_music.png",
+  "/avatars/defaults/fox_love.png",
+  "/avatars/defaults/fox_peace.png",
+  "/avatars/defaults/fox_pleading.png",
+  "/avatars/defaults/fox_pout.png",
+  "/avatars/defaults/fox_shocked.png",
+  "/avatars/defaults/fox_wave.png",
+  "/avatars/defaults/fox_worried.png",
+  "/avatars/defaults/fox_yawning.png"
+]

@@ -127,9 +127,10 @@
   min-width: 225px;
   border: 1px solid var(--fox-border);
   border-radius: 8px;
-  background: color-mix(in oklch, var(--fox-card) 97%, transparent);
+  background: var(--fox-shell-chrome);
   box-shadow: 0 18px 48px color-mix(in oklch, var(--fox-text) 18%, transparent);
-  backdrop-filter: blur(18px);
+  backdrop-filter: blur(34px) saturate(1.38);
+  -webkit-backdrop-filter: blur(34px) saturate(1.38);
 }
 
 .fox-window-controls {

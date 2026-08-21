@@ -49,6 +49,8 @@ type ApiResponse<T> =
 
 `conversation_create` 可接受可选 `expertId`，但 `agentId` 必须为 Assistant，`expertId` 必须为 Expert。`conversation_expert_bind` 与 `conversation_expert_remove` 接收 `{ conversationId, expertId? }`；Repository 只把 `role=user/assistant` 的消息计入锁定条件，专家卡片和输入框草稿不计，活动 Run 或归档会话也会锁定。绑定错误使用 `conversation.expert_locked`、`conversation.expert_invalid_role`、`conversation.expert_remote_unavailable`、`expert.not_found` 等稳定错误码。`conversation_load` 通过 `expertBindings` 返回 active 与历史记录，其中展示快照负责卡片，执行快照及 Hash 负责 Runtime 版本冻结。
 
+`yuxi_agents_sync` 使用 3 秒总超时。成功时写入最新远程专家并恢复服务端可用状态；失败、超时或未登录时保留缓存记录但将其标记为不可用，分别返回 `yuxi.agent_sync_failed`、`yuxi.agent_sync_timeout` 或 `yuxi.not_authenticated`。前端应先调用本地 `agents_list` 完成渲染，再在后台调用该命令，不能让远程连接阻塞专家中心首屏。
+
 ### A0 工作状态诊断
 
 两个命令都接收 `{ conversationId }`：

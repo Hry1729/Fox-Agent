@@ -5,23 +5,13 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { desktopClient, desktopRuntimeAvailable } from '@/features/conversations/api/desktop-client'
+import { profileAvatarUrls } from '@/generated/profile-avatars'
 
 const profileStorageKey = 'fox.profile.local'
 const profileChangedEvent = 'fox:profile-changed'
 
-const avatarFiles = [
-  'fox_angry.png', 'fox_big_smile.png', 'fox_calm.png', 'fox_celebrate.png',
-  'fox_cheerful.png', 'fox_coffee.png', 'fox_confident.png', 'fox_confused.png',
-  'fox_cool.png', 'fox_determined.png', 'fox_excited.png', 'fox_happy.png',
-  'fox_joyful.png', 'fox_laptop.png', 'fox_laughing.png', 'fox_listen_music.png',
-  'fox_love.png', 'fox_motivate.png', 'fox_peace.png', 'fox_pleading.png',
-  'fox_ponder.png', 'fox_pout.png', 'fox_reading.png', 'fox_running.png',
-  'fox_shocked.png', 'fox_sleepy.png', 'fox_study.png', 'fox_surprised.png',
-  'fox_thinking.png', 'fox_thinking_face.png', 'fox_thumbs_up.png', 'fox_wave.png',
-  'fox_wink.png', 'fox_working.png', 'fox_worried.png', 'fox_yawning.png',
-] as const
-
-export const defaultProfileAvatars = avatarFiles.map((file) => `/avatars/defaults/${file}`)
+export const defaultProfileAvatars = profileAvatarUrls
+const defaultProfileAvatar = defaultProfileAvatars[0] ?? '/mascot/fox_magic.png'
 
 interface StoredUserProfile { name?: string; avatar?: string }
 export interface UserProfile { name: string; avatar: string; initial: string }
@@ -37,6 +27,13 @@ function readStoredProfile(): StoredUserProfile {
   } catch {
     return {}
   }
+}
+
+function resolveAvailableAvatar(avatar?: string | null) {
+  const value = avatar?.trim()
+  if (!value) return undefined
+  if (value.startsWith('/avatars/defaults/') && !defaultProfileAvatars.includes(value)) return undefined
+  return value
 }
 
 export function useUserProfile(fallback?: { name?: string | null; avatar?: string | null }) {
@@ -72,7 +69,7 @@ export function useUserProfile(fallback?: { name?: string | null; avatar?: strin
     }
   }, [])
   const name = stored.name || fallback?.name?.trim() || 'Fox 用户'
-  const avatar = stored.avatar || fallback?.avatar || defaultProfileAvatars[11]
+  const avatar = resolveAvailableAvatar(stored.avatar) || resolveAvailableAvatar(fallback?.avatar) || defaultProfileAvatar
   const profile: UserProfile = { name, avatar, initial: name.charAt(0).toUpperCase() || 'F' }
   const save = async (next: Pick<UserProfile, 'name' | 'avatar'>) => {
     const value = { name: next.name.trim(), avatar: next.avatar }

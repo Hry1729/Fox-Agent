@@ -3137,9 +3137,22 @@ export function Workbench() {
       const targetKind = normalizeAgentClassification(targetAgent).agentKind
       if (targetKind === 'worker') return
       if (targetKind === 'expert' && entityId !== desktopConversation.selectedExpertId) {
-        void desktopConversation.createConversationForExpert(entityId).then((result) => {
-          if (!result.success) toast.error(expertErrorMessage(result.error, '无法召唤这个专家'))
-        })
+        const configuredKnowledgeIds = new Set(
+          Array.isArray(targetAgent.packageManifest.knowledge)
+            ? targetAgent.packageManifest.knowledge.filter((id): id is string => typeof id === 'string')
+            : [],
+        )
+        const configuredKnowledge = knowledge.items.filter((item) => configuredKnowledgeIds.has(item.id))
+        void (async () => {
+          const result = await desktopConversation.createConversationForExpert(entityId)
+          if (!result.success) {
+            toast.error(expertErrorMessage(result.error, '无法召唤这个专家'))
+            return
+          }
+          if (configuredKnowledge.length) {
+            await desktopConversation.setKnowledgeBindings(configuredKnowledge)
+          }
+        })()
       }
       if (targetKind === 'assistant' && entityId !== desktopConversation.detail?.conversation.agentId) {
         void desktopConversation.createConversationForAgent(entityId).then((created) => {

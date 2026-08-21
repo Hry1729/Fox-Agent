@@ -2566,18 +2566,44 @@ pub async fn yuxi_agents_sync(
 ) -> Result<ApiResponse<Vec<YuxiAgentRecord>>, String> {
     let (service, token) = match configured_yuxi(&state) {
         Ok(value) => value,
-        Err(error) => return Ok(ApiResponse::failure("yuxi.not_authenticated", error, false)),
+        Err(error) => {
+            let _ = state.database.mark_yuxi_agents_unavailable();
+            return Ok(ApiResponse::failure("yuxi.not_authenticated", error, false));
+        }
     };
-    match state
-        .yuxi_client
-        .list_agents(&service.base_url, &token)
-        .await
+    match tokio::time::timeout(
+        Duration::from_secs(3),
+        state.yuxi_client.list_agents(&service.base_url, &token),
+    )
+    .await
     {
-        Ok(agents) => match state.database.upsert_yuxi_agents(&agents) {
+        Ok(Ok(agents)) => match state.database.upsert_yuxi_agents(&agents) {
             Ok(()) => Ok(ApiResponse::success(agents)),
             Err(error) => Ok(storage_error(error)),
         },
-        Err(error) => Ok(ApiResponse::failure("yuxi.agent_sync_failed", error, true)),
+        Ok(Err(error)) => {
+            let cache_error = state.database.mark_yuxi_agents_unavailable().err();
+            let message = cache_error.map_or(error.clone(), |cache_error| {
+                format!("{error}；本地缓存状态更新失败：{cache_error}")
+            });
+            Ok(ApiResponse::failure(
+                "yuxi.agent_sync_failed",
+                message,
+                true,
+            ))
+        }
+        Err(_) => {
+            let cache_error = state.database.mark_yuxi_agents_unavailable().err();
+            let message = cache_error.map_or_else(
+                || "知识库专家同步超时，已继续使用本地缓存".to_owned(),
+                |cache_error| format!("知识库专家同步超时；本地缓存状态更新失败：{cache_error}"),
+            );
+            Ok(ApiResponse::failure(
+                "yuxi.agent_sync_timeout",
+                message,
+                true,
+            ))
+        }
     }
 }
 

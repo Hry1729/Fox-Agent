@@ -850,11 +850,24 @@ impl Database {
                 "acceptance_submit"
             ])
         });
+        let enabled_skills = object
+            .get("skills")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let enabled_skills_json =
+            serde_json::to_string(&enabled_skills).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
             if request.id.is_some() {
-                let builtin = connection.query_row("SELECT is_builtin FROM agents WHERE id = ?1 AND runtime_type = 'pi'", [&id], |row| row.get::<_, i64>(0))?;
+                let builtin = transaction.query_row("SELECT is_builtin FROM agents WHERE id = ?1 AND runtime_type = 'pi'", [&id], |row| row.get::<_, i64>(0))?;
                 if builtin != 0 { return Err(rusqlite::Error::InvalidQuery); }
-                connection.execute(
+                transaction.execute(
                     "UPDATE agents SET name = ?2, description = ?3, icon = ?4, category = ?5,
                          system_prompt = ?6, default_model = ?7, opening_suggestions_json = ?8,
                          package_version = '1.0.0', package_manifest_json = ?9, updated_at = ?10,
@@ -863,7 +876,7 @@ impl Database {
                     params![id, name, request.description.trim(), request.icon.as_deref().filter(|value| !value.trim().is_empty()), request.category.trim(), prompt, request.default_model.trim(), serde_json::to_string(&suggestions).unwrap_or_else(|_| "[]".to_owned()), manifest.to_string(), now],
                 )?;
             } else {
-                connection.execute(
+                transaction.execute(
                     "INSERT INTO agents(id, name, description, runtime_type, system_prompt, default_model,
                          created_at, updated_at, icon, category, opening_suggestions_json, is_builtin,
                          package_version, package_manifest_json, agent_kind, invocation_mode, visibility)
@@ -872,7 +885,18 @@ impl Database {
                     params![id, name, request.description.trim(), prompt, request.default_model.trim(), now, request.icon.as_deref().filter(|value| !value.trim().is_empty()), request.category.trim(), serde_json::to_string(&suggestions).unwrap_or_else(|_| "[]".to_owned()), manifest.to_string()],
                 )?;
             }
-            Ok(())
+            transaction.execute(
+                "INSERT INTO agent_runtime_config(
+                    agent_id, scope_type, scope_id, config_key, value_json, source,
+                    created_at, updated_at
+                 ) VALUES (?1, 'agent', ?1, 'skills.enabled', ?2, 'user', ?3, ?3)
+                 ON CONFLICT(agent_id, scope_type, scope_id, config_key) DO UPDATE SET
+                    value_json = excluded.value_json,
+                    source = 'user',
+                    updated_at = excluded.updated_at",
+                params![id, enabled_skills_json, now],
+            )?;
+            transaction.commit()
         })?;
         self.get_agent(&id)?
             .ok_or_else(|| "saved expert was not found".to_owned())
@@ -1751,6 +1775,37 @@ impl Database {
                     )?;
                 }
             }
+            transaction.commit()
+        })
+    }
+
+    pub fn mark_yuxi_agents_unavailable(&self) -> Result<(), String> {
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let mut statement = transaction
+                .prepare("SELECT id, system_prompt FROM agents WHERE runtime_type = 'yuxi'")?;
+            let agents = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+
+            for (id, system_prompt) in agents {
+                let mut metadata = parse_json(&system_prompt);
+                if !metadata.is_object() {
+                    metadata = json!({});
+                }
+                if let Some(object) = metadata.as_object_mut() {
+                    object.insert("remoteAvailable".to_owned(), Value::Bool(false));
+                }
+                transaction.execute(
+                    "UPDATE agents SET system_prompt = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id, metadata.to_string(), now],
+                )?;
+            }
+
             transaction.commit()
         })
     }
@@ -4898,7 +4953,10 @@ mod tests {
                 system_prompt: "Inspect evidence before changing files.".to_owned(),
                 default_model: "configured-model".to_owned(),
                 opening_suggestions: vec!["检查项目".to_owned()],
-                package_manifest: json!({ "allowedTools": ["read", "grep"] }),
+                package_manifest: json!({
+                    "skills": ["project-review"],
+                    "allowedTools": ["read", "grep"]
+                }),
             })
             .expect("create expert");
         assert!(!created.is_builtin);
@@ -4909,6 +4967,12 @@ mod tests {
         assert_eq!(
             created.package_manifest["allowedTools"],
             json!(["read", "grep"])
+        );
+        assert_eq!(
+            database
+                .enabled_agent_skills(&created.id)
+                .expect("load created expert skills"),
+            vec!["project-review"]
         );
 
         let copied = database.copy_agent(&created.id, None).expect("copy expert");
@@ -6225,6 +6289,57 @@ mod tests {
                 .into_iter()
                 .find(|agent| agent.id == "yuxi:assistant")
                 .expect("stale remote agent remains for conversation history")
+                .available
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn marks_cached_remote_agents_unavailable_after_sync_failure() {
+        let (database, path) = test_database();
+        let agent = YuxiAgentRecord {
+            id: "yuxi:cached-expert".to_owned(),
+            slug: "cached-expert".to_owned(),
+            name: "Cached Expert".to_owned(),
+            description: String::new(),
+            icon: None,
+            backend_id: "ChatbotAgent".to_owned(),
+            default_model: "remote-model".to_owned(),
+            capabilities: json!([]),
+            resources: AgentResourcesRecord::default(),
+            configurable_items: json!({}),
+            is_default: false,
+            available: true,
+        };
+        database
+            .upsert_yuxi_agents(std::slice::from_ref(&agent))
+            .expect("upsert cached remote expert");
+
+        database
+            .mark_yuxi_agents_unavailable()
+            .expect("mark remote experts unavailable");
+        assert!(
+            !database
+                .list_agents()
+                .expect("list agents")
+                .into_iter()
+                .find(|item| item.id == "yuxi:cached-expert")
+                .expect("cached remote expert")
+                .available
+        );
+
+        database
+            .upsert_yuxi_agents(std::slice::from_ref(&agent))
+            .expect("restore remote expert availability");
+        assert!(
+            database
+                .list_agents()
+                .expect("list agents")
+                .into_iter()
+                .find(|item| item.id == "yuxi:cached-expert")
+                .expect("cached remote expert")
                 .available
         );
 
