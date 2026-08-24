@@ -4,9 +4,12 @@ use crate::database::{
 };
 use crate::work_mode_gate;
 use serde_json::{json, Value};
-use std::fmt;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
-pub const WORK_TOOLS: [&str; 11] = [
+pub const WORK_TOOLS: [&str; 17] = [
     "work_snapshot_get",
     "goal_propose",
     "goal_complete",
@@ -18,6 +21,12 @@ pub const WORK_TOOLS: [&str; 11] = [
     "review_finding_add",
     "review_finding_resolve",
     "acceptance_submit",
+    "workflow_snapshot_get",
+    "workflow_start",
+    "workflow_stage_start",
+    "workflow_stage_complete",
+    "workflow_stage_fail",
+    "workflow_cancel",
 ];
 
 #[derive(Debug)]
@@ -120,6 +129,7 @@ pub fn execute(
                     json!({ "goalId": goal_id, "status": goal.status }),
                 ));
             }
+            require_no_pending_plan(database, conversation_id, &goal_id)?;
             let (_, tasks, evidence) = database
                 .load_work_graph_snapshot(conversation_id)
                 .map_err(|error| error.to_string())?;
@@ -210,6 +220,7 @@ pub fn execute(
             if goal.status != GoalStatus::Active {
                 return Err("tasks can only be added after Fox Host activates the goal".into());
             }
+            require_no_pending_plan(database, conversation_id, &goal_id)?;
             let tasks = input
                 .get("tasks")
                 .and_then(Value::as_array)
@@ -258,6 +269,7 @@ pub fn execute(
             if goal.status != GoalStatus::Active {
                 return Err("the goal is paused; resume it before updating tasks".into());
             }
+            require_no_pending_plan(database, conversation_id, &goal_id)?;
             let status = parse_task_status(
                 input
                     .get("status")
@@ -297,6 +309,7 @@ pub fn execute(
             if goal.status != GoalStatus::Active {
                 return Err("the goal is paused; resume it before adding evidence".into());
             }
+            require_no_pending_plan(database, conversation_id, &goal_id)?;
             let evidence_type: EvidenceType = serde_json::from_value(
                 input
                     .get("evidenceType")
@@ -350,6 +363,7 @@ pub fn execute(
             if goal.status != GoalStatus::Active {
                 return Err("the goal is paused; resume it before validating evidence".into());
             }
+            require_no_pending_plan(database, conversation_id, &goal_id)?;
             let status = database
                 .task_evidence()
                 .validate(&evidence_id)
@@ -381,11 +395,7 @@ pub fn execute(
                     json!({ "goalId": goal_id, "status": goal.status }),
                 ));
             }
-            let tasks = input
-                .get("tasks")
-                .cloned()
-                .filter(Value::is_array)
-                .ok_or_else(|| "tasks must be an array".to_owned())?;
+            let tasks = validate_plan_tasks(input, &goal_id)?;
             let revision = database.create_plan_revision(
                 conversation_id,
                 &goal_id,
@@ -411,7 +421,14 @@ pub fn execute(
             let _goal = require_goal(database, conversation_id, &goal_id)?;
             let task_id = optional_string(input, "taskId")?;
             if let Some(task_id) = task_id.as_deref() {
-                let _ = require_task(database, conversation_id, task_id)?;
+                let (_, task_goal_id) = require_task(database, conversation_id, task_id)?;
+                if task_goal_id != goal_id {
+                    return Err(WorkToolError::new(
+                        "review.task_goal_mismatch",
+                        "review task must belong to the reviewed goal",
+                        json!({ "goalId": goal_id, "taskId": task_id }),
+                    ));
+                }
             }
             let severity = required_string(input, "severity")?;
             if !["critical", "high", "medium", "low", "info"].contains(&severity.as_str()) {
@@ -420,6 +437,36 @@ pub fn execute(
             let status = optional_string(input, "status")?.unwrap_or_else(|| "open".to_owned());
             if !["open", "resolved", "waived"].contains(&status.as_str()) {
                 return Err("unsupported review status".into());
+            }
+            let plan_revision_id = required_string(input, "planRevisionId")?;
+            let (plans, _, _) = database.load_a1_snapshot(conversation_id)?;
+            let reviewed_plan = plans
+                .iter()
+                .find(|plan| plan.id == plan_revision_id && plan.goal_id == goal_id)
+                .ok_or_else(|| {
+                    WorkToolError::new(
+                        "review.plan_not_found",
+                        "the reviewed PlanRevision was not found for this goal",
+                        json!({ "goalId": goal_id, "planRevisionId": plan_revision_id }),
+                    )
+                })?;
+            if reviewed_plan.status != "approved" {
+                return Err(WorkToolError::new(
+                    "review.plan_not_approved",
+                    "independent review requires a user-approved PlanRevision",
+                    json!({ "goalId": goal_id, "planRevisionId": plan_revision_id, "status": reviewed_plan.status }),
+                ));
+            }
+            if let Some(pending) = plans.iter().find(|candidate| {
+                candidate.goal_id == goal_id
+                    && candidate.status == "proposed"
+                    && candidate.revision > reviewed_plan.revision
+            }) {
+                return Err(WorkToolError::new(
+                    "review.plan_pending",
+                    "review cannot finalize while a newer PlanRevision awaits user approval",
+                    json!({ "goalId": goal_id, "reviewedPlanRevisionId": reviewed_plan.id, "pendingPlanRevisionId": pending.id }),
+                ));
             }
             let (_, goal_tasks, goal_evidence) = database
                 .load_work_graph_snapshot(conversation_id)
@@ -443,7 +490,7 @@ pub fn execute(
                 conversation_id,
                 &goal_id,
                 task_id.as_deref(),
-                optional_string(input, "planRevisionId")?.as_deref(),
+                Some(&plan_revision_id),
                 &severity,
                 &required_string(input, "category")?,
                 &required_string(input, "title")?,
@@ -499,7 +546,7 @@ pub fn execute(
                     json!({ "goalId": goal_id, "status": goal.status }),
                 ));
             }
-            let checks = validate_goal_for_completion(database, conversation_id, &goal_id)?;
+            let task_summary = validate_goal_for_completion(database, conversation_id, &goal_id)?;
             let (plans, findings, _) = database.load_a1_snapshot(conversation_id)?;
             let plan = plans
                 .iter()
@@ -512,15 +559,58 @@ pub fn execute(
                         json!({ "goalId": goal_id }),
                     )
                 })?;
+            if let Some(pending) = plans.iter().find(|candidate| {
+                candidate.goal_id == goal_id
+                    && candidate.status == "proposed"
+                    && candidate.revision > plan.revision
+            }) {
+                return Err(WorkToolError::new(
+                    "acceptance.plan_pending",
+                    "a newer PlanRevision is still awaiting user approval",
+                    json!({ "goalId": goal_id, "approvedPlanRevisionId": plan.id, "pendingPlanRevisionId": pending.id }),
+                ));
+            }
             let goal_findings = findings
                 .iter()
-                .filter(|finding| finding.goal_id == goal_id)
+                .filter(|finding| {
+                    finding.goal_id == goal_id
+                        && finding.plan_revision_id.as_deref() == Some(plan.id.as_str())
+                })
                 .collect::<Vec<_>>();
             if goal_findings.is_empty() {
                 return Err(WorkToolError::new(
                     "acceptance.review_required",
                     "an independent review record is required before final acceptance",
                     json!({ "goalId": goal_id }),
+                ));
+            }
+            let reviewer_findings = goal_findings
+                .iter()
+                .filter(|finding| finding.created_by == run_id)
+                .collect::<Vec<_>>();
+            if reviewer_findings.is_empty() {
+                return Err(WorkToolError::new(
+                    "acceptance.reviewer_run_required",
+                    "final acceptance must be submitted by the run that reviewed the approved plan",
+                    json!({ "goalId": goal_id, "planRevisionId": plan.id, "reviewerRunId": run_id }),
+                ));
+            }
+            let (_, goal_tasks, goal_evidence) = database
+                .load_work_graph_snapshot(conversation_id)
+                .map_err(|error| error.to_string())?;
+            let goal_task_ids = goal_tasks
+                .iter()
+                .filter(|task| task.goal_id == goal_id)
+                .map(|task| task.id.as_str())
+                .collect::<HashSet<_>>();
+            if goal_evidence.iter().any(|evidence| {
+                goal_task_ids.contains(evidence.task_id.as_str())
+                    && evidence.source_run_id.as_deref() == Some(run_id)
+            }) {
+                return Err(WorkToolError::new(
+                    "acceptance.reviewer_not_independent",
+                    "the acceptance reviewer run must be different from every implementation evidence run",
+                    json!({ "goalId": goal_id, "reviewerRunId": run_id }),
                 ));
             }
             let blockers = goal_findings.iter().filter(|finding| finding.status == "open" && ["critical", "high", "medium"].contains(&finding.severity.as_str())).map(|finding| json!({ "findingId": finding.id, "severity": finding.severity, "title": finding.title })).collect::<Vec<_>>();
@@ -531,6 +621,14 @@ pub fn execute(
                     json!({ "goalId": goal_id, "findings": blockers }),
                 ));
             }
+            let checks = validate_acceptance_checks(
+                database,
+                conversation_id,
+                &goal_id,
+                run_id,
+                input,
+                task_summary,
+            )?;
             let acceptance = database.create_acceptance(
                 conversation_id,
                 &goal_id,
@@ -538,7 +636,7 @@ pub fn execute(
                 "accepted",
                 &required_string(input, "summary")?,
                 checks,
-                &required_string(input, "reviewer")?,
+                run_id,
             )?;
             let goal = database
                 .goals()
@@ -555,6 +653,9 @@ pub fn execute(
                 events.push(event);
             }
             json!({ "acceptance": acceptance, "goal": goal })
+        }
+        tool if crate::expert_workflows::is_workflow_tool(tool) => {
+            crate::expert_workflows::execute_tool(database, conversation_id, run_id, tool, input)?
         }
         _ => return Err(format!("unsupported work tool: {tool}").into()),
     };
@@ -662,9 +763,223 @@ fn validate_goal_for_completion(
     if !missing.is_empty() {
         return Err(WorkToolError::new("goal.valid_evidence_required", "each completed task needs at least one valid evidence record before the goal can complete", json!({ "goalId": goal_id, "tasks": missing })));
     }
+    let goal_task_ids = goal_tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<HashSet<_>>();
     Ok(
-        json!({ "taskCount": goal_tasks.len(), "completed": goal_tasks.iter().filter(|task| task.status == WorkTaskStatus::Completed).count(), "skipped": goal_tasks.iter().filter(|task| task.status == WorkTaskStatus::Skipped).count(), "validEvidence": evidence.iter().filter(|item| item.validity_status == EvidenceValidityStatus::Valid).count() }),
+        json!({ "taskCount": goal_tasks.len(), "completed": goal_tasks.iter().filter(|task| task.status == WorkTaskStatus::Completed).count(), "skipped": goal_tasks.iter().filter(|task| task.status == WorkTaskStatus::Skipped).count(), "validEvidence": evidence.iter().filter(|item| goal_task_ids.contains(item.task_id.as_str()) && item.validity_status == EvidenceValidityStatus::Valid).count() }),
     )
+}
+
+fn require_no_pending_plan(
+    database: &Database,
+    conversation_id: &str,
+    goal_id: &str,
+) -> Result<(), WorkToolError> {
+    let (plans, _, _) = database.load_a1_snapshot(conversation_id)?;
+    if let Some(plan) = plans
+        .iter()
+        .find(|plan| plan.goal_id == goal_id && plan.status == "proposed")
+    {
+        return Err(WorkToolError::new(
+            "plan.approval_required",
+            "state-changing work is paused until the user approves or rejects the proposed PlanRevision",
+            json!({ "goalId": goal_id, "planRevisionId": plan.id, "revision": plan.revision }),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_plan_tasks(input: &Value, goal_id: &str) -> Result<Value, WorkToolError> {
+    let submitted = input
+        .get("tasks")
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty())
+        .ok_or_else(|| {
+            WorkToolError::new(
+                "plan.tasks_required",
+                "a PlanRevision requires a non-empty ordered task list",
+                json!({ "goalId": goal_id }),
+            )
+        })?;
+    let mut tasks = submitted
+        .iter()
+        .map(|task| {
+            let ordinal = task
+                .get("ordinal")
+                .and_then(Value::as_i64)
+                .filter(|ordinal| *ordinal >= 0)
+                .ok_or_else(|| {
+                    WorkToolError::new(
+                        "plan.task_ordinal_invalid",
+                        "every plan task requires a non-negative ordinal",
+                        json!({ "goalId": goal_id, "task": task }),
+                    )
+                })?;
+            Ok((
+                ordinal,
+                json!({
+                    "title": required_string(task, "title")?,
+                    "detail": optional_string(task, "detail")?,
+                    "ordinal": ordinal,
+                }),
+            ))
+        })
+        .collect::<Result<Vec<_>, WorkToolError>>()?;
+    tasks.sort_by_key(|(ordinal, _)| *ordinal);
+    for (expected, (ordinal, _)) in tasks.iter().enumerate() {
+        if *ordinal != expected as i64 {
+            return Err(WorkToolError::new(
+                "plan.task_ordinals_not_contiguous",
+                "plan task ordinals must be unique and contiguous from zero",
+                json!({ "goalId": goal_id, "expectedOrdinal": expected, "actualOrdinal": ordinal }),
+            ));
+        }
+    }
+    Ok(Value::Array(
+        tasks.into_iter().map(|(_, task)| task).collect(),
+    ))
+}
+
+fn validate_acceptance_checks(
+    database: &Database,
+    conversation_id: &str,
+    goal_id: &str,
+    reviewer_run_id: &str,
+    input: &Value,
+    task_summary: Value,
+) -> Result<Value, WorkToolError> {
+    let submitted = input
+        .get("checks")
+        .and_then(Value::as_array)
+        .filter(|checks| !checks.is_empty())
+        .ok_or_else(|| {
+            WorkToolError::new(
+                "acceptance.checks_required",
+                "final acceptance requires at least one explicit criterion check",
+                json!({ "goalId": goal_id }),
+            )
+        })?;
+    let (_, tasks, evidence) = database
+        .load_work_graph_snapshot(conversation_id)
+        .map_err(|error| error.to_string())?;
+    let goal_tasks = tasks
+        .iter()
+        .filter(|task| task.goal_id == goal_id)
+        .collect::<Vec<_>>();
+    let goal_task_ids = goal_tasks
+        .iter()
+        .map(|task| task.id.as_str())
+        .collect::<HashSet<_>>();
+    let evidence_by_id = evidence
+        .iter()
+        .filter(|item| goal_task_ids.contains(item.task_id.as_str()))
+        .map(|item| (item.id.as_str(), item))
+        .collect::<HashMap<_, _>>();
+    let mut criteria = Vec::with_capacity(submitted.len());
+    let mut criterion_names = HashSet::new();
+    let mut covered_task_ids = HashSet::new();
+
+    for check in submitted {
+        let criterion = required_string(check, "criterion")?;
+        if !criterion_names.insert(criterion.to_lowercase()) {
+            return Err(WorkToolError::new(
+                "acceptance.criterion_duplicate",
+                "acceptance criteria must be unique",
+                json!({ "goalId": goal_id, "criterion": criterion }),
+            ));
+        }
+        let method = required_string(check, "method")?;
+        if !["test", "inspection", "review", "manual", "other"].contains(&method.as_str()) {
+            return Err(WorkToolError::new(
+                "acceptance.method_unsupported",
+                "acceptance method must be test, inspection, review, manual, or other",
+                json!({ "goalId": goal_id, "criterion": criterion, "method": method }),
+            ));
+        }
+        let status = required_string(check, "status")?;
+        if !["passed", "not_applicable"].contains(&status.as_str()) {
+            return Err(WorkToolError::new(
+                "acceptance.check_not_passed",
+                "final acceptance only permits passed or justified not_applicable criteria",
+                json!({ "goalId": goal_id, "criterion": criterion, "status": status }),
+            ));
+        }
+        let detail = optional_string(check, "detail")?;
+        if status == "not_applicable" && detail.is_none() {
+            return Err(WorkToolError::new(
+                "acceptance.not_applicable_reason_required",
+                "a not_applicable criterion requires a detail explaining why",
+                json!({ "goalId": goal_id, "criterion": criterion }),
+            ));
+        }
+        let evidence_ids = match check.get("evidenceIds") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| "evidenceIds must contain non-empty strings".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Some(_) => return Err("evidenceIds must be an array".into()),
+        };
+        if status == "passed" && evidence_ids.is_empty() {
+            return Err(WorkToolError::new(
+                "acceptance.evidence_required",
+                "each passed criterion requires at least one valid evidence record",
+                json!({ "goalId": goal_id, "criterion": criterion }),
+            ));
+        }
+        for evidence_id in &evidence_ids {
+            let item = evidence_by_id.get(evidence_id.as_str()).ok_or_else(|| {
+                WorkToolError::new(
+                    "acceptance.evidence_not_found",
+                    "acceptance evidence must belong to this goal",
+                    json!({ "goalId": goal_id, "criterion": criterion, "evidenceId": evidence_id }),
+                )
+            })?;
+            if item.validity_status != EvidenceValidityStatus::Valid {
+                return Err(WorkToolError::new(
+                    "acceptance.evidence_not_valid",
+                    "acceptance evidence must be Host-validated",
+                    json!({ "goalId": goal_id, "criterion": criterion, "evidenceId": evidence_id, "validityStatus": item.validity_status }),
+                ));
+            }
+            covered_task_ids.insert(item.task_id.as_str());
+        }
+        criteria.push(json!({
+            "criterion": criterion,
+            "method": method,
+            "status": status,
+            "evidenceIds": evidence_ids,
+            "detail": detail,
+        }));
+    }
+
+    let uncovered_tasks = goal_tasks
+        .iter()
+        .filter(|task| task.status == WorkTaskStatus::Completed)
+        .filter(|task| !covered_task_ids.contains(task.id.as_str()))
+        .map(|task| json!({ "taskId": task.id, "title": task.title }))
+        .collect::<Vec<_>>();
+    if !uncovered_tasks.is_empty() {
+        return Err(WorkToolError::new(
+            "acceptance.task_coverage_required",
+            "acceptance criteria must cite evidence covering every completed task",
+            json!({ "goalId": goal_id, "tasks": uncovered_tasks }),
+        ));
+    }
+
+    Ok(json!({
+        "criteria": criteria,
+        "taskSummary": task_summary,
+        "reviewer": { "runId": reviewer_run_id },
+    }))
 }
 
 fn require_goal(
@@ -991,9 +1306,39 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned();
+        assert_eq!(plan.result["details"]["planRevision"]["status"], "proposed");
+
+        let error = execute(
+            &database,
+            &conversation_id,
+            &run_id,
+            "task_create_many",
+            &json!({
+                "goalId": goal_id, "tasks": [{ "title": "must wait", "ordinal": 1 }]
+            }),
+        )
+        .expect_err("a proposed plan must pause state-changing work");
+        assert_eq!(error.code, "plan.approval_required");
 
         let error = execute(&database, &conversation_id, &run_id, "acceptance_submit", &json!({
-            "goalId": goal_id, "expectedVersion": 1, "summary": "done", "reviewer": "fox-reviewer"
+            "goalId": goal_id, "expectedVersion": 1, "summary": "done",
+            "checks": [{
+                "criterion": "implementation verified", "method": "inspection", "status": "passed",
+                "evidenceIds": [evidence_id]
+            }]
+        })).expect_err("a proposed plan cannot be accepted");
+        assert_eq!(error.code, "acceptance.plan_required");
+        let approved_plan = database
+            .resolve_plan_revision(&conversation_id, &plan_id, "approved")
+            .expect("approve plan revision through Host boundary");
+        assert_eq!(approved_plan.status, "approved");
+
+        let error = execute(&database, &conversation_id, &run_id, "acceptance_submit", &json!({
+            "goalId": goal_id, "expectedVersion": 1, "summary": "done",
+            "checks": [{
+                "criterion": "implementation verified", "method": "inspection", "status": "passed",
+                "evidenceIds": [evidence_id]
+            }]
         })).expect_err("review is required");
         assert_eq!(error.code, "acceptance.review_required");
 
@@ -1007,21 +1352,23 @@ mod tests {
         execute(&database, &conversation_id, &review_run.id, "review_finding_add", &json!({
             "goalId": goal_id, "planRevisionId": plan_id, "severity": "info", "category": "verification",
             "title": "Independent review completed", "detail": "No blocking finding after evidence review.",
-            "status": "resolved", "reviewer": "fox-reviewer"
+            "status": "resolved"
         })).expect("record independent review");
         let accepted = execute(&database, &conversation_id, &review_run.id, "acceptance_submit", &json!({
             "goalId": goal_id, "expectedVersion": 1, "summary": "plan, review, tasks, and evidence accepted",
-            "reviewer": "fox-reviewer"
+            "checks": [{
+                "criterion": "implementation verified", "method": "inspection", "status": "passed",
+                "evidenceIds": [evidence_id], "detail": "reviewed the validated implementation evidence"
+            }]
         })).expect("accept goal");
         assert_eq!(accepted.result["details"]["goal"]["status"], "completed");
-        assert_eq!(
-            database
-                .load_conversation(&conversation_id)
-                .unwrap()
-                .acceptances
-                .len(),
-            1
-        );
+        let acceptances = database
+            .load_conversation(&conversation_id)
+            .unwrap()
+            .acceptances;
+        assert_eq!(acceptances.len(), 1);
+        assert_eq!(acceptances[0].reviewer, review_run.id);
+        assert_eq!(acceptances[0].checks["criteria"][0]["method"], "inspection");
         drop(database);
         let _ = std::fs::remove_file(path);
     }

@@ -5,6 +5,8 @@ services/agent-runtime/dist/*
 !services/agent-runtime/dist/.gitkeep
 target/
 .runtime-*/
+.agent_context/
+.claude/
 
 # Local reference projects and design experiments are not product source.
 apps/desktop/public/mascot/Yuxi/

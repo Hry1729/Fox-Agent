@@ -9,6 +9,7 @@ import { resolveConversationAgentId } from '../model/agent-initialization'
 import { withWorkspaceInitializationTimeout } from '../model/workspace-initialization'
 import type {
   ConversationDetail,
+  ChildRunNotification,
   ConversationExpertBinding,
   ConversationMessage,
   ConversationSummary,
@@ -17,6 +18,7 @@ import type {
   RuntimeStatus,
   ProjectRecord,
   ApprovalRecord,
+  ApprovalDecision,
   KnowledgeBaseRecord,
   KnowledgeBindingRecord,
   WorkEventRecord,
@@ -34,6 +36,8 @@ interface DesktopConversationState {
   enabled: boolean
   ready: boolean
   conversations: ConversationSummary[]
+  archivedConversations: ConversationSummary[]
+  trashedConversations: ConversationSummary[]
   runtimeStatus: RuntimeStatus | null
   refreshRuntimeStatus: () => Promise<void>
   detail: ConversationDetail | null
@@ -51,8 +55,10 @@ interface DesktopConversationState {
   rerunFromMessage: (messageId: string, text: string, model?: string) => Promise<boolean>
   resumeQuestion: (parentRunId: string, text: string, answers: Record<string, string | string[]>) => Promise<boolean>
   cancel: () => Promise<void>
-  resolveApproval: (approvalId: string, approved: boolean) => Promise<boolean>
+  resolveApproval: (approvalId: string, decision: ApprovalDecision | boolean) => Promise<boolean>
   resolveWorkModeConfirmation: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>
+  resolvePlanRevision: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>
+  resolveExpertWorkflowGate: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>
   deleteGoal: (goalId: string) => Promise<boolean>
   setGoalRunning: (goalId: string, expectedVersion: number, running: boolean) => Promise<boolean>
   createConversation: (projectRoot?: string, permissionMode?: ProjectRecord['permissionMode']) => Promise<boolean>
@@ -66,7 +72,12 @@ interface DesktopConversationState {
   renameConversation: (conversationId: string, title: string) => Promise<boolean>
   setConversationPinned: (conversationId: string, pinned: boolean) => Promise<boolean>
   archiveConversation: (conversationId: string) => Promise<boolean>
+  unarchiveConversation: (conversationId: string) => Promise<boolean>
+  restoreConversation: (conversationId: string) => Promise<boolean>
   deleteConversation: (conversationId: string) => Promise<ConversationDeleteResult>
+  purgeConversation: (conversationId: string) => Promise<ConversationDeleteResult>
+  forkConversation: (messageId: string, title?: string) => Promise<ConversationSummary | null>
+  refreshLifecycleLists: () => Promise<void>
   searchConversations: (query: string) => Promise<ConversationSummary[]>
   setKnowledgeBindings: (knowledgeBases: KnowledgeBaseRecord[]) => Promise<boolean>
 }
@@ -138,6 +149,8 @@ export function useDesktopConversation(): DesktopConversationState {
   const [ready, setReady] = useState(false)
   const [defaultAgentId, setDefaultAgentId] = useState<string | null>(null)
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
+  const [archivedConversations, setArchivedConversations] = useState<ConversationSummary[]>([])
+  const [trashedConversations, setTrashedConversations] = useState<ConversationSummary[]>([])
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
   const [detail, setDetail] = useState<ConversationDetail | null>(null)
   const [draftAgentId, setDraftAgentId] = useState<string | null>(null)
@@ -163,6 +176,8 @@ export function useDesktopConversation(): DesktopConversationState {
   const runtimeEventQueueRef = useRef<RuntimeEventNotification[]>([])
   const runtimeEventFrameRef = useRef<number | null>(null)
   const lastRuntimeEventAtRef = useRef(0)
+  const uiDispatchStartedRef = useRef(new Map<string, number>())
+  const runtimeEventReceivedAtRef = useRef(new Map<string, number>())
   const runtimeInitializationRef = useRef<Promise<RuntimeInitialization> | null>(null)
   const fallbackAgentId = 'fox-general'
 
@@ -210,6 +225,17 @@ export function useDesktopConversation(): DesktopConversationState {
     const next = await desktopClient.listConversations()
     setConversations(next)
     return next
+  }, [])
+
+  const refreshLifecycleLists = useCallback(async () => {
+    const [active, archived, trashed] = await Promise.all([
+      desktopClient.listConversations(),
+      desktopClient.listArchivedConversations(),
+      desktopClient.listTrashedConversations(),
+    ])
+    setConversations(active)
+    setArchivedConversations(archived)
+    setTrashedConversations(trashed)
   }, [])
 
   const refreshRuntimeStatus = useCallback(async () => {
@@ -373,7 +399,7 @@ export function useDesktopConversation(): DesktopConversationState {
   const archiveConversation = useCallback(async (conversationId: string) => {
     try {
       await desktopClient.archiveConversation(conversationId)
-      await refreshList()
+      await refreshLifecycleLists()
       if (activeConversationIdRef.current === conversationId) {
         activeConversationIdRef.current = null
         activeRunIdRef.current = null
@@ -385,12 +411,36 @@ export function useDesktopConversation(): DesktopConversationState {
       setError(cause instanceof Error ? cause.message : String(cause))
       return false
     }
-  }, [applyDraft, defaultAgentId, refreshList])
+  }, [applyDraft, defaultAgentId, refreshLifecycleLists])
+
+  const unarchiveConversation = useCallback(async (conversationId: string) => {
+    try {
+      await desktopClient.unarchiveConversation(conversationId)
+      await refreshLifecycleLists()
+      setError(null)
+      return true
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      return false
+    }
+  }, [refreshLifecycleLists])
+
+  const restoreConversation = useCallback(async (conversationId: string) => {
+    try {
+      await desktopClient.restoreConversation(conversationId)
+      await refreshLifecycleLists()
+      setError(null)
+      return true
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      return false
+    }
+  }, [refreshLifecycleLists])
 
   const deleteConversation = useCallback(async (conversationId: string) => {
     try {
       await desktopClient.deleteConversation(conversationId)
-      await refreshList()
+      await refreshLifecycleLists()
       if (activeConversationIdRef.current === conversationId) {
         activeConversationIdRef.current = null
         activeRunIdRef.current = null
@@ -404,7 +454,35 @@ export function useDesktopConversation(): DesktopConversationState {
         error: cause instanceof Error ? cause.message : String(cause),
       }
     }
-  }, [applyDraft, defaultAgentId, refreshList])
+  }, [applyDraft, defaultAgentId, refreshLifecycleLists])
+
+  const purgeConversation = useCallback(async (conversationId: string) => {
+    try {
+      const deleted = await desktopClient.purgeConversation(conversationId)
+      await refreshLifecycleLists()
+      return { deleted, error: null }
+    } catch (cause) {
+      return {
+        deleted: false,
+        error: cause instanceof Error ? cause.message : String(cause),
+      }
+    }
+  }, [refreshLifecycleLists])
+
+  const forkConversation = useCallback(async (messageId: string, title?: string) => {
+    const conversationId = activeConversationIdRef.current
+    if (!conversationId) return null
+    try {
+      const fork = await desktopClient.forkConversation(conversationId, messageId, title)
+      await refreshLifecycleLists()
+      await openConversation(fork.id)
+      setError(null)
+      return fork
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      return null
+    }
+  }, [openConversation, refreshLifecycleLists])
 
   const removeExpert = useCallback(async () => {
     const current = detail
@@ -478,7 +556,7 @@ export function useDesktopConversation(): DesktopConversationState {
         })
         await Promise.all([
           withWorkspaceInitializationTimeout(refreshRuntimeStatus(), '运行状态加载'),
-          withWorkspaceInitializationTimeout(refreshList(), '对话列表加载'),
+          withWorkspaceInitializationTimeout(refreshLifecycleLists(), '对话列表加载'),
         ])
         if (cancelled) return
         activeConversationIdRef.current = null
@@ -500,16 +578,19 @@ export function useDesktopConversation(): DesktopConversationState {
       }
     })()
     return () => { cancelled = true }
-  }, [applyDraft, initializeRuntime, refreshList, refreshRuntimeStatus])
+  }, [applyDraft, initializeRuntime, refreshLifecycleLists, refreshRuntimeStatus])
 
   useEffect(() => {
     if (!desktopRuntimeAvailable) return
     let disposed = false
     const stops: Array<() => void> = []
     const updateApproval = (approval: ApprovalRecord) => {
-      if (disposed || approval.conversationId !== activeConversationIdRef.current) return
+      if (disposed) return
       setDetail((current) => {
         if (!current) return current
+        const belongsToActiveConversation = approval.conversationId === activeConversationIdRef.current
+          || current.childRuns.some((child) => child.childConversationId === approval.conversationId)
+        if (!belongsToActiveConversation) return current
         const exists = current.approvals.some((item) => item.id === approval.id)
         return {
           ...current,
@@ -521,6 +602,20 @@ export function useDesktopConversation(): DesktopConversationState {
     }
     void desktopClient.listenApprovalRequests(updateApproval).then((stop) => disposed ? stop() : stops.push(stop))
     void desktopClient.listenApprovalResolved(updateApproval).then((stop) => disposed ? stop() : stops.push(stop))
+    const updateChildRun = (notification: ChildRunNotification) => {
+      if (disposed || notification.parentConversationId !== activeConversationIdRef.current) return
+      setDetail((current) => {
+        if (!current || current.conversation.id !== notification.parentConversationId) return current
+        const exists = current.childRuns.some((item) => item.childRunId === notification.childRun.childRunId)
+        return {
+          ...current,
+          childRuns: exists
+            ? current.childRuns.map((item) => item.childRunId === notification.childRun.childRunId ? notification.childRun : item)
+            : [...current.childRuns, notification.childRun],
+        }
+      })
+    }
+    void desktopClient.listenChildRunUpdates(updateChildRun).then((stop) => disposed ? stop() : stops.push(stop))
     return () => {
       disposed = true
       stops.forEach((stop) => stop())
@@ -549,6 +644,15 @@ export function useDesktopConversation(): DesktopConversationState {
       }
       if (!terminal) return
       const event = terminal.event
+      const terminalReceivedAt = runtimeEventReceivedAtRef.current.get(`${terminal.runId}:${terminal.seq}`)
+      runtimeEventReceivedAtRef.current.delete(`${terminal.runId}:${terminal.seq}`)
+      if (terminalReceivedAt !== undefined) {
+        void desktopClient.recordUiMetric(
+          terminal.runId,
+          'ui.terminal_render',
+          Math.max(0, Math.round(performance.now() - terminalReceivedAt)),
+        ).catch(() => undefined)
+      }
       const isCurrentConversation = activeConversationIdRef.current === terminal.conversationId
       if (isCurrentConversation && (event.type === 'run.failed' || event.type === 'run.interrupted') && typeof event.message === 'string') {
         setError(event.message)
@@ -581,6 +685,18 @@ export function useDesktopConversation(): DesktopConversationState {
         setErrorDetails(null)
       }
       lastRuntimeEventAtRef.current = Date.now()
+      if (['run.completed', 'run.cancelled', 'run.failed', 'run.interrupted'].includes(String(event.type))) {
+        runtimeEventReceivedAtRef.current.set(`${notification.runId}:${notification.seq}`, performance.now())
+      }
+      const dispatchedAt = uiDispatchStartedRef.current.get(notification.conversationId)
+      if (dispatchedAt !== undefined) {
+        uiDispatchStartedRef.current.delete(notification.conversationId)
+        void desktopClient.recordUiMetric(
+          notification.runId,
+          'ui.first_event',
+          Math.max(0, Math.round(performance.now() - dispatchedAt)),
+        ).catch(() => undefined)
+      }
       enqueueRuntimeEvent(runtimeEventQueueRef.current, notification)
       scheduleRuntimeFlush()
     })
@@ -596,6 +712,8 @@ export function useDesktopConversation(): DesktopConversationState {
     return () => {
       disposed = true
       runtimeEventQueueRef.current = []
+      runtimeEventReceivedAtRef.current.clear()
+      uiDispatchStartedRef.current.clear()
       lastRuntimeEventAtRef.current = 0
       if (runtimeEventFrameRef.current !== null) {
         window.cancelAnimationFrame(runtimeEventFrameRef.current)
@@ -781,6 +899,7 @@ export function useDesktopConversation(): DesktopConversationState {
         ? `\n\nFox attachments available through read_attachment:\n${attachments.map((item) => `- ${item.id}: ${item.displayName}`).join('\n')}`
         : ''
       await Promise.all([runtimeListenerReadyRef.current, workListenerReadyRef.current])
+      uiDispatchStartedRef.current.set(activeConversation.conversation.id, performance.now())
       const started = await desktopClient.startRun({
         conversationId: activeConversation.conversation.id,
         text: cleanText,
@@ -819,6 +938,7 @@ export function useDesktopConversation(): DesktopConversationState {
       await refreshList()
       return true
     } catch (cause) {
+      if (active) uiDispatchStartedRef.current.delete(active.conversation.id)
       const details = desktopErrorDetails(cause)
       if (active) await openConversation(active.conversation.id).catch(() => undefined)
       await refreshList().catch(() => undefined)
@@ -976,8 +1096,12 @@ export function useDesktopConversation(): DesktopConversationState {
     await desktopClient.cancelRun(runId)
   }, [detail?.lastRun?.id])
 
-  const resolveApproval = useCallback(async (approvalId: string, approved: boolean) => {
+  const resolveApproval = useCallback(async (approvalId: string, requestedDecision: ApprovalDecision | boolean) => {
+    const decision: ApprovalDecision = typeof requestedDecision === 'boolean'
+      ? requestedDecision ? 'allow_once' : 'deny'
+      : requestedDecision
     const resolvedAt = Date.now()
+    const approved = decision !== 'deny'
     let previous: ApprovalRecord | undefined
     setDetail((current) => {
       if (!current) return current
@@ -988,13 +1112,16 @@ export function useDesktopConversation(): DesktopConversationState {
         approvals: current.approvals.map((item) => item.id === approvalId ? {
           ...item,
           status: approved ? 'approved' : 'denied',
-          decision: { approved },
+          decision: {
+            approved,
+            scope: decision === 'allow_conversation' ? 'conversation' : decision === 'allow_once' ? 'once' : 'none',
+          },
           resolvedAt,
         } : item),
       }
     })
     try {
-      const resolved = await desktopClient.resolveApproval(approvalId, approved)
+      const resolved = await desktopClient.resolveApproval(approvalId, decision)
       if (!resolved) throw new Error('这个审批已经处理或失效')
       const conversationId = activeConversationIdRef.current
       if (conversationId) {
@@ -1035,6 +1162,25 @@ export function useDesktopConversation(): DesktopConversationState {
       return false
     }
   }, [refreshList])
+
+  const resolvePlanRevision = useCallback(async (
+    planRevisionId: string,
+    decision: 'approved' | 'rejected',
+  ) => {
+    const conversationId = activeConversationIdRef.current
+    if (!conversationId) return false
+    try {
+      await desktopClient.resolvePlanRevision(conversationId, planRevisionId, decision)
+      const persisted = await desktopClient.loadConversation(conversationId)
+      activeRunIdRef.current = runRecordIsActive(persisted.lastRun) ? persisted.lastRun?.id ?? null : null
+      setDetail((current) => mergeConversationDetail(persisted, current))
+      setError(null)
+      return true
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      return false
+    }
+  }, [])
 
   const deleteGoal = useCallback(async (goalId: string) => {
     const conversationId = activeConversationIdRef.current
@@ -1080,10 +1226,27 @@ export function useDesktopConversation(): DesktopConversationState {
     }
   }, [])
 
+  const resolveExpertWorkflowGate = useCallback(async (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => {
+    const conversationId = activeConversationIdRef.current
+    if (!conversationId) return false
+    try {
+      await desktopClient.resolveExpertWorkflowGate(workflowRunId, stageId, decision)
+      const persisted = await desktopClient.loadConversation(conversationId)
+      setDetail((current) => mergeConversationDetail(persisted, current))
+      setError(null)
+      return true
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      return false
+    }
+  }, [])
+
   return useMemo(() => ({
     enabled: desktopRuntimeAvailable,
     ready,
     conversations,
+    archivedConversations,
+    trashedConversations,
     runtimeStatus,
     refreshRuntimeStatus,
     detail,
@@ -1113,6 +1276,8 @@ export function useDesktopConversation(): DesktopConversationState {
     cancel,
     resolveApproval,
     resolveWorkModeConfirmation,
+    resolvePlanRevision,
+    resolveExpertWorkflowGate,
     deleteGoal,
     setGoalRunning,
     createConversation,
@@ -1126,10 +1291,15 @@ export function useDesktopConversation(): DesktopConversationState {
     renameConversation,
     setConversationPinned,
     archiveConversation,
+    unarchiveConversation,
+    restoreConversation,
     deleteConversation,
+    purgeConversation,
+    forkConversation,
+    refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [archiveConversation, cancel, conversations, createConversation, createConversationForAgent, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftPermissionMode, draftProjectRoot, error, errorDetails, loadEarlierMessages, loadingEarlierMessages, openConversation, ready, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveWorkModeConfirmation, resumeQuestion, runtimeStatus, searchConversations, send, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings])
+  }), [archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runtimeStatus, searchConversations, send, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {

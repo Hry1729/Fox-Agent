@@ -2,12 +2,16 @@ use super::{
     migrations, AgentRecord, AgentResourceRecord, AgentResourcesRecord, ArtifactRecord,
     AttachmentRecord, ConversationDetail, ConversationExpertBinding,
     ConversationExpertBindingError, ConversationRuntimeRecord, ConversationSummary,
-    ExternalRunRecord, KnowledgeBindingRecord, KnowledgeDocumentActivity,
-    KnowledgeDocumentAnnotation, KnowledgeDocumentBookmark, KnowledgeDocumentReadingState,
-    KnowledgePreviewCacheEntry, MessageRecord, ModelConnectionTest, ModelProviderRecord,
-    ModelServiceRecord, PendingWorkModeDispatch, ProviderModelRecord, RecoverableExternalRunRecord,
-    RunEventRecord, RunRecord, RuntimePromptMessage, RuntimeSessionRecord, SaveAgentRequest,
-    StartRunResult, ToolCallRecord, YuxiAgentRecord, YuxiConnectionTest, YuxiServiceRecord,
+    ExpertPackageVersionRecord, ExternalRunRecord, InstallExpertPackageVersionRequest,
+    KnowledgeBindingRecord, KnowledgeDocumentActivity, KnowledgeDocumentAnnotation,
+    KnowledgeDocumentBookmark, KnowledgeDocumentReadingState, KnowledgePreviewCacheEntry,
+    KnowledgeReference, KnowledgeReferenceBindingInput, KnowledgeReferenceBindingRecord,
+    McpPluginSourceRecord, MessageRecord, ModelConnectionTest, ModelProviderRecord,
+    ModelServiceRecord, PendingWorkModeDispatch, PluginCatalogEntryRecord, PluginInstallStatus,
+    PluginInstallationRecord, PluginKind, PluginOrigin, ProviderModelRecord,
+    RecoverableExternalRunRecord, RunEventRecord, RunRecord, RuntimePromptMessage,
+    RuntimeSessionRecord, SaveAgentRequest, StartRunResult, ToolCallRecord, YuxiAgentRecord,
+    YuxiConnectionTest, YuxiServiceRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -20,9 +24,16 @@ use std::{
 use uuid::Uuid;
 
 mod a1_workflow;
+mod child_runs;
+mod digital_colleagues;
+mod expert_teams;
+mod expert_workflows;
+mod memory;
+mod observability;
 mod work_events;
 mod work_graph;
 
+pub(crate) use child_runs::CreateChildRunInput;
 pub use work_events::WORK_EVENT_TYPES;
 #[allow(unused_imports)]
 pub use work_graph::{
@@ -76,7 +87,7 @@ const USER_PROFILE_KEY: &str = "user_profile";
 const AGENT_RECORD_COLUMNS: &str =
     "id, name, description, runtime_type, agent_kind, invocation_mode, visibility, default_model, \
      system_prompt, icon, category, opening_suggestions_json, is_builtin, package_version, \
-     package_manifest_json";
+     package_manifest_json, package_source, package_id, package_hash";
 
 #[derive(Clone)]
 pub struct Database {
@@ -184,6 +195,30 @@ impl Database {
                     limit_bytes.to_string(),
                     now_ms()
                 ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn app_setting(&self, key: &str) -> Result<Option<String>, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = ?1",
+                    [key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+        })
+    }
+
+    pub fn set_app_setting(&self, key: &str, value: &str) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO app_settings(key, value, updated_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                     updated_at = excluded.updated_at",
+                params![key, value, now_ms()],
             )?;
             Ok(())
         })
@@ -673,7 +708,7 @@ impl Database {
                     "skills": [],
                     "knowledge": [],
                     "mcpServers": [],
-                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "write_file", "edit_file", "run_command", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit"]
+                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
                 });
                 let (agent_kind, invocation_mode, visibility) = if *id == DEFAULT_AGENT_ID {
                     ("assistant", "primary", "chat_selector")
@@ -683,7 +718,8 @@ impl Database {
                 connection.execute(
                     "UPDATE agents SET is_builtin = 1, category = ?2,
                          package_version = '1.0.0', package_manifest_json = ?3,
-                         agent_kind = ?4, invocation_mode = ?5, visibility = ?6
+                         agent_kind = ?4, invocation_mode = ?5, visibility = ?6,
+                         package_source = 'builtin', package_id = NULL, package_hash = NULL
                      WHERE id = ?1",
                     params![
                         id,
@@ -831,6 +867,23 @@ impl Database {
                 "write_file",
                 "edit_file",
                 "run_command",
+                "web_search",
+                "web_read",
+                "http_request",
+                "system_info",
+                "sqlite_read",
+                "structured_data",
+                "git_read",
+                "test_run",
+                "code_check",
+                "format_code",
+                "tabular_data",
+                "child_agent_list",
+                "child_run_start",
+                "child_run_collect",
+                "child_run_cancel",
+                "memory_search",
+                "memory_propose",
                 "list_knowledge_bases",
                 "search_knowledge",
                 "read_knowledge_document",
@@ -847,7 +900,13 @@ impl Database {
                 "plan_revision_create",
                 "review_finding_add",
                 "review_finding_resolve",
-                "acceptance_submit"
+                "acceptance_submit",
+                "workflow_snapshot_get",
+                "workflow_start",
+                "workflow_stage_start",
+                "workflow_stage_complete",
+                "workflow_stage_fail",
+                "workflow_cancel"
             ])
         });
         let enabled_skills = object
@@ -865,8 +924,12 @@ impl Database {
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             if request.id.is_some() {
-                let builtin = transaction.query_row("SELECT is_builtin FROM agents WHERE id = ?1 AND runtime_type = 'pi'", [&id], |row| row.get::<_, i64>(0))?;
-                if builtin != 0 { return Err(rusqlite::Error::InvalidQuery); }
+                let (builtin, package_source) = transaction.query_row(
+                    "SELECT is_builtin, package_source FROM agents WHERE id = ?1 AND runtime_type = 'pi'",
+                    [&id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )?;
+                if builtin != 0 || package_source != "local" { return Err(rusqlite::Error::InvalidQuery); }
                 transaction.execute(
                     "UPDATE agents SET name = ?2, description = ?3, icon = ?4, category = ?5,
                          system_prompt = ?6, default_model = ?7, opening_suggestions_json = ?8,
@@ -900,6 +963,294 @@ impl Database {
         })?;
         self.get_agent(&id)?
             .ok_or_else(|| "saved expert was not found".to_owned())
+    }
+
+    pub fn get_agent_by_package_id(&self, package_id: &str) -> Result<Option<AgentRecord>, String> {
+        self.with_connection(|connection| {
+            let sql = format!("SELECT {AGENT_RECORD_COLUMNS} FROM agents WHERE package_id = ?1");
+            connection
+                .query_row(&sql, [package_id], agent_record_from_row)
+                .optional()
+        })
+    }
+
+    pub fn list_expert_package_versions(
+        &self,
+        expert_id: &str,
+    ) -> Result<Vec<ExpertPackageVersionRecord>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, expert_id, package_id, version, package_hash, package_json,
+                        source, status, created_at, activated_at
+                 FROM expert_package_versions
+                 WHERE expert_id = ?1
+                 ORDER BY activated_at DESC, created_at DESC, version DESC",
+            )?;
+            let records = statement
+                .query_map([expert_id], |row| {
+                    Ok(ExpertPackageVersionRecord {
+                        id: row.get(0)?,
+                        expert_id: row.get(1)?,
+                        package_id: row.get(2)?,
+                        version: row.get(3)?,
+                        package_hash: row.get(4)?,
+                        package: parse_json(&row.get::<_, String>(5)?),
+                        source: row.get(6)?,
+                        status: row.get(7)?,
+                        created_at: row.get(8)?,
+                        activated_at: row.get(9)?,
+                    })
+                })?
+                .collect();
+            records
+        })
+    }
+
+    pub fn get_expert_package_version(
+        &self,
+        expert_id: &str,
+        version: &str,
+    ) -> Result<Option<ExpertPackageVersionRecord>, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT id, expert_id, package_id, version, package_hash, package_json,
+                            source, status, created_at, activated_at
+                     FROM expert_package_versions
+                     WHERE expert_id = ?1 AND version = ?2",
+                    params![expert_id, version],
+                    |row| {
+                        Ok(ExpertPackageVersionRecord {
+                            id: row.get(0)?,
+                            expert_id: row.get(1)?,
+                            package_id: row.get(2)?,
+                            version: row.get(3)?,
+                            package_hash: row.get(4)?,
+                            package: parse_json(&row.get::<_, String>(5)?),
+                            source: row.get(6)?,
+                            status: row.get(7)?,
+                            created_at: row.get(8)?,
+                            activated_at: row.get(9)?,
+                        })
+                    },
+                )
+                .optional()
+        })
+    }
+
+    pub fn known_remote_knowledge_references(&self) -> Result<Vec<KnowledgeReference>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT DISTINCT provider_key, connection_id, knowledge_base_id
+                 FROM knowledge_bindings_v2
+                 WHERE source = 'remote' AND connection_id IS NOT NULL",
+            )?;
+            let references = statement
+                .query_map([], |row| {
+                    Ok(KnowledgeReference {
+                        source: "remote".to_owned(),
+                        provider_key: row.get(0)?,
+                        connection_id: row.get(1)?,
+                        id: row.get(2)?,
+                    })
+                })?
+                .collect();
+            references
+        })
+    }
+
+    pub fn install_expert_package_version(
+        &self,
+        request: &InstallExpertPackageVersionRequest,
+    ) -> Result<AgentRecord, String> {
+        self.write_expert_package_version(request, false)
+    }
+
+    pub fn activate_expert_package_version(
+        &self,
+        request: &InstallExpertPackageVersionRequest,
+    ) -> Result<AgentRecord, String> {
+        self.write_expert_package_version(request, true)
+    }
+
+    fn write_expert_package_version(
+        &self,
+        request: &InstallExpertPackageVersionRequest,
+        reactivate: bool,
+    ) -> Result<AgentRecord, String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "database lock is poisoned".to_owned())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let current = transaction
+            .query_row(
+                "SELECT id, package_version, package_hash, package_source
+                 FROM agents WHERE package_id = ?1",
+                [&request.package_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some((_, _, current_hash, source)) = &current {
+            if source != "imported" {
+                return Err("expert.package_source_conflict".to_owned());
+            }
+            if request.expected_current_hash.as_deref() != current_hash.as_deref() {
+                return Err("expert.package_state_changed".to_owned());
+            }
+        } else if request.expected_current_hash.is_some() {
+            return Err("expert.package_state_changed".to_owned());
+        }
+
+        let existing_version = transaction
+            .query_row(
+                "SELECT expert_id, package_hash FROM expert_package_versions
+                 WHERE package_id = ?1 AND version = ?2",
+                params![request.package_id, request.version],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some((version_expert_id, version_hash)) = &existing_version {
+            if version_expert_id != &request.expert_id || version_hash != &request.package_hash {
+                return Err("expert.package_version_conflict".to_owned());
+            }
+            if !reactivate {
+                transaction.commit().map_err(|error| error.to_string())?;
+                return query_agent_record(&connection, &request.expert_id)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "expert.package_not_found".to_owned());
+            }
+        } else if reactivate {
+            return Err("expert.package_version_not_found".to_owned());
+        }
+
+        let now = now_ms();
+        let suggestions_json = serde_json::to_string(&request.opening_suggestions)
+            .map_err(|error| error.to_string())?;
+        let manifest_json = request.package_manifest.to_string();
+        if let Some((expert_id, _, _, _)) = current {
+            if expert_id != request.expert_id {
+                return Err("expert.package_identity_conflict".to_owned());
+            }
+            transaction
+                .execute(
+                    "UPDATE agents SET name = ?2, description = ?3, icon = ?4, category = ?5,
+                         system_prompt = ?6, default_model = ?7, opening_suggestions_json = ?8,
+                         package_version = ?9, package_manifest_json = ?10,
+                         package_hash = ?11, updated_at = ?12
+                     WHERE id = ?1 AND package_source = 'imported'",
+                    params![
+                        request.expert_id,
+                        request.name,
+                        request.description,
+                        request.icon,
+                        request.category,
+                        request.system_prompt,
+                        request.default_model,
+                        suggestions_json,
+                        request.version,
+                        manifest_json,
+                        request.package_hash,
+                        now
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+        } else {
+            transaction
+                .execute(
+                    "INSERT INTO agents(
+                        id, name, description, runtime_type, system_prompt, default_model,
+                        created_at, updated_at, icon, category, opening_suggestions_json,
+                        is_builtin, package_version, package_manifest_json, agent_kind,
+                        invocation_mode, visibility, package_source, package_id, package_hash
+                     ) VALUES (
+                        ?1, ?2, ?3, 'pi', ?4, ?5, ?6, ?6, ?7, ?8, ?9, 0, ?10, ?11,
+                        'expert', 'inline', 'expert_center', 'imported', ?12, ?13
+                     )",
+                    params![
+                        request.expert_id,
+                        request.name,
+                        request.description,
+                        request.system_prompt,
+                        request.default_model,
+                        now,
+                        request.icon,
+                        request.category,
+                        suggestions_json,
+                        request.version,
+                        manifest_json,
+                        request.package_id,
+                        request.package_hash
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction
+            .execute(
+                "UPDATE expert_package_versions SET status = 'historical'
+                 WHERE expert_id = ?1 AND status = 'active'",
+                [&request.expert_id],
+            )
+            .map_err(|error| error.to_string())?;
+        if reactivate {
+            transaction
+                .execute(
+                    "UPDATE expert_package_versions
+                     SET status = 'active', activated_at = ?3
+                     WHERE expert_id = ?1 AND version = ?2",
+                    params![request.expert_id, request.version, now],
+                )
+                .map_err(|error| error.to_string())?;
+        } else {
+            transaction
+                .execute(
+                    "INSERT INTO expert_package_versions(
+                        id, expert_id, package_id, version, package_hash, package_json,
+                        source, status, created_at, activated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'imported', 'active', ?7, ?7)",
+                    params![
+                        format!("expert-package-version-{}", Uuid::new_v4().simple()),
+                        request.expert_id,
+                        request.package_id,
+                        request.version,
+                        request.package_hash,
+                        request.package.to_string(),
+                        now
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO agent_runtime_config(
+                    agent_id, scope_type, scope_id, config_key, value_json, source,
+                    created_at, updated_at
+                 ) VALUES (?1, 'agent', ?1, 'skills.enabled', ?2, 'package', ?3, ?3)
+                 ON CONFLICT(agent_id, scope_type, scope_id, config_key) DO UPDATE SET
+                    value_json = excluded.value_json, source = 'package', updated_at = excluded.updated_at",
+                params![
+                    request.expert_id,
+                    serde_json::to_string(&request.enabled_skills)
+                        .map_err(|error| error.to_string())?,
+                    now
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        query_agent_record(&connection, &request.expert_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "expert.package_not_found".to_owned())
     }
 
     pub fn copy_agent(&self, agent_id: &str, name: Option<&str>) -> Result<AgentRecord, String> {
@@ -960,13 +1311,55 @@ impl Database {
             let mut statement = connection.prepare(
                 "SELECT c.id, c.agent_id, a.name, c.title, c.project_id,
                         COALESCE(p.root_path, c.project_root), c.status,
-                        c.pinned, c.archived,
+                        c.pinned, c.archived, c.archived_at, c.trashed_at,
+                        c.parent_conversation_id, c.forked_from_message_id,
+                        COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
-                 WHERE c.archived = 0
+                 WHERE c.conversation_kind = 'primary' AND c.archived = 0 AND c.trashed_at IS NULL
                  ORDER BY c.pinned DESC, COALESCE(c.last_message_at, c.created_at) DESC",
+            )?;
+            let records = statement.query_map([], map_conversation)?.collect();
+            records
+        })
+    }
+
+    pub fn list_archived_conversations(&self) -> Result<Vec<ConversationSummary>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT c.id, c.agent_id, a.name, c.title, c.project_id,
+                        COALESCE(p.root_path, c.project_root), c.status,
+                        c.pinned, c.archived, c.archived_at, c.trashed_at,
+                        c.parent_conversation_id, c.forked_from_message_id,
+                        COALESCE(c.lineage_root_id, c.id),
+                        c.created_at, c.updated_at, c.last_message_at
+                 FROM conversations c
+                 JOIN agents a ON a.id = c.agent_id
+                 LEFT JOIN projects p ON p.id = c.project_id
+                 WHERE c.conversation_kind = 'primary' AND c.archived = 1 AND c.trashed_at IS NULL
+                 ORDER BY COALESCE(c.archived_at, c.updated_at) DESC",
+            )?;
+            let records = statement.query_map([], map_conversation)?.collect();
+            records
+        })
+    }
+
+    pub fn list_trashed_conversations(&self) -> Result<Vec<ConversationSummary>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT c.id, c.agent_id, a.name, c.title, c.project_id,
+                        COALESCE(p.root_path, c.project_root), c.status,
+                        c.pinned, c.archived, c.archived_at, c.trashed_at,
+                        c.parent_conversation_id, c.forked_from_message_id,
+                        COALESCE(c.lineage_root_id, c.id),
+                        c.created_at, c.updated_at, c.last_message_at
+                 FROM conversations c
+                 JOIN agents a ON a.id = c.agent_id
+                 LEFT JOIN projects p ON p.id = c.project_id
+                 WHERE c.conversation_kind = 'primary' AND c.trashed_at IS NOT NULL
+                 ORDER BY c.trashed_at DESC",
             )?;
             let records = statement.query_map([], map_conversation)?.collect();
             records
@@ -1165,12 +1558,14 @@ impl Database {
             let mut statement = connection.prepare(
                 "SELECT DISTINCT c.id, c.agent_id, a.name, c.title, c.project_id,
                         COALESCE(p.root_path, c.project_root), c.status,
-                        c.pinned, c.archived,
+                        c.pinned, c.archived, c.archived_at, c.trashed_at,
+                        c.parent_conversation_id, c.forked_from_message_id,
+                        COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
-                 WHERE c.archived = 0 AND (
+                 WHERE c.conversation_kind = 'primary' AND c.archived = 0 AND c.trashed_at IS NULL AND (
                        c.title LIKE ?1 ESCAPE '\\'
                     OR COALESCE(p.root_path, c.project_root, '') LIKE ?1 ESCAPE '\\'
                     OR a.name LIKE ?1 ESCAPE '\\'
@@ -1284,7 +1679,21 @@ impl Database {
 
     pub fn delete_project(&self, project_id: &str) -> Result<bool, String> {
         self.with_connection(|connection| {
-            Ok(connection.execute("DELETE FROM projects WHERE id = ?1", [project_id])? > 0)
+            let transaction = connection.transaction()?;
+            transaction.execute(
+                "UPDATE conversations
+                 SET project_root = COALESCE(
+                         project_root,
+                         (SELECT root_path FROM projects WHERE id = ?1)
+                     ),
+                     project_id = NULL
+                 WHERE project_id = ?1",
+                [project_id],
+            )?;
+            let deleted =
+                transaction.execute("DELETE FROM projects WHERE id = ?1", [project_id])? > 0;
+            transaction.commit()?;
+            Ok(deleted)
         })
     }
 
@@ -1477,8 +1886,9 @@ impl Database {
 
             connection.execute(
                 "INSERT INTO conversations(
-                    id, agent_id, title, project_id, project_root, status, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)",
+                    id, agent_id, title, project_id, project_root, status,
+                    lineage_root_id, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?1, ?6, ?6)",
                 params![id, agent_id, title, project_id, project_root, now],
             )?;
             query_conversation(connection, &id)
@@ -1521,6 +1931,9 @@ impl Database {
                 plan_revisions: Vec::new(),
                 review_findings: Vec::new(),
                 acceptances: Vec::new(),
+                child_runs: Vec::new(),
+                expert_workflow: None,
+                expert_team: None,
             })
         })?;
         let (goals, tasks, evidence) = self
@@ -1533,6 +1946,12 @@ impl Database {
         detail.plan_revisions = plan_revisions;
         detail.review_findings = review_findings;
         detail.acceptances = acceptances;
+        detail.child_runs = self.child_runs_for_conversation(id)?;
+        detail.expert_workflow = self.active_expert_workflow(id)?;
+        detail.expert_team = self.latest_expert_team(id)?;
+        detail
+            .approvals
+            .extend(self.child_run_approvals_for_conversation(id)?);
         Ok(detail)
     }
 
@@ -1614,6 +2033,28 @@ impl Database {
         conversation_id: &str,
     ) -> Result<Vec<KnowledgeBindingRecord>, String> {
         self.with_connection(|connection| query_knowledge_bindings(connection, conversation_id))
+    }
+
+    pub fn conversation_knowledge_reference_bindings(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<KnowledgeReferenceBindingRecord>, String> {
+        self.with_connection(|connection| {
+            query_knowledge_reference_bindings(connection, conversation_id)
+        })
+    }
+
+    pub fn conversation_knowledge_references(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<KnowledgeReference>, String> {
+        self.conversation_knowledge_reference_bindings(conversation_id)
+            .map(|bindings| {
+                bindings
+                    .into_iter()
+                    .map(|binding| binding.reference)
+                    .collect()
+            })
     }
 
     pub fn conversation_agent_knowledge_scope(
@@ -1734,14 +2175,15 @@ impl Database {
                 transaction.execute(
                     "INSERT INTO agents(id, name, description, runtime_type, system_prompt,
                                         default_model, created_at, updated_at, agent_kind,
-                                        invocation_mode, visibility)
-                     VALUES (?1, ?2, ?3, 'yuxi', ?4, ?5, ?6, ?6, ?7, ?8, ?9)
+                                        invocation_mode, visibility, package_source)
+                     VALUES (?1, ?2, ?3, 'yuxi', ?4, ?5, ?6, ?6, ?7, ?8, ?9, 'remote')
                      ON CONFLICT(id) DO UPDATE SET name = excluded.name,
                         description = excluded.description, system_prompt = excluded.system_prompt,
                         default_model = excluded.default_model, updated_at = excluded.updated_at,
                         agent_kind = excluded.agent_kind,
                         invocation_mode = excluded.invocation_mode,
-                        visibility = excluded.visibility",
+                        visibility = excluded.visibility,
+                        package_source = 'remote'",
                     params![
                         id,
                         agent.name,
@@ -1901,7 +2343,8 @@ impl Database {
         let now = now_ms();
         self.with_connection(|connection| {
             let updated = connection.execute(
-                "UPDATE conversations SET pinned = ?2, updated_at = ?3 WHERE id = ?1",
+                "UPDATE conversations SET pinned = ?2, updated_at = ?3
+                 WHERE id = ?1 AND archived = 0 AND trashed_at IS NULL",
                 params![id, pinned, now],
             )?;
             if updated == 0 {
@@ -1916,14 +2359,294 @@ impl Database {
         self.with_connection(|connection| {
             let updated = connection.execute(
                 "UPDATE conversations
-                 SET archived = 1, pinned = 0, updated_at = ?2
-                 WHERE id = ?1",
+                 SET archived = 1, archived_at = ?2, pinned = 0, updated_at = ?2
+                 WHERE id = ?1 AND trashed_at IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM runs
+                       WHERE conversation_id = ?1
+                         AND status IN ('queued', 'running', 'cancelling', 'awaiting_confirmation')
+                   )",
                 params![id, now],
             )?;
             if updated == 0 {
                 return Ok(None);
             }
             query_conversation(connection, id).optional()
+        })
+    }
+
+    pub fn unarchive_conversation(&self, id: &str) -> Result<Option<ConversationSummary>, String> {
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let updated = connection.execute(
+                "UPDATE conversations
+                 SET archived = 0, archived_at = NULL, updated_at = ?2
+                 WHERE id = ?1 AND trashed_at IS NULL",
+                params![id, now],
+            )?;
+            if updated == 0 {
+                return Ok(None);
+            }
+            query_conversation(connection, id).optional()
+        })
+    }
+
+    pub fn trash_conversation(&self, id: &str) -> Result<Option<ConversationSummary>, String> {
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let updated = connection.execute(
+                "UPDATE conversations
+                 SET trashed_at = ?2, archived = 0, archived_at = NULL,
+                     pinned = 0, updated_at = ?2
+                 WHERE id = ?1 AND trashed_at IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM runs
+                       WHERE conversation_id = ?1
+                         AND status IN ('queued', 'running', 'cancelling', 'awaiting_confirmation')
+                   )",
+                params![id, now],
+            )?;
+            if updated == 0 {
+                return Ok(None);
+            }
+            query_conversation(connection, id).optional()
+        })
+    }
+
+    pub fn restore_trashed_conversation(
+        &self,
+        id: &str,
+    ) -> Result<Option<ConversationSummary>, String> {
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let updated = connection.execute(
+                "UPDATE conversations
+                 SET trashed_at = NULL, archived = 0, archived_at = NULL, updated_at = ?2
+                 WHERE id = ?1 AND trashed_at IS NOT NULL",
+                params![id, now],
+            )?;
+            if updated == 0 {
+                return Ok(None);
+            }
+            query_conversation(connection, id).optional()
+        })
+    }
+
+    pub fn fork_conversation(
+        &self,
+        source_id: &str,
+        message_id: &str,
+        title: Option<&str>,
+    ) -> Result<Option<ConversationSummary>, String> {
+        let fork_id = Uuid::new_v4().to_string();
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let source = transaction
+                .query_row(
+                    "SELECT c.agent_id, c.title, c.project_id, c.project_root,
+                            COALESCE(c.lineage_root_id, c.id)
+                     FROM conversations c
+                     WHERE c.id = ?1 AND c.trashed_at IS NULL",
+                    [source_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((agent_id, source_title, project_id, project_root, lineage_root_id)) = source
+            else {
+                return Ok(None);
+            };
+            let active_run = transaction.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM runs
+                    WHERE conversation_id = ?1
+                      AND status IN ('queued', 'running', 'cancelling', 'awaiting_confirmation')
+                 )",
+                [source_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if active_run {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let target_ordinal = transaction
+                .query_row(
+                    "SELECT ordinal FROM messages WHERE id = ?1 AND conversation_id = ?2",
+                    params![message_id, source_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            let Some(target_ordinal) = target_ordinal else {
+                return Ok(None);
+            };
+            let fork_title = title
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{source_title} · 分支"));
+            let last_message_at = transaction.query_row(
+                "SELECT MAX(created_at) FROM messages
+                 WHERE conversation_id = ?1 AND ordinal <= ?2",
+                params![source_id, target_ordinal],
+                |row| row.get::<_, Option<i64>>(0),
+            )?;
+            transaction.execute(
+                "INSERT INTO conversations(
+                    id, agent_id, title, project_id, project_root, status, pinned, archived,
+                    parent_conversation_id, forked_from_message_id, lineage_root_id,
+                    created_at, updated_at, last_message_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, 'active', 0, 0, ?6, ?7, ?8, ?9, ?9, ?10
+                 )",
+                params![
+                    fork_id,
+                    agent_id,
+                    fork_title,
+                    project_id,
+                    project_root,
+                    source_id,
+                    message_id,
+                    lineage_root_id,
+                    now,
+                    last_message_at,
+                ],
+            )?;
+
+            let messages = {
+                let mut statement = transaction.prepare(
+                    "SELECT role, kind, content, status, ordinal, created_at, updated_at
+                     FROM messages
+                     WHERE conversation_id = ?1 AND ordinal <= ?2
+                     ORDER BY ordinal ASC",
+                )?;
+                let records = statement
+                    .query_map(params![source_id, target_ordinal], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(6)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                records
+            };
+            for (role, kind, content, status, ordinal, created_at, updated_at) in messages {
+                transaction.execute(
+                    "INSERT INTO messages(
+                        id, conversation_id, run_id, role, kind, content, status, ordinal,
+                        runtime_message_id, metadata_json, created_at, updated_at
+                     ) VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7, NULL, '{}', ?8, ?9)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        fork_id,
+                        role,
+                        kind,
+                        content,
+                        status,
+                        ordinal,
+                        created_at,
+                        updated_at,
+                    ],
+                )?;
+            }
+
+            let knowledge_bindings = {
+                let mut statement = transaction.prepare(
+                    "SELECT source, provider_key, connection_id, knowledge_base_id,
+                            knowledge_base_name, enabled
+                     FROM knowledge_bindings_v2
+                     WHERE conversation_id = ?1 AND enabled = 1",
+                )?;
+                let records = statement
+                    .query_map([source_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, bool>(5)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                records
+            };
+            for (source, provider_key, connection_id, knowledge_base_id, name, enabled) in
+                knowledge_bindings
+            {
+                transaction.execute(
+                    "INSERT INTO knowledge_bindings_v2(
+                        id, conversation_id, source, provider_key, connection_id,
+                        knowledge_base_id, knowledge_base_name, enabled, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        fork_id,
+                        source,
+                        provider_key,
+                        connection_id,
+                        knowledge_base_id,
+                        name,
+                        enabled,
+                        now,
+                    ],
+                )?;
+            }
+
+            let active_expert = transaction
+                .query_row(
+                    "SELECT expert_id, expert_version, package_hash, package_snapshot_json,
+                            display_snapshot_json
+                     FROM conversation_expert_bindings
+                     WHERE conversation_id = ?1 AND state = 'active'
+                     ORDER BY activated_at DESC, rowid DESC LIMIT 1",
+                    [source_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((expert_id, version, hash, package_snapshot, display_snapshot)) =
+                active_expert
+            {
+                transaction.execute(
+                    "INSERT INTO conversation_expert_bindings(
+                        id, conversation_id, expert_id, state, activation_source,
+                        expert_version, package_hash, package_snapshot_json,
+                        display_snapshot_json, activated_at, deactivated_at
+                     ) VALUES (?1, ?2, ?3, 'active', 'conversation_fork', ?4, ?5, ?6, ?7, ?8, NULL)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        fork_id,
+                        expert_id,
+                        version,
+                        hash,
+                        package_snapshot,
+                        display_snapshot,
+                        now,
+                    ],
+                )?;
+            }
+            let fork = query_conversation(&transaction, &fork_id)?;
+            transaction.commit()?;
+            Ok(Some(fork))
         })
     }
 
@@ -2106,6 +2829,10 @@ impl Database {
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             transaction.execute(
+                "DELETE FROM knowledge_bindings_v2 WHERE conversation_id = ?1",
+                [conversation_id],
+            )?;
+            transaction.execute(
                 "DELETE FROM knowledge_bindings WHERE conversation_id = ?1",
                 [conversation_id],
             )?;
@@ -2122,6 +2849,69 @@ impl Database {
             transaction.commit()?;
             Ok(records)
         })
+    }
+
+    pub fn set_knowledge_reference_bindings(
+        &self,
+        conversation_id: &str,
+        bindings: &[KnowledgeReferenceBindingInput],
+    ) -> Result<Vec<KnowledgeReferenceBindingRecord>, String> {
+        for binding in bindings {
+            binding
+                .reference
+                .validate()
+                .map_err(|error| format!("invalid knowledge reference: {error}"))?;
+        }
+
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            transaction.execute(
+                "DELETE FROM knowledge_bindings_v2 WHERE conversation_id = ?1",
+                [conversation_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM knowledge_bindings WHERE conversation_id = ?1",
+                [conversation_id],
+            )?;
+            for binding in bindings {
+                let reference = &binding.reference;
+                transaction.execute(
+                    "INSERT INTO knowledge_bindings_v2(
+                        id, conversation_id, source, provider_key, connection_id,
+                        knowledge_base_id, knowledge_base_name, enabled, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8)",
+                    params![
+                        knowledge_binding_v2_id(conversation_id, reference),
+                        conversation_id,
+                        reference.source,
+                        reference.provider_key,
+                        reference.connection_id,
+                        reference.id,
+                        binding.name,
+                        now,
+                    ],
+                )?;
+            }
+            let records = query_knowledge_reference_bindings(&transaction, conversation_id)?;
+            transaction.commit()?;
+            Ok(records)
+        })
+    }
+
+    pub fn set_knowledge_references(
+        &self,
+        conversation_id: &str,
+        references: &[(KnowledgeReference, String)],
+    ) -> Result<Vec<KnowledgeReferenceBindingRecord>, String> {
+        let bindings = references
+            .iter()
+            .map(|(reference, name)| KnowledgeReferenceBindingInput {
+                reference: reference.clone(),
+                name: name.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.set_knowledge_reference_bindings(conversation_id, &bindings)
     }
 
     pub fn conversation_project_root(&self, id: &str) -> Result<Option<String>, String> {
@@ -2189,6 +2979,98 @@ impl Database {
         Ok(skills)
     }
 
+    pub fn enabled_agent_skill_count(&self, skill_id: &str) -> Result<usize, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT value_json FROM agent_runtime_config
+                 WHERE scope_type = 'agent' AND config_key = 'skills.enabled'",
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            let mut count = 0usize;
+            for row in rows {
+                let value = row?;
+                let enabled = serde_json::from_str::<Vec<String>>(&value).unwrap_or_default();
+                if enabled.iter().any(|item| item == skill_id) {
+                    count += 1;
+                }
+            }
+            Ok(count)
+        })
+    }
+
+    pub fn list_plugin_catalog_entries(&self) -> Result<Vec<PluginCatalogEntryRecord>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT plugin_id, version, kind, origin, manifest_json, package_hash,
+                        signature, fetched_at
+                 FROM plugin_catalog_cache
+                 ORDER BY fetched_at DESC, plugin_id COLLATE NOCASE, version DESC",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let kind = plugin_kind_from_db(row.get::<_, String>(2)?)?;
+                let origin = plugin_origin_from_db(row.get::<_, String>(3)?)?;
+                let manifest_json: String = row.get(4)?;
+                Ok(PluginCatalogEntryRecord {
+                    plugin_id: row.get(0)?,
+                    version: row.get(1)?,
+                    kind,
+                    origin,
+                    manifest: serde_json::from_str(&manifest_json).unwrap_or_else(|_| json!({})),
+                    package_hash: row.get(5)?,
+                    signature: row.get(6)?,
+                    fetched_at: row.get(7)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+    }
+
+    pub fn list_plugin_installations(&self) -> Result<Vec<PluginInstallationRecord>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT plugin_id, installed_version, origin, install_status, install_path,
+                        package_hash, installed_at, updated_at, last_error_code,
+                        last_error_message
+                 FROM plugin_installations
+                 ORDER BY updated_at DESC, plugin_id COLLATE NOCASE",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let origin = plugin_origin_from_db(row.get::<_, String>(2)?)?;
+                let install_status = plugin_install_status_from_db(row.get::<_, String>(3)?)?;
+                Ok(PluginInstallationRecord {
+                    plugin_id: row.get(0)?,
+                    installed_version: row.get(1)?,
+                    origin,
+                    install_status,
+                    install_path: row.get(4)?,
+                    package_hash: row.get(5)?,
+                    installed_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                    last_error_code: row.get(8)?,
+                    last_error_message: row.get(9)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+    }
+
+    pub fn list_mcp_plugin_sources(&self) -> Result<Vec<McpPluginSourceRecord>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, catalog_plugin_id, origin
+                 FROM mcp_servers ORDER BY id COLLATE NOCASE",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(McpPluginSourceRecord {
+                    server_id: row.get(0)?,
+                    catalog_plugin_id: row.get(1)?,
+                    origin: plugin_origin_from_db(row.get::<_, String>(2)?)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+    }
+
     pub fn conversation_agent_id(&self, conversation_id: &str) -> Result<String, String> {
         self.with_connection(|connection| {
             connection.query_row(
@@ -2202,8 +3084,9 @@ impl Database {
     pub fn list_mcp_servers(&self) -> Result<Vec<super::McpServerRecord>, String> {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                "SELECT id, name, command, args_json, enabled, status, last_error,
-                        last_checked_at, created_at, updated_at
+                "SELECT id, name, command, args_json, transport, endpoint_url, definition,
+                        enabled, status, last_error, last_checked_at, last_latency_ms,
+                        tool_count, consecutive_failures, created_at, updated_at
                  FROM mcp_servers ORDER BY name COLLATE NOCASE",
             )?;
             let rows = statement.query_map([], |row| {
@@ -2213,13 +3096,19 @@ impl Database {
                     name: row.get(1)?,
                     command: row.get(2)?,
                     args: serde_json::from_str(&args_json).unwrap_or_default(),
-                    enabled: row.get::<_, i64>(4)? != 0,
-                    status: row.get(5)?,
+                    transport: row.get(4)?,
+                    endpoint_url: row.get(5)?,
+                    definition: row.get(6)?,
+                    enabled: row.get::<_, i64>(7)? != 0,
+                    status: row.get(8)?,
                     credential_configured: false,
-                    last_error: row.get(6)?,
-                    last_checked_at: row.get(7)?,
-                    created_at: row.get(8)?,
-                    updated_at: row.get(9)?,
+                    last_error: row.get(9)?,
+                    last_checked_at: row.get(10)?,
+                    last_latency_ms: row.get(11)?,
+                    tool_count: row.get(12)?,
+                    consecutive_failures: row.get(13)?,
+                    created_at: row.get(14)?,
+                    updated_at: row.get(15)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()
@@ -2239,17 +3128,34 @@ impl Database {
         name: &str,
         command: &str,
         args: &[String],
+        transport: &str,
+        endpoint_url: Option<&str>,
+        definition: Option<&str>,
     ) -> Result<super::McpServerRecord, String> {
         let now = now_ms();
         let args_json = serde_json::to_string(args).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
             connection.execute(
-                "INSERT INTO mcp_servers(id, name, command, args_json, enabled, status, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, 1, 'unknown', ?5, ?5)
+                "INSERT INTO mcp_servers(
+                    id, name, command, args_json, transport, endpoint_url, definition,
+                    enabled, status, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, 'unknown', ?8, ?8)
                  ON CONFLICT(id) DO UPDATE SET name = excluded.name, command = excluded.command,
-                    args_json = excluded.args_json, enabled = 1, status = 'unknown',
-                    last_error = NULL, updated_at = excluded.updated_at",
-                params![id, name, command, args_json, now],
+                    args_json = excluded.args_json, transport = excluded.transport,
+                    endpoint_url = excluded.endpoint_url, definition = excluded.definition,
+                    enabled = 1, status = 'unknown', last_error = NULL,
+                    last_latency_ms = NULL, tool_count = NULL, consecutive_failures = 0,
+                    updated_at = excluded.updated_at",
+                params![
+                    id,
+                    name,
+                    command,
+                    args_json,
+                    transport,
+                    endpoint_url,
+                    definition,
+                    now
+                ],
             )?;
             Ok(())
         })?;
@@ -2263,12 +3169,154 @@ impl Database {
         status: &str,
         error: Option<&str>,
     ) -> Result<(), String> {
+        self.record_mcp_health(id, status, error, None, None)
+    }
+
+    pub fn record_mcp_health(
+        &self,
+        id: &str,
+        status: &str,
+        error: Option<&str>,
+        latency_ms: Option<i64>,
+        tool_count: Option<i64>,
+    ) -> Result<(), String> {
         let now = now_ms();
         self.with_connection(|connection| {
             connection.execute(
                 "UPDATE mcp_servers SET status = ?2, last_error = ?3,
-                         last_checked_at = ?4, updated_at = ?4 WHERE id = ?1",
-                params![id, status, error, now],
+                         last_checked_at = ?4, last_latency_ms = ?5,
+                         tool_count = COALESCE(?6, tool_count),
+                         consecutive_failures = CASE WHEN ?2 = 'connected' THEN 0
+                             ELSE consecutive_failures + 1 END,
+                         updated_at = ?4 WHERE id = ?1",
+                params![id, status, error, now, latency_ms, tool_count],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn list_lifecycle_hooks(&self) -> Result<Vec<super::LifecycleHookRecord>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, name, event, matcher, action, reason, enabled, priority,
+                        created_at, updated_at
+                 FROM lifecycle_hooks ORDER BY priority, name COLLATE NOCASE, id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(super::LifecycleHookRecord {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    event: row.get(2)?,
+                    matcher: row.get(3)?,
+                    action: row.get(4)?,
+                    reason: row.get(5)?,
+                    enabled: row.get::<_, i64>(6)? != 0,
+                    priority: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+    }
+
+    pub fn save_lifecycle_hook(
+        &self,
+        id: &str,
+        name: &str,
+        event: &str,
+        matcher: &str,
+        action: &str,
+        reason: &str,
+        enabled: bool,
+        priority: i64,
+    ) -> Result<super::LifecycleHookRecord, String> {
+        let now = now_ms();
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO lifecycle_hooks(
+                    id, name, event, matcher, action, reason, enabled, priority, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+                 ON CONFLICT(id) DO UPDATE SET name = excluded.name, event = excluded.event,
+                    matcher = excluded.matcher, action = excluded.action, reason = excluded.reason,
+                    enabled = excluded.enabled, priority = excluded.priority,
+                    updated_at = excluded.updated_at",
+                params![id, name, event, matcher, action, reason, enabled as i64, priority, now],
+            )?;
+            connection.query_row(
+                "SELECT id, name, event, matcher, action, reason, enabled, priority,
+                        created_at, updated_at FROM lifecycle_hooks WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(super::LifecycleHookRecord {
+                        id: row.get(0)?, name: row.get(1)?, event: row.get(2)?,
+                        matcher: row.get(3)?, action: row.get(4)?, reason: row.get(5)?,
+                        enabled: row.get::<_, i64>(6)? != 0, priority: row.get(7)?,
+                        created_at: row.get(8)?, updated_at: row.get(9)?,
+                    })
+                },
+            )
+        })
+    }
+
+    pub fn set_lifecycle_hook_enabled(
+        &self,
+        id: &str,
+        enabled: bool,
+    ) -> Result<Option<super::LifecycleHookRecord>, String> {
+        let now = now_ms();
+        let changed = self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE lifecycle_hooks SET enabled = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, enabled as i64, now],
+            )
+        })?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Ok(self
+            .list_lifecycle_hooks()?
+            .into_iter()
+            .find(|item| item.id == id))
+    }
+
+    pub fn delete_lifecycle_hook(&self, id: &str) -> Result<bool, String> {
+        self.with_connection(|connection| {
+            Ok(connection.execute("DELETE FROM lifecycle_hooks WHERE id = ?1", [id])? > 0)
+        })
+    }
+
+    pub fn record_lifecycle_hook_execution(
+        &self,
+        hook_id: &str,
+        run_id: Option<&str>,
+        tool_call_id: Option<&str>,
+        event: &str,
+        tool_name: Option<&str>,
+        action: &str,
+        outcome: &str,
+        details: &Value,
+    ) -> Result<(), String> {
+        let now = now_ms();
+        let details_json = serde_json::to_string(details).map_err(|error| error.to_string())?;
+        self.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO lifecycle_hook_executions(
+                    id, hook_id, run_id, tool_call_id, event, tool_name, action,
+                    outcome, details_json, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    hook_id,
+                    run_id,
+                    tool_call_id,
+                    event,
+                    tool_name,
+                    action,
+                    outcome,
+                    details_json,
+                    now
+                ],
             )?;
             Ok(())
         })
@@ -2473,27 +3521,80 @@ impl Database {
     pub fn resolve_approval(
         &self,
         approval_id: &str,
-        approved: bool,
+        decision: super::ApprovalDecision,
     ) -> Result<Option<super::ApprovalRecord>, String> {
         let now = now_ms();
-        let decision = serde_json::to_string(&json!({ "approved": approved }))
-            .map_err(|error| error.to_string())?;
+        let approved = decision.approved();
+        let decision_json = serde_json::to_string(&json!({
+            "approved": approved,
+            "scope": decision.scope(),
+        }))
+        .map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
-            let updated = connection.execute(
+            let transaction = connection.transaction()?;
+            let updated = transaction.execute(
                 "UPDATE approvals
                  SET status = ?2, decision_json = ?3, resolved_at = ?4
                  WHERE id = ?1 AND status = 'pending'",
                 params![
                     approval_id,
                     if approved { "approved" } else { "denied" },
-                    decision,
+                    decision_json,
                     now
                 ],
             )?;
             if updated == 0 {
                 return Ok(None);
             }
-            query_approval(connection, approval_id).optional()
+            let approval = query_approval(&transaction, approval_id)?;
+            if decision == super::ApprovalDecision::AllowConversation {
+                transaction.execute(
+                    "INSERT INTO conversation_tool_permissions(conversation_id, tool_name, granted_at)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(conversation_id, tool_name) DO UPDATE SET granted_at = excluded.granted_at",
+                    params![&approval.conversation_id, &approval.tool_name, now],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(Some(approval))
+        })
+    }
+
+    pub fn conversation_tool_permission_granted(
+        &self,
+        conversation_id: &str,
+        tool_name: &str,
+    ) -> Result<bool, String> {
+        self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM conversation_tool_permissions
+                    WHERE conversation_id = ?1 AND tool_name = ?2
+                 )",
+                params![conversation_id, tool_name],
+                |row| row.get(0),
+            )
+        })
+    }
+
+    pub fn pending_approvals_for_conversation_tool(
+        &self,
+        conversation_id: &str,
+        tool_name: &str,
+    ) -> Result<Vec<super::ApprovalRecord>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT a.id, a.tool_call_id, t.run_id, t.conversation_id, t.tool_name,
+                        a.status, a.requested_action, a.request_json, a.decision_json,
+                        a.requested_at, a.resolved_at
+                 FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
+                 WHERE t.conversation_id = ?1 AND t.tool_name = ?2 AND a.status = 'pending'
+                 ORDER BY a.requested_at ASC, a.id ASC",
+            )?;
+            let approvals = statement
+                .query_map(params![conversation_id, tool_name], map_approval)?
+                .collect();
+            approvals
         })
     }
 
@@ -2529,6 +3630,25 @@ impl Database {
     pub fn delete_conversation(&self, id: &str) -> Result<bool, String> {
         self.with_connection(|connection| {
             Ok(connection.execute("DELETE FROM conversations WHERE id = ?1", [id])? > 0)
+        })
+    }
+
+    pub fn purge_trashed_conversation(&self, id: &str) -> Result<bool, String> {
+        self.with_connection(|connection| {
+            Ok(connection.execute(
+                "DELETE FROM conversations WHERE id = ?1 AND trashed_at IS NOT NULL",
+                [id],
+            )? > 0)
+        })
+    }
+
+    pub fn conversation_is_trashed(&self, id: &str) -> Result<bool, String> {
+        self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT trashed_at IS NOT NULL FROM conversations WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
         })
     }
 
@@ -2914,6 +4034,14 @@ impl Database {
                  WHERE id = ?1 AND status = 'awaiting_confirmation'",
                 params![run_id, now],
             )?;
+            observability::close_run_trace_in_transaction(
+                &transaction,
+                &run_id,
+                now,
+                "ok",
+                Some("work_mode.declined"),
+                Some("User declined work mode execution."),
+            )?;
             transaction.execute(
                 "DELETE FROM pending_work_mode_dispatches WHERE goal_id = ?1",
                 [goal_id],
@@ -3214,6 +4342,28 @@ impl Database {
                  WHERE run_id = ?1 AND status IN ('pending', 'running')",
                 params![run_id, message, now],
             )?;
+            observability::close_run_trace_in_transaction(
+                &transaction,
+                run_id,
+                now,
+                "error",
+                Some(code),
+                Some(message),
+            )?;
+            child_runs::project_child_run_event(
+                &transaction,
+                run_id,
+                "run.failed",
+                &json!({ "type": "run.failed", "code": code, "message": message }),
+                now,
+            )?;
+            digital_colleagues::project_digital_colleague_event(
+                &transaction,
+                run_id,
+                "run.failed",
+                &json!({ "type": "run.failed", "code": code, "message": message }),
+                now,
+            )?;
             interrupt_tasks_owned_by_run(&transaction, run_id, &now.to_string())?;
             transaction.commit()?;
             Ok(())
@@ -3245,6 +4395,28 @@ impl Database {
                  SET status = 'interrupted', error_message = ?2, completed_at = ?3, updated_at = ?3
                  WHERE run_id = ?1 AND status IN ('pending', 'running')",
                 params![run_id, message, now],
+            )?;
+            observability::close_run_trace_in_transaction(
+                &transaction,
+                run_id,
+                now,
+                "error",
+                Some(code),
+                Some(message),
+            )?;
+            child_runs::project_child_run_event(
+                &transaction,
+                run_id,
+                "run.interrupted",
+                &json!({ "type": "run.interrupted", "code": code, "message": message }),
+                now,
+            )?;
+            digital_colleagues::project_digital_colleague_event(
+                &transaction,
+                run_id,
+                "run.interrupted",
+                &json!({ "type": "run.interrupted", "code": code, "message": message }),
+                now,
             )?;
             interrupt_tasks_owned_by_run(&transaction, run_id, &now.to_string())?;
             transaction.commit()?;
@@ -3619,6 +4791,8 @@ impl Database {
 
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
+            let (trace_id, span_id) =
+                observability::project_runtime_span(&transaction, run_id, event_type, payload, now)?;
             let last_seq: i64 = transaction.query_row(
                 "SELECT last_seq FROM runs WHERE id = ?1",
                 [run_id],
@@ -3629,9 +4803,19 @@ impl Database {
                 return Ok(false);
             }
             let inserted = transaction.execute(
-                "INSERT OR IGNORE INTO run_events(id, run_id, seq, event_type, event_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![Uuid::new_v4().to_string(), run_id, seq, event_type, event_json, now],
+                "INSERT OR IGNORE INTO run_events(
+                    id, run_id, seq, event_type, event_json, created_at, trace_id, span_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    run_id,
+                    seq,
+                    event_type,
+                    event_json,
+                    now,
+                    trace_id,
+                    span_id,
+                ],
             )?;
             if inserted == 0 {
                 transaction.rollback()?;
@@ -3685,7 +4869,14 @@ impl Database {
                     update_last_seq(&transaction, run_id, seq)?;
                 }
                 "tool.started" => {
-                    project_tool_started(&transaction, run_id, payload, now)?;
+                    project_tool_started(
+                        &transaction,
+                        run_id,
+                        payload,
+                        now,
+                        Some(&trace_id),
+                        Some(&span_id),
+                    )?;
                     update_last_seq(&transaction, run_id, seq)?;
                 }
                 "tool.updated" => {
@@ -3693,7 +4884,14 @@ impl Database {
                     update_last_seq(&transaction, run_id, seq)?;
                 }
                 "tool.completed" => {
-                    project_tool_completed(&transaction, run_id, payload, now)?;
+                    project_tool_completed(
+                        &transaction,
+                        run_id,
+                        payload,
+                        now,
+                        Some(&trace_id),
+                        Some(&span_id),
+                    )?;
                     update_last_seq(&transaction, run_id, seq)?;
                 }
                 "run.completed" => {
@@ -3774,6 +4972,15 @@ impl Database {
                 _ => update_last_seq(&transaction, run_id, seq)?,
             }
 
+            child_runs::project_child_run_event(&transaction, run_id, event_type, payload, now)?;
+            digital_colleagues::project_digital_colleague_event(
+                &transaction,
+                run_id,
+                event_type,
+                payload,
+                now,
+            )?;
+
             transaction.commit()?;
             Ok(true)
         })
@@ -3844,7 +5051,7 @@ fn create_run_in_transaction(
                 END,
                 c.title
          FROM conversations c JOIN agents a ON a.id = c.agent_id
-         WHERE c.id = ?1",
+         WHERE c.id = ?1 AND c.archived = 0 AND c.trashed_at IS NULL",
         params![conversation_id, requested_model],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
@@ -3872,6 +5079,7 @@ fn create_run_in_transaction(
          VALUES (?1, ?2, 'queued', ?3, ?4)",
         params![run_id, conversation_id, model, now],
     )?;
+    let (trace_id, root_span_id) = observability::initialize_run_trace(transaction, &run_id, now)?;
     transaction.execute(
         "INSERT INTO messages(
             id, conversation_id, run_id, role, kind, content, status, ordinal, created_at, updated_at
@@ -3902,8 +5110,8 @@ fn create_run_in_transaction(
             error_code: None,
             error_message: None,
             last_seq: 0,
-            trace_id: None,
-            root_span_id: None,
+            trace_id: Some(trace_id),
+            root_span_id: Some(root_span_id),
         },
         user_message: MessageRecord {
             id: message_id,
@@ -3932,9 +5140,14 @@ fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationSum
         status: row.get(6)?,
         pinned: row.get(7)?,
         archived: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
-        last_message_at: row.get(11)?,
+        archived_at: row.get(9)?,
+        trashed_at: row.get(10)?,
+        parent_conversation_id: row.get(11)?,
+        forked_from_message_id: row.get(12)?,
+        lineage_root_id: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
+        last_message_at: row.get(16)?,
     })
 }
 
@@ -3988,6 +5201,9 @@ fn agent_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRecor
         is_builtin: row.get::<_, i64>(12)? != 0,
         package_version: row.get(13)?,
         package_manifest: parse_json(&row.get::<_, String>(14)?),
+        package_source: row.get(15)?,
+        package_id: row.get(16)?,
+        package_hash: row.get(17)?,
         capabilities: metadata.get("capabilities").cloned().unwrap_or_else(|| {
             if runtime_type == "pi" {
                 json!(["files", "tools", "reasoning"])
@@ -4076,7 +5292,7 @@ fn conversation_expert_binding_lock_reason(
     conversation_id: &str,
 ) -> rusqlite::Result<Option<ConversationExpertBindingError>> {
     let archived = connection.query_row(
-        "SELECT archived != 0 FROM conversations WHERE id = ?1",
+        "SELECT archived != 0 OR trashed_at IS NOT NULL FROM conversations WHERE id = ?1",
         [conversation_id],
         |row| row.get::<_, bool>(0),
     )?;
@@ -4180,7 +5396,9 @@ fn query_conversation(connection: &Connection, id: &str) -> rusqlite::Result<Con
     connection.query_row(
         "SELECT c.id, c.agent_id, a.name, c.title, c.project_id,
                 COALESCE(p.root_path, c.project_root), c.status,
-                c.pinned, c.archived,
+                c.pinned, c.archived, c.archived_at, c.trashed_at,
+                c.parent_conversation_id, c.forked_from_message_id,
+                COALESCE(c.lineage_root_id, c.id),
                 c.created_at, c.updated_at, c.last_message_at
          FROM conversations c
          JOIN agents a ON a.id = c.agent_id
@@ -4470,11 +5688,96 @@ fn query_knowledge_bindings(
     connection: &Connection,
     conversation_id: &str,
 ) -> rusqlite::Result<Vec<KnowledgeBindingRecord>> {
+    let Some(bindings) = query_knowledge_reference_bindings_v2(connection, conversation_id)? else {
+        return query_legacy_knowledge_bindings(connection, conversation_id);
+    };
+    Ok(bindings
+        .into_iter()
+        .filter_map(legacy_knowledge_binding_record)
+        .collect())
+}
+
+fn query_knowledge_reference_bindings(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Vec<KnowledgeReferenceBindingRecord>> {
+    if let Some(bindings) = query_knowledge_reference_bindings_v2(connection, conversation_id)? {
+        return Ok(bindings);
+    }
+    query_legacy_knowledge_reference_bindings(connection, conversation_id)
+}
+
+fn query_knowledge_reference_bindings_v2(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Option<Vec<KnowledgeReferenceBindingRecord>>> {
+    let mut statement = match connection.prepare(
+        "SELECT conversation_id, source, provider_key, connection_id,
+                knowledge_base_id, knowledge_base_name, enabled, created_at, updated_at
+         FROM knowledge_bindings_v2
+         WHERE conversation_id = ?1 AND enabled = 1
+         ORDER BY knowledge_base_name ASC, knowledge_base_id ASC",
+    ) {
+        Ok(statement) => statement,
+        Err(error) if missing_knowledge_bindings_v2(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let records = statement
+        .query_map([conversation_id], |row| {
+            Ok(KnowledgeReferenceBindingRecord {
+                conversation_id: row.get(0)?,
+                reference: KnowledgeReference {
+                    source: row.get(1)?,
+                    provider_key: row.get(2)?,
+                    connection_id: row.get(3)?,
+                    id: row.get(4)?,
+                },
+                knowledge_base_name: row.get(5)?,
+                enabled: row.get::<_, i64>(6)? != 0,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(Some(records))
+}
+
+fn query_legacy_knowledge_reference_bindings(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Vec<KnowledgeReferenceBindingRecord>> {
     let mut statement = connection.prepare(
         "SELECT conversation_id, service_connection_id, knowledge_base_id,
                 knowledge_base_name, enabled, created_at, updated_at
          FROM knowledge_bindings WHERE conversation_id = ?1 AND enabled = 1
-         ORDER BY knowledge_base_name ASC",
+         ORDER BY knowledge_base_name ASC, knowledge_base_id ASC",
+    )?;
+    let records = statement
+        .query_map([conversation_id], |row| {
+            let service_connection_id: String = row.get(1)?;
+            let knowledge_base_id: String = row.get(2)?;
+            Ok(KnowledgeReferenceBindingRecord {
+                conversation_id: row.get(0)?,
+                reference: KnowledgeReference::remote(service_connection_id, knowledge_base_id),
+                knowledge_base_name: row.get(3)?,
+                enabled: row.get::<_, i64>(4)? != 0,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(records)
+}
+
+fn query_legacy_knowledge_bindings(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<Vec<KnowledgeBindingRecord>> {
+    let mut statement = connection.prepare(
+        "SELECT conversation_id, service_connection_id, knowledge_base_id,
+                knowledge_base_name, enabled, created_at, updated_at
+         FROM knowledge_bindings WHERE conversation_id = ?1 AND enabled = 1
+         ORDER BY knowledge_base_name ASC, knowledge_base_id ASC",
     )?;
     let records = statement
         .query_map([conversation_id], |row| {
@@ -4488,8 +5791,38 @@ fn query_knowledge_bindings(
                 updated_at: row.get(6)?,
             })
         })?
-        .collect();
-    records
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(records)
+}
+
+fn legacy_knowledge_binding_record(
+    binding: KnowledgeReferenceBindingRecord,
+) -> Option<KnowledgeBindingRecord> {
+    let service_connection_id = binding.reference.connection_id?;
+    Some(KnowledgeBindingRecord {
+        conversation_id: binding.conversation_id,
+        service_connection_id,
+        knowledge_base_id: binding.reference.id,
+        knowledge_base_name: binding.knowledge_base_name,
+        enabled: binding.enabled,
+        created_at: binding.created_at,
+        updated_at: binding.updated_at,
+    })
+}
+
+fn knowledge_binding_v2_id(conversation_id: &str, reference: &KnowledgeReference) -> String {
+    format!(
+        "v2:{conversation_id}:{}:{}:{}",
+        reference.source, reference.provider_key, reference.id
+    )
+}
+
+fn missing_knowledge_bindings_v2(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(_, Some(message))
+            if message.contains("no such table: knowledge_bindings_v2")
+    )
 }
 
 fn query_approval_by_tool_call(
@@ -4584,6 +5917,8 @@ fn project_tool_started(
     run_id: &str,
     payload: &Value,
     now: i64,
+    trace_id: Option<&str>,
+    span_id: Option<&str>,
 ) -> rusqlite::Result<()> {
     let Some(runtime_tool_call_id) = payload.get("toolCallId").and_then(Value::as_str) else {
         return Ok(());
@@ -4602,13 +5937,16 @@ fn project_tool_started(
     transaction.execute(
         "INSERT INTO tool_calls(
             id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
-            status, execution_location, requires_approval, started_at, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', 'runtime', 0, ?7, ?7)
+            status, execution_location, requires_approval, started_at, updated_at,
+            trace_id, span_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', 'runtime', 0, ?7, ?7, ?8, ?9)
          ON CONFLICT(run_id, runtime_tool_call_id) DO UPDATE SET
             tool_name = excluded.tool_name,
             input_json = excluded.input_json,
             status = 'running',
-            updated_at = excluded.updated_at",
+            updated_at = excluded.updated_at,
+            trace_id = excluded.trace_id,
+            span_id = excluded.span_id",
         params![
             Uuid::new_v4().to_string(),
             runtime_tool_call_id,
@@ -4616,7 +5954,9 @@ fn project_tool_started(
             conversation_id,
             tool_name,
             input_json,
-            now
+            now,
+            trace_id,
+            span_id,
         ],
     )?;
     Ok(())
@@ -4648,6 +5988,8 @@ fn project_tool_completed(
     run_id: &str,
     payload: &Value,
     now: i64,
+    trace_id: Option<&str>,
+    span_id: Option<&str>,
 ) -> rusqlite::Result<()> {
     let Some(runtime_tool_call_id) = payload.get("toolCallId").and_then(Value::as_str) else {
         return Ok(());
@@ -4662,14 +6004,17 @@ fn project_tool_completed(
         .unwrap_or(false);
     transaction.execute(
         "UPDATE tool_calls
-         SET status = ?3, result_json = ?4, completed_at = ?5, updated_at = ?5
+         SET status = ?3, result_json = ?4, completed_at = ?5, updated_at = ?5,
+             trace_id = COALESCE(?6, trace_id), span_id = COALESCE(?7, span_id)
          WHERE run_id = ?1 AND runtime_tool_call_id = ?2",
         params![
             run_id,
             runtime_tool_call_id,
             if is_error { "failed" } else { "completed" },
             result_json,
-            now
+            now,
+            trace_id,
+            span_id,
         ],
     )?;
     Ok(())
@@ -4814,6 +6159,37 @@ fn truncate_title(text: &str) -> String {
     title
 }
 
+fn plugin_kind_from_db(value: String) -> rusqlite::Result<PluginKind> {
+    match value.as_str() {
+        "mcp" => Ok(PluginKind::Mcp),
+        "skill" => Ok(PluginKind::Skill),
+        "tool" => Ok(PluginKind::Tool),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn plugin_origin_from_db(value: String) -> rusqlite::Result<PluginOrigin> {
+    match value.as_str() {
+        "builtin" => Ok(PluginOrigin::Builtin),
+        "official" => Ok(PluginOrigin::Official),
+        "community" => Ok(PluginOrigin::Community),
+        "local" => Ok(PluginOrigin::Local),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
+fn plugin_install_status_from_db(value: String) -> rusqlite::Result<PluginInstallStatus> {
+    match value.as_str() {
+        "not_installed" => Ok(PluginInstallStatus::NotInstalled),
+        "installing" => Ok(PluginInstallStatus::Installing),
+        "installed" => Ok(PluginInstallStatus::Installed),
+        "update_available" => Ok(PluginInstallStatus::UpdateAvailable),
+        "uninstalling" => Ok(PluginInstallStatus::Uninstalling),
+        "install_failed" => Ok(PluginInstallStatus::InstallFailed),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
 pub fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4881,6 +6257,220 @@ mod tests {
             created_at: 1,
             last_accessed_at,
         }
+    }
+
+    const LEGACY_EXPERT_V1_FIXTURE: &str =
+        "tests/fixtures/expert-packages/v1/legacy-remote-knowledge.json";
+
+    fn legacy_expert_v1_fixture_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(LEGACY_EXPERT_V1_FIXTURE)
+    }
+
+    fn legacy_remote_knowledge_ids(manifest: &Value) -> Vec<String> {
+        manifest
+            .get("knowledge")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn legacy_expert_v1_generator_input() -> Value {
+        json!({
+            "agentId": "fox-debugger",
+            "packageManifest": {
+                "version": "1.0.0",
+                "prompt": "Use the configured remote knowledge bases as evidence.",
+                "skills": ["research"],
+                "knowledge": ["remote-kb-architecture", "remote-kb-policies"],
+                "mcpServers": ["remote-search"],
+                "allowedTools": ["read", "search_knowledge", "read_knowledge_document"]
+            }
+        })
+    }
+
+    fn fixture_generation_commit() -> String {
+        if let Ok(commit) = std::env::var("FOX_EXPERT_FIXTURE_COMMIT") {
+            if !commit.trim().is_empty() {
+                return commit;
+            }
+        }
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let output = std::process::Command::new("git")
+            .args([
+                "-C",
+                repository_root.to_str().expect("repository path"),
+                "rev-parse",
+                "HEAD",
+            ])
+            .output()
+            .expect("resolve fixture generation commit");
+        assert!(
+            output.status.success(),
+            "git rev-parse failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("commit is utf-8")
+            .trim()
+            .to_owned()
+    }
+
+    #[test]
+    fn legacy_expert_v1_fixture_preserves_snapshot_and_remote_knowledge_contract() {
+        let fixture_path = legacy_expert_v1_fixture_path();
+        let fixture_bytes = std::fs::read(&fixture_path).expect("read committed v1 fixture");
+        let fixture: Value =
+            serde_json::from_slice(&fixture_bytes).expect("parse committed v1 fixture");
+        let input = fixture.get("input").cloned().expect("fixture input");
+        let agent_id = input
+            .get("agentId")
+            .and_then(Value::as_str)
+            .expect("fixture input has agent ID");
+        let package_manifest = input
+            .get("packageManifest")
+            .cloned()
+            .expect("fixture input has package manifest");
+        let expected_snapshot_bytes = fixture
+            .get("packageSnapshotBytes")
+            .and_then(Value::as_str)
+            .expect("fixture has compact package snapshot bytes");
+        let expected_hash = fixture
+            .get("packageSnapshotHash")
+            .and_then(Value::as_str)
+            .expect("fixture has package snapshot hash");
+        let expected_snapshot: Value =
+            serde_json::from_str(expected_snapshot_bytes).expect("parse compact snapshot");
+        assert_eq!(
+            expected_snapshot.to_string(),
+            expected_snapshot_bytes,
+            "fixture snapshot must remain compact and byte-stable"
+        );
+        assert_eq!(
+            fixture["generatedFromCommit"].as_str().map(str::len),
+            Some(40)
+        );
+        assert_eq!(fixture["fixtureVersion"], 1);
+
+        let (database, path) = test_database();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE agents SET package_manifest_json = ?2 WHERE id = ?1",
+                    params![agent_id, package_manifest.to_string()],
+                )?;
+                Ok(())
+            })
+            .expect("restore v1 expert input");
+        let saved = database
+            .get_agent(agent_id)
+            .expect("load v1 expert")
+            .expect("v1 expert exists");
+        let actual_snapshot = agent_package_snapshot(&saved);
+        assert_eq!(
+            actual_snapshot.to_string(),
+            expected_snapshot_bytes,
+            "current snapshot serialization must not rewrite the v1 fixture"
+        );
+        assert_eq!(package_snapshot_hash(&actual_snapshot), expected_hash);
+        assert_eq!(package_snapshot_hash(&expected_snapshot), expected_hash);
+
+        let manifest = actual_snapshot
+            .get("packageManifest")
+            .expect("snapshot has package manifest");
+        let expected_legacy_ids = fixture
+            .get("legacyKnowledgeIds")
+            .and_then(Value::as_array)
+            .expect("fixture has legacy knowledge IDs");
+        assert_eq!(
+            manifest.get("knowledge").and_then(Value::as_array),
+            Some(expected_legacy_ids)
+        );
+        assert!(manifest.get("knowledgeReferences").is_none());
+        assert!(manifest.get("manifestSchemaVersion").is_none());
+        assert_eq!(
+            legacy_remote_knowledge_ids(manifest),
+            expected_legacy_ids
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fixture["legacyKnowledgeResolution"],
+            json!({
+                "source": "remote",
+                "ids": expected_legacy_ids
+            })
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore = "explicit fixture generation only; never run as part of compatibility tests"]
+    fn generate_legacy_expert_v1_fixture_explicitly() {
+        assert_eq!(
+            std::env::var("FOX_GENERATE_EXPERT_V1_FIXTURE").as_deref(),
+            Ok("1"),
+            "set FOX_GENERATE_EXPERT_V1_FIXTURE=1 to overwrite the committed fixture"
+        );
+        let input = legacy_expert_v1_generator_input();
+        let agent_id = input
+            .get("agentId")
+            .and_then(Value::as_str)
+            .expect("generator agent ID");
+        let package_manifest = input
+            .get("packageManifest")
+            .cloned()
+            .expect("generator package manifest");
+        let (database, path) = test_database();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE agents SET package_manifest_json = ?2 WHERE id = ?1",
+                    params![agent_id, package_manifest.to_string()],
+                )?;
+                Ok(())
+            })
+            .expect("apply generator package manifest");
+        let saved = database
+            .get_agent(agent_id)
+            .expect("load generator expert")
+            .expect("generator expert exists");
+        let snapshot = agent_package_snapshot(&saved);
+        let legacy_ids = legacy_remote_knowledge_ids(
+            snapshot
+                .get("packageManifest")
+                .expect("fixture package manifest"),
+        );
+        let fixture = json!({
+            "fixtureFormat": "fox.expert-package",
+            "fixtureVersion": 1,
+            "generatedFromCommit": fixture_generation_commit(),
+            "input": input,
+            "legacyKnowledgeIds": legacy_ids,
+            "legacyKnowledgeResolution": {
+                "source": "remote",
+                "ids": legacy_ids
+            },
+            "packageSnapshotBytes": snapshot.to_string(),
+            "packageSnapshotHash": package_snapshot_hash(&snapshot)
+        });
+        let fixture_path = legacy_expert_v1_fixture_path();
+        std::fs::create_dir_all(fixture_path.parent().expect("fixture directory"))
+            .expect("create fixture directory");
+        std::fs::write(
+            fixture_path,
+            serde_json::to_vec_pretty(&fixture).expect("serialize fixture"),
+        )
+        .expect("write generated fixture");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -4995,6 +6585,98 @@ mod tests {
         assert_eq!(updated.name, "项目根因专家");
         assert!(database.delete_agent(&created.id).expect("delete original"));
         assert!(database.delete_agent(&copied.id).expect("delete copy"));
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn installs_upgrades_and_rolls_back_versioned_expert_packages() {
+        let (database, path) = test_database();
+        let request = |version: &str,
+                       package_hash: &str,
+                       prompt: &str,
+                       expected_current_hash: Option<&str>| {
+            InstallExpertPackageVersionRequest {
+                expert_id: "fox-package-test".to_owned(),
+                package_id: "fox.test-package".to_owned(),
+                version: version.to_owned(),
+                package_hash: package_hash.to_owned(),
+                package: json!({"id": "fox.test-package", "version": version}),
+                package_manifest: json!({
+                    "version": version,
+                    "prompt": prompt,
+                    "skills": [],
+                    "allowedTools": ["read"]
+                }),
+                name: "Versioned Test".to_owned(),
+                description: "Test package history".to_owned(),
+                icon: None,
+                category: "test".to_owned(),
+                system_prompt: prompt.to_owned(),
+                default_model: String::new(),
+                opening_suggestions: vec!["Test".to_owned()],
+                enabled_skills: Vec::new(),
+                expected_current_hash: expected_current_hash.map(str::to_owned),
+            }
+        };
+        let v1 = request("0.1.0", "hash-v1", "Prompt v1", None);
+        let installed = database
+            .install_expert_package_version(&v1)
+            .expect("install v1");
+        assert_eq!(installed.package_source, "imported");
+        assert_eq!(installed.package_version, "0.1.0");
+
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        let binding = database
+            .bind_conversation_expert(&conversation.id, &installed.id, "test")
+            .expect("bind installed expert");
+        assert_eq!(binding.package_snapshot["systemPrompt"], "Prompt v1");
+
+        let v2 = request("0.2.0", "hash-v2", "Prompt v2", Some("hash-v1"));
+        let upgraded = database
+            .install_expert_package_version(&v2)
+            .expect("upgrade to v2");
+        assert_eq!(upgraded.package_version, "0.2.0");
+        assert_eq!(upgraded.system_prompt, "Prompt v2");
+        let frozen = database
+            .list_conversation_expert_bindings(&conversation.id)
+            .expect("load frozen binding");
+        assert_eq!(frozen[0].package_snapshot["systemPrompt"], "Prompt v1");
+
+        let tampered = request("0.2.0", "different-hash", "Tampered", Some("hash-v2"));
+        assert_eq!(
+            database
+                .install_expert_package_version(&tampered)
+                .expect_err("same version tampering must fail"),
+            "expert.package_version_conflict"
+        );
+
+        let rollback = request("0.1.0", "hash-v1", "Prompt v1", Some("hash-v2"));
+        let rolled_back = database
+            .activate_expert_package_version(&rollback)
+            .expect("reactivate v1");
+        assert_eq!(rolled_back.package_version, "0.1.0");
+        assert_eq!(rolled_back.system_prompt, "Prompt v1");
+        let versions = database
+            .list_expert_package_versions(&installed.id)
+            .expect("list versions");
+        assert_eq!(versions.len(), 2);
+        assert_eq!(
+            versions
+                .iter()
+                .filter(|item| item.status == "active")
+                .count(),
+            1
+        );
+        assert_eq!(
+            versions
+                .iter()
+                .find(|item| item.status == "active")
+                .map(|item| item.version.as_str()),
+            Some("0.1.0")
+        );
         drop(database);
         let _ = std::fs::remove_file(path);
     }
@@ -5535,6 +7217,163 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["run.started", "message.started"]
         );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn conversation_lifecycle_restores_and_forks_without_runtime_state() {
+        let (database, path) = test_database();
+        let source = database
+            .create_conversation(DEFAULT_AGENT_ID, Some("原会话"), None, None)
+            .expect("create source conversation");
+        database
+            .set_knowledge_reference_bindings(
+                &source.id,
+                &[KnowledgeReferenceBindingInput {
+                    reference: KnowledgeReference::local("knowledge-1"),
+                    name: "参考资料".to_owned(),
+                }],
+            )
+            .expect("bind knowledge");
+        database
+            .bind_conversation_expert(&source.id, "fox-reviewer", "manual")
+            .expect("bind expert");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO conversation_tool_permissions(conversation_id, tool_name, granted_at)
+                     VALUES (?1, 'write_file', ?2)",
+                    params![&source.id, now_ms()],
+                )?;
+                Ok(())
+            })
+            .expect("grant source-only tool permission");
+        let started = database
+            .create_run(&source.id, "先分析问题", None)
+            .expect("start source run");
+        for (sequence, event) in [
+            json!({"type": "run.started"}),
+            json!({"type": "message.started"}),
+            json!({"type": "message.delta", "delta": "分析完成"}),
+            json!({"type": "run.completed"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            database
+                .apply_runtime_event(&started.run.id, sequence as i64 + 1, &event)
+                .expect("persist source event");
+        }
+        let source_detail = database
+            .load_conversation(&source.id)
+            .expect("load source detail");
+        let fork_point = source_detail
+            .messages
+            .last()
+            .expect("assistant message")
+            .id
+            .clone();
+
+        let fork = database
+            .fork_conversation(&source.id, &fork_point, None)
+            .expect("fork conversation")
+            .expect("fork result");
+        assert_eq!(
+            fork.parent_conversation_id.as_deref(),
+            Some(source.id.as_str())
+        );
+        assert_eq!(
+            fork.forked_from_message_id.as_deref(),
+            Some(fork_point.as_str())
+        );
+        assert_eq!(fork.lineage_root_id, source.id);
+        assert!(fork.title.ends_with("· 分支"));
+        let fork_detail = database
+            .load_conversation(&fork.id)
+            .expect("load fork detail");
+        assert_eq!(fork_detail.messages.len(), source_detail.messages.len());
+        assert!(fork_detail
+            .messages
+            .iter()
+            .all(|message| message.run_id.is_none()));
+        assert!(fork_detail.runtime_events.is_empty());
+        assert!(fork_detail.tool_calls.is_empty());
+        assert!(fork_detail.approvals.is_empty());
+        assert!(fork_detail.last_run.is_none());
+        assert!(database
+            .conversation_tool_permission_granted(&source.id, "write_file")
+            .expect("source permission"));
+        assert!(!database
+            .conversation_tool_permission_granted(&fork.id, "write_file")
+            .expect("fork permission"));
+        assert_eq!(
+            database
+                .conversation_knowledge_references(&fork.id)
+                .expect("load fork knowledge")
+                .len(),
+            1
+        );
+        assert_eq!(
+            fork_detail
+                .expert_bindings
+                .iter()
+                .filter(|binding| binding.state == "active")
+                .count(),
+            1
+        );
+
+        database
+            .archive_conversation(&fork.id)
+            .expect("archive fork")
+            .expect("archived fork");
+        assert!(!database
+            .list_conversations()
+            .expect("active list")
+            .is_empty());
+        assert_eq!(
+            database
+                .list_archived_conversations()
+                .expect("archive list")
+                .len(),
+            1
+        );
+        database
+            .unarchive_conversation(&fork.id)
+            .expect("unarchive fork")
+            .expect("restored archive");
+        database
+            .trash_conversation(&fork.id)
+            .expect("trash fork")
+            .expect("trashed fork");
+        assert_eq!(
+            database
+                .list_trashed_conversations()
+                .expect("trash list")
+                .len(),
+            1
+        );
+        assert!(database
+            .restore_trashed_conversation(&fork.id)
+            .expect("restore trash")
+            .expect("restored fork")
+            .trashed_at
+            .is_none());
+        assert!(!database
+            .purge_trashed_conversation(&fork.id)
+            .expect("active conversations cannot be purged"));
+        database
+            .trash_conversation(&fork.id)
+            .expect("trash fork again")
+            .expect("trashed fork again");
+        assert!(database
+            .conversation_is_trashed(&fork.id)
+            .expect("inspect trash state"));
+        assert!(database
+            .purge_trashed_conversation(&fork.id)
+            .expect("purge trashed fork"));
+        assert!(database.load_conversation(&source.id).is_ok());
 
         drop(database);
         let _ = std::fs::remove_file(path);
@@ -6484,14 +8323,45 @@ mod tests {
             .create_approval(&tool.id, "创建 result.md", &json!({"target":"result.md"}))
             .expect("create approval");
         let resolved = database
-            .resolve_approval(&approval.id, true)
+            .resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce)
             .expect("approve")
             .expect("resolved approval");
         assert_eq!(resolved.status, "approved");
+        assert!(!database
+            .conversation_tool_permission_granted(&conversation.id, "write_file")
+            .expect("check one-time approval"));
         assert!(database
-            .resolve_approval(&approval.id, false)
+            .resolve_approval(&approval.id, crate::database::ApprovalDecision::Deny)
             .expect("repeat approval")
             .is_none());
+
+        let conversation_tool = database
+            .create_host_tool_call(
+                &started.run.id,
+                "write-2",
+                "write_file",
+                &json!({"path":"another.md"}),
+                "pending",
+                true,
+            )
+            .expect("create second tool");
+        let conversation_approval = database
+            .create_approval(
+                &conversation_tool.id,
+                "创建 another.md",
+                &json!({"target":"another.md"}),
+            )
+            .expect("create conversation approval");
+        database
+            .resolve_approval(
+                &conversation_approval.id,
+                crate::database::ApprovalDecision::AllowConversation,
+            )
+            .expect("approve conversation tool")
+            .expect("resolved conversation approval");
+        assert!(database
+            .conversation_tool_permission_granted(&conversation.id, "write_file")
+            .expect("check conversation approval"));
 
         database
             .complete_host_tool_call(
@@ -6520,6 +8390,113 @@ mod tests {
         assert_eq!(detail.artifacts.len(), 1);
         assert_eq!(detail.knowledge_bindings.len(), 1);
         assert_eq!(detail.approvals[0].status, "approved");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn round_trips_local_and_remote_knowledge_references_through_v2() {
+        let (database, path) = test_database();
+        database
+            .save_yuxi_service("Local", "http://127.0.0.1:5050")
+            .expect("save Yuxi service");
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        let local = KnowledgeReference::local("local-kb");
+        let remote = KnowledgeReference::remote("yuxi-primary", "remote-kb");
+
+        let records = database
+            .set_knowledge_reference_bindings(
+                &conversation.id,
+                &[
+                    KnowledgeReferenceBindingInput {
+                        reference: local.clone(),
+                        name: "本地知识库".to_owned(),
+                    },
+                    KnowledgeReferenceBindingInput {
+                        reference: remote.clone(),
+                        name: "远程知识库".to_owned(),
+                    },
+                ],
+            )
+            .expect("write v2 knowledge references");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].reference, local);
+        assert_eq!(records[1].reference, remote);
+
+        let references = database
+            .conversation_knowledge_references(&conversation.id)
+            .expect("read v2 knowledge references");
+        assert_eq!(
+            references,
+            vec![
+                KnowledgeReference::local("local-kb"),
+                KnowledgeReference::remote("yuxi-primary", "remote-kb")
+            ]
+        );
+
+        let local_json = serde_json::to_value(&references[0]).expect("serialize local reference");
+        assert_eq!(local_json["source"], "local");
+        assert_eq!(local_json["providerKey"], "local");
+        assert!(local_json.get("connectionId").is_none());
+        assert_eq!(local_json["id"], "local-kb");
+
+        let legacy_records = database
+            .conversation_knowledge_bindings(&conversation.id)
+            .expect("read legacy-compatible bindings");
+        assert_eq!(legacy_records.len(), 1);
+        assert_eq!(legacy_records[0].service_connection_id, "yuxi-primary");
+        assert_eq!(legacy_records[0].knowledge_base_id, "remote-kb");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reads_legacy_remote_bindings_through_the_v2_reference_api() {
+        let (database, path) = test_database();
+        database
+            .save_yuxi_service("Local", "http://127.0.0.1:5050")
+            .expect("save Yuxi service");
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        database
+            .set_knowledge_bindings(
+                &conversation.id,
+                &[("legacy-kb".to_owned(), "历史远程知识库".to_owned())],
+            )
+            .expect("write legacy remote binding");
+
+        let references = database
+            .conversation_knowledge_references(&conversation.id)
+            .expect("read migrated remote reference");
+        assert_eq!(
+            references,
+            vec![KnowledgeReference::remote("yuxi-primary", "legacy-kb")]
+        );
+
+        let v2_row: (String, String, Option<String>) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT source, provider_key, connection_id
+                     FROM knowledge_bindings_v2
+                     WHERE conversation_id = ?1 AND knowledge_base_id = 'legacy-kb'",
+                    [&conversation.id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .expect("inspect migrated v2 row");
+        assert_eq!(
+            v2_row,
+            (
+                "remote".to_owned(),
+                "yuxi-primary".to_owned(),
+                Some("yuxi-primary".to_owned())
+            )
+        );
 
         drop(database);
         let _ = std::fs::remove_file(path);
@@ -6869,6 +8846,59 @@ mod tests {
             .expect("load deleted activity");
         assert!(activity.bookmarks.is_empty());
         assert!(activity.annotations.is_empty());
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn persists_toggles_and_audits_declarative_lifecycle_hooks() {
+        let (database, path) = test_database();
+        let hook = database
+            .save_lifecycle_hook(
+                "hook-1",
+                "Require shell approval",
+                "before_tool",
+                "run_command, *_write",
+                "require_approval",
+                "Project mutations require review",
+                true,
+                20,
+            )
+            .expect("save lifecycle hook");
+        assert!(hook.enabled);
+        assert_eq!(database.list_lifecycle_hooks().unwrap(), vec![hook.clone()]);
+        let disabled = database
+            .set_lifecycle_hook_enabled(&hook.id, false)
+            .expect("toggle hook")
+            .expect("hook exists");
+        assert!(!disabled.enabled);
+        database
+            .record_lifecycle_hook_execution(
+                &hook.id,
+                None,
+                Some("tool-call-1"),
+                "before_tool",
+                Some("run_command"),
+                "require_approval",
+                "applied",
+                &json!({ "inputKeys": ["command"] }),
+            )
+            .expect("record hook execution");
+        assert_eq!(
+            database
+                .with_connection(|connection| {
+                    connection.query_row(
+                        "SELECT COUNT(*) FROM lifecycle_hook_executions WHERE hook_id = ?1",
+                        [&hook.id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                })
+                .unwrap(),
+            1
+        );
+        assert!(database.delete_lifecycle_hook(&hook.id).unwrap());
+        assert!(database.list_lifecycle_hooks().unwrap().is_empty());
 
         drop(database);
         let _ = std::fs::remove_file(path);

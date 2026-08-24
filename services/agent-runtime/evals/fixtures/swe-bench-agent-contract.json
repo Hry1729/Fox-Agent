@@ -1,0 +1,13 @@
+{
+  "name": "SWE-bench-inspired Fox coding-agent contract",
+  "source": "SWE-bench",
+  "sourceUrl": "https://github.com/princeton-nlp/SWE-bench",
+  "scope": "Deterministic local checks for the inspect-edit-test-evidence-acceptance capability chain. This does not execute or claim an official SWE-bench score.",
+  "cases": [
+    { "id": "inspect-repository", "requiredTools": ["ls", "grep", "read"] },
+    { "id": "apply-scoped-change", "requiredTools": ["edit_file"] },
+    { "id": "run-regression-tests", "requiredTools": ["test_run"] },
+    { "id": "attach-verifiable-evidence", "requiredTools": ["task_evidence_add", "task_evidence_validate"] },
+    { "id": "submit-acceptance", "requiredTools": ["acceptance_submit"] }
+  ]
+}

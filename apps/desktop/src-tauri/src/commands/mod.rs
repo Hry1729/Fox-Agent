@@ -10,11 +10,12 @@ use crate::{
     database::{
         AgentIdRequest, AgentRecord, ApiResponse, AttachmentRecord, CancelRunRequest,
         CleanupDataRequest, ConversationDetail, ConversationExpertBindRequest,
-        ConversationExpertBinding, ConversationExpertBindingError, ConversationHistoryPage,
-        ConversationHistoryRequest, ConversationIdRequest, ConversationSearchRequest,
-        ConversationSummary, CopyAgentRequest, CreateConversationRequest,
-        DeleteKnowledgeDocumentActivityItemRequest, GoalIdRequest, GraphQueryRequest,
-        KnowledgeBaseRecord, KnowledgeDetailRecord, KnowledgeDocumentActivity,
+        ConversationExpertBinding, ConversationExpertBindingError, ConversationForkRequest,
+        ConversationHistoryPage, ConversationHistoryRequest, ConversationIdRequest,
+        ConversationSearchRequest, ConversationSummary, CopyAgentRequest,
+        CreateConversationRequest, CreateMemoryRequest, DeleteKnowledgeDocumentActivityItemRequest,
+        EvaluationRunSummary, GoalIdRequest, GraphQueryRequest, KnowledgeBaseRecord,
+        KnowledgeBindingInput, KnowledgeDetailRecord, KnowledgeDocumentActivity,
         KnowledgeDocumentAnnotation, KnowledgeDocumentBookmark, KnowledgeDocumentDownloadRequest,
         KnowledgeDocumentDownloadResult, KnowledgeDocumentRangeRequest,
         KnowledgeDocumentReadingState, KnowledgeDocumentRequest, KnowledgeDocumentSourceMetadata,
@@ -22,19 +23,24 @@ use crate::{
         KnowledgePreviewCacheAcquireRequest, KnowledgePreviewCacheCancelRequest,
         KnowledgePreviewCacheEntry, KnowledgePreviewCacheLease, KnowledgePreviewCacheLimitRequest,
         KnowledgePreviewCacheOpenRequest, KnowledgePreviewCacheReadRequest,
-        KnowledgePreviewCacheReleaseRequest, KnowledgeQueryRequest, McpServerIdRequest,
-        McpServerRecord, ModelConnectionTest, ModelProviderIdRequest, ModelProviderRecord,
-        ModelServiceRecord, OpenDownloadedFileRequest, ProjectFileEntry, ProjectFilePreview,
-        ProjectFileReadRequest, ProjectFilesRequest, ProjectIdRequest, ProjectRecord,
-        ProviderModelRecord, RenameConversationRequest, ResolveApprovalRequest,
-        RestoreBackupRequest, ResumeYuxiRunRequest, RewindRunRequest, RuntimeInitialization,
-        SaveAgentRequest, SaveAttachmentsRequest, SaveKnowledgeDocumentAnnotationRequest,
+        KnowledgePreviewCacheReleaseRequest, KnowledgeQueryRequest, KnowledgeReference,
+        KnowledgeReferenceBindingRecord, LifecycleHookIdRequest, LifecycleHookRecord,
+        McpServerIdRequest, McpServerRecord, MemoryEntityRecord, MemoryIdRequest,
+        MemoryListRequest, MemoryMutationRequest, MemoryRecallListRequest, MemoryRecallRecord,
+        MemoryRevisionRecord, ModelConnectionTest, ModelProviderIdRequest, ModelProviderRecord,
+        ModelServiceRecord, ObservabilityStatistics, OpenDownloadedFileRequest, ProjectFileEntry,
+        ProjectFilePreview, ProjectFileReadRequest, ProjectFilesRequest, ProjectIdRequest,
+        ProjectRecord, ProviderModelRecord, RecordUiMetricRequest, RenameConversationRequest,
+        ResolveApprovalRequest, ResolveMemoryConflictRequest, RestoreBackupRequest,
+        ResumeYuxiRunRequest, RewindRunRequest, RuntimeInitialization, SaveAgentRequest,
+        SaveAttachmentsRequest, SaveKnowledgeDocumentAnnotationRequest,
         SaveKnowledgeDocumentBookmarkRequest, SaveKnowledgeDocumentReadingStateRequest,
-        SaveMcpServerRequest, SaveModelProviderRequest, SaveModelServiceRequest,
-        SaveUserProfileRequest, SaveYuxiServiceRequest, SetGoalRunningRequest,
-        SetGoalRunningResult, SetKnowledgeBindingsRequest, SetSkillEnabledRequest, SkillRecord,
-        StartRunRequest, StartRunResult, TestModelServiceRequest, TestYuxiServiceRequest,
-        UpdateConversationPinnedRequest, UpdateMcpServerEnabledRequest,
+        SaveLifecycleHookRequest, SaveMcpServerRequest, SaveModelProviderRequest,
+        SaveModelServiceRequest, SaveUserProfileRequest, SaveYuxiServiceRequest,
+        SetGoalRunningRequest, SetGoalRunningResult, SetMemoryEnabledRequest,
+        SetSkillEnabledRequest, SkillRecord, StartRunRequest, StartRunResult,
+        TestModelServiceRequest, TestYuxiServiceRequest, UpdateConversationPinnedRequest,
+        UpdateLifecycleHookEnabledRequest, UpdateMcpServerEnabledRequest, UpdateMemoryRequest,
         UpdateProjectPermissionRequest, UsageStatistics, UserProfileRecord, YuxiAgentRecord,
         YuxiConnectionTest, YuxiLoginRequest, YuxiModelRecord, YuxiServiceRecord, YuxiUserRecord,
     },
@@ -42,7 +48,7 @@ use crate::{
     work_mode_gate::{self, ResolveWorkModeConfirmationRequest, WorkModeDecision},
 };
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -54,6 +60,50 @@ use std::{
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
+
+pub(crate) mod plugin_center;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KnowledgeReferenceInput {
+    #[serde(flatten)]
+    reference: KnowledgeReference,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SetKnowledgeBindingsWireRequest {
+    pub conversation_id: String,
+    #[serde(default)]
+    pub knowledge_bases: Option<Vec<KnowledgeBindingInput>>,
+    #[serde(default)]
+    pub knowledge_references: Option<Vec<KnowledgeReferenceInput>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KnowledgeBindingsSetResponse {
+    bindings: Vec<crate::database::KnowledgeBindingRecord>,
+    knowledge_references: Vec<KnowledgeReference>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConversationLoadResponse {
+    #[serde(flatten)]
+    detail: ConversationDetail,
+    knowledge_references: Vec<KnowledgeReference>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvePlanRevisionRequest {
+    pub conversation_id: String,
+    pub plan_revision_id: String,
+    pub decision: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -442,6 +492,38 @@ pub fn usage_statistics(state: State<'_, AppState>) -> ApiResponse<UsageStatisti
 }
 
 #[tauri::command]
+pub fn observability_statistics(
+    state: State<'_, AppState>,
+) -> ApiResponse<ObservabilityStatistics> {
+    match state.database.observability_statistics() {
+        Ok(statistics) => ApiResponse::success(statistics),
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
+pub fn run_ui_metric_record(
+    state: State<'_, AppState>,
+    request: RecordUiMetricRequest,
+) -> ApiResponse<()> {
+    match state
+        .database
+        .record_ui_metric(&request.run_id, &request.metric, request.duration_ms)
+    {
+        Ok(()) => ApiResponse::success(()),
+        Err(error) => ApiResponse::failure("observability.ui_metric_rejected", error, false),
+    }
+}
+
+#[tauri::command]
+pub fn offline_evaluation_run(state: State<'_, AppState>) -> ApiResponse<EvaluationRunSummary> {
+    match state.runtime_host.run_offline_evaluations() {
+        Ok(report) => ApiResponse::success(report),
+        Err(error) => ApiResponse::failure("evaluation.offline_failed", error, true),
+    }
+}
+
+#[tauri::command]
 pub fn user_profile_get(state: State<'_, AppState>) -> ApiResponse<Option<UserProfileRecord>> {
     match state.database.user_profile() {
         Ok(profile) => ApiResponse::success(profile),
@@ -473,6 +555,126 @@ pub fn user_profile_save(
         Ok(profile) => ApiResponse::success(profile),
         Err(error) => storage_error(error),
     }
+}
+
+fn memory_error<T: Serialize>(error: String) -> ApiResponse<T> {
+    let code = error
+        .split_whitespace()
+        .find(|part| part.starts_with("memory."))
+        .unwrap_or("memory.operation_failed")
+        .trim_matches(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '.' && character != '_'
+        })
+        .to_owned();
+    ApiResponse::failure(&code, error, false)
+}
+
+#[tauri::command]
+pub fn memories_list(
+    state: State<'_, AppState>,
+    request: MemoryListRequest,
+) -> ApiResponse<Vec<MemoryEntityRecord>> {
+    state
+        .database
+        .list_memories(&request)
+        .map(ApiResponse::success)
+        .unwrap_or_else(memory_error)
+}
+
+#[tauri::command]
+pub fn memory_create(
+    state: State<'_, AppState>,
+    request: CreateMemoryRequest,
+) -> ApiResponse<MemoryEntityRecord> {
+    state
+        .database
+        .create_user_memory(&request)
+        .map(ApiResponse::success)
+        .unwrap_or_else(memory_error)
+}
+
+#[tauri::command]
+pub fn memory_confirm(
+    state: State<'_, AppState>,
+    request: MemoryMutationRequest,
+) -> ApiResponse<MemoryEntityRecord> {
+    state
+        .database
+        .confirm_memory(&request.memory_id, request.expected_version)
+        .map(ApiResponse::success)
+        .unwrap_or_else(memory_error)
+}
+
+#[tauri::command]
+pub fn memory_update(
+    state: State<'_, AppState>,
+    request: UpdateMemoryRequest,
+) -> ApiResponse<MemoryEntityRecord> {
+    state
+        .database
+        .update_memory(&request)
+        .map(ApiResponse::success)
+        .unwrap_or_else(memory_error)
+}
+
+#[tauri::command]
+pub fn memory_set_enabled(
+    state: State<'_, AppState>,
+    request: SetMemoryEnabledRequest,
+) -> ApiResponse<MemoryEntityRecord> {
+    state
+        .database
+        .set_memory_enabled(&request)
+        .map(ApiResponse::success)
+        .unwrap_or_else(memory_error)
+}
+
+#[tauri::command]
+pub fn memory_delete(
+    state: State<'_, AppState>,
+    request: MemoryIdRequest,
+) -> ApiResponse<MemoryEntityRecord> {
+    state
+        .database
+        .delete_memory(&request.memory_id)
+        .map(ApiResponse::success)
+        .unwrap_or_else(memory_error)
+}
+
+#[tauri::command]
+pub fn memory_conflict_resolve(
+    state: State<'_, AppState>,
+    request: ResolveMemoryConflictRequest,
+) -> ApiResponse<MemoryEntityRecord> {
+    state
+        .database
+        .resolve_memory_conflict(&request)
+        .map(ApiResponse::success)
+        .unwrap_or_else(memory_error)
+}
+
+#[tauri::command]
+pub fn memory_revisions_list(
+    state: State<'_, AppState>,
+    request: MemoryIdRequest,
+) -> ApiResponse<Vec<MemoryRevisionRecord>> {
+    state
+        .database
+        .list_memory_revisions(&request.memory_id)
+        .map(ApiResponse::success)
+        .unwrap_or_else(memory_error)
+}
+
+#[tauri::command]
+pub fn memory_recalls_list(
+    state: State<'_, AppState>,
+    request: MemoryRecallListRequest,
+) -> ApiResponse<Vec<MemoryRecallRecord>> {
+    state
+        .database
+        .list_memory_recalls(&request.memory_id, request.limit.unwrap_or(50))
+        .map(ApiResponse::success)
+        .unwrap_or_else(memory_error)
 }
 
 #[tauri::command]
@@ -808,8 +1010,39 @@ pub fn mcp_server_save(
 ) -> ApiResponse<McpServerRecord> {
     let name = request.name.trim();
     let command = request.command.trim();
-    if name.is_empty() || command.is_empty() {
-        return ApiResponse::failure("mcp.invalid_config", "名称和命令不能为空", false);
+    let transport = request.transport.trim();
+    if name.is_empty() {
+        return ApiResponse::failure("mcp.invalid_config", "名称不能为空", false);
+    }
+    if !matches!(transport, "stdio" | "streamable_http" | "openapi") {
+        return ApiResponse::failure("mcp.invalid_transport", "扩展传输类型无效", false);
+    }
+    if transport == "stdio" && command.is_empty() {
+        return ApiResponse::failure("mcp.invalid_config", "stdio MCP 的命令不能为空", false);
+    }
+    let endpoint_url = request
+        .endpoint_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if transport == "streamable_http" && endpoint_url.is_none() {
+        return ApiResponse::failure("mcp.invalid_endpoint", "HTTP MCP 的端点不能为空", false);
+    }
+    if let Some(endpoint_url) = endpoint_url {
+        if let Err(error) = crate::mcp::parse_endpoint(Some(endpoint_url), "扩展源") {
+            return ApiResponse::failure("mcp.invalid_endpoint", error, false);
+        }
+    }
+    let definition = request
+        .definition
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if transport == "openapi" && definition.is_none() {
+        return ApiResponse::failure("mcp.invalid_openapi", "OpenAPI 定义不能为空", false);
+    }
+    if definition.is_some_and(|value| value.len() > 2 * 1024 * 1024) {
+        return ApiResponse::failure("mcp.invalid_openapi", "OpenAPI 定义超过 2 MB 上限", false);
     }
     if request.args.len() > 64 || request.args.iter().any(|arg| arg.len() > 4096) {
         return ApiResponse::failure("mcp.invalid_args", "MCP 参数数量或长度超过限制", false);
@@ -835,10 +1068,20 @@ pub fn mcp_server_save(
             return ApiResponse::failure("mcp.credential_save_failed", error, true);
         }
     }
-    match state
-        .database
-        .save_mcp_server(&id, name, command, &request.args)
-    {
+    crate::mcp::invalidate_connection(&id);
+    match state.database.save_mcp_server(
+        &id,
+        name,
+        if transport == "stdio" { command } else { "" },
+        if transport == "stdio" {
+            &request.args
+        } else {
+            &[]
+        },
+        transport,
+        endpoint_url,
+        definition,
+    ) {
         Ok(mut server) => {
             server.credential_configured = crate::mcp::environment_configured(&server.id);
             ApiResponse::success(server)
@@ -857,17 +1100,31 @@ pub fn mcp_server_test(
         Ok(None) => return ApiResponse::failure("mcp.not_found", "MCP Server 不存在", false),
         Err(error) => return storage_error(error),
     };
+    let started = std::time::Instant::now();
     match crate::mcp::list_tools(&server) {
         Ok(tools) => {
-            let _ = state
-                .database
-                .record_mcp_status(&server.id, "connected", None);
-            ApiResponse::success(json!({ "toolCount": tools.len(), "tools": tools }))
+            let _ = state.database.record_mcp_health(
+                &server.id,
+                "connected",
+                None,
+                Some(started.elapsed().as_millis() as i64),
+                Some(tools.len() as i64),
+            );
+            ApiResponse::success(json!({
+                "toolCount": tools.len(),
+                "tools": tools,
+                "latencyMs": started.elapsed().as_millis() as i64,
+                "transport": server.transport,
+            }))
         }
         Err(error) => {
-            let _ = state
-                .database
-                .record_mcp_status(&server.id, "unavailable", Some(&error));
+            let _ = state.database.record_mcp_health(
+                &server.id,
+                "unavailable",
+                Some(&error),
+                Some(started.elapsed().as_millis() as i64),
+                None,
+            );
             ApiResponse::failure("mcp.connection_failed", error, true)
         }
     }
@@ -883,6 +1140,7 @@ pub fn mcp_server_set_enabled(
         .set_mcp_server_enabled(&request.server_id, request.enabled)
     {
         Ok(Some(mut server)) => {
+            crate::mcp::invalidate_connection(&server.id);
             server.credential_configured = crate::mcp::environment_configured(&server.id);
             ApiResponse::success(server)
         }
@@ -897,7 +1155,96 @@ pub fn mcp_server_delete(
     request: McpServerIdRequest,
 ) -> ApiResponse<bool> {
     let _ = crate::mcp::clear_environment(&request.server_id);
+    crate::mcp::invalidate_connection(&request.server_id);
     match state.database.delete_mcp_server(&request.server_id) {
+        Ok(deleted) => ApiResponse::success(deleted),
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
+pub fn lifecycle_hooks_list(state: State<'_, AppState>) -> ApiResponse<Vec<LifecycleHookRecord>> {
+    match state.database.list_lifecycle_hooks() {
+        Ok(hooks) => ApiResponse::success(hooks),
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
+pub fn lifecycle_hook_save(
+    state: State<'_, AppState>,
+    request: SaveLifecycleHookRequest,
+) -> ApiResponse<LifecycleHookRecord> {
+    let name = request.name.trim();
+    let matcher = request.matcher.trim();
+    let reason = request.reason.trim();
+    if name.is_empty() || matcher.is_empty() {
+        return ApiResponse::failure("hook.invalid", "Hook 名称和匹配器不能为空", false);
+    }
+    if !matches!(
+        request.event.as_str(),
+        "before_run" | "before_tool" | "after_tool" | "after_run"
+    ) {
+        return ApiResponse::failure("hook.invalid_event", "Hook 事件无效", false);
+    }
+    if !matches!(
+        request.action.as_str(),
+        "block" | "require_approval" | "annotate"
+    ) {
+        return ApiResponse::failure("hook.invalid_action", "Hook 动作无效", false);
+    }
+    if request.event != "before_tool"
+        && matches!(request.action.as_str(), "block" | "require_approval")
+    {
+        return ApiResponse::failure(
+            "hook.invalid_action",
+            "block 和 require_approval 仅可用于 before_tool",
+            false,
+        );
+    }
+    if matcher.len() > 512 || reason.len() > 4096 || !(0..=1000).contains(&request.priority) {
+        return ApiResponse::failure("hook.invalid", "Hook 配置超过限制", false);
+    }
+    let id = request
+        .id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    match state.database.save_lifecycle_hook(
+        &id,
+        name,
+        &request.event,
+        matcher,
+        &request.action,
+        reason,
+        request.enabled,
+        request.priority,
+    ) {
+        Ok(hook) => ApiResponse::success(hook),
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
+pub fn lifecycle_hook_set_enabled(
+    state: State<'_, AppState>,
+    request: UpdateLifecycleHookEnabledRequest,
+) -> ApiResponse<LifecycleHookRecord> {
+    match state
+        .database
+        .set_lifecycle_hook_enabled(&request.hook_id, request.enabled)
+    {
+        Ok(Some(hook)) => ApiResponse::success(hook),
+        Ok(None) => ApiResponse::failure("hook.not_found", "Hook 不存在", false),
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
+pub fn lifecycle_hook_delete(
+    state: State<'_, AppState>,
+    request: LifecycleHookIdRequest,
+) -> ApiResponse<bool> {
+    match state.database.delete_lifecycle_hook(&request.hook_id) {
         Ok(deleted) => ApiResponse::success(deleted),
         Err(error) => storage_error(error),
     }
@@ -906,6 +1253,26 @@ pub fn mcp_server_delete(
 #[tauri::command]
 pub fn conversations_list(state: State<'_, AppState>) -> ApiResponse<Vec<ConversationSummary>> {
     match state.database.list_conversations() {
+        Ok(conversations) => ApiResponse::success(conversations),
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
+pub fn conversations_archived_list(
+    state: State<'_, AppState>,
+) -> ApiResponse<Vec<ConversationSummary>> {
+    match state.database.list_archived_conversations() {
+        Ok(conversations) => ApiResponse::success(conversations),
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
+pub fn conversations_trashed_list(
+    state: State<'_, AppState>,
+) -> ApiResponse<Vec<ConversationSummary>> {
+    match state.database.list_trashed_conversations() {
         Ok(conversations) => ApiResponse::success(conversations),
         Err(error) => storage_error(error),
     }
@@ -1250,6 +1617,20 @@ pub fn conversation_archive(
 ) -> ApiResponse<ConversationSummary> {
     match state
         .database
+        .conversation_has_active_run(&request.conversation_id)
+    {
+        Ok(true) => {
+            return ApiResponse::failure(
+                "conversation.run_active",
+                "请先停止当前生成，再归档对话",
+                false,
+            )
+        }
+        Ok(false) => {}
+        Err(error) => return storage_error(error),
+    }
+    match state
+        .database
         .archive_conversation(&request.conversation_id)
     {
         Ok(Some(conversation)) => ApiResponse::success(conversation),
@@ -1259,10 +1640,90 @@ pub fn conversation_archive(
 }
 
 #[tauri::command]
+pub fn conversation_unarchive(
+    state: State<'_, AppState>,
+    request: ConversationIdRequest,
+) -> ApiResponse<ConversationSummary> {
+    match state
+        .database
+        .unarchive_conversation(&request.conversation_id)
+    {
+        Ok(Some(conversation)) => ApiResponse::success(conversation),
+        Ok(None) => ApiResponse::failure("conversation.not_found", "未找到可恢复的归档对话", false),
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
+pub fn conversation_restore(
+    state: State<'_, AppState>,
+    request: ConversationIdRequest,
+) -> ApiResponse<ConversationSummary> {
+    match state
+        .database
+        .restore_trashed_conversation(&request.conversation_id)
+    {
+        Ok(Some(conversation)) => ApiResponse::success(conversation),
+        Ok(None) => {
+            ApiResponse::failure("conversation.not_found", "未找到可恢复的回收站对话", false)
+        }
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
+pub fn conversation_fork(
+    state: State<'_, AppState>,
+    request: ConversationForkRequest,
+) -> ApiResponse<ConversationSummary> {
+    match state
+        .database
+        .conversation_has_active_run(&request.conversation_id)
+    {
+        Ok(true) => {
+            return ApiResponse::failure(
+                "conversation.run_active",
+                "请等待当前生成结束，再从消息创建分支",
+                false,
+            )
+        }
+        Ok(false) => {}
+        Err(error) => return storage_error(error),
+    }
+    match state
+        .database
+        .conversation_runtime(&request.conversation_id)
+    {
+        Ok(runtime) if runtime.runtime_type == "yuxi" => {
+            return ApiResponse::failure(
+                "conversation.fork_remote_unsupported",
+                "远程会话暂不支持可靠复制上下文，请在本地助手会话中使用 Fork",
+                false,
+            )
+        }
+        Ok(_) => {}
+        Err(error) => return ApiResponse::failure("conversation.not_found", error, false),
+    }
+    match state.database.fork_conversation(
+        &request.conversation_id,
+        &request.message_id,
+        request.title.as_deref(),
+    ) {
+        Ok(Some(conversation)) => ApiResponse::success(conversation),
+        Ok(None) => ApiResponse::failure(
+            "conversation.fork_point_not_found",
+            "未找到指定的会话或消息",
+            false,
+        ),
+        Err(error) => ApiResponse::failure("conversation.fork_failed", error, false),
+    }
+}
+
+#[tauri::command]
 pub fn conversation_load(
     state: State<'_, AppState>,
     request: ConversationIdRequest,
-) -> ApiResponse<ConversationDetail> {
+) -> ApiResponse<ConversationLoadResponse> {
     // Loading a Yuxi conversation is also a reconciliation point. This lets a
     // run that completed remotely after a transient Worker/SSE outage replay
     // its missing events into Fox without requiring a new login or app restart.
@@ -1270,7 +1731,16 @@ pub fn conversation_load(
         .yuxi_runtime
         .recover_conversation_detached(&request.conversation_id);
     match state.database.load_conversation(&request.conversation_id) {
-        Ok(conversation) => ApiResponse::success(conversation),
+        Ok(detail) => match state
+            .database
+            .conversation_knowledge_references(&request.conversation_id)
+        {
+            Ok(knowledge_references) => ApiResponse::success(ConversationLoadResponse {
+                detail,
+                knowledge_references,
+            }),
+            Err(error) => storage_error(error),
+        },
         Err(error) => ApiResponse::failure("conversation.not_found", error, false),
     }
 }
@@ -1323,6 +1793,50 @@ pub async fn conversation_delete(
         Ok(false) => {}
         Err(error) => return Ok(storage_error(error)),
     }
+    match state.database.trash_conversation(&request.conversation_id) {
+        Ok(Some(_)) => Ok(ApiResponse::success(true)),
+        Ok(None) => Ok(ApiResponse::failure(
+            "conversation.not_found",
+            "未找到可移入回收站的对话",
+            false,
+        )),
+        Err(error) => Ok(storage_error(error)),
+    }
+}
+
+#[tauri::command]
+pub async fn conversation_purge(
+    state: State<'_, AppState>,
+    request: ConversationIdRequest,
+) -> Result<ApiResponse<bool>, String> {
+    match state
+        .database
+        .conversation_is_trashed(&request.conversation_id)
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return Ok(ApiResponse::failure(
+                "conversation.purge_requires_trash",
+                "请先将对话移入回收站，再执行永久删除",
+                false,
+            ))
+        }
+        Err(error) => return Ok(ApiResponse::failure("conversation.not_found", error, false)),
+    }
+    match state
+        .database
+        .conversation_has_active_run(&request.conversation_id)
+    {
+        Ok(true) => {
+            return Ok(ApiResponse::failure(
+                "conversation.run_active",
+                "请先停止当前生成，再永久删除对话",
+                false,
+            ))
+        }
+        Ok(false) => {}
+        Err(error) => return Ok(storage_error(error)),
+    }
     if let Ok(runtime) = state
         .database
         .conversation_runtime(&request.conversation_id)
@@ -1359,14 +1873,17 @@ pub async fn conversation_delete(
         Ok(paths) => paths,
         Err(error) => return Ok(storage_error(error)),
     };
-    match state.database.delete_conversation(&request.conversation_id) {
+    match state
+        .database
+        .purge_trashed_conversation(&request.conversation_id)
+    {
         Ok(deleted) => {
             if deleted {
                 for path in managed_paths {
                     if let Err(error) = remove_managed_file(&state.data_dir, &path) {
                         return Ok(ApiResponse::failure(
                             "conversation.file_cleanup_failed",
-                            format!("对话已删除，但内部文件清理失败：{error}"),
+                            format!("对话已永久删除，但内部文件清理失败：{error}"),
                             true,
                         ));
                     }
@@ -1400,7 +1917,10 @@ mod command_tests {
         conversation_expert_error, downloaded_file_can_open_directly, knowledge_preview_cache_key,
         knowledge_preview_cache_path, managed_preview_cache_file, remove_managed_file,
         validated_external_url, ApiResponse, ConversationExpertBindingError,
+        SetKnowledgeBindingsWireRequest,
     };
+    use crate::database::KnowledgeReference;
+    use serde_json::json;
     use std::path::Path;
     use uuid::Uuid;
 
@@ -1566,6 +2086,36 @@ mod command_tests {
                 "expected {filename} to require reveal-only handling"
             );
         }
+    }
+
+    #[test]
+    fn knowledge_binding_request_distinguishes_legacy_and_v2_fields() {
+        let legacy: SetKnowledgeBindingsWireRequest = serde_json::from_value(json!({
+            "conversationId": "conversation-1",
+            "knowledgeBases": [{ "id": "remote-1", "name": "远程资料" }]
+        }))
+        .expect("legacy request should decode");
+        assert!(legacy.knowledge_references.is_none());
+        assert_eq!(legacy.knowledge_bases.as_ref().map(Vec::len), Some(1));
+
+        let v2: SetKnowledgeBindingsWireRequest = serde_json::from_value(json!({
+            "conversationId": "conversation-1",
+            "knowledgeReferences": [{
+                "source": "local",
+                "providerKey": "local",
+                "id": "local-1",
+                "name": "本地资料"
+            }]
+        }))
+        .expect("v2 request should decode");
+        assert!(v2.knowledge_bases.is_none());
+        let item = v2
+            .knowledge_references
+            .as_ref()
+            .and_then(|items| items.first())
+            .expect("one reference");
+        assert_eq!(item.reference, KnowledgeReference::local("local-1"));
+        assert_eq!(item.name.as_deref(), Some("本地资料"));
     }
 }
 
@@ -2080,10 +2630,33 @@ pub fn attachments_save(
 #[tauri::command]
 pub fn knowledge_bindings_set(
     state: State<'_, AppState>,
-    request: SetKnowledgeBindingsRequest,
-) -> ApiResponse<Vec<crate::database::KnowledgeBindingRecord>> {
+    request: SetKnowledgeBindingsWireRequest,
+) -> ApiResponse<KnowledgeBindingsSetResponse> {
+    if let Some(references) = request.knowledge_references {
+        let items = references
+            .into_iter()
+            .map(|KnowledgeReferenceInput { reference, name }| {
+                let name = name
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| reference.id.clone());
+                (reference, name)
+            })
+            .collect::<Vec<_>>();
+        return match state
+            .database
+            .set_knowledge_references(&request.conversation_id, &items)
+        {
+            Ok(records) => ApiResponse::success(KnowledgeBindingsSetResponse {
+                bindings: legacy_knowledge_bindings(&records),
+                knowledge_references: records.into_iter().map(|record| record.reference).collect(),
+            }),
+            Err(error) => storage_error(error),
+        };
+    }
+
     let items = request
         .knowledge_bases
+        .unwrap_or_default()
         .into_iter()
         .map(|item| (item.id, item.name))
         .collect::<Vec<_>>();
@@ -2091,9 +2664,38 @@ pub fn knowledge_bindings_set(
         .database
         .set_knowledge_bindings(&request.conversation_id, &items)
     {
-        Ok(records) => ApiResponse::success(records),
+        Ok(bindings) => match state
+            .database
+            .conversation_knowledge_references(&request.conversation_id)
+        {
+            Ok(knowledge_references) => ApiResponse::success(KnowledgeBindingsSetResponse {
+                bindings,
+                knowledge_references,
+            }),
+            Err(error) => storage_error(error),
+        },
         Err(error) => storage_error(error),
     }
+}
+
+fn legacy_knowledge_bindings(
+    records: &[KnowledgeReferenceBindingRecord],
+) -> Vec<crate::database::KnowledgeBindingRecord> {
+    records
+        .iter()
+        .filter_map(|record| {
+            let connection_id = record.reference.connection_id.clone()?;
+            Some(crate::database::KnowledgeBindingRecord {
+                conversation_id: record.conversation_id.clone(),
+                service_connection_id: connection_id,
+                knowledge_base_id: record.reference.id.clone(),
+                knowledge_base_name: record.knowledge_base_name.clone(),
+                enabled: record.enabled,
+                created_at: record.created_at,
+                updated_at: record.updated_at,
+            })
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -2103,10 +2705,43 @@ pub fn approval_resolve(
 ) -> ApiResponse<bool> {
     match state
         .runtime_host
-        .resolve_approval(&request.approval_id, request.approved)
+        .resolve_approval(&request.approval_id, request.decision)
     {
         Ok(resolved) => ApiResponse::success(resolved),
         Err(error) => ApiResponse::failure("approval.resolve_failed", error, true),
+    }
+}
+
+#[tauri::command]
+pub fn plan_revision_resolve(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: ResolvePlanRevisionRequest,
+) -> ApiResponse<crate::database::PlanRevisionRecord> {
+    match state.database.resolve_plan_revision(
+        &request.conversation_id,
+        &request.plan_revision_id,
+        &request.decision,
+    ) {
+        Ok(plan_revision) => {
+            let event_type = if plan_revision.status == "approved" {
+                "plan.approved"
+            } else {
+                "plan.rejected"
+            };
+            if let Ok(event) = state.database.append_work_event(
+                event_type,
+                &request.conversation_id,
+                Some(&plan_revision.goal_id),
+                None,
+                None,
+                json!({ "planRevision": plan_revision }),
+            ) {
+                let _ = app.emit("fox://work-event", event);
+            }
+            ApiResponse::success(plan_revision)
+        }
+        Err(error) => ApiResponse::failure("plan_revision.resolve_failed", error, false),
     }
 }
 
@@ -3795,7 +4430,7 @@ fn downloaded_file_can_open_directly(path: &Path) -> bool {
 }
 
 #[cfg(windows)]
-fn open_downloaded_file(path: &Path, reveal: bool) -> Result<(), String> {
+pub(crate) fn open_downloaded_file(path: &Path, reveal: bool) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::ShellExecuteW;
@@ -3859,7 +4494,7 @@ fn open_downloaded_file(path: &Path, reveal: bool) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn open_downloaded_file(_path: &Path, _reveal: bool) -> Result<(), String> {
+pub(crate) fn open_downloaded_file(_path: &Path, _reveal: bool) -> Result<(), String> {
     Err("当前平台暂不支持此操作".to_owned())
 }
 

@@ -5,6 +5,15 @@ import { createKnowledgeRangePreviewSource, validateSourceSize, type KnowledgeRa
 
 export { binaryValue, createKnowledgeCachedPreviewSource, type KnowledgeCachedPreviewSource } from './knowledge-cached-preview-source'
 
+export interface KnowledgeCachedPreviewOpenOptions {
+  maxBytes: number
+  signal?: AbortSignal
+}
+
+export type KnowledgeCachedPreviewOpener = (
+  options: KnowledgeCachedPreviewOpenOptions,
+) => Promise<KnowledgeCachedPreviewSource>
+
 export async function openKnowledgeRangePreviewSource({
   knowledgeBaseId,
   documentId,

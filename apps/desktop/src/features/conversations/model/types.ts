@@ -38,6 +38,9 @@ export interface AgentRecord {
   systemPrompt: string
   isBuiltin: boolean
   packageVersion: string
+  packageSource: 'builtin' | 'local' | 'imported' | 'remote'
+  packageId: string | null
+  packageHash: string | null
   packageManifest: ExpertPackageManifest
   capabilities: unknown
   resources: {
@@ -75,11 +78,17 @@ export interface McpServerRecord {
   name: string
   command: string
   args: string[]
+  transport: 'stdio' | 'streamable_http' | 'openapi'
+  endpointUrl: string | null
+  definition: string | null
   enabled: boolean
   status: 'unknown' | 'connected' | 'unavailable' | 'disabled' | string
   credentialConfigured: boolean
   lastError: string | null
   lastCheckedAt: number | null
+  lastLatencyMs: number | null
+  toolCount: number | null
+  consecutiveFailures: number
   createdAt: number
   updatedAt: number
 }
@@ -93,6 +102,32 @@ export interface McpToolRecord {
 export interface McpConnectionTest {
   toolCount: number
   tools: McpToolRecord[]
+  latencyMs: number
+  transport: McpServerRecord['transport']
+}
+
+export interface LifecycleHookRecord {
+  id: string
+  name: string
+  event: 'before_run' | 'before_tool' | 'after_tool' | 'after_run'
+  matcher: string
+  action: 'block' | 'require_approval' | 'annotate'
+  reason: string
+  enabled: boolean
+  priority: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface SaveLifecycleHookInput {
+  id?: string
+  name: string
+  event: LifecycleHookRecord['event']
+  matcher: string
+  action: LifecycleHookRecord['action']
+  reason: string
+  enabled?: boolean
+  priority?: number
 }
 
 export interface MaintenanceResult {
@@ -151,6 +186,64 @@ export interface UsageStatistics {
   days: UsageDayStat[]
 }
 
+export interface TraceRunSummary {
+  runId: string
+  conversationId: string
+  traceId: string
+  rootSpanId: string
+  status: string
+  model: string
+  startedAt: number
+  finishedAt: number | null
+  totalDurationMs: number | null
+  planningDurationMs: number
+  modelDurationMs: number
+  toolDurationMs: number
+  uiDurationMs: number
+  spanCount: number
+}
+
+export interface LatencyMetric {
+  operation: string
+  sampleCount: number
+  averageMs: number
+  p50Ms: number
+  p95Ms: number
+  maxMs: number
+}
+
+export interface EvaluationSuiteSummary {
+  name: string
+  source: string | null
+  sourceUrl: string | null
+  total: number
+  passed: number
+  failed: number
+}
+
+export interface EvaluationRunSummary {
+  id: string
+  generatedAt: string
+  recordedAt: number
+  durationMs: number
+  reportHash: string
+  suites: number
+  total: number
+  passed: number
+  failed: number
+  suiteResults: EvaluationSuiteSummary[]
+}
+
+export interface ObservabilityStatistics {
+  traceSchemaVersion: number
+  tracedRunCount: number
+  totalRunCount: number
+  traceCoveragePercent: number
+  recentRuns: TraceRunSummary[]
+  latencyMetrics: LatencyMetric[]
+  evaluationHistory: EvaluationRunSummary[]
+}
+
 export interface ProjectFileEntry {
   path: string
   name: string
@@ -178,6 +271,11 @@ export interface ConversationSummary {
   status: string
   pinned?: boolean
   archived?: boolean
+  archivedAt?: number | null
+  trashedAt?: number | null
+  parentConversationId?: string | null
+  forkedFromMessageId?: string | null
+  lineageRootId?: string
   createdAt: number
   updatedAt: number
   lastMessageAt: number | null
@@ -194,6 +292,59 @@ export interface ConversationMessage {
   ordinal: number
   createdAt: number
   updatedAt: number
+}
+
+export type MemoryScope = 'global' | 'agent' | 'project'
+export type MemoryKind = 'preference' | 'identity' | 'project' | 'workflow' | 'fact' | 'other'
+export type MemoryState = 'candidate' | 'confirmed' | 'conflict'
+
+export interface MemoryEntityRecord {
+  id: string
+  scope: MemoryScope
+  scopeKey: string
+  kind: MemoryKind
+  canonicalKey: string
+  content: string
+  state: MemoryState
+  enabled: boolean
+  sourceConversationId: string | null
+  sourceMessageId: string | null
+  sourceRunId: string | null
+  evidenceExcerpt: string
+  createdBy: 'user' | 'agent' | 'system'
+  confidence: number
+  version: number
+  createdAt: number
+  updatedAt: number
+  confirmedAt: number | null
+  disabledAt: number | null
+  deletedAt: number | null
+  openConflictId: string | null
+  recallCount: number
+  lastRecalledAt: number | null
+}
+
+export interface MemoryRevisionRecord {
+  id: string
+  memoryId: string
+  actor: 'user' | 'agent' | 'system'
+  action: string
+  before: Record<string, unknown> | null
+  after: Record<string, unknown> | null
+  createdAt: number
+}
+
+export interface MemoryRecallRecord {
+  id: string
+  memoryId: string
+  conversationId: string
+  runId: string | null
+  query: string
+  reason: string
+  score: number
+  rank: number
+  evidenceExcerpt: string
+  recalledAt: number
 }
 
 export interface ExpertDisplaySnapshot {
@@ -235,6 +386,48 @@ export interface RunRecord {
   errorCode: string | null
   errorMessage: string | null
   lastSeq: number
+  traceId?: string | null
+  rootSpanId?: string | null
+}
+
+export interface ChildRunBudget {
+  maxDurationMs: number
+  maxTotalTokens: number
+  maxOutputTokens: number
+  maxToolCalls: number
+}
+
+export interface ChildRunRecord {
+  id: string
+  parentRunId: string
+  childRunId: string
+  childConversationId: string
+  workerAgentId: string
+  workerAgentName: string
+  objective: string
+  context: string
+  teamRunId: string | null
+  teamMemberId: string | null
+  allowedTools: string[] | null
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  depth: number
+  budget: ChildRunBudget
+  resultText: string | null
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  toolCallCount: number
+  errorCode: string | null
+  errorMessage: string | null
+  createdAt: number
+  startedAt: number | null
+  finishedAt: number | null
+}
+
+export interface ChildRunNotification {
+  parentRunId: string
+  parentConversationId: string
+  childRun: ChildRunRecord
 }
 
 export interface ConversationDetail {
@@ -246,6 +439,7 @@ export interface ConversationDetail {
   attachments: AttachmentRecord[]
   artifacts: ArtifactRecord[]
   knowledgeBindings: KnowledgeBindingRecord[]
+  knowledgeReferences?: KnowledgeReference[]
   expertBindings: ConversationExpertBinding[]
   lastRun: RunRecord | null
   hasEarlierMessages: boolean
@@ -255,6 +449,9 @@ export interface ConversationDetail {
   planRevisions: PlanRevisionRecord[]
   reviewFindings: ReviewFindingRecord[]
   acceptances: AcceptanceRecord[]
+  childRuns: ChildRunRecord[]
+  expertWorkflow: ExpertWorkflowSnapshot | null
+  expertTeam: ExpertTeamSnapshot | null
 }
 
 export interface ConversationHistoryPage {
@@ -344,6 +541,8 @@ export interface ApprovalRecord {
   requestedAt: number
   resolvedAt: number | null
 }
+
+export type ApprovalDecision = 'deny' | 'allow_once' | 'allow_conversation'
 
 export interface RunEventRecord {
   runId: string
@@ -633,11 +832,28 @@ export interface ModelProviderRecord {
   updatedAt: number
 }
 
+export type KnowledgeReference =
+  | {
+      source: 'local'
+      providerKey?: 'local'
+      id: string
+      revision?: string
+    }
+  | {
+      source: 'remote'
+      providerKey?: string
+      connectionId: string
+      id: string
+      revision?: string
+    }
+
 export interface ExpertPackageManifest {
   version?: string
+  manifestSchemaVersion?: number
   prompt?: string
   skills?: string[]
   knowledge?: string[]
+  knowledgeReferences?: KnowledgeReference[]
   mcpServers?: string[]
   allowedTools?: string[]
   [key: string]: unknown
@@ -653,6 +869,224 @@ export interface SaveAgentInput {
   defaultModel: string
   openingSuggestions: string[]
   packageManifest: ExpertPackageManifest
+}
+
+export interface MissingExpertPackageResources {
+  agents: string[]
+  skills: string[]
+  tools: string[]
+  mcpServers: string[]
+  knowledgeReferences: KnowledgeReference[]
+}
+
+export interface ExpertPackagePreview {
+  packageId: string
+  name: string
+  version: string
+  packageHash: string
+  action: 'install' | 'upgrade' | 'no_change' | 'downgrade' | 'conflict'
+  currentVersion: string | null
+  currentHash: string | null
+  compatible: boolean
+  foxVersion: string
+  requestedProjectPermission: 'none' | 'read_only' | 'ask' | 'allow'
+  missingResources: MissingExpertPackageResources
+  warnings: string[]
+  canInstall: boolean
+}
+
+export interface ExpertPackageVersionRecord {
+  id: string
+  expertId: string
+  packageId: string
+  version: string
+  packageHash: string
+  package: Record<string, unknown>
+  source: 'imported' | 'local' | 'builtin'
+  status: 'active' | 'historical'
+  createdAt: number
+  activatedAt: number
+}
+
+export interface ExpertWorkflowRunRecord {
+  id: string
+  conversationId: string
+  expertBindingId: string
+  expertId: string
+  packageHash: string
+  workflowId: string
+  workflowVersion: string
+  workflow: Record<string, unknown>
+  goalId: string
+  status: 'running' | 'awaiting_gate' | 'completed' | 'failed' | 'cancelled'
+  currentStageIndex: number
+  input: unknown
+  output: unknown | null
+  errorMessage: string | null
+  createdAt: number
+  updatedAt: number
+  completedAt: number | null
+}
+
+export interface ExpertWorkflowStageRunRecord {
+  id: string
+  workflowRunId: string
+  stageId: string
+  taskId: string
+  ordinal: number
+  status: 'pending' | 'queued' | 'running' | 'awaiting_gate' | 'completed' | 'failed' | 'skipped'
+  attempt: number
+  maxAttempts: number
+  output: unknown | null
+  errorMessage: string | null
+  startedAt: number | null
+  completedAt: number | null
+  updatedAt: number
+}
+
+export interface ExpertWorkflowGateRecord {
+  id: string
+  workflowRunId: string
+  stageId: string
+  status: 'pending' | 'approved' | 'rejected'
+  reason: string
+  requestedAt: number
+  resolvedAt: number | null
+  resolvedBy: string | null
+}
+
+export interface ExpertWorkflowSnapshot {
+  run: ExpertWorkflowRunRecord
+  stages: ExpertWorkflowStageRunRecord[]
+  gates: ExpertWorkflowGateRecord[]
+}
+
+export interface ExpertTeamRunRecord {
+  id: string
+  conversationId: string
+  expertBindingId: string
+  expertId: string
+  packageHash: string
+  teamId: string
+  teamVersion: string
+  team: Record<string, unknown>
+  parentRunId: string
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
+  objective: string
+  context: string
+  result: unknown | null
+  errorMessage: string | null
+  createdAt: number
+  updatedAt: number
+  completedAt: number | null
+}
+
+export interface ExpertTeamSnapshot {
+  run: ExpertTeamRunRecord
+  members: ChildRunRecord[]
+}
+
+export interface DigitalColleagueRecord {
+  id: string
+  name: string
+  expertId: string
+  expertBindingId: string
+  packageHash: string
+  packageSnapshot: Record<string, unknown>
+  conversationId: string
+  objective: string
+  projectId: string | null
+  projectRoot: string | null
+  knowledgeReferences: KnowledgeReference[]
+  status: 'active' | 'paused' | 'revoked'
+  maxRunsPerDay: number
+  maxTokensPerDay: number
+  maxDurationMs: number
+  maxOutputTokens: number
+  maxToolCalls: number
+  createdAt: number
+  updatedAt: number
+  revokedAt: number | null
+}
+
+export interface DigitalColleagueScheduleRecord {
+  id: string
+  colleagueId: string
+  name: string
+  scheduleKind: 'interval'
+  intervalSeconds: number
+  catchupWindowSeconds: number
+  enabled: boolean
+  nextDueAt: number
+  lastScheduledAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface DigitalColleagueChannelRecord {
+  id: string
+  colleagueId: string
+  name: string
+  channelKind: 'webhook' | 'im_bridge'
+  externalIdentity: string
+  secretPrefix: string
+  rateLimitPerMinute: number
+  status: 'active' | 'revoked'
+  createdAt: number
+  updatedAt: number
+  revokedAt: number | null
+}
+
+export interface DigitalColleagueChannelCreated {
+  channel: DigitalColleagueChannelRecord
+  secret: string
+}
+
+export interface DigitalColleagueTriggerRecord {
+  id: string
+  colleagueId: string
+  sourceType: 'manual' | 'schedule' | 'channel'
+  sourceId: string | null
+  idempotencyKey: string
+  status: 'accepted' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'rejected' | 'skipped'
+  payload: unknown
+  scheduledFor: number | null
+  runId: string | null
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+  toolCallCount: number
+  errorCode: string | null
+  errorMessage: string | null
+  createdAt: number
+  updatedAt: number
+  completedAt: number | null
+}
+
+export interface DigitalColleagueAuditRecord {
+  id: string
+  colleagueId: string | null
+  channelId: string | null
+  triggerId: string | null
+  event: string
+  outcome: 'accepted' | 'applied' | 'rejected' | 'skipped' | 'failed'
+  actor: string
+  details: unknown
+  createdAt: number
+}
+
+export interface CreateDigitalColleagueInput {
+  name: string
+  expertId: string
+  objective: string
+  projectId?: string | null
+  projectRoot?: string | null
+  knowledgeReferences?: KnowledgeReference[]
+  maxRunsPerDay?: number
+  maxTokensPerDay?: number
+  maxDurationMs?: number
+  maxOutputTokens?: number
+  maxToolCalls?: number
 }
 
 // A0 Work Loop Types

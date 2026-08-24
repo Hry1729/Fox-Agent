@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "keyId": "fox-release-2026",
+  "algorithm": "Ed25519",
+  "publicKeyBase64": "bRtNjN4PfBhE8sWH6hjEexicmHFX/RrOP1au4/H3CfM=",
+  "fingerprintSha256": "20d11b7c97ff2ca259638c9c52c60c32a2ed343e1745bb7bff40bb7cbd6783e2"
+}

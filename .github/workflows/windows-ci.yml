@@ -1,0 +1,146 @@
+name: Windows CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-checks:
+    name: Windows checks
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      ZVEC_AUTO_BUILD: '0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Configure Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Configure Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Configure Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify contract fixtures
+        run: pnpm contract-fixtures:verify
+
+      - name: Test contract fixture validator
+        run: pnpm contract-fixtures:test
+
+      - name: Test desktop
+        run: pnpm desktop:test
+
+      - name: Build desktop and run typecheck
+        run: pnpm build
+
+      - name: Test Agent Runtime
+        run: pnpm runtime:test
+
+      - name: Test Rust Host without optional Zvec
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features
+
+  vector-runtime-smoke:
+    name: Zvec offline smoke (resource-gated)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      ZVEC_AUTO_BUILD: '0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect packaged Zvec resources
+        id: resources
+        shell: pwsh
+        run: |
+          $resourceDir = Join-Path $env:GITHUB_WORKSPACE 'apps\desktop\src-tauri\resources\vector'
+          $dllPath = Join-Path $resourceDir 'zvec_c_api.dll'
+          $importLibraryPath = Join-Path $resourceDir 'zvec_c_api.lib'
+          if (-not (Test-Path -LiteralPath $dllPath -PathType Leaf)) {
+            'enabled=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'Zvec offline smoke 未启用：仓库没有官方 zvec_c_api.dll。默认构建保持无原生资源通过，未伪造 Smoke 成功。'
+            exit 0
+          }
+          if (-not (Test-Path -LiteralPath $importLibraryPath -PathType Leaf)) {
+            throw '发现 zvec_c_api.dll，但缺少同目录的 zvec_c_api.lib；Windows/MSVC Smoke 明确失败。'
+          }
+          'enabled=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "resource_dir=$resourceDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '检测到官方 Zvec Windows x64/MSVC 资源，将执行真实离线 Smoke。'
+
+      - name: Run real Zvec offline smoke
+        if: steps.resources.outputs.enabled == 'true'
+        shell: pwsh
+        env:
+          ZVEC_LIB_DIR: ${{ steps.resources.outputs.resource_dir }}
+        run: ./scripts/zvec-offline-smoke.ps1
+
+  onnx-runtime-smoke:
+    name: ONNX Runtime offline smoke (resource-gated)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Detect complete ONNX package
+        id: resources
+        shell: pwsh
+        run: |
+          $modelRoot = Join-Path $env:GITHUB_WORKSPACE 'apps\desktop\src-tauri\resources\models'
+          $packages = @()
+          if (Test-Path -LiteralPath $modelRoot -PathType Container) {
+            $packages = @(Get-ChildItem -LiteralPath $modelRoot -Directory | Where-Object {
+              (Test-Path -LiteralPath (Join-Path $_.FullName 'manifest.json') -PathType Leaf) -and
+              (Test-Path -LiteralPath (Join-Path $_.FullName 'model.onnx') -PathType Leaf)
+            })
+          }
+          if ($packages.Count -eq 0) {
+            'enabled=false' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'ONNX Runtime offline gate 未通过：仓库没有完整的 manifest.json + model.onnx + onnxruntime.dll 资源；未伪造 Smoke 成功。'
+            exit 0
+          }
+          if ($packages.Count -ne 1) {
+            throw 'ONNX offline smoke requires exactly one complete package in CI; set an explicit package selection before adding more packages.'
+          }
+          $packageDir = $packages[0].FullName
+          $runtimePath = Join-Path $packageDir 'onnxruntime.dll'
+          if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) {
+            throw "ONNX package is incomplete: missing $runtimePath"
+          }
+          'enabled=true' | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "package_dir=$packageDir" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "检测到完整 ONNX package，将执行真实离线 Smoke：$packageDir"
+
+      - name: Run real ONNX Runtime offline smoke
+        if: steps.resources.outputs.enabled == 'true'
+        shell: pwsh
+        env:
+          FOX_ONNX_MODEL_DIR: ${{ steps.resources.outputs.package_dir }}
+        run: ./scripts/onnx-offline-smoke.ps1

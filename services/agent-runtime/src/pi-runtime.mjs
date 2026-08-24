@@ -1,13 +1,14 @@
 import { createInterface } from 'node:readline'
-import { fauxAssistantMessage, registerFauxProvider } from '@earendil-works/pi-ai'
 import {
-  AuthStorage,
   DefaultResourceLoader,
-  ModelRegistry,
+  PI_PACKAGE_VERSION,
   SessionManager,
   SettingsManager,
-  createAgentSession,
-} from '@earendil-works/pi-coding-agent'
+  createFoxAgentSession,
+  createFoxModelRuntime,
+  fauxAssistantMessage,
+  registerFauxProvider,
+} from './pi-adapter.mjs'
 import { createEnvelope, PROTOCOL_NAME, PROTOCOL_VERSION, validateEnvelope } from './protocol.mjs'
 import { createPiEventMapper, sanitizeAssistantHistory } from './pi-event-mapper.mjs'
 import { createReadOnlyTools } from './read-only-tools.mjs'
@@ -25,6 +26,8 @@ import {
 import { stablePromptHash } from './prompt-composer.mjs'
 import { plannerHandoff, runPlanner, shouldUsePlanner } from './planner-runtime.mjs'
 import { diagnoseToolsForAgentContext } from './expert-package.mjs'
+import { adaptFoxToolsToPi } from './tool-adapter.mjs'
+import { runOfflineEvals } from './offline-evaluator.mjs'
 import {
   modelProfilePrompt,
   modelProfileSnapshot,
@@ -194,6 +197,11 @@ async function executePrompt(request) {
   const transcript = sanitizeAssistantHistory(sanitizeProviderHistory(transcriptFromSession(session, fallbackMessages)))
   const modelProfile = resolveModelProfile(modelService)
   const model = createModel(modelService, modelProfile)
+  const modelRuntime = await createFoxModelRuntime({
+    model,
+    apiKey: modelService.apiKey,
+    fauxRegistration: modelService.apiType === 'faux' ? fauxProvider : null,
+  })
   const catalogTools = [...createReadOnlyTools(preflight), ...createHostTools(hostRequest), ...createKnowledgeTools(hostRequest), ...createMcpTools(hostRequest)]
   assertRegisteredToolsMatchCatalog(catalogTools)
   const toolDiagnostics = diagnoseToolsForAgentContext(
@@ -201,7 +209,7 @@ async function executePrompt(request) {
     request.payload?.assistantPackage,
     request.payload?.expertPackage,
   )
-  const tools = toolDiagnostics.tools
+  const tools = adaptFoxToolsToPi(toolDiagnostics.tools)
   const requestSnapshot = {
     schemaVersion: 1,
     model: modelService.modelId,
@@ -223,6 +231,10 @@ async function executePrompt(request) {
     assistantPackage: request.payload?.assistantPackage ?? null,
     expertBinding: request.payload?.expertBinding ?? null,
     expertPackage: request.payload?.expertPackage ?? null,
+    memoryRecallStatus: request.payload?.memoryContext?.status ?? 'empty',
+    memoryRecallCount: Array.isArray(request.payload?.memoryContext?.items)
+      ? request.payload.memoryContext.items.length
+      : 0,
   }
   const workToolNames = new Set(RUNTIME_TOOL_CATALOG
     .filter((tool) => tool.category === 'work')
@@ -233,6 +245,7 @@ async function executePrompt(request) {
     projectRoot: request.payload?.projectContext?.projectRoot,
     permissionMode: request.payload?.projectContext?.permissionMode,
     workSnapshot: request.payload?.workSnapshot,
+    memoryContext: request.payload?.memoryContext,
     assistantPackage: request.payload?.assistantPackage,
     expertBinding: request.payload?.expertBinding,
     expertPackage: request.payload?.expertPackage,
@@ -256,6 +269,7 @@ async function executePrompt(request) {
         model,
         modelService,
         modelProfile,
+        modelRuntime,
         context: planningContext,
         history: transcript,
         text: currentText,
@@ -328,10 +342,7 @@ async function executePrompt(request) {
     systemPrompt: promptComposition.prompt,
   })
   await resourceLoader.reload()
-  const authStorage = AuthStorage.inMemory()
-  authStorage.setRuntimeApiKey(model.provider, modelService.apiKey || 'not-needed')
-  const modelRegistry = ModelRegistry.inMemory(authStorage)
-  const created = await createAgentSession({
+  const created = await createFoxAgentSession({
     cwd,
     agentDir: process.cwd(),
     model,
@@ -341,8 +352,7 @@ async function executePrompt(request) {
     resourceLoader,
     sessionManager: SessionManager.inMemory(cwd),
     settingsManager,
-    authStorage,
-    modelRegistry,
+    modelRuntime,
   })
   agent = created.session
   runControl.agent = agent
@@ -405,6 +415,10 @@ async function handleRequest(request) {
   }
   try {
     switch (request.type) {
+      case 'evaluation.run': {
+        respond(request, 'evaluation_report', await runOfflineEvals())
+        break
+      }
       case 'initialize': {
         const config = request.payload?.modelService
         if (!config?.baseUrl || !config?.modelId) throw new Error('Model service configuration is incomplete.')
@@ -422,7 +436,7 @@ async function handleRequest(request) {
           protocol: PROTOCOL_NAME,
           protocolVersion: PROTOCOL_VERSION,
           runtime: 'fox-pi-runtime',
-          runtimeVersion: '0.1.0+pi-0.79.9',
+          runtimeVersion: `0.1.0+pi-${PI_PACKAGE_VERSION}`,
           capabilities: createCapabilityManifest({ imageInput: modelProfile.supportsImageInput }),
           modelProfile: modelProfileSnapshot(modelProfile),
         })

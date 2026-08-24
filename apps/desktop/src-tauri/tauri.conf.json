@@ -30,12 +30,15 @@
     "resources": {
       "../../../services/agent-runtime/src/fake-runtime.mjs": "agent-runtime/fake-runtime.mjs",
       "../../../services/agent-runtime/src/pi-runtime.mjs": "agent-runtime/pi-runtime.mjs",
+      "../../../services/agent-runtime/src/offline-evaluator.mjs": "agent-runtime/offline-evaluator.mjs",
+      "../../../services/agent-runtime/evals/fixtures/*": "evals/fixtures/",
       "../../../services/agent-runtime/src/pi-event-mapper.mjs": "agent-runtime/pi-event-mapper.mjs",
       "../../../services/agent-runtime/src/read-only-tool-executors.mjs": "agent-runtime/read-only-tool-executors.mjs",
       "../../../services/agent-runtime/src/read-only-tools.mjs": "agent-runtime/read-only-tools.mjs",
       "../../../services/agent-runtime/src/runtime-session.mjs": "agent-runtime/runtime-session.mjs",
       "../../../services/agent-runtime/src/protocol.mjs": "agent-runtime/protocol.mjs",
-      "../../../services/agent-runtime/dist/*": "agent-runtime/"
+      "../../../services/agent-runtime/dist/*": "agent-runtime/",
+      "resources/models/trusted-release-keys/fox-release-2026.json": "models/trusted-release-keys/fox-release-2026.json"
     },
     "icon": [
       "icons/32x32.png",

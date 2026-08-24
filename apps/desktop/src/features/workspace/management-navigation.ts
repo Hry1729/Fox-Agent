@@ -11,6 +11,43 @@ export interface ManagementReturnRoutes {
   knowledge: WorkspaceReturnRoute
 }
 
+export type LocalKnowledgeRouteView = 'home' | 'files' | 'list' | 'detail' | 'documents' | 'import' | 'jobs'
+
+const localKnowledgeViews: Partial<Record<WorkspaceView, LocalKnowledgeRouteView>> = {
+  'local-knowledge-home': 'home',
+  'local-files': 'files',
+  'local-knowledge': 'list',
+  'local-knowledge-detail': 'detail',
+  'local-knowledge-documents': 'documents',
+  'local-knowledge-import': 'import',
+  'local-knowledge-jobs': 'jobs',
+}
+
+const workspaceViewsForLocalKnowledge: Record<LocalKnowledgeRouteView, WorkspaceView> = {
+  home: 'local-knowledge-home',
+  files: 'local-files',
+  list: 'local-knowledge',
+  detail: 'local-knowledge-detail',
+  documents: 'local-knowledge-documents',
+  import: 'local-knowledge-import',
+  jobs: 'local-knowledge-jobs',
+}
+
+export function localKnowledgeViewForWorkspace(view: WorkspaceView): LocalKnowledgeRouteView | null {
+  return localKnowledgeViews[view] ?? null
+}
+
+export function workspaceViewForLocalKnowledge(view: LocalKnowledgeRouteView): WorkspaceView {
+  return workspaceViewsForLocalKnowledge[view]
+}
+
+export function localKnowledgeBackRoute(view: WorkspaceView, knowledgeBaseId?: string | null): { view: WorkspaceView; entityId?: string } {
+  if (view === 'local-knowledge-home') return { view: 'chat' }
+  if (view === 'local-files' || view === 'local-knowledge') return { view: 'local-knowledge-home' }
+  if (view === 'local-knowledge-detail') return { view: 'local-knowledge' }
+  return { view: 'local-knowledge-detail', entityId: knowledgeBaseId ?? undefined }
+}
+
 export const SETTINGS_WORKSPACE_VIEWS: readonly WorkspaceView[] = [
   'settings',
   'onboarding',
@@ -32,7 +69,18 @@ export const SETTINGS_WORKSPACE_VIEWS: readonly WorkspaceView[] = [
 
 export function managementSection(view: WorkspaceView): 'settings' | 'knowledge' | null {
   if (SETTINGS_WORKSPACE_VIEWS.includes(view)) return 'settings'
-  if (view === 'knowledge' || view === 'knowledge-detail' || view === 'knowledge-graph') return 'knowledge'
+  if (
+    view === 'knowledge'
+    || view === 'knowledge-detail'
+    || view === 'knowledge-graph'
+    || view === 'local-knowledge-home'
+    || view === 'local-files'
+    || view === 'local-knowledge'
+    || view === 'local-knowledge-detail'
+    || view === 'local-knowledge-documents'
+    || view === 'local-knowledge-import'
+    || view === 'local-knowledge-jobs'
+  ) return 'knowledge'
   return null
 }
 

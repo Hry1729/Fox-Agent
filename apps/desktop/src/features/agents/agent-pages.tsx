@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Brain, CalendarDays, CheckCircle2, Clock3, Code2, Database, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, Plus, Puzzle, Search, Settings2, Sparkles, Wrench } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Brain, CalendarDays, CheckCircle2, Clock3, Code2, Database, Download, FileUp, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, Plus, Puzzle, RotateCcw, Search, Settings2, Sparkles, Wrench } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -10,25 +10,40 @@ import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { desktopClient } from '@/features/conversations/api/desktop-client'
-import type { AgentRecord, ConversationSummary, SaveAgentInput } from '@/features/conversations/model/types'
+import { desktopClient, desktopRuntimeAvailable } from '@/features/conversations/api/desktop-client'
+import type { AgentRecord, ConversationSummary, ExpertPackagePreview, ExpertPackageVersionRecord, KnowledgeReference, MemoryEntityRecord, MemoryKind, MemoryRecallRecord, MemoryRevisionRecord, MemoryScope, ProjectRecord, SaveAgentInput } from '@/features/conversations/model/types'
 import { AgentCard, type AgentCardData } from '@/features/workspace/entity-card'
 import { WorkspacePage } from '@/features/workspace/page-shell'
 import type { NavigateWorkspace } from '@/features/workspace/types'
 import { useAgents } from './use-agents'
 import { expertCatalogAgents } from './agent-classification'
 import { useExpertIcons } from './use-expert-icons'
+import { DigitalColleagueManager } from './digital-colleague-manager'
 import { useMcpServers } from '@/features/settings/use-mcp-servers'
 import { useSkills } from '@/features/settings/use-skills'
 import { useKnowledgeBases } from '@/features/knowledge/use-knowledge'
+import { knowledgeReferencesFromDeclaration, remoteKnowledgeReference, resolveExpertKnowledgeDeclaration, toPersistedExpertManifest } from './expert-knowledge'
 
 function asCard(agent: AgentRecord): AgentCardData {
   const manifest = agent.packageManifest
+  let knowledgeCount = agent.resources.knowledges.length
+  if (agent.runtimeType === 'pi') {
+    try {
+      const declaration = resolveExpertKnowledgeDeclaration(manifest)
+      knowledgeCount = declaration.format === 'references'
+        ? declaration.references.length
+        : declaration.format === 'legacy_remote_ids'
+          ? declaration.ids.length
+          : 0
+    } catch {
+      knowledgeCount = 0
+    }
+  }
   return {
     ...agent,
     image: agent.icon || (agent.runtimeType === 'pi' ? '/mascot/fox_magic.png' : '/mascot/fox_search.png'),
     tools: agent.runtimeType === 'pi' && Array.isArray(manifest.allowedTools) ? manifest.allowedTools.length : agent.resources.tools.length,
-    knowledge: agent.runtimeType === 'pi' && Array.isArray(manifest.knowledge) ? manifest.knowledge.length : agent.resources.knowledges.length,
+    knowledge: knowledgeCount,
     mcps: agent.runtimeType === 'pi' && Array.isArray(manifest.mcpServers) ? manifest.mcpServers.length : agent.resources.mcps.length,
     skills: agent.runtimeType === 'pi' && Array.isArray(manifest.skills) ? manifest.skills.length : agent.resources.skills.length,
     recent: agent.runtimeType === 'pi' ? '本机' : '知识库',
@@ -36,12 +51,226 @@ function asCard(agent: AgentRecord): AgentCardData {
   }
 }
 
-const fallbackAgent: AgentRecord = { id: 'fox-general', name: 'Fox 通用助手', description: 'Fox 默认通用专家', runtimeType: 'pi', defaultModel: 'configured-model', icon: null, category: 'general', openingSuggestions: [], systemPrompt: '', isBuiltin: true, packageVersion: '1.0.0', packageManifest: {}, capabilities: ['files', 'tools', 'reasoning'], resources: { tools: [{ id: 'files', name: '文件读写', description: '读取和处理已授权项目文件' }, { id: 'tools', name: '本地工具', description: '调用 Fox Runtime 提供的本地工具' }, { id: 'reasoning', name: '任务推理', description: '规划并执行多步骤任务' }], knowledges: [], mcps: [], skills: [] }, configurableItems: {}, isDefault: true, available: true }
+const fallbackAgent: AgentRecord = { id: 'fox-general', name: 'Fox 通用助手', description: 'Fox 默认通用专家', runtimeType: 'pi', defaultModel: 'configured-model', icon: null, category: 'general', openingSuggestions: [], systemPrompt: '', isBuiltin: true, packageVersion: '1.0.0', packageSource: 'builtin', packageId: null, packageHash: null, packageManifest: {}, capabilities: ['files', 'tools', 'reasoning'], resources: { tools: [{ id: 'files', name: '文件读写', description: '读取和处理已授权项目文件' }, { id: 'tools', name: '本地工具', description: '调用 Fox Runtime 提供的本地工具' }, { id: 'reasoning', name: '任务推理', description: '规划并执行多步骤任务' }], knowledges: [], mcps: [], skills: [] }, configurableItems: {}, isDefault: true, available: true }
 
 const emptyAgentDraft: SaveAgentInput = {
   name: '', description: '', icon: '/mascot/fox_magic.png', category: 'general', systemPrompt: '',
   defaultModel: 'configured-model', openingSuggestions: [],
-  packageManifest: { version: '1.0.0', skills: [], knowledge: [], mcpServers: [], allowedTools: [] },
+  packageManifest: { version: '1.0.0', manifestSchemaVersion: 2, skills: [], knowledgeReferences: [], mcpServers: [], allowedTools: [] },
+}
+
+interface MemoryDraft {
+  scope: MemoryScope
+  scopeKey: string
+  kind: MemoryKind
+  canonicalKey: string
+  content: string
+  evidenceExcerpt: string
+}
+
+const emptyMemoryDraft: MemoryDraft = {
+  scope: 'agent',
+  scopeKey: '',
+  kind: 'preference',
+  canonicalKey: '',
+  content: '',
+  evidenceExcerpt: '',
+}
+
+const memoryKindLabels: Record<MemoryKind, string> = {
+  preference: '偏好', identity: '身份', project: '项目', workflow: '工作流', fact: '事实', other: '其他',
+}
+
+const memoryStateLabels: Record<MemoryEntityRecord['state'], string> = {
+  candidate: '待确认', confirmed: '已确认', conflict: '有冲突',
+}
+
+function memoryTime(value: number | null) {
+  return value ? new Date(value).toLocaleString('zh-CN') : '从未'
+}
+
+function AgentMemoryManager({ agent }: { agent: AgentRecord }) {
+  const [memories, setMemories] = useState<MemoryEntityRecord[]>([])
+  const [projects, setProjects] = useState<ProjectRecord[]>([])
+  const [loading, setLoading] = useState(true)
+  const [query, setQuery] = useState('')
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [editing, setEditing] = useState<MemoryEntityRecord | null>(null)
+  const [draft, setDraft] = useState<MemoryDraft>(emptyMemoryDraft)
+  const [saving, setSaving] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historyMemory, setHistoryMemory] = useState<MemoryEntityRecord | null>(null)
+  const [revisions, setRevisions] = useState<MemoryRevisionRecord[]>([])
+  const [recalls, setRecalls] = useState<MemoryRecallRecord[]>([])
+
+  const refresh = async () => {
+    if (!desktopRuntimeAvailable) return
+    const [records, projectRecords] = await Promise.all([
+      desktopClient.listMemories(),
+      desktopClient.listProjects(),
+    ])
+    setMemories(records)
+    setProjects(projectRecords)
+  }
+
+  useEffect(() => {
+    let active = true
+    if (!desktopRuntimeAvailable) {
+      setLoading(false)
+      return () => { active = false }
+    }
+    setLoading(true)
+    void Promise.all([desktopClient.listMemories(), desktopClient.listProjects()])
+      .then(([records, projectRecords]) => {
+        if (!active) return
+        setMemories(records)
+        setProjects(projectRecords)
+      })
+      .catch((cause) => { if (active) toast.error(cause instanceof Error ? cause.message : String(cause)) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [agent.id])
+
+  const visibleMemories = useMemo(() => {
+    const normalized = query.trim().toLowerCase()
+    return memories.filter((memory) => {
+      if (memory.scope === 'agent' && memory.scopeKey !== agent.id) return false
+      return !normalized
+        || memory.canonicalKey.toLowerCase().includes(normalized)
+        || memory.content.toLowerCase().includes(normalized)
+        || memory.evidenceExcerpt.toLowerCase().includes(normalized)
+    })
+  }, [agent.id, memories, query])
+
+  const openCreate = () => {
+    setEditing(null)
+    setDraft({ ...emptyMemoryDraft, scopeKey: agent.id })
+    setEditorOpen(true)
+  }
+
+  const openEdit = (memory: MemoryEntityRecord) => {
+    setEditing(memory)
+    setDraft({
+      scope: memory.scope,
+      scopeKey: memory.scopeKey,
+      kind: memory.kind,
+      canonicalKey: memory.canonicalKey,
+      content: memory.content,
+      evidenceExcerpt: memory.evidenceExcerpt,
+    })
+    setEditorOpen(true)
+  }
+
+  const saveMemory = async () => {
+    if (!draft.canonicalKey.trim() || !draft.content.trim()) {
+      toast.error('记忆键和值不能为空')
+      return
+    }
+    if (draft.scope === 'project' && !draft.scopeKey) {
+      toast.error('请选择项目作用域')
+      return
+    }
+    setSaving(true)
+    try {
+      if (editing) {
+        await desktopClient.updateMemory({
+          memoryId: editing.id,
+          kind: draft.kind,
+          canonicalKey: draft.canonicalKey,
+          content: draft.content,
+          evidenceExcerpt: draft.evidenceExcerpt,
+          expectedVersion: editing.version,
+        })
+      } else {
+        await desktopClient.createMemory({
+          scope: draft.scope,
+          scopeKey: draft.scope === 'global' ? undefined : draft.scopeKey,
+          kind: draft.kind,
+          canonicalKey: draft.canonicalKey,
+          content: draft.content,
+          evidenceExcerpt: draft.evidenceExcerpt,
+        })
+      }
+      await refresh()
+      setEditorOpen(false)
+      toast.success(editing ? '记忆已更新' : '记忆已创建并确认')
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const mutate = async (operation: () => Promise<unknown>, success: string) => {
+    try {
+      await operation()
+      await refresh()
+      toast.success(success)
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  const openHistory = async (memory: MemoryEntityRecord) => {
+    setHistoryMemory(memory)
+    setHistoryOpen(true)
+    setRevisions([])
+    setRecalls([])
+    try {
+      const [revisionRecords, recallRecords] = await Promise.all([
+        desktopClient.listMemoryRevisions(memory.id),
+        desktopClient.listMemoryRecalls(memory.id),
+      ])
+      setRevisions(revisionRecords)
+      setRecalls(recallRecords)
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  const scopeName = (memory: MemoryEntityRecord) => {
+    if (memory.scope === 'global') return '全局'
+    if (memory.scope === 'agent') return memory.scopeKey === agent.id ? `当前专家 · ${agent.name}` : `专家 · ${memory.scopeKey}`
+    return `项目 · ${projects.find((project) => project.id === memory.scopeKey)?.name ?? memory.scopeKey}`
+  }
+
+  if (!desktopRuntimeAvailable) return <Card className="fox-agent-section-card fox-agent-memory-empty"><span><Brain /></span><h2>仅桌面版可用</h2><p>长期记忆由 Fox Host 本地治理，不会同步到网页 Runtime。</p></Card>
+
+  return <div className="fox-memory-manager">
+    <div className="fox-memory-toolbar">
+      <div><Search size={15} /><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索记忆、证据或键" /></div>
+      <Button size="sm" onClick={openCreate}><Plus size={14} />新增记忆</Button>
+    </div>
+    <Card className="fox-memory-privacy-note"><Brain size={18} /><p><b>用户控制的长期记忆</b><span>模型只能提交候选；只有已确认且启用的条目会被有界召回。Fox 不会自动保存整段对话。{agent.runtimeType !== 'pi' ? ' 当前远程 Runtime 仅支持查看和治理，尚不注入本地记忆。' : ''}</span></p></Card>
+    {loading ? <Card className="fox-agent-section-card fox-agent-memory-empty"><LoaderCircle className="fox-spin" /><h2>正在读取记忆</h2></Card> : visibleMemories.length === 0 ? <Card className="fox-agent-section-card fox-agent-memory-empty"><span><Brain /></span><h2>暂无长期记忆</h2><p>你可以主动创建；Agent 提交的候选也会出现在这里等待确认。</p></Card> : <div className="fox-memory-list">{visibleMemories.map((memory) => <Card key={memory.id} className={`fox-memory-card is-${memory.state}`}>
+      <header><div><Badge variant={memory.state === 'conflict' ? 'destructive' : 'secondary'}>{memoryStateLabels[memory.state]}</Badge><span>{memoryKindLabels[memory.kind]}</span><span>{scopeName(memory)}</span></div>{memory.state === 'confirmed' && <Switch checked={memory.enabled} aria-label={`${memory.canonicalKey} 记忆启用状态`} onCheckedChange={(enabled) => void mutate(() => desktopClient.setMemoryEnabled(memory.id, enabled, memory.version), enabled ? '记忆已启用' : '记忆已禁用')} />}</header>
+      <h3>{memory.canonicalKey}</h3><p>{memory.content}</p>
+      {memory.evidenceExcerpt && <blockquote>证据：{memory.evidenceExcerpt}</blockquote>}
+      <small>来源：{memory.createdBy === 'agent' ? 'Agent 候选' : '用户'} · 置信度 {Math.round(memory.confidence * 100)}% · 召回 {memory.recallCount} 次 · 最近 {memoryTime(memory.lastRecalledAt)}</small>
+      <footer>
+        {memory.state === 'candidate' && !memory.openConflictId && <Button size="sm" onClick={() => void mutate(() => desktopClient.confirmMemory(memory.id, memory.version), '候选记忆已确认')}>确认并启用</Button>}
+        {memory.state === 'conflict' && memory.openConflictId && <><Button size="sm" variant="outline" onClick={() => void mutate(() => desktopClient.resolveMemoryConflict(memory.openConflictId!, 'keep_existing'), '已保留原记忆')}>保留原记忆</Button><Button size="sm" onClick={() => void mutate(() => desktopClient.resolveMemoryConflict(memory.openConflictId!, 'accept_competing'), '已采用新候选')}>采用此候选</Button></>}
+        <Button size="sm" variant="ghost" onClick={() => void openHistory(memory)}><History size={14} />审计记录</Button>
+        <Button size="sm" variant="ghost" onClick={() => openEdit(memory)}>编辑</Button>
+        <Button size="sm" variant="ghost" disabled={Boolean(memory.openConflictId)} onClick={() => void mutate(() => desktopClient.deleteMemory(memory.id), '记忆已删除')}>删除</Button>
+      </footer>
+    </Card>)}</div>}
+
+    <Dialog open={editorOpen} onOpenChange={setEditorOpen}><DialogContent className="fox-memory-dialog"><DialogHeader><DialogTitle>{editing ? '编辑长期记忆' : '新增长期记忆'}</DialogTitle><DialogDescription>作用域创建后不可更改。用户新建条目会直接确认；同键不同值会进入冲突处理。</DialogDescription></DialogHeader>
+      <div className="fox-memory-form">
+        <label>作用域<Select disabled={Boolean(editing)} value={draft.scope} onValueChange={(scope: MemoryScope) => setDraft((current) => ({ ...current, scope, scopeKey: scope === 'agent' ? agent.id : scope === 'global' ? '' : projects[0]?.id ?? '' }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="global">全局</SelectItem><SelectItem value="agent">当前专家</SelectItem><SelectItem value="project">项目</SelectItem></SelectContent></Select></label>
+        {draft.scope === 'project' && <label>项目<Select disabled={Boolean(editing)} value={draft.scopeKey} onValueChange={(scopeKey) => setDraft((current) => ({ ...current, scopeKey }))}><SelectTrigger><SelectValue placeholder="选择项目" /></SelectTrigger><SelectContent>{projects.map((project) => <SelectItem key={project.id} value={project.id}>{project.name}</SelectItem>)}</SelectContent></Select></label>}
+        <label>类型<Select value={draft.kind} onValueChange={(kind: MemoryKind) => setDraft((current) => ({ ...current, kind }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{(Object.keys(memoryKindLabels) as MemoryKind[]).map((kind) => <SelectItem key={kind} value={kind}>{memoryKindLabels[kind]}</SelectItem>)}</SelectContent></Select></label>
+        <label>规范键<Input value={draft.canonicalKey} maxLength={160} placeholder="例如 preferred_editor" onChange={(event) => setDraft((current) => ({ ...current, canonicalKey: event.target.value }))} /></label>
+        <label>记忆内容<Textarea value={draft.content} maxLength={4000} placeholder="保存简洁、可复用的事实或偏好" onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))} /></label>
+        <label>证据摘录<Textarea value={draft.evidenceExcerpt} maxLength={1000} placeholder="为何保存这条记忆；不要粘贴整段对话" onChange={(event) => setDraft((current) => ({ ...current, evidenceExcerpt: event.target.value }))} /></label>
+      </div><DialogFooter><Button variant="outline" onClick={() => setEditorOpen(false)}>取消</Button><Button disabled={saving} onClick={() => void saveMemory()}>{saving ? '正在保存' : '保存'}</Button></DialogFooter>
+    </DialogContent></Dialog>
+
+    <Dialog open={historyOpen} onOpenChange={setHistoryOpen}><DialogContent className="fox-memory-history-dialog"><DialogHeader><DialogTitle>记忆审计记录</DialogTitle><DialogDescription>{historyMemory?.canonicalKey} 的变更历史与召回证据。</DialogDescription></DialogHeader>
+      <Tabs defaultValue="recalls"><TabsList><TabsTrigger value="recalls">召回记录 {recalls.length}</TabsTrigger><TabsTrigger value="revisions">变更记录 {revisions.length}</TabsTrigger></TabsList><TabsContent value="recalls"><div className="fox-memory-audit-list">{recalls.length === 0 ? <p>尚未被召回。</p> : recalls.map((recall) => <article key={recall.id}><b>{memoryTime(recall.recalledAt)} · 排名 {recall.rank}</b><span>查询：{recall.query || '空查询'}</span><span>原因：{recall.reason}</span>{recall.evidenceExcerpt && <span>证据：{recall.evidenceExcerpt}</span>}<small>Run：{recall.runId ?? '无'} · 对话：{recall.conversationId}</small></article>)}</div></TabsContent><TabsContent value="revisions"><div className="fox-memory-audit-list">{revisions.map((revision) => <article key={revision.id}><b>{memoryTime(revision.createdAt)} · {revision.action}</b><span>执行者：{revision.actor}</span></article>)}</div></TabsContent></Tabs>
+    </DialogContent></Dialog>
+  </div>
 }
 
 type ExpertResourceKey = 'skills' | 'knowledge' | 'mcpServers' | 'allowedTools'
@@ -181,6 +410,14 @@ const foxRuntimeTools = [
   { id: 'write_file', name: 'write_file', description: '在已授权项目中创建或覆盖文本文件', kind: 'Runtime' },
   { id: 'edit_file', name: 'edit_file', description: '替换文件中的指定文本并生成变更记录', kind: 'Runtime' },
   { id: 'run_command', name: 'run_command', description: '在已授权项目目录中执行非交互式 CLI 命令', kind: 'CLI' },
+  { id: 'web_search', name: 'web_search', description: '检索实时网页，默认无需额外搜索密钥', kind: 'Web' },
+  { id: 'web_read', name: 'web_read', description: '安全读取公开网页并提取正文', kind: 'Web' },
+  { id: 'structured_data', name: 'structured_data', description: '解析、转换、查询和校验结构化数据', kind: 'Data' },
+  { id: 'git_read', name: 'git_read', description: '只读查看 Git 状态、差异、历史和逐行归属', kind: 'CLI' },
+  { id: 'test_run', name: 'test_run', description: '识别项目类型并运行已有测试命令', kind: 'CLI' },
+  { id: 'code_check', name: 'code_check', description: '运行项目已有的 lint、类型检查和静态检查', kind: 'CLI' },
+  { id: 'format_code', name: 'format_code', description: '使用项目已有格式化器检查或应用格式', kind: 'CLI' },
+  { id: 'tabular_data', name: 'tabular_data', description: '预览、筛选和聚合 CSV、TSV 与 JSON 表格', kind: 'Data' },
   { id: 'list_knowledge_bases', name: 'list_knowledge_bases', description: '列出当前对话已绑定的知识库', kind: 'Knowledge' },
   { id: 'search_knowledge', name: 'search_knowledge', description: '检索已绑定知识库并返回来源', kind: 'Knowledge' },
   { id: 'read_knowledge_document', name: 'read_knowledge_document', description: '读取知识库中已解析的文档', kind: 'Knowledge' },
@@ -198,6 +435,12 @@ const foxRuntimeTools = [
   { id: 'review_finding_add', name: 'review_finding_add', description: '登记独立审查发现', kind: 'Work' },
   { id: 'review_finding_resolve', name: 'review_finding_resolve', description: '解决或豁免审查发现', kind: 'Work' },
   { id: 'acceptance_submit', name: 'acceptance_submit', description: '提交 A1 最终验收', kind: 'Work' },
+  { id: 'workflow_snapshot_get', name: 'workflow_snapshot_get', description: '读取持久化专家工作流检查点', kind: 'Workflow' },
+  { id: 'workflow_start', name: 'workflow_start', description: '按能力包声明启动版本化工作流', kind: 'Workflow' },
+  { id: 'workflow_stage_start', name: 'workflow_stage_start', description: '启动或重试当前工作流阶段', kind: 'Workflow' },
+  { id: 'workflow_stage_complete', name: 'workflow_stage_complete', description: '校验并持久化阶段输出', kind: 'Workflow' },
+  { id: 'workflow_stage_fail', name: 'workflow_stage_fail', description: '登记阶段失败并应用有限重试', kind: 'Workflow' },
+  { id: 'workflow_cancel', name: 'workflow_cancel', description: '取消活动工作流并收口任务状态', kind: 'Workflow' },
 ]
 
 const toolDescriptions: Record<string, string> = {
@@ -213,6 +456,14 @@ const toolDescriptions: Record<string, string> = {
   write_file: '创建或覆盖文本文件',
   edit_file: '编辑文件中的指定内容',
   run_command: '执行 CLI 命令',
+  web_search: '检索实时网页',
+  web_read: '读取公开网页正文',
+  structured_data: '处理结构化数据',
+  git_read: '读取 Git 状态与历史',
+  test_run: '运行项目测试',
+  code_check: '运行代码质量检查',
+  format_code: '检查或应用代码格式',
+  tabular_data: '预览、筛选和聚合表格数据',
   list_mcp_tools: '列出 MCP 服务提供的工具',
   call_mcp_tool: '调用 MCP 服务中的工具',
 }
@@ -227,6 +478,7 @@ function AgentCapabilitiesCard({ agent, navigate, section = 'all' }: { agent: Ag
   const [draftTools, setDraftTools] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
   const localAgent = agent.runtimeType === 'pi'
+  const editableLocal = localAgent && agent.packageSource === 'local'
   const defaultSkillIds = new Set(agent.resources.skills.map((item) => item.id))
   const defaultSkills = agent.resources.skills
   const userSkills = localAgent ? skillResource.items.filter((item) => !defaultSkillIds.has(item.id)) : []
@@ -274,7 +526,7 @@ function AgentCapabilitiesCard({ agent, navigate, section = 'all' }: { agent: Ag
   }
 
   const saveResources = async () => {
-    if (!localAgent) return
+    if (!editableLocal) return
     setSaving(true)
     const skillChanges = userSkills.filter((item) => draftSkills.has(item.id) !== item.enabled)
     const mcpChanges = agent.isBuiltin
@@ -290,7 +542,7 @@ function AgentCapabilitiesCard({ agent, navigate, section = 'all' }: { agent: Ag
           id: agent.id, name: agent.name, description: agent.description, icon: agent.icon,
           category: agent.category, systemPrompt: agent.systemPrompt, defaultModel: agent.defaultModel,
           openingSuggestions: agent.openingSuggestions,
-          packageManifest: { ...agent.packageManifest, skills: [...draftSkills], mcpServers: [...draftMcps], allowedTools: [...draftTools] },
+          packageManifest: toPersistedExpertManifest({ ...agent.packageManifest, skills: [...draftSkills], mcpServers: [...draftMcps], allowedTools: [...draftTools] }),
         })
       } catch {
         results.push(false)
@@ -325,18 +577,18 @@ function AgentCapabilitiesCard({ agent, navigate, section = 'all' }: { agent: Ag
       <Dialog open={managerOpen} onOpenChange={setManagerOpen}>
         <DialogContent className="fox-agent-resource-dialog">
           <DialogHeader>
-            <div className="fox-agent-resource-dialog-title"><div><DialogTitle>管理能力与工具</DialogTitle><DialogDescription>{localAgent ? `预置资源默认开启且不可修改，用户添加的资源可以自由启用或停用。` : '知识库专家的能力与工具由知识库服务统一管理。'}</DialogDescription></div>{localAgent && <Button variant="outline" size="sm" onClick={() => { setManagerOpen(false); navigate(managerTab === 'skills' ? 'skills' : 'mcp') }}><Plus />{managerTab === 'skills' ? '添加 Skill' : '添加工具'}</Button>}</div>
+            <div className="fox-agent-resource-dialog-title"><div><DialogTitle>管理能力与工具</DialogTitle><DialogDescription>{editableLocal ? '预置资源默认开启且不可修改，用户添加的资源可以自由启用或停用。' : agent.packageSource === 'imported' ? '已安装能力包的资源声明不可直接修改；可复制为本地专家后编辑。' : '该专家的能力与工具由其来源统一管理。'}</DialogDescription></div>{editableLocal && <Button variant="outline" size="sm" onClick={() => { setManagerOpen(false); navigate(managerTab === 'skills' ? 'skills' : 'mcp') }}><Plus />{managerTab === 'skills' ? '添加 Skill' : '添加工具'}</Button>}</div>
           </DialogHeader>
           <Tabs value={managerTab} onValueChange={(value) => setManagerTab(value as 'skills' | 'tools')}>
             <TabsList><TabsTrigger value="skills">能力（{localAgent ? defaultSkills.length + draftSkills.size : skills.length}）</TabsTrigger><TabsTrigger value="tools">工具（{localAgent ? foxRuntimeTools.length + draftMcps.size : tools.length}）</TabsTrigger></TabsList>
             <TabsContent value="skills" className="fox-agent-resource-list">
-              {localAgent ? <>{defaultSkills.map((skill) => <div key={`default:${skill.id}`}><span><Puzzle /></span><p><b>{skill.name || skill.id}<em>预置</em></b><small>{skill.description || `Skill · ${skill.id}`}</small></p><Switch checked disabled aria-label={`${skill.name} 默认开启`} /></div>)}{userSkills.map((skill) => <div key={skill.id}><span><Puzzle /></span><p><b>{skill.name}<em>用户添加</em></b><small>{skill.description || skill.id}</small></p><Switch checked={draftSkills.has(skill.id)} disabled={!skill.valid || saving} onCheckedChange={(checked) => toggleDraft('skills', skill.id, checked)} /></div>)}{!defaultSkills.length && !userSkills.length && <p className="fox-agent-resource-empty">还没有可用的 Skill，可通过右上角“添加 Skill”安装。</p>}</> : skills.length ? skills.map((skill) => <div key={skill.id}><span><Puzzle /></span><p><b>{skill.name}<em>预置</em></b><small>{skill.description}</small></p><Switch checked disabled aria-label={`${skill.name} 默认开启`} /></div>) : <p className="fox-agent-resource-empty">该专家没有公开的能力信息。</p>}
+              {localAgent ? <>{defaultSkills.map((skill) => <div key={`default:${skill.id}`}><span><Puzzle /></span><p><b>{skill.name || skill.id}<em>预置</em></b><small>{skill.description || `Skill · ${skill.id}`}</small></p><Switch checked disabled aria-label={`${skill.name} 默认开启`} /></div>)}{userSkills.map((skill) => <div key={skill.id}><span><Puzzle /></span><p><b>{skill.name}<em>用户添加</em></b><small>{skill.description || skill.id}</small></p><Switch checked={draftSkills.has(skill.id)} disabled={!editableLocal || !skill.valid || saving} onCheckedChange={(checked) => toggleDraft('skills', skill.id, checked)} /></div>)}{!defaultSkills.length && !userSkills.length && <p className="fox-agent-resource-empty">还没有可用的 Skill。</p>}</> : skills.length ? skills.map((skill) => <div key={skill.id}><span><Puzzle /></span><p><b>{skill.name}<em>预置</em></b><small>{skill.description}</small></p><Switch checked disabled aria-label={`${skill.name} 默认开启`} /></div>) : <p className="fox-agent-resource-empty">该专家没有公开的能力信息。</p>}
             </TabsContent>
             <TabsContent value="tools" className="fox-agent-resource-list">
-              {localAgent ? <>{foxRuntimeTools.map((tool) => <div key={tool.id}><span>{tool.kind === 'CLI' ? <Code2 /> : <Wrench />}</span><p><b><code>{tool.id}</code><em>{agent.isBuiltin ? '预置' : '能力包'}</em></b><small>{tool.description}</small></p><Switch checked={draftTools.has(tool.id)} disabled={agent.isBuiltin || saving} aria-label={`${tool.id} 工具权限`} onCheckedChange={(checked) => toggleDraft('tools', tool.id, checked)} /></div>)}{mcpResource.items.map((server) => <div key={server.id}><span><Globe2 /></span><p><b>{server.name}<em>用户添加</em></b><small>MCP · {server.command}</small></p><Switch checked={draftMcps.has(server.id)} disabled={saving} onCheckedChange={(checked) => toggleDraft('mcp', server.id, checked)} /></div>)}</> : tools.length ? tools.map((tool) => <div key={`${tool.kind}:${tool.id}`}><span><Wrench /></span><p><b><code>{tool.id}</code><em>预置</em></b><small>{tool.description}</small></p><Switch checked disabled aria-label={`${tool.id} 默认开启`} /></div>) : <p className="fox-agent-resource-empty">该专家没有公开的工具信息。</p>}
+              {localAgent ? <>{foxRuntimeTools.map((tool) => <div key={tool.id}><span>{tool.kind === 'CLI' ? <Code2 /> : <Wrench />}</span><p><b><code>{tool.id}</code><em>{agent.isBuiltin ? '预置' : '能力包'}</em></b><small>{tool.description}</small></p><Switch checked={draftTools.has(tool.id)} disabled={!editableLocal || saving} aria-label={`${tool.id} 工具权限`} onCheckedChange={(checked) => toggleDraft('tools', tool.id, checked)} /></div>)}{mcpResource.items.map((server) => <div key={server.id}><span><Globe2 /></span><p><b>{server.name}<em>用户添加</em></b><small>MCP · {server.command}</small></p><Switch checked={draftMcps.has(server.id)} disabled={!editableLocal || saving} onCheckedChange={(checked) => toggleDraft('mcp', server.id, checked)} /></div>)}</> : tools.length ? tools.map((tool) => <div key={`${tool.kind}:${tool.id}`}><span><Wrench /></span><p><b><code>{tool.id}</code><em>预置</em></b><small>{tool.description}</small></p><Switch checked disabled aria-label={`${tool.id} 默认开启`} /></div>) : <p className="fox-agent-resource-empty">该专家没有公开的工具信息。</p>}
             </TabsContent>
           </Tabs>
-          <DialogFooter><Button variant="outline" onClick={() => setManagerOpen(false)}>取消</Button><Button disabled={!localAgent || saving} onClick={() => void saveResources()}>{saving ? '正在保存' : '保存更改'}</Button></DialogFooter>
+          <DialogFooter><Button variant="outline" onClick={() => setManagerOpen(false)}>取消</Button><Button disabled={!editableLocal || saving} onClick={() => void saveResources()}>{saving ? '正在保存' : '保存更改'}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
     </>
@@ -358,7 +610,14 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
   const [editingAgent, setEditingAgent] = useState<AgentRecord | null>(null)
   const [draft, setDraft] = useState<SaveAgentInput>(emptyAgentDraft)
   const [savingAgent, setSavingAgent] = useState(false)
-  const [editorTab, setEditorTab] = useState<'profile' | 'resources'>('profile')
+  const [editorTab, setEditorTab] = useState<'profile' | 'resources' | 'versions'>('profile')
+  const packageInputRef = useRef<HTMLInputElement>(null)
+  const [packagePreviewOpen, setPackagePreviewOpen] = useState(false)
+  const [packagePreview, setPackagePreview] = useState<ExpertPackagePreview | null>(null)
+  const [pendingPackage, setPendingPackage] = useState<Record<string, unknown> | null>(null)
+  const [packageVersions, setPackageVersions] = useState<ExpertPackageVersionRecord[]>([])
+  const [packageBusy, setPackageBusy] = useState(false)
+  const [digitalColleaguesOpen, setDigitalColleaguesOpen] = useState(false)
   const skillResource = useSkills(editingAgent?.id ?? 'fox-general')
   const mcpResource = useMcpServers()
   const knowledgeResource = useKnowledgeBases(editorOpen)
@@ -393,16 +652,135 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
     })
     setEditorTab('profile')
     setEditorOpen(true)
+    setPackageVersions([])
+    if (agent.packageSource === 'imported') {
+      void desktopClient.listExpertPackageVersions(agent.id)
+        .then(setPackageVersions)
+        .catch((cause) => toast.error('读取能力包版本失败', { description: cause instanceof Error ? cause.message : String(cause) }))
+    }
+  }
+
+  const inspectPackageFile = async (file: File | undefined) => {
+    if (!file) return
+    if (file.size > 2 * 1024 * 1024) {
+      toast.error('能力包不能超过 2 MiB')
+      return
+    }
+    setPackageBusy(true)
+    try {
+      const parsed = JSON.parse(await file.text()) as unknown
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error('能力包根节点必须是 JSON 对象')
+      const expertPackage = parsed as Record<string, unknown>
+      const preview = await desktopClient.inspectExpertPackage(expertPackage)
+      setPendingPackage(expertPackage)
+      setPackagePreview(preview)
+      setPackagePreviewOpen(true)
+    } catch (cause) {
+      toast.error('能力包校验失败', { description: cause instanceof Error ? cause.message : String(cause) })
+    } finally {
+      setPackageBusy(false)
+      if (packageInputRef.current) packageInputRef.current.value = ''
+    }
+  }
+
+  const installPackage = async () => {
+    if (!pendingPackage || !packagePreview?.canInstall) return
+    setPackageBusy(true)
+    try {
+      const installed = await desktopClient.installExpertPackage(pendingPackage, packagePreview.currentHash)
+      await resource.refresh(false)
+      setPackagePreviewOpen(false)
+      setPendingPackage(null)
+      setPackagePreview(null)
+      toast.success(packagePreview.action === 'upgrade' ? `已升级到 v${installed.packageVersion}` : `已安装 ${installed.name}`)
+    } catch (cause) {
+      toast.error('安装能力包失败', { description: cause instanceof Error ? cause.message : String(cause) })
+    } finally {
+      setPackageBusy(false)
+    }
+  }
+
+  const exportPackage = async () => {
+    if (!editingAgent) return
+    setPackageBusy(true)
+    try {
+      const expertPackage = await desktopClient.exportExpertPackage(editingAgent.id)
+      const packageId = typeof expertPackage.id === 'string' ? expertPackage.id : editingAgent.id
+      const version = typeof expertPackage.version === 'string' ? expertPackage.version : editingAgent.packageVersion
+      const url = URL.createObjectURL(new Blob([JSON.stringify(expertPackage, null, 2)], { type: 'application/json' }))
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${packageId}-${version}.foxexpert`
+      anchor.click()
+      URL.revokeObjectURL(url)
+      toast.success('能力包已导出')
+    } catch (cause) {
+      toast.error('导出能力包失败', { description: cause instanceof Error ? cause.message : String(cause) })
+    } finally {
+      setPackageBusy(false)
+    }
+  }
+
+  const rollbackPackage = async (version: string) => {
+    if (!editingAgent || editingAgent.packageSource !== 'imported') return
+    if (!window.confirm(`确定将“${editingAgent.name}”回滚到 v${version} 吗？现有对话仍保留原版本快照。`)) return
+    setPackageBusy(true)
+    try {
+      const rolledBack = await desktopClient.rollbackExpertPackage(editingAgent.id, version, editingAgent.packageHash)
+      await resource.refresh(false)
+      const versions = await desktopClient.listExpertPackageVersions(editingAgent.id)
+      setEditingAgent(rolledBack)
+      setDraft((value) => ({ ...value, name: rolledBack.name, description: rolledBack.description, icon: rolledBack.icon, category: rolledBack.category, systemPrompt: rolledBack.systemPrompt, defaultModel: rolledBack.defaultModel, openingSuggestions: rolledBack.openingSuggestions, packageManifest: rolledBack.packageManifest }))
+      setPackageVersions(versions)
+      toast.success(`已回滚到 v${version}`)
+    } catch (cause) {
+      toast.error('回滚能力包失败', { description: cause instanceof Error ? cause.message : String(cause) })
+    } finally {
+      setPackageBusy(false)
+    }
   }
   const selectedResources = (key: ExpertResourceKey) => new Set(
-    Array.isArray(draft.packageManifest[key]) ? draft.packageManifest[key] as string[] : [],
+    key === 'knowledge'
+      ? (() => {
+          try {
+            return knowledgeReferencesFromDeclaration(resolveExpertKnowledgeDeclaration(draft.packageManifest)).map((reference) => reference.id)
+          } catch {
+            return []
+          }
+        })()
+      : Array.isArray(draft.packageManifest[key]) ? draft.packageManifest[key] as string[] : [],
   )
   const toggleResource = (key: ExpertResourceKey, id: string, checked: boolean) => {
     setDraft((value) => {
-      const selected = new Set(Array.isArray(value.packageManifest[key]) ? value.packageManifest[key] as string[] : [])
-      if (checked) selected.add(id)
-      else selected.delete(id)
-      const packageManifest = { ...value.packageManifest, [key]: [...selected] }
+      let selected: Set<string>
+      let packageManifest = { ...value.packageManifest }
+      if (key === 'knowledge') {
+        let references = [] as ReturnType<typeof knowledgeReferencesFromDeclaration>
+        try {
+          references = knowledgeReferencesFromDeclaration(resolveExpertKnowledgeDeclaration(value.packageManifest))
+        } catch {
+          references = []
+        }
+        const remoteReferences = references.filter(
+          (reference): reference is Extract<KnowledgeReference, { source: 'remote' }> => reference.source === 'remote',
+        )
+        selected = new Set(references.map((reference) => reference.id))
+        if (checked) selected.add(id)
+        else selected.delete(id)
+        const nextRemoteReferences = remoteReferences.filter((reference) => selected.has(reference.id))
+        if (checked && !remoteReferences.some((reference) => reference.id === id)) nextRemoteReferences.push(remoteKnowledgeReference(id))
+        packageManifest.manifestSchemaVersion = 2
+        packageManifest.knowledgeReferences = [
+          ...references.filter((reference) => reference.source === 'local'),
+          ...nextRemoteReferences,
+        ]
+        delete packageManifest.knowledge
+      } else {
+        selected = new Set(Array.isArray(value.packageManifest[key]) ? value.packageManifest[key] as string[] : [])
+        if (checked) selected.add(id)
+        else selected.delete(id)
+        packageManifest = { ...packageManifest, [key]: [...selected] }
+      }
       if (key === 'knowledge' || key === 'mcpServers') {
         const tools = new Set(Array.isArray(packageManifest.allowedTools) ? packageManifest.allowedTools : [])
         const dependentTools = key === 'knowledge' ? knowledgeToolIds : mcpToolIds
@@ -420,7 +798,7 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
     }
     setSavingAgent(true)
     try {
-      await desktopClient.saveAgent(draft)
+      await desktopClient.saveAgent({ ...draft, packageManifest: toPersistedExpertManifest(draft.packageManifest) })
       await resource.refresh(false)
       setEditorOpen(false)
       toast.success(editingAgent ? '专家已更新' : '专家已创建')
@@ -459,7 +837,7 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
       setSavingAgent(false)
     }
   }
-  const readOnly = Boolean(editingAgent && (editingAgent.isBuiltin || editingAgent.runtimeType !== 'pi'))
+  const readOnly = Boolean(editingAgent && (editingAgent.packageSource !== 'local' || editingAgent.runtimeType !== 'pi'))
   const iconOptions = draft.icon && !iconResource.items.some((item) => item.src === draft.icon)
     ? [{ id: 'current', name: '当前头像', src: draft.icon }, ...iconResource.items]
     : iconResource.items
@@ -503,17 +881,21 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
           <Select value={category} onValueChange={setCategory}><SelectTrigger className="fox-agent-filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">全部分类</SelectItem><SelectItem value="general">通用</SelectItem><SelectItem value="engineering">工程</SelectItem><SelectItem value="design">设计</SelectItem><SelectItem value="planning">规划</SelectItem><SelectItem value="review">审查</SelectItem><SelectItem value="business">业务</SelectItem></SelectContent></Select>
           <span className="fox-agent-result-count">{filteredCards.length} 个结果</span>
           <Button variant="ghost" size="sm" disabled={resource.syncing} onClick={() => void resource.refresh()}>{resource.syncing && <LoaderCircle className="animate-spin" />}刷新</Button>
+          <input ref={packageInputRef} hidden type="file" accept=".foxexpert,.json,application/json" onChange={(event) => void inspectPackageFile(event.target.files?.[0])} />
+          <Button variant="outline" size="sm" disabled={packageBusy || !desktopRuntimeAvailable} onClick={() => packageInputRef.current?.click()}>{packageBusy ? <LoaderCircle className="animate-spin" /> : <FileUp size={14} />}导入能力包</Button>
+          <Button variant="outline" size="sm" disabled={!desktopRuntimeAvailable} onClick={() => setDigitalColleaguesOpen(true)}><Clock3 size={14} />数字同事</Button>
           <Button size="sm" onClick={openCreate}><Plus size={14} />新建专家</Button>
         </div>
         {resource.error && <p className="fox-page-error">{resource.error}</p>}
         {(resource.syncing || resource.syncError) && <div className={`fox-agent-sync-notice ${resource.syncError ? 'is-offline' : ''}`} title={resource.syncError ?? undefined}>{resource.syncing ? <LoaderCircle className="animate-spin" /> : <Info />}<span>{resource.syncing ? '正在后台同步知识库专家，本地专家可正常使用。' : '知识库服务暂不可用或未登录，已显示缓存专家。'}</span></div>}
         {resource.loading && cards.length === 0 ? <p className="fox-page-empty">正在加载专家...</p> : filteredCards.length ? <div className="fox-entity-grid fox-shadcn-entity-grid">{filteredCards.map((agent) => <AgentCard key={agent.id} agent={agent} onUse={() => navigate('chat', agent.id)} onManage={agent.runtimeType === 'pi' ? () => openManage(agent) : undefined} />)}</div> : <p className="fox-page-empty">没有符合当前筛选条件的专家。</p>}
       </section>
+      <DigitalColleagueManager open={digitalColleaguesOpen} onOpenChange={setDigitalColleaguesOpen} experts={resource.agents} />
       <Dialog open={editorOpen} onOpenChange={setEditorOpen}>
         <DialogContent className="fox-agent-editor-dialog">
-          <DialogHeader><DialogTitle>{editingAgent ? '管理专家' : '新建专家'}</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>{editingAgent ? '管理专家' : '新建专家'}</DialogTitle>{editingAgent && <DialogDescription>{editingAgent.packageSource === 'imported' ? `已安装能力包 ${editingAgent.packageId} · v${editingAgent.packageVersion} · ${editingAgent.packageHash?.slice(0, 12)}…（包内容只读，可复制为本地专家）` : editingAgent.isBuiltin ? `Fox 内置专家 · v${editingAgent.packageVersion}` : `本地可编辑专家 · v${editingAgent.packageVersion}`}</DialogDescription>}</DialogHeader>
           <Tabs className="fox-agent-editor-tabs" value={editorTab} onValueChange={(value) => setEditorTab(value as typeof editorTab)}>
-            <TabsList><TabsTrigger value="profile">基本设置</TabsTrigger><TabsTrigger value="resources">能力配置</TabsTrigger></TabsList>
+            <TabsList><TabsTrigger value="profile">基本设置</TabsTrigger><TabsTrigger value="resources">能力配置</TabsTrigger>{editingAgent?.packageSource === 'imported' && <TabsTrigger value="versions">版本历史</TabsTrigger>}</TabsList>
             <TabsContent value="profile">
               <div className="fox-agent-editor-grid">
                 <div className="fox-agent-editor-profile-row">
@@ -535,14 +917,47 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
               <section><header><span><Globe2 />MCP 服务</span><b>{selectedResources('mcpServers').size} 已选择</b></header><ExpertResourceList items={mcpChoices} selected={selectedResources('mcpServers')} disabled={readOnly} emptyText={mcpResource.loading ? '正在读取 MCP 服务…' : mcpResource.error || '没有可选择的 MCP 服务'} onToggle={(id, checked) => toggleResource('mcpServers', id, checked)} /></section>
               <section><header><span><Wrench />工具权限</span><b>{selectedResources('allowedTools').size} 已选择</b></header><ExpertResourceList items={toolChoices} selected={selectedResources('allowedTools')} disabled={readOnly} emptyText="当前没有可选择的 Runtime 工具" onToggle={(id, checked) => toggleResource('allowedTools', id, checked)} /></section>
             </TabsContent>
+            {editingAgent?.packageSource === 'imported' && <TabsContent value="versions" className="fox-agent-editor-resources">
+              <section>
+                <header><span><History />不可变版本记录</span><b>{packageVersions.length} 个版本</b></header>
+                <div className="fox-agent-resource-list">
+                  {packageVersions.map((item) => <div key={item.id}><span><History /></span><p><b>v{item.version}<em>{item.status === 'active' ? '当前' : '历史'}</em></b><small>SHA-256 {item.packageHash.slice(0, 16)}… · {new Date(item.activatedAt).toLocaleString('zh-CN')}</small></p>{item.status !== 'active' && <Button variant="outline" size="sm" disabled={packageBusy} onClick={() => void rollbackPackage(item.version)}><RotateCcw size={13} />回滚</Button>}</div>)}
+                  {!packageVersions.length && <p className="fox-agent-resource-empty">正在读取版本历史…</p>}
+                </div>
+              </section>
+            </TabsContent>}
           </Tabs>
           <DialogFooter className="fox-agent-editor-actions">
             {editingAgent && !editingAgent.isBuiltin && <Button variant="destructive" disabled={savingAgent} onClick={() => void deleteAgent()}>删除</Button>}
             {editingAgent && <Button variant="outline" disabled={savingAgent} onClick={() => void copyAgent()}>复制</Button>}
+            {editingAgent?.runtimeType === 'pi' && <Button variant="outline" disabled={packageBusy} onClick={() => void exportPackage()}><Download size={14} />导出能力包</Button>}
             <span />
             <Button variant="outline" onClick={() => setEditorOpen(false)}>取消</Button>
             {!readOnly && <Button disabled={savingAgent} onClick={() => void saveAgent()}>{savingAgent ? '正在保存' : '保存'}</Button>}
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={packagePreviewOpen} onOpenChange={setPackagePreviewOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>安装能力包前预览</DialogTitle><DialogDescription>安装只登记声明式资源，不会执行包内脚本，也不会自动授予项目权限。</DialogDescription></DialogHeader>
+          {packagePreview && <div className="fox-agent-editor-grid">
+            <div className="fox-agent-editor-profile-row">
+              <label><span>能力包</span><strong>{packagePreview.packageId}</strong></label>
+              <label><span>版本变化</span><strong>{packagePreview.currentVersion ? `v${packagePreview.currentVersion} → v${packagePreview.version}` : `安装 v${packagePreview.version}`}</strong></label>
+              <label><span>操作</span><strong>{{ install: '安装', upgrade: '升级', no_change: '已是当前版本', downgrade: '拒绝降级', conflict: '版本冲突' }[packagePreview.action]}</strong></label>
+            </div>
+            <label><span>包哈希</span><code>{packagePreview.packageHash}</code></label>
+            <label><span>项目权限请求</span><strong>{packagePreview.requestedProjectPermission}</strong><small>最终权限仍由 Host 和用户在运行时决定。</small></label>
+            {(packagePreview.missingResources.agents.length + packagePreview.missingResources.skills.length + packagePreview.missingResources.tools.length + packagePreview.missingResources.mcpServers.length + packagePreview.missingResources.knowledgeReferences.length) > 0 && <div className="fox-page-error">缺少资源：{[
+              ...packagePreview.missingResources.agents.map((id) => `Agent ${id}`),
+              ...packagePreview.missingResources.skills.map((id) => `Skill ${id}`),
+              ...packagePreview.missingResources.tools.map((id) => `Tool ${id}`),
+              ...packagePreview.missingResources.mcpServers.map((id) => `MCP ${id}`),
+              ...packagePreview.missingResources.knowledgeReferences.map((item) => `Knowledge ${item.id}`),
+            ].join('、')}</div>}
+            {packagePreview.warnings.map((warning) => <p key={warning} className="fox-page-error">{warning}</p>)}
+          </div>}
+          <DialogFooter><Button variant="outline" onClick={() => setPackagePreviewOpen(false)}>取消</Button><Button disabled={!packagePreview?.canInstall || packageBusy} onClick={() => void installPackage()}>{packageBusy ? '正在安装' : packagePreview?.action === 'upgrade' ? '确认升级' : packagePreview?.action === 'no_change' ? '无需安装' : '确认安装'}</Button></DialogFooter>
         </DialogContent>
       </Dialog>
     </WorkspacePage>
@@ -559,7 +974,7 @@ export function AgentDetailPage({ sidebarCollapsed, onSidebar, navigate, agentId
         <main className="fox-detail-main">
           {section === 'home' && <><section className="fox-agent-hero"><span><img src={agent.image} alt="" /></span><div><div><h1>{agent.name}</h1>{agent.isDefault && <Badge variant="secondary"><i />默认专家</Badge>}</div><p>{agent.description}</p><small>{agent.runtimeType === 'pi' ? 'Fox 原生专家可在知识库服务离线时继续对话、读取和处理已授权项目。' : '系统提示词与管理配置保留在知识库服务，Fox 仅展示普通用户可见和可配置的字段。'}</small></div></section><AgentWorkRecord agentId={agent.id} /><AgentCapabilitiesCard agent={agent} navigate={navigate} /></>}
           {section === 'conversations' && <AgentSectionLayout title="对话任务" description="查看该专家执行过的对话任务、完成状态和关联项目。"><AgentWorkRecord agentId={agent.id} conversationsOnly /></AgentSectionLayout>}
-          {section === 'memory' && <AgentSectionLayout title="记忆" description="管理该专家保存的长期记忆、用户偏好和项目上下文。"><Card className="fox-agent-section-card fox-agent-memory-empty"><span><Brain /></span><h2>记忆尚未启用</h2><p>后续将支持查看和管理该专家保存的长期记忆、用户偏好与项目上下文。</p></Card></AgentSectionLayout>}
+          {section === 'memory' && <AgentSectionLayout title="记忆" description="查看、确认、编辑、启停、处理冲突和删除 Fox Host 管理的长期记忆。"><AgentMemoryManager agent={agent} /></AgentSectionLayout>}
           {section === 'skills' && <AgentSectionLayout title="Skills" description="查看和管理为该专家启用的预置能力与用户扩展。"><AgentCapabilitiesCard agent={agent} navigate={navigate} section="skills" /></AgentSectionLayout>}
           {section === 'tools' && <AgentSectionLayout title="工具" description="查看该专家可以使用的 Runtime、CLI 与 MCP 工具。"><AgentCapabilitiesCard agent={agent} navigate={navigate} section="tools" /></AgentSectionLayout>}
         </main>

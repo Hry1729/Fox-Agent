@@ -5,7 +5,7 @@ import type { KnowledgeDocumentSourceMetadata } from '@/features/conversations/m
 import type { KnowledgeSourceLocator } from '@/features/workspace/types'
 import type { DocumentViewPosition } from './document-activity-model'
 import { MAX_PDF_ZOOM, MIN_PDF_ZOOM, PDF_ZOOM_STEP, movePdfPage, normalizePdfViewport, zoomPdf } from './knowledge-preview-model'
-import { openKnowledgeCachedPreviewSource } from './knowledge-preview-source'
+import { openKnowledgeCachedPreviewSource, type KnowledgeCachedPreviewOpener } from './knowledge-preview-source'
 import { PreviewIconButton, PreviewToolbar } from './knowledge-preview-controls'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
@@ -27,6 +27,7 @@ export default function KnowledgePdfViewer({
   requestedPosition,
   onPositionChange,
   onFailure,
+  openPreviewSource,
 }: {
   knowledgeBaseId: string
   documentId: string
@@ -36,6 +37,7 @@ export default function KnowledgePdfViewer({
   requestedPosition?: DocumentViewPosition
   onPositionChange?(position: DocumentViewPosition): void
   onFailure(message: string): void
+  openPreviewSource?: KnowledgeCachedPreviewOpener
 }) {
   const canvasHostRef = useRef<HTMLDivElement | null>(null)
   const documentRef = useRef<PDFDocumentProxy | null>(null)
@@ -68,14 +70,16 @@ export default function KnowledgePdfViewer({
       try {
         const pdfjs = await import('pdfjs-dist')
         pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl
-        source = await openKnowledgeCachedPreviewSource({
-          knowledgeBaseId,
-          documentId,
-          filename,
-          maxBytes: MAX_PDF_BYTES,
-          metadata,
-          signal: abortController.signal,
-        })
+        source = openPreviewSource
+          ? await openPreviewSource({ maxBytes: MAX_PDF_BYTES, signal: abortController.signal })
+          : await openKnowledgeCachedPreviewSource({
+              knowledgeBaseId,
+              documentId,
+              filename,
+              maxBytes: MAX_PDF_BYTES,
+              metadata,
+              signal: abortController.signal,
+            })
         const bytes = await source.readAll()
         if (disposed) return
         loadingTask = pdfjs.getDocument({
@@ -109,7 +113,7 @@ export default function KnowledgePdfViewer({
       void loadingTask?.destroy()
       void source?.close()
     }
-  }, [documentId, filename, knowledgeBaseId, metadata, onFailure])
+  }, [documentId, filename, knowledgeBaseId, metadata, onFailure, openPreviewSource])
 
   useEffect(() => {
     requestedPageRef.current = sourceLocator?.page

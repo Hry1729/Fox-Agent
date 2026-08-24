@@ -5,10 +5,13 @@
   "scripts": {
     "dev": "pnpm --dir apps/desktop dev",
     "build": "pnpm --dir apps/desktop build",
+    "desktop:test": "bun test ./apps/desktop/tests",
     "runtime:test": "pnpm --dir services/agent-runtime test",
     "runtime:eval": "pnpm --dir services/agent-runtime eval:offline",
     "runtime:build": "pnpm --dir services/agent-runtime build:sidecar",
     "runtime:smoke": "pnpm --dir services/agent-runtime smoke:sidecar",
+    "contract-fixtures:verify": "node scripts/validate-contract-fixtures.mjs",
+    "contract-fixtures:test": "node --test scripts/validate-contract-fixtures.test.mjs",
     "knowledge:verify-preview": "node scripts/verify-knowledge-preview-contract.mjs",
     "knowledge:verify-preview:test": "node --test scripts/verify-knowledge-preview-contract.test.mjs",
     "tauri": "pnpm --dir apps/desktop tauri",

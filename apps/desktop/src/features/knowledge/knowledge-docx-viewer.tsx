@@ -5,7 +5,7 @@ import type { KnowledgeSourceLocator } from '@/features/workspace/types'
 import type { DocumentViewPosition } from './document-activity-model'
 import { assertSafeZipArchive } from './knowledge-archive-safety'
 import { PreviewIconButton, PreviewToolbar } from './knowledge-preview-controls'
-import { openKnowledgeCachedPreviewSource } from './knowledge-preview-source'
+import { openKnowledgeCachedPreviewSource, type KnowledgeCachedPreviewOpener } from './knowledge-preview-source'
 
 const MAX_DOCX_BYTES = 64 * 1024 * 1024
 const DOCX_ZIP_LIMITS = {
@@ -24,6 +24,7 @@ export default function KnowledgeDocxViewer({
   requestedPosition,
   onPositionChange,
   onFailure,
+  openPreviewSource,
 }: {
   knowledgeBaseId: string
   documentId: string
@@ -33,6 +34,7 @@ export default function KnowledgeDocxViewer({
   requestedPosition?: DocumentViewPosition
   onPositionChange?(position: DocumentViewPosition): void
   onFailure(message: string): void
+  openPreviewSource?: KnowledgeCachedPreviewOpener
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const wheelDeltaRef = useRef(0)
@@ -77,14 +79,16 @@ export default function KnowledgeDocxViewer({
         setLoading(true)
         const [{ renderAsync }, nextSource] = await Promise.all([
           import('docx-preview'),
-          openKnowledgeCachedPreviewSource({
-            knowledgeBaseId,
-            documentId,
-            filename,
-            maxBytes: MAX_DOCX_BYTES,
-            metadata,
-            signal: abortController.signal,
-          }),
+          openPreviewSource
+            ? openPreviewSource({ maxBytes: MAX_DOCX_BYTES, signal: abortController.signal })
+            : openKnowledgeCachedPreviewSource({
+                knowledgeBaseId,
+                documentId,
+                filename,
+                maxBytes: MAX_DOCX_BYTES,
+                metadata,
+                signal: abortController.signal,
+              }),
         ])
         source = nextSource
         const bytes = await source.readAll()
@@ -138,7 +142,7 @@ export default function KnowledgeDocxViewer({
       if (wheelResetRef.current != null) window.clearTimeout(wheelResetRef.current)
       containerRef.current?.replaceChildren()
     }
-  }, [documentId, filename, knowledgeBaseId, metadata, onFailure, showPage, sourceLocator?.anchor, sourceLocator?.excerpt, sourceLocator?.page])
+  }, [documentId, filename, knowledgeBaseId, metadata, onFailure, openPreviewSource, showPage, sourceLocator?.anchor, sourceLocator?.excerpt, sourceLocator?.page])
 
   useEffect(() => {
     if (loading || !requestedPosition?.page || requestedPosition.page === page) return

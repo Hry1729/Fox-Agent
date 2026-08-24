@@ -1,0 +1,90 @@
+{
+  "manifestVersion": 1,
+  "fixtures": [
+    {
+      "id": "plugin-activation-global",
+      "path": "fixtures/plugin-activation-global.json"
+    },
+    {
+      "id": "plugin-activation-per-agent",
+      "path": "fixtures/plugin-activation-per-agent.json"
+    },
+    {
+      "id": "knowledge-reference-local",
+      "path": "fixtures/knowledge-reference-local.json"
+    },
+    {
+      "id": "knowledge-reference-remote",
+      "path": "fixtures/knowledge-reference-remote.json"
+    },
+    {
+      "id": "operation-success",
+      "path": "fixtures/operation-success.json"
+    },
+    {
+      "id": "operation-partial",
+      "path": "fixtures/operation-partial.json"
+    },
+    {
+      "id": "operation-failure",
+      "path": "fixtures/operation-failure.json"
+    }
+  ],
+  "enums": [
+    {
+      "name": "operation-status",
+      "members": [
+        {
+          "name": "queued",
+          "fixture": "enums/operation-status/queued.json"
+        },
+        {
+          "name": "running",
+          "fixture": "enums/operation-status/running.json"
+        },
+        {
+          "name": "paused",
+          "fixture": "enums/operation-status/paused.json"
+        },
+        {
+          "name": "completed",
+          "fixture": "enums/operation-status/completed.json"
+        },
+        {
+          "name": "failed",
+          "fixture": "enums/operation-status/failed.json"
+        },
+        {
+          "name": "cancelled",
+          "fixture": "enums/operation-status/cancelled.json"
+        }
+      ]
+    },
+    {
+      "name": "plugin-activation-mode",
+      "members": [
+        {
+          "name": "global",
+          "fixture": "enums/plugin-activation-mode/global.json"
+        },
+        {
+          "name": "per_agent",
+          "fixture": "enums/plugin-activation-mode/per_agent.json"
+        }
+      ]
+    },
+    {
+      "name": "knowledge-source",
+      "members": [
+        {
+          "name": "local",
+          "fixture": "enums/knowledge-source/local.json"
+        },
+        {
+          "name": "remote",
+          "fixture": "enums/knowledge-source/remote.json"
+        }
+      ]
+    }
+  ]
+}

@@ -22,7 +22,8 @@ import { useYuxiUser } from './use-yuxi-user'
 import { desktopClient } from '@/features/conversations/api/desktop-client'
 import { useSkills } from './use-skills'
 import { useMcpServers, type SaveMcpServerInput } from './use-mcp-servers'
-import type { KnowledgePreviewCacheStatistics, McpServerRecord, ModelProviderRecord, ProjectRecord, UsageStatistics } from '@/features/conversations/model/types'
+import { useLifecycleHooks } from './use-lifecycle-hooks'
+import type { KnowledgePreviewCacheStatistics, LifecycleHookRecord, McpServerRecord, ModelProviderRecord, ObservabilityStatistics, ProjectRecord, UsageStatistics } from '@/features/conversations/model/types'
 import { Grainient } from '@/components/effects/grainient'
 import { SpecularButton } from '@/components/effects/specular-button'
 import { UserProfileDialog, useUserProfile } from '@/features/profile/user-profile'
@@ -415,14 +416,36 @@ function formatUsageNumber(value: number) {
   return new Intl.NumberFormat('zh-CN', { notation: value >= 10_000 ? 'compact' : 'standard', maximumFractionDigits: 1 }).format(value)
 }
 
+function formatDuration(value: number | null) {
+  if (value === null) return '进行中'
+  if (value < 1000) return `${value} ms`
+  return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)} s`
+}
+
 export function UsageStatisticsPage({ sidebarCollapsed, onSidebar }: { sidebarCollapsed: boolean; onSidebar: () => void }) {
   const [statistics, setStatistics] = useState<UsageStatistics | null>(null)
+  const [observability, setObservability] = useState<ObservabilityStatistics | null>(null)
   const [loading, setLoading] = useState(true)
+  const [evaluationLoading, setEvaluationLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const refresh = () => {
     setLoading(true)
     setError(null)
-    void desktopClient.usageStatistics().then(setStatistics).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause))).finally(() => setLoading(false))
+    void Promise.all([desktopClient.usageStatistics(), desktopClient.observabilityStatistics()])
+      .then(([usage, traces]) => { setStatistics(usage); setObservability(traces) })
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
+      .finally(() => setLoading(false))
+  }
+  const runEvaluation = () => {
+    setEvaluationLoading(true)
+    setError(null)
+    void desktopClient.runOfflineEvaluation()
+      .then((result) => {
+        toast.success(`离线评测完成：${result.passed}/${result.total}`)
+        refresh()
+      })
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
+      .finally(() => setEvaluationLoading(false))
   }
   useEffect(refresh, [])
   const activityRecord = useMemo(() => {
@@ -442,7 +465,9 @@ export function UsageStatisticsPage({ sidebarCollapsed, onSidebar }: { sidebarCo
   const maxAgentRuns = Math.max(1, ...(statistics?.agents.map((agent) => agent.runCount) ?? [1]))
   const cacheEligibleTokens = (statistics?.inputTokens ?? 0) + (statistics?.cacheReadTokens ?? 0)
   const cacheHitRate = cacheEligibleTokens ? Math.round((statistics?.cacheReadTokens ?? 0) / cacheEligibleTokens * 100) : 0
-  return <WorkspacePage title="使用统计" subtitle="本地活动与 Token" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="本地统计" title="使用统计" description="查看 Fox 在这台设备上的对话、任务、专家和 Token 使用情况；不包含费用估算。">
+  const latestEvaluation = observability?.evaluationHistory[0] ?? null
+  const operationLabels: Record<string, string> = { plan: '规划', inference: '模型', execute_tool: '工具', host_prepare: '准备', finalize: '收尾', ui_render: '界面' }
+  return <WorkspacePage title="使用统计" subtitle="活动、Trace 与评测" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="本地统计" title="使用统计" description="查看 Fox 在这台设备上的使用、分段延迟、Trace 覆盖与固定离线回归；不包含费用估算。">
     {error && <p className="fox-setting-error">{error}</p>}
     {!statistics && loading ? <Card className="fox-settings-section fox-usage-loading"><LoaderCircle className="animate-spin" /><span>正在汇总使用记录</span></Card> : statistics && <>
       <Card className="fox-agent-work-card fox-usage-record-card">
@@ -470,6 +495,19 @@ export function UsageStatisticsPage({ sidebarCollapsed, onSidebar }: { sidebarCo
         <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>专家使用</h2></div></div>{statistics.agents.length ? <div className="fox-usage-agents">{statistics.agents.map((agent, index) => <div key={agent.agentId}><span className="fox-usage-rank">{index + 1}</span><div><header><b>{agent.agentName}</b><small>{agent.runCount} 次运行</small></header><span><i style={{ width: `${agent.runCount / maxAgentRuns * 100}%` }} /></span><small>{agent.conversationCount} 个对话 · {formatUsageNumber(agent.totalTokens)} tokens</small></div></div>)}</div> : <p className="fox-settings-empty-copy">还没有专家使用记录。</p>}</Card>
         <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>Token 构成</h2><p>Prompt 与工具目录共享同一供应商缓存口径。</p></div><Badge variant="secondary">命中 {cacheHitRate}%</Badge></div><div className="fox-token-summary"><div><span>输入</span><strong>{formatUsageNumber(statistics.inputTokens)}</strong><i style={{ width: `${statistics.totalTokens ? statistics.inputTokens / statistics.totalTokens * 100 : 0}%` }} /></div><div><span>输出</span><strong>{formatUsageNumber(statistics.outputTokens)}</strong><i style={{ width: `${statistics.totalTokens ? statistics.outputTokens / statistics.totalTokens * 100 : 0}%` }} /></div><div><span>缓存读取</span><strong>{formatUsageNumber(statistics.cacheReadTokens)}</strong><i style={{ width: `${statistics.totalTokens ? statistics.cacheReadTokens / statistics.totalTokens * 100 : 0}%` }} /></div><div><span>缓存写入</span><strong>{formatUsageNumber(statistics.cacheWriteTokens)}</strong><i style={{ width: `${statistics.totalTokens ? statistics.cacheWriteTokens / statistics.totalTokens * 100 : 0}%` }} /></div></div><p className="fox-usage-note"><Activity />命中率 = 缓存读取 /（普通输入 + 缓存读取）；统计取每次运行最后一次 usage，避免流式重复累计。</p></Card>
       </div>
+      {observability && <>
+        <Card className="fox-settings-section fox-observability-card">
+          <div className="fox-settings-section-head"><div><h2>运行可观测性</h2><p>Fox Trace schema v{observability.traceSchemaVersion} · 每次运行以 invoke_agent 为根 Span。</p></div><Badge variant={observability.traceCoveragePercent === 100 ? 'secondary' : 'outline'}>{observability.traceCoveragePercent}% Trace 覆盖</Badge></div>
+          <div className="fox-observability-metrics">
+            {observability.latencyMetrics.length ? observability.latencyMetrics.map((metric) => <div key={metric.operation}><span>{operationLabels[metric.operation] ?? metric.operation}</span><strong>P50 {formatDuration(metric.p50Ms)}</strong><small>P95 {formatDuration(metric.p95Ms)} · {metric.sampleCount} 样本</small></div>) : <p className="fox-settings-empty-copy">完成一次本地运行后会显示规划、模型、工具和界面分段耗时。</p>}
+          </div>
+          {observability.recentRuns.length > 0 && <div className="fox-trace-run-list">{observability.recentRuns.slice(0, 8).map((run) => <div key={run.runId}><span><b>{run.model || '默认模型'}</b><small title={run.traceId}>{run.traceId.slice(0, 12)}… · {run.spanCount} spans</small></span><span><small>规划 {formatDuration(run.planningDurationMs)} · 模型 {formatDuration(run.modelDurationMs)} · 工具 {formatDuration(run.toolDurationMs)}</small><b>{formatDuration(run.totalDurationMs)}</b></span></div>)}</div>}
+        </Card>
+        <Card className="fox-settings-section fox-evaluation-card">
+          <div className="fox-settings-section-head"><div><h2>Agent 固定回归集</h2><p>SWE-bench、BFCL、AgentDojo 风格的本地契约评测；结果不冒充官方榜单成绩。</p></div><Button variant="outline" size="sm" onClick={runEvaluation} disabled={evaluationLoading || loading}>{evaluationLoading ? <LoaderCircle className="animate-spin" /> : <Zap />}运行离线评测</Button></div>
+          {latestEvaluation ? <><div className="fox-evaluation-summary"><strong>{latestEvaluation.passed}/{latestEvaluation.total}</strong><span>{latestEvaluation.failed ? `${latestEvaluation.failed} 项失败` : '全部通过'} · {latestEvaluation.suites} 个套件 · {formatDuration(latestEvaluation.durationMs)}</span><code title={latestEvaluation.reportHash}>{latestEvaluation.reportHash.slice(0, 12)}</code></div><div className="fox-evaluation-suites">{latestEvaluation.suiteResults.map((suite) => <div key={suite.name}><span>{suite.name}</span><b className={suite.failed ? 'is-failed' : ''}>{suite.passed}/{suite.total}</b></div>)}</div>{observability.evaluationHistory.length > 1 && <p className="fox-usage-note"><Activity />已保留最近 {observability.evaluationHistory.length} 次结果，可观察固定数据集通过率趋势。</p>}</> : <p className="fox-settings-empty-copy">尚无本机评测记录。运行时只读取内置固定夹具，不调用真实模型、网络或项目文件。</p>}
+        </Card>
+      </>}
     </>}
   </SettingsScaffold></WorkspacePage>
 }
@@ -477,7 +515,7 @@ export function UsageStatisticsPage({ sidebarCollapsed, onSidebar }: { sidebarCo
 export function ExtensionsSettingsPage({ sidebarCollapsed, onSidebar, navigate }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace }) {
   const skills = useSkills()
   const mcp = useMcpServers()
-  return <WorkspacePage title="扩展" subtitle="Skills 与 MCP" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="能力扩展" title="扩展" description="管理注入 Agent 的 Skills 和通过 stdio 连接的 MCP Server。"><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>Skills</h2><p>为 Fox Agent 注入可审查的领域指令，不会自动增加工具权限。</p></div><Badge variant="secondary">{skills.items.filter((item) => item.enabled).length} 已启用</Badge></div><button className="fox-service-card" onClick={() => navigate('skills')}><span><Puzzle /></span><p><b>管理 Skills</b><small>{skills.items.length} 个已安装 · 扫描本地 SKILL.md</small></p><ChevronRight /></button></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>MCP Servers</h2><p>外部工具调用仍经过 Fox 权限审批与审计。</p></div><Badge variant="secondary">{mcp.items.filter((item) => item.enabled).length} 已启用</Badge></div><button className="fox-service-card" onClick={() => navigate('mcp')}><span><Cable /></span><p><b>管理 MCP</b><small>{mcp.items.length} 个 Server · stdio 连接</small></p><ChevronRight /></button></Card></SettingsScaffold></WorkspacePage>
+  return <WorkspacePage title="扩展" subtitle="Skills 与扩展源" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="能力扩展" title="扩展" description="管理 Skills、持久 MCP、OpenAPI Connector 与声明式策略 Hooks。"><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>Skills</h2><p>为 Fox Agent 注入可审查的领域指令，不会自动增加工具权限。</p></div><Badge variant="secondary">{skills.items.filter((item) => item.enabled).length} 已启用</Badge></div><button className="fox-service-card" onClick={() => navigate('skills')}><span><Puzzle /></span><p><b>管理 Skills</b><small>{skills.items.length} 个已安装 · 扫描本地 SKILL.md</small></p><ChevronRight /></button></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>扩展源</h2><p>外部工具调用仍经过 Fox 权限审批、Hook 策略与审计。</p></div><Badge variant="secondary">{mcp.items.filter((item) => item.enabled).length} 已启用</Badge></div><button className="fox-service-card" onClick={() => navigate('mcp')}><span><Cable /></span><p><b>管理扩展源</b><small>{mcp.items.length} 个源 · stdio / HTTP MCP / OpenAPI</small></p><ChevronRight /></button></Card></SettingsScaffold></WorkspacePage>
 }
 
 export function AboutSettingsPage({ sidebarCollapsed, onSidebar }: { sidebarCollapsed: boolean; onSidebar: () => void }) {
@@ -501,11 +539,32 @@ interface McpFormState {
   name: string
   command: string
   argsText: string
+  transport: McpServerRecord['transport']
+  endpointUrl: string
+  definition: string
   environmentText: string
   clearEnvironment: boolean
 }
 
-const emptyMcpForm: McpFormState = { name: '', command: '', argsText: '', environmentText: '', clearEnvironment: false }
+const emptyMcpForm: McpFormState = { name: '', command: '', argsText: '', transport: 'stdio', endpointUrl: '', definition: '', environmentText: '', clearEnvironment: false }
+
+interface HookFormState {
+  id?: string
+  name: string
+  event: LifecycleHookRecord['event']
+  matcher: string
+  action: LifecycleHookRecord['action']
+  reason: string
+  priority: number
+}
+
+const emptyHookForm: HookFormState = { name: '', event: 'before_tool', matcher: '*', action: 'annotate', reason: '', priority: 100 }
+
+function extensionTransportLabel(transport: McpServerRecord['transport']) {
+  if (transport === 'streamable_http') return 'HTTP MCP'
+  if (transport === 'openapi') return 'OpenAPI'
+  return 'stdio MCP'
+}
 
 function mcpStatusLabel(server: McpServerRecord) {
   if (!server.enabled) return '已停用'
@@ -528,31 +587,43 @@ function parseEnvironment(value: string) {
 
 export function McpPage({ sidebarCollapsed, onSidebar, navigate }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace }) {
   const resource = useMcpServers()
+  const hooks = useLifecycleHooks()
   const [form, setForm] = useState<McpFormState | null>(null)
+  const [hookForm, setHookForm] = useState<HookFormState>({ ...emptyHookForm })
   const [expanded, setExpanded] = useState<string | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
-  const openEdit = (server: McpServerRecord) => setForm({ id: server.id, name: server.name, command: server.command, argsText: server.args.join('\n'), environmentText: '', clearEnvironment: false })
+  const openEdit = (server: McpServerRecord) => setForm({ id: server.id, name: server.name, command: server.command, argsText: server.args.join('\n'), transport: server.transport, endpointUrl: server.endpointUrl ?? '', definition: server.definition ?? '', environmentText: '', clearEnvironment: false })
   const save = async () => {
     if (!form) return
     try {
       const environment = parseEnvironment(form.environmentText)
-      const input: SaveMcpServerInput = { id: form.id, name: form.name.trim(), command: form.command.trim(), args: form.argsText.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), clearEnvironment: form.clearEnvironment }
+      const input: SaveMcpServerInput = { id: form.id, name: form.name.trim(), command: form.command.trim(), args: form.argsText.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), transport: form.transport, endpointUrl: form.endpointUrl.trim() || undefined, definition: form.definition.trim() || undefined, clearEnvironment: form.clearEnvironment }
       if (Object.keys(environment).length) input.environment = environment
       const saved = await resource.save(input)
       if (!saved) return
       setForm(null); setFormError(null); toast.success(form.id ? 'MCP Server 已更新' : 'MCP Server 已添加')
     } catch (cause) { setFormError(cause instanceof Error ? cause.message : String(cause)) }
   }
+  const saveHook = async () => {
+    const saved = await hooks.save({ ...hookForm, name: hookForm.name.trim(), matcher: hookForm.matcher.trim(), reason: hookForm.reason.trim(), enabled: true })
+    if (!saved) return
+    setHookForm({ ...emptyHookForm })
+    toast.success(hookForm.id ? '生命周期 Hook 已更新' : '生命周期 Hook 已添加')
+  }
   return (
-    <WorkspacePage title="MCP" subtitle="外部工具连接" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('settings')} actions={<Button size="sm" onClick={() => { setForm({ ...emptyMcpForm }); setFormError(null) }}><Plus />添加 Server</Button>}>
+    <WorkspacePage title="扩展源" subtitle="MCP、OpenAPI 与策略" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('settings')} actions={<Button size="sm" onClick={() => { setForm({ ...emptyMcpForm }); setFormError(null) }}><Plus />添加扩展源</Button>}>
       <div className="fox-settings-layout">
-        <main><header><span>工具扩展</span><h1>MCP Servers</h1><p>Fox 通过 stdio 隔离连接 MCP。工具调用始终经过 Fox 审批与审计，保存配置不会自动启动进程。</p></header>
+        <main><header><span>统一扩展协议</span><h1>扩展源</h1><p>持久连接 stdio / Streamable HTTP MCP，或把 OpenAPI 3.x operation 动态注册为工具；所有调用继续经过审批、声明式 Hook 与审计。</p></header>
           {resource.error && <p className="fox-setting-error">{resource.error}</p>}
-          {!resource.loading && resource.items.length === 0 && <Card className="fox-settings-section fox-skill-empty"><Cable /><div><h2>尚未添加 MCP Server</h2><p>添加本机命令后，可先测试工具目录，再由 Fox Runtime 按需调用。</p></div></Card>}
-          <div className="fox-mcp-list">{resource.items.map((server) => { const test = resource.tests[server.id]; const isExpanded = expanded === server.id; return <Card key={server.id} className="fox-settings-section fox-mcp-card"><div className="fox-mcp-card-head"><span><Cable /></span><button className="fox-skill-summary" onClick={() => setExpanded(isExpanded ? null : server.id)}><h2>{server.name}</h2><p title={server.command}>{server.command}{server.args.length ? ` · ${server.args.join(' ')}` : ''}</p></button><Badge variant={server.status === 'unavailable' ? 'destructive' : 'secondary'}>{mcpStatusLabel(server)}</Badge><Switch checked={server.enabled} disabled={resource.busyId === server.id} onCheckedChange={(enabled) => void resource.setEnabled(server.id, enabled)} /></div><Separator /><div className="fox-mcp-meta"><span><Zap />{test ? `${test.toolCount} 个工具` : server.status === 'connected' ? '工具目录已验证' : '等待连接测试'}</span><span>{server.credentialConfigured ? '环境变量已安全保存' : '未保存环境变量'}</span><div><Button variant="ghost" size="sm" disabled={!server.enabled || resource.busyId === server.id} onClick={() => void resource.test(server.id).then((result) => result && toast.success(`连接成功，发现 ${result.toolCount} 个工具`))}>{resource.busyId === server.id ? <LoaderCircle className="animate-spin" /> : <Zap />}测试</Button><Button variant="ghost" size="icon-sm" title="编辑" onClick={() => openEdit(server)}><Pencil /></Button><Button variant="ghost" size="icon-sm" title="删除" onClick={() => { if (window.confirm(`删除 MCP Server“${server.name}”？已保存的环境变量也会被清除。`)) void resource.remove(server.id).then((ok) => ok && toast.success('MCP Server 已删除')) }}><Trash2 /></Button><button className="fox-mcp-expand" aria-label={isExpanded ? '收起工具' : '展开工具'} onClick={() => setExpanded(isExpanded ? null : server.id)}><ChevronDown className={isExpanded ? 'is-open' : ''} /></button></div></div>{server.lastError && <p className="fox-setting-error">{server.lastError}</p>}{isExpanded && <div className="fox-mcp-tools">{test?.tools.length ? test.tools.map((tool) => <div key={tool.name}><b>{tool.name}</b><p>{tool.description || '此工具没有提供说明。'}</p></div>) : <p>点击“测试”读取并校验此 Server 的工具目录。Fox 最多接收 200 个工具。</p>}</div>}</Card> })}</div>
+          {!resource.loading && resource.items.length === 0 && <Card className="fox-settings-section fox-skill-empty"><Cable /><div><h2>尚未添加扩展源</h2><p>添加本机 MCP、HTTP MCP 或 OpenAPI 定义后，先运行健康测试，再由 Fox Runtime 按需调用。</p></div></Card>}
+          <div className="fox-mcp-list">{resource.items.map((server) => { const test = resource.tests[server.id]; const isExpanded = expanded === server.id; const target = server.transport === 'stdio' ? `${server.command}${server.args.length ? ` · ${server.args.join(' ')}` : ''}` : server.endpointUrl ?? ''; return <Card key={server.id} className="fox-settings-section fox-mcp-card"><div className="fox-mcp-card-head"><span><Cable /></span><button className="fox-skill-summary" onClick={() => setExpanded(isExpanded ? null : server.id)}><h2>{server.name}</h2><p title={target}>{extensionTransportLabel(server.transport)} · {target}</p></button><Badge variant={server.status === 'unavailable' ? 'destructive' : 'secondary'}>{mcpStatusLabel(server)}</Badge><Switch checked={server.enabled} disabled={resource.busyId === server.id} onCheckedChange={(enabled) => void resource.setEnabled(server.id, enabled)} /></div><Separator /><div className="fox-mcp-meta"><span><Zap />{test ? `${test.toolCount} 个工具 · ${test.latencyMs} ms` : server.toolCount != null ? `${server.toolCount} 个工具${server.lastLatencyMs != null ? ` · ${server.lastLatencyMs} ms` : ''}` : '等待健康测试'}</span><span>{server.credentialConfigured ? (server.transport === 'stdio' ? '环境变量已安全保存' : '请求 Header 已安全保存') : '未保存凭证'}</span><div><Button variant="ghost" size="sm" disabled={!server.enabled || resource.busyId === server.id} onClick={() => void resource.test(server.id).then((result) => result && toast.success(`健康检查通过，发现 ${result.toolCount} 个工具`))}>{resource.busyId === server.id ? <LoaderCircle className="animate-spin" /> : <Zap />}健康检查</Button><Button variant="ghost" size="icon-sm" title="编辑" onClick={() => openEdit(server)}><Pencil /></Button><Button variant="ghost" size="icon-sm" title="删除" onClick={() => { if (window.confirm(`删除扩展源“${server.name}”？已保存的凭证也会被清除。`)) void resource.remove(server.id).then((ok) => ok && toast.success('扩展源已删除')) }}><Trash2 /></Button><button className="fox-mcp-expand" aria-label={isExpanded ? '收起工具' : '展开工具'} onClick={() => setExpanded(isExpanded ? null : server.id)}><ChevronDown className={isExpanded ? 'is-open' : ''} /></button></div></div>{server.lastError && <p className="fox-setting-error">{server.lastError}</p>}{isExpanded && <div className="fox-mcp-tools">{test?.tools.length ? test.tools.map((tool) => <div key={tool.name}><b>{tool.name}</b><p>{tool.description || '此工具没有提供说明。'}</p></div>) : <p>点击“健康检查”读取并校验工具目录。Fox 每个扩展源最多接收 200 个工具。</p>}</div>}</Card> })}</div>
+          <header><span>受限策略生命周期</span><h1>声明式 Hooks</h1><p>Hook 不执行脚本，只能按工具名匹配并阻止、要求审批或向模型附加说明；每次命中都会写入审计记录。</p></header>
+          {hooks.error && <p className="fox-setting-error">{hooks.error}</p>}
+          <Card className="fox-settings-section fox-service-form"><div className="fox-settings-section-head"><div><h2>{hookForm.id ? '编辑 Hook' : '添加 Hook'}</h2><p>匹配器支持精确名称、逗号分组，以及前后缀通配符，例如 call_*。</p></div><ShieldCheck /></div><div className="fox-settings-form-grid"><label>名称<Input value={hookForm.name} onChange={(event) => setHookForm({ ...hookForm, name: event.target.value })} placeholder="例如 高风险工具审批" /></label><label>事件<Select value={hookForm.event} onValueChange={(event: LifecycleHookRecord['event']) => setHookForm({ ...hookForm, event, action: event === 'before_tool' ? hookForm.action : 'annotate' })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="before_tool">工具调用前</SelectItem><SelectItem value="after_tool">工具调用后</SelectItem><SelectItem value="before_run">Run 开始前</SelectItem><SelectItem value="after_run">Run 结束后</SelectItem></SelectContent></Select></label><label>匹配器<Input value={hookForm.matcher} onChange={(event) => setHookForm({ ...hookForm, matcher: event.target.value })} placeholder="run_command, call_*" /></label><label>动作<Select value={hookForm.action} onValueChange={(action: LifecycleHookRecord['action']) => setHookForm({ ...hookForm, action })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{hookForm.event === 'before_tool' && <SelectItem value="block">阻止</SelectItem>}{hookForm.event === 'before_tool' && <SelectItem value="require_approval">要求审批</SelectItem>}<SelectItem value="annotate">附加说明</SelectItem></SelectContent></Select></label><label>原因 / 说明<Textarea value={hookForm.reason} onChange={(event) => setHookForm({ ...hookForm, reason: event.target.value })} placeholder="会展示在审批或模型上下文中" /></label></div><div className="fox-setting-actions">{hookForm.id && <Button variant="outline" onClick={() => setHookForm({ ...emptyHookForm })}>取消编辑</Button>}<Button disabled={!hookForm.name.trim() || !hookForm.matcher.trim() || hooks.busyId != null} onClick={() => void saveHook()}>{hooks.busyId && <LoaderCircle className="animate-spin" />}保存 Hook</Button></div></Card>
+          <div className="fox-mcp-list">{hooks.items.map((hook) => <Card key={hook.id} className="fox-settings-section fox-mcp-card"><div className="fox-mcp-card-head"><span><Shield /></span><button className="fox-skill-summary" onClick={() => setHookForm({ id: hook.id, name: hook.name, event: hook.event, matcher: hook.matcher, action: hook.action, reason: hook.reason, priority: hook.priority })}><h2>{hook.name}</h2><p>{hook.event} · {hook.matcher} · {hook.action}</p></button><Badge variant={hook.action === 'block' ? 'destructive' : 'secondary'}>{hook.action}</Badge><Switch checked={hook.enabled} disabled={hooks.busyId === hook.id} onCheckedChange={(enabled) => void hooks.setEnabled(hook.id, enabled)} /></div><Separator /><div className="fox-mcp-meta"><span>{hook.reason || '未填写说明'}</span><div><Button variant="ghost" size="icon-sm" title="编辑" onClick={() => setHookForm({ id: hook.id, name: hook.name, event: hook.event, matcher: hook.matcher, action: hook.action, reason: hook.reason, priority: hook.priority })}><Pencil /></Button><Button variant="ghost" size="icon-sm" title="删除" onClick={() => { if (window.confirm(`删除 Hook“${hook.name}”？`)) void hooks.remove(hook.id).then((ok) => ok && toast.success('Hook 已删除')) }}><Trash2 /></Button></div></div></Card>)}</div>
         </main>
       </div>
-      <Dialog open={Boolean(form)} onOpenChange={(open) => { if (!open) setForm(null) }}><DialogContent className="fox-mcp-dialog"><DialogHeader><DialogTitle>{form?.id ? '编辑 MCP Server' : '添加 MCP Server'}</DialogTitle><DialogDescription>当前支持 stdio。参数每行一项，环境变量使用 KEY=VALUE 格式且只存入系统凭证库。</DialogDescription></DialogHeader>{form && <div className="fox-mcp-form"><label>名称<Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如 Filesystem" /></label><label>命令<Input value={form.command} onChange={(event) => setForm({ ...form, command: event.target.value })} placeholder="例如 npx.cmd 或 MCP Server 可执行文件路径" /></label><label>参数（每行一项）<Textarea value={form.argsText} onChange={(event) => setForm({ ...form, argsText: event.target.value })} placeholder={'-y\n@modelcontextprotocol/server-filesystem\nD:\\projects'} /></label><label>环境变量（每行 KEY=VALUE）<Textarea value={form.environmentText} onChange={(event) => setForm({ ...form, environmentText: event.target.value, clearEnvironment: false })} placeholder={form.id ? '已保存的值不会回显；留空保持不变' : 'API_KEY=...'} /></label>{form.id && <div className="fox-setting-row"><span><b>清除已保存环境变量</b><small>保存时同时从系统凭证库删除</small></span><Switch checked={form.clearEnvironment} onCheckedChange={(clearEnvironment) => setForm({ ...form, clearEnvironment, environmentText: clearEnvironment ? '' : form.environmentText })} /></div>}{formError && <p className="fox-setting-error">{formError}</p>}</div>}<DialogFooter><Button variant="outline" onClick={() => setForm(null)}>取消</Button><Button disabled={!form?.name.trim() || !form?.command.trim() || resource.busyId != null} onClick={() => void save()}>{resource.busyId && <LoaderCircle className="animate-spin" />}保存</Button></DialogFooter></DialogContent></Dialog>
+      <Dialog open={Boolean(form)} onOpenChange={(open) => { if (!open) setForm(null) }}><DialogContent className="fox-mcp-dialog"><DialogHeader><DialogTitle>{form?.id ? '编辑扩展源' : '添加扩展源'}</DialogTitle><DialogDescription>远程凭证只存入系统凭证库；HTTP MCP 和 OpenAPI 禁止自动重定向，超时 15 秒，响应上限 10 MB。</DialogDescription></DialogHeader>{form && <div className="fox-mcp-form"><label>名称<Input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="例如 Filesystem 或 Pet API" /></label><label>扩展类型<Select value={form.transport} onValueChange={(transport: McpServerRecord['transport']) => setForm({ ...form, transport })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="stdio">stdio MCP</SelectItem><SelectItem value="streamable_http">Streamable HTTP MCP</SelectItem><SelectItem value="openapi">OpenAPI 3.x Connector</SelectItem></SelectContent></Select></label>{form.transport === 'stdio' ? <><label>命令<Input value={form.command} onChange={(event) => setForm({ ...form, command: event.target.value })} placeholder="例如 npx.cmd 或 MCP Server 可执行文件路径" /></label><label>参数（每行一项）<Textarea value={form.argsText} onChange={(event) => setForm({ ...form, argsText: event.target.value })} placeholder={'-y\n@modelcontextprotocol/server-filesystem\nD:\\projects'} /></label></> : <label>端点 URL{form.transport === 'openapi' ? '（可选，覆盖 servers[0].url）' : ''}<Input value={form.endpointUrl} onChange={(event) => setForm({ ...form, endpointUrl: event.target.value })} placeholder={form.transport === 'openapi' ? '可留空使用定义中的 servers[0].url' : 'https://mcp.example.com/mcp'} /></label>}{form.transport === 'openapi' && <label>OpenAPI JSON / YAML<Textarea value={form.definition} onChange={(event) => setForm({ ...form, definition: event.target.value })} placeholder={'openapi: 3.0.3\ninfo: ...\npaths: ...'} /></label>}<label>{form.transport === 'stdio' ? '环境变量' : '请求 Header'}（每行 KEY=VALUE）<Textarea value={form.environmentText} onChange={(event) => setForm({ ...form, environmentText: event.target.value, clearEnvironment: false })} placeholder={form.id ? '已保存的值不会回显；留空保持不变' : form.transport === 'stdio' ? 'API_KEY=...' : 'Authorization=Bearer ...'} /></label>{form.id && <div className="fox-setting-row"><span><b>清除已保存凭证</b><small>保存时同时从系统凭证库删除</small></span><Switch checked={form.clearEnvironment} onCheckedChange={(clearEnvironment) => setForm({ ...form, clearEnvironment, environmentText: clearEnvironment ? '' : form.environmentText })} /></div>}{formError && <p className="fox-setting-error">{formError}</p>}</div>}<DialogFooter><Button variant="outline" onClick={() => setForm(null)}>取消</Button><Button disabled={!form?.name.trim() || (form.transport === 'stdio' && !form.command.trim()) || (form.transport === 'streamable_http' && !form.endpointUrl.trim()) || (form.transport === 'openapi' && !form.definition.trim()) || resource.busyId != null} onClick={() => void save()}>{resource.busyId && <LoaderCircle className="animate-spin" />}保存</Button></DialogFooter></DialogContent></Dialog>
     </WorkspacePage>
   )
 }

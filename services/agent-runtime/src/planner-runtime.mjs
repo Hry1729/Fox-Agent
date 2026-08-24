@@ -1,13 +1,12 @@
 import {
-  AuthStorage,
   DefaultResourceLoader,
-  ModelRegistry,
   SessionManager,
   SettingsManager,
-  createAgentSession,
-} from '@earendil-works/pi-coding-agent'
+  createFoxAgentSession,
+} from './pi-adapter.mjs'
 import { createReadOnlyTools } from './read-only-tools.mjs'
 import { composeFoxPrompt, stablePromptHash } from './prompt-composer.mjs'
+import { adaptFoxToolsToPi } from './tool-adapter.mjs'
 
 const MAX_PLAN_STEPS = 8
 const MAX_PLAN_CHARS = 8_000
@@ -95,6 +94,7 @@ export async function runPlanner({
   model,
   modelService,
   modelProfile,
+  modelRuntime,
   context,
   history = [],
   text,
@@ -102,7 +102,7 @@ export async function runPlanner({
   onAgent,
 } = {}) {
   const startedAt = Date.now()
-  const tools = createReadOnlyTools(preflight)
+  const tools = adaptFoxToolsToPi(createReadOnlyTools(preflight))
   const settingsManager = SettingsManager.inMemory({
     compaction: { enabled: true, reserveTokens: 4_096, keepRecentTokens: 8_192 },
     retry: {
@@ -131,11 +131,8 @@ export async function runPlanner({
     systemPrompt: composition.prompt,
   })
   await resourceLoader.reload()
-  const authStorage = AuthStorage.inMemory()
-  authStorage.setRuntimeApiKey(model.provider, modelService.apiKey || 'not-needed')
-  const modelRegistry = ModelRegistry.inMemory(authStorage)
   const plannerModel = { ...model, maxTokens: Math.min(model.maxTokens || 2_048, modelProfile?.planner?.maxOutputTokens || 2_048) }
-  const { session } = await createAgentSession({
+  const { session } = await createFoxAgentSession({
     cwd,
     agentDir: process.cwd(),
     model: plannerModel,
@@ -145,8 +142,7 @@ export async function runPlanner({
     resourceLoader,
     sessionManager: SessionManager.inMemory(cwd),
     settingsManager,
-    authStorage,
-    modelRegistry,
+    modelRuntime,
   })
   onAgent?.(session)
   session.state.messages = Array.isArray(history) ? history.slice(-12) : []

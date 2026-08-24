@@ -7,6 +7,7 @@ import type {
   ConversationExpertBinding,
   ConversationSummary,
   ConversationHistoryPage,
+  ChildRunNotification,
   RuntimeEventNotification,
   RuntimeInitialization,
   RuntimeStatus,
@@ -21,13 +22,18 @@ import type {
   ProjectFileEntry,
   ProjectFilePreview,
   UsageStatistics,
+  ObservabilityStatistics,
+  EvaluationRunSummary,
   SkillRecord,
   McpServerRecord,
   McpConnectionTest,
+  LifecycleHookRecord,
+  SaveLifecycleHookInput,
   MaintenanceResult,
   WorkStateDiagnosticReport,
   WorkEventRecord,
   GoalRecord,
+  PlanRevisionRecord,
   SetGoalRunningResult,
   ApprovalRecord,
   AttachmentRecord,
@@ -43,14 +49,214 @@ import type {
   KnowledgePreviewCacheStatistics,
   KnowledgeDownloadProgress,
   KnowledgeBindingRecord,
+  KnowledgeReference,
   YuxiAgentRecord,
   YuxiUserRecord,
   YuxiModelRecord,
   ExpertDisplaySnapshot,
   DesktopErrorDetails,
+  MemoryEntityRecord,
+  MemoryKind,
+  MemoryRecallRecord,
+  MemoryRevisionRecord,
+  MemoryScope,
+  ExpertPackagePreview,
+  ExpertPackageVersionRecord,
+  ExpertWorkflowSnapshot,
+  ExpertTeamSnapshot,
+  CreateDigitalColleagueInput,
+  DigitalColleagueAuditRecord,
+  DigitalColleagueChannelCreated,
+  DigitalColleagueChannelRecord,
+  DigitalColleagueRecord,
+  DigitalColleagueScheduleRecord,
+  DigitalColleagueTriggerRecord,
 } from '../model/types'
+import {
+  pluginActivationUpdateToWire,
+  pluginCardFromWire,
+  type PluginActivationUpdate,
+  type PluginCardWire,
+  type PluginCatalogDTO,
+  type PluginCatalogQuery,
+  type PluginCatalogWireDTO,
+  type PluginInstallationsDTO,
+  type PluginInstallationsWireDTO,
+} from '../../plugins/model'
 
 export const desktopRuntimeAvailable = isTauri()
+
+export interface KnowledgeBindingsSetWireResponse {
+  bindings: KnowledgeBindingRecord[]
+  knowledgeReferences?: KnowledgeReference[]
+}
+
+export interface KnowledgeBindingsSetResult {
+  bindings: KnowledgeBindingRecord[]
+  knowledgeReferences: KnowledgeReference[]
+}
+
+type KnowledgeBindingsSetPayload = KnowledgeBindingsSetWireResponse | KnowledgeBindingRecord[]
+
+export function knowledgeReferenceKey(reference: KnowledgeReference): string {
+  return [
+    reference.source,
+    reference.providerKey ?? (reference.source === 'local' ? 'local' : reference.connectionId),
+    reference.source === 'local' ? '' : reference.connectionId,
+    reference.id,
+  ].join(':')
+}
+
+export function normalizeKnowledgeReference(reference: KnowledgeReference): KnowledgeReference {
+  if (reference.source === 'local') {
+    return { ...reference, providerKey: reference.providerKey ?? 'local' }
+  }
+  return {
+    ...reference,
+    providerKey: reference.providerKey ?? reference.connectionId,
+  }
+}
+
+export function knowledgeReferenceFromLegacyBinding(binding: KnowledgeBindingRecord): Extract<KnowledgeReference, { source: 'remote' }> {
+  const connectionId = binding.serviceConnectionId || 'yuxi-primary'
+  return normalizeKnowledgeReference({
+    source: 'remote',
+    connectionId,
+    providerKey: connectionId,
+    id: binding.knowledgeBaseId,
+  }) as Extract<KnowledgeReference, { source: 'remote' }>
+}
+
+export function normalizeKnowledgeBindingsSetPayload(payload: KnowledgeBindingsSetPayload): KnowledgeBindingsSetResult {
+  if (Array.isArray(payload)) {
+    return {
+      bindings: payload,
+      knowledgeReferences: payload.map(knowledgeReferenceFromLegacyBinding),
+    }
+  }
+  const bindings = Array.isArray(payload.bindings) ? payload.bindings : []
+  return {
+    bindings,
+    knowledgeReferences: Array.isArray(payload.knowledgeReferences)
+      ? payload.knowledgeReferences.map(normalizeKnowledgeReference)
+      : bindings.map(knowledgeReferenceFromLegacyBinding),
+  }
+}
+
+export interface LocalKnowledgeBaseDto {
+  id: string
+  name: string
+  description: string | null
+  activeIndexGeneration: string | null
+  documentCount: number
+  activeJobStatus: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface LocalKnowledgeDocumentDto {
+  id: string
+  knowledgeBaseId: string
+  displayName: string
+  relativePath: string
+  currentRevision: number
+  fileSize: number
+  mimeType: string
+  parseStatus: string
+  indexStatus: string
+  chunkCount: number
+  lastErrorCode: string | null
+  lastErrorMessage: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface LocalKnowledgeFileSourceDto {
+  id: string
+  rootPath: string
+  displayName: string
+  fileCount: number
+  totalSize: number
+  lastScannedAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface LocalKnowledgeCatalogFileDto {
+  id: string
+  sourceId: string
+  sourceName: string
+  sourcePath: string
+  absolutePath: string
+  relativePath: string
+  displayName: string
+  extension: string
+  mimeType: string
+  fileSize: number
+  modifiedAt: number | null
+}
+
+export interface LocalKnowledgeJobDto {
+  id: string
+  parentOperationId: string | null
+  knowledgeBaseId: string
+  jobType: string
+  status: string
+  stage: string | null
+  progress: number
+  retryCount: number
+  lastSequence: number
+  outcome: string | null
+  generationId: string | null
+  heartbeatAt: number | null
+  checkpointJson: string | null
+  errorCode: string | null
+  errorMessage: string | null
+  createdAt: number
+  startedAt: number | null
+  updatedAt: number
+  completedAt: number | null
+}
+
+export interface LocalKnowledgeStorageStatusDto {
+  rootPath: string
+  databasePath: string
+  writable: boolean
+  schemaVersion: number
+  pendingRootPath: string | null
+  restartRequired: boolean
+  migrationId?: string | null
+}
+
+export interface LocalKnowledgeStorageDirectoryDto {
+  path: string | null
+}
+
+export interface LocalKnowledgeStorageMigrationDto {
+  id: string
+  sourcePath: string
+  destinationPath: string
+  status: string
+  stage: string | null
+  progress: number
+  lastSequence: number
+  errorCode: string | null
+  errorMessage: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface PickedLocalKnowledgeFileDto {
+  sourcePath: string
+  name: string
+  mimeType: string
+  sizeBytes: number
+}
+
+export interface LocalKnowledgeOperationAcceptedDto {
+  operationId: string
+  acceptedAt: number
+}
 
 export class DesktopCommandError extends Error {
   readonly code: string
@@ -121,21 +327,117 @@ export const desktopClient = {
   saveAgent: (request: import('../model/types').SaveAgentInput) => command<AgentRecord>('agent_save', request),
   copyAgent: (agentId: string, name?: string) => command<AgentRecord>('agent_copy', { agentId, name }),
   deleteAgent: (agentId: string) => command<boolean>('agent_delete', { agentId }),
+  inspectExpertPackage: (expertPackage: Record<string, unknown>) =>
+    command<ExpertPackagePreview>('expert_package_inspect', { package: expertPackage }),
+  installExpertPackage: (expertPackage: Record<string, unknown>, expectedCurrentHash: string | null) =>
+    command<AgentRecord>('expert_package_install', { package: expertPackage, expectedCurrentHash }),
+  exportExpertPackage: (agentId: string) =>
+    command<Record<string, unknown>>('expert_package_export', { agentId }),
+  listExpertPackageVersions: (agentId: string) =>
+    command<ExpertPackageVersionRecord[]>('expert_package_versions', { agentId }),
+  rollbackExpertPackage: (expertId: string, version: string, expectedCurrentHash: string | null) =>
+    command<AgentRecord>('expert_package_rollback', { expertId, version, expectedCurrentHash }),
+  getExpertWorkflow: (conversationId: string) =>
+    command<ExpertWorkflowSnapshot | null>('expert_workflow_get', { conversationId }),
+  startExpertWorkflow: (conversationId: string, input: unknown = {}) =>
+    command<ExpertWorkflowSnapshot>('expert_workflow_start', { conversationId, input }),
+  resolveExpertWorkflowGate: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected', reason = '') =>
+    command<ExpertWorkflowSnapshot>('expert_workflow_gate_resolve', { workflowRunId, stageId, decision, reason }),
+  cancelExpertWorkflow: (workflowRunId: string, reason = '') =>
+    command<ExpertWorkflowSnapshot>('expert_workflow_cancel', { workflowRunId, reason }),
+  getExpertTeam: (conversationId: string) =>
+    command<ExpertTeamSnapshot | null>('expert_team_get', { conversationId }),
+  cancelExpertTeam: (teamRunId: string, reason = '') =>
+    command<ExpertTeamSnapshot>('expert_team_cancel', { teamRunId, reason }),
+  listDigitalColleagues: () =>
+    command<DigitalColleagueRecord[]>('digital_colleagues_list'),
+  createDigitalColleague: (request: CreateDigitalColleagueInput) =>
+    command<DigitalColleagueRecord>('digital_colleague_create', request),
+  updateDigitalColleague: (request: { colleagueId: string; name: string; objective: string; maxRunsPerDay: number; maxTokensPerDay: number; maxDurationMs: number; maxOutputTokens: number; maxToolCalls: number }) =>
+    command<DigitalColleagueRecord>('digital_colleague_update', request),
+  setDigitalColleaguePaused: (colleagueId: string, paused: boolean) =>
+    command<DigitalColleagueRecord>('digital_colleague_set_paused', { colleagueId, paused }),
+  revokeDigitalColleague: (colleagueId: string, reason = '') =>
+    command<DigitalColleagueRecord>('digital_colleague_revoke', { colleagueId, reason }),
+  listDigitalColleagueSchedules: (colleagueId: string) =>
+    command<DigitalColleagueScheduleRecord[]>('digital_colleague_schedules_list', { colleagueId }),
+  saveDigitalColleagueSchedule: (request: { scheduleId?: string; colleagueId: string; name: string; intervalSeconds: number; catchupWindowSeconds?: number; enabled?: boolean }) =>
+    command<DigitalColleagueScheduleRecord>('digital_colleague_schedule_save', request),
+  listDigitalColleagueChannels: (colleagueId: string) =>
+    command<DigitalColleagueChannelRecord[]>('digital_colleague_channels_list', { colleagueId }),
+  createDigitalColleagueChannel: (request: { colleagueId: string; name: string; channelKind: 'webhook' | 'im_bridge'; externalIdentity: string; rateLimitPerMinute?: number }) =>
+    command<DigitalColleagueChannelCreated>('digital_colleague_channel_create', request),
+  revokeDigitalColleagueChannel: (channelId: string) =>
+    command<DigitalColleagueChannelRecord>('digital_colleague_channel_revoke', { channelId }),
+  triggerDigitalColleague: (colleagueId: string, payload: unknown = {}, idempotencyKey?: string) =>
+    command<DigitalColleagueTriggerRecord>('digital_colleague_trigger_manual', { colleagueId, payload, idempotencyKey }),
+  triggerDigitalColleagueChannel: (request: { channelId: string; senderId: string; timestamp: number; idempotencyKey: string; signature: string; payload?: unknown }) =>
+    command<DigitalColleagueTriggerRecord>('digital_colleague_trigger_channel', request),
+  listDigitalColleagueTriggers: (colleagueId: string) =>
+    command<DigitalColleagueTriggerRecord[]>('digital_colleague_triggers_list', { colleagueId }),
+  listDigitalColleagueAudit: (colleagueId: string) =>
+    command<DigitalColleagueAuditRecord[]>('digital_colleague_audit_list', { colleagueId }),
   listSkills: (agentId: string) => command<SkillRecord[]>('skills_list', { agentId }),
   setSkillEnabled: (agentId: string, skillId: string, enabled: boolean) =>
     command<SkillRecord[]>('skill_set_enabled', { agentId, skillId, enabled }),
   listMcpServers: () => command<McpServerRecord[]>('mcp_servers_list'),
-  saveMcpServer: (request: { id?: string; name: string; command: string; args: string[]; environment?: Record<string, string>; clearEnvironment?: boolean }) =>
+  saveMcpServer: (request: { id?: string; name: string; command: string; args: string[]; transport: McpServerRecord['transport']; endpointUrl?: string; definition?: string; environment?: Record<string, string>; clearEnvironment?: boolean }) =>
     command<McpServerRecord>('mcp_server_save', request),
   testMcpServer: (serverId: string) => command<McpConnectionTest>('mcp_server_test', { serverId }),
   setMcpServerEnabled: (serverId: string, enabled: boolean) =>
     command<McpServerRecord>('mcp_server_set_enabled', { serverId, enabled }),
   deleteMcpServer: (serverId: string) => command<boolean>('mcp_server_delete', { serverId }),
+  listLifecycleHooks: () => command<LifecycleHookRecord[]>('lifecycle_hooks_list'),
+  saveLifecycleHook: (request: SaveLifecycleHookInput) =>
+    command<LifecycleHookRecord>('lifecycle_hook_save', request),
+  setLifecycleHookEnabled: (hookId: string, enabled: boolean) =>
+    command<LifecycleHookRecord>('lifecycle_hook_set_enabled', { hookId, enabled }),
+  deleteLifecycleHook: (hookId: string) =>
+    command<boolean>('lifecycle_hook_delete', { hookId }),
+  pluginCatalogList: async (query: PluginCatalogQuery): Promise<PluginCatalogDTO> => {
+    const dto = await command<PluginCatalogWireDTO>('plugin_catalog_list', query)
+    return { ...dto, items: dto.items.map(pluginCardFromWire) }
+  },
+  pluginInstallationsList: async (): Promise<PluginInstallationsDTO> => {
+    const dto = await command<PluginInstallationsWireDTO>('plugin_installations_list')
+    return { ...dto, items: dto.items.map(pluginCardFromWire) }
+  },
+  pluginSetActivation: async (pluginId: string, update: PluginActivationUpdate) => {
+    const card = await command<PluginCardWire>('plugin_set_activation', {
+      pluginId,
+      update: pluginActivationUpdateToWire(update),
+    })
+    return pluginCardFromWire(card)
+  },
   listConversations: () => command<ConversationSummary[]>('conversations_list'),
+  listArchivedConversations: () => command<ConversationSummary[]>('conversations_archived_list'),
+  listTrashedConversations: () => command<ConversationSummary[]>('conversations_trashed_list'),
   usageStatistics: () => command<UsageStatistics>('usage_statistics'),
+  observabilityStatistics: () => command<ObservabilityStatistics>('observability_statistics'),
+  recordUiMetric: (runId: string, metric: 'ui.first_event' | 'ui.terminal_render', durationMs: number) =>
+    command<void>('run_ui_metric_record', { runId, metric, durationMs }),
+  runOfflineEvaluation: () => command<EvaluationRunSummary>('offline_evaluation_run'),
   getUserProfile: () => command<{ name: string; avatar: string } | null>('user_profile_get'),
   saveUserProfile: (profile: { name: string; avatar: string }) =>
     command<{ name: string; avatar: string }>('user_profile_save', profile),
+  listMemories: (request: { agentId?: string; projectId?: string; includeDeleted?: boolean; query?: string } = {}) =>
+    command<MemoryEntityRecord[]>('memories_list', request),
+  createMemory: (request: { scope: MemoryScope; scopeKey?: string; kind: MemoryKind; canonicalKey: string; content: string; evidenceExcerpt?: string }) =>
+    command<MemoryEntityRecord>('memory_create', request),
+  confirmMemory: (memoryId: string, expectedVersion: number) =>
+    command<MemoryEntityRecord>('memory_confirm', { memoryId, expectedVersion }),
+  updateMemory: (request: { memoryId: string; kind: MemoryKind; canonicalKey: string; content: string; evidenceExcerpt?: string; expectedVersion: number }) =>
+    command<MemoryEntityRecord>('memory_update', request),
+  setMemoryEnabled: (memoryId: string, enabled: boolean, expectedVersion: number) =>
+    command<MemoryEntityRecord>('memory_set_enabled', { memoryId, enabled, expectedVersion }),
+  deleteMemory: (memoryId: string) =>
+    command<MemoryEntityRecord>('memory_delete', { memoryId }),
+  resolveMemoryConflict: (conflictId: string, decision: 'keep_existing' | 'accept_competing') =>
+    command<MemoryEntityRecord>('memory_conflict_resolve', { conflictId, decision }),
+  listMemoryRevisions: (memoryId: string) =>
+    command<MemoryRevisionRecord[]>('memory_revisions_list', { memoryId }),
+  listMemoryRecalls: (memoryId: string, limit = 50) =>
+    command<MemoryRecallRecord[]>('memory_recalls_list', { memoryId, limit }),
   searchConversations: (query: string, limit = 50) =>
     command<ConversationSummary[]>('conversations_search', { query, limit }),
   listProjects: () => command<ProjectRecord[]>('projects_list'),
@@ -152,7 +454,14 @@ export const desktopClient = {
     command<ConversationSummary>('conversation_create', request),
   loadConversation: async (conversationId: string) => {
     const detail = await command<ConversationDetail>('conversation_load', { conversationId })
-    return { ...detail, expertBindings: (detail.expertBindings ?? []).map(normalizeExpertBinding) }
+    const knowledgeReferences = Array.isArray(detail.knowledgeReferences)
+      ? detail.knowledgeReferences.map(normalizeKnowledgeReference)
+      : (detail.knowledgeBindings ?? []).map(knowledgeReferenceFromLegacyBinding)
+    return {
+      ...detail,
+      knowledgeReferences,
+      expertBindings: (detail.expertBindings ?? []).map(normalizeExpertBinding),
+    }
   },
   bindConversationExpert: async (conversationId: string, expertId: string) =>
     normalizeExpertBinding(await command<ConversationExpertBinding>('conversation_expert_bind', { conversationId, expertId })),
@@ -162,16 +471,40 @@ export const desktopClient = {
     command<ConversationHistoryPage>('conversation_history', { conversationId, beforeOrdinal, limit }),
   deleteConversation: (conversationId: string) =>
     command<boolean>('conversation_delete', { conversationId }),
+  purgeConversation: (conversationId: string) =>
+    command<boolean>('conversation_purge', { conversationId }),
   renameConversation: (conversationId: string, title: string) =>
     command<ConversationSummary>('conversation_rename', { conversationId, title }),
   setConversationPinned: (conversationId: string, pinned: boolean) =>
     command<ConversationSummary>('conversation_pin', { conversationId, pinned }),
   archiveConversation: (conversationId: string) =>
     command<ConversationSummary>('conversation_archive', { conversationId }),
+  unarchiveConversation: (conversationId: string) =>
+    command<ConversationSummary>('conversation_unarchive', { conversationId }),
+  restoreConversation: (conversationId: string) =>
+    command<ConversationSummary>('conversation_restore', { conversationId }),
+  forkConversation: (conversationId: string, messageId: string, title?: string) =>
+    command<ConversationSummary>('conversation_fork', { conversationId, messageId, title }),
   saveAttachments: (conversationId: string, files: Array<{ filename: string; mediaType?: string; dataUrl: string }>, messageId?: string) =>
     command<AttachmentRecord[]>('attachments_save', { conversationId, messageId, files }),
-  setKnowledgeBindings: (conversationId: string, knowledgeBases: Array<{ id: string; name: string }>) =>
-    command<KnowledgeBindingRecord[]>('knowledge_bindings_set', { conversationId, knowledgeBases }),
+  setKnowledgeBindings: async (conversationId: string, knowledgeBases: Array<{ id: string; name: string }>) => {
+    const payload = await command<KnowledgeBindingsSetPayload>('knowledge_bindings_set', { conversationId, knowledgeBases })
+    return normalizeKnowledgeBindingsSetPayload(payload).bindings
+  },
+  setKnowledgeReferences: async (
+    conversationId: string,
+    knowledgeReferences: KnowledgeReference[],
+    names: Record<string, string> = {},
+  ): Promise<KnowledgeBindingsSetResult> => {
+    const payload = await command<KnowledgeBindingsSetPayload>('knowledge_bindings_set', {
+      conversationId,
+      knowledgeReferences: knowledgeReferences.map((reference) => ({
+        ...normalizeKnowledgeReference(reference),
+        name: names[knowledgeReferenceKey(reference)] ?? reference.id,
+      })),
+    })
+    return normalizeKnowledgeBindingsSetPayload(payload)
+  },
   startRun: (request: { conversationId: string; text: string; runtimeText?: string; model?: string; attachmentIds?: string[] }) =>
     command<StartRunResult>('run_start', request),
   rewindRun: (request: { conversationId: string; messageId: string; text: string; runtimeText?: string; model?: string }) =>
@@ -179,10 +512,12 @@ export const desktopClient = {
   resumeRun: (request: { conversationId: string; parentRunId: string; text: string; answers: Record<string, string | string[]> }) =>
     command<StartRunResult>('run_resume', request),
   cancelRun: (runId: string) => command<boolean>('run_cancel', { runId }),
-  resolveApproval: (approvalId: string, approved: boolean) =>
-    command<boolean>('approval_resolve', { approvalId, approved }),
+  resolveApproval: (approvalId: string, decision: import('../model/types').ApprovalDecision) =>
+    command<boolean>('approval_resolve', { approvalId, decision }),
   resolveWorkModeConfirmation: (conversationId: string, goalId: string, expectedVersion: number, approved: boolean) =>
     command<GoalRecord>('work_mode_confirmation_resolve', { conversationId, goalId, expectedVersion, approved }),
+  resolvePlanRevision: (conversationId: string, planRevisionId: string, decision: 'approved' | 'rejected') =>
+    command<PlanRevisionRecord>('plan_revision_resolve', { conversationId, planRevisionId, decision }),
   deleteGoal: (conversationId: string, goalId: string) =>
     command<boolean>('goal_delete', { conversationId, goalId }),
   setGoalRunning: (conversationId: string, goalId: string, expectedVersion: number, running: boolean) =>
@@ -200,6 +535,56 @@ export const desktopClient = {
   listKnowledgeBases: () => command<KnowledgeBaseRecord[]>('knowledge_bases_list'),
   getKnowledgeDetail: (knowledgeBaseId: string) =>
     command<KnowledgeDetailRecord>('knowledge_detail', { knowledgeBaseId }),
+  listLocalKnowledgeBases: () =>
+    command<LocalKnowledgeBaseDto[]>('local_knowledge_bases_list'),
+  listLocalKnowledgeFileSources: () =>
+    command<LocalKnowledgeFileSourceDto[]>('local_knowledge_file_sources_list'),
+  pickLocalKnowledgeSourceFolder: () =>
+    command<string | null>('local_knowledge_source_folder_pick'),
+  addLocalKnowledgeFileSource: (path: string) =>
+    command<LocalKnowledgeFileSourceDto>('local_knowledge_file_source_add', { path }),
+  rescanLocalKnowledgeFileSource: (id: string) =>
+    command<LocalKnowledgeFileSourceDto>('local_knowledge_file_source_rescan', { id }),
+  removeLocalKnowledgeFileSource: (id: string) =>
+    command<boolean>('local_knowledge_file_source_remove', { id }),
+  listLocalKnowledgeLocalFiles: (options: { sourceId?: string; query?: string; category?: string; limit?: number; offset?: number } = {}) =>
+    command<LocalKnowledgeCatalogFileDto[]>('local_knowledge_local_files_list', options),
+  readLocalKnowledgeLocalFileRange: (id: string, start: number, end: number) =>
+    command<unknown>('local_knowledge_local_file_read', { id, start, end }),
+  openLocalKnowledgeLocalFile: (id: string, reveal = false) =>
+    command<boolean>('local_knowledge_local_file_open', { id, reveal }),
+  getLocalKnowledgeBase: (id: string) =>
+    command<LocalKnowledgeBaseDto>('local_knowledge_base_get', { id }),
+  createLocalKnowledgeBase: (request: { name: string; description?: string | null }) =>
+    command<LocalKnowledgeBaseDto>('local_knowledge_base_create', request),
+  updateLocalKnowledgeBase: (request: { id: string; name: string; description?: string | null }) =>
+    command<LocalKnowledgeBaseDto>('local_knowledge_base_update', request),
+  listLocalKnowledgeDocuments: (knowledgeBaseId: string, query?: string) =>
+    command<LocalKnowledgeDocumentDto[]>('local_knowledge_documents_list', { knowledgeBaseId, query }),
+  readLocalKnowledgeDocumentFileRange: (knowledgeBaseId: string, documentId: string, start: number, end: number) =>
+    command<unknown>('local_knowledge_document_file_read', { knowledgeBaseId, documentId, start, end }),
+  openLocalKnowledgeDocumentFile: (knowledgeBaseId: string, documentId: string, reveal = false) =>
+    command<boolean>('local_knowledge_document_file_open', { knowledgeBaseId, documentId, reveal }),
+  pickLocalKnowledgeImportFiles: () =>
+    command<PickedLocalKnowledgeFileDto[]>('local_knowledge_import_files_pick'),
+  startLocalKnowledgeImport: (request: { knowledgeBaseId: string; files: Array<{ sourcePath: string }>; parserVersion?: string; chunkConfigHash?: string }) =>
+    command<LocalKnowledgeOperationAcceptedDto>('local_knowledge_documents_import_start', request),
+  listLocalKnowledgeJobs: (knowledgeBaseId?: string) =>
+    command<LocalKnowledgeJobDto[]>('local_knowledge_jobs_list', knowledgeBaseId ? { knowledgeBaseId } : undefined),
+  getLocalKnowledgeJob: (id: string) =>
+    command<LocalKnowledgeJobDto>('local_knowledge_job_get', { id }),
+  cancelLocalKnowledgeJob: (id: string) =>
+    command<LocalKnowledgeJobDto>('local_knowledge_job_cancel', { id }),
+  retryLocalKnowledgeJob: (id: string) =>
+    command<LocalKnowledgeJobDto>('local_knowledge_job_retry', { id }),
+  getLocalKnowledgeStorageStatus: () =>
+    command<LocalKnowledgeStorageStatusDto>('local_knowledge_storage_status'),
+  pickLocalKnowledgeStorageDirectory: () =>
+    command<LocalKnowledgeStorageDirectoryDto | string | null>('local_knowledge_storage_directory_pick'),
+  startLocalKnowledgeStorageMigration: (destinationPath: string) =>
+    command<LocalKnowledgeOperationAcceptedDto>('local_knowledge_storage_migrate_start', { destinationPath }),
+  getLocalKnowledgeStorageMigration: (id: string) =>
+    command<LocalKnowledgeStorageMigrationDto>('local_knowledge_storage_migration_get', { id }),
   getKnowledgeDocument: (knowledgeBaseId: string, documentId: string) =>
     command<unknown>('knowledge_document_content', { knowledgeBaseId, documentId }),
   getKnowledgeDocumentActivity: (knowledgeBaseId: string, documentId: string) =>
@@ -259,6 +644,8 @@ export const desktopClient = {
   deleteModelProvider: (providerId: string) => command<boolean>('model_provider_delete', { providerId }),
   listenRuntimeEvents: (handler: (event: RuntimeEventNotification) => void): Promise<UnlistenFn> =>
     listen<RuntimeEventNotification>('fox://runtime-event', ({ payload }) => handler(payload)),
+  listenChildRunUpdates: (handler: (event: ChildRunNotification) => void): Promise<UnlistenFn> =>
+    listen<ChildRunNotification>('fox://child-run-updated', ({ payload }) => handler(payload)),
   listenWorkEvents: (handler: (event: WorkEventRecord) => void): Promise<UnlistenFn> =>
     listen<WorkEventRecord>('fox://work-event', ({ payload }) => handler(payload)),
   listenApprovalRequests: (handler: (approval: ApprovalRecord) => void): Promise<UnlistenFn> =>

@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import type { AcceptanceRecord, ConversationDetail, GoalRecord, PlanRevisionRecord, ReviewFindingRecord, WorkTaskRecord, TaskEvidenceRecord } from '@/features/conversations/model/types'
+import type { AcceptanceRecord, ConversationDetail, ExpertTeamSnapshot, ExpertWorkflowSnapshot, GoalRecord, PlanRevisionRecord, ReviewFindingRecord, WorkTaskRecord, TaskEvidenceRecord } from '@/features/conversations/model/types'
 
 export interface GoalProgressData {
   goal: GoalRecord
@@ -8,6 +8,8 @@ export interface GoalProgressData {
   planRevisions: PlanRevisionRecord[]
   reviewFindings: ReviewFindingRecord[]
   acceptances: AcceptanceRecord[]
+  expertWorkflow: ExpertWorkflowSnapshot | null
+  expertTeam: ExpertTeamSnapshot | null
   completedCount: number
   totalCount: number
   currentTask: WorkTaskRecord | null
@@ -65,6 +67,8 @@ export function useGoalProgress(detail: ConversationDetail | null): GoalProgress
       planRevisions: (detail.planRevisions || []).filter((item) => item.goalId === activeGoal.id),
       reviewFindings: (detail.reviewFindings || []).filter((item) => item.goalId === activeGoal.id),
       acceptances: (detail.acceptances || []).filter((item) => item.goalId === activeGoal.id),
+      expertWorkflow: detail.expertWorkflow?.run.goalId === activeGoal.id ? detail.expertWorkflow : null,
+      expertTeam: detail.expertTeam,
       completedCount,
       totalCount,
       currentTask

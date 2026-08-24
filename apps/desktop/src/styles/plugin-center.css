@@ -1,0 +1,1084 @@
+.fox-plugin-center {
+  position: relative;
+  min-width: 0;
+  min-height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  color: var(--fox-text);
+  background: var(--fox-canvas);
+}
+
+.fox-plugin-header,
+.fox-plugin-toolbar,
+.fox-plugin-content {
+  width: min(1180px, 100%);
+  margin-inline: auto;
+}
+
+.fox-plugin-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 30px 30px 14px;
+}
+
+.fox-plugin-header h1,
+.fox-plugin-section-heading h2,
+.fox-plugin-installed-panel h2 {
+  margin: 0;
+  color: var(--fox-text);
+  font-weight: 680;
+  letter-spacing: -.02em;
+}
+
+.fox-plugin-header h1 {
+  margin: 0;
+  font-size: 27px;
+  line-height: 1.2;
+}
+
+.fox-plugin-header-actions,
+.fox-plugin-toolbar,
+.fox-plugin-card-footer,
+.fox-plugin-card-meta,
+.fox-plugin-section-heading,
+.fox-plugin-installed-panel header,
+.fox-plugin-operation {
+  display: flex;
+  align-items: center;
+}
+
+.fox-plugin-header-actions {
+  min-width: 0;
+  flex: none;
+  gap: 8px;
+}
+
+.fox-plugin-toolbar-action,
+.fox-plugin-refresh-action {
+  height: var(--fox-action-height) !important;
+  min-height: var(--fox-action-height);
+  font-size: 13px;
+}
+
+.fox-plugin-toolbar-actions .badge {
+  min-width: 18px;
+  height: 18px;
+  padding-inline: 5px;
+  font-size: 10px;
+}
+
+.fox-plugin-kind-tabs {
+  height: var(--fox-action-height) !important;
+  gap: 2px !important;
+  padding: 3px !important;
+  border-radius: 10px !important;
+  background: var(--fox-panel) !important;
+}
+
+.fox-plugin-kind-tabs [data-slot='tabs-trigger'] {
+  flex: none;
+  gap: 6px;
+  min-height: 28px;
+  padding-inline: 12px;
+  border-radius: 8px;
+  color: var(--fox-muted);
+  font-size: 13px;
+}
+
+.fox-plugin-kind-tabs [data-slot='tabs-trigger'] svg {
+  width: 15px;
+  height: 15px;
+}
+
+.fox-plugin-kind-tabs [data-slot='tabs-trigger'][data-active] {
+  color: var(--fox-text);
+  background: var(--fox-card);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--fox-text) 10%, transparent);
+}
+
+.fox-plugin-toolbar {
+  min-height: 44px;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 0 30px 10px;
+}
+
+.fox-plugin-toolbar > [data-slot='tabs'] {
+  flex: none;
+}
+
+.fox-plugin-toolbar-actions {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 8px;
+}
+
+.fox-plugin-search {
+  display: flex;
+  align-items: center;
+  flex: 0 1 300px;
+  height: var(--fox-action-height);
+  gap: 7px;
+  padding: 0 9px;
+  border: 1px solid var(--fox-border);
+  border-radius: 8px;
+  background: var(--fox-card);
+  color: var(--fox-faint);
+}
+
+.fox-plugin-search svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+.fox-plugin-search input {
+  height: calc(var(--fox-action-height) - 2px);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.fox-plugin-categories {
+  display: flex;
+  align-items: center;
+  flex: 1 1 180px;
+  min-width: 0;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+.fox-plugin-categories button {
+  flex: none;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fox-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.fox-plugin-categories button:hover,
+.fox-plugin-categories button.is-active {
+  border-color: var(--fox-border);
+  background: var(--fox-panel);
+  color: var(--fox-text);
+}
+
+.fox-plugin-content {
+  padding: 0 30px 42px;
+}
+
+.fox-plugin-section {
+  margin-top: 19px;
+}
+
+.fox-plugin-section-heading {
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 12px;
+}
+
+.fox-plugin-section-heading h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.fox-plugin-section-heading button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.fox-plugin-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 13px;
+}
+
+.fox-plugin-featured-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.fox-plugin-card {
+  min-width: 0;
+  padding: 0 !important;
+  gap: 0 !important;
+  border: 1px solid var(--fox-border);
+  border-radius: 14px !important;
+  background: var(--fox-card);
+  box-shadow: 0 7px 22px color-mix(in srgb, var(--fox-text) 5%, transparent) !important;
+  transition: border-color 150ms ease, background-color 150ms ease, transform 150ms ease;
+}
+
+.fox-plugin-card:hover {
+  border-color: var(--fox-border-strong);
+  background: color-mix(in srgb, var(--fox-card) 86%, var(--fox-accent-soft));
+  transform: translateY(-1px);
+}
+
+.fox-plugin-card[data-install-status='install_failed'] {
+  border-color: color-mix(in srgb, var(--destructive) 35%, var(--fox-border));
+}
+
+.fox-plugin-card-main {
+  min-width: 0;
+  padding: 16px 16px 13px;
+}
+
+.fox-plugin-card-heading {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.fox-plugin-icon {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 11px;
+  background: var(--fox-accent-soft);
+  color: var(--fox-accent);
+}
+
+.fox-plugin-icon svg {
+  width: 21px;
+  height: 21px;
+}
+
+.fox-plugin-card-title {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fox-plugin-card-title strong {
+  overflow: hidden;
+  color: var(--fox-text);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-plugin-card-title small,
+.fox-plugin-card-meta,
+.fox-plugin-operation-copy small,
+.fox-plugin-installed-list small {
+  color: var(--fox-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.fox-plugin-card-main p {
+  display: -webkit-box;
+  min-height: 36px;
+  margin: 13px 0 11px;
+  overflow: hidden;
+  color: var(--fox-muted);
+  font-size: 11px;
+  line-height: 1.65;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.fox-plugin-card-meta {
+  min-width: 0;
+  gap: 10px;
+  color: var(--fox-faint);
+}
+
+.fox-plugin-card-meta > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-plugin-runtime {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--fox-muted);
+}
+
+.fox-plugin-runtime.is-healthy {
+  color: #208d62;
+}
+
+.fox-plugin-runtime i,
+.fox-plugin-status i {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.fox-plugin-card-footer {
+  min-width: 0;
+  min-height: 48px;
+  gap: 8px;
+  padding: 8px 12px 8px 16px;
+  border-top: 1px solid var(--fox-border);
+}
+
+.fox-plugin-card-footer > button:last-child {
+  margin-left: auto;
+}
+
+.fox-plugin-activation-summary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fox-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-plugin-activation,
+.fox-plugin-scope-trigger,
+.fox-plugin-host-managed {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  gap: 6px;
+  color: var(--fox-muted);
+  font-size: 10px;
+}
+
+.fox-plugin-scope-trigger {
+  height: 25px;
+  padding-inline: 7px;
+}
+
+.fox-plugin-scope-trigger svg:first-child {
+  width: 12px;
+  height: 12px;
+}
+
+.fox-plugin-scope-trigger svg:last-child {
+  width: 11px;
+  height: 11px;
+}
+
+.fox-plugin-status {
+  height: 20px;
+  gap: 4px;
+  padding-inline: 6px;
+  font-size: 9px;
+}
+
+.fox-plugin-status svg {
+  width: 11px;
+  height: 11px;
+}
+
+.fox-plugin-status-installed,
+.fox-plugin-status-installed svg {
+  color: #208d62;
+}
+
+.fox-plugin-status-progress,
+.fox-plugin-status-update,
+.fox-plugin-status-update svg {
+  color: #a16c17;
+}
+
+.fox-plugin-status-error,
+.fox-plugin-status-error svg {
+  color: var(--destructive);
+}
+
+.fox-plugin-loading,
+.fox-plugin-empty,
+.fox-plugin-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 150px;
+  gap: 9px;
+  color: var(--fox-muted);
+  font-size: 12px;
+}
+
+.fox-plugin-loading svg,
+.fox-plugin-empty > svg,
+.fox-plugin-error > svg {
+  width: 18px;
+  height: 18px;
+  color: var(--fox-accent);
+}
+
+.fox-plugin-empty {
+  flex-direction: column;
+  min-height: 190px;
+  border: 1px dashed var(--fox-border);
+  border-radius: 12px;
+}
+
+.fox-plugin-empty span {
+  color: var(--fox-muted);
+}
+
+.fox-plugin-error {
+  justify-content: flex-start;
+  min-height: 44px;
+  margin: 0 30px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--destructive) 28%, var(--fox-border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--destructive) 5%, var(--fox-card));
+  color: var(--destructive);
+}
+
+.fox-plugin-error > span {
+  flex: 1;
+}
+
+.fox-plugin-operations {
+  margin-top: 24px;
+  padding: 16px;
+  border: 1px solid var(--fox-border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--fox-card) 92%, var(--fox-panel));
+}
+
+.fox-plugin-operations .fox-plugin-section-heading {
+  margin-bottom: 8px;
+}
+
+.fox-plugin-operation-list,
+.fox-plugin-installed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fox-plugin-operation {
+  gap: 9px;
+  min-height: 38px;
+  padding: 5px 0;
+}
+
+.fox-plugin-operation-icon {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--fox-accent-soft);
+  color: var(--fox-accent);
+}
+
+.fox-plugin-operation-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.fox-plugin-operation-icon.is-done {
+  background: color-mix(in srgb, #208d62 12%, var(--fox-card));
+  color: #208d62;
+}
+
+.fox-plugin-operation-icon.is-failed {
+  background: color-mix(in srgb, var(--destructive) 10%, var(--fox-card));
+  color: var(--destructive);
+}
+
+.fox-plugin-operation-copy {
+  display: flex;
+  min-width: 130px;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.fox-plugin-operation-copy strong {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.fox-plugin-operation-progress {
+  display: flex;
+  align-items: center;
+  width: 150px;
+  flex: 0 0 150px;
+  gap: 8px;
+}
+
+.fox-plugin-operation-progress > span {
+  display: block;
+  height: 5px;
+  flex: 1;
+  overflow: hidden;
+  border-radius: 99px;
+  background: var(--fox-panel);
+}
+
+.fox-plugin-operation-progress > span > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--fox-accent);
+}
+
+.fox-plugin-operation-progress small {
+  width: 28px;
+  color: var(--fox-muted);
+  font-size: 9px;
+  text-align: right;
+}
+
+.fox-plugin-installed-panel {
+  position: fixed;
+  z-index: 30;
+  top: 18px;
+  right: 18px;
+  width: min(380px, calc(100vw - 36px));
+  max-height: calc(100vh - 36px);
+  overflow: auto;
+  padding: 18px;
+  border: 1px solid var(--fox-border);
+  border-radius: 14px;
+  background: var(--fox-card);
+  box-shadow: 0 22px 60px color-mix(in srgb, var(--fox-text) 18%, transparent);
+}
+
+.fox-plugin-installed-panel header {
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 15px;
+}
+
+.fox-plugin-installed-panel h2 {
+  font-size: 19px;
+}
+
+.fox-plugin-installed-list button {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 9px;
+  min-height: 45px;
+  padding: 6px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--fox-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.fox-plugin-installed-list button:hover {
+  border-color: var(--fox-border);
+  background: var(--fox-panel);
+}
+
+.fox-plugin-installed-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--fox-accent-soft);
+  color: var(--fox-accent);
+}
+
+.fox-plugin-installed-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.fox-plugin-installed-list button > span:nth-child(2) {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.fox-plugin-installed-list b {
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-plugin-installed-list button > svg {
+  width: 14px;
+  height: 14px;
+  color: var(--fox-faint);
+}
+
+.fox-plugin-scope-backdrop {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: color-mix(in srgb, var(--fox-text) 18%, transparent);
+}
+
+.fox-plugin-scope-dialog {
+  width: min(420px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--fox-border);
+  border-radius: 14px;
+  background: var(--fox-card);
+  box-shadow: 0 25px 70px color-mix(in srgb, var(--fox-text) 22%, transparent);
+}
+
+.fox-plugin-scope-dialog > header,
+.fox-plugin-scope-dialog > footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 15px 17px;
+}
+
+.fox-plugin-scope-dialog > header {
+  border-bottom: 1px solid var(--fox-border);
+}
+
+.fox-plugin-scope-dialog > header > span {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--fox-accent-soft);
+  color: var(--fox-accent);
+}
+
+.fox-plugin-scope-dialog > header > span svg {
+  width: 16px;
+  height: 16px;
+}
+
+.fox-plugin-scope-dialog > header > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.fox-plugin-scope-dialog h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.fox-plugin-scope-dialog p {
+  margin: 3px 0 0;
+  color: var(--fox-muted);
+  font-size: 10px;
+}
+
+.fox-plugin-scope-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 17px;
+}
+
+.fox-plugin-scope-list label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 38px;
+  padding: 5px 7px;
+  border-radius: 7px;
+  color: var(--fox-text);
+  cursor: pointer;
+}
+
+.fox-plugin-scope-list label:hover {
+  background: var(--fox-panel);
+}
+
+.fox-plugin-scope-list label > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fox-plugin-scope-list input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--fox-accent);
+}
+
+.fox-plugin-scope-list b {
+  font-size: 11px;
+  font-weight: 550;
+}
+
+.fox-plugin-scope-list small {
+  color: var(--fox-muted);
+  font-size: 10px;
+}
+
+.fox-plugin-scope-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 130px;
+  color: var(--fox-muted);
+  font-size: 11px;
+}
+
+.fox-plugin-scope-loading svg {
+  width: 15px;
+  height: 15px;
+}
+
+.fox-plugin-scope-dialog > footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--fox-border);
+}
+
+@media (max-width: 980px) {
+  .fox-plugin-grid,
+  .fox-plugin-featured-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .fox-plugin-header {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 22px 17px 14px;
+  }
+
+  .fox-plugin-header-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .fox-plugin-toolbar,
+  .fox-plugin-content {
+    padding-inline: 17px;
+  }
+
+  .fox-plugin-toolbar {
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .fox-plugin-toolbar-actions {
+    margin-left: auto;
+  }
+
+  .fox-plugin-categories {
+    order: 3;
+    flex-basis: 100%;
+  }
+
+  .fox-plugin-search {
+    width: 100%;
+    order: -1;
+    flex-basis: auto;
+  }
+
+  .fox-plugin-grid,
+  .fox-plugin-featured-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fox-plugin-error {
+    margin-inline: 17px;
+  }
+
+  .fox-plugin-operation-progress {
+    width: 90px;
+  }
+}
+
+/* Final plugin center layout: kind navigation occupies the page title row. */
+.fox-plugin-topbar,
+.fox-plugin-filterbar,
+.fox-plugin-installed-page-header,
+.fox-plugin-installed-content {
+  width: min(1180px, 100%);
+  margin-inline: auto;
+}
+
+.fox-plugin-topbar {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 24px 30px 0;
+}
+
+.fox-plugin-topbar > [data-slot='tabs'] {
+  flex: none;
+}
+
+.fox-plugin-topbar-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.fox-plugin-topbar-actions .fox-plugin-search {
+  width: min(300px, 32vw);
+  flex-basis: 300px;
+}
+
+.fox-plugin-topbar-actions .badge {
+  min-width: 18px;
+  height: 18px;
+  padding-inline: 5px;
+  font-size: 10px;
+}
+
+.fox-plugin-filterbar {
+  min-height: 45px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 30px 4px;
+}
+
+.fox-plugin-filterbar .fox-plugin-categories {
+  justify-content: flex-start;
+}
+
+.fox-plugin-filterbar .fox-plugin-refresh-action {
+  margin-left: auto;
+}
+
+.fox-plugin-card {
+  min-height: 122px;
+  border-radius: 12px !important;
+  box-shadow: none !important;
+}
+
+.fox-plugin-card-main {
+  padding: 14px;
+}
+
+.fox-plugin-card-heading {
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  gap: 9px;
+}
+
+.fox-plugin-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+}
+
+.fox-plugin-icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.fox-plugin-card-main p {
+  min-height: 31px;
+  margin: 10px 0 0;
+  font-size: 11px !important;
+  line-height: 16px;
+}
+
+.fox-plugin-card-install {
+  height: 28px !important;
+  min-height: 28px;
+  padding-inline: 8px;
+  font-size: 10px;
+}
+
+.fox-plugin-card-install svg {
+  width: 12px;
+  height: 12px;
+}
+
+.fox-plugin-installed-page-header {
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 24px 30px 10px;
+}
+
+.fox-plugin-installed-page-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.fox-plugin-installed-back {
+  height: var(--fox-action-height) !important;
+  padding-inline: 7px 10px;
+  color: var(--fox-muted);
+}
+
+.fox-plugin-installed-back svg {
+  width: 15px;
+  height: 15px;
+}
+
+.fox-plugin-installed-page-title h1 {
+  margin: 0 0 0 4px;
+  font-size: 25px;
+  line-height: 1.2;
+  font-weight: 700;
+}
+
+.fox-plugin-installed-page-title > .badge {
+  height: 20px;
+  min-width: 20px;
+  padding-inline: 6px;
+  font-size: 10px;
+}
+
+.fox-plugin-installed-page-header > .fox-plugin-search {
+  width: min(320px, 36vw);
+  margin-left: auto;
+  flex-basis: 320px;
+}
+
+.fox-plugin-installed-content {
+  padding: 10px 30px 44px;
+}
+
+.fox-plugin-installed-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.fox-plugin-installed-card {
+  min-width: 0;
+  min-height: 92px;
+  display: grid !important;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px !important;
+  padding: 13px !important;
+  border-radius: 12px !important;
+  box-shadow: none !important;
+}
+
+.fox-plugin-installed-card-icon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--fox-accent-soft);
+  color: var(--fox-accent);
+}
+
+.fox-plugin-installed-card-icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.fox-plugin-installed-card-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.fox-plugin-installed-card-copy > span {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fox-plugin-installed-card-copy strong {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-plugin-installed-card-copy .badge {
+  height: 18px;
+  flex: none;
+  padding-inline: 5px;
+  font-size: 9px;
+}
+
+.fox-plugin-installed-card-copy small {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--fox-muted);
+  font-size: 10px;
+  line-height: 14px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+@media (max-width: 980px) {
+  .fox-plugin-topbar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .fox-plugin-topbar-actions {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+
+  .fox-plugin-installed-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .fox-plugin-topbar,
+  .fox-plugin-filterbar,
+  .fox-plugin-installed-page-header,
+  .fox-plugin-installed-content {
+    padding-inline: 17px;
+  }
+
+  .fox-plugin-topbar-actions {
+    flex-wrap: wrap;
+  }
+
+  .fox-plugin-topbar-actions .fox-plugin-search {
+    width: 100%;
+    flex-basis: 100%;
+  }
+
+  .fox-plugin-installed-page-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .fox-plugin-installed-page-header > .fox-plugin-search {
+    width: 100%;
+    margin-left: 0;
+    flex-basis: var(--fox-action-height);
+  }
+
+  .fox-plugin-installed-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

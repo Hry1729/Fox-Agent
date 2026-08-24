@@ -70,6 +70,7 @@
   --fox-user: #eaf5ff;
   --fox-user-foreground: #243447;
   --fox-shadow: 0 16px 45px color-mix(in oklch, var(--foreground) 12%, transparent);
+  --fox-action-height: 34px;
   --fox-text-scale: 1;
   --fox-type-chrome: calc(13px * var(--fox-text-scale));
   --fox-type-caption: calc(11.5px * var(--fox-text-scale));

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { LoaderCircle } from 'lucide-react'
 import type { KnowledgeDocumentSourceMetadata } from '@/features/conversations/model/types'
 import { assertSafeZipArchive, hasZipSignature } from './knowledge-archive-safety'
-import { openKnowledgeCachedPreviewSource } from './knowledge-preview-source'
+import { openKnowledgeCachedPreviewSource, type KnowledgeCachedPreviewOpener } from './knowledge-preview-source'
 
 const MAX_SPREADSHEET_BYTES = 64 * 1024 * 1024
 const WORKBOOK_ZIP_LIMITS = {
@@ -23,12 +23,14 @@ export default function KnowledgeSpreadsheetViewer({
   filename,
   metadata,
   onFailure,
+  openPreviewSource,
 }: {
   knowledgeBaseId: string
   documentId: string
   filename: string
   metadata: KnowledgeDocumentSourceMetadata
   onFailure(message: string): void
+  openPreviewSource?: KnowledgeCachedPreviewOpener
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const [loading, setLoading] = useState(true)
@@ -42,14 +44,16 @@ export default function KnowledgeSpreadsheetViewer({
       let source: Awaited<ReturnType<typeof openKnowledgeCachedPreviewSource>> | null = null
       try {
         setLoading(true)
-        source = await openKnowledgeCachedPreviewSource({
-          knowledgeBaseId,
-          documentId,
-          filename,
-          maxBytes: MAX_SPREADSHEET_BYTES,
-          metadata,
-          signal: abortController.signal,
-        })
+        source = openPreviewSource
+          ? await openPreviewSource({ maxBytes: MAX_SPREADSHEET_BYTES, signal: abortController.signal })
+          : await openKnowledgeCachedPreviewSource({
+              knowledgeBaseId,
+              documentId,
+              filename,
+              maxBytes: MAX_SPREADSHEET_BYTES,
+              metadata,
+              signal: abortController.signal,
+            })
         const bytes = await source.readAll()
         if (hasZipSignature(bytes)) assertSafeZipArchive(bytes, WORKBOOK_ZIP_LIMITS)
         if (disposed || !containerRef.current) return
@@ -81,7 +85,7 @@ export default function KnowledgeSpreadsheetViewer({
       preview = null
       containerRef.current?.replaceChildren()
     }
-  }, [documentId, filename, knowledgeBaseId, metadata, onFailure])
+  }, [documentId, filename, knowledgeBaseId, metadata, onFailure, openPreviewSource])
 
   return (
     <div className="fox-spreadsheet-preview-shell">

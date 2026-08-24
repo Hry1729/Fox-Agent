@@ -7,6 +7,7 @@ import {
   validateEnvelope,
 } from './protocol.mjs'
 import { createCapabilityManifest, RUNTIME_TOOL_CATALOG } from './runtime-contract.mjs'
+import { runOfflineEvals } from './offline-evaluator.mjs'
 import { createWorkEvent } from './work-events.mjs'
 
 const sessions = new Map()
@@ -151,6 +152,9 @@ async function handleRequest(request) {
   }
 
   switch (request.type) {
+    case 'evaluation.run':
+      respond(request, 'evaluation_report', await runOfflineEvals())
+      break
     case 'initialize':
       {
       const workLoop = request.payload?.workLoop === true

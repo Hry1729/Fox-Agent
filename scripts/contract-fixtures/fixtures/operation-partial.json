@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "operationId": "operation-parent-example",
+  "parentOperationId": "operation-batch-example",
+  "domain": "knowledge",
+  "operation": "local_knowledge_import",
+  "status": "completed",
+  "sequence": 4,
+  "data": {
+    "outcome": "partial",
+    "completedItems": 2,
+    "succeededItems": 1,
+    "failedItems": 1,
+    "totalItems": 2
+  }
+}

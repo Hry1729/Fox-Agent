@@ -7,6 +7,9 @@ export interface SaveMcpServerInput {
   name: string
   command: string
   args: string[]
+  transport: McpServerRecord['transport']
+  endpointUrl?: string
+  definition?: string
   environment?: Record<string, string>
   clearEnvironment?: boolean
 }

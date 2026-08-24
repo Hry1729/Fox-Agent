@@ -4,7 +4,7 @@ import type { KnowledgeDocumentSourceMetadata } from '@/features/conversations/m
 import type { DocumentViewPosition } from './document-activity-model'
 import { assertSafeZipArchive } from './knowledge-archive-safety'
 import { PreviewIconButton, PreviewToolbar } from './knowledge-preview-controls'
-import { openKnowledgeCachedPreviewSource } from './knowledge-preview-source'
+import { openKnowledgeCachedPreviewSource, type KnowledgeCachedPreviewOpener } from './knowledge-preview-source'
 
 const MAX_PPTX_BYTES = 64 * 1024 * 1024
 const PPTX_ZIP_LIMITS = {
@@ -36,6 +36,7 @@ export default function KnowledgePptxViewer({
   requestedPosition,
   onPositionChange,
   onFailure,
+  openPreviewSource,
 }: {
   knowledgeBaseId: string
   documentId: string
@@ -44,6 +45,7 @@ export default function KnowledgePptxViewer({
   requestedPosition?: DocumentViewPosition
   onPositionChange?(position: DocumentViewPosition): void
   onFailure(message: string): void
+  openPreviewSource?: KnowledgeCachedPreviewOpener
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const viewerRef = useRef<PptxViewerInstance | null>(null)
@@ -64,14 +66,16 @@ export default function KnowledgePptxViewer({
         setSlideCount(0)
         const [{ PptxViewer }, nextSource] = await Promise.all([
           import('@aiden0z/pptx-renderer'),
-          openKnowledgeCachedPreviewSource({
-            knowledgeBaseId,
-            documentId,
-            filename,
-            maxBytes: MAX_PPTX_BYTES,
-            metadata,
-            signal: abortController.signal,
-          }),
+          openPreviewSource
+            ? openPreviewSource({ maxBytes: MAX_PPTX_BYTES, signal: abortController.signal })
+            : openKnowledgeCachedPreviewSource({
+                knowledgeBaseId,
+                documentId,
+                filename,
+                maxBytes: MAX_PPTX_BYTES,
+                metadata,
+                signal: abortController.signal,
+              }),
         ])
         source = nextSource
         const bytes = await source.readAll()
@@ -118,7 +122,7 @@ export default function KnowledgePptxViewer({
       viewerRef.current = null
       containerRef.current?.replaceChildren()
     }
-  }, [documentId, filename, knowledgeBaseId, metadata, onFailure])
+  }, [documentId, filename, knowledgeBaseId, metadata, onFailure, openPreviewSource])
 
   useEffect(() => {
     const viewer = viewerRef.current

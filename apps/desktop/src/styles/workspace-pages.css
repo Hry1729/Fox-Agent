@@ -4033,12 +4033,198 @@
   line-height: 1.65;
 }
 
+.fox-observability-card,
+.fox-evaluation-card {
+  margin-top: 12px;
+}
+
+.fox-observability-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.fox-observability-metrics > div {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--fox-border);
+  border-radius: 10px;
+  background: var(--fox-hover);
+}
+
+.fox-observability-metrics span,
+.fox-observability-metrics small,
+.fox-trace-run-list small,
+.fox-evaluation-summary span {
+  color: var(--fox-muted);
+  font-size: 12px;
+}
+
+.fox-trace-run-list {
+  display: grid;
+  margin-top: 14px;
+  border-top: 1px solid var(--fox-border);
+}
+
+.fox-trace-run-list > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--fox-border);
+}
+
+.fox-trace-run-list > div > span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.fox-trace-run-list > div > span:last-child {
+  justify-items: end;
+  text-align: right;
+}
+
+.fox-evaluation-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 10px;
+  background: var(--fox-hover);
+}
+
+.fox-evaluation-summary strong {
+  font-size: 24px;
+}
+
+.fox-evaluation-summary code {
+  margin-left: auto;
+  color: var(--fox-muted);
+  font-size: 11px;
+}
+
+.fox-evaluation-suites {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.fox-evaluation-suites > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--fox-border);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.fox-evaluation-suites .is-failed {
+  color: var(--destructive);
+}
+
+@media (max-width: 720px) {
+  .fox-trace-run-list > div,
+  .fox-evaluation-summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .fox-trace-run-list > div > span:last-child {
+    justify-items: start;
+    text-align: left;
+  }
+
+  .fox-evaluation-summary code {
+    margin-left: 0;
+  }
+}
+
+.fox-memory-manager {
+  display: grid;
+  gap: 12px;
+}
+
+.fox-memory-toolbar,
+.fox-memory-card > header,
+.fox-memory-card > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.fox-memory-toolbar > div {
+  width: min(420px, 100%);
+  position: relative;
+}
+
+.fox-memory-toolbar > div > svg {
+  position: absolute;
+  z-index: 1;
+  left: 11px;
+  top: 10px;
+  color: var(--fox-muted);
+}
+
+.fox-memory-toolbar input { padding-left: 34px; }
+
+.fox-memory-privacy-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 13px 15px;
+  border-color: color-mix(in oklch, var(--fox-accent) 28%, var(--fox-border));
+  background: color-mix(in oklch, var(--fox-accent) 6%, var(--fox-card));
+  box-shadow: none;
+}
+
+.fox-memory-privacy-note > svg { flex: none; margin-top: 2px; color: var(--fox-accent); }
+.fox-memory-privacy-note p { display: grid; gap: 3px; margin: 0; }
+.fox-memory-privacy-note b { font-size: 13px; }
+.fox-memory-privacy-note span { color: var(--fox-muted); font-size: 12px; line-height: 1.55; }
+
+.fox-memory-list { display: grid; gap: 10px; }
+
+.fox-memory-card {
+  padding: 16px;
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.fox-memory-card.is-conflict { border-color: color-mix(in oklch, var(--destructive) 55%, var(--fox-border)); }
+.fox-memory-card > header > div { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.fox-memory-card > header > div > span { color: var(--fox-muted); font-size: 11px; }
+.fox-memory-card h3 { margin: 13px 0 5px; font-size: 15px; }
+.fox-memory-card > p { margin: 0; font-size: 13px; line-height: 1.65; white-space: pre-wrap; }
+.fox-memory-card blockquote { margin: 10px 0; padding: 8px 10px; border-left: 2px solid var(--fox-border-strong); color: var(--fox-muted); background: var(--fox-panel); font-size: 11px; }
+.fox-memory-card > small { display: block; margin-top: 10px; color: var(--fox-muted); font-size: 10px; }
+.fox-memory-card > footer { justify-content: flex-end; margin-top: 12px; flex-wrap: wrap; }
+
+.fox-memory-form { display: grid; gap: 12px; }
+.fox-memory-form > label { display: grid; gap: 6px; color: var(--fox-muted); font-size: 12px; }
+.fox-memory-form textarea { min-height: 86px; }
+.fox-memory-dialog { max-width: 620px; }
+.fox-memory-history-dialog { max-width: 720px; }
+.fox-memory-audit-list { max-height: 430px; overflow: auto; display: grid; gap: 8px; padding-top: 10px; }
+.fox-memory-audit-list > p { color: var(--fox-muted); font-size: 12px; }
+.fox-memory-audit-list article { display: grid; gap: 4px; padding: 11px 12px; border: 1px solid var(--fox-border); border-radius: 7px; }
+.fox-memory-audit-list article b { font-size: 12px; }
+.fox-memory-audit-list article span,
+.fox-memory-audit-list article small { color: var(--fox-muted); font-size: 11px; overflow-wrap: anywhere; }
+
 @media(max-width:760px) {
   .fox-agent-work-head { align-items: flex-start; flex-direction: column; gap: 10px; }
   .fox-agent-work-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .fox-agent-capability-grid { grid-template-columns: 1fr; }
   .fox-agent-work-list > .fox-agent-task-row { grid-template-columns: 34px minmax(0, 1fr) auto; }
   .fox-agent-task-row time { display: none; }
+  .fox-memory-toolbar { align-items: stretch; flex-direction: column; }
+  .fox-memory-toolbar > div { width: 100%; }
 }
 
 /* Keep these final overrides after all legacy page rules. */

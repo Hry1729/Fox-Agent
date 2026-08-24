@@ -8,6 +8,7 @@ import { createEnvelope } from '../src/protocol.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const runtimePath = resolve(root, 'dist', 'fox-agent-runtime-x86_64-pc-windows-msvc.exe')
+const COLD_START_TIMEOUT = 90_000
 await access(runtimePath)
 
 const directory = await mkdtemp(join(tmpdir(), 'fox-runtime-smoke-'))
@@ -63,7 +64,7 @@ try {
       },
     },
   })
-  await waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+  await waitFor((message) => message.requestId === initialize.id && message.type === 'ready', COLD_START_TIMEOUT)
 
   const conversationId = 'sidecar-smoke-conversation'
   const runtimeSessionId = 'sidecar-smoke-session'

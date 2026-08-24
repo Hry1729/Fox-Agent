@@ -3,7 +3,7 @@
 > 状态：生效<br>
 > 适用版本：Fox 0.1.x<br>
 > 维护范围：Tauri Command、AppState、Repository、Host Service 和系统资源<br>
-> 最后更新：2026-08-07
+> 最后更新：2026-08-24
 
 ## 定位
 
@@ -21,7 +21,8 @@ flowchart TD
     RH --> GUARD["tool_guard.rs"]
     RH --> TOOL["tool_host.rs"]
     RH --> SKILL["skills.rs"]
-    RH --> MCP["mcp.rs"]
+    RH --> MCP["mcp.rs / mcp_openapi.rs"]
+    RH --> HOOK["lifecycle_hooks.rs"]
     CMD --> YUXI["yuxi/mod.rs HTTP Client"]
     CMD --> MODEL["model_service.rs"]
     CMD --> MAINT["maintenance.rs"]
@@ -29,7 +30,7 @@ flowchart TD
 
 ## 启动生命周期
 
-`lib.rs::run` 依次完成应用数据目录、待恢复数据、数据库、运行目录、客户端与 Runtime Host 初始化。应用退出时调用 `runtime_host.shutdown()`，避免遗留 Sidecar。
+`lib.rs::run` 依次完成应用数据目录、待恢复数据、数据库、运行目录、客户端与 Runtime Host 初始化。应用退出时调用 `runtime_host.shutdown()` 和扩展连接池 shutdown，避免遗留 Sidecar 或 stdio MCP 子进程。
 
 `AppState` 持有可共享的数据库句柄、Runtime Host、知识库客户端、远程 Runtime、模型客户端、数据路径，以及下载/预览任务的取消注册表和锁。AppState 管理基础设施引用，不应成为新的业务数据事实源。
 
@@ -47,6 +48,7 @@ flowchart TD
 
 - SQLite 使用 WAL、5 秒 busy timeout，并通过 `Database` 封装访问。
 - Runtime Host 管理 Worker 与待运行队列，单 Run 的事件按 `seq` 去重。
+- 扩展连接池按 source 串行请求，复用 stdio 进程或 HTTP MCP Session；配置变化使旧连接失效。
 - 知识预览以 `cache_key` 获取异步互斥锁，避免同一原件重复下载。
 - 下载与预览使用取消注册表；完成路径必须注销操作。
 
@@ -76,7 +78,7 @@ Host 是安全边界而不是简单代理。写文件、编辑、命令和 MCP �
 - `database/migrations.rs` 与 `repositories.rs` 内建数据库测试。
 - `maintenance.rs` 覆盖缓存、备份、恢复和回滚。
 - `runtime_host/mod.rs` 覆盖协议、依赖检测、附件与事件处理。
-- `mcp.rs` 使用假 MCP Server 验证 list/call/schema/timeout。
+- `mcp.rs` 与 `mcp_openapi.rs` 使用假 stdio Server 和本地 HTTP Server 验证持久连接、Session/SSE、OpenAPI list/call/schema/timeout；`lifecycle_hooks.rs` 验证声明式动作与审计。
 
 ## 关键代码
 

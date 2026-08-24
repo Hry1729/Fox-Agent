@@ -1,9 +1,11 @@
-import { Type } from '@earendil-works/pi-ai'
+import { Type } from 'typebox'
+import { KNOWLEDGE_TOOL_NAMES } from './runtime-contract.mjs'
+import { defineFoxTools } from './tool-adapter.mjs'
 
 async function executeHostTool(toolCallId, tool, input, requestHost, signal) {
   const response = await requestHost('tool.execute', { toolCallId, tool, input }, signal)
   const payload = response?.payload ?? {}
-  if (payload.isError || !payload.result) {
+  if (payload.isError || !Object.prototype.hasOwnProperty.call(payload, 'result')) {
     const baseMessage = payload.error || `Fox host tool ${tool} failed.`
     const serializedDetails = payload.errorDetails && typeof payload.errorDetails === 'object'
       ? JSON.stringify(payload.errorDetails)
@@ -13,14 +15,21 @@ async function executeHostTool(toolCallId, tool, input, requestHost, signal) {
       : baseMessage)
     if (payload.errorDetails && typeof payload.errorDetails === 'object') {
       error.details = payload.errorDetails
+      if (typeof payload.errorDetails.code === 'string' && payload.errorDetails.code) {
+        error.code = payload.errorDetails.code
+      }
+      if (typeof payload.errorDetails.retryable === 'boolean') {
+        error.retryable = payload.errorDetails.retryable
+      }
     }
+    if (typeof payload.errorCode === 'string' && payload.errorCode) error.code = payload.errorCode
     throw error
   }
   return payload.result
 }
 
 export function createHostTools(requestHost) {
-  return [
+  return defineFoxTools([
     {
       name: 'read_attachment',
       label: 'Read attachment',
@@ -67,12 +76,356 @@ export function createHostTools(requestHost) {
         executeHostTool(toolCallId, 'run_command', params, requestHost, signal),
     },
     {
+      name: 'web_search',
+      label: 'Search the web',
+      description: 'Search the live web. Fox includes a no-key DuckDuckGo fallback and can use a configured Brave, Tavily, Exa, or SearXNG provider when available.',
+      parameters: Type.Object({
+        query: Type.String(),
+        provider: Type.Optional(Type.Union([
+          Type.Literal('auto'),
+          Type.Literal('brave'),
+          Type.Literal('tavily'),
+          Type.Literal('exa'),
+          Type.Literal('searxng'),
+          Type.Literal('duckduckgo'),
+        ])),
+        maxResults: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })),
+        includeDomains: Type.Optional(Type.Array(Type.String())),
+        excludeDomains: Type.Optional(Type.Array(Type.String())),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'web_search', params, requestHost, signal),
+    },
+    {
+      name: 'web_read',
+      label: 'Read webpage',
+      description: 'Fetch a public HTTP or HTTPS page through Fox Host and extract bounded Markdown or plain text. Private, loopback, link-local, and reserved network targets are blocked.',
+      parameters: Type.Object({
+        url: Type.String(),
+        format: Type.Optional(Type.Union([Type.Literal('markdown'), Type.Literal('text')])),
+        maxChars: Type.Optional(Type.Integer({ minimum: 1000, maximum: 300000 })),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'web_read', params, requestHost, signal),
+    },
+    {
+      name: 'http_request',
+      label: 'Send HTTP request',
+      description: 'Send an approved HTTP request to an exact allowlisted public host. Private networks, cross-host redirects, credential headers, responses over 10 MiB, and timeouts over 15 seconds are blocked. Use a Keyring-backed OpenAPI Connector for authenticated APIs.',
+      parameters: Type.Object({
+        method: Type.Optional(Type.Union([
+          Type.Literal('GET'), Type.Literal('HEAD'), Type.Literal('POST'),
+          Type.Literal('PUT'), Type.Literal('PATCH'), Type.Literal('DELETE'),
+        ])),
+        url: Type.String(),
+        allowedHosts: Type.Array(Type.String(), { minItems: 1, maxItems: 20 }),
+        headers: Type.Optional(Type.Record(Type.String(), Type.String())),
+        body: Type.Optional(Type.Unknown()),
+        timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 15 })),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'http_request', params, requestHost, signal),
+    },
+    {
+      name: 'system_info',
+      label: 'Read system information',
+      description: 'Read an approved structured snapshot of CPU, memory, disks, and optionally bounded process summaries. Environment output is restricted to a fixed non-secret allowlist and never exposes variables containing API keys, tokens, secrets, or passwords.',
+      parameters: Type.Object({
+        includeProcesses: Type.Optional(Type.Boolean()),
+        maxProcesses: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+        includeEnvironment: Type.Optional(Type.Boolean()),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'system_info', params, requestHost, signal),
+    },
+    {
+      name: 'sqlite_read',
+      label: 'Query SQLite read-only',
+      description: 'Run one approved read-only SQLite statement against a database inside the authorized project. Fox opens the database read-only and enforces a 1000-row, 100-column, 2 MiB, and 5-second result boundary.',
+      parameters: Type.Object({
+        path: Type.String(),
+        query: Type.String(),
+        parameters: Type.Optional(Type.Array(Type.Unknown(), { maxItems: 100 })),
+        rowLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
+        timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'sqlite_read', params, requestHost, signal),
+    },
+    {
+      name: 'structured_data',
+      label: 'Process structured data',
+      description: 'Parse, format, convert, query, or validate JSON, YAML, TOML, XML, CSV, and TSV data. Input may be inline or a file inside the authorized project.',
+      parameters: Type.Object({
+        action: Type.Union([
+          Type.Literal('format'),
+          Type.Literal('convert'),
+          Type.Literal('query'),
+          Type.Literal('validate'),
+        ]),
+        data: Type.Optional(Type.String()),
+        path: Type.Optional(Type.String()),
+        inputFormat: Type.Optional(Type.Union([
+          Type.Literal('auto'), Type.Literal('json'), Type.Literal('yaml'),
+          Type.Literal('toml'), Type.Literal('xml'), Type.Literal('csv'), Type.Literal('tsv'),
+        ])),
+        outputFormat: Type.Optional(Type.Union([
+          Type.Literal('json'), Type.Literal('yaml'), Type.Literal('toml'),
+          Type.Literal('xml'), Type.Literal('csv'), Type.Literal('tsv'),
+        ])),
+        query: Type.Optional(Type.String()),
+        requiredKeys: Type.Optional(Type.Array(Type.String())),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'structured_data', params, requestHost, signal),
+    },
+    {
+      name: 'git_read',
+      label: 'Read Git state',
+      description: 'Read structured Git status, diff, log, or blame information for the authorized project without using a shell or modifying the repository.',
+      parameters: Type.Object({
+        operation: Type.Union([
+          Type.Literal('status'), Type.Literal('diff'), Type.Literal('log'), Type.Literal('blame'),
+        ]),
+        path: Type.Optional(Type.String()),
+        ref: Type.Optional(Type.String()),
+        base: Type.Optional(Type.String()),
+        staged: Type.Optional(Type.Boolean()),
+        maxEntries: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+        startLine: Type.Optional(Type.Integer({ minimum: 1 })),
+        endLine: Type.Optional(Type.Integer({ minimum: 1 })),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'git_read', params, requestHost, signal),
+    },
+    {
+      name: 'test_run',
+      label: 'Run tests',
+      description: 'Detect and run an existing Rust, Node, or Python test command in the authorized project. Fox executes direct process arguments, never a shell, and returns failures as structured results.',
+      parameters: Type.Object({
+        runner: Type.Optional(Type.Union([
+          Type.Literal('auto'), Type.Literal('node'), Type.Literal('rust'), Type.Literal('python'),
+        ])),
+        script: Type.Optional(Type.String()),
+        target: Type.Optional(Type.String()),
+        cwd: Type.Optional(Type.String()),
+        timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 600 })),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'test_run', params, requestHost, signal),
+    },
+    {
+      name: 'code_check',
+      label: 'Check code',
+      description: 'Run an existing project lint, type-check, Cargo check, Clippy, Ruff, or Mypy command selected from a bounded detection matrix. Fox never downloads tools implicitly.',
+      parameters: Type.Object({
+        check: Type.Optional(Type.Union([
+          Type.Literal('auto'), Type.Literal('lint'), Type.Literal('typecheck'),
+        ])),
+        ecosystem: Type.Optional(Type.Union([
+          Type.Literal('auto'), Type.Literal('node'), Type.Literal('rust'), Type.Literal('python'),
+        ])),
+        cwd: Type.Optional(Type.String()),
+        timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 600 })),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'code_check', params, requestHost, signal),
+    },
+    {
+      name: 'format_code',
+      label: 'Format code',
+      description: 'Check or apply formatting with an existing project formatter for Rust, Node, or Python. Every call requires approval and no formatter package is downloaded implicitly.',
+      parameters: Type.Object({
+        mode: Type.Union([Type.Literal('check'), Type.Literal('write')]),
+        ecosystem: Type.Optional(Type.Union([
+          Type.Literal('auto'), Type.Literal('node'), Type.Literal('rust'), Type.Literal('python'),
+        ])),
+        path: Type.Optional(Type.String()),
+        cwd: Type.Optional(Type.String()),
+        timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 600 })),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'format_code', params, requestHost, signal),
+    },
+    {
+      name: 'tabular_data',
+      label: 'Analyze tabular data',
+      description: 'Preview, filter, or aggregate bounded CSV, TSV, and JSON tables from inline data or an authorized project file. XLSX support is intentionally deferred to the next phase.',
+      parameters: Type.Object({
+        operation: Type.Union([
+          Type.Literal('preview'), Type.Literal('filter'), Type.Literal('aggregate'),
+        ]),
+        data: Type.Optional(Type.String()),
+        path: Type.Optional(Type.String()),
+        format: Type.Optional(Type.Union([
+          Type.Literal('auto'), Type.Literal('csv'), Type.Literal('tsv'), Type.Literal('json'),
+        ])),
+        offset: Type.Optional(Type.Integer({ minimum: 0 })),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
+        filterColumn: Type.Optional(Type.String()),
+        filterValue: Type.Optional(Type.String()),
+        filterMode: Type.Optional(Type.Union([Type.Literal('equals'), Type.Literal('contains')])),
+        aggregate: Type.Optional(Type.Union([
+          Type.Literal('count'), Type.Literal('sum'), Type.Literal('avg'),
+          Type.Literal('min'), Type.Literal('max'),
+        ])),
+        column: Type.Optional(Type.String()),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'tabular_data', params, requestHost, signal),
+    },
+    {
       name: 'work_snapshot_get',
       label: 'Get work snapshot',
       description: 'Load the current goal, tasks, and evidence for the Host-owned current conversation. The conversation identity is injected by Fox.',
       parameters: Type.Object({}),
       execute: (toolCallId, params, signal) =>
         executeHostTool(toolCallId, 'work_snapshot_get', params, requestHost, signal),
+    },
+    {
+      name: 'workflow_snapshot_get',
+      label: 'Get expert workflow snapshot',
+      description: 'Load the active persisted expert Workflow, its current Stage, mapped Host Task, attempts, output checkpoints, and pending Gate. Conversation identity is injected by Fox.',
+      parameters: Type.Object({}),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'workflow_snapshot_get', params, requestHost, signal),
+    },
+    {
+      name: 'workflow_start',
+      label: 'Start expert workflow',
+      description: 'Start the versioned Workflow frozen in the active expert package. Fox validates the declared input JSON Schema and atomically creates one Host Goal plus one ordered Task per Stage.',
+      parameters: Type.Object({ input: Type.Optional(Type.Unknown()) }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'workflow_start', params, requestHost, signal),
+    },
+    {
+      name: 'workflow_stage_start',
+      label: 'Start workflow stage',
+      description: 'Start or retry only the current queued Workflow Stage. Fox binds the mapped Task to the real current Run and enforces the persisted retry limit.',
+      parameters: Type.Object({ stageId: Type.Optional(Type.String()) }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'workflow_stage_start', params, requestHost, signal),
+    },
+    {
+      name: 'workflow_stage_complete',
+      label: 'Complete workflow stage',
+      description: 'Checkpoint the current Stage output after valid Task Evidence exists. Fox validates the Stage output JSON Schema; the final Stage also requires and validates workflowOutput before completing the Host Goal.',
+      parameters: Type.Object({
+        stageOutput: Type.Unknown(),
+        workflowOutput: Type.Optional(Type.Unknown()),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'workflow_stage_complete', params, requestHost, signal),
+    },
+    {
+      name: 'workflow_stage_fail',
+      label: 'Fail workflow stage attempt',
+      description: 'Record a real Stage failure. Fox requeues the Stage while attempts remain, otherwise marks the Workflow failed and blocks the mapped Host Goal.',
+      parameters: Type.Object({ error: Type.String({ minLength: 1, maxLength: 2000 }) }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'workflow_stage_fail', params, requestHost, signal),
+    },
+    {
+      name: 'workflow_cancel',
+      label: 'Cancel expert workflow',
+      description: 'Cancel the active Workflow and map all unfinished Stages to terminal Host Task states. Use only when the user asks to stop or a declared stop condition is met.',
+      parameters: Type.Object({ reason: Type.Optional(Type.String({ maxLength: 2000 })) }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'workflow_cancel', params, requestHost, signal),
+    },
+    {
+      name: 'team_snapshot_get',
+      label: 'Get expert team snapshot',
+      description: 'Load the persisted Supervisor Team and its real Child Run members, isolated statuses, bounded results, usage, and failures.',
+      parameters: Type.Object({}),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'team_snapshot_get', params, requestHost, signal),
+    },
+    {
+      name: 'team_start',
+      label: 'Start expert team',
+      description: 'Start the versioned Supervisor Team frozen in the active expert package. The current Run remains Lead and Fox persists the Team before any member is dispatched.',
+      parameters: Type.Object({
+        objective: Type.String({ minLength: 1, maxLength: 8000 }),
+        context: Type.Optional(Type.String({ maxLength: 12000 })),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'team_start', params, requestHost, signal),
+    },
+    {
+      name: 'team_member_start',
+      label: 'Start expert team member',
+      description: 'Serially dispatch one declared Team member as a real isolated Child Run. Fox binds the frozen member identity, instructions, tool scope, budget, and parent cancellation chain.',
+      parameters: Type.Object({
+        memberId: Type.String({ minLength: 1, maxLength: 128 }),
+        task: Type.String({ minLength: 1, maxLength: 8000 }),
+        context: Type.Optional(Type.String({ maxLength: 12000 })),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'team_member_start', params, requestHost, signal),
+    },
+    {
+      name: 'team_collect',
+      label: 'Collect expert team',
+      description: 'Collect all persisted Team members. Fox keeps the Team running until every declared member has been dispatched and is terminal, then produces one bounded aggregate result.',
+      parameters: Type.Object({
+        waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 60000 })),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'team_collect', params, requestHost, signal),
+    },
+    {
+      name: 'team_cancel',
+      label: 'Cancel expert team',
+      description: 'Cancel the active Team and propagate cancellation to its active isolated Child Run before terminalizing the Team record.',
+      parameters: Type.Object({ reason: Type.Optional(Type.String({ maxLength: 2000 })) }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'team_cancel', params, requestHost, signal),
+    },
+    {
+      name: 'child_agent_list',
+      label: 'List child agents',
+      description: 'List the Host-approved local agents that can execute an isolated Child Run. Call this before selecting a specialist unless the general agent is sufficient.',
+      parameters: Type.Object({}),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'child_agent_list', params, requestHost, signal),
+    },
+    {
+      name: 'child_run_start',
+      label: 'Start child run',
+      description: 'Start one isolated, asynchronous Child Run for a concrete independent investigation, implementation, or review task. Fox enforces depth, concurrency, duration, token, output, and tool-call limits. Start multiple independent children before collecting them to obtain real parallelism.',
+      parameters: Type.Object({
+        objective: Type.String({ minLength: 1, maxLength: 8000 }),
+        context: Type.Optional(Type.String({ maxLength: 12000 })),
+        agentId: Type.Optional(Type.String({ minLength: 1, maxLength: 160 })),
+        budget: Type.Optional(Type.Object({
+          maxDurationMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 900000 })),
+          maxTotalTokens: Type.Optional(Type.Integer({ minimum: 256, maximum: 200000 })),
+          maxOutputTokens: Type.Optional(Type.Integer({ minimum: 64, maximum: 32768 })),
+          maxToolCalls: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
+        })),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'child_run_start', params, requestHost, signal),
+    },
+    {
+      name: 'child_run_collect',
+      label: 'Collect child runs',
+      description: 'Collect Host-persisted Child Run statuses and bounded final results. A positive waitMs waits for all requested children to become terminal or until the timeout, without blocking other children.',
+      parameters: Type.Object({
+        childRunIds: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }),
+        waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 60000 })),
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'child_run_collect', params, requestHost, signal),
+    },
+    {
+      name: 'child_run_cancel',
+      label: 'Cancel child run',
+      description: 'Cancel one active Child Run owned by the current parent Run. Fox propagates cancellation to the isolated runtime process and persists the terminal state.',
+      parameters: Type.Object({ childRunId: Type.String({ minLength: 1, maxLength: 160 }) }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'child_run_cancel', params, requestHost, signal),
     },
     {
       name: 'goal_propose',
@@ -164,12 +517,12 @@ export function createHostTools(requestHost) {
     {
       name: 'plan_revision_create',
       label: 'Create plan revision',
-      description: 'Persist a new approved PlanRevision for an active goal. Use this when the execution plan changes, and include the complete ordered task plan rather than only the delta.',
+      description: 'Persist a proposed PlanRevision for an active goal. Include the complete ordered task plan rather than only the delta. Fox Host keeps it proposed until the user approves or rejects it.',
       parameters: Type.Object({
         goalId: Type.String(),
         title: Type.String(),
         summary: Type.String(),
-        tasks: Type.Array(Type.Object({ title: Type.String(), detail: Type.Optional(Type.String()), ordinal: Type.Integer({ minimum: 0 }) })),
+        tasks: Type.Array(Type.Object({ title: Type.String(), detail: Type.Optional(Type.String()), ordinal: Type.Integer({ minimum: 0 }) }), { minItems: 1 }),
       }),
       execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'plan_revision_create', params, requestHost, signal),
     },
@@ -178,11 +531,10 @@ export function createHostTools(requestHost) {
       label: 'Add review finding',
       description: 'Persist an independent review result. Record real issues as open findings. When review finds no blocker, add one resolved info finding that states the review scope and checks performed.',
       parameters: Type.Object({
-        goalId: Type.String(), taskId: Type.Optional(Type.String()), planRevisionId: Type.Optional(Type.String()),
+        goalId: Type.String(), taskId: Type.Optional(Type.String()), planRevisionId: Type.String(),
         severity: Type.Union([Type.Literal('critical'), Type.Literal('high'), Type.Literal('medium'), Type.Literal('low'), Type.Literal('info')]),
         category: Type.String(), title: Type.String(), detail: Type.String(),
         status: Type.Optional(Type.Union([Type.Literal('open'), Type.Literal('resolved'), Type.Literal('waived')])),
-        reviewer: Type.String(),
       }),
       execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'review_finding_add', params, requestHost, signal),
     },
@@ -196,64 +548,140 @@ export function createHostTools(requestHost) {
     {
       name: 'acceptance_submit',
       label: 'Submit final acceptance',
-      description: 'Submit final A1 acceptance. Fox Host requires an approved PlanRevision, an independent review record, no open blocking findings, terminal tasks, valid evidence, and the current goal version before completing the goal.',
-      parameters: Type.Object({ goalId: Type.String(), expectedVersion: Type.Integer({ minimum: 1 }), summary: Type.String(), reviewer: Type.String() }),
+      description: 'Submit final A1 acceptance from the same independent Run that reviewed the approved plan. Every passed criterion must name its method and cite Host-validated evidence; Fox Host binds reviewer identity to the real Run ID.',
+      parameters: Type.Object({
+        goalId: Type.String(),
+        expectedVersion: Type.Integer({ minimum: 1 }),
+        summary: Type.String(),
+        checks: Type.Array(Type.Object({
+          criterion: Type.String(),
+          method: Type.Union([
+            Type.Literal('test'), Type.Literal('inspection'), Type.Literal('review'),
+            Type.Literal('manual'), Type.Literal('other'),
+          ]),
+          status: Type.Union([Type.Literal('passed'), Type.Literal('not_applicable')]),
+          evidenceIds: Type.Array(Type.String()),
+          detail: Type.Optional(Type.String()),
+        }), { minItems: 1 }),
+      }),
       execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'acceptance_submit', params, requestHost, signal),
     },
-  ]
+    {
+      name: 'memory_search',
+      label: 'Search confirmed memory',
+      description: 'Search only user-confirmed, enabled memories visible to this conversation. Fox records the query, selection reason, rank, evidence excerpt, Run, and recall time for user audit.',
+      parameters: Type.Object({
+        query: Type.String(),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })),
+      }),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'memory_search', params, requestHost, signal),
+    },
+    {
+      name: 'memory_propose',
+      label: 'Propose long-term memory',
+      description: 'Submit one concise, evidence-backed candidate memory for user governance. This never confirms or enables memory, never stores a whole conversation, and creates an explicit conflict when it disagrees with confirmed memory.',
+      parameters: Type.Object({
+        scope: Type.Optional(Type.Union([
+          Type.Literal('global'), Type.Literal('agent'), Type.Literal('project'),
+        ])),
+        kind: Type.Union([
+          Type.Literal('preference'), Type.Literal('identity'), Type.Literal('project'),
+          Type.Literal('workflow'), Type.Literal('fact'), Type.Literal('other'),
+        ]),
+        canonicalKey: Type.String({ minLength: 1, maxLength: 160 }),
+        content: Type.String({ minLength: 1, maxLength: 4000 }),
+        evidenceExcerpt: Type.String({ minLength: 1, maxLength: 1000 }),
+        sourceMessageId: Type.Optional(Type.String()),
+        confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
+      }),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'memory_propose', params, requestHost, signal),
+    },
+  ], { source: 'fox-host', execution: 'host', trusted: true })
 }
 
+export const KNOWLEDGE_REFERENCE_SCHEMA = Type.Union([
+  Type.Object({
+    source: Type.Literal('local'),
+    id: Type.String(),
+    revision: Type.Optional(Type.String()),
+  }),
+  Type.Object({
+    source: Type.Literal('remote'),
+    connectionId: Type.String(),
+    id: Type.String(),
+    revision: Type.Optional(Type.String()),
+  }),
+])
+
+const KNOWLEDGE_REFERENCES_SCHEMA = Type.Array(KNOWLEDGE_REFERENCE_SCHEMA, { minItems: 1 })
+
 export function createKnowledgeTools(requestHost) {
-  return [
+  return defineFoxTools([
     {
-      name: 'list_knowledge_bases',
+      name: KNOWLEDGE_TOOL_NAMES.list,
       label: 'List knowledge bases',
-      description: 'List Yuxi knowledge bases explicitly enabled for the current Fox conversation.',
-      parameters: Type.Object({}),
-      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'list_knowledge_bases', params, requestHost, signal),
-    },
-    {
-      name: 'search_knowledge',
-      label: 'Search knowledge',
-      description: 'Search one Yuxi knowledge base enabled for the current conversation and return source metadata.',
-      parameters: Type.Object({ knowledgeBaseId: Type.String(), query: Type.String() }),
-      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'search_knowledge', params, requestHost, signal),
-    },
-    {
-      name: 'read_knowledge_document',
-      label: 'Read knowledge document',
-      description: 'Read an already parsed document from a Yuxi knowledge base enabled for the conversation.',
-      parameters: Type.Object({ knowledgeBaseId: Type.String(), documentId: Type.String() }),
-      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'read_knowledge_document', params, requestHost, signal),
-    },
-    {
-      name: 'query_knowledge_graph',
-      label: 'Query knowledge graph',
-      description: 'Query a bounded Yuxi knowledge graph subgraph from a knowledge base enabled for the current conversation.',
+      description: 'List knowledge bases explicitly enabled for the current Fox conversation, including their local or remote source. Optionally narrow the result with source-aware targets.',
       parameters: Type.Object({
-        knowledgeBaseId: Type.String(),
+        target: Type.Optional(KNOWLEDGE_REFERENCE_SCHEMA),
+        targets: Type.Optional(KNOWLEDGE_REFERENCES_SCHEMA),
+      }),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, KNOWLEDGE_TOOL_NAMES.list, params, requestHost, signal),
+    },
+    {
+      name: KNOWLEDGE_TOOL_NAMES.search,
+      label: 'Search knowledge',
+      description: 'Search enabled local or remote knowledge bases. Use targets for source-aware references; knowledgeBaseId remains compatible with legacy remote calls.',
+      parameters: Type.Object({
+        knowledgeBaseId: Type.Optional(Type.String()),
+        target: Type.Optional(KNOWLEDGE_REFERENCE_SCHEMA),
+        targets: Type.Optional(KNOWLEDGE_REFERENCES_SCHEMA),
+        query: Type.String(),
+        topK: Type.Optional(Type.Integer({ minimum: 1 })),
+        documentIds: Type.Optional(Type.Array(Type.String(), { minItems: 1 })),
+      }),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, KNOWLEDGE_TOOL_NAMES.search, params, requestHost, signal),
+    },
+    {
+      name: KNOWLEDGE_TOOL_NAMES.read,
+      label: 'Read knowledge document',
+      description: 'Read an enabled local or remote knowledge document. Use target for a source-aware reference; knowledgeBaseId remains compatible with legacy remote calls.',
+      parameters: Type.Object({
+        knowledgeBaseId: Type.Optional(Type.String()),
+        target: Type.Optional(KNOWLEDGE_REFERENCE_SCHEMA),
+        documentId: Type.String(),
+      }),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, KNOWLEDGE_TOOL_NAMES.read, params, requestHost, signal),
+    },
+    {
+      name: KNOWLEDGE_TOOL_NAMES.graph,
+      label: 'Query knowledge graph',
+      description: 'Query a bounded knowledge graph subgraph. Local targets explicitly return local_knowledge.graph_unavailable until local graph support is available.',
+      parameters: Type.Object({
+        knowledgeBaseId: Type.Optional(Type.String()),
+        target: Type.Optional(KNOWLEDGE_REFERENCE_SCHEMA),
+        targets: Type.Optional(KNOWLEDGE_REFERENCES_SCHEMA),
         keyword: Type.Optional(Type.String()),
         maxDepth: Type.Optional(Type.Number()),
         maxNodes: Type.Optional(Type.Number()),
       }),
-      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'query_knowledge_graph', params, requestHost, signal),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, KNOWLEDGE_TOOL_NAMES.graph, params, requestHost, signal),
     },
-  ]
+  ], { source: 'fox-knowledge', execution: 'host', trusted: true })
 }
 
 export function createMcpTools(requestHost) {
-  return [
+  return defineFoxTools([
     {
       name: 'list_mcp_tools',
-      label: 'List MCP tools',
-      description: 'List enabled MCP servers and their validated tool catalog. Use this before calling an MCP tool.',
+      label: 'List extension tools',
+      description: 'List enabled persistent stdio/HTTP MCP and OpenAPI extension sources with their validated tool catalog. Use this before calling an extension tool.',
       parameters: Type.Object({ query: Type.Optional(Type.String()) }),
       execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'list_mcp_tools', params, requestHost, signal),
     },
     {
       name: 'call_mcp_tool',
-      label: 'Call MCP tool',
-      description: 'Call one validated MCP tool through Fox. Use this for a real MCP operation after list_mcp_tools; every call requires explicit user approval.',
+      label: 'Call extension tool',
+      description: 'Call one validated MCP or OpenAPI tool through Fox after list_mcp_tools. Calls require explicit user approval and pass declarative lifecycle Hooks.',
       parameters: Type.Object({
         serverId: Type.String(),
         tool: Type.String(),
@@ -261,5 +689,5 @@ export function createMcpTools(requestHost) {
       }),
       execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'call_mcp_tool', params, requestHost, signal),
     },
-  ]
+  ], { source: 'fox-mcp', execution: 'host', trusted: true })
 }

@@ -1,0 +1,4 @@
+{
+  "enum": "plugin-activation-mode",
+  "value": "global"
+}

@@ -18,12 +18,301 @@ pub struct AgentRecord {
     pub system_prompt: String,
     pub is_builtin: bool,
     pub package_version: String,
+    pub package_source: String,
+    pub package_id: Option<String>,
+    pub package_hash: Option<String>,
     pub package_manifest: Value,
     pub capabilities: Value,
     pub resources: AgentResourcesRecord,
     pub configurable_items: Value,
     pub is_default: bool,
     pub available: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpertPackageVersionRecord {
+    pub id: String,
+    pub expert_id: String,
+    pub package_id: String,
+    pub version: String,
+    pub package_hash: String,
+    pub package: Value,
+    pub source: String,
+    pub status: String,
+    pub created_at: i64,
+    pub activated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstallExpertPackageVersionRequest {
+    pub expert_id: String,
+    pub package_id: String,
+    pub version: String,
+    pub package_hash: String,
+    pub package: Value,
+    pub package_manifest: Value,
+    pub name: String,
+    pub description: String,
+    pub icon: Option<String>,
+    pub category: String,
+    pub system_prompt: String,
+    pub default_model: String,
+    pub opening_suggestions: Vec<String>,
+    pub enabled_skills: Vec<String>,
+    pub expected_current_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpertWorkflowRunRecord {
+    pub id: String,
+    pub conversation_id: String,
+    pub expert_binding_id: String,
+    pub expert_id: String,
+    pub package_hash: String,
+    pub workflow_id: String,
+    pub workflow_version: String,
+    pub workflow: Value,
+    pub goal_id: String,
+    pub status: String,
+    pub current_stage_index: i64,
+    pub input: Value,
+    pub output: Option<Value>,
+    pub error_message: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpertWorkflowStageRunRecord {
+    pub id: String,
+    pub workflow_run_id: String,
+    pub stage_id: String,
+    pub task_id: String,
+    pub ordinal: i64,
+    pub status: String,
+    pub attempt: i64,
+    pub max_attempts: i64,
+    pub output: Option<Value>,
+    pub error_message: Option<String>,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpertWorkflowGateRecord {
+    pub id: String,
+    pub workflow_run_id: String,
+    pub stage_id: String,
+    pub status: String,
+    pub reason: String,
+    pub requested_at: i64,
+    pub resolved_at: Option<i64>,
+    pub resolved_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpertWorkflowSnapshot {
+    pub run: ExpertWorkflowRunRecord,
+    pub stages: Vec<ExpertWorkflowStageRunRecord>,
+    pub gates: Vec<ExpertWorkflowGateRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpertTeamRunRecord {
+    pub id: String,
+    pub conversation_id: String,
+    pub expert_binding_id: String,
+    pub expert_id: String,
+    pub package_hash: String,
+    pub team_id: String,
+    pub team_version: String,
+    pub team: Value,
+    pub parent_run_id: String,
+    pub status: String,
+    pub objective: String,
+    pub context: String,
+    pub result: Option<Value>,
+    pub error_message: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpertTeamSnapshot {
+    pub run: ExpertTeamRunRecord,
+    pub members: Vec<ChildRunRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StartExpertTeamInput {
+    pub conversation_id: String,
+    pub expert_binding_id: String,
+    pub expert_id: String,
+    pub package_hash: String,
+    pub team_id: String,
+    pub team_version: String,
+    pub team: Value,
+    pub parent_run_id: String,
+    pub objective: String,
+    pub context: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DigitalColleagueRecord {
+    pub id: String,
+    pub name: String,
+    pub expert_id: String,
+    pub expert_binding_id: String,
+    pub package_hash: String,
+    pub package_snapshot: Value,
+    pub conversation_id: String,
+    pub objective: String,
+    pub project_id: Option<String>,
+    pub project_root: Option<String>,
+    pub knowledge_references: Vec<KnowledgeReference>,
+    pub status: String,
+    pub max_runs_per_day: i64,
+    pub max_tokens_per_day: i64,
+    pub max_duration_ms: i64,
+    pub max_output_tokens: i64,
+    pub max_tool_calls: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub revoked_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DigitalColleagueScheduleRecord {
+    pub id: String,
+    pub colleague_id: String,
+    pub name: String,
+    pub schedule_kind: String,
+    pub interval_seconds: i64,
+    pub catchup_window_seconds: i64,
+    pub enabled: bool,
+    pub next_due_at: i64,
+    pub last_scheduled_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DigitalColleagueChannelRecord {
+    pub id: String,
+    pub colleague_id: String,
+    pub name: String,
+    pub channel_kind: String,
+    pub external_identity: String,
+    pub secret_prefix: String,
+    pub rate_limit_per_minute: i64,
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub revoked_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DigitalColleagueTriggerRecord {
+    pub id: String,
+    pub colleague_id: String,
+    pub source_type: String,
+    pub source_id: Option<String>,
+    pub idempotency_key: String,
+    pub status: String,
+    pub payload: Value,
+    pub scheduled_for: Option<i64>,
+    pub run_id: Option<String>,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub tool_call_count: i64,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DigitalColleagueAuditRecord {
+    pub id: String,
+    pub colleague_id: Option<String>,
+    pub channel_id: Option<String>,
+    pub trigger_id: Option<String>,
+    pub event: String,
+    pub outcome: String,
+    pub actor: String,
+    pub details: Value,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedDigitalColleagueTrigger {
+    pub colleague: DigitalColleagueRecord,
+    pub trigger: DigitalColleagueTriggerRecord,
+    pub started: StartRunResult,
+    pub remaining_tokens: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DigitalColleagueTriggerAcceptance {
+    pub trigger: DigitalColleagueTriggerRecord,
+    pub prepared: Option<PreparedDigitalColleagueTrigger>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateDigitalColleagueInput {
+    pub name: String,
+    pub expert_id: String,
+    pub objective: String,
+    pub project_id: Option<String>,
+    pub project_root: Option<String>,
+    pub knowledge_references: Vec<KnowledgeReference>,
+    pub max_runs_per_day: i64,
+    pub max_tokens_per_day: i64,
+    pub max_duration_ms: i64,
+    pub max_output_tokens: i64,
+    pub max_tool_calls: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StartExpertWorkflowInput {
+    pub conversation_id: String,
+    pub expert_binding_id: String,
+    pub expert_id: String,
+    pub package_hash: String,
+    pub workflow_id: String,
+    pub workflow_version: String,
+    pub workflow: Value,
+    pub title: String,
+    pub objective: String,
+    pub acceptance_summary: String,
+    pub input: Value,
+    pub stages: Vec<StartExpertWorkflowStageInput>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StartExpertWorkflowStageInput {
+    pub stage_id: String,
+    pub title: String,
+    pub detail: String,
+    pub max_attempts: i64,
+    pub user_gate: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -78,6 +367,11 @@ pub struct ConversationSummary {
     pub status: String,
     pub pinned: bool,
     pub archived: bool,
+    pub archived_at: Option<i64>,
+    pub trashed_at: Option<i64>,
+    pub parent_conversation_id: Option<String>,
+    pub forked_from_message_id: Option<String>,
+    pub lineage_root_id: String,
     pub created_at: i64,
     pub updated_at: i64,
     pub last_message_at: Option<i64>,
@@ -120,6 +414,54 @@ pub struct RunRecord {
     pub last_seq: i64,
     pub trace_id: Option<String>,
     pub root_span_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildRunBudget {
+    pub max_duration_ms: i64,
+    pub max_total_tokens: i64,
+    pub max_output_tokens: i64,
+    pub max_tool_calls: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildAgentSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub category: String,
+    pub agent_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildRunRecord {
+    pub id: String,
+    pub parent_run_id: String,
+    pub child_run_id: String,
+    pub child_conversation_id: String,
+    pub worker_agent_id: String,
+    pub worker_agent_name: String,
+    pub objective: String,
+    pub context: String,
+    pub team_run_id: Option<String>,
+    pub team_member_id: Option<String>,
+    pub allowed_tools: Option<Vec<String>>,
+    pub status: String,
+    pub depth: i64,
+    pub budget: ChildRunBudget,
+    pub result_text: Option<String>,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub tool_call_count: i64,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -317,6 +659,9 @@ pub struct ConversationDetail {
     pub plan_revisions: Vec<PlanRevisionRecord>,
     pub review_findings: Vec<ReviewFindingRecord>,
     pub acceptances: Vec<AcceptanceRecord>,
+    pub child_runs: Vec<ChildRunRecord>,
+    pub expert_workflow: Option<ExpertWorkflowSnapshot>,
+    pub expert_team: Option<ExpertTeamSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -462,6 +807,82 @@ pub struct UsageStatistics {
     pub days: Vec<UsageDayStat>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceRunSummary {
+    pub run_id: String,
+    pub conversation_id: String,
+    pub trace_id: String,
+    pub root_span_id: String,
+    pub status: String,
+    pub model: String,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub total_duration_ms: Option<i64>,
+    pub planning_duration_ms: i64,
+    pub model_duration_ms: i64,
+    pub tool_duration_ms: i64,
+    pub ui_duration_ms: i64,
+    pub span_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatencyMetric {
+    pub operation: String,
+    pub sample_count: i64,
+    pub average_ms: i64,
+    pub p50_ms: i64,
+    pub p95_ms: i64,
+    pub max_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvaluationSuiteSummary {
+    pub name: String,
+    pub source: Option<String>,
+    pub source_url: Option<String>,
+    pub total: i64,
+    pub passed: i64,
+    pub failed: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvaluationRunSummary {
+    pub id: String,
+    pub generated_at: String,
+    pub recorded_at: i64,
+    pub duration_ms: i64,
+    pub report_hash: String,
+    pub suites: i64,
+    pub total: i64,
+    pub passed: i64,
+    pub failed: i64,
+    pub suite_results: Vec<EvaluationSuiteSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservabilityStatistics {
+    pub trace_schema_version: i64,
+    pub traced_run_count: i64,
+    pub total_run_count: i64,
+    pub trace_coverage_percent: i64,
+    pub recent_runs: Vec<TraceRunSummary>,
+    pub latency_metrics: Vec<LatencyMetric>,
+    pub evaluation_history: Vec<EvaluationRunSummary>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordUiMetricRequest {
+    pub run_id: String,
+    pub metric: String,
+    pub duration_ms: i64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectFilesRequest {
@@ -533,6 +954,28 @@ pub struct ApprovalRecord {
     pub resolved_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    Deny,
+    AllowOnce,
+    AllowConversation,
+}
+
+impl ApprovalDecision {
+    pub fn approved(self) -> bool {
+        !matches!(self, Self::Deny)
+    }
+
+    pub fn scope(self) -> &'static str {
+        match self {
+            Self::Deny => "none",
+            Self::AllowOnce => "once",
+            Self::AllowConversation => "conversation",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentRecord {
@@ -590,6 +1033,235 @@ pub struct AgentRuntimeConfigRecord {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeReference {
+    pub source: String,
+    pub provider_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+    pub id: String,
+}
+
+impl KnowledgeReference {
+    pub fn local(id: impl Into<String>) -> Self {
+        Self {
+            source: "local".to_owned(),
+            provider_key: "local".to_owned(),
+            connection_id: None,
+            id: id.into(),
+        }
+    }
+
+    pub fn remote(connection_id: impl Into<String>, id: impl Into<String>) -> Self {
+        let connection_id = connection_id.into();
+        Self {
+            source: "remote".to_owned(),
+            provider_key: connection_id.clone(),
+            connection_id: Some(connection_id),
+            id: id.into(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err("knowledge reference id must not be empty".to_owned());
+        }
+        if self.provider_key.trim().is_empty() {
+            return Err("knowledge reference providerKey must not be empty".to_owned());
+        }
+        match self.source.as_str() {
+            "local" if self.provider_key == "local" && self.connection_id.is_none() => Ok(()),
+            "remote"
+                if self.connection_id.as_deref().is_some_and(|connection_id| {
+                    !connection_id.trim().is_empty() && connection_id == self.provider_key
+                }) =>
+            {
+                Ok(())
+            }
+            "local" => Err(
+                "local knowledge references require providerKey=local and no connectionId"
+                    .to_owned(),
+            ),
+            "remote" => {
+                Err("remote knowledge references require connectionId=providerKey".to_owned())
+            }
+            _ => Err("knowledge reference source must be local or remote".to_owned()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeReferenceBindingRecord {
+    pub conversation_id: String,
+    pub reference: KnowledgeReference,
+    pub knowledge_base_name: Option<String>,
+    pub enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeReferenceBindingInput {
+    pub reference: KnowledgeReference,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginKind {
+    Mcp,
+    Skill,
+    Tool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginOrigin {
+    Builtin,
+    Official,
+    Community,
+    Local,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginInstallStatus {
+    NotInstalled,
+    Installing,
+    Installed,
+    UpdateAvailable,
+    Uninstalling,
+    InstallFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpRuntimeStatus {
+    Unknown,
+    Ready,
+    Connecting,
+    Healthy,
+    Degraded,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum PluginActivation {
+    Global { enabled: bool },
+    PerAgent { enabled_agent_count: usize },
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum PluginActivationUpdate {
+    Global { enabled: bool },
+    PerAgent { agent_id: String, enabled: bool },
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCardView {
+    pub id: String,
+    pub kind: PluginKind,
+    pub origin: PluginOrigin,
+    pub category: String,
+    pub name: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub install_status: PluginInstallStatus,
+    pub activation: PluginActivation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_status: Option<McpRuntimeStatus>,
+    pub permissions: Vec<String>,
+    pub compatible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incompatibility_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCatalogQuery {
+    pub kind: PluginKind,
+    pub search: Option<String>,
+    pub category: Option<String>,
+    pub page_size: Option<usize>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCatalogPage {
+    pub items: Vec<PluginCardView>,
+    pub total: usize,
+    pub categories: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+pub type PluginCatalogDTO = PluginCatalogPage;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallationsPage {
+    pub items: Vec<PluginCardView>,
+    pub total: usize,
+}
+
+pub type PluginInstallationsDTO = PluginInstallationsPage;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSetActivationRequest {
+    pub plugin_id: String,
+    pub update: PluginActivationUpdate,
+}
+
+#[derive(Debug, Clone)]
+pub struct PluginCatalogEntryRecord {
+    pub plugin_id: String,
+    pub version: String,
+    pub kind: PluginKind,
+    pub origin: PluginOrigin,
+    pub manifest: Value,
+    pub package_hash: Option<String>,
+    pub signature: Option<String>,
+    pub fetched_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PluginInstallationRecord {
+    pub plugin_id: String,
+    pub installed_version: String,
+    pub origin: PluginOrigin,
+    pub install_status: PluginInstallStatus,
+    pub install_path: Option<String>,
+    pub package_hash: Option<String>,
+    pub installed_at: i64,
+    pub updated_at: i64,
+    pub last_error_code: Option<String>,
+    pub last_error_message: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpPluginSourceRecord {
+    pub server_id: String,
+    pub catalog_plugin_id: Option<String>,
+    pub origin: PluginOrigin,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillRecord {
@@ -626,11 +1298,17 @@ pub struct McpServerRecord {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
+    pub transport: String,
+    pub endpoint_url: Option<String>,
+    pub definition: Option<String>,
     pub enabled: bool,
     pub status: String,
     pub credential_configured: bool,
     pub last_error: Option<String>,
     pub last_checked_at: Option<i64>,
+    pub last_latency_ms: Option<i64>,
+    pub tool_count: Option<i64>,
+    pub consecutive_failures: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -643,10 +1321,18 @@ pub struct SaveMcpServerRequest {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default = "default_mcp_transport")]
+    pub transport: String,
+    pub endpoint_url: Option<String>,
+    pub definition: Option<String>,
     #[serde(default)]
     pub environment: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub clear_environment: bool,
+}
+
+fn default_mcp_transport() -> String {
+    "stdio".to_owned()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -659,6 +1345,57 @@ pub struct McpServerIdRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateMcpServerEnabledRequest {
     pub server_id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleHookRecord {
+    pub id: String,
+    pub name: String,
+    pub event: String,
+    pub matcher: String,
+    pub action: String,
+    pub reason: String,
+    pub enabled: bool,
+    pub priority: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveLifecycleHookRequest {
+    pub id: Option<String>,
+    pub name: String,
+    pub event: String,
+    pub matcher: String,
+    pub action: String,
+    pub reason: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_hook_priority")]
+    pub priority: i64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_hook_priority() -> i64 {
+    100
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleHookIdRequest {
+    pub hook_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateLifecycleHookEnabledRequest {
+    pub hook_id: String,
     pub enabled: bool,
 }
 
@@ -794,6 +1531,14 @@ pub struct ConversationIdRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConversationForkRequest {
+    pub conversation_id: String,
+    pub message_id: String,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GoalIdRequest {
     pub conversation_id: String,
     pub goal_id: String,
@@ -816,7 +1561,7 @@ pub struct ProjectIdRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ResolveApprovalRequest {
     pub approval_id: String,
-    pub approved: bool,
+    pub decision: ApprovalDecision,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1433,6 +2178,173 @@ pub struct SaveModelProviderRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ModelProviderIdRequest {
     pub provider_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryEntityRecord {
+    pub id: String,
+    pub scope: String,
+    pub scope_key: String,
+    pub kind: String,
+    pub canonical_key: String,
+    pub content: String,
+    pub state: String,
+    pub enabled: bool,
+    pub source_conversation_id: Option<String>,
+    pub source_message_id: Option<String>,
+    pub source_run_id: Option<String>,
+    pub evidence_excerpt: String,
+    pub created_by: String,
+    pub confidence: f64,
+    pub version: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub confirmed_at: Option<i64>,
+    pub disabled_at: Option<i64>,
+    pub deleted_at: Option<i64>,
+    pub open_conflict_id: Option<String>,
+    pub recall_count: i64,
+    pub last_recalled_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryRevisionRecord {
+    pub id: String,
+    pub memory_id: String,
+    pub actor: String,
+    pub action: String,
+    pub before: Option<Value>,
+    pub after: Option<Value>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryConflictRecord {
+    pub id: String,
+    pub existing_memory_id: String,
+    pub competing_memory_id: String,
+    pub status: String,
+    pub resolution: Option<String>,
+    pub created_at: i64,
+    pub resolved_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryRecallRecord {
+    pub id: String,
+    pub memory_id: String,
+    pub conversation_id: String,
+    pub run_id: Option<String>,
+    pub query: String,
+    pub reason: String,
+    pub score: f64,
+    pub rank: i64,
+    pub evidence_excerpt: String,
+    pub recalled_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryRecallItem {
+    pub id: String,
+    pub scope: String,
+    pub kind: String,
+    pub canonical_key: String,
+    pub content: String,
+    pub evidence_excerpt: String,
+    pub reason: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryRecallBundle {
+    pub status: String,
+    pub query: String,
+    pub items: Vec<MemoryRecallItem>,
+    pub total_chars: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryListRequest {
+    pub agent_id: Option<String>,
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub include_deleted: bool,
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateMemoryRequest {
+    pub scope: String,
+    pub scope_key: Option<String>,
+    pub kind: String,
+    pub canonical_key: String,
+    pub content: String,
+    pub evidence_excerpt: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryIdRequest {
+    pub memory_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryMutationRequest {
+    pub memory_id: String,
+    pub expected_version: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMemoryRequest {
+    pub memory_id: String,
+    pub kind: String,
+    pub canonical_key: String,
+    pub content: String,
+    pub evidence_excerpt: Option<String>,
+    pub expected_version: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMemoryEnabledRequest {
+    pub memory_id: String,
+    pub enabled: bool,
+    pub expected_version: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveMemoryConflictRequest {
+    pub conflict_id: String,
+    pub decision: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryRecallListRequest {
+    pub memory_id: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoryProposalInput {
+    pub scope: String,
+    pub kind: String,
+    pub canonical_key: String,
+    pub content: String,
+    pub evidence_excerpt: String,
+    pub source_message_id: Option<String>,
+    pub confidence: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]

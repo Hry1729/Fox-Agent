@@ -1,0 +1,5 @@
+{
+  "mode": "per_agent",
+  "agentId": "agent-example",
+  "enabled": true
+}

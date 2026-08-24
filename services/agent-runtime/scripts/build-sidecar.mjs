@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from 'node:fs'
-import { copyFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -91,62 +91,14 @@ async function createBundlerWorkspace() {
   ]) {
     await materializeDependency(dependency)
   }
-  const runtimeSource = await readFile(resolve(root, 'src/pi-runtime.mjs'), 'utf8')
-  const bundlerSource = runtimeSource
-    .replace(
-      "import { fauxAssistantMessage, registerFauxProvider } from '@earendil-works/pi-ai'",
-      [
-        "import { fauxAssistantMessage, registerFauxProvider } from './node_modules/@earendil-works/pi-ai/dist/providers/faux.js'",
-        "import { registerApiProvider } from './node_modules/@earendil-works/pi-ai/dist/api-registry.js'",
-        "import { streamAnthropic, streamSimpleAnthropic } from './node_modules/@earendil-works/pi-ai/dist/providers/anthropic.js'",
-        "import { streamOpenAICompletions, streamSimpleOpenAICompletions } from './node_modules/@earendil-works/pi-ai/dist/providers/openai-completions.js'",
-        "import { streamOpenAIResponses, streamSimpleOpenAIResponses } from './node_modules/@earendil-works/pi-ai/dist/providers/openai-responses.js'",
-      ].join('\n'),
-    )
-    .replace(
-      "const sessions = new Map()",
-      [
-        "registerApiProvider({ api: 'openai-completions', stream: streamOpenAICompletions, streamSimple: streamSimpleOpenAICompletions })",
-        "registerApiProvider({ api: 'openai-responses', stream: streamOpenAIResponses, streamSimple: streamSimpleOpenAIResponses })",
-        "registerApiProvider({ api: 'anthropic-messages', stream: streamAnthropic, streamSimple: streamSimpleAnthropic })",
-        "",
-        "const sessions = new Map()",
-      ].join('\n'),
-    )
-  await writeFile(resolve(workspace, 'pi-runtime.mjs'), bundlerSource)
-  for (const file of ['agent.js', 'agent-loop.js']) {
-    const path = resolve(workspace, 'node_modules', '@earendil-works', 'pi-agent-core', 'dist', file)
-    const source = await readFile(path, 'utf8')
-    await writeFile(path, source.replaceAll('from "@earendil-works/pi-ai/base"', 'from "../../pi-ai/dist/base.js"'))
-  }
-  const piAiDist = resolve(workspace, 'node_modules', '@earendil-works', 'pi-ai', 'dist')
-  const piAiBase = await readFile(resolve(piAiDist, 'base.js'), 'utf8')
-  await writeFile(resolve(piAiDist, 'base.js'), piAiBase
-    .split('\n')
-    .filter((line) => !line.includes('./images') && !line.includes('./image-models'))
-    .join('\n'))
-  for (const provider of ['google.js', 'google-vertex.js', 'mistral.js', 'register-builtins.js']) {
-    await rm(resolve(piAiDist, 'providers', provider), { force: true })
-  }
-  await writeFile(resolve(piAiDist, 'index.js'), [
-    'import { clearApiProviders, registerApiProvider } from "./api-registry.js"',
-    'import { streamAnthropic, streamSimpleAnthropic } from "./providers/anthropic.js"',
-    'import { streamOpenAICompletions, streamSimpleOpenAICompletions } from "./providers/openai-completions.js"',
-    'import { streamOpenAIResponses, streamSimpleOpenAIResponses } from "./providers/openai-responses.js"',
-    'export * from "./base.js"',
-    'export function resetApiProviders() {',
-    '  clearApiProviders()',
-    '  registerApiProvider({ api: "anthropic-messages", stream: streamAnthropic, streamSimple: streamSimpleAnthropic })',
-    '  registerApiProvider({ api: "openai-completions", stream: streamOpenAICompletions, streamSimple: streamSimpleOpenAICompletions })',
-    '  registerApiProvider({ api: "openai-responses", stream: streamOpenAIResponses, streamSimple: streamSimpleOpenAIResponses })',
-    '}',
-    'resetApiProviders()',
-    '',
-  ].join('\n'))
+  await copyFile(resolve(root, 'src/pi-runtime.mjs'), resolve(workspace, 'pi-runtime.mjs'))
   for (const file of [
+    'expert-package.mjs',
     'fox-planning-extension.mjs',
     'host-tools.mjs',
     'model-profile.mjs',
+    'offline-evaluator.mjs',
+    'pi-adapter.mjs',
     'pi-event-mapper.mjs',
     'planner-runtime.mjs',
     'prompt-composer.mjs',
@@ -156,6 +108,7 @@ async function createBundlerWorkspace() {
     'runtime-contract.mjs',
     'runtime-instructions.mjs',
     'runtime-session.mjs',
+    'tool-adapter.mjs',
   ]) {
     await copyFile(resolve(root, 'src', file), resolve(workspace, file))
   }

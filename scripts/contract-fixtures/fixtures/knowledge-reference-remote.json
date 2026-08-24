@@ -1,0 +1,6 @@
+{
+  "source": "remote",
+  "connectionId": "connection-example",
+  "knowledgeBaseId": "kb-remote-example",
+  "revision": "remote-revision-1"
+}

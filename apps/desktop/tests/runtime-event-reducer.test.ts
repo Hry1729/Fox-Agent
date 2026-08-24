@@ -331,6 +331,28 @@ describe('runtime event reducer', () => {
     expect(next.messages).toEqual(current.messages)
     expect(next.runtimeEvents).toEqual([])
   })
+
+  test('projects Host plan approval events into the persisted revision', () => {
+    const current = detail()
+    const planRevision = {
+      id: 'plan-1', goalId: 'goal-1', conversationId: 'conversation-1', revision: 1,
+      title: 'Implementation plan', summary: 'one task', tasks: [{ title: 'Implement', ordinal: 0 }],
+      status: 'proposed' as const, createdBy: 'run-1', createdAt: new Date(1000).toISOString(), approvedAt: null,
+    }
+    current.planRevisions = [planRevision]
+    const event: WorkEventRecord = {
+      type: 'plan.approved', schemaVersion: 1, conversationId: 'conversation-1', goalId: 'goal-1',
+      taskId: null, runId: 'run-1', traceId: null, spanId: null, sequence: 8,
+      timestamp: new Date(8000).toISOString(),
+      data: { planRevision: { ...planRevision, status: 'approved', approvedAt: new Date(8000).toISOString() } },
+    }
+
+    const next = applyWorkEvent(current, event)!
+    expect(next.planRevisions).toEqual([
+      expect.objectContaining({ id: 'plan-1', status: 'approved' }),
+    ])
+    expect(next.lastRun).toEqual(current.lastRun)
+  })
 })
 
 describe('runtime event display queue', () => {

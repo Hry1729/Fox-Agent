@@ -9,11 +9,13 @@
     "build:sidecar": "node scripts/build-sidecar.mjs",
     "smoke:sidecar": "node scripts/smoke-sidecar.mjs",
     "eval:offline": "node evals/run-offline-evals.mjs",
+    "eval:trends": "node evals/report-trends.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.79.9",
-    "@earendil-works/pi-ai": "0.79.9",
-    "@earendil-works/pi-coding-agent": "0.79.9"
+    "@earendil-works/pi-agent-core": "0.84.2",
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "typebox": "1.3.7"
   }
 }

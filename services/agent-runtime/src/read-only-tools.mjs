@@ -1,5 +1,6 @@
-import { Type } from '@earendil-works/pi-ai'
+import { Type } from 'typebox'
 import { executeReadOnlyTool } from './read-only-tool-executors.mjs'
+import { defineFoxTools } from './tool-adapter.mjs'
 
 async function approvedArgs(tool, params, requestPreflight, signal) {
   const input = tool !== 'read' && !String(params?.path || '').trim()
@@ -13,7 +14,7 @@ async function approvedArgs(tool, params, requestPreflight, signal) {
 }
 
 export function createReadOnlyTools(requestPreflight) {
-  return [
+  return defineFoxTools([
     {
       name: 'read',
       label: 'Read file',
@@ -54,5 +55,5 @@ export function createReadOnlyTools(requestPreflight) {
         return executeReadOnlyTool('grep', input, { signal })
       },
     },
-  ]
+  ], { source: 'fox-read-only', execution: 'runtime', trusted: true })
 }

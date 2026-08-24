@@ -151,6 +151,7 @@ export function mergeConversationDetail(persisted: ConversationDetail, current: 
     planRevisions: mergeRecords(persisted.planRevisions ?? [], current.planRevisions ?? [], (item) => item.id),
     reviewFindings: mergeRecords(persisted.reviewFindings ?? [], current.reviewFindings ?? [], (item) => item.id),
     acceptances: mergeRecords(persisted.acceptances ?? [], current.acceptances ?? [], (item) => item.id),
+    childRuns: mergeRecords(persisted.childRuns ?? [], current.childRuns ?? [], (item) => item.childRunId),
   }
 }
 
@@ -193,6 +194,8 @@ const processEventTypes = new Set([
   'evidence.added',
   'evidence.validated',
   'plan.revised',
+  'plan.approved',
+  'plan.rejected',
   'review.finding_added',
   'review.finding_resolved',
   'acceptance.completed',
@@ -471,7 +474,7 @@ export function applyRuntimeNotification(
         checkedAt: workTimestamp,
       }
     })
-  } else if (event.type === 'plan.revised' && planRevisionEvent && typeof planRevisionEvent.id === 'string') {
+  } else if (['plan.revised', 'plan.approved', 'plan.rejected'].includes(event.type) && planRevisionEvent && typeof planRevisionEvent.id === 'string') {
     planRevisions = [...planRevisions.filter((item) => item.id !== planRevisionEvent.id), planRevisionEvent as unknown as PlanRevisionRecord]
   } else if ((event.type === 'review.finding_added' || event.type === 'review.finding_resolved') && reviewFindingEvent && typeof reviewFindingEvent.id === 'string') {
     reviewFindings = [...reviewFindings.filter((item) => item.id !== reviewFindingEvent.id), reviewFindingEvent as unknown as ReviewFindingRecord]

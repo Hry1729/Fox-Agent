@@ -212,7 +212,7 @@
 .fox-sidebar.is-collapsed .fox-sidebar-title-safe {
   height: 45px;
   flex-basis: 45px;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
   transform: translateY(9px);
 }
@@ -398,8 +398,16 @@
 }
 
 .fox-sidebar-command kbd {
+  align-self: center;
   color: var(--fox-faint);
   font: 9px/1.2 "HarmonyOS Sans SC", sans-serif;
+}
+
+.fox-shell .fox-sidebar-command > svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  align-self: center;
 }
 
 .fox-sidebar.is-collapsed .fox-sidebar-primary {
@@ -3067,15 +3075,12 @@
 }
 
 .fox-decision-approval-list {
-  max-height: 220px;
+  min-height: 124px;
+  max-height: 280px;
+  display: flex;
+  align-items: stretch;
   overflow-y: auto;
   scrollbar-width: thin;
-}
-
-.fox-decision-approval-list > .fox-runtime-confirmation + .fox-runtime-confirmation {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--fox-border);
 }
 
 .fox-question-decision-content,
@@ -3149,7 +3154,48 @@
 }
 
 .fox-runtime-confirmation {
+  min-height: 124px;
+  justify-content: center;
   background: color-mix(in srgb, var(--fox-card) 96%, #e8f4ff 4%) !important;
+}
+
+.fox-runtime-confirmation .fox-confirmation-body {
+  align-items: center;
+}
+
+.fox-runtime-confirmation .fox-confirmation-content {
+  min-width: 0;
+  min-height: 62px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.fox-runtime-confirmation [data-slot='alert-description'] {
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.fox-runtime-confirmation .fox-confirmation-body code {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.fox-runtime-confirmation .fox-confirmation-body small {
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.fox-runtime-confirmation .fox-confirmation-actions {
+  flex-wrap: wrap;
+  margin-top: 14px;
+}
+
+.fox-runtime-confirmation .fox-confirmation-actions button {
+  min-height: 34px;
+  padding-inline: 14px;
+  font-size: 13px;
 }
 
 .fox-question-field b {
@@ -3598,7 +3644,7 @@
 
 .fox-prompt-input > [data-slot='input-group'] {
   position: relative;
-  min-height: 86px;
+  min-height: 96px;
   overflow: hidden;
   border: 1px solid var(--fox-border);
   border-radius: 18px;

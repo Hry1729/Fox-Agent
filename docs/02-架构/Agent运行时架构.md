@@ -3,7 +3,7 @@
 > 状态：生效<br>
 > 适用版本：Fox 0.1.x<br>
 > 维护范围：`services/agent-runtime`、`apps/desktop/src-tauri/src/runtime_host`、Runtime Adapter 契约<br>
-> 最后更新：2026-08-21
+> 最后更新：2026-08-24
 
 ## 目标与边界
 
@@ -81,7 +81,7 @@ Pi 是首个本地 Runtime Adapter，不是 Fox 对话架构本身。未来增�
 - Runtime stderr 尾部、最后错误和恢复次数；
 - Runtime 名称、版本和 Capability Manifest。
 
-当前实现是单 Worker 队列，不是多 Agent Worker Pool。同一时刻由一个本地 Worker 处理活动 Run，其他 Run 排队；A5 的 Child Agent 和真正并行 Worker 属于后续能力。
+Primary Run 继续使用单 Worker FIFO，保证普通会话的既有顺序语义。A5 在这一主队列之外增加 Host-owned Child Runtime 池：每个 Child Run 使用独立 RuntimeHost、Sidecar 和 Session，同一 root 最多并发 3 个、深度 1。它不是复用一个全局多 Agent 进程，也不会让普通会话绕过 FIFO。父子身份、预算、权限交集、审批、取消和结果聚合见[子 Agent 与 Child Run 架构](子Agent与ChildRun架构.md)。
 
 ### Sidecar 启动
 
@@ -143,7 +143,7 @@ Manifest 版本、Runtime 版本和实际工具目录必须相容。Runtime 声�
 
 ## Pi Runtime 实现
 
-`services/agent-runtime/src/pi-runtime.mjs` 是当前真实本地适配器，使用：
+`services/agent-runtime/src/pi-runtime.mjs` 是当前真实本地 Runtime 入口。`pi-adapter.mjs` 是 Pi SDK 的唯一直接依赖边界，并同步锁定：
 
 - `@earendil-works/pi-agent-core`；
 - `@earendil-works/pi-ai`；
@@ -153,6 +153,8 @@ Pi 提供模型抽象、Agent Session、工具调用、重试和上下文压缩�
 
 | 模块 | Fox 职责 |
 | --- | --- |
+| `pi-adapter.mjs` | 封装 Pi 0.84.2 `ModelRuntime`、Session、ResourceLoader 与 Faux Provider，限制升级影响面 |
+| `tool-adapter.mjs` | 在 Fox Tool Definition 与 Pi Custom Tool 之间转换，保持 Host 权限契约独立于 Agent 引擎 |
 | `model-profile.mjs` | 按 API、供应商和模型族生成能力画像及兼容参数 |
 | `runtime-instructions.mjs` | 定义 Fox 稳定运行规则、Goal 意图和安全边界 |
 | `prompt-composer.mjs` | 分层组合稳定提示词、Host 上下文和单轮上下文 |
@@ -242,6 +244,10 @@ Planner 只有在存在授权项目、用户请求具有行动意图且任务较
 - Goal、Task、Evidence 等 Work Tools。
 
 执行位置和审批要求由 `runtime-contract.mjs` 与 Rust Host 共同校验。Runtime 注册了工具并不代表获得权限；项目权限、智能体知识范围和用户审批仍在 Host 侧生效。
+
+所有 Host-owned 工具在执行前后经过同一声明式 Lifecycle Hook 边界。`before_tool` 可以阻断、强制本次审批或附加注解；`after_tool` 只能注解。Run 分派和终态分别记录 `before_run/after_run`。Hook 不能执行脚本、降低目录中的审批要求或扩大 Assistant/Expert/Child Agent scope，Runtime 只接收最终工具结果和可选 `hookAnnotations`。
+
+`list_mcp_tools/call_mcp_tool` 统一投影持久 stdio、Streamable HTTP 和 OpenAPI 源；连接方式、凭据、Session ID 和健康状态都留在 Host，不进入 Sidecar。完整边界见[扩展源与策略生命周期架构](扩展源与策略生命周期架构.md)。
 
 ## Goal 和 Planning Extension
 
@@ -336,14 +342,14 @@ pnpm.cmd runtime:smoke
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml runtime_host
 ```
 
-离线 `30/30` 是 Harness 契约基线，不是 BFCL、AgentDojo、SWE-bench 等官方模型质量分数。真实模型评测必须记录模型版本、凭据环境、数据集版本、重复次数和成本。
+离线 `35/35` 是 Harness 契约基线，不是 BFCL、AgentDojo、SWE-bench 等官方模型质量分数。真实模型评测必须记录模型版本、凭据环境、数据集版本、重复次数和成本。
 
 ## 已知限制
 
-- 本地 Host 仍是单 Worker 队列，未实现 Child Agent 与并行调度。
+- 普通 Primary Run 仍按单 Worker FIFO 调度；只有显式 Child Run 使用最多 3 个隔离进程的有限并发。
 - 混合文本 reasoning 的拆分存在模型特异性，需要持续回归。
 - `openai-responses` 尚未作为完整 UI/Host 配置能力发布。
-- Planner 是单轮只读建议器，尚无持久化 PlanRevision 或独立 Reviewer。
+- Planner 仍是单轮建议器；持久化 PlanRevision、独立 Reviewer 与 Acceptance 由 Host-owned A1 工作闭环承接。
 - Runtime Session 仍是本地 JSON 文件，跨设备迁移只保证产品数据，不保证执行栈原样恢复。
 
 ## 相关代码与文档

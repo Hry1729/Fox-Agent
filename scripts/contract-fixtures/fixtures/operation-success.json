@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "operationId": "operation-success-example",
+  "domain": "knowledge",
+  "operation": "local_knowledge_import",
+  "status": "completed",
+  "sequence": 1,
+  "data": {
+    "outcome": "success",
+    "completedItems": 1,
+    "succeededItems": 1,
+    "failedItems": 0,
+    "totalItems": 1
+  }
+}

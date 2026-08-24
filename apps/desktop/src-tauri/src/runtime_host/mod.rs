@@ -1,11 +1,20 @@
+mod capability_tools;
 mod protocol;
 mod work_tools;
 
 #[cfg(test)]
 pub(crate) use work_tools::WORK_TOOLS;
 
-use crate::database::{AgentRecord, AttachmentRecord, Database, StartRunResult};
 use crate::yuxi::{get_access_token, YuxiClient};
+use crate::{
+    app_state::AppState,
+    database::{
+        AgentRecord, ApprovalDecision, AttachmentRecord, ChildRunBudget, ChildRunRecord, Database,
+        EvaluationRunSummary, KnowledgeReference, MemoryProposalInput,
+        PreparedDigitalColleagueTrigger, StartRunResult, ToolCallRecord,
+    },
+    local_knowledge::LocalKnowledgeStore,
+};
 use flate2::read::DeflateDecoder;
 use protocol::{HostResponse, RuntimeCapabilityManifest, RuntimeEnvelope, RuntimeRequest};
 use serde::Serialize;
@@ -18,9 +27,12 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
@@ -59,8 +71,8 @@ fn runtime_agent_package(
     agent: &AgentRecord,
     enabled_skills: &[String],
     enabled_mcps: &[String],
-    bound_knowledge: &[String],
-) -> Value {
+    bound_knowledge: &[KnowledgeReference],
+) -> Result<Value, String> {
     let system_prompt = (agent.runtime_type == "pi").then(|| agent.system_prompt.clone());
     let mut package_manifest = agent.package_manifest.clone();
     if let Some(object) = package_manifest.as_object_mut() {
@@ -68,9 +80,9 @@ fn runtime_agent_package(
         if agent.is_builtin {
             object.insert("mcpServers".to_owned(), json!(enabled_mcps));
         }
-        object.insert("knowledge".to_owned(), json!(bound_knowledge));
+        apply_bound_knowledge_declaration(object, bound_knowledge, false)?;
     }
-    json!({
+    Ok(json!({
         "id": agent.id,
         "name": agent.name,
         "description": agent.description,
@@ -88,7 +100,152 @@ fn runtime_agent_package(
         "capabilities": agent.capabilities,
         "resources": agent.resources,
         "enabledSkills": enabled_skills,
+    }))
+}
+
+fn package_string_scope(manifest: &Value, field: &str) -> Option<HashSet<String>> {
+    manifest.get(field).and_then(Value::as_array).map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect()
     })
+}
+
+fn intersect_optional_scopes(
+    left: Option<HashSet<String>>,
+    right: Option<HashSet<String>>,
+) -> Option<HashSet<String>> {
+    match (left, right) {
+        (None, None) => None,
+        (Some(scope), None) | (None, Some(scope)) => Some(scope),
+        (Some(left), Some(right)) => Some(left.intersection(&right).cloned().collect()),
+    }
+}
+
+fn apply_delegated_package_scope(
+    package: &mut Value,
+    parent_tools: Option<&HashSet<String>>,
+    parent_mcps: Option<&HashSet<String>>,
+) -> Result<(), String> {
+    let manifest = package
+        .get_mut("packageManifest")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "delegated agent package manifest is invalid".to_owned())?;
+    for (field, parent_scope) in [("allowedTools", parent_tools), ("mcpServers", parent_mcps)] {
+        let Some(parent_scope) = parent_scope else {
+            continue;
+        };
+        let selected = package_string_scope(&Value::Object(manifest.clone()), field)
+            .map(|child_scope| {
+                child_scope
+                    .intersection(parent_scope)
+                    .cloned()
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_else(|| parent_scope.clone());
+        let mut selected = selected.into_iter().collect::<Vec<_>>();
+        selected.sort();
+        manifest.insert(field.to_owned(), json!(selected));
+    }
+    Ok(())
+}
+
+fn apply_bound_knowledge_declaration(
+    manifest: &mut serde_json::Map<String, Value>,
+    bound_knowledge: &[KnowledgeReference],
+    strict: bool,
+) -> Result<(), String> {
+    if let Some(declaration) = manifest.get("knowledgeReferences") {
+        let references = declaration.as_array().ok_or_else(|| {
+            "[conversation.expert_snapshot_invalid] Expert knowledgeReferences must be an array."
+                .to_owned()
+        })?;
+        let mut effective = Vec::new();
+        for reference in references {
+            let parsed = match package_knowledge_reference(reference) {
+                Ok(reference) => reference,
+                Err(error) if strict => return Err(error),
+                Err(_) => continue,
+            };
+            if bound_knowledge.contains(&parsed) {
+                effective.push(reference.clone());
+            }
+        }
+        manifest.insert("manifestSchemaVersion".to_owned(), json!(2));
+        manifest.insert("knowledgeReferences".to_owned(), Value::Array(effective));
+        manifest.remove("knowledge");
+    } else if strict && manifest.contains_key("knowledge") {
+        let declared = manifest
+            .get("knowledge")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                "[conversation.expert_snapshot_invalid] Expert knowledge must be an array."
+                    .to_owned()
+            })?
+            .iter()
+            .map(|item| {
+                item.as_str().ok_or_else(|| {
+                    "[conversation.expert_snapshot_invalid] Expert knowledge id is invalid."
+                        .to_owned()
+                })
+            })
+            .collect::<Result<HashSet<_>, _>>()?;
+        let effective = bound_knowledge
+            .iter()
+            .filter(|reference| {
+                reference.source == "remote" && declared.contains(reference.id.as_str())
+            })
+            .map(|reference| reference.id.clone())
+            .collect::<Vec<_>>();
+        manifest.insert("knowledge".to_owned(), json!(effective));
+    } else if bound_knowledge.iter().all(|reference| {
+        reference.source == "remote" && reference.connection_id.as_deref() == Some("yuxi")
+    }) {
+        manifest.insert(
+            "knowledge".to_owned(),
+            json!(bound_knowledge
+                .iter()
+                .map(|reference| reference.id.clone())
+                .collect::<Vec<_>>()),
+        );
+    } else {
+        manifest.insert("manifestSchemaVersion".to_owned(), json!(2));
+        manifest.insert("knowledgeReferences".to_owned(), json!(bound_knowledge));
+        manifest.remove("knowledge");
+    }
+    Ok(())
+}
+
+fn package_knowledge_reference(value: &Value) -> Result<KnowledgeReference, String> {
+    let invalid = || {
+        "[conversation.expert_snapshot_invalid] Expert knowledge reference is invalid.".to_owned()
+    };
+    let object = value.as_object().ok_or_else(invalid)?;
+    let source = object
+        .get("source")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(invalid)?;
+    let reference = match source {
+        "local" => KnowledgeReference::local(id),
+        "remote" => KnowledgeReference::remote(
+            object
+                .get("connectionId")
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?,
+            id,
+        ),
+        _ => return Err(invalid()),
+    };
+    reference.validate().map_err(|_| invalid())?;
+    Ok(reference)
 }
 
 fn package_string_list(package: &Value, key: &str) -> Vec<String> {
@@ -127,7 +284,7 @@ fn runtime_expert_package(
     expected_hash: &str,
     enabled_skills: &[String],
     enabled_mcps: &[String],
-    bound_knowledge: &[String],
+    bound_knowledge: &[KnowledgeReference],
 ) -> Result<Value, String> {
     validate_expert_package_snapshot(snapshot, expected_hash)?;
 
@@ -169,7 +326,7 @@ fn runtime_expert_package(
     if is_builtin {
         manifest.insert("mcpServers".to_owned(), json!(enabled_mcps));
     }
-    manifest.insert("knowledge".to_owned(), json!(bound_knowledge));
+    apply_bound_knowledge_declaration(manifest, bound_knowledge, true)?;
     package_object.insert("enabledSkills".to_owned(), json!(effective_skills));
     Ok(package)
 }
@@ -216,6 +373,14 @@ pub struct RuntimeEventNotification {
     pub seq: i64,
     pub timestamp: String,
     pub event: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildRunNotification {
+    pub parent_run_id: String,
+    pub parent_conversation_id: String,
+    pub child_run: ChildRunRecord,
 }
 
 type PendingResponses = Arc<Mutex<HashMap<String, mpsc::Sender<RuntimeEnvelope>>>>;
@@ -289,9 +454,91 @@ pub struct RuntimeHost {
     attachments_dir: PathBuf,
     skills_dir: PathBuf,
     yuxi_client: YuxiClient,
+    child_hosts: Arc<Mutex<HashMap<String, RuntimeHost>>>,
+    run_budget_override: Option<ChildRunBudget>,
+    tool_allowlist_override: Option<HashSet<String>>,
+    mcp_server_scope_override: Option<HashSet<String>>,
+    digital_scheduler_started: Arc<AtomicBool>,
+    digital_scheduler_stop: Arc<AtomicBool>,
 }
 
 impl RuntimeHost {
+    pub fn run_offline_evaluations(&self) -> Result<EvaluationRunSummary, String> {
+        let runtime = self.runtime_command()?;
+        let mut command = Command::new(&runtime.program);
+        if let Some(script) = runtime.script.as_ref() {
+            command.arg(script);
+        }
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000);
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| format!("failed to start the offline evaluator: {error}"))?;
+        let request = RuntimeRequest::new("evaluation.run");
+        let request_id = request.id.clone();
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "offline evaluator stdin was unavailable".to_owned())?;
+        serde_json::to_writer(&mut stdin, &request).map_err(|error| error.to_string())?;
+        stdin
+            .write_all(b"\n")
+            .and_then(|_| stdin.flush())
+            .map_err(|error| format!("failed to request offline evaluation: {error}"))?;
+        drop(stdin);
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "offline evaluator stdout was unavailable".to_owned())?;
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            let result = loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break Err("offline evaluator closed without a report".to_owned()),
+                    Ok(_) if line.len() > MAX_PROTOCOL_LINE_BYTES => {
+                        break Err(
+                            "offline evaluation report exceeded the protocol limit".to_owned()
+                        )
+                    }
+                    Ok(_) => match serde_json::from_str::<RuntimeEnvelope>(line.trim()) {
+                        Ok(envelope)
+                            if envelope.kind == "response"
+                                && envelope.request_id.as_deref() == Some(request_id.as_str()) =>
+                        {
+                            if envelope.r#type != "evaluation_report" {
+                                break Err(response_error(&envelope, "offline evaluation failed"));
+                            }
+                            break envelope
+                                .payload
+                                .ok_or_else(|| "offline evaluation report was empty".to_owned());
+                        }
+                        Ok(_) => continue,
+                        Err(error) => {
+                            break Err(format!("offline evaluator returned invalid JSON: {error}"))
+                        }
+                    },
+                    Err(error) => break Err(format!("failed to read offline evaluation: {error}")),
+                }
+            };
+            let _ = sender.send(result);
+        });
+        let started = Instant::now();
+        let received = receiver.recv_timeout(Duration::from_secs(30));
+        let _ = child.kill();
+        let _ = child.wait();
+        let report =
+            received.map_err(|_| "offline evaluation timed out after 30 seconds".to_owned())?;
+        let report = report?;
+        self.database
+            .record_evaluation_report(&report, started.elapsed().as_millis() as i64)
+    }
+
     pub fn new(
         app: AppHandle,
         database: Database,
@@ -324,6 +571,12 @@ impl RuntimeHost {
             attachments_dir,
             skills_dir,
             yuxi_client,
+            child_hosts: Arc::new(Mutex::new(HashMap::new())),
+            run_budget_override: None,
+            tool_allowlist_override: None,
+            mcp_server_scope_override: None,
+            digital_scheduler_started: Arc::new(AtomicBool::new(false)),
+            digital_scheduler_stop: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -428,7 +681,12 @@ impl RuntimeHost {
             .worker
             .as_ref()
             .and_then(|worker| worker.active_run_id.clone());
-        if active.is_some() {
+        let active_children = self
+            .child_hosts
+            .lock()
+            .map_err(|_| "child runtime map is poisoned".to_owned())?
+            .len();
+        if active.is_some() || active_children > 0 {
             return Err("模型配置不能在 Agent 正在运行时修改".to_owned());
         }
         self.stop_worker()?;
@@ -682,6 +940,24 @@ impl RuntimeHost {
         if let Ok(mut state) = self.state.lock() {
             state.recovery_attempts = 0;
         }
+        let run_kind = if self.database.is_digital_colleague_run(&started.run.id)? {
+            "digital_colleague"
+        } else if self.run_budget_override.is_some() {
+            "child"
+        } else {
+            "primary"
+        };
+        crate::lifecycle_hooks::run_event(
+            &self.database,
+            "before_run",
+            &started.run.id,
+            run_kind,
+            &json!({
+                "conversationId": started.run.conversation_id,
+                "runKind": run_kind,
+                "depth": if run_kind == "child" { 1 } else { 0 },
+            }),
+        )?;
         self.ensure_worker(&started.run.conversation_id)?;
         let (runtime_session_id, _) = self.open_runtime_session(&started.run.conversation_id)?;
         let images = self.runtime_images(&started.run.conversation_id, attachments)?;
@@ -690,10 +966,28 @@ impl RuntimeHost {
             .database
             .get_model_service()?
             .ok_or_else(|| "model service is not configured".to_owned())?;
+        let effective_max_output_tokens = self
+            .run_budget_override
+            .as_ref()
+            .map(|budget| budget.max_output_tokens)
+            .unwrap_or(model_service.max_output_tokens)
+            .min(model_service.max_output_tokens);
         let input_tokens = model_service
             .context_window
-            .saturating_sub(model_service.max_output_tokens)
+            .saturating_sub(effective_max_output_tokens)
             .max(4096);
+        let input_tokens = self
+            .run_budget_override
+            .as_ref()
+            .map(|budget| {
+                input_tokens.min(
+                    budget
+                        .max_total_tokens
+                        .saturating_sub(effective_max_output_tokens)
+                        .max(512),
+                )
+            })
+            .unwrap_or(input_tokens);
         let context_chars = (input_tokens as usize)
             .saturating_mul(3)
             .clamp(12_000, 240_000);
@@ -727,20 +1021,26 @@ impl RuntimeHost {
             .into_iter()
             .filter(|server| server.enabled)
             .map(|server| server.id)
+            .filter(|server_id| {
+                self.mcp_server_scope_override
+                    .as_ref()
+                    .is_none_or(|scope| scope.contains(server_id))
+            })
             .collect::<Vec<_>>();
         let bound_knowledge = self
             .database
-            .conversation_knowledge_bindings(&started.run.conversation_id)?
-            .into_iter()
-            .filter(|binding| binding.enabled)
-            .map(|binding| binding.knowledge_base_id)
-            .collect::<Vec<_>>();
-        let assistant_package = runtime_agent_package(
+            .conversation_knowledge_references(&started.run.conversation_id)?;
+        let mut assistant_package = runtime_agent_package(
             &assistant,
             &assistant_skills,
             &enabled_mcps,
             &bound_knowledge,
-        );
+        )?;
+        apply_delegated_package_scope(
+            &mut assistant_package,
+            self.tool_allowlist_override.as_ref(),
+            self.mcp_server_scope_override.as_ref(),
+        )?;
         let expert_package = expert_binding
             .as_ref()
             .map(|binding| {
@@ -796,6 +1096,13 @@ impl RuntimeHost {
             }),
         };
         let work_snapshot = work_tools::snapshot(&self.database, &started.run.conversation_id)?;
+        let memory_context = self.database.recall_memories(
+            &started.run.conversation_id,
+            Some(&started.run.id),
+            text,
+            8,
+            6_000,
+        )?;
 
         let _transition = self
             .run_transition
@@ -830,6 +1137,8 @@ impl RuntimeHost {
                 "expertPackage": expert_package,
                 "projectContext": project_context,
                 "workSnapshot": work_snapshot,
+                "memoryContext": memory_context,
+                "promptBudget": { "maxPromptTokens": input_tokens },
             }));
         let prompt_response = self.send_request(prompt_request, RESPONSE_TIMEOUT)?;
         if prompt_response.r#type != "request_succeeded" {
@@ -973,7 +1282,370 @@ impl RuntimeHost {
         self.sessions_dir.join(format!("{runtime_session_id}.json"))
     }
 
+    fn start_child_runtime(
+        &self,
+        started: StartRunResult,
+        child_run: ChildRunRecord,
+        parent_conversation_id: String,
+    ) -> Result<(), String> {
+        let child_run_id = child_run.child_run_id.clone();
+        let mut child_host = RuntimeHost::new(
+            self.app.clone(),
+            self.database.clone(),
+            self.sessions_dir.clone(),
+            self.attachments_dir.clone(),
+            self.skills_dir.clone(),
+            self.yuxi_client.clone(),
+        );
+        child_host.run_budget_override = Some(child_run.budget.clone());
+        let shared_pending_approvals = self
+            .state
+            .lock()
+            .map_err(|_| "runtime state lock is poisoned".to_owned())?
+            .pending_approvals
+            .clone();
+        child_host
+            .state
+            .lock()
+            .map_err(|_| "child runtime state lock is poisoned".to_owned())?
+            .pending_approvals = shared_pending_approvals;
+        let (mut tool_scope, mcp_scope) =
+            effective_conversation_delegation_scope(&self.database, &parent_conversation_id)?;
+        tool_scope = intersect_optional_scopes(
+            tool_scope,
+            child_run
+                .allowed_tools
+                .as_ref()
+                .map(|tools| tools.iter().cloned().collect()),
+        );
+        child_host.tool_allowlist_override = tool_scope;
+        child_host.mcp_server_scope_override = mcp_scope;
+        {
+            let mut hosts = self
+                .child_hosts
+                .lock()
+                .map_err(|_| "child runtime map is poisoned".to_owned())?;
+            if hosts.contains_key(&child_run_id) {
+                return Ok(());
+            }
+            hosts.insert(child_run_id.clone(), child_host.clone());
+        }
+        self.emit_child_run_update(&parent_conversation_id, &child_run);
+
+        let coordinator = self.clone();
+        thread::spawn(move || {
+            let prompt = started.user_message.content.clone();
+            if let Err(error) = child_host.start_run(&started, &prompt, &[]) {
+                let (code, detail) = structured_runtime_error(&error);
+                let _ = coordinator.database.mark_run_failed(
+                    &child_run_id,
+                    if code == "runtime.start_failed" {
+                        "child_run.start_failed"
+                    } else {
+                        code
+                    },
+                    detail,
+                );
+            } else {
+                if let Ok(Some(record)) = coordinator.database.child_run(&child_run_id) {
+                    coordinator.emit_child_run_update(&parent_conversation_id, &record);
+                }
+                let deadline =
+                    Instant::now() + Duration::from_millis(child_run.budget.max_duration_ms as u64);
+                loop {
+                    let status = coordinator
+                        .database
+                        .child_run_status(&child_run_id)
+                        .ok()
+                        .flatten();
+                    if status.as_deref().is_some_and(run_status_is_terminal) {
+                        break;
+                    }
+                    let token_budget_exceeded = coordinator
+                        .database
+                        .child_budget_exceeded(&child_run_id)
+                        .unwrap_or(false);
+                    let duration_exceeded = Instant::now() >= deadline;
+                    if token_budget_exceeded || duration_exceeded {
+                        let _ = child_host.cancel_run(&child_run_id);
+                        let _ = child_host.stop_worker();
+                        let (code, message) = if token_budget_exceeded {
+                            (
+                                "child_run.token_budget_exceeded",
+                                "Child Run exceeded its Host-enforced total-token budget.",
+                            )
+                        } else {
+                            (
+                                "child_run.duration_budget_exceeded",
+                                "Child Run exceeded its Host-enforced duration budget.",
+                            )
+                        };
+                        let _ = coordinator
+                            .database
+                            .mark_run_failed(&child_run_id, code, message);
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+            let _ = child_host.stop_worker();
+            let _ = coordinator.database.sync_child_run_terminal(&child_run_id);
+            if let Ok(Some(record)) = coordinator.database.child_run(&child_run_id) {
+                coordinator.emit_child_run_update(&parent_conversation_id, &record);
+            }
+            if let Ok(mut hosts) = coordinator.child_hosts.lock() {
+                hosts.remove(&child_run_id);
+            }
+        });
+        Ok(())
+    }
+
+    pub(crate) fn dispatch_digital_colleague_trigger(
+        &self,
+        prepared: PreparedDigitalColleagueTrigger,
+    ) -> Result<(), String> {
+        let run_id = prepared
+            .trigger
+            .run_id
+            .clone()
+            .unwrap_or_else(|| prepared.started.run.id.clone());
+        let conversation_id = prepared.started.run.conversation_id.clone();
+        let mut managed_host = RuntimeHost::new(
+            self.app.clone(),
+            self.database.clone(),
+            self.sessions_dir.clone(),
+            self.attachments_dir.clone(),
+            self.skills_dir.clone(),
+            self.yuxi_client.clone(),
+        );
+        managed_host.run_budget_override = Some(ChildRunBudget {
+            max_duration_ms: prepared.colleague.max_duration_ms,
+            max_total_tokens: prepared.remaining_tokens.min(200_000),
+            max_output_tokens: prepared.colleague.max_output_tokens,
+            max_tool_calls: prepared.colleague.max_tool_calls,
+        });
+        let shared_pending_approvals = self
+            .state
+            .lock()
+            .map_err(|_| "runtime state lock is poisoned".to_owned())?
+            .pending_approvals
+            .clone();
+        managed_host
+            .state
+            .lock()
+            .map_err(|_| "digital colleague runtime state lock is poisoned".to_owned())?
+            .pending_approvals = shared_pending_approvals;
+        let (tool_scope, mcp_scope) =
+            effective_conversation_delegation_scope(&self.database, &conversation_id)?;
+        managed_host.tool_allowlist_override = tool_scope;
+        managed_host.mcp_server_scope_override = mcp_scope;
+        {
+            let mut hosts = self
+                .child_hosts
+                .lock()
+                .map_err(|_| "managed runtime map is poisoned".to_owned())?;
+            if hosts.contains_key(&run_id) {
+                return Ok(());
+            }
+            hosts.insert(run_id.clone(), managed_host.clone());
+        }
+        let coordinator = self.clone();
+        thread::spawn(move || {
+            let prompt = prepared.started.user_message.content.clone();
+            if let Err(error) = managed_host.start_run(&prepared.started, &prompt, &[]) {
+                let (code, detail) = structured_runtime_error(&error);
+                let _ = coordinator.database.mark_run_failed(
+                    &run_id,
+                    if code == "runtime.start_failed" {
+                        "digital_colleague.start_failed"
+                    } else {
+                        code
+                    },
+                    detail,
+                );
+            } else {
+                let deadline = Instant::now()
+                    + Duration::from_millis(prepared.colleague.max_duration_ms as u64);
+                loop {
+                    let status = coordinator
+                        .database
+                        .digital_colleague_run_status(&run_id)
+                        .ok()
+                        .flatten();
+                    if status.as_deref().is_some_and(run_status_is_terminal) {
+                        break;
+                    }
+                    let token_budget_exceeded = coordinator
+                        .database
+                        .digital_colleague_budget_exceeded(&run_id)
+                        .unwrap_or(false);
+                    let duration_exceeded = Instant::now() >= deadline;
+                    if token_budget_exceeded || duration_exceeded {
+                        let _ = managed_host.cancel_run(&run_id);
+                        let _ = managed_host.stop_worker();
+                        let (code, message) = if token_budget_exceeded {
+                            (
+                                "digital_colleague.token_budget_exceeded",
+                                "Digital colleague exceeded its Host-enforced token budget.",
+                            )
+                        } else {
+                            (
+                                "digital_colleague.duration_budget_exceeded",
+                                "Digital colleague exceeded its Host-enforced duration budget.",
+                            )
+                        };
+                        let _ = coordinator.database.mark_run_failed(&run_id, code, message);
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+            let _ = managed_host.stop_worker();
+            if let Ok(mut hosts) = coordinator.child_hosts.lock() {
+                hosts.remove(&run_id);
+            }
+        });
+        Ok(())
+    }
+
+    pub(crate) fn start_digital_colleague_scheduler(&self) {
+        if self.digital_scheduler_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.digital_scheduler_stop.store(false, Ordering::SeqCst);
+        let coordinator = self.clone();
+        thread::spawn(move || {
+            while !coordinator.digital_scheduler_stop.load(Ordering::SeqCst) {
+                if let Ok(prepared) = coordinator
+                    .database
+                    .claim_due_digital_colleague_triggers(crate::database::now_ms())
+                {
+                    for trigger in prepared {
+                        if let Err(error) =
+                            coordinator.dispatch_digital_colleague_trigger(trigger.clone())
+                        {
+                            let _ = coordinator.database.mark_run_failed(
+                                &trigger.started.run.id,
+                                "digital_colleague.dispatch_failed",
+                                &error,
+                            );
+                        }
+                    }
+                }
+                for _ in 0..100 {
+                    if coordinator.digital_scheduler_stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+            coordinator
+                .digital_scheduler_started
+                .store(false, Ordering::SeqCst);
+        });
+    }
+
+    fn emit_child_run_update(&self, parent_conversation_id: &str, child_run: &ChildRunRecord) {
+        let _ = self.app.emit(
+            "fox://child-run-updated",
+            ChildRunNotification {
+                parent_run_id: child_run.parent_run_id.clone(),
+                parent_conversation_id: parent_conversation_id.to_owned(),
+                child_run: child_run.clone(),
+            },
+        );
+    }
+
+    fn ensure_delegated_tool_allowed(&self, tool: &str) -> Result<(), String> {
+        if self
+            .tool_allowlist_override
+            .as_ref()
+            .is_some_and(|scope| !scope.contains(tool))
+        {
+            return Err(format!(
+                "child_run.parent_tool_scope_denied: parent Run did not authorize tool '{tool}'"
+            ));
+        }
+        Ok(())
+    }
+
+    fn cancel_child_runtime(&self, child_run_id: &str) -> Result<bool, String> {
+        let child_host = self
+            .child_hosts
+            .lock()
+            .map_err(|_| "child runtime map is poisoned".to_owned())?
+            .get(child_run_id)
+            .cloned();
+        let Some(child_host) = child_host else {
+            if self
+                .database
+                .child_run_status(child_run_id)?
+                .as_deref()
+                .is_some_and(run_status_is_terminal)
+            {
+                return Ok(false);
+            }
+            let seq = self.database.next_run_seq(child_run_id)?;
+            return self
+                .database
+                .apply_runtime_event(
+                    child_run_id,
+                    seq,
+                    &json!({ "type": "run.cancelled", "reason": "parent_or_host_cancelled" }),
+                )
+                .map_err(|error| error.to_string());
+        };
+        let _ = self.database.mark_run_cancelling(child_run_id)?;
+        if child_host.cancel_run(child_run_id)? {
+            return Ok(true);
+        }
+        let seq = self.database.next_run_seq(child_run_id)?;
+        self.database.apply_runtime_event(
+            child_run_id,
+            seq,
+            &json!({ "type": "run.cancelled", "reason": "cancelled_before_runtime_submission" }),
+        )
+    }
+
+    pub(crate) fn cancel_managed_run(&self, run_id: &str) -> Result<bool, String> {
+        let is_managed = self
+            .child_hosts
+            .lock()
+            .map_err(|_| "managed runtime map is poisoned".to_owned())?
+            .contains_key(run_id);
+        if is_managed {
+            self.cancel_child_runtime(run_id)
+        } else {
+            self.cancel_run(run_id)
+        }
+    }
+
+    pub(crate) fn cancel_expert_team(
+        &self,
+        team_run_id: &str,
+        reason: &str,
+    ) -> Result<crate::database::ExpertTeamSnapshot, String> {
+        let snapshot = self
+            .database
+            .get_expert_team(team_run_id)?
+            .ok_or_else(|| "team.not_found".to_owned())?;
+        for member in &snapshot.members {
+            if !run_status_is_terminal(&member.status) {
+                let _ = self.cancel_child_runtime(&member.child_run_id);
+            }
+        }
+        self.database.cancel_expert_team(team_run_id, reason)
+    }
+
     pub fn cancel_run(&self, run_id: &str) -> Result<bool, String> {
+        let _ = self
+            .database
+            .cancel_expert_teams_for_parent(run_id, "parent Run cancelled");
+        for child_run_id in self.database.active_child_run_ids(run_id)? {
+            if child_run_id != run_id {
+                let _ = self.cancel_child_runtime(&child_run_id);
+            }
+        }
         let _transition = self
             .run_transition
             .lock()
@@ -1016,8 +1688,12 @@ impl RuntimeHost {
         Ok(response.r#type == "request_succeeded")
     }
 
-    pub fn resolve_approval(&self, approval_id: &str, approved: bool) -> Result<bool, String> {
-        let resolved = self.database.resolve_approval(approval_id, approved)?;
+    pub fn resolve_approval(
+        &self,
+        approval_id: &str,
+        decision: ApprovalDecision,
+    ) -> Result<bool, String> {
+        let resolved = self.database.resolve_approval(approval_id, decision)?;
         let Some(approval) = resolved else {
             return Ok(false);
         };
@@ -1030,9 +1706,33 @@ impl RuntimeHost {
             .map_err(|_| "approval map is poisoned".to_owned())?
             .remove(approval_id);
         if let Some(pending) = sender {
-            let _ = pending.sender.send(approved);
+            let _ = pending.sender.send(decision.approved());
         }
+        let conversation_id = approval.conversation_id.clone();
+        let tool_name = approval.tool_name.clone();
         let _ = self.app.emit("fox://approval-resolved", approval);
+        if decision == ApprovalDecision::AllowConversation {
+            if let Ok(queued) = self
+                .database
+                .pending_approvals_for_conversation_tool(&conversation_id, &tool_name)
+            {
+                for queued_approval in queued {
+                    let Ok(Some(resolved)) = self
+                        .database
+                        .resolve_approval(&queued_approval.id, ApprovalDecision::AllowConversation)
+                    else {
+                        continue;
+                    };
+                    let sender = self.state.lock().ok().and_then(|state| {
+                        state.pending_approvals.lock().ok()?.remove(&resolved.id)
+                    });
+                    if let Some(pending) = sender {
+                        let _ = pending.sender.send(true);
+                    }
+                    let _ = self.app.emit("fox://approval-resolved", resolved);
+                }
+            }
+        }
         Ok(true)
     }
 
@@ -1083,6 +1783,22 @@ impl RuntimeHost {
     }
 
     pub fn shutdown(&self) -> Result<(), String> {
+        self.digital_scheduler_stop.store(true, Ordering::SeqCst);
+        let child_hosts = self
+            .child_hosts
+            .lock()
+            .map_err(|_| "child runtime map is poisoned".to_owned())?
+            .drain()
+            .collect::<Vec<_>>();
+        for (run_id, child_host) in child_hosts {
+            let _ = child_host.cancel_run(&run_id);
+            let _ = child_host.stop_worker();
+            self.database.mark_run_interrupted(
+                &run_id,
+                "runtime.application_exit",
+                "Fox closed before the managed Run reached a terminal state.",
+            )?;
+        }
         let (active_run_id, queued_run_ids) = {
             let mut state = self
                 .state
@@ -1242,7 +1958,12 @@ impl RuntimeHost {
                     "modelId": model_service.model_id,
                     "apiType": model_service.api_type,
                     "contextWindow": model_service.context_window,
-                    "maxOutputTokens": model_service.max_output_tokens,
+                    "maxOutputTokens": self
+                        .run_budget_override
+                        .as_ref()
+                        .map(|budget| budget.max_output_tokens)
+                        .unwrap_or(model_service.max_output_tokens)
+                        .min(model_service.max_output_tokens),
                     "supportsImageInput": model_service.supports_image_input,
                     "apiKey": api_key,
                 }
@@ -1423,7 +2144,8 @@ impl RuntimeHost {
                             ensure_expert_tool_allowed(&database, conversation_id, tool)
                         })
                         .transpose();
-                    let (allowed, payload) = match expert_guard {
+                    let delegated_guard = runtime_host.ensure_delegated_tool_allowed(tool);
+                    let (allowed, payload) = match delegated_guard.and(expert_guard.map(|_| ())) {
                         Ok(_) => crate::tool_guard::preflight_payload(
                             tool,
                             &input,
@@ -1452,12 +2174,78 @@ impl RuntimeHost {
                 }
 
                 if envelope.kind == "request" && envelope.r#type == "tool.execute" {
+                    let tool = envelope
+                        .payload
+                        .as_ref()
+                        .and_then(|payload| payload.get("tool"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if let Err(error) = runtime_host.ensure_delegated_tool_allowed(tool) {
+                        let response = HostResponse::for_request(
+                            &envelope,
+                            "tool.execute_failed",
+                            json!({
+                                "isError": true,
+                                "error": error,
+                                "errorDetails": {
+                                    "code": "child_run.parent_tool_scope_denied",
+                                    "retryable": false,
+                                }
+                            }),
+                        );
+                        if let Err(write_error) = write_protocol_message(&stdin, &response) {
+                            runtime_host.handle_runtime_crash(write_error);
+                            return;
+                        }
+                        continue;
+                    }
+                    if let Some(run_id) = envelope.run_id.as_deref() {
+                        if let Err(error) = database.enforce_child_tool_budget(run_id) {
+                            let response = HostResponse::for_request(
+                                &envelope,
+                                "tool.execute_failed",
+                                json!({
+                                    "isError": true,
+                                    "error": error,
+                                    "errorDetails": {
+                                        "code": "child_run.budget_exceeded",
+                                        "retryable": false,
+                                    }
+                                }),
+                            );
+                            if let Err(write_error) = write_protocol_message(&stdin, &response) {
+                                runtime_host.handle_runtime_crash(write_error);
+                                return;
+                            }
+                            continue;
+                        }
+                        if let Err(error) = database.enforce_digital_colleague_tool_budget(run_id) {
+                            let response = HostResponse::for_request(
+                                &envelope,
+                                "tool.execute_failed",
+                                json!({
+                                    "isError": true,
+                                    "error": error,
+                                    "errorDetails": {
+                                        "code": "digital_colleague.budget_exceeded",
+                                        "retryable": false,
+                                    }
+                                }),
+                            );
+                            if let Err(write_error) = write_protocol_message(&stdin, &response) {
+                                runtime_host.handle_runtime_crash(write_error);
+                                return;
+                            }
+                            continue;
+                        }
+                    }
                     let app = app.clone();
                     let database = database.clone();
                     let state = state.clone();
                     let stdin = stdin.clone();
                     let yuxi_client = yuxi_client.clone();
                     let attachments_dir = attachments_dir.clone();
+                    let child_runtime_host = runtime_host.clone();
                     thread::spawn(move || {
                         let tool = envelope
                             .payload
@@ -1465,7 +2253,16 @@ impl RuntimeHost {
                             .and_then(|payload| payload.get("tool"))
                             .and_then(Value::as_str)
                             .unwrap_or_default();
-                        if tool == "read_attachment" {
+                        if is_child_run_tool(tool) {
+                            handle_child_run_tool_request(
+                                &child_runtime_host,
+                                &app,
+                                &database,
+                                &state,
+                                &stdin,
+                                envelope,
+                            )
+                        } else if tool == "read_attachment" {
                             handle_attachment_tool_request(
                                 &app,
                                 &database,
@@ -1474,8 +2271,14 @@ impl RuntimeHost {
                                 &stdin,
                                 envelope,
                             )
+                        } else if capability_tools::is_capability_tool(tool) {
+                            handle_capability_tool_request(
+                                &app, &database, &state, &stdin, envelope,
+                            )
                         } else if work_tools::is_work_tool(tool) {
                             handle_work_tool_request(&app, &database, &state, &stdin, envelope)
+                        } else if is_memory_tool(tool) {
+                            handle_memory_tool_request(&app, &database, &state, &stdin, envelope)
                         } else if is_knowledge_tool(tool) {
                             handle_knowledge_tool_request(
                                 &app,
@@ -1530,6 +2333,16 @@ impl RuntimeHost {
                                 payload.get("type").and_then(Value::as_str),
                                 Some("run.completed" | "run.cancelled" | "run.failed")
                             ) {
+                                let _ = crate::lifecycle_hooks::run_event(
+                                    &database,
+                                    "after_run",
+                                    &run_id,
+                                    payload
+                                        .get("type")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("run.terminal"),
+                                    &payload,
+                                );
                                 runtime_host.mark_run_ready(&run_id);
                             }
                         }
@@ -1962,6 +2775,30 @@ fn handle_host_tool_request(
     }
 }
 
+fn handle_capability_tool_request(
+    app: &AppHandle,
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    stdin: &Arc<Mutex<ChildStdin>>,
+    envelope: RuntimeEnvelope,
+) {
+    let response = execute_capability_tool_request(app, database, state, &envelope)
+        .unwrap_or_else(|error| json!({ "isError": true, "error": error }));
+    let response_type = if response
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "tool.execute_failed"
+    } else {
+        "tool.execute_completed"
+    };
+    let response = HostResponse::for_request(&envelope, response_type, response);
+    if let Err(error) = write_protocol_message(stdin, &response) {
+        record_runtime_crash(app, database, state, error);
+    }
+}
+
 fn handle_work_tool_request(
     app: &AppHandle,
     database: &Database,
@@ -1992,6 +2829,612 @@ fn handle_work_tool_request(
     let response = HostResponse::for_request(&envelope, response_type, response);
     if let Err(error) = write_protocol_message(stdin, &response) {
         record_runtime_crash(app, database, state, error);
+    }
+}
+
+fn handle_child_run_tool_request(
+    runtime_host: &RuntimeHost,
+    app: &AppHandle,
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    stdin: &Arc<Mutex<ChildStdin>>,
+    envelope: RuntimeEnvelope,
+) {
+    let response = execute_child_run_tool_request(runtime_host, app, database, state, &envelope)
+        .unwrap_or_else(|error| {
+            json!({
+                "isError": true,
+                "error": error,
+                "errorDetails": { "code": "child_run.tool_failed", "retryable": false },
+            })
+        });
+    let response_type = if response
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "tool.execute_failed"
+    } else {
+        "tool.execute_completed"
+    };
+    let response = HostResponse::for_request(&envelope, response_type, response);
+    if let Err(error) = write_protocol_message(stdin, &response) {
+        record_runtime_crash(app, database, state, error);
+    }
+}
+
+fn execute_child_run_tool_request(
+    runtime_host: &RuntimeHost,
+    app: &AppHandle,
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    envelope: &RuntimeEnvelope,
+) -> Result<Value, String> {
+    let run_id = envelope
+        .run_id
+        .as_deref()
+        .ok_or_else(|| "Child Run tool request is missing runId".to_owned())?;
+    let conversation_id = envelope
+        .conversation_id
+        .as_deref()
+        .ok_or_else(|| "Child Run tool request is missing conversationId".to_owned())?;
+    let payload = envelope
+        .payload
+        .as_ref()
+        .ok_or_else(|| "Child Run tool request is missing payload".to_owned())?;
+    let tool_call_id = payload
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Child Run tool request is missing toolCallId".to_owned())?;
+    let tool = payload
+        .get("tool")
+        .and_then(Value::as_str)
+        .filter(|tool| is_child_run_tool(tool))
+        .ok_or_else(|| "Child Run tool request has an unsupported tool".to_owned())?;
+    ensure_expert_tool_allowed(database, conversation_id, tool)?;
+    let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    let hook_decision =
+        crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)?;
+    if let Some(reason) = &hook_decision.blocked {
+        return Err(format!("[hook.blocked] {reason}"));
+    }
+    let tool_call = database.create_host_tool_call(
+        run_id,
+        tool_call_id,
+        tool,
+        &input,
+        if hook_decision.requires_approval {
+            "pending"
+        } else {
+            "running"
+        },
+        hook_decision.requires_approval,
+    )?;
+    if hook_decision.requires_approval {
+        request_declarative_hook_approval(
+            app,
+            database,
+            state,
+            run_id,
+            &tool_call,
+            tool,
+            &input,
+            hook_decision.approval_reason.as_deref(),
+        )?;
+    }
+
+    let outcome: Result<Value, String> = (|| match tool {
+        "team_snapshot_get" => Ok(json!({
+            "team": database.latest_expert_team(conversation_id)?,
+        })),
+        "team_start" => {
+            let objective = required_bounded_text(&input, "objective", 8_000)?;
+            let context = optional_bounded_text(&input, "context", 12_000)?;
+            let team = crate::expert_teams::start_team(
+                database,
+                conversation_id,
+                run_id,
+                objective,
+                context,
+            )?;
+            Ok(json!({ "team": team }))
+        }
+        "team_member_start" => {
+            let snapshot = database
+                .active_expert_team(conversation_id)?
+                .ok_or_else(|| "team.not_active".to_owned())?;
+            if snapshot.run.parent_run_id != run_id {
+                return Err("team.parent_run_mismatch".to_owned());
+            }
+            let member_id = required_bounded_text(&input, "memberId", 128)?;
+            if snapshot
+                .members
+                .iter()
+                .any(|member| member.team_member_id.as_deref() == Some(member_id))
+            {
+                return Err("team.member_already_started".to_owned());
+            }
+            if snapshot
+                .members
+                .iter()
+                .any(|member| matches!(member.status.as_str(), "queued" | "running" | "cancelling"))
+            {
+                return Err("team.serial_member_still_active".to_owned());
+            }
+            let team = crate::expert_teams::parse_team(snapshot.run.team.clone())?;
+            let member = team
+                .members
+                .iter()
+                .find(|member| member.id == member_id)
+                .ok_or_else(|| "team.member_not_found".to_owned())?;
+            let task = required_bounded_text(&input, "task", 8_000)?;
+            let member_context = optional_bounded_text(&input, "context", 12_000)?;
+            let model_max_output = database
+                .get_model_service()?
+                .ok_or_else(|| "model service is not configured".to_owned())?
+                .max_output_tokens;
+            if member.budget.max_output_tokens > model_max_output {
+                return Err("team.member_budget_exceeds_model_output".to_owned());
+            }
+            let isolated_context = format!(
+                "# Expert Team\n{} ({})\n\n# Member identity\n{} — {}\n\n# Frozen member instructions\n{}\n\n# Lead objective\n{}\n\n# Shared bounded context\n{}\n\n# Member-specific bounded context\n{}",
+                team.title,
+                team.id,
+                member.name,
+                member.role,
+                member.instructions,
+                snapshot.run.objective,
+                snapshot.run.context,
+                member_context,
+            );
+            let (started, child_run, created) = database
+                .create_child_run(crate::database::CreateChildRunInput {
+                    parent_run_id: run_id,
+                    tool_call_id,
+                    worker_agent_id: &member.agent_id,
+                    objective: task,
+                    context: &isolated_context,
+                    budget: &member.budget,
+                    team_run_id: Some(&snapshot.run.id),
+                    team_member_id: Some(&member.id),
+                    allowed_tools: Some(&member.allowed_tools),
+                })
+                .map_err(|error| format!(
+                    "team.member_start_rejected: Host serial, identity, depth, concurrency, or budget constraints rejected the member ({error})"
+                ))?;
+            if created || child_run.status == "queued" {
+                runtime_host.start_child_runtime(
+                    started,
+                    child_run.clone(),
+                    conversation_id.to_owned(),
+                )?;
+            }
+            Ok(json!({ "teamRunId": snapshot.run.id, "childRun": child_run, "created": created }))
+        }
+        "team_collect" => {
+            let snapshot = database
+                .active_expert_team(conversation_id)?
+                .or_else(|| database.latest_expert_team(conversation_id).ok().flatten())
+                .ok_or_else(|| "team.not_found".to_owned())?;
+            if snapshot.run.parent_run_id != run_id {
+                return Err("team.parent_run_mismatch".to_owned());
+            }
+            let wait_ms = input
+                .get("waitMs")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .clamp(0, 60_000) as u64;
+            let deadline = Instant::now() + Duration::from_millis(wait_ms);
+            let snapshot = loop {
+                let current = database
+                    .get_expert_team(&snapshot.run.id)?
+                    .ok_or_else(|| "team.not_found".to_owned())?;
+                if current
+                    .members
+                    .iter()
+                    .all(|member| run_status_is_terminal(&member.status))
+                    || wait_ms == 0
+                    || Instant::now() >= deadline
+                {
+                    break current;
+                }
+                thread::sleep(Duration::from_millis(100));
+            };
+            let team = if snapshot
+                .members
+                .iter()
+                .all(|member| run_status_is_terminal(&member.status))
+            {
+                database.finalize_expert_team(&snapshot.run.id)?
+            } else {
+                snapshot
+            };
+            Ok(json!({ "team": team }))
+        }
+        "team_cancel" => {
+            let snapshot = database
+                .active_expert_team(conversation_id)?
+                .ok_or_else(|| "team.not_active".to_owned())?;
+            if snapshot.run.parent_run_id != run_id {
+                return Err("team.parent_run_mismatch".to_owned());
+            }
+            let reason = optional_bounded_text(&input, "reason", 2_000)?;
+            let team = runtime_host.cancel_expert_team(
+                &snapshot.run.id,
+                if reason.is_empty() {
+                    "cancelled by Team Lead"
+                } else {
+                    reason
+                },
+            )?;
+            Ok(json!({ "team": team }))
+        }
+        "child_agent_list" => Ok(json!({ "agents": database.list_child_agents()? })),
+        "child_run_start" => {
+            let objective = required_bounded_text(&input, "objective", 8_000)?;
+            let context = optional_bounded_text(&input, "context", 12_000)?;
+            let agent_id = input
+                .get("agentId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("fox-general");
+            let model_max_output = database
+                .get_model_service()?
+                .ok_or_else(|| "model service is not configured".to_owned())?
+                .max_output_tokens;
+            let budget = normalized_child_budget(input.get("budget"), model_max_output)?;
+            let (started, child_run, created) = database
+                .create_child_run(crate::database::CreateChildRunInput {
+                    parent_run_id: run_id,
+                    tool_call_id,
+                    worker_agent_id: agent_id,
+                    objective,
+                    context,
+                    budget: &budget,
+                    team_run_id: None,
+                    team_member_id: None,
+                    allowed_tools: None,
+                })
+                .map_err(|error| {
+                    format!(
+                        "child_run.start_rejected: the agent, depth, concurrency, or per-parent limit rejected this Child Run ({error})"
+                    )
+                })?;
+            if created || child_run.status == "queued" {
+                runtime_host.start_child_runtime(
+                    started,
+                    child_run.clone(),
+                    conversation_id.to_owned(),
+                )?;
+            }
+            Ok(json!({ "childRun": child_run, "created": created }))
+        }
+        "child_run_collect" => {
+            let requested = input
+                .get("childRunIds")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "childRunIds must be a non-empty array".to_owned())?;
+            if requested.is_empty() || requested.len() > 8 {
+                return Err("childRunIds must contain between 1 and 8 items".to_owned());
+            }
+            let requested = requested
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| "childRunIds contains an invalid ID".to_owned())
+                })
+                .collect::<Result<HashSet<_>, _>>()?;
+            let wait_ms = input
+                .get("waitMs")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .clamp(0, 60_000) as u64;
+            let deadline = Instant::now() + Duration::from_millis(wait_ms);
+            let records = loop {
+                let records = database
+                    .child_runs_for_parent(run_id)?
+                    .into_iter()
+                    .filter(|record| requested.contains(&record.child_run_id))
+                    .collect::<Vec<_>>();
+                if records.len() != requested.len() {
+                    return Err(
+                        "one or more Child Runs do not belong to the current parent Run".to_owned(),
+                    );
+                }
+                if records
+                    .iter()
+                    .all(|record| run_status_is_terminal(&record.status))
+                    || wait_ms == 0
+                    || Instant::now() >= deadline
+                {
+                    break records;
+                }
+                thread::sleep(Duration::from_millis(100));
+            };
+            let all_terminal = records
+                .iter()
+                .all(|record| run_status_is_terminal(&record.status));
+            Ok(json!({ "childRuns": records, "allTerminal": all_terminal }))
+        }
+        "child_run_cancel" => {
+            let child_run_id = required_bounded_text(&input, "childRunId", 160)?;
+            let child = database
+                .child_run(child_run_id)?
+                .ok_or_else(|| "Child Run was not found".to_owned())?;
+            if child.parent_run_id != run_id {
+                return Err("Child Run does not belong to the current parent Run".to_owned());
+            }
+            let cancelled = runtime_host.cancel_child_runtime(child_run_id)?;
+            let child_run = database.child_run(child_run_id)?;
+            Ok(json!({ "cancelled": cancelled, "childRun": child_run }))
+        }
+        _ => unreachable!(),
+    })();
+
+    match outcome {
+        Ok(result) => {
+            database.complete_host_tool_call(run_id, tool_call_id, Some(&result), None)?;
+            let hook_annotations =
+                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)?;
+            Ok(json!({
+                "isError": false,
+                "result": result,
+                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
+            }))
+        }
+        Err(error) => {
+            database.complete_host_tool_call(run_id, tool_call_id, None, Some(&error))?;
+            let _ = crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, false);
+            Err(error)
+        }
+    }
+}
+
+fn required_bounded_text<'a>(
+    input: &'a Value,
+    field: &str,
+    max_chars: usize,
+) -> Result<&'a str, String> {
+    let value = input
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{field} is required"))?;
+    if value.chars().count() > max_chars {
+        return Err(format!("{field} exceeds the {max_chars}-character limit"));
+    }
+    Ok(value)
+}
+
+fn optional_bounded_text<'a>(
+    input: &'a Value,
+    field: &str,
+    max_chars: usize,
+) -> Result<&'a str, String> {
+    let value = input
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if value.chars().count() > max_chars {
+        return Err(format!("{field} exceeds the {max_chars}-character limit"));
+    }
+    Ok(value)
+}
+
+fn normalized_child_budget(
+    value: Option<&Value>,
+    model_max_output: i64,
+) -> Result<ChildRunBudget, String> {
+    let value = value.and_then(Value::as_object);
+    let integer = |name: &str, default: i64, minimum: i64, maximum: i64| -> Result<i64, String> {
+        let selected = value
+            .and_then(|value| value.get(name))
+            .map(|value| {
+                value
+                    .as_i64()
+                    .ok_or_else(|| format!("budget.{name} must be an integer"))
+            })
+            .transpose()?
+            .unwrap_or(default);
+        if !(minimum..=maximum).contains(&selected) {
+            return Err(format!(
+                "budget.{name} must be between {minimum} and {maximum}"
+            ));
+        }
+        Ok(selected)
+    };
+    let max_duration_ms = integer("maxDurationMs", 300_000, 1_000, 900_000)?;
+    let max_total_tokens = integer("maxTotalTokens", 32_000, 256, 200_000)?;
+    let requested_output = value.and_then(|value| value.get("maxOutputTokens"));
+    let default_output = model_max_output.clamp(64, 4_096).min(max_total_tokens);
+    let max_output_tokens = integer(
+        "maxOutputTokens",
+        default_output,
+        64,
+        model_max_output.clamp(64, 32_768),
+    )?;
+    if requested_output.is_some() && max_output_tokens > max_total_tokens {
+        return Err("budget.maxOutputTokens cannot exceed budget.maxTotalTokens".to_owned());
+    }
+    let max_tool_calls = integer("maxToolCalls", 16, 0, 100)?;
+    Ok(ChildRunBudget {
+        max_duration_ms,
+        max_total_tokens,
+        max_output_tokens: max_output_tokens.min(max_total_tokens),
+        max_tool_calls,
+    })
+}
+
+fn run_status_is_terminal(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
+}
+
+fn is_memory_tool(tool: &str) -> bool {
+    matches!(tool, "memory_search" | "memory_propose")
+}
+
+fn is_child_run_tool(tool: &str) -> bool {
+    crate::expert_teams::is_team_tool(tool)
+        || matches!(
+            tool,
+            "child_agent_list" | "child_run_start" | "child_run_collect" | "child_run_cancel"
+        )
+}
+
+fn handle_memory_tool_request(
+    app: &AppHandle,
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    stdin: &Arc<Mutex<ChildStdin>>,
+    envelope: RuntimeEnvelope,
+) {
+    let response =
+        execute_memory_tool_request(app, database, state, &envelope).unwrap_or_else(|error| {
+            json!({
+                "isError": true,
+                "error": error,
+                "errorDetails": { "code": "memory.tool_failed", "retryable": false },
+            })
+        });
+    let response_type = if response
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "tool.execute_failed"
+    } else {
+        "tool.execute_completed"
+    };
+    let response = HostResponse::for_request(&envelope, response_type, response);
+    if let Err(error) = write_protocol_message(stdin, &response) {
+        record_runtime_crash(app, database, state, error);
+    }
+}
+
+fn execute_memory_tool_request(
+    app: &AppHandle,
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    envelope: &RuntimeEnvelope,
+) -> Result<Value, String> {
+    let run_id = envelope
+        .run_id
+        .as_deref()
+        .ok_or_else(|| "memory tool request is missing runId".to_owned())?;
+    let conversation_id = envelope
+        .conversation_id
+        .as_deref()
+        .ok_or_else(|| "memory tool request is missing conversationId".to_owned())?;
+    let payload = envelope
+        .payload
+        .as_ref()
+        .ok_or_else(|| "memory tool request is missing payload".to_owned())?;
+    let tool_call_id = payload
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "memory tool request is missing toolCallId".to_owned())?;
+    let tool = payload
+        .get("tool")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "memory tool request is missing tool".to_owned())?;
+    ensure_expert_tool_allowed(database, conversation_id, tool)?;
+    let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    let hook_decision =
+        crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)?;
+    if let Some(reason) = &hook_decision.blocked {
+        return Err(format!("[hook.blocked] {reason}"));
+    }
+    let tool_call = database.create_host_tool_call(
+        run_id,
+        tool_call_id,
+        tool,
+        &input,
+        if hook_decision.requires_approval {
+            "pending"
+        } else {
+            "running"
+        },
+        hook_decision.requires_approval,
+    )?;
+    if hook_decision.requires_approval {
+        request_declarative_hook_approval(
+            app,
+            database,
+            state,
+            run_id,
+            &tool_call,
+            tool,
+            &input,
+            hook_decision.approval_reason.as_deref(),
+        )?;
+    }
+    let outcome = match tool {
+        "memory_search" => {
+            let query = input.get("query").and_then(Value::as_str).unwrap_or("");
+            let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
+            database
+                .recall_memories(conversation_id, Some(run_id), query, limit, 8_000)
+                .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
+        }
+        "memory_propose" => {
+            let required = |name: &str| {
+                input
+                    .get(name)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("memory.{name}_required"))
+            };
+            let proposal = MemoryProposalInput {
+                scope: input
+                    .get("scope")
+                    .and_then(Value::as_str)
+                    .unwrap_or("agent")
+                    .to_owned(),
+                kind: required("kind")?,
+                canonical_key: required("canonicalKey")?,
+                content: required("content")?,
+                evidence_excerpt: required("evidenceExcerpt")?,
+                source_message_id: input
+                    .get("sourceMessageId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                confidence: input
+                    .get("confidence")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.7),
+            };
+            database
+                .propose_memory_for_run(conversation_id, run_id, &proposal)
+                .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
+        }
+        _ => Err(format!("unsupported memory tool: {tool}")),
+    };
+    match outcome {
+        Ok(result) => {
+            database.complete_host_tool_call(run_id, tool_call_id, Some(&result), None)?;
+            let hook_annotations =
+                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)?;
+            Ok(json!({
+                "isError": false,
+                "result": result,
+                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
+            }))
+        }
+        Err(error) => {
+            database.complete_host_tool_call(run_id, tool_call_id, None, Some(&error))?;
+            let _ = crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, false);
+            Err(error)
+        }
     }
 }
 
@@ -2038,18 +3481,58 @@ fn execute_work_tool_request(
     ensure_expert_tool_allowed(database, conversation_id, tool)
         .map_err(work_tools::WorkToolError::from)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
-    database.create_host_tool_call(run_id, tool_call_id, tool, &input, "running", false)?;
+    let hook_decision =
+        crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)
+            .map_err(work_tools::WorkToolError::from)?;
+    if let Some(reason) = &hook_decision.blocked {
+        return Err(work_tools::WorkToolError::from(format!(
+            "[hook.blocked] {reason}"
+        )));
+    }
+    let tool_call = database.create_host_tool_call(
+        run_id,
+        tool_call_id,
+        tool,
+        &input,
+        if hook_decision.requires_approval {
+            "pending"
+        } else {
+            "running"
+        },
+        hook_decision.requires_approval,
+    )?;
+    if hook_decision.requires_approval {
+        request_declarative_hook_approval(
+            app,
+            database,
+            state,
+            run_id,
+            &tool_call,
+            tool,
+            &input,
+            hook_decision.approval_reason.as_deref(),
+        )
+        .map_err(work_tools::WorkToolError::from)?;
+    }
     match work_tools::execute(database, conversation_id, run_id, tool, &input) {
         Ok(outcome) => {
             database.complete_host_tool_call(run_id, tool_call_id, Some(&outcome.result), None)?;
             for event in outcome.events {
                 let _ = app.emit("fox://work-event", event);
             }
-            Ok(json!({ "isError": false, "result": outcome.result }))
+            let hook_annotations =
+                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)
+                    .map_err(work_tools::WorkToolError::from)?;
+            Ok(json!({
+                "isError": false,
+                "result": outcome.result,
+                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
+            }))
         }
         Err(error) => {
             let message = error.to_string();
             database.complete_host_tool_call(run_id, tool_call_id, None, Some(&message))?;
+            let _ = crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, false);
             Err(error)
         }
     }
@@ -2139,11 +3622,30 @@ fn intersect_mcp_server_scopes(
     left: Option<HashSet<String>>,
     right: Option<HashSet<String>>,
 ) -> Option<HashSet<String>> {
-    match (left, right) {
-        (None, None) => None,
-        (Some(scope), None) | (None, Some(scope)) => Some(scope),
-        (Some(left), Some(right)) => Some(left.intersection(&right).cloned().collect()),
+    intersect_optional_scopes(left, right)
+}
+
+fn effective_conversation_delegation_scope(
+    database: &Database,
+    conversation_id: &str,
+) -> Result<(Option<HashSet<String>>, Option<HashSet<String>>), String> {
+    let agent_id = database.conversation_agent_id(conversation_id)?;
+    let assistant = database
+        .get_agent(&agent_id)?
+        .ok_or_else(|| "conversation assistant was not found".to_owned())?;
+    let mut tool_scope = package_string_scope(&assistant.package_manifest, "allowedTools");
+    let mut mcp_scope = agent_mcp_server_scope(&assistant);
+    if let Some(binding) = database.current_conversation_expert_binding(conversation_id)? {
+        validate_expert_package_snapshot(&binding.package_snapshot, &binding.package_hash)?;
+        let manifest = expert_package_manifest(&binding.package_snapshot)?;
+        tool_scope =
+            intersect_optional_scopes(tool_scope, package_string_scope(manifest, "allowedTools"));
+        mcp_scope = intersect_optional_scopes(
+            mcp_scope,
+            expert_package_mcp_server_scope(&binding.package_snapshot)?,
+        );
     }
+    Ok((tool_scope, mcp_scope))
 }
 
 fn ensure_expert_tool_allowed(
@@ -2167,6 +3669,88 @@ fn ensure_expert_tool_allowed(
         ensure_package_tool_allowed(manifest, name, "expert", tool)?;
     }
     Ok(())
+}
+
+fn request_declarative_hook_approval(
+    app: &AppHandle,
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    run_id: &str,
+    tool_call: &ToolCallRecord,
+    tool: &str,
+    input: &Value,
+    reason: Option<&str>,
+) -> Result<(), String> {
+    let summary = reason
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("声明式策略要求本次工具调用获得批准");
+    let approval = database.create_approval(
+        &tool_call.id,
+        &format!("策略审批：{tool}"),
+        &json!({
+            "tool": tool,
+            "title": "生命周期 Hook 要求审批",
+            "target": tool,
+            "summary": summary,
+            "arguments": input,
+            "policyReason": summary,
+        }),
+    )?;
+    let (sender, receiver) = mpsc::channel();
+    state
+        .lock()
+        .map_err(|_| "runtime state lock is poisoned".to_owned())?
+        .pending_approvals
+        .lock()
+        .map_err(|_| "approval map is poisoned".to_owned())?
+        .insert(
+            approval.id.clone(),
+            PendingApproval {
+                run_id: run_id.to_owned(),
+                sender,
+            },
+        );
+    let approval_id = approval.id.clone();
+    let _ = app.emit("fox://approval-requested", approval);
+    let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
+    if let Ok(runtime_state) = state.lock() {
+        if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
+            pending.remove(&approval_id);
+        }
+    }
+    let approved = match approval_result {
+        Ok(approved) => approved,
+        Err(error) => {
+            if let Ok(Some(resolved)) =
+                database.resolve_approval(&approval_id, ApprovalDecision::Deny)
+            {
+                let _ = app.emit("fox://approval-resolved", resolved);
+            }
+            return Err(match error {
+                std::sync::mpsc::RecvTimeoutError::Timeout => {
+                    "Lifecycle Hook approval request timed out".to_owned()
+                }
+                std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                    "Lifecycle Hook approval request was interrupted".to_owned()
+                }
+            });
+        }
+    };
+    if !approved {
+        database.complete_host_tool_call(
+            run_id,
+            &tool_call.runtime_tool_call_id,
+            None,
+            Some("The user denied the lifecycle Hook policy approval."),
+        )?;
+        return Err("The user denied the lifecycle Hook policy approval.".to_owned());
+    }
+    Ok(())
+}
+
+fn merge_hook_annotations(mut before: Vec<String>, after: Vec<String>) -> Vec<String> {
+    before.extend(after);
+    before
 }
 
 fn handle_mcp_tool_request(
@@ -2235,7 +3819,14 @@ fn execute_mcp_tool_request(
         .ok_or_else(|| "MCP tool request is missing tool".to_owned())?;
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
-    let requires_approval = tool == "call_mcp_tool";
+    let hook_decision =
+        crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)?;
+    if let Some(reason) = &hook_decision.blocked {
+        return Err(format!("[hook.blocked] {reason}"));
+    }
+    let requires_approval = hook_decision.requires_approval
+        || (tool == "call_mcp_tool"
+            && !database.conversation_tool_permission_granted(conversation_id, tool)?);
     let tool_call = database.create_host_tool_call(
         run_id,
         tool_call_id,
@@ -2265,8 +3856,16 @@ fn execute_mcp_tool_request(
                     .is_none_or(|allowed| allowed.contains(&item.id))
             })
         {
+            let health_started = Instant::now();
             match crate::mcp::list_tools(&server) {
                 Ok(tools) => {
+                    let _ = database.record_mcp_health(
+                        &server.id,
+                        "connected",
+                        None,
+                        Some(health_started.elapsed().as_millis() as i64),
+                        Some(tools.len() as i64),
+                    );
                     let tools = tools
                         .into_iter()
                         .filter(|item| {
@@ -2279,7 +3878,13 @@ fn execute_mcp_tool_request(
                     }
                 }
                 Err(error) => {
-                    let _ = database.record_mcp_status(&server.id, "unavailable", Some(&error));
+                    let _ = database.record_mcp_health(
+                        &server.id,
+                        "unavailable",
+                        Some(&error),
+                        Some(health_started.elapsed().as_millis() as i64),
+                        None,
+                    );
                 }
             }
         }
@@ -2304,76 +3909,105 @@ fn execute_mcp_tool_request(
             .get_mcp_server(server_id)?
             .filter(|server| server.enabled)
             .ok_or_else(|| "MCP Server 不存在或已停用".to_owned())?;
-        let approval = database.create_approval(
-            &tool_call.id,
-            &format!("调用 MCP 工具 {} / {}", server.name, remote_tool),
-            &json!({
-                "tool": "call_mcp_tool",
-                "title": "调用 MCP 工具",
-                "target": format!("{} / {}", server.name, remote_tool),
-                "summary": format!("允许 Fox 调用 MCP Server {} 的工具 {}", server.name, remote_tool),
-                "serverId": server.id,
-                "serverName": server.name,
-                "mcpTool": remote_tool,
-                "arguments": arguments,
-            }),
-        )?;
-        let (sender, receiver) = mpsc::channel();
-        state
-            .lock()
-            .map_err(|_| "runtime state lock is poisoned".to_owned())?
-            .pending_approvals
-            .lock()
-            .map_err(|_| "approval map is poisoned".to_owned())?
-            .insert(
-                approval.id.clone(),
-                PendingApproval {
-                    run_id: run_id.to_owned(),
-                    sender,
-                },
-            );
-        let approval_id = approval.id.clone();
-        let _ = app.emit("fox://approval-requested", approval);
-        let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
-        if let Ok(runtime_state) = state.lock() {
-            if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
-                pending.remove(&approval_id);
-            }
-        }
-        let approved = match approval_result {
-            Ok(approved) => approved,
-            Err(error) => {
-                if let Ok(Some(resolved)) = database.resolve_approval(&approval_id, false) {
-                    let _ = app.emit("fox://approval-resolved", resolved);
-                }
-                return Err(match error {
-                    std::sync::mpsc::RecvTimeoutError::Timeout => {
-                        "MCP approval request timed out".to_owned()
-                    }
-                    std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                        "MCP approval request was interrupted".to_owned()
-                    }
-                });
-            }
-        };
-        if !approved {
-            database.complete_host_tool_call(
-                run_id,
-                tool_call_id,
-                None,
-                Some("The user denied this MCP operation."),
+        if requires_approval {
+            let approval = database.create_approval(
+                &tool_call.id,
+                &format!("调用 MCP 工具 {} / {}", server.name, remote_tool),
+                &json!({
+                    "tool": "call_mcp_tool",
+                    "title": "调用 MCP 工具",
+                    "target": format!("{} / {}", server.name, remote_tool),
+                    "summary": format!("允许 Fox 调用 MCP Server {} 的工具 {}", server.name, remote_tool),
+                    "serverId": server.id,
+                    "serverName": server.name,
+                    "mcpTool": remote_tool,
+                    "arguments": arguments,
+                }),
             )?;
-            return Err("The user denied this MCP operation.".to_owned());
+            let (sender, receiver) = mpsc::channel();
+            state
+                .lock()
+                .map_err(|_| "runtime state lock is poisoned".to_owned())?
+                .pending_approvals
+                .lock()
+                .map_err(|_| "approval map is poisoned".to_owned())?
+                .insert(
+                    approval.id.clone(),
+                    PendingApproval {
+                        run_id: run_id.to_owned(),
+                        sender,
+                    },
+                );
+            let approval_id = approval.id.clone();
+            let _ = app.emit("fox://approval-requested", approval);
+            let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
+            if let Ok(runtime_state) = state.lock() {
+                if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
+                    pending.remove(&approval_id);
+                }
+            }
+            let approved = match approval_result {
+                Ok(approved) => approved,
+                Err(error) => {
+                    if let Ok(Some(resolved)) =
+                        database.resolve_approval(&approval_id, ApprovalDecision::Deny)
+                    {
+                        let _ = app.emit("fox://approval-resolved", resolved);
+                    }
+                    return Err(match error {
+                        std::sync::mpsc::RecvTimeoutError::Timeout => {
+                            "MCP approval request timed out".to_owned()
+                        }
+                        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                            "MCP approval request was interrupted".to_owned()
+                        }
+                    });
+                }
+            };
+            if !approved {
+                database.complete_host_tool_call(
+                    run_id,
+                    tool_call_id,
+                    None,
+                    Some("The user denied this MCP operation."),
+                )?;
+                return Err("The user denied this MCP operation.".to_owned());
+            }
         }
-        crate::mcp::call_tool(&server, remote_tool, &arguments)?
+        let health_started = Instant::now();
+        match crate::mcp::call_tool(&server, remote_tool, &arguments) {
+            Ok(result) => {
+                let _ = database.record_mcp_health(
+                    &server.id,
+                    "connected",
+                    None,
+                    Some(health_started.elapsed().as_millis() as i64),
+                    server.tool_count,
+                );
+                result
+            }
+            Err(error) => {
+                let _ = database.record_mcp_health(
+                    &server.id,
+                    "unavailable",
+                    Some(&error),
+                    Some(health_started.elapsed().as_millis() as i64),
+                    None,
+                );
+                return Err(error);
+            }
+        }
     } else {
         return Err(format!("unsupported MCP proxy tool: {tool}"));
     };
+    let hook_annotations =
+        crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)?;
     let wrapped = json!({
         "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()) }],
         "details": result,
         "untrusted": true,
         "sourceType": "knowledge",
+                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
     });
     database.complete_host_tool_call(run_id, tool_call_id, Some(&wrapped), None)?;
     Ok(json!({ "isError": false, "result": wrapped }))
@@ -2387,8 +4021,9 @@ fn handle_attachment_tool_request(
     stdin: &Arc<Mutex<ChildStdin>>,
     envelope: RuntimeEnvelope,
 ) {
-    let response = execute_attachment_tool_request(database, attachments_dir, &envelope)
-        .unwrap_or_else(|error| json!({ "isError": true, "error": error }));
+    let response =
+        execute_attachment_tool_request(app, database, attachments_dir, state, &envelope)
+            .unwrap_or_else(|error| json!({ "isError": true, "error": error }));
     let response_type = if response
         .get("isError")
         .and_then(Value::as_bool)
@@ -2405,8 +4040,10 @@ fn handle_attachment_tool_request(
 }
 
 fn execute_attachment_tool_request(
+    app: &AppHandle,
     database: &Database,
     attachments_dir: &std::path::Path,
+    state: &Arc<Mutex<RuntimeHostState>>,
     envelope: &RuntimeEnvelope,
 ) -> Result<Value, String> {
     let run_id = envelope
@@ -2427,19 +4064,45 @@ fn execute_attachment_tool_request(
         .ok_or_else(|| "attachment tool request is missing toolCallId".to_owned())?;
     ensure_expert_tool_allowed(database, conversation_id, "read_attachment")?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    let hook_decision = crate::lifecycle_hooks::before_tool(
+        database,
+        run_id,
+        tool_call_id,
+        "read_attachment",
+        &input,
+    )?;
+    if let Some(reason) = &hook_decision.blocked {
+        return Err(format!("[hook.blocked] {reason}"));
+    }
     let attachment_id = input
         .get("attachmentId")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "attachmentId is required".to_owned())?;
-    database.create_host_tool_call(
+    let tool_call = database.create_host_tool_call(
         run_id,
         tool_call_id,
         "read_attachment",
         &input,
-        "running",
-        false,
+        if hook_decision.requires_approval {
+            "pending"
+        } else {
+            "running"
+        },
+        hook_decision.requires_approval,
     )?;
+    if hook_decision.requires_approval {
+        request_declarative_hook_approval(
+            app,
+            database,
+            state,
+            run_id,
+            &tool_call,
+            "read_attachment",
+            &input,
+            hook_decision.approval_reason.as_deref(),
+        )?;
+    }
     match read_attachment_text(database, attachments_dir, conversation_id, attachment_id) {
         Ok(result) => {
             let wrapped = json!({
@@ -2447,10 +4110,28 @@ fn execute_attachment_tool_request(
                 "details": result,
             });
             database.complete_host_tool_call(run_id, tool_call_id, Some(&wrapped), None)?;
-            Ok(json!({ "isError": false, "result": wrapped }))
+            let hook_annotations = crate::lifecycle_hooks::after_tool(
+                database,
+                run_id,
+                tool_call_id,
+                "read_attachment",
+                true,
+            )?;
+            Ok(json!({
+                "isError": false,
+                "result": wrapped,
+                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
+            }))
         }
         Err(error) => {
             database.complete_host_tool_call(run_id, tool_call_id, None, Some(&error))?;
+            let _ = crate::lifecycle_hooks::after_tool(
+                database,
+                run_id,
+                tool_call_id,
+                "read_attachment",
+                false,
+            );
             Err(error)
         }
     }
@@ -2795,12 +4476,27 @@ fn handle_knowledge_tool_request(
     stdin: &Arc<Mutex<ChildStdin>>,
     envelope: RuntimeEnvelope,
 ) {
+    let local_knowledge = app.state::<AppState>().local_knowledge.clone();
     let response = tauri::async_runtime::block_on(execute_knowledge_tool_request(
+        app,
         database,
         yuxi_client,
+        &local_knowledge,
+        state,
         &envelope,
     ))
-    .unwrap_or_else(|error| json!({ "isError": true, "error": error }));
+    .unwrap_or_else(|error| {
+        let (code, message, retryable) = structured_knowledge_error(&error);
+        json!({
+            "isError": true,
+            "error": message,
+            "errorCode": code,
+            "errorDetails": {
+                "code": code,
+                "retryable": retryable,
+            },
+        })
+    });
     let response_type = if response
         .get("isError")
         .and_then(Value::as_bool)
@@ -2817,8 +4513,11 @@ fn handle_knowledge_tool_request(
 }
 
 async fn execute_knowledge_tool_request(
+    app: &AppHandle,
     database: &Database,
     yuxi_client: &YuxiClient,
+    local_knowledge: &LocalKnowledgeStore,
+    state: &Arc<Mutex<RuntimeHostState>>,
     envelope: &RuntimeEnvelope,
 ) -> Result<Value, String> {
     let run_id = envelope
@@ -2843,67 +4542,218 @@ async fn execute_knowledge_tool_request(
         .ok_or_else(|| "knowledge tool request is missing tool".to_owned())?;
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
-    let tool_call =
-        database.create_host_tool_call(run_id, tool_call_id, tool, &input, "running", false)?;
-    let service = database
-        .get_yuxi_service()?
-        .ok_or_else(|| "Yuxi service is not configured".to_owned())?;
-    let token = get_access_token(&service.base_url)
-        .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
-    let bindings = database
-        .load_conversation(conversation_id)?
-        .knowledge_bindings;
-    let ensure_bound = |id: &str| {
+    let hook_decision =
+        crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)?;
+    if let Some(reason) = &hook_decision.blocked {
+        return Err(format!("[hook.blocked] {reason}"));
+    }
+    let tool_call = database.create_host_tool_call(
+        run_id,
+        tool_call_id,
+        tool,
+        &input,
+        if hook_decision.requires_approval {
+            "pending"
+        } else {
+            "running"
+        },
+        hook_decision.requires_approval,
+    )?;
+    if hook_decision.requires_approval {
+        request_declarative_hook_approval(
+            app,
+            database,
+            state,
+            run_id,
+            &tool_call,
+            tool,
+            &input,
+            hook_decision.approval_reason.as_deref(),
+        )?;
+    }
+    let bindings = database.conversation_knowledge_reference_bindings(conversation_id)?;
+    let ensure_bound = |target: &KnowledgeToolTarget| {
         bindings
             .iter()
-            .any(|binding| binding.enabled && binding.knowledge_base_id == id)
+            .any(|binding| {
+                binding.enabled
+                    && binding.reference.source == target.source
+                    && binding.reference.id == target.id
+                    && target.provider_key.as_deref().is_none_or(|provider_key| {
+                        binding.reference.provider_key == provider_key
+                    })
+                    && target.connection_id.as_deref().is_none_or(|connection_id| {
+                        binding.reference.connection_id.as_deref() == Some(connection_id)
+                    })
+            })
             .then_some(())
             .ok_or_else(|| {
-                "The requested knowledge base is not enabled for this conversation".to_owned()
+                "[local_knowledge.binding_invalid] The requested knowledge base is not enabled for this conversation".to_owned()
             })
     };
     let result = match tool {
-        "list_knowledge_bases" => json!({
-            "items": bindings.iter().filter(|binding| binding.enabled).map(|binding| json!({
-                "id": binding.knowledge_base_id,
-                "name": binding.knowledge_base_name,
-            })).collect::<Vec<_>>()
-        }),
+        "list_knowledge_bases" => {
+            if has_explicit_knowledge_target(&input) {
+                let targets = knowledge_tool_targets(&input, true)?;
+                let mut items = Vec::with_capacity(targets.len());
+                for target in targets {
+                    ensure_bound(&target)?;
+                    if target.source == "local" {
+                        let bases = local_knowledge
+                            .list_bases_for_ids(std::slice::from_ref(&target.id))
+                            .map_err(|error| format!("[{}] {}", error.code(), error))?;
+                        for base in bases {
+                            items.push(json!({
+                                "id": base.id,
+                                "name": base.name,
+                                "description": base.description,
+                                "documentCount": base.document_count,
+                                "activeIndexGeneration": base.active_index_generation,
+                                "reference": target.as_json(),
+                                "available": true,
+                            }));
+                        }
+                    } else if let Some(binding) = bindings.iter().find(|binding| {
+                        binding.reference.source == "remote"
+                            && binding.reference.id == target.id
+                            && target.connection_id.as_deref().is_none_or(|connection_id| {
+                                binding.reference.connection_id.as_deref() == Some(connection_id)
+                            })
+                    }) {
+                        items.push(json!({
+                            "id": binding.reference.id,
+                            "name": binding.knowledge_base_name,
+                            "reference": target.as_json(),
+                            "available": true,
+                        }));
+                    }
+                }
+                json!({ "items": items })
+            } else {
+                let mut items = Vec::with_capacity(bindings.len());
+                for binding in &bindings {
+                    if binding.reference.source == "local" {
+                        let base = local_knowledge
+                            .list_bases_for_ids(std::slice::from_ref(&binding.reference.id))
+                            .map_err(|error| format!("[{}] {}", error.code(), error))?
+                            .into_iter()
+                            .next();
+                        items.push(match base {
+                            Some(base) => json!({
+                                "id": base.id,
+                                "name": base.name,
+                                "description": base.description,
+                                "documentCount": base.document_count,
+                                "activeIndexGeneration": base.active_index_generation,
+                                "reference": &binding.reference,
+                                "available": true,
+                            }),
+                            None => json!({
+                                "id": binding.reference.id,
+                                "name": binding.knowledge_base_name,
+                                "reference": &binding.reference,
+                                "available": false,
+                            }),
+                        });
+                    } else {
+                        items.push(json!({
+                            "id": binding.reference.id,
+                            "name": binding.knowledge_base_name,
+                            "reference": &binding.reference,
+                            "available": true,
+                        }));
+                    }
+                }
+                json!({ "items": items })
+            }
+        }
         "search_knowledge" => {
-            let id = input
-                .get("knowledgeBaseId")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "knowledgeBaseId is required".to_owned())?;
+            let targets = knowledge_tool_targets(&input, true)?;
             let query = input
                 .get("query")
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| "query is required".to_owned())?;
-            ensure_bound(id)?;
-            yuxi_client
-                .query_knowledge(&service.base_url, &token, id, query)
-                .await?
+            let requested_limit = input
+                .get("topK")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            let requested_max_chars = input
+                .get("maxChars")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            let mut results = Vec::with_capacity(targets.len());
+            for target in &targets {
+                ensure_bound(target)?;
+                let value = if target.source == "local" {
+                    local_knowledge
+                        .search_lexical(&target.id, query, requested_limit, requested_max_chars)
+                        .map_err(|error| format!("[{}] {}", error.code(), error))?
+                } else {
+                    let service = database
+                        .get_yuxi_service()?
+                        .ok_or_else(|| "Yuxi service is not configured".to_owned())?;
+                    let token = get_access_token(&service.base_url)
+                        .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
+                    yuxi_client
+                        .query_knowledge(&service.base_url, &token, &target.id, query)
+                        .await?
+                };
+                results.push(json!({ "reference": target.as_json(), "result": value }));
+            }
+            if results.len() == 1 {
+                results.remove(0)["result"].clone()
+            } else {
+                json!({ "items": results })
+            }
         }
         "read_knowledge_document" => {
-            let id = input
-                .get("knowledgeBaseId")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "knowledgeBaseId is required".to_owned())?;
+            let target = knowledge_tool_targets(&input, false)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| "knowledge target is required".to_owned())?;
             let document_id = input
                 .get("documentId")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "documentId is required".to_owned())?;
-            ensure_bound(id)?;
+            let chunk_id = input
+                .get("chunkId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let requested_max_chars = input
+                .get("maxChars")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            ensure_bound(&target)?;
+            if target.source == "local" {
+                return local_knowledge
+                    .read_document(&target.id, document_id, chunk_id, requested_max_chars)
+                    .map(|value| {
+                        json!({
+                            "reference": target.as_json(),
+                            "result": value,
+                        })
+                    })
+                    .map_err(|error| format!("[{}] {}", error.code(), error));
+            }
+            let service = database
+                .get_yuxi_service()?
+                .ok_or_else(|| "Yuxi service is not configured".to_owned())?;
+            let token = get_access_token(&service.base_url)
+                .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
             yuxi_client
-                .knowledge_document_content(&service.base_url, &token, id, document_id)
+                .knowledge_document_content(&service.base_url, &token, &target.id, document_id)
                 .await?
         }
         "query_knowledge_graph" => {
-            let id = input
-                .get("knowledgeBaseId")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "knowledgeBaseId is required".to_owned())?;
-            ensure_bound(id)?;
+            let targets = knowledge_tool_targets(&input, true)?;
+            for target in &targets {
+                ensure_bound(target)?;
+            }
+            if targets.iter().any(|target| target.source == "local") {
+                return Err("[local_knowledge.graph_unavailable] Local knowledge graph support is not available in this release".to_owned());
+            }
             let keyword = input
                 .get("keyword")
                 .and_then(Value::as_str)
@@ -2918,16 +4768,303 @@ async fn execute_knowledge_tool_request(
                 .and_then(Value::as_i64)
                 .unwrap_or(80)
                 .clamp(1, 200);
-            yuxi_client
-                .graph_subgraph(&service.base_url, &token, id, keyword, max_depth, max_nodes)
-                .await?
+            let service = database
+                .get_yuxi_service()?
+                .ok_or_else(|| "Yuxi service is not configured".to_owned())?;
+            let token = get_access_token(&service.base_url)
+                .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
+            let mut results = Vec::with_capacity(targets.len());
+            for target in &targets {
+                ensure_bound(target)?;
+                let value = yuxi_client
+                    .graph_subgraph(
+                        &service.base_url,
+                        &token,
+                        &target.id,
+                        keyword,
+                        max_depth,
+                        max_nodes,
+                    )
+                    .await?;
+                results.push(json!({ "reference": target.as_json(), "result": value }));
+            }
+            if results.len() == 1 {
+                results.remove(0)["result"].clone()
+            } else {
+                json!({ "items": results })
+            }
         }
         _ => return Err(format!("unsupported knowledge tool: {tool}")),
     };
     let wrapped = bounded_knowledge_tool_result(result);
     database.complete_host_tool_call(run_id, tool_call_id, Some(&wrapped), None)?;
-    let _ = tool_call;
-    Ok(json!({ "isError": false, "result": wrapped }))
+    let hook_annotations =
+        crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)?;
+    Ok(json!({
+        "isError": false,
+        "result": wrapped,
+                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
+    }))
+}
+
+#[derive(Debug, Clone)]
+struct KnowledgeToolTarget {
+    source: String,
+    provider_key: Option<String>,
+    connection_id: Option<String>,
+    id: String,
+    revision: Option<String>,
+}
+
+impl KnowledgeToolTarget {
+    fn as_json(&self) -> Value {
+        match self.source.as_str() {
+            "remote" => json!({
+                "source": "remote",
+                "providerKey": self.provider_key,
+                "connectionId": self.connection_id,
+                "id": self.id,
+                "revision": self.revision,
+            }),
+            _ => json!({
+                "source": "local",
+                "providerKey": self.provider_key.clone().unwrap_or_else(|| "local".to_owned()),
+                "id": self.id,
+                "revision": self.revision,
+            }),
+        }
+    }
+}
+
+fn has_explicit_knowledge_target(input: &Value) -> bool {
+    input.get("targets").is_some()
+        || input.get("references").is_some()
+        || input.get("target").is_some()
+        || input.get("reference").is_some()
+}
+
+fn knowledge_tool_targets(
+    input: &Value,
+    allow_multiple: bool,
+) -> Result<Vec<KnowledgeToolTarget>, String> {
+    if let Some(targets) = input.get("targets").or_else(|| input.get("references")) {
+        if !allow_multiple {
+            return Err(
+                "[local_knowledge.binding_invalid] targets is not supported for this tool"
+                    .to_owned(),
+            );
+        }
+        let targets = targets.as_array().ok_or_else(|| {
+            "[local_knowledge.binding_invalid] targets must be an array".to_owned()
+        })?;
+        if targets.is_empty() {
+            return Err("[local_knowledge.binding_invalid] targets cannot be empty".to_owned());
+        }
+        return targets.iter().map(knowledge_tool_target).collect();
+    }
+    if let Some(target) = input.get("target").or_else(|| input.get("reference")) {
+        return Ok(vec![knowledge_tool_target(target)?]);
+    }
+    let id = input
+        .get("knowledgeBaseId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            "[local_knowledge.binding_invalid] knowledgeBaseId or target is required".to_owned()
+        })?;
+    Ok(vec![KnowledgeToolTarget {
+        source: "remote".to_owned(),
+        provider_key: None,
+        connection_id: None,
+        id: id.to_owned(),
+        revision: None,
+    }])
+}
+
+fn knowledge_tool_target(value: &Value) -> Result<KnowledgeToolTarget, String> {
+    let object = value.as_object().ok_or_else(|| {
+        "[local_knowledge.binding_invalid] knowledge target must be an object".to_owned()
+    })?;
+    let source = object
+        .get("source")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "[local_knowledge.binding_invalid] knowledge target source is required".to_owned()
+        })?;
+    if !matches!(source, "local" | "remote") {
+        return Err(
+            "[local_knowledge.binding_invalid] knowledge target source is invalid".to_owned(),
+        );
+    }
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            "[local_knowledge.binding_invalid] knowledge target id is required".to_owned()
+        })?;
+    let provider_key = object
+        .get("providerKey")
+        .or_else(|| object.get("provider_key"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let connection_id = object
+        .get("connectionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if source == "local" {
+        if provider_key
+            .as_deref()
+            .is_some_and(|value| value != "local")
+        {
+            return Err(
+                "[local_knowledge.binding_invalid] local knowledge target providerKey must be local"
+                    .to_owned(),
+            );
+        }
+        if connection_id.is_some() {
+            return Err(
+                "[local_knowledge.binding_invalid] local knowledge target cannot have connectionId"
+                    .to_owned(),
+            );
+        }
+    } else {
+        if connection_id.is_none() {
+            return Err(
+                "[local_knowledge.binding_invalid] remote knowledge target connectionId is required"
+                    .to_owned(),
+            );
+        }
+        if provider_key
+            .as_deref()
+            .is_some_and(|value| Some(value) != connection_id.as_deref())
+        {
+            return Err(
+                "[local_knowledge.binding_invalid] remote knowledge target providerKey must match connectionId"
+                    .to_owned(),
+            );
+        }
+    }
+    let revision = object
+        .get("revision")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    Ok(KnowledgeToolTarget {
+        source: source.to_owned(),
+        provider_key: if source == "local" {
+            Some("local".to_owned())
+        } else {
+            provider_key.or_else(|| connection_id.clone())
+        },
+        connection_id,
+        id: id.to_owned(),
+        revision,
+    })
+}
+
+fn structured_knowledge_error(message: &str) -> (&str, &str, bool) {
+    let Some(rest) = message.strip_prefix('[') else {
+        return ("knowledge.tool_failed", message, true);
+    };
+    let Some((code, detail)) = rest.split_once(']') else {
+        return ("knowledge.tool_failed", message, true);
+    };
+    let retryable = matches!(
+        code,
+        "local_knowledge.retrieval_unavailable"
+            | "vector_index.unavailable"
+            | "vector_index.operation_failed"
+            | "vector_index.integrity_failed"
+    );
+    (code, detail.trim_start(), retryable)
+}
+
+#[cfg(test)]
+mod knowledge_tool_contract_tests {
+    use super::{
+        has_explicit_knowledge_target, knowledge_tool_targets, structured_knowledge_error,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn accepts_legacy_and_source_aware_knowledge_targets() {
+        let legacy = knowledge_tool_targets(&json!({ "knowledgeBaseId": "kb-1" }), true)
+            .expect("legacy target");
+        assert_eq!(legacy[0].source, "remote");
+        assert_eq!(legacy[0].id, "kb-1");
+        assert_eq!(legacy[0].provider_key, None);
+        assert_eq!(legacy[0].connection_id, None);
+
+        let targets = knowledge_tool_targets(
+            &json!({
+                "targets": [
+                    { "source": "local", "id": "local-1", "revision": "generation:3" },
+                    { "source": "remote", "connectionId": "yuxi-primary", "id": "remote-1" }
+                ]
+            }),
+            true,
+        )
+        .expect("source-aware targets");
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].source, "local");
+        assert_eq!(targets[0].provider_key.as_deref(), Some("local"));
+        assert_eq!(targets[1].connection_id.as_deref(), Some("yuxi-primary"));
+    }
+
+    #[test]
+    fn accepts_reference_alias_and_keeps_local_scope_explicit() {
+        assert!(has_explicit_knowledge_target(&json!({
+            "reference": { "source": "local", "providerKey": "local", "id": "local-1" }
+        })));
+        let target = knowledge_tool_targets(
+            &json!({
+                "reference": { "source": "local", "providerKey": "local", "id": "local-1" }
+            }),
+            false,
+        )
+        .expect("local reference");
+        assert_eq!(target[0].source, "local");
+        assert_eq!(target[0].provider_key.as_deref(), Some("local"));
+        assert!(knowledge_tool_targets(&json!({}), true).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_remote_reference_and_multiple_read_targets() {
+        assert!(knowledge_tool_targets(
+            &json!({ "target": { "source": "remote", "id": "kb-1" } }),
+            false,
+        )
+        .is_err());
+        assert!(knowledge_tool_targets(
+            &json!({ "targets": [{ "source": "local", "id": "kb-1" }] }),
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn preserves_structured_knowledge_error_codes() {
+        let (code, message, retryable) = structured_knowledge_error(
+            "[local_knowledge.graph_unavailable] Local graph is unavailable",
+        );
+        assert_eq!(code, "local_knowledge.graph_unavailable");
+        assert_eq!(message, "Local graph is unavailable");
+        assert!(!retryable);
+
+        let (code, _, retryable) = structured_knowledge_error(
+            "[local_knowledge.retrieval_unavailable] Index is rebuilding",
+        );
+        assert_eq!(code, "local_knowledge.retrieval_unavailable");
+        assert!(retryable);
+    }
 }
 
 fn bounded_knowledge_tool_result(result: Value) -> Value {
@@ -2996,6 +5133,12 @@ fn execute_host_tool_request(
         .ok_or_else(|| "host tool request is missing tool".to_owned())?;
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    let hook_decision =
+        crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)?;
+    if let Some(reason) = &hook_decision.blocked {
+        return Err(format!("[hook.blocked] {reason}"));
+    }
+    ensure_plan_approved_before_mutation(database, conversation_id, tool, &input)?;
     let (project_root, permission_mode) = database
         .conversation_project_access(conversation_id)?
         .ok_or_else(|| "this conversation has no authorized project folder".to_owned())?;
@@ -3004,7 +5147,9 @@ fn execute_host_tool_request(
     }
 
     let prepared = crate::tool_host::prepare(tool, &input, &project_root)?;
-    let requires_approval = permission_mode == "ask" || tool == "run_command";
+    let requires_approval = hook_decision.requires_approval
+        || ((permission_mode == "ask" || tool == "run_command")
+            && !database.conversation_tool_permission_granted(conversation_id, tool)?);
     let tool_call = database.create_host_tool_call(
         run_id,
         tool_call_id,
@@ -3048,7 +5193,9 @@ fn execute_host_tool_request(
         let approved = match approval_result {
             Ok(approved) => approved,
             Err(error) => {
-                if let Ok(Some(resolved)) = database.resolve_approval(&approval_id, false) {
+                if let Ok(Some(resolved)) =
+                    database.resolve_approval(&approval_id, ApprovalDecision::Deny)
+                {
                     let _ = app.emit("fox://approval-resolved", resolved);
                 }
                 return Err(match error {
@@ -3075,13 +5222,178 @@ fn execute_host_tool_request(
     match crate::tool_host::execute(prepared) {
         Ok(result) => {
             database.complete_host_tool_call(run_id, tool_call_id, Some(&result), None)?;
-            Ok(json!({ "isError": false, "result": result }))
+            let hook_annotations =
+                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)?;
+            Ok(json!({
+                "isError": false,
+                "result": result,
+                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
+            }))
         }
         Err(error) => {
             database.complete_host_tool_call(run_id, tool_call_id, None, Some(&error))?;
+            let _ = crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, false);
             Err(error)
         }
     }
+}
+
+fn execute_capability_tool_request(
+    app: &AppHandle,
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    envelope: &RuntimeEnvelope,
+) -> Result<Value, String> {
+    let run_id = envelope
+        .run_id
+        .as_deref()
+        .ok_or_else(|| "capability tool request is missing runId".to_owned())?;
+    let conversation_id = envelope
+        .conversation_id
+        .as_deref()
+        .ok_or_else(|| "capability tool request is missing conversationId".to_owned())?;
+    let payload = envelope
+        .payload
+        .as_ref()
+        .ok_or_else(|| "capability tool request is missing payload".to_owned())?;
+    let tool_call_id = payload
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "capability tool request is missing toolCallId".to_owned())?;
+    let tool = payload
+        .get("tool")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "capability tool request is missing tool".to_owned())?;
+    ensure_expert_tool_allowed(database, conversation_id, tool)?;
+    let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    let hook_decision =
+        crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)?;
+    if let Some(reason) = &hook_decision.blocked {
+        return Err(format!("[hook.blocked] {reason}"));
+    }
+    ensure_plan_approved_before_mutation(database, conversation_id, tool, &input)?;
+    let project_access = database.conversation_project_access(conversation_id)?;
+    let project_root = project_access.as_ref().map(|(root, _)| root.as_str());
+    let permission_mode = project_access
+        .as_ref()
+        .map(|(_, mode)| mode.as_str())
+        .unwrap_or("read_only");
+    let prepared = capability_tools::prepare(tool, &input, project_root)?;
+    if permission_mode == "read_only" && prepared.blocked_in_read_only() {
+        return Err(format!("tool {tool} is blocked in read-only mode"));
+    }
+
+    let requires_approval = hook_decision.requires_approval
+        || (prepared.requires_approval()
+            && !database.conversation_tool_permission_granted(conversation_id, tool)?);
+    let tool_call = database.create_host_tool_call(
+        run_id,
+        tool_call_id,
+        tool,
+        &input,
+        if requires_approval {
+            "pending"
+        } else {
+            "running"
+        },
+        requires_approval,
+    )?;
+
+    if requires_approval {
+        let request =
+            serde_json::to_value(prepared.preview()).map_err(|error| error.to_string())?;
+        let approval =
+            database.create_approval(&tool_call.id, &prepared.preview().summary, &request)?;
+        let (sender, receiver) = mpsc::channel();
+        state
+            .lock()
+            .map_err(|_| "runtime state lock is poisoned".to_owned())?
+            .pending_approvals
+            .lock()
+            .map_err(|_| "approval map is poisoned".to_owned())?
+            .insert(
+                approval.id.clone(),
+                PendingApproval {
+                    run_id: run_id.to_owned(),
+                    sender,
+                },
+            );
+        let approval_id = approval.id.clone();
+        let _ = app.emit("fox://approval-requested", approval);
+        let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
+        if let Ok(runtime_state) = state.lock() {
+            if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
+                pending.remove(&approval_id);
+            }
+        }
+        let approved = match approval_result {
+            Ok(approved) => approved,
+            Err(error) => {
+                if let Ok(Some(resolved)) =
+                    database.resolve_approval(&approval_id, ApprovalDecision::Deny)
+                {
+                    let _ = app.emit("fox://approval-resolved", resolved);
+                }
+                let message = match error {
+                    std::sync::mpsc::RecvTimeoutError::Timeout => "Approval request timed out",
+                    std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                        "Approval request was interrupted"
+                    }
+                };
+                database.complete_host_tool_call(run_id, tool_call_id, None, Some(message))?;
+                return Err(message.to_owned());
+            }
+        };
+        if !approved {
+            database.complete_host_tool_call(
+                run_id,
+                tool_call_id,
+                None,
+                Some("The user denied this operation."),
+            )?;
+            return Err("The user denied this operation.".to_owned());
+        }
+    }
+
+    match capability_tools::execute(prepared) {
+        Ok(result) => {
+            database.complete_host_tool_call(run_id, tool_call_id, Some(&result), None)?;
+            let hook_annotations =
+                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)?;
+            Ok(json!({
+                "isError": false,
+                "result": result,
+                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
+            }))
+        }
+        Err(error) => {
+            database.complete_host_tool_call(run_id, tool_call_id, None, Some(&error))?;
+            let _ = crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, false);
+            Err(error)
+        }
+    }
+}
+
+fn ensure_plan_approved_before_mutation(
+    database: &Database,
+    conversation_id: &str,
+    tool: &str,
+    input: &Value,
+) -> Result<(), String> {
+    let mutates_project = matches!(tool, "write_file" | "edit_file" | "run_command")
+        || (tool == "format_code" && input.get("mode").and_then(Value::as_str) == Some("write"));
+    if !mutates_project {
+        return Ok(());
+    }
+    let (plans, _, _) = database.load_a1_snapshot(conversation_id)?;
+    if let Some(plan) = plans.iter().find(|plan| plan.status == "proposed") {
+        return Err(format!(
+            "plan.approval_required: state-changing tool '{tool}' is paused until PlanRevision {} (v{}) is approved or rejected by the user",
+            plan.id, plan.revision
+        ));
+    }
+    Ok(())
 }
 
 fn mark_crashed(state: &Arc<Mutex<RuntimeHostState>>, message: String) {
@@ -3158,13 +5470,16 @@ fn record_runtime_crash(
 #[cfg(test)]
 mod attachment_tests {
     use super::{
-        attachment_image_media_type, attachment_is_docx, attachment_is_text,
-        attachment_looks_like_image, bounded_knowledge_tool_result, extract_docx_text,
-        intersect_mcp_server_scopes, node_dependency_is_available, parse_runtime_ready_payload,
-        pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package,
-        should_attempt_recovery, structured_runtime_error, PendingApproval,
+        apply_delegated_package_scope, attachment_image_media_type, attachment_is_docx,
+        attachment_is_text, attachment_looks_like_image, bounded_knowledge_tool_result,
+        ensure_plan_approved_before_mutation, extract_docx_text, intersect_mcp_server_scopes,
+        intersect_optional_scopes, node_dependency_is_available, normalized_child_budget,
+        parse_runtime_ready_payload, pending_approval_ids_for_run, redact_diagnostic_line,
+        runtime_expert_package, should_attempt_recovery, structured_runtime_error, PendingApproval,
     };
-    use crate::database::AttachmentRecord;
+    use crate::database::{
+        AttachmentRecord, CreateGoalInput, Database, GoalStatus, KnowledgeReference,
+    };
     use flate2::{write::DeflateEncoder, Compression};
     use serde_json::json;
     use sha2::{Digest, Sha256};
@@ -3175,6 +5490,70 @@ mod attachment_tests {
         sync::mpsc,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn proposed_plan_blocks_project_mutations_but_not_read_tools() {
+        let path = std::env::temp_dir().join(format!("fox-plan-gate-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).expect("open database");
+        let conversation = database
+            .create_conversation(database.default_agent_id(), Some("plan gate"), None, None)
+            .expect("create conversation");
+        let run = database
+            .create_run(&conversation.id, "propose plan", None)
+            .expect("create run")
+            .run;
+        let goal = database
+            .goals()
+            .create(CreateGoalInput {
+                id: None,
+                conversation_id: conversation.id.clone(),
+                title: "Plan gate".to_owned(),
+                objective: "block writes before plan approval".to_owned(),
+                acceptance_summary: None,
+                status: GoalStatus::Active,
+                created_by: run.id.clone(),
+            })
+            .expect("create goal");
+        let plan = database
+            .create_plan_revision(
+                &conversation.id,
+                &goal.id,
+                "v1",
+                "wait for approval",
+                json!([{ "title": "Implement", "ordinal": 0 }]),
+                &run.id,
+            )
+            .expect("create proposed plan");
+
+        assert!(ensure_plan_approved_before_mutation(
+            &database,
+            &conversation.id,
+            "edit_file",
+            &json!({ "path": "src/lib.rs" }),
+        )
+        .unwrap_err()
+        .contains("plan.approval_required"));
+        assert!(ensure_plan_approved_before_mutation(
+            &database,
+            &conversation.id,
+            "git_read",
+            &json!({}),
+        )
+        .is_ok());
+        database
+            .resolve_plan_revision(&conversation.id, &plan.id, "approved")
+            .expect("approve plan");
+        assert!(ensure_plan_approved_before_mutation(
+            &database,
+            &conversation.id,
+            "edit_file",
+            &json!({ "path": "src/lib.rs" }),
+        )
+        .is_ok());
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
 
     #[test]
     fn resolves_runtime_dependencies_from_a_hoisted_workspace_node_modules() {
@@ -3233,7 +5612,7 @@ mod attachment_tests {
             &package_hash,
             &["review".to_owned(), "new-skill".to_owned()],
             &["docs".to_owned(), "browser".to_owned()],
-            &["kb-1".to_owned()],
+            &[KnowledgeReference::remote("yuxi", "kb-1")],
         )
         .expect("valid bound expert package");
 
@@ -3242,7 +5621,53 @@ mod attachment_tests {
             package.pointer("/packageManifest/skills"),
             Some(&json!(["review"]))
         );
+        assert_eq!(
+            package.pointer("/packageManifest/knowledge"),
+            Some(&json!(["kb-1"]))
+        );
         assert!(runtime_expert_package(&snapshot, "invalid-hash", &[], &[], &[],).is_err());
+    }
+
+    #[test]
+    fn expert_runtime_package_preserves_v2_knowledge_references() {
+        let snapshot = json!({
+            "id": "fox-local-reviewer",
+            "name": "Local Reviewer",
+            "agentKind": "expert",
+            "invocationMode": "inline",
+            "visibility": "expert_center",
+            "isBuiltin": false,
+            "packageManifest": {
+                "manifestSchemaVersion": 2,
+                "skills": [],
+                "knowledgeReferences": [
+                    { "source": "local", "id": "local-1", "revision": "generation:2" },
+                    { "source": "remote", "connectionId": "yuxi-primary", "id": "remote-1" },
+                    { "source": "local", "id": "not-bound" }
+                ]
+            }
+        });
+        let package_hash = hex::encode(Sha256::digest(snapshot.to_string().as_bytes()));
+        let package = runtime_expert_package(
+            &snapshot,
+            &package_hash,
+            &[],
+            &[],
+            &[
+                KnowledgeReference::local("local-1"),
+                KnowledgeReference::remote("yuxi-primary", "remote-1"),
+            ],
+        )
+        .expect("v2 expert package");
+
+        assert_eq!(
+            package.pointer("/packageManifest/knowledgeReferences"),
+            Some(&json!([
+                { "source": "local", "id": "local-1", "revision": "generation:2" },
+                { "source": "remote", "connectionId": "yuxi-primary", "id": "remote-1" }
+            ]))
+        );
+        assert!(package.pointer("/packageManifest/knowledge").is_none());
     }
 
     #[test]
@@ -3525,6 +5950,78 @@ mod attachment_tests {
             "results": [{ "file_id": "file-1", "content": "answer" }],
         }));
         assert_eq!(wrapped["details"]["results"][0]["file_id"], "file-1");
+    }
+
+    #[test]
+    fn normalizes_and_rejects_child_run_budgets_at_the_host_boundary() {
+        let defaults = normalized_child_budget(None, 2_048).expect("default child budget");
+        assert_eq!(defaults.max_duration_ms, 300_000);
+        assert_eq!(defaults.max_total_tokens, 32_000);
+        assert_eq!(defaults.max_output_tokens, 2_048);
+        assert_eq!(defaults.max_tool_calls, 16);
+
+        let bounded = normalized_child_budget(
+            Some(&json!({
+                "maxDurationMs": 1_000,
+                "maxTotalTokens": 256,
+                "maxOutputTokens": 64,
+                "maxToolCalls": 0
+            })),
+            2_048,
+        )
+        .expect("minimum valid child budget");
+        assert_eq!(bounded.max_tool_calls, 0);
+        assert_eq!(bounded.max_output_tokens, 64);
+
+        assert!(normalized_child_budget(
+            Some(&json!({ "maxTotalTokens": 256, "maxOutputTokens": 512 })),
+            2_048,
+        )
+        .expect_err("output budget cannot exceed total budget")
+        .contains("cannot exceed"));
+        assert!(
+            normalized_child_budget(Some(&json!({ "maxDurationMs": 999 })), 2_048,)
+                .expect_err("duration budget must be bounded")
+                .contains("maxDurationMs")
+        );
+    }
+
+    #[test]
+    fn delegated_package_scope_can_only_narrow_parent_tools_and_mcps() {
+        let mut package = json!({
+            "packageManifest": {
+                "allowedTools": ["read", "write_file", "run_command"],
+                "mcpServers": ["mcp-a", "mcp-b"]
+            }
+        });
+        let parent_tools = ["read", "grep"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        let parent_mcps = ["mcp-b", "mcp-c"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+
+        apply_delegated_package_scope(&mut package, Some(&parent_tools), Some(&parent_mcps))
+            .expect("apply delegated scope");
+
+        assert_eq!(package["packageManifest"]["allowedTools"], json!(["read"]));
+        assert_eq!(package["packageManifest"]["mcpServers"], json!(["mcp-b"]));
+    }
+
+    #[test]
+    fn team_member_scope_intersects_the_parent_host_scope() {
+        let parent = ["read", "grep", "run_command"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        let member = ["read", "git_read"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        let effective = intersect_optional_scopes(Some(parent), Some(member)).unwrap();
+        assert_eq!(effective, ["read".to_owned()].into_iter().collect());
     }
 
     fn single_entry_zip(name: &str, raw: &[u8], compressed: &[u8], method: u16) -> Vec<u8> {

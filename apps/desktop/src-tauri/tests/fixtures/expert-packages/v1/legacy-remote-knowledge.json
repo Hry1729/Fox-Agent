@@ -1,0 +1,40 @@
+{
+  "fixtureFormat": "fox.expert-package",
+  "fixtureVersion": 1,
+  "generatedFromCommit": "ac85f04605f0311fc3ea641390e78778d86037be",
+  "input": {
+    "agentId": "fox-debugger",
+    "packageManifest": {
+      "allowedTools": [
+        "read",
+        "search_knowledge",
+        "read_knowledge_document"
+      ],
+      "knowledge": [
+        "remote-kb-architecture",
+        "remote-kb-policies"
+      ],
+      "mcpServers": [
+        "remote-search"
+      ],
+      "prompt": "Use the configured remote knowledge bases as evidence.",
+      "skills": [
+        "research"
+      ],
+      "version": "1.0.0"
+    }
+  },
+  "legacyKnowledgeIds": [
+    "remote-kb-architecture",
+    "remote-kb-policies"
+  ],
+  "legacyKnowledgeResolution": {
+    "ids": [
+      "remote-kb-architecture",
+      "remote-kb-policies"
+    ],
+    "source": "remote"
+  },
+  "packageSnapshotBytes": "{\"agentKind\":\"expert\",\"capabilities\":[\"files\",\"tools\",\"reasoning\"],\"category\":\"engineering\",\"defaultModel\":\"configured-model\",\"description\":\"定位根因、修复缺陷并补充回归验证\",\"id\":\"fox-debugger\",\"invocationMode\":\"inline\",\"isBuiltin\":true,\"name\":\"Fox 调试专家\",\"openingSuggestions\":[],\"packageManifest\":{\"allowedTools\":[\"read\",\"search_knowledge\",\"read_knowledge_document\"],\"knowledge\":[\"remote-kb-architecture\",\"remote-kb-policies\"],\"mcpServers\":[\"remote-search\"],\"prompt\":\"Use the configured remote knowledge bases as evidence.\",\"skills\":[\"research\"],\"version\":\"1.0.0\"},\"packageVersion\":\"1.0.0\",\"resources\":{\"knowledges\":[],\"mcps\":[],\"skills\":[],\"tools\":[{\"description\":\"读取和处理已授权项目文件\",\"id\":\"files\",\"name\":\"文件读写\"},{\"description\":\"调用 Fox Runtime 提供的本地工具\",\"id\":\"tools\",\"name\":\"本地工具\"},{\"description\":\"规划并执行多步骤任务\",\"id\":\"reasoning\",\"name\":\"任务推理\"}]},\"runtimeType\":\"pi\",\"systemPrompt\":\"You are Fox's debugging specialist. Reproduce the problem when possible, collect concrete evidence, isolate the earliest root cause, and distinguish cause from symptom. Prefer the smallest complete fix, preserve unrelated behavior, and add or run focused regression checks. State uncertainty plainly. Do not claim a bug is fixed until the relevant verification succeeds.\",\"visibility\":\"expert_center\"}",
+  "packageSnapshotHash": "0377723c9031f279b12c54520e25df1a726e09f25dc7d283da1e3f1e767b6630"
+}

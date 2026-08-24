@@ -91,6 +91,37 @@ test('injects planner handoff as advisory runtime context', () => {
   assert.match(composed.prompt, /"authority":"advisory"/)
 })
 
+test('injects only bounded Host-confirmed memory as contextual facts', () => {
+  const composed = composeFoxPrompt({
+    runtimeInstructions: 'Rules',
+    context: {
+      memoryContext: {
+        status: 'recalled',
+        query: 'preferred editor',
+        items: [{
+          id: 'memory-1',
+          state: 'confirmed',
+          enabled: true,
+          canonicalKey: 'preferred_editor',
+          content: 'The user prefers Vim.',
+          evidenceExcerpt: 'Explicit user preference.',
+        }],
+      },
+    },
+  })
+
+  assert.match(composed.prompt, /kind="confirmed_memory" authority="runtime"/)
+  assert.match(composed.prompt, /user-confirmed and currently enabled memories/)
+  assert.match(composed.prompt, /The current user message wins/)
+  assert.match(composed.prompt, /preferred_editor/)
+
+  const empty = composeFoxPrompt({
+    runtimeInstructions: 'Rules',
+    context: { memoryContext: { status: 'empty', items: [] } },
+  })
+  assert.doesNotMatch(empty.prompt, /kind="confirmed_memory"/)
+})
+
 test('bounds untrusted context blocks', () => {
   const block = contextBlock('workspace', 'workspace', 'x'.repeat(25_000))
   assert.ok(block.length < 19_000)

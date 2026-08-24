@@ -31,16 +31,72 @@ impl Database {
                 [goal_id], |row| row.get::<_, i64>(0),
             )?;
             transaction.execute(
-                "UPDATE plan_revisions SET status = 'superseded' WHERE goal_id = ?1 AND status IN ('proposed', 'approved')",
+                "UPDATE plan_revisions SET status = 'superseded' WHERE goal_id = ?1 AND status = 'proposed'",
                 [goal_id],
             )?;
             transaction.execute(
                 "INSERT INTO plan_revisions(id, goal_id, conversation_id, revision, title, summary,
                      tasks_json, status, created_by, created_at, approved_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'approved', ?8, ?9, ?9)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'proposed', ?8, ?9, NULL)",
                 params![id, goal_id, conversation_id, revision, title, summary, tasks.to_string(), created_by, created_at],
             )?;
             let record = transaction.query_row("SELECT id, goal_id, conversation_id, revision, title, summary, tasks_json, status, created_by, created_at, approved_at FROM plan_revisions WHERE id = ?1", [&id], plan_revision_from_row)?;
+            transaction.commit()?;
+            Ok(record)
+        })
+    }
+
+    pub fn resolve_plan_revision(
+        &self,
+        conversation_id: &str,
+        plan_revision_id: &str,
+        decision: &str,
+    ) -> Result<PlanRevisionRecord, String> {
+        if !["approved", "rejected"].contains(&decision) {
+            return Err("plan revision decision must be approved or rejected".to_owned());
+        }
+        let (plans, _, _) = self.load_a1_snapshot(conversation_id)?;
+        let existing = plans
+            .iter()
+            .find(|plan| plan.id == plan_revision_id)
+            .ok_or_else(|| "plan revision was not found in this conversation".to_owned())?;
+        if existing.status != "proposed" {
+            return Err(format!(
+                "plan revision is already resolved with status '{}'",
+                existing.status
+            ));
+        }
+
+        let resolved_at = now_ms().to_string();
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let changed = if decision == "approved" {
+                transaction.execute(
+                    "UPDATE plan_revisions SET status = 'superseded'
+                     WHERE goal_id = ?1 AND id <> ?2 AND status IN ('proposed', 'approved')",
+                    params![existing.goal_id, plan_revision_id],
+                )?;
+                transaction.execute(
+                    "UPDATE plan_revisions SET status = 'approved', approved_at = ?2
+                     WHERE id = ?1 AND conversation_id = ?3 AND status = 'proposed'",
+                    params![plan_revision_id, resolved_at, conversation_id],
+                )?
+            } else {
+                transaction.execute(
+                    "UPDATE plan_revisions SET status = 'rejected', approved_at = NULL
+                     WHERE id = ?1 AND conversation_id = ?2 AND status = 'proposed'",
+                    params![plan_revision_id, conversation_id],
+                )?
+            };
+            if changed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            let record = transaction.query_row(
+                "SELECT id, goal_id, conversation_id, revision, title, summary, tasks_json, status,
+                     created_by, created_at, approved_at FROM plan_revisions WHERE id = ?1",
+                [plan_revision_id],
+                plan_revision_from_row,
+            )?;
             transaction.commit()?;
             Ok(record)
         })
@@ -184,4 +240,121 @@ fn acceptance_from_row(row: &Row<'_>) -> rusqlite::Result<AcceptanceRecord> {
 
 fn json_value(raw: String) -> Value {
     serde_json::from_str(&raw).unwrap_or(Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::{CreateGoalInput, GoalStatus};
+    use serde_json::json;
+
+    #[test]
+    fn plan_revisions_require_host_resolution_and_preserve_approved_history() {
+        let path = std::env::temp_dir().join(format!("fox-a1-plan-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).expect("open database");
+        let conversation = database
+            .create_conversation(database.default_agent_id(), Some("A1 plan"), None, None)
+            .expect("create conversation");
+        let run = database
+            .create_run(&conversation.id, "create plan", None)
+            .expect("create run")
+            .run;
+        let goal = database
+            .goals()
+            .create(CreateGoalInput {
+                id: None,
+                conversation_id: conversation.id.clone(),
+                title: "A1 plan".to_owned(),
+                objective: "verify plan approval history".to_owned(),
+                acceptance_summary: None,
+                status: GoalStatus::Active,
+                created_by: run.id.clone(),
+            })
+            .expect("create goal");
+
+        let first = database
+            .create_plan_revision(
+                &conversation.id,
+                &goal.id,
+                "v1",
+                "initial",
+                json!([]),
+                &run.id,
+            )
+            .expect("create first plan");
+        assert_eq!(first.status, "proposed");
+        let first = database
+            .resolve_plan_revision(&conversation.id, &first.id, "approved")
+            .expect("approve first plan");
+        assert_eq!(first.status, "approved");
+
+        let second = database
+            .create_plan_revision(
+                &conversation.id,
+                &goal.id,
+                "v2",
+                "candidate",
+                json!([]),
+                &run.id,
+            )
+            .expect("create second plan");
+        let (plans, _, _) = database
+            .load_a1_snapshot(&conversation.id)
+            .expect("load plans");
+        assert_eq!(
+            plans
+                .iter()
+                .find(|plan| plan.id == first.id)
+                .unwrap()
+                .status,
+            "approved"
+        );
+        database
+            .resolve_plan_revision(&conversation.id, &second.id, "rejected")
+            .expect("reject second plan");
+
+        let third = database
+            .create_plan_revision(
+                &conversation.id,
+                &goal.id,
+                "v3",
+                "replacement",
+                json!([]),
+                &run.id,
+            )
+            .expect("create third plan");
+        database
+            .resolve_plan_revision(&conversation.id, &third.id, "approved")
+            .expect("approve third plan");
+        let (plans, _, _) = database
+            .load_a1_snapshot(&conversation.id)
+            .expect("load history");
+        assert_eq!(
+            plans
+                .iter()
+                .find(|plan| plan.id == first.id)
+                .unwrap()
+                .status,
+            "superseded"
+        );
+        assert_eq!(
+            plans
+                .iter()
+                .find(|plan| plan.id == second.id)
+                .unwrap()
+                .status,
+            "rejected"
+        );
+        assert_eq!(
+            plans
+                .iter()
+                .find(|plan| plan.id == third.id)
+                .unwrap()
+                .status,
+            "approved"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
 }

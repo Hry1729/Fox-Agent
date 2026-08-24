@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "operationId": "operation-failure-example",
+  "domain": "migration",
+  "operation": "local_knowledge_storage_migrate",
+  "status": "failed",
+  "sequence": 2,
+  "error": {
+    "code": "storage.migration_failed",
+    "message": "fixture failure"
+  }
+}

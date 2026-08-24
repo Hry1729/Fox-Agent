@@ -1,3 +1,4 @@
+use crate::local_knowledge::LocalKnowledgeStore;
 use crate::model_service::ModelServiceClient;
 use crate::{
     database::Database,
@@ -20,6 +21,7 @@ pub struct AppState {
     pub yuxi_client: YuxiClient,
     pub yuxi_runtime: YuxiRuntimeHost,
     pub model_service_client: ModelServiceClient,
+    pub local_knowledge: LocalKnowledgeStore,
     pub data_dir: PathBuf,
     pub skills_dir: PathBuf,
     knowledge_download_cancellations: Arc<Mutex<HashSet<String>>>,
@@ -36,6 +38,7 @@ impl AppState {
         yuxi_client: YuxiClient,
         yuxi_runtime: YuxiRuntimeHost,
         model_service_client: ModelServiceClient,
+        local_knowledge: LocalKnowledgeStore,
         data_dir: PathBuf,
         skills_dir: PathBuf,
     ) -> Self {
@@ -45,6 +48,7 @@ impl AppState {
             yuxi_client,
             yuxi_runtime,
             model_service_client,
+            local_knowledge,
             data_dir,
             skills_dir,
             knowledge_download_cancellations: Arc::new(Mutex::new(HashSet::new())),

@@ -1,5 +1,12 @@
 export const CAPABILITY_MANIFEST_VERSION = 2
 
+export const KNOWLEDGE_TOOL_NAMES = Object.freeze({
+  list: 'list_knowledge_bases',
+  search: 'search_knowledge',
+  read: 'read_knowledge_document',
+  graph: 'query_knowledge_graph',
+})
+
 export const RUNTIME_TOOL_CATALOG = Object.freeze([
   Object.freeze({ name: 'read', category: 'project-read', execution: 'runtime', approval: 'preflight' }),
   Object.freeze({ name: 'ls', category: 'project-read', execution: 'runtime', approval: 'preflight' }),
@@ -9,7 +16,33 @@ export const RUNTIME_TOOL_CATALOG = Object.freeze([
   Object.freeze({ name: 'write_file', category: 'project-write', execution: 'host', approval: 'policy' }),
   Object.freeze({ name: 'edit_file', category: 'project-write', execution: 'host', approval: 'policy' }),
   Object.freeze({ name: 'run_command', category: 'process', execution: 'host', approval: 'always' }),
+  Object.freeze({ name: 'web_search', category: 'skill', execution: 'host', approval: 'always' }),
+  Object.freeze({ name: 'web_read', category: 'skill', execution: 'host', approval: 'always' }),
+  Object.freeze({ name: 'http_request', category: 'skill', execution: 'host', approval: 'always' }),
+  Object.freeze({ name: 'system_info', category: 'skill', execution: 'host', approval: 'always' }),
+  Object.freeze({ name: 'sqlite_read', category: 'project-read', execution: 'host', approval: 'always' }),
+  Object.freeze({ name: 'structured_data', category: 'skill', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'git_read', category: 'project-read', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'test_run', category: 'process', execution: 'host', approval: 'always' }),
+  Object.freeze({ name: 'code_check', category: 'process', execution: 'host', approval: 'always' }),
+  Object.freeze({ name: 'format_code', category: 'project-write', execution: 'host', approval: 'always' }),
+  Object.freeze({ name: 'tabular_data', category: 'project-read', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'work_snapshot_get', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'workflow_snapshot_get', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'workflow_start', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'workflow_stage_start', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'workflow_stage_complete', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'workflow_stage_fail', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'workflow_cancel', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'team_snapshot_get', category: 'delegation', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'team_start', category: 'delegation', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'team_member_start', category: 'delegation', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'team_collect', category: 'delegation', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'team_cancel', category: 'delegation', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'child_agent_list', category: 'delegation', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'child_run_start', category: 'delegation', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'child_run_collect', category: 'delegation', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'child_run_cancel', category: 'delegation', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'goal_propose', category: 'work', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'goal_complete', category: 'work', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'task_create_many', category: 'work', execution: 'host', approval: 'none' }),
@@ -20,10 +53,12 @@ export const RUNTIME_TOOL_CATALOG = Object.freeze([
   Object.freeze({ name: 'review_finding_add', category: 'work', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'review_finding_resolve', category: 'work', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'acceptance_submit', category: 'work', execution: 'host', approval: 'none' }),
-  Object.freeze({ name: 'list_knowledge_bases', category: 'knowledge', execution: 'host', approval: 'none' }),
-  Object.freeze({ name: 'search_knowledge', category: 'knowledge', execution: 'host', approval: 'none' }),
-  Object.freeze({ name: 'read_knowledge_document', category: 'knowledge', execution: 'host', approval: 'none' }),
-  Object.freeze({ name: 'query_knowledge_graph', category: 'knowledge', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'memory_search', category: 'memory', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'memory_propose', category: 'memory', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: KNOWLEDGE_TOOL_NAMES.list, category: 'knowledge', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: KNOWLEDGE_TOOL_NAMES.search, category: 'knowledge', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: KNOWLEDGE_TOOL_NAMES.read, category: 'knowledge', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: KNOWLEDGE_TOOL_NAMES.graph, category: 'knowledge', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'list_mcp_tools', category: 'mcp', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'call_mcp_tool', category: 'mcp', execution: 'host', approval: 'always' }),
 ])
@@ -76,7 +111,7 @@ export function validateCapabilityManifest(value) {
   for (const tool of value.tools) {
     if (!tool || typeof tool !== 'object' || Array.isArray(tool)) return 'tool entries must be objects'
     if (typeof tool.name !== 'string' || !tool.name) return 'tool name is required'
-    if (!['project-read', 'project-write', 'attachment', 'process', 'knowledge', 'skill', 'mcp', 'work'].includes(tool.category)) {
+    if (!['project-read', 'project-write', 'attachment', 'process', 'knowledge', 'skill', 'mcp', 'work', 'memory', 'delegation'].includes(tool.category)) {
       return `unsupported tool category: ${tool.category}`
     }
     if (!['runtime', 'host', 'remote'].includes(tool.execution)) return `unsupported tool execution: ${tool.execution}`

@@ -12,7 +12,7 @@ Fox 需要一个能够事务更新、离线读取、迁移、备份并随桌面�
 
 ## 决策
 
-使用 SQLite `fox.db` 作为 Fox 本地产品事实源。
+使用 SQLite `fox.db` 作为 Fox 核心产品事实源。本地知识库的大体量文档、分块、索引代次与任务事实独立保存在 `knowledge.db`，具体边界见 [0004：本地知识使用独立 SQLite 事实库](0004-本地知识使用独立SQLite事实库.md)。
 
 - 会话、消息、Run、运行事件、工具调用、项目、模型配置和用户资料写入 SQLite。
 - React 实时状态是 SQLite 快照与实时事件的投影，不是最终事实。
@@ -48,6 +48,7 @@ Fox 需要一个能够事务更新、离线读取、迁移、备份并随桌面�
 - `apps/desktop/src-tauri/src/app_state.rs`
 - `apps/desktop/src-tauri/src/runtime_host`
 - `apps/desktop/src/features/conversations/model/runtime-event-reducer.ts`
+- `apps/desktop/src-tauri/src/local_knowledge.rs`
 
 ## 后续要求
 

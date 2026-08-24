@@ -1,9 +1,10 @@
 # Runtime 协议参考
 
-> 状态：协议版本 1<br>
+> 状态：生效<br>
+> 协议版本：1<br>
 > 适用版本：Fox 0.1.x<br>
 > 维护者：Fox Runtime 团队<br>
-> 最后更新：2026-08-21
+> 最后更新：2026-08-24
 
 ## Envelope
 
@@ -46,20 +47,58 @@ stdout 只能输出 Envelope；日志必须写 stderr。Host 校验 protocol/ver
 | `initialize` | payload.modelService | 模型和能力初始化 | `ready` |
 | `create_session` | conversation/session | 新建检查点 | `session_created` |
 | `resume_session` | sessionPath | 恢复检查点 | `session_created` |
+| `evaluation.run` | 无 | 运行内置确定性离线评测；不要求模型初始化 | `evaluation_report` |
 | `prompt` | conversation/session/run + assistantPackage + expertBinding? + expertPackage? + projectContext/workSnapshot | 开始异步推理 | `request_succeeded` |
 | `cancel` | run | 中止运行 | `request_succeeded` |
 | `shutdown` | 无 | 关闭进程 | `request_succeeded` |
 
-响应仅表示请求已接收；Run 完成以事件为准。
+普通运行响应仅表示请求已接收；Run 完成以事件为准。`evaluation_report` 是例外：它同步返回 schema v2 固定夹具报告，不创建 Conversation/Run、不读取项目、不调用模型或网络，由 Host 校验并持久化报告 Hash 和套件摘要。
 
 `assistantPackage` 表示 `conversations.agent_id` 对应的基础助手；`expertBinding` 仅在当前会话有 active 专家时携带绑定 ID、专家 ID、版本与 Hash；`expertPackage` 来自绑定时冻结并经 Hash 校验的静态执行包，再叠加当前 Run 的 Skills、知识和 Host 授权。Runtime 对助手和专家 `allowedTools` 逐层过滤，MCP scope 也取交集；这些字段不能授予 Host 未注册或未批准的能力。
 
 ## Runtime 到 Host 的请求
 
 - `tool.preflight`：校验只读工具路径与权限。
-- `tool.execute`：执行附件、写入、命令、知识、MCP 或 A0 工作闭环工具。
+- `tool.execute`：执行附件、写入、命令、通用 Host 能力、知识、MCP、A0/A1 工作闭环或 A5 Child Run 工具。
 
 Host 返回 `tool.preflight_allowed/blocked` 或 `tool.execute_completed/failed`，并使用原请求 `requestId` 关联。
+
+`list_mcp_tools` 与 `call_mcp_tool` 是兼容名称下的统一扩展源工具：source 可为持久 stdio MCP、Streamable HTTP MCP 或 OpenAPI Connector。Runtime 不感知连接方式、Session ID 或凭据；Host 负责工具发现、Schema 校验、审批、超时、健康更新和连接回收。工具成功结果可包含 `hookAnnotations`，表示 `before_tool/after_tool` 声明式策略注解；阻断与强制审批由 Host 在执行前完成，Runtime 不能覆盖。
+
+Run 分派和终态还会触发 `before_run/after_run` 审计，但不会新增 Runtime 可执行回调。Fox 不把任意 Hook 脚本、HTTP Header、MCP Session ID 或 OpenAPI 定义传入模型上下文。
+
+知识工具保持现有名称并使用 source-aware 参数。`list_knowledge_bases`、`search_knowledge` 和 `read_knowledge_document` 根据 `KnowledgeReference.source` 路由到本地或远程 Provider；历史只传 `knowledgeBaseId` 的请求按远程语义兼容。Runtime 不直接调用任何 `local_knowledge_*` Tauri 命令。本地知识图谱尚不可用时，`query_knowledge_graph` 返回 `local_knowledge.graph_unavailable`，不能用空结果冒充“没有关系”。
+
+### 通用 Host 工具
+
+| 工具 | 核心输入 | category / approval |
+|---|---|---|
+| `web_search` | `query`、`provider=auto\|brave\|tavily\|exa\|searxng\|duckduckgo`、`maxResults?`、域名包含/排除列表 | `skill / always` |
+| `web_read` | `url`、`format=markdown\|text`、`maxChars?` | `skill / always` |
+| `http_request` | `method?`、`url`、精确 `allowedHosts`、安全 Header、`body?`、`timeoutSeconds?` | `skill / always` |
+| `system_info` | `includeProcesses?`、`maxProcesses?`、`includeEnvironment?` | `skill / always` |
+| `sqlite_read` | 项目内 `path`、单条 `query`、位置参数、`rowLimit?`、`timeoutSeconds?` | `project-read / always` |
+| `structured_data` | `action`、`data?` 或 `path?`、输入/输出格式、`query?`、`requiredKeys?` | `skill / none` |
+| `git_read` | `operation=status\|diff\|log\|blame`、`path?`、引用与分页参数 | `project-read / none` |
+| `test_run` | `runner?`、`script?`、`target?`、`cwd?`、`timeoutSeconds?` | `process / always` |
+| `code_check` | `check=auto\|lint\|typecheck`、`ecosystem?`、`cwd?` | `process / always` |
+| `format_code` | `mode=check\|write`、`ecosystem?`、`path?`、`cwd?` | `project-write / always` |
+| `tabular_data` | `operation=preview\|filter\|aggregate`、`data?` 或 `path?`、筛选/聚合参数 | `project-read / none` |
+
+网络、系统、数据库、进程和格式化工具由 Host 执行并进入 `tool_calls`；需要审批的调用同时进入 `approvals`。`web_search` 的 `auto` 模式优先使用已配置 Provider，没有配置时自动回退到无 Key 的 DuckDuckGo HTML 搜索，不得向普通用户要求注册额外搜索 API Key。`web_read` 只接受公开 HTTP/HTTPS 地址，逐跳重新解析并验证重定向；正文最大 2 MiB。`http_request` 只访问调用中列出的精确公网 Host，阻止私网、跨 Host 重定向和认证 Header，请求/响应分别限制为 1/10 MiB，最长 15 秒；认证 API 必须改用 Keyring-backed OpenAPI Connector。`system_info` 只输出 CPU、内存、磁盘、有限进程摘要和固定安全环境变量白名单。`sqlite_read` 只打开授权项目内文件，连接和 Statement 双重只读，最多 1000 行、100 列、2 MiB、5 秒。进程工具使用程序名与参数数组直接启动，不通过 Shell，输出最大 512 KiB，超时范围 1–600 秒；测试或静态检查返回非零码时，工具调用本身成功完成并在 `details.passed=false` 中报告检查失败。结构化和表格文件必须位于授权项目且最大 4 MiB，当前表格首版不支持 XLSX。
+
+### A5 Child Run 工具
+
+四个工具固定为 `category: delegation`、`execution: host`、`approval: none`。`approval: none` 只表示创建/查询/取消 delegation 本身不需审批；Child 内部调用高风险工具时仍走真实 ToolCall 与 Host 审批。
+
+| 工具 | 核心输入 | Host 结果 |
+|---|---|---|
+| `child_agent_list` | 空对象 | `agents[]` |
+| `child_run_start` | `objective`、`context?`、`agentId?`、`budget?` | `childRun`、`created` |
+| `child_run_collect` | `childRunIds`（1–8）、`waitMs?`（0–60000） | `childRuns`、`allTerminal` |
+| `child_run_cancel` | `childRunId` | `cancelled`、`childRun` |
+
+`budget` 可声明 `maxDurationMs`、`maxTotalTokens`、`maxOutputTokens` 和 `maxToolCalls`，Host 会在模型上限与固定安全范围内规范化。`child_run_start` 以 `(parent_run_id, toolCallId)` 幂等；collect/cancel 只接受当前 parent 的直属 Child。父子共用 Trace ID但使用不同 root span。Child 的工具和 MCP scope 是父 Assistant、父 Expert 与 Child Agent 声明的交集，Runtime 侧过滤后 Host 仍会再次拒绝越权请求。
 
 ## Runtime 事件
 
@@ -111,14 +150,47 @@ Runtime 只能经 `tool.execute` 提交以下命令，Host 校验当前 `convers
 | `review_finding_add` | `goalId`, `taskId?`, `planRevisionId?`, `severity`, `category`, `title`, `detail`, `status?`, `reviewer` |
 | `review_finding_resolve` | `findingId`, `status` |
 | `acceptance_submit` | `goalId`, `expectedVersion`, `summary`, `reviewer` |
+| `workflow_snapshot_get` | 无；读取当前冻结 Workflow 的持久检查点 |
+| `workflow_start` | `input` |
+| `workflow_stage_start` | `workflowRunId`, `stageId` |
+| `workflow_stage_complete` | `workflowRunId`, `stageId`, `output`, `evidenceIds` |
+| `workflow_stage_fail` | `workflowRunId`, `stageId`, `error` |
+| `workflow_cancel` | `workflowRunId`, `reason?` |
 
-十一个工具固定为 `category: work`、`execution: host`、`approval: none`。任务和 Goal 状态更新使用乐观版本；任务完成前必须已有 Evidence。`task_create_many` 只接受 `active` Goal；`proposed` Goal 必须先由用户在 Host 确认，Runtime 无权激活，也不能提前创建 queued Task。`goal_complete` 保留为兼容 A0 的完成请求；A1 使用 `acceptance_submit`，Host 还会要求已批准的 PlanRevision、至少一条独立 ReviewFinding、没有未解决的 critical/high/medium 审查问题，并继续校验任务终态与有效 Evidence。
+十七个工具固定为 `category: work`、`execution: host`、`approval: none`。任务和 Goal 状态更新使用乐观版本；任务完成前必须已有 Evidence。`task_create_many` 只接受 `active` Goal；`proposed` Goal 必须先由用户在 Host 确认，Runtime 无权激活，也不能提前创建 queued Task。`goal_complete` 保留为兼容 A0 的完成请求；A1 使用 `acceptance_submit`，Host 还会要求已批准的 PlanRevision、至少一条独立 ReviewFinding、没有未解决的 critical/high/medium 审查问题，并继续校验任务终态与有效 Evidence。Workflow 工具复用同一 Goal/Task/Evidence 事实源，不能建立第二套任务图。
+
+## E3 专家团队工具
+
+串行 Supervisor Team 通过五个 Host 工具运行；Member 始终是真实 Child Run：
+
+| 工具 | 核心输入 |
+|---|---|
+| `team_snapshot_get` | 无；读取当前团队、成员与聚合状态 |
+| `team_start` | `objective`, `context?` |
+| `team_member_start` | `teamRunId`, `memberId`, `objective`, `context?` |
+| `team_collect` | `teamRunId`, `waitMs?` |
+| `team_cancel` | `teamRunId`, `reason?` |
+
+Host 校验冻结 Team 定义、串行成员顺序、父 Scope 与 Member Allowlist 交集、预算、取消传播和终态聚合。Runtime 不能动态添加成员或嵌套 Team/Child 委派。
 
 ## Pi Coding Agent 扩展边界
 
-Fox Runtime 固定使用 `@earendil-works/pi-coding-agent@0.79.9` 的 `DefaultResourceLoader`、`createAgentSession` 和内联 Extension 生命周期。Fox 的规划扩展在每轮 `before_agent_start` 注入 Host 提供的项目授权与工作快照，并注册 A0 Work Tool。
+Fox Runtime 固定使用同版本的 `@earendil-works/pi-agent-core`、`@earendil-works/pi-ai` 和 `@earendil-works/pi-coding-agent@0.84.2`。`pi-adapter.mjs` 是唯一允许直接导入 Pi 包的 Runtime 模块，负责 `ModelRuntime`、`DefaultResourceLoader`、`createAgentSession` 和 Faux Provider 兼容；业务工具和执行流程不能直接依赖 Pi 包入口。Fox 的规划扩展在每轮 `before_agent_start` 注入 Host 提供的项目授权与工作快照，并注册 A0 Work Tool。
 
 Coding Agent 的内置 `bash/read/edit/write`、TUI plan-mode 示例和本地 todo 持久化不会启用。项目读写、命令、Goal、Task、Evidence 与审批仍全部经过 Fox Host；SQLite 仍是唯一事实源。Runtime 仅加载 Fox 内联扩展，不自动发现用户目录或项目目录中的 Pi 扩展。
+
+Runtime 工具先按 Fox Tool Definition v1 注册，再经过助手/专家 `allowedTools` 交集过滤，最后由 `adaptFoxToolsToPi` 转换为当前 Pi `customTools`。统一定义固定包含 `name`、`label`、`description`、object 类型 `parameters`、`execute` 和 `fox{schemaVersion, source, execution, trusted}`，并可保留 Pi 的 `promptSnippet`、`promptGuidelines`、`prepareArguments` 与 `executionMode`；`fox` 元数据和 TUI 专用渲染器不会传给 Pi。
+
+兼容 Pi 工具时使用以下约束：
+
+- `adaptPiToolToFox` 默认采用 `execution: host`，必须注入 Host executor，并替换第三方工具原始 `execute`。
+- 只有应用明确标记 `trusted: true` 的工具才能使用 `execution: runtime` 直接执行。
+- `collectTrustedPiExtensionTools` 只开放同步 `registerTool`，不开放 `on` 等生命周期 API。
+- 适配成功不代表获得权限；工具仍需进入 Runtime Tool Catalog，并在 Host 注册 Handler、审批和审计策略。
+
+当前适配层支持开发者显式集成受信任 Pi 工具，不提供市场包的自动 JavaScript 加载。未来若开放第三方安装，Host 必须先完成签名、来源、版本、Hash 和权限审核，再把受信任模块交给 Runtime。
+
+Pi 三个核心包必须锁定并同步升级。升级 PR 必须通过 Runtime 全量测试、Pi Adapter 版本门禁、Windows Sidecar 构建和 Sidecar 冒烟；`build-sidecar.mjs` 只允许使用公开包入口，不得修改 Pi 的 `dist` 内部文件。
 
 ## A0/A1 工作事件
 
@@ -159,7 +231,7 @@ Host 在状态提交后单独记录事件，事件记录失败不回滚工作状
 
 ## 能力清单
 
-Manifest 版本为 2，字段包括流式、取消、推理、Session 恢复、审批、图片、Steering、上下文压缩、动态模型切换、`workLoop` 和工具列表。工具条目含 `name/category/execution/approval`。Rust 与 Node 两端均校验版本、枚举、重复工具及 Host Handler 存在性。
+Manifest 版本为 2，字段包括流式、取消、推理、Session 恢复、审批、图片、Steering、上下文压缩、动态模型切换、`workLoop` 和工具列表。工具条目含 `name/category/execution/approval`；category 当前包含 `project-read/project-write/attachment/process/knowledge/skill/mcp/work/memory/delegation`。Rust 与 Node 两端均校验版本、枚举、重复工具及 Host Handler 存在性。
 
 Host 继续接受 manifest v1；v1、缺少 `workLoop` 或 `workLoop: false` 时，工作工具关闭，会话无错误地按普通对话运行。即使旧 Runtime 主动伪造工作工具请求，Host 也会拒绝执行。
 
@@ -180,7 +252,7 @@ Fox 只在确有差异时做模型家族分支：MiniMax、DeepSeek、Claude、O
 - `agentdojo-injection.json`：AgentDojo 风格提示注入子集，检查不可信上下文隔离、稳定 Prompt 不被污染和 Host 权限规则保留；不是官方 AgentDojo 安全分数。
 - `fox-intent-regressions.json`：普通问答不误触发 Planner/Goal、复杂编码请求进入 Planner、审批演示不伪造工具调用。
 
-2026-08-06 基线为 `4` 个套件、`30/30` 通过。真实 BFCL、AgentDojo、SWE-bench、Aider、Terminal-Bench、tau-bench 和 RAGAS 需要显式模型凭据、隔离工作区及相应数据集；Fox 不把离线适配结果冒充这些项目的官方排行榜分数。
+2026-08-24 基线为 `5` 个套件、`35/35` 通过，包含新增的 SWE-bench 风格 inspect/edit/test/evidence/acceptance 契约链。真实 BFCL、AgentDojo、SWE-bench、Aider、Terminal-Bench、tau-bench 和 RAGAS 需要显式模型凭据、隔离工作区及相应数据集；Fox 不把离线适配结果冒充这些项目的官方排行榜分数。
 
 ## 幂等与恢复
 

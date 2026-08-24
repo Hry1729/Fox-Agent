@@ -56,6 +56,8 @@ impl RuntimeCapabilityManifest {
                     | "skill"
                     | "mcp"
                     | "work"
+                    | "memory"
+                    | "delegation"
             ) {
                 return Err(format!(
                     "runtime capability tool {} has unsupported category {}",
@@ -114,7 +116,19 @@ fn host_tool_is_supported(tool: &str) -> bool {
             | "query_knowledge_graph"
             | "list_mcp_tools"
             | "call_mcp_tool"
-    ) || super::work_tools::is_work_tool(tool)
+            | "memory_search"
+            | "memory_propose"
+            | "child_agent_list"
+            | "child_run_start"
+            | "child_run_collect"
+            | "child_run_cancel"
+            | "team_snapshot_get"
+            | "team_start"
+            | "team_member_start"
+            | "team_collect"
+            | "team_cancel"
+    ) || super::capability_tools::is_capability_tool(tool)
+        || super::work_tools::is_work_tool(tool)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -250,12 +264,20 @@ mod tests {
             "contextCompaction": true,
             "dynamicModelSwitch": false,
             "workLoop": true,
-            "tools": [{
-                "name": "read",
-                "category": "project-read",
-                "execution": "runtime",
-                "approval": "preflight"
-            }]
+            "tools": [
+                {
+                    "name": "read",
+                    "category": "project-read",
+                    "execution": "runtime",
+                    "approval": "preflight"
+                },
+                {
+                    "name": "child_run_start",
+                    "category": "delegation",
+                    "execution": "host",
+                    "approval": "none"
+                }
+            ]
         }))
         .expect("deserialize capability manifest");
         manifest.validate().expect("valid manifest");
@@ -268,6 +290,46 @@ mod tests {
             assert!(
                 host_tool_is_supported(tool),
                 "registered work tool {tool} must be accepted by capability validation"
+            );
+        }
+    }
+
+    #[test]
+    fn governed_memory_tools_have_host_handlers() {
+        for tool in ["memory_search", "memory_propose"] {
+            assert!(
+                host_tool_is_supported(tool),
+                "registered memory tool {tool} must be accepted by capability validation"
+            );
+        }
+    }
+
+    #[test]
+    fn child_run_tools_have_host_handlers() {
+        for tool in [
+            "team_snapshot_get",
+            "team_start",
+            "team_member_start",
+            "team_collect",
+            "team_cancel",
+            "child_agent_list",
+            "child_run_start",
+            "child_run_collect",
+            "child_run_cancel",
+        ] {
+            assert!(
+                host_tool_is_supported(tool),
+                "registered Child Run tool {tool} must be accepted by capability validation"
+            );
+        }
+    }
+
+    #[test]
+    fn every_registered_capability_tool_has_a_host_handler() {
+        for tool in super::super::capability_tools::CAPABILITY_TOOLS {
+            assert!(
+                host_tool_is_supported(tool),
+                "registered capability tool {tool} must be accepted by capability validation"
             );
         }
     }
