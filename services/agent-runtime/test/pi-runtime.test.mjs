@@ -10,6 +10,13 @@ import { fileURLToPath } from 'node:url'
 import { createEnvelope } from '../src/protocol.mjs'
 
 const runtimePath = fileURLToPath(new URL('../src/pi-runtime.mjs', import.meta.url))
+const LEGACY_WORKFLOW_MUTATORS = [
+  'workflow_start',
+  'workflow_stage_start',
+  'workflow_stage_complete',
+  'workflow_stage_fail',
+  'workflow_cancel',
+]
 
 function startRuntime() {
   const child = spawn(process.execPath, [runtimePath], { stdio: ['pipe', 'pipe', 'pipe'] })
@@ -57,6 +64,17 @@ test('runs the real Pi Agent loop through Fox JSONL with a faux provider', async
   const ready = await runtime.waitFor((message) => message.requestId === initialize.id)
   assert.equal(ready.type, 'ready')
   assert.equal(ready.payload.runtime, 'fox-pi-runtime')
+  for (const toolName of ['task_attempt_start', 'task_repair_start', 'task_attempt_finish']) {
+    assert.ok(ready.payload.capabilities.tools.some(({ name }) => name === toolName))
+  }
+  assert.ok(!ready.payload.capabilities.tools.some(({ name }) => name === 'task_repair_escalate_start'))
+  for (const toolName of ['graph_readonly_activate', 'graph_readonly_snapshot_get', 'graph_readonly_node_start', 'graph_readonly_node_review', 'graph_readonly_node_finish', 'graph_readonly_node_cancel', 'graph_readonly_accept']) {
+    assert.ok(!ready.payload.capabilities.tools.some(({ name }) => name === toolName))
+  }
+  assert.ok(ready.payload.capabilities.tools.some(({ name }) => name === 'workflow_snapshot_get'))
+  for (const toolName of LEGACY_WORKFLOW_MUTATORS) {
+    assert.ok(ready.payload.capabilities.tools.some(({ name }) => name === toolName))
+  }
 
   const sessionId = 'pi-session-1'
   const conversationId = 'conversation-1'
@@ -131,10 +149,190 @@ test('records tool and prompt diagnostics while allowing a text-only run with no
   )
   assert.ok(snapshot.payload.promptDiagnostics.totalChars <= snapshot.payload.promptDiagnostics.maxPromptChars)
   assert.equal('prompt' in snapshot.payload.promptDiagnostics, false)
+  assert.equal(snapshot.payload.promptDefinitionId, 'fox.runtime.system')
+  assert.equal(snapshot.payload.promptVersion, '1.0.0')
+  assert.match(snapshot.payload.promptContentHash, /^[a-f0-9]{64}$/)
+  assert.match(snapshot.payload.contextSchemaHash, /^[a-f0-9]{64}$/)
+  assert.equal(snapshot.payload.promptCacheIdentity.toolCatalogHash, snapshot.payload.toolCatalogHash)
+  assert.equal(snapshot.payload.promptCacheDiagnostics.read.eligible, false)
+  assert.equal(snapshot.payload.promptCacheDiagnostics.write.eligible, false)
 
   const answer = await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'message.delta')
   assert.match(answer.payload.delta, /^Text-only/)
   await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
+})
+
+test('validates Execution Profile at startup and snapshots a side-effect-free shadow surface per Run', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-profile-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const runtime = startRuntime()
+  context.after(() => runtime.close())
+
+  const invalid = runtime.send('initialize', {
+    payload: {
+      executionProfile: 'durable_v2',
+      executionStrategy: { completionAudit: 'legacy' },
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+      },
+    },
+  })
+  const rejected = await runtime.waitFor((message) => message.requestId === invalid.id)
+  assert.equal(rejected.type, 'request_failed')
+  assert.match(rejected.payload.message, /Unsupported execution strategy combination/)
+
+  const durableInitialize = runtime.send('initialize', {
+    payload: {
+      executionProfile: 'durable_v2',
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 32768,
+        maxOutputTokens: 512,
+      },
+    },
+  })
+  const durableReady = await runtime.waitFor((message) => message.requestId === durableInitialize.id)
+  assert.equal(durableReady.type, 'ready')
+  assert.equal(durableReady.payload.executionProfile.id, 'durable_v2')
+  assert.ok(durableReady.payload.capabilities.tools.some(({ name }) => name === 'workflow_snapshot_get'))
+  assert.ok(durableReady.payload.capabilities.tools.every(({ name }) => !LEGACY_WORKFLOW_MUTATORS.includes(name)))
+  assert.deepEqual(
+    durableReady.payload.capabilities.tools.find(({ name }) => name === 'task_repair_escalate_start'),
+    { name: 'task_repair_escalate_start', category: 'work', execution: 'host', approval: 'always' },
+  )
+  for (const toolName of ['graph_readonly_activate', 'graph_readonly_snapshot_get', 'graph_readonly_node_start', 'graph_readonly_node_review', 'graph_readonly_node_finish', 'graph_readonly_node_cancel', 'graph_readonly_accept']) {
+    assert.deepEqual(
+      durableReady.payload.capabilities.tools.find(({ name }) => name === toolName),
+      { name: toolName, category: 'work', execution: 'host', approval: 'none' },
+    )
+  }
+
+  const initialize = runtime.send('initialize', {
+    payload: {
+      executionProfile: 'durable_v2_shadow',
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 32768,
+        maxOutputTokens: 512,
+        fauxResponses: ['Shadow analysis only.'],
+      },
+    },
+  })
+  const ready = await runtime.waitFor((message) => message.requestId === initialize.id)
+  assert.equal(ready.type, 'ready')
+  assert.equal(ready.payload.executionProfile.id, 'durable_v2_shadow')
+  assert.equal(ready.payload.executionProfile.sideEffectsAllowed, false)
+  assert.equal(ready.payload.continuationDecisionContract.hostValidationRequired, true)
+  assert.ok(ready.payload.capabilities.tools.every((tool) => ![
+    'write_file',
+    'run_command',
+    'web_search',
+    'goal_complete',
+    'task_attempt_start',
+    'task_repair_start',
+    'task_repair_escalate_start',
+    'task_attempt_finish',
+    'graph_readonly_activate',
+    'graph_readonly_snapshot_get',
+    'graph_readonly_node_start',
+    'graph_readonly_node_review',
+    'graph_readonly_node_finish',
+    'graph_readonly_node_cancel',
+    'graph_readonly_accept',
+    'child_run_start',
+  ].includes(tool.name)))
+
+  const sessionId = 'pi-profile-session'
+  const conversationId = 'pi-profile-conversation'
+  const create = runtime.send('create_session', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    payload: { sessionPath: join(directory, 'session.json') },
+  })
+  await runtime.waitFor((message) => message.requestId === create.id && message.type === 'session_created')
+
+  const runId = 'pi-profile-run'
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    runId,
+    payload: {
+      text: 'Analyze without side effects.',
+      messages: [{ role: 'user', content: 'Analyze without side effects.' }],
+      assistantPackage: { packageManifest: { allowedTools: ['read'] } },
+    },
+  })
+  const snapshot = await runtime.waitFor((message) => (
+    message.runId === runId && message.payload?.type === 'run.request_snapshot'
+  ))
+  assert.equal(snapshot.payload.executionProfile.id, 'durable_v2_shadow')
+  assert.equal(snapshot.payload.executionProfile.shadow, true)
+  assert.equal(snapshot.payload.continuationDecisionContract.proposalEventType, 'run.continuation_proposed')
+  assert.ok(snapshot.payload.effectiveToolNames.includes('continuation_propose'))
+  assert.ok(snapshot.payload.effectiveToolNames.includes('read'))
+  assert.ok(!snapshot.payload.effectiveToolNames.includes('write_file'))
+  assert.ok(snapshot.payload.excludedTools.some((tool) => tool.name === 'write_file'))
+  assert.deepEqual(snapshot.payload.assistantDeclaredToolNames, ['read'])
+  await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
+
+  const graphInitialize = runtime.send('initialize', {
+    payload: {
+      executionProfile: 'graph_readonly_preview',
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 32768,
+        maxOutputTokens: 512,
+      },
+    },
+  })
+  const graphReady = await runtime.waitFor((message) => message.requestId === graphInitialize.id)
+  assert.equal(graphReady.type, 'ready')
+  assert.equal(graphReady.payload.executionProfile.id, 'graph_readonly_preview')
+  assert.deepEqual(
+    graphReady.payload.capabilities.tools.find(({ name }) => name === 'graph_readonly_run'),
+    { name: 'graph_readonly_run', category: 'project-read', execution: 'runtime', approval: 'none' },
+  )
+  assert.ok(!durableReady.payload.capabilities.tools.some(({ name }) => name === 'graph_readonly_run'))
+  assert.ok(!ready.payload.capabilities.tools.some(({ name }) => name === 'graph_readonly_run'))
+  for (const toolName of ['graph_readonly_activate', 'graph_readonly_snapshot_get', 'graph_readonly_node_start', 'graph_readonly_node_review', 'graph_readonly_node_finish', 'graph_readonly_node_cancel', 'graph_readonly_accept']) {
+    assert.ok(!graphReady.payload.capabilities.tools.some(({ name }) => name === toolName))
+  }
+
+  const reviewerInitialize = runtime.send('initialize', {
+    payload: {
+      executionProfile: 'graph_reviewer_v1',
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 32768,
+        maxOutputTokens: 512,
+      },
+    },
+  })
+  const reviewerReady = await runtime.waitFor((message) => message.requestId === reviewerInitialize.id)
+  assert.equal(reviewerReady.type, 'ready')
+  assert.equal(reviewerReady.payload.executionProfile.id, 'graph_reviewer_v1')
+  assert.equal(reviewerReady.payload.executionProfile.strategies.completionAudit, 'strict_v2')
+  assert.equal(reviewerReady.payload.executionProfile.strategies.validationPolicy, 'high_risk_v1')
+  assert.equal(reviewerReady.payload.executionProfile.strategies.promptPolicy, 'graph_reviewer_v1')
+  assert.equal(reviewerReady.payload.executionProfile.continuation.mode, 'disabled')
+  assert.equal(reviewerReady.payload.executionProfile.graph.mode, 'disabled')
+  assert.equal(reviewerReady.payload.executionProfile.sideEffectsAllowed, false)
+  assert.deepEqual(
+    reviewerReady.payload.capabilities.tools.map(({ name }) => name),
+    ['read', 'ls', 'find', 'grep'],
+  )
 })
 
 test('keeps a forced Planner session separate from the Executor transcript', async (context) => {

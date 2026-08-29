@@ -1,0 +1,19 @@
+{
+  "name": "Fox permission and failure contract",
+  "scope": "Deterministic capability-manifest rejection and permission-boundary checks. These verify Runtime contract parsing, not Host approval persistence or UI behavior.",
+  "cases": [
+    { "id": "reject-non-object-manifest", "scenario": "non-object", "expectedError": "capabilities must be an object" },
+    { "id": "reject-unsupported-manifest-version", "scenario": "unsupported-version", "expectedError": "unsupported capability manifest version" },
+    { "id": "reject-non-boolean-tool-approval", "scenario": "non-boolean-tool-approval", "expectedError": "toolApproval must be a boolean" },
+    { "id": "reject-non-array-tools", "scenario": "non-array-tools", "expectedError": "tools must be an array" },
+    { "id": "reject-non-object-tool-entry", "scenario": "non-object-tool-entry", "expectedError": "tool entries must be objects" },
+    { "id": "reject-missing-tool-name", "scenario": "missing-tool-name", "expectedError": "tool name is required" },
+    { "id": "reject-unsupported-tool-category", "scenario": "unsupported-tool-category", "expectedError": "unsupported tool category: unsafe" },
+    { "id": "reject-unsupported-tool-execution", "scenario": "unsupported-tool-execution", "expectedError": "unsupported tool execution: direct" },
+    { "id": "reject-unsupported-tool-approval", "scenario": "unsupported-tool-approval", "expectedError": "unsupported tool approval: implicit" },
+    { "id": "reject-work-tool-without-work-loop", "scenario": "work-without-work-loop", "expectedError": "work tools require workLoop capability" },
+    { "id": "reject-duplicate-tool-name", "scenario": "duplicate-tool-name", "expectedError": "tools must not contain duplicates" },
+    { "id": "accept-valid-v2-manifest", "scenario": "valid-v2", "expectedError": null },
+    { "id": "accept-valid-v1-manifest-without-work-tools", "scenario": "valid-v1-without-work-tools", "expectedError": null }
+  ]
+}

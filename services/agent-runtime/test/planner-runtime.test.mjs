@@ -9,6 +9,10 @@ test('uses the planner only for project-scoped multi-step execution requests', (
   assert.equal(shouldUsePlanner('请修改代码并运行测试', { hasProject: false }), false)
   assert.equal(shouldUsePlanner('请修改代码并运行测试', { hasProject: true, approvalDemo: true }), false)
   assert.equal(shouldUsePlanner('请修改代码并运行测试', { hasProject: true, apiType: 'faux' }), false)
+  assert.equal(shouldUsePlanner('请把下面这个独立子任务委派给合适的子 Agent，并在完成后汇总、验证它的结果：\n\n优化下前面生成的代码', { hasProject: true }), false)
+  assert.equal(shouldUsePlanner('/plan 优化前面生成的代码', { hasProject: true }), true)
+  assert.equal(shouldUsePlanner('/计划 优化前面生成的代码', { hasProject: true }), true)
+  assert.equal(shouldUsePlanner('/plan 优化前面生成的代码', { hasProject: false }), false)
   assert.equal(shouldUsePlanner('test planner', { hasProject: true, apiType: 'faux', force: true }), true)
 })
 

@@ -10,6 +10,7 @@ import type {
 } from '../src/features/conversations/api/desktop-client'
 import {
   createTauriLocalKnowledgeGateway,
+  mapLocalKnowledgeBase,
   type LocalKnowledgeDesktopClient,
 } from '../src/features/local-knowledge/tauri-gateway'
 
@@ -20,6 +21,12 @@ const base: LocalKnowledgeBaseDto = {
   activeIndexGeneration: 'generation-12',
   documentCount: 2,
   activeJobStatus: null,
+  textIndexReady: true,
+  vectorIndexReady: false,
+  searchMode: 'keyword',
+  chunkCount: 8,
+  vectorCount: null,
+  fallbackReason: '未配置向量模型',
   createdAt: 1_755_800_000_000,
   updatedAt: 1_755_800_060_000,
 }
@@ -191,10 +198,40 @@ describe('local knowledge Tauri gateway', () => {
       id: 'kb-local',
       status: 'ready',
       activeGeneration: 12,
+      textIndexReady: true,
+      vectorIndexReady: false,
+      searchMode: 'keyword',
+      embeddingModel: null,
+      vectorCount: null,
+      fallbackReason: '未配置向量模型',
       storagePath: 'D:\\Fox\\knowledge',
       writable: true,
       recentJobs: [{ operationId: 'operation-1', stage: 'chunking', progress: 42 }],
     })
+  })
+
+  test('does not infer index readiness from legacy document or generation counts', () => {
+    const legacy: LocalKnowledgeBaseDto = { ...base }
+    delete legacy.textIndexReady
+    delete legacy.vectorIndexReady
+    delete legacy.searchMode
+    delete legacy.chunkCount
+    delete legacy.vectorCount
+    delete legacy.fallbackReason
+
+    expect(mapLocalKnowledgeBase(legacy)).toMatchObject({
+      status: 'error',
+      textIndexReady: false,
+      vectorIndexReady: false,
+      searchMode: 'keyword',
+      chunkCount: null,
+      vectorCount: null,
+      fallbackReason: 'Host 未提供向量索引状态',
+    })
+  })
+
+  test('treats an interrupted index job as a terminal error', () => {
+    expect(mapLocalKnowledgeBase({ ...base, activeJobStatus: 'interrupted' }).status).toBe('error')
   })
 
   test('creates a base through the real Host command contract', async () => {

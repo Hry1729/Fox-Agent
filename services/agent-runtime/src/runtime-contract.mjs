@@ -1,4 +1,5 @@
 export const CAPABILITY_MANIFEST_VERSION = 2
+export const GRAPH_READONLY_TOOL_NAME = 'graph_readonly_run'
 
 export const KNOWLEDGE_TOOL_NAMES = Object.freeze({
   list: 'list_knowledge_bases',
@@ -12,6 +13,7 @@ export const RUNTIME_TOOL_CATALOG = Object.freeze([
   Object.freeze({ name: 'ls', category: 'project-read', execution: 'runtime', approval: 'preflight' }),
   Object.freeze({ name: 'find', category: 'project-read', execution: 'runtime', approval: 'preflight' }),
   Object.freeze({ name: 'grep', category: 'project-read', execution: 'runtime', approval: 'preflight' }),
+  Object.freeze({ name: GRAPH_READONLY_TOOL_NAME, category: 'project-read', execution: 'runtime', approval: 'none' }),
   Object.freeze({ name: 'read_attachment', category: 'attachment', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'write_file', category: 'project-write', execution: 'host', approval: 'policy' }),
   Object.freeze({ name: 'edit_file', category: 'project-write', execution: 'host', approval: 'policy' }),
@@ -28,6 +30,13 @@ export const RUNTIME_TOOL_CATALOG = Object.freeze([
   Object.freeze({ name: 'format_code', category: 'project-write', execution: 'host', approval: 'always' }),
   Object.freeze({ name: 'tabular_data', category: 'project-read', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'work_snapshot_get', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'graph_readonly_activate', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'graph_readonly_snapshot_get', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'graph_readonly_node_start', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'graph_readonly_node_review', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'graph_readonly_node_finish', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'graph_readonly_node_cancel', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'graph_readonly_accept', category: 'work', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'workflow_snapshot_get', category: 'work', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'workflow_start', category: 'work', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'workflow_stage_start', category: 'work', execution: 'host', approval: 'none' }),
@@ -47,6 +56,10 @@ export const RUNTIME_TOOL_CATALOG = Object.freeze([
   Object.freeze({ name: 'goal_complete', category: 'work', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'task_create_many', category: 'work', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'task_update', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'task_attempt_start', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'task_repair_start', category: 'work', execution: 'host', approval: 'none' }),
+  Object.freeze({ name: 'task_repair_escalate_start', category: 'work', execution: 'host', approval: 'always' }),
+  Object.freeze({ name: 'task_attempt_finish', category: 'work', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'task_evidence_add', category: 'work', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'task_evidence_validate', category: 'work', execution: 'host', approval: 'none' }),
   Object.freeze({ name: 'plan_revision_create', category: 'work', execution: 'host', approval: 'none' }),

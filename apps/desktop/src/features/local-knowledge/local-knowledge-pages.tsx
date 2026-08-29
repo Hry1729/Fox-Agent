@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
-import { AlertCircle, ArrowLeft, ArrowRight, BookOpen, CheckCircle2, Clock3, Database, ExternalLink, FileQuestion, FileStack, FileText, FolderOpen, FolderPlus, HardDrive, History, Layers3, LoaderCircle, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2, Upload, XCircle } from 'lucide-react'
+import { AlertCircle, ArrowLeft, ArrowRight, BookOpen, CheckCircle2, Clock3, Database, ExternalLink, FileQuestion, FileStack, FileText, FolderOpen, FolderPlus, HardDrive, History, Layers3, LoaderCircle, Pencil, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2, Upload, XCircle } from 'lucide-react'
 import { MessageResponse } from '@/components/ai-elements/message-response'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -26,6 +26,7 @@ const LOCAL_FILE_PAGE_SIZE = 60
 const RECENT_DOCUMENT_LIMIT = 8
 const RECENT_DOCUMENT_STORAGE_KEY = 'fox.local-knowledge.recent-documents'
 const LOCAL_KNOWLEDGE_MASCOT = '/mascot/fox/status/fox_give_flowers.png'
+const FOX_GUIDE_KNOWLEDGE_BASE_ID = 'fox-user-guide'
 
 export type LocalKnowledgeView = 'home' | 'files' | 'list' | 'detail' | 'documents' | 'import' | 'jobs'
 
@@ -78,6 +79,8 @@ export interface LocalKnowledgePageProps {
 export interface LocalKnowledgeNavigationProps extends LocalKnowledgePageProps {
   knowledgeBaseId?: string
   documentId?: string
+  createRequest?: number
+  onCreateRequestHandled?: () => void
   onBack?: () => void
   onNavigate?: (view: LocalKnowledgeView, knowledgeBaseId?: string, documentId?: string) => void
 }
@@ -353,8 +356,120 @@ function CreateKnowledgeBaseDialog({
   )
 }
 
+function EditKnowledgeBaseDialog({
+  base,
+  open,
+  submitting,
+  error,
+  onOpenChange,
+  onSubmit,
+}: {
+  base: LocalKnowledgeBaseDetail
+  open: boolean
+  submitting: boolean
+  error: string | null
+  onOpenChange: (open: boolean) => void
+  onSubmit: (request: LocalKnowledgeBaseCreateRequest) => Promise<void>
+}) {
+  const [name, setName] = useState(base.name)
+  const [description, setDescription] = useState(base.description)
+  const [validationError, setValidationError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    setName(base.name)
+    setDescription(base.description)
+    setValidationError(null)
+  }, [base.description, base.name, open])
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const normalizedName = name.trim()
+    if (!normalizedName) {
+      setValidationError('请输入知识库名称。')
+      return
+    }
+    setValidationError(null)
+    void onSubmit({ name: normalizedName, description: description.trim() || null })
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!submitting) onOpenChange(nextOpen) }}>
+      <DialogContent className="fox-local-kb-create-dialog" showCloseButton={!submitting}>
+        <DialogHeader>
+          <DialogTitle>编辑本地知识库</DialogTitle>
+          <DialogDescription>修改知识库的名称和说明，不会影响已导入的文档。</DialogDescription>
+        </DialogHeader>
+        <form className="fox-local-kb-create-form" onSubmit={submit}>
+          <div>
+            <label htmlFor="local-knowledge-base-edit-name">名称 <span>*</span></label>
+            <Input id="local-knowledge-base-edit-name" autoFocus value={name} onChange={(event) => { setName(event.target.value); setValidationError(null) }} disabled={submitting} />
+          </div>
+          <div>
+            <label htmlFor="local-knowledge-base-edit-description">描述 <small>（可选）</small></label>
+            <textarea id="local-knowledge-base-edit-description" className="fox-local-kb-create-textarea" value={description} onChange={(event) => setDescription(event.target.value)} disabled={submitting} />
+          </div>
+          {(validationError || error) && <p className="fox-local-kb-create-error" role="alert"><AlertCircle />{validationError ?? error}</p>}
+          <DialogFooter className="fox-local-kb-create-actions">
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>取消</Button>
+            <Button type="submit" disabled={submitting}>{submitting && <LoaderCircle className="animate-spin" />}保存修改</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function DeleteKnowledgeBaseDialog({
+  base,
+  open,
+  submitting,
+  error,
+  onOpenChange,
+  onConfirm,
+}: {
+  base: LocalKnowledgeBaseDetail
+  open: boolean
+  submitting: boolean
+  error: string | null
+  onOpenChange: (open: boolean) => void
+  onConfirm: () => Promise<void>
+}) {
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => { if (!submitting) onOpenChange(nextOpen) }}>
+      <DialogContent className="fox-local-kb-create-dialog fox-local-kb-delete-dialog" showCloseButton={!submitting}>
+        <DialogHeader>
+          <DialogTitle>删除本地知识库</DialogTitle>
+          <DialogDescription>此操作会删除知识库中的全部文档和本地索引，无法撤销。</DialogDescription>
+        </DialogHeader>
+        <div className="fox-local-kb-delete-summary"><Trash2 /><div><strong>{base.name}</strong><span>{base.documentCount} 个文档将被永久删除</span></div></div>
+        {error && <p className="fox-local-kb-create-error" role="alert"><AlertCircle />{error}</p>}
+        <DialogFooter className="fox-local-kb-create-actions">
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>取消</Button>
+          <Button type="button" variant="destructive" onClick={() => void onConfirm()} disabled={submitting}>{submitting ? <LoaderCircle className="animate-spin" /> : <Trash2 />}{submitting ? '正在删除' : '确认删除'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 function KnowledgeStatusBadge({ status }: { status: LocalKnowledgeBase['status'] }) {
   return <Badge variant="secondary" className={cn('fox-local-kb-status', `is-${status}`)}><i />{baseStatusLabel(status)}</Badge>
+}
+
+function countLabel(value: number | null): string {
+  return value == null ? '暂无统计' : String(value)
+}
+
+function generationLabel(base: LocalKnowledgeBase): string {
+  return base.vectorIndexReady && base.activeGeneration != null ? `G${base.activeGeneration}` : '未建立'
+}
+
+function searchModeLabel(base: LocalKnowledgeBase): string {
+  if (!base.vectorIndexReady) return base.textIndexReady ? '仅关键词检索' : '关键词检索未就绪'
+  if (base.searchMode === 'vector' && base.vectorIndexReady) return '向量检索'
+  if (base.searchMode === 'hybrid' && base.vectorIndexReady) return '混合检索'
+  return '关键词检索'
 }
 
 function KnowledgeBaseCard({ base, onOpen }: { base: LocalKnowledgeBase; onOpen: () => void }) {
@@ -366,7 +481,8 @@ function KnowledgeBaseCard({ base, onOpen }: { base: LocalKnowledgeBase; onOpen:
       </CardHeader>
       <CardContent className="fox-shadcn-kb-content">
         <p className="fox-agent-description" title={base.description}>{base.description || '本地知识库'}</p>
-        <div className="fox-shadcn-kb-stats"><span><FileStack /><b>{base.documentCount}</b><small>文档</small></span><span><Layers3 /><b>{base.chunkCount}</b><small>分块</small></span><span><CheckCircle2 /><b>{base.activeGeneration == null ? '--' : `G${base.activeGeneration}`}</b><small>代次</small></span></div>
+        <div className="fox-shadcn-kb-stats"><span><FileStack /><b>{base.documentCount}</b><small>文档</small></span><span><Layers3 /><b>{countLabel(base.chunkCount)}</b><small>分块</small></span><span><CheckCircle2 /><b>{generationLabel(base)}</b><small>向量代次</small></span></div>
+        <small className="fox-local-kb-card-capability">{searchModeLabel(base)} · {base.vectorIndexReady ? '向量索引已校验' : (base.fallbackReason ?? '向量索引未就绪')}</small>
       </CardContent>
     </Card>
   )
@@ -902,7 +1018,7 @@ export function LocalKnowledgeHomePage({ gateway = defaultLocalKnowledgeGateway,
   )
 }
 
-export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway, className, onNavigate }: LocalKnowledgePageProps & { onNavigate?: (view: LocalKnowledgeView, knowledgeBaseId?: string) => void; onCreate?: () => void }) {
+export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway, className, onNavigate, createRequest, onCreateRequestHandled }: LocalKnowledgePageProps & { onNavigate?: (view: LocalKnowledgeView, knowledgeBaseId?: string) => void; createRequest?: number; onCreateRequestHandled?: () => void }) {
   const [items, setItems] = useState<LocalKnowledgeBase[]>([])
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(true)
@@ -925,6 +1041,12 @@ export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway,
     setCreateError(null)
     setCreateOpen(true)
   }
+
+  useEffect(() => {
+    if (createRequest == null || createRequest <= 0) return
+    openCreateDialog()
+    onCreateRequestHandled?.()
+  }, [createRequest, onCreateRequestHandled])
 
   const createKnowledgeBase = async (request: LocalKnowledgeBaseCreateRequest) => {
     setCreating(true)
@@ -959,7 +1081,7 @@ export function LocalKnowledgeListPage({ gateway = defaultLocalKnowledgeGateway,
         {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
         {!loading && !error && items.length === 0 && <LocalKnowledgeEmpty title="还没有本地知识库" description="创建一个知识库后，就可以导入文件并建立本地索引。" action={<Button onClick={openCreateDialog}>创建知识库</Button>} />}
         {!loading && !error && items.length > 0 && filteredItems.length === 0 && <LocalKnowledgeEmpty title="没有匹配的知识库" description="换一个名称、描述或存储位置关键词试试。" />}
-        {!loading && !error && filteredItems.length > 0 && <div className="fox-local-kb-grid fox-shadcn-entity-grid fox-knowledge-grid">{filteredItems.map((base) => <KnowledgeBaseCard key={base.id} base={base} onOpen={() => onNavigate?.('documents', base.id)} />)}</div>}
+        {!loading && !error && filteredItems.length > 0 && <div className="fox-local-kb-grid fox-shadcn-entity-grid fox-knowledge-grid">{filteredItems.map((base) => <KnowledgeBaseCard key={base.id} base={base} onOpen={() => onNavigate?.('detail', base.id)} />)}</div>}
       </div>
       <StorageLocationDialog gateway={gateway} open={storageOpen} onOpenChange={setStorageOpen} />
       <CreateKnowledgeBaseDialog open={createOpen} submitting={creating} error={createError} onOpenChange={(open) => { setCreateOpen(open); if (open) setCreateError(null) }} onSubmit={createKnowledgeBase} />
@@ -971,6 +1093,11 @@ export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGatewa
   const [base, setBase] = useState<LocalKnowledgeBaseDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [editOpen, setEditOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [mutationError, setMutationError] = useState<string | null>(null)
 
   const load = async () => {
     if (!knowledgeBaseId) return
@@ -982,6 +1109,36 @@ export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGatewa
 
   useEffect(() => { void load() }, [gateway, knowledgeBaseId])
 
+  const updateKnowledgeBase = async (request: LocalKnowledgeBaseCreateRequest) => {
+    if (!knowledgeBaseId) return
+    setSaving(true)
+    setMutationError(null)
+    try {
+      await gateway.updateKnowledgeBase(knowledgeBaseId, request)
+      setEditOpen(false)
+      await load()
+    } catch (cause) {
+      setMutationError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const deleteKnowledgeBase = async () => {
+    if (!knowledgeBaseId) return
+    setDeleting(true)
+    setMutationError(null)
+    try {
+      await gateway.deleteKnowledgeBase(knowledgeBaseId)
+      setDeleteOpen(false)
+      onNavigate?.('list')
+    } catch (cause) {
+      setMutationError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   if (!knowledgeBaseId) return <div className={cn('fox-local-kb-page', className)}><div className="fox-local-kb-content"><LocalKnowledgeEmpty title="没有选择知识库" description="请从本地知识库列表进入一个知识库。" action={<Button onClick={onBack}>返回列表</Button>} /></div></div>
 
   return (
@@ -990,12 +1147,13 @@ export function LocalKnowledgeDetailPage({ gateway = defaultLocalKnowledgeGatewa
         {loading && <LocalKnowledgeLoading />}
         {!loading && error && <LocalKnowledgeError message={error} onRetry={() => void load()} />}
         {!loading && base && <>
-           <LocalKnowledgeHeader title={base.name} description={base.description || '本地知识库详情'} onBack={onBack} actions={<><Button variant="outline" onClick={() => onNavigate?.('jobs', base.id)}><Clock3 />任务状态</Button><Button onClick={() => onNavigate?.('import', base.id)}><Upload />导入文档</Button></>} />
-           <div className="fox-local-kb-detail-meta"><KnowledgeStatusBadge status={base.status} /><span><FolderOpen />{base.storagePath}</span><span>活动代次 {base.activeGeneration == null ? '未建立' : `G${base.activeGeneration}`}</span></div>
-          <div className="fox-local-kb-metrics"><span><b>{base.documentCount}</b><small>文档</small></span><span><b>{base.chunkCount}</b><small>文本分块</small></span><span><b>{base.activeGeneration == null ? '--' : `G${base.activeGeneration}`}</b><small>文本索引代次</small></span><span><b>{base.writable ? '可写' : '只读'}</b><small>本地状态</small></span></div>
-          <section className="fox-local-kb-section"><div className="fox-local-kb-section-head"><div><h2>文档</h2><p>文件在本地存储，导入后通过后台 Job 解析和索引。</p></div><Button variant="outline" size="sm" onClick={() => onNavigate?.('documents', base.id)}>查看全部</Button></div>{base.recentJobs.length > 0 && <div className="fox-local-kb-inline-job"><span>{jobStatusIcon(base.recentJobs[0].status)}</span><div><strong>最近任务：{formatJobStage(base.recentJobs[0].stage)}</strong><small>{jobStatusLabel(base.recentJobs[0].status, base.recentJobs[0].outcome)} · {base.recentJobs[0].progress}%</small></div><Button variant="ghost" size="sm" onClick={() => onNavigate?.('jobs', base.id)}>查看任务</Button></div>}<div className="fox-local-kb-detail-grid"><div><Layers3 /><strong>{base.parserVersion}</strong><small>解析器版本</small></div><div><HardDrive /><strong>{formatBytes(base.storage.freeBytes)}</strong><small>可用空间</small></div><div><ShieldCheck /><strong>{base.writable ? '可编辑' : '只读'}</strong><small>本地权限</small></div></div></section>
+           <LocalKnowledgeHeader title={base.name} description={base.description || '本地知识库详情'} onBack={onBack} actions={<><Button variant="outline" onClick={() => onNavigate?.('documents', base.id)}><BookOpen />查看文档</Button><Button variant="outline" onClick={() => onNavigate?.('jobs', base.id)}><Clock3 />任务状态</Button>{base.id !== FOX_GUIDE_KNOWLEDGE_BASE_ID && <><Button variant="outline" onClick={() => { setMutationError(null); setEditOpen(true) }}><Pencil />编辑</Button><Button variant="outline" className="fox-local-kb-delete-trigger" onClick={() => { setMutationError(null); setDeleteOpen(true) }}><Trash2 />删除</Button></>}<Button onClick={() => onNavigate?.('import', base.id)}><Upload />导入文档</Button></>} />
+           <div className="fox-local-kb-detail-meta"><KnowledgeStatusBadge status={base.status} /><span><FolderOpen />{base.storagePath}</span><span>{searchModeLabel(base)} · {base.vectorIndexReady ? `向量代次 ${generationLabel(base)}` : (base.fallbackReason ?? '向量索引未就绪')}</span></div>
+          <div className="fox-local-kb-metrics"><span><b>{base.documentCount}</b><small>文档</small></span><span><b>{countLabel(base.chunkCount)}</b><small>文本分块</small></span><span><b>{base.vectorIndexReady ? countLabel(base.vectorCount) : '未就绪'}</b><small>向量索引</small></span><span><b>{base.textIndexReady ? '已就绪' : '未就绪'}</b><small>文本检索</small></span></div>
+          <section className="fox-local-kb-section"><div className="fox-local-kb-section-head"><div><h2>文档</h2><p>文件在本地存储，导入后通过后台 Job 解析和索引。</p></div><Button variant="outline" size="sm" onClick={() => onNavigate?.('documents', base.id)}>查看全部</Button></div>{base.recentJobs.length > 0 && <div className="fox-local-kb-inline-job"><span>{jobStatusIcon(base.recentJobs[0].status)}</span><div><strong>最近任务：{formatJobStage(base.recentJobs[0].stage)}</strong><small>{jobStatusLabel(base.recentJobs[0].status, base.recentJobs[0].outcome)} · {base.recentJobs[0].progress}%</small></div><Button variant="ghost" size="sm" onClick={() => onNavigate?.('jobs', base.id)}>查看任务</Button></div>}<div className="fox-local-kb-detail-grid"><div><Layers3 /><strong>{base.parserVersion ?? '暂无统计'}</strong><small>解析器版本</small></div><div><HardDrive /><strong>{base.storage.freeBytes == null ? '暂无统计' : formatBytes(base.storage.freeBytes)}</strong><small>可用空间</small></div><div><ShieldCheck /><strong>{base.writable ? '可编辑' : '只读'}</strong><small>本地权限</small></div></div></section>
         </>}
       </div>
+      {base && base.id !== FOX_GUIDE_KNOWLEDGE_BASE_ID && <><EditKnowledgeBaseDialog base={base} open={editOpen} submitting={saving} error={editOpen ? mutationError : null} onOpenChange={(open) => { setEditOpen(open); if (open) setMutationError(null) }} onSubmit={updateKnowledgeBase} /><DeleteKnowledgeBaseDialog base={base} open={deleteOpen} submitting={deleting} error={deleteOpen ? mutationError : null} onOpenChange={(open) => { setDeleteOpen(open); if (open) setMutationError(null) }} onConfirm={deleteKnowledgeBase} /></>}
     </div>
   )
 }
@@ -1184,7 +1342,7 @@ function JobRow({ job, onCancel, onRetry }: { job: KnowledgeJob; onCancel: () =>
   return <Card className={cn('fox-local-kb-job-row', partial && 'is-partial')}><div className={cn('fox-local-kb-job-icon', `is-${job.status}`)}>{jobStatusIcon(job.status)}</div><div className="fox-local-kb-job-main"><div className="fox-local-kb-job-title"><strong>{job.type === 'import' ? '文档导入' : job.type === 'index' ? '索引构建' : job.type === 'rebuild' ? '索引重建' : '文档删除'}</strong><Badge variant="secondary" className={cn('fox-local-kb-job-status', partial && 'is-partial')}>{jobStatusLabel(job.status, job.outcome)}</Badge></div><div className="fox-local-kb-progress"><span style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }} /></div><div className="fox-local-kb-job-meta"><span>{formatJobStage(job.stage)}</span><span>{job.progress}%</span><span>{job.completedItems}/{job.totalItems} 项</span>{job.failedItems > 0 && <span className="is-error">{job.failedItems} 项失败</span>}<span>更新于 {formatDate(job.updatedAt)}</span></div>{job.error && <p className="fox-local-kb-job-error"><AlertCircle />{job.error.message}</p>}</div><div className="fox-local-kb-job-actions">{canCancel && <Button variant="outline" size="sm" onClick={onCancel}>取消</Button>}{canRetry && <Button variant="outline" size="sm" onClick={onRetry}><RotateCcw />重试</Button>}{!canCancel && !canRetry && <span className="fox-local-kb-job-seq">seq {job.lastSequence}</span>}</div></Card>
 }
 
-export function LocalKnowledgeWorkspace({ view = 'list', knowledgeBaseId, documentId, gateway = defaultLocalKnowledgeGateway, onNavigate, onBack, onCreate, onOperationAccepted }: LocalKnowledgeNavigationProps & { view?: LocalKnowledgeView; onCreate?: () => void; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
+export function LocalKnowledgeWorkspace({ view = 'list', knowledgeBaseId, documentId, gateway = defaultLocalKnowledgeGateway, onNavigate, onBack, createRequest, onCreateRequestHandled, onOperationAccepted }: LocalKnowledgeNavigationProps & { view?: LocalKnowledgeView; createRequest?: number; onOperationAccepted?: (accepted: OperationAccepted) => void }) {
   const navigate = onNavigate
   switch (view) {
     case 'home': return <LocalKnowledgeHomePage gateway={gateway} onNavigate={navigate} />
@@ -1193,6 +1351,6 @@ export function LocalKnowledgeWorkspace({ view = 'list', knowledgeBaseId, docume
     case 'documents': return <LocalKnowledgeDocumentsPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} documentId={documentId} onBack={onBack} onNavigate={navigate} />
     case 'import': return <LocalKnowledgeImportPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} onOperationAccepted={onOperationAccepted} />
     case 'jobs': return <LocalKnowledgeJobsPage gateway={gateway} knowledgeBaseId={knowledgeBaseId} onBack={onBack} onNavigate={navigate} />
-    default: return <LocalKnowledgeListPage gateway={gateway} onNavigate={navigate} onCreate={onCreate} />
+    default: return <LocalKnowledgeListPage gateway={gateway} onNavigate={navigate} createRequest={createRequest} onCreateRequestHandled={onCreateRequestHandled} />
   }
 }

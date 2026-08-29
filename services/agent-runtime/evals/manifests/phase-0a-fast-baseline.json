@@ -1,0 +1,67 @@
+{
+  "kind": "fox-offline-eval-manifest",
+  "schemaVersion": 1,
+  "id": "phase-0a-fast-baseline",
+  "version": "2026-08-26.1",
+  "description": "Phase 0A deterministic quick baseline: 10 simple, 10 medium, 5 complex, and 5 recovery-boundary cases.",
+  "scorerVersion": "fox-deterministic-contract-v1",
+  "runPolicy": {
+    "network": "disabled",
+    "sideEffects": "none",
+    "repetitions": 1,
+    "failOnCaseFailure": true,
+    "failOnComparableRegression": true
+  },
+  "frozenIdentity": [
+    "foxCommit",
+    "dirtyWorktree",
+    "datasetHash",
+    "manifestHash",
+    "scorerVersion",
+    "stablePromptHash",
+    "toolCatalogHash",
+    "environmentHash"
+  ],
+  "expectedCaseCounts": {
+    "simple": 10,
+    "medium": 10,
+    "complex": 5,
+    "recovery": 5,
+    "total": 30
+  },
+  "cases": [
+    { "suiteId": "model-adapter-matrix", "caseId": "minimax-m3-anthropic", "category": "simple" },
+    { "suiteId": "model-adapter-matrix", "caseId": "deepseek-reasoner", "category": "simple" },
+    { "suiteId": "model-adapter-matrix", "caseId": "deepseek-chat", "category": "simple" },
+    { "suiteId": "model-adapter-matrix", "caseId": "openai-gpt5-responses", "category": "simple" },
+    { "suiteId": "model-adapter-matrix", "caseId": "anthropic-claude4", "category": "simple" },
+    { "suiteId": "model-adapter-matrix", "caseId": "alibaba-qwen-coder", "category": "simple" },
+    { "suiteId": "model-adapter-matrix", "caseId": "zhipu-glm5", "category": "simple" },
+    { "suiteId": "model-adapter-matrix", "caseId": "moonshot-kimi-k25", "category": "simple" },
+    { "suiteId": "bfcl-tool-contract", "caseId": "inspect-file", "category": "simple" },
+    { "suiteId": "bfcl-tool-contract", "caseId": "list-directory", "category": "simple" },
+
+    { "suiteId": "model-adapter-matrix", "caseId": "google-gemini25", "category": "medium" },
+    { "suiteId": "model-adapter-matrix", "caseId": "xai-grok", "category": "medium" },
+    { "suiteId": "model-adapter-matrix", "caseId": "openrouter-claude", "category": "medium" },
+    { "suiteId": "model-adapter-matrix", "caseId": "local-generic", "category": "medium" },
+    { "suiteId": "bfcl-tool-contract", "caseId": "edit-file", "category": "medium" },
+    { "suiteId": "bfcl-tool-contract", "caseId": "run-tests", "category": "medium" },
+    { "suiteId": "bfcl-tool-contract", "caseId": "search-knowledge", "category": "medium" },
+    { "suiteId": "bfcl-tool-contract", "caseId": "call-mcp", "category": "medium" },
+    { "suiteId": "bfcl-tool-contract", "caseId": "propose-goal", "category": "medium" },
+    { "suiteId": "fox-intent-regressions", "caseId": "multi-step-code-change", "category": "medium" },
+
+    { "suiteId": "coding-agent-contract", "caseId": "inspect-repository", "category": "complex" },
+    { "suiteId": "coding-agent-contract", "caseId": "apply-scoped-change", "category": "complex" },
+    { "suiteId": "coding-agent-contract", "caseId": "run-regression-tests", "category": "complex" },
+    { "suiteId": "coding-agent-contract", "caseId": "attach-verifiable-evidence", "category": "complex" },
+    { "suiteId": "coding-agent-contract", "caseId": "submit-acceptance", "category": "complex" },
+
+    { "suiteId": "runtime-recovery-contract", "caseId": "tool-result-after-interruption", "category": "recovery" },
+    { "suiteId": "runtime-recovery-contract", "caseId": "validation-state-after-interruption", "category": "recovery" },
+    { "suiteId": "runtime-recovery-contract", "caseId": "waiting-approval-authoritative-fallback", "category": "recovery" },
+    { "suiteId": "runtime-recovery-contract", "caseId": "child-run-tool-state-after-interruption", "category": "recovery" },
+    { "suiteId": "runtime-recovery-contract", "caseId": "missing-session-authoritative-fallback", "category": "recovery" }
+  ]
+}

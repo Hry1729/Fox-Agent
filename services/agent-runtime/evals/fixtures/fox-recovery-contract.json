@@ -1,0 +1,11 @@
+{
+  "name": "Fox runtime recovery boundary contract",
+  "scope": "Deterministic Runtime-session replay checks for interrupted tool, validation, approval, child-run, and missing-session shapes. These are not Host restart or SQLite recovery E2E tests.",
+  "cases": [
+    { "id": "tool-result-after-interruption", "scenario": "tool-result-after-interruption" },
+    { "id": "validation-state-after-interruption", "scenario": "validation-state-after-interruption" },
+    { "id": "waiting-approval-authoritative-fallback", "scenario": "waiting-approval-authoritative-fallback" },
+    { "id": "child-run-tool-state-after-interruption", "scenario": "child-run-tool-state-after-interruption" },
+    { "id": "missing-session-authoritative-fallback", "scenario": "missing-session-authoritative-fallback" }
+  ]
+}

@@ -114,6 +114,17 @@ export async function runRuntimeAdapterContract({
   assert.ok(events.some(({ payload }) => payload.type === 'message.started'))
   assert.ok(events.some(({ payload }) => payload.type === 'message.delta'))
   assert.ok(events.some(({ payload }) => payload.type === 'message.completed'))
+  const usageEvents = events.filter(({ payload }) => payload.type === 'usage.updated')
+  assert.ok(usageEvents.length >= 1)
+  for (const { payload } of usageEvents) {
+    for (const field of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens']) {
+      assert.equal(Number.isSafeInteger(payload[field]) && payload[field] >= 0, true, field)
+    }
+    assert.ok(payload.totalTokens >= payload.inputTokens
+      + payload.outputTokens
+      + payload.cacheReadTokens
+      + payload.cacheWriteTokens)
+  }
   assertSingleTerminal(events, 'run.completed')
   return ready
 }

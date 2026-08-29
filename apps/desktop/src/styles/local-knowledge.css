@@ -67,7 +67,14 @@
 
 .fox-local-kb-header-actions {
   flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 7px;
+}
+
+.fox-local-kb-delete-trigger {
+  border-color: color-mix(in srgb, var(--destructive) 28%, var(--fox-border));
+  color: var(--destructive);
 }
 
 .fox-local-kb-back {
@@ -583,6 +590,17 @@
   gap: 14px !important;
 }
 
+.fox-local-kb-create-dialog:not(.fox-local-kb-delete-dialog) [data-slot='dialog-close'] {
+  width: var(--fox-action-height) !important;
+  min-width: var(--fox-action-height);
+  padding: 0 !important;
+}
+
+.fox-local-kb-create-dialog:not(.fox-local-kb-delete-dialog) [data-slot='dialog-close'] svg {
+  width: 19px !important;
+  height: 19px !important;
+}
+
 .fox-local-kb-storage-dialog [data-slot='dialog-title'],
 .fox-local-kb-create-dialog [data-slot='dialog-title'] {
   font-size: 18px;
@@ -742,6 +760,11 @@
   font-size: 13px !important;
 }
 
+.fox-local-kb-create-form input {
+  height: var(--fox-action-height) !important;
+  min-height: var(--fox-action-height);
+}
+
 .fox-local-kb-create-textarea {
   min-height: 92px;
   resize: vertical;
@@ -774,14 +797,46 @@
 }
 
 .fox-local-kb-create-actions {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  justify-content: center !important;
   gap: 10px;
   padding-top: 2px;
 }
 
 .fox-local-kb-create-actions button {
+  width: auto;
   min-width: 88px;
+  flex: 0 0 auto;
   padding-inline: 20px;
 }
+
+.fox-local-kb-delete-summary {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 13px;
+  border: 1px solid color-mix(in srgb, var(--destructive) 22%, var(--fox-border));
+  border-radius: calc(var(--radius) - 2px);
+  background: color-mix(in srgb, var(--destructive) 6%, var(--fox-card));
+}
+
+.fox-local-kb-delete-summary > svg {
+  width: 20px;
+  height: 20px;
+  color: var(--destructive);
+}
+
+.fox-local-kb-delete-summary > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.fox-local-kb-delete-summary strong { font-size: 13px; }
+.fox-local-kb-delete-summary span { color: var(--fox-muted); font-size: 11px; }
 
 .fox-local-files-sources {
   display: grid;
@@ -1568,18 +1623,18 @@
 .fox-local-kb-home-actions > button {
   width: 104px;
   min-width: 104px;
-  height: 36px;
+  height: 34px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  padding: 0 12px;
+  padding: 0 8px;
   border: 1px solid var(--fox-border);
   border-radius: 999px;
   background: color-mix(in srgb, var(--fox-card) 72%, transparent);
   color: var(--fox-muted);
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fox-card) 72%, transparent);
-  font-size: 11px !important;
+  font-size: var(--fox-type-meta) !important;
   cursor: pointer;
   white-space: nowrap;
 }

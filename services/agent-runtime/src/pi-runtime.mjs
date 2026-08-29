@@ -12,6 +12,7 @@ import {
 import { createEnvelope, PROTOCOL_NAME, PROTOCOL_VERSION, validateEnvelope } from './protocol.mjs'
 import { createPiEventMapper, sanitizeAssistantHistory } from './pi-event-mapper.mjs'
 import { createReadOnlyTools } from './read-only-tools.mjs'
+import { createGraphReadonlyTools } from './graph-readonly-tools.mjs'
 import { createHostTools, createKnowledgeTools, createMcpTools } from './host-tools.mjs'
 import { createSessionState, loadSessionState, normalizeHistory, sanitizeProviderHistory, saveSessionState, transcriptFromSession } from './runtime-session.mjs'
 import { RUNTIME_TOOL_CATALOG, assertRegisteredToolsMatchCatalog, createCapabilityManifest } from './runtime-contract.mjs'
@@ -34,12 +35,26 @@ import {
   resolveModelProfile,
   transportProvider,
 } from './model-profile.mjs'
+import {
+  applyExecutionProfileToTools,
+  executionProfileCatalogTools,
+  executionProfilePrompt,
+  executionProfileSnapshot,
+  resolveExecutionProfile,
+} from './execution-profile.mjs'
+import {
+  CONTINUATION_PROPOSAL_EVENT_TYPE,
+  CONTINUATION_PROPOSAL_TOOL_NAME,
+  continuationDecisionContract,
+  createContinuationDecisionTools,
+} from './continuation-decision.mjs'
 
 const sessions = new Map()
 const activeRuns = new Map()
 const pendingHostRequests = new Map()
 let modelService = null
 let fauxProvider = null
+let executionProfile = resolveExecutionProfile('legacy')
 
 function configuredFauxResponses(config) {
   if (!Array.isArray(config.fauxResponses) || config.fauxResponses.length === 0) {
@@ -156,6 +171,9 @@ function promptBudgetForRun(payload, modelProfile) {
 }
 
 async function executePrompt(request) {
+  const activeExecutionProfile = executionProfile
+  const activeExecutionProfileSnapshot = executionProfileSnapshot(activeExecutionProfile)
+  const activeContinuationContract = continuationDecisionContract(activeExecutionProfile)
   const session = currentSession(request)
   const seq = { value: 1 }
   const fallbackMessages = normalizeHistory(request.payload?.messages)
@@ -167,7 +185,17 @@ async function executePrompt(request) {
     || isApprovalDemoFollowup(currentText, previousUserText)
   const bufferedAssistantEvents = []
   let toolExecutionCount = 0
+  const runControl = {
+    cancelled: false,
+    agent: null,
+  }
   const emit = (type, payload = {}) => {
+    if (runControl.cancelled
+      && type !== 'usage.updated'
+      && type !== 'run.completed'
+      && type !== 'run.cancelled'
+      && type !== 'run.interrupted'
+      && type !== 'run.failed') return
     if (type === 'tool.started') toolExecutionCount += 1
     if (approvalDemo && (type === 'message.delta' || type === 'message.completed')) {
       bufferedAssistantEvents.push({ type, payload })
@@ -175,16 +203,12 @@ async function executePrompt(request) {
     }
     runtimeEvent(request, seq, type, payload)
   }
-  emit('run.started', { model: modelService.modelId })
+  emit('run.started', { model: modelService.modelId, executionProfileId: activeExecutionProfile.id })
   const mapper = createPiEventMapper(emit, { deferCompletion: true })
   let agent = null
   let terminalSeen = false
   let checkpoint = Promise.resolve()
   let stopListening = () => {}
-  const runControl = {
-    cancelled: false,
-    agent: null,
-  }
   activeRuns.set(request.runId, runControl)
   try {
   const preflight = async (tool, input, signal) => {
@@ -202,45 +226,6 @@ async function executePrompt(request) {
     apiKey: modelService.apiKey,
     fauxRegistration: modelService.apiType === 'faux' ? fauxProvider : null,
   })
-  const catalogTools = [...createReadOnlyTools(preflight), ...createHostTools(hostRequest), ...createKnowledgeTools(hostRequest), ...createMcpTools(hostRequest)]
-  assertRegisteredToolsMatchCatalog(catalogTools)
-  const toolDiagnostics = diagnoseToolsForAgentContext(
-    catalogTools,
-    request.payload?.assistantPackage,
-    request.payload?.expertPackage,
-  )
-  const tools = adaptFoxToolsToPi(toolDiagnostics.tools)
-  const requestSnapshot = {
-    schemaVersion: 1,
-    model: modelService.modelId,
-    apiType: modelService.apiType,
-    provider: model.provider,
-    baseUrl: modelService.baseUrl,
-    stablePromptHash: null,
-    contextHash: null,
-    toolCatalogHash: stablePromptHash(JSON.stringify(toolDiagnostics.effectiveToolNames)),
-    toolNames: toolDiagnostics.effectiveToolNames,
-    assistantDeclaredToolNames: toolDiagnostics.assistantDeclaredToolNames,
-    expertDeclaredToolNames: toolDiagnostics.expertDeclaredToolNames,
-    effectiveToolNames: toolDiagnostics.effectiveToolNames,
-    excludedTools: toolDiagnostics.excludedTools,
-    messageCount: transcript.length,
-    contextWindow: modelProfile.contextWindow,
-    maxOutputTokens: modelProfile.maxOutputTokens,
-    modelProfile: modelProfileSnapshot(modelProfile),
-    assistantPackage: request.payload?.assistantPackage ?? null,
-    expertBinding: request.payload?.expertBinding ?? null,
-    expertPackage: request.payload?.expertPackage ?? null,
-    memoryRecallStatus: request.payload?.memoryContext?.status ?? 'empty',
-    memoryRecallCount: Array.isArray(request.payload?.memoryContext?.items)
-      ? request.payload.memoryContext.items.length
-      : 0,
-  }
-  const workToolNames = new Set(RUNTIME_TOOL_CATALOG
-    .filter((tool) => tool.category === 'work')
-    .map((tool) => tool.name))
-  const workTools = tools.filter((tool) => workToolNames.has(tool.name))
-  const customTools = tools.filter((tool) => !workToolNames.has(tool.name))
   const planningContext = {
     projectRoot: request.payload?.projectContext?.projectRoot,
     permissionMode: request.payload?.projectContext?.permissionMode,
@@ -252,8 +237,80 @@ async function executePrompt(request) {
     conversationId: request.conversationId,
     runtimeSessionId: request.runtimeSessionId,
     model: modelService.modelId,
+    executionProfile: activeExecutionProfileSnapshot,
+    continuationDecisionContract: activeContinuationContract,
   }
   const cwd = String(planningContext.projectRoot || process.cwd())
+  const catalogTools = [
+    ...createReadOnlyTools(preflight),
+    ...createGraphReadonlyTools({
+      profile: activeExecutionProfile,
+      cwd,
+      model,
+      modelRuntime,
+      modelProfile,
+      preflight,
+      context: planningContext,
+    }),
+    ...createHostTools(hostRequest),
+    ...createKnowledgeTools(hostRequest),
+    ...createMcpTools(hostRequest),
+  ]
+  assertRegisteredToolsMatchCatalog(catalogTools)
+  const continuationTools = createContinuationDecisionTools({
+    runId: request.runId,
+    executionProfile: activeExecutionProfile,
+    getEventCursor: () => Math.max(0, seq.value - 1),
+    onProposal: (proposal) => emit(CONTINUATION_PROPOSAL_EVENT_TYPE, { proposal }),
+  })
+  const toolDiagnostics = diagnoseToolsForAgentContext(
+    catalogTools,
+    request.payload?.assistantPackage,
+    request.payload?.expertPackage,
+  )
+  const profileToolSelection = applyExecutionProfileToTools(
+    [...toolDiagnostics.tools, ...continuationTools],
+    activeExecutionProfile,
+  )
+  const effectiveToolNames = profileToolSelection.tools.map(({ name }) => name)
+  const excludedTools = [
+    ...toolDiagnostics.excludedTools.filter(({ name }) => name !== CONTINUATION_PROPOSAL_TOOL_NAME),
+    ...profileToolSelection.excludedTools,
+  ]
+  const tools = adaptFoxToolsToPi(profileToolSelection.tools)
+  const requestSnapshot = {
+    schemaVersion: 1,
+    model: modelService.modelId,
+    apiType: modelService.apiType,
+    provider: model.provider,
+    baseUrl: modelService.baseUrl,
+    stablePromptHash: null,
+    contextHash: null,
+    toolCatalogHash: stablePromptHash(JSON.stringify(effectiveToolNames)),
+    toolNames: effectiveToolNames,
+    assistantDeclaredToolNames: toolDiagnostics.assistantDeclaredToolNames,
+    expertDeclaredToolNames: toolDiagnostics.expertDeclaredToolNames,
+    effectiveToolNames,
+    excludedTools,
+    messageCount: transcript.length,
+    contextWindow: modelProfile.contextWindow,
+    maxOutputTokens: modelProfile.maxOutputTokens,
+    modelProfile: modelProfileSnapshot(modelProfile),
+    assistantPackage: request.payload?.assistantPackage ?? null,
+    expertBinding: request.payload?.expertBinding ?? null,
+    expertPackage: request.payload?.expertPackage ?? null,
+    memoryRecallStatus: request.payload?.memoryContext?.status ?? 'empty',
+    memoryRecallCount: Array.isArray(request.payload?.memoryContext?.items)
+      ? request.payload.memoryContext.items.length
+      : 0,
+    executionProfile: activeExecutionProfileSnapshot,
+    continuationDecisionContract: activeContinuationContract,
+  }
+  const workToolNames = new Set(RUNTIME_TOOL_CATALOG
+    .filter((tool) => tool.category === 'work')
+    .map((tool) => tool.name))
+  const workTools = tools.filter((tool) => workToolNames.has(tool.name))
+  const customTools = tools.filter((tool) => !workToolNames.has(tool.name))
   let plannerPlan = null
   if (modelProfile.planner.enabled && shouldUsePlanner(currentText, {
     approvalDemo,
@@ -297,9 +354,16 @@ async function executePrompt(request) {
   }
   const promptComposition = composeRuntimePrompt({
     systemPrompt: request.payload?.systemPrompt,
-    modelInstructions: modelProfilePrompt(modelProfile),
+    modelInstructions: [modelProfilePrompt(modelProfile), executionProfilePrompt(activeExecutionProfile)]
+      .filter(Boolean)
+      .join('\n\n'),
     approvalDemo,
     budget: promptBudgetForRun(request.payload, modelProfile),
+    cache: {
+      modelId: modelService.modelId,
+      toolCatalogHash: requestSnapshot.toolCatalogHash,
+      policy: modelProfile.supportsPromptCache ? 'read_write' : 'disabled',
+    },
     context: planningContext,
     turn: {
       cwd,
@@ -309,6 +373,12 @@ async function executePrompt(request) {
   })
   requestSnapshot.stablePromptHash = promptComposition.stablePromptHash
   requestSnapshot.contextHash = promptComposition.contextHash
+  requestSnapshot.promptDefinitionId = promptComposition.diagnostics.promptRegistry.definitionId
+  requestSnapshot.promptVersion = promptComposition.diagnostics.promptRegistry.version
+  requestSnapshot.promptContentHash = promptComposition.diagnostics.promptRegistry.contentHash
+  requestSnapshot.contextSchemaHash = promptComposition.diagnostics.contextSchemaHash
+  requestSnapshot.promptCacheIdentity = promptComposition.diagnostics.cacheIdentity
+  requestSnapshot.promptCacheDiagnostics = promptComposition.diagnostics.cache
   requestSnapshot.promptDiagnostics = promptComposition.diagnostics
   emit('run.request_snapshot', requestSnapshot)
   emit('run.phase', { phase: 'preparing' })
@@ -347,7 +417,7 @@ async function executePrompt(request) {
     agentDir: process.cwd(),
     model,
     thinkingLevel: modelProfile.thinkingLevel,
-    tools: toolDiagnostics.effectiveToolNames,
+    tools: effectiveToolNames,
     customTools,
     resourceLoader,
     sessionManager: SessionManager.inMemory(cwd),
@@ -376,9 +446,12 @@ async function executePrompt(request) {
     }
     emit('run.phase', { phase: 'model_streaming', attempt: 1 })
     await agent.prompt(request.payload?.text ?? '', { images, expandPromptTemplates: false })
+    // `message_end` / `agent_end` may already have queued a checkpoint.  Wait for
+    // that writer before replacing the same session file with the final snapshot;
+    // concurrent renames are not reliably replace-safe on Windows.
+    await checkpoint
     session.messages = normalizeHistory(sanitizeAssistantHistory(agent.state.messages))
     if (session.sessionPath) await saveSessionState(session.sessionPath, session)
-    await checkpoint
     if (approvalDemo && toolExecutionCount === 0) {
       session.messages = replaceLatestAssistantText(session.messages, APPROVAL_DEMO_NO_TOOL_MESSAGE)
       if (session.sessionPath) await saveSessionState(session.sessionPath, session)
@@ -422,7 +495,19 @@ async function handleRequest(request) {
       case 'initialize': {
         const config = request.payload?.modelService
         if (!config?.baseUrl || !config?.modelId) throw new Error('Model service configuration is incomplete.')
+        const nextExecutionProfile = resolveExecutionProfile({
+          id: request.payload?.executionProfile
+            ?? request.payload?.execution_profile
+            ?? config.executionProfile
+            ?? config.execution_profile
+            ?? 'legacy',
+          strategy: request.payload?.executionStrategy
+            ?? request.payload?.execution_strategy
+            ?? config.executionStrategy
+            ?? config.execution_strategy,
+        })
         modelService = config
+        executionProfile = nextExecutionProfile
         const modelProfile = resolveModelProfile(config)
         if (config.apiType === 'faux') {
           fauxProvider?.unregister()
@@ -437,8 +522,13 @@ async function handleRequest(request) {
           protocolVersion: PROTOCOL_VERSION,
           runtime: 'fox-pi-runtime',
           runtimeVersion: `0.1.0+pi-${PI_PACKAGE_VERSION}`,
-          capabilities: createCapabilityManifest({ imageInput: modelProfile.supportsImageInput }),
+          capabilities: createCapabilityManifest({
+            imageInput: modelProfile.supportsImageInput,
+            tools: executionProfileCatalogTools(RUNTIME_TOOL_CATALOG, executionProfile),
+          }),
           modelProfile: modelProfileSnapshot(modelProfile),
+          executionProfile: executionProfileSnapshot(executionProfile),
+          continuationDecisionContract: continuationDecisionContract(executionProfile),
         })
         break
       }

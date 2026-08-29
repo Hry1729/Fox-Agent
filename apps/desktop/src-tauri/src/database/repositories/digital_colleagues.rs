@@ -8,6 +8,8 @@ use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+pub(crate) const MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS: i64 = 64;
+
 impl Database {
     pub fn create_digital_colleague(
         &self,
@@ -582,9 +584,64 @@ impl Database {
                 transaction.commit()?;
                 return Ok(Err(code.to_owned()));
             }
+            let remaining_tokens = colleague
+                .max_tokens_per_day
+                .saturating_sub(tokens_today)
+                .max(0)
+                .min(200_000);
+            let model_max_output = transaction
+                .query_row(
+                    "SELECT max_output_tokens FROM model_service
+                     WHERE singleton_id = 1 AND enabled = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .unwrap_or(colleague.max_output_tokens);
+            let effective_max_output = colleague
+                .max_output_tokens
+                .min(remaining_tokens)
+                .min(model_max_output);
+            if effective_max_output < MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS {
+                let code = "digital_colleague.remaining_output_budget_exhausted";
+                append_audit(
+                    &transaction,
+                    Some(colleague_id),
+                    source_id.filter(|_| source_type == "channel"),
+                    None,
+                    "trigger.received",
+                    "skipped",
+                    actor,
+                    &json!({
+                        "code": code,
+                        "remainingTokens": remaining_tokens,
+                        "minimumOutputTokens": MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
+                    }),
+                    now,
+                )?;
+                transaction.commit()?;
+                return Ok(Err(code.to_owned()));
+            }
             let prompt = digital_colleague_prompt(&colleague, source_type, payload)?;
             let started =
                 create_run_in_transaction(&transaction, &colleague.conversation_id, &prompt, None)?;
+            let frozen_run_budget = json!({
+                "contract": "digital_colleague_run_budget_v1",
+                "maxDurationMs": colleague.max_duration_ms,
+                "maxTotalTokens": remaining_tokens,
+                "maxOutputTokens": effective_max_output,
+                "maxToolCalls": colleague.max_tool_calls,
+                "maxDailyTokens": colleague.max_tokens_per_day,
+                "dailyWindowStartMs": day_start,
+            })
+            .to_string();
+            let frozen = transaction.execute(
+                "UPDATE runs SET budget_json = ?2 WHERE id = ?1 AND status = 'queued'",
+                params![started.run.id, frozen_run_budget],
+            )?;
+            if frozen != 1 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
             let trigger_id = Uuid::new_v4().to_string();
             transaction.execute(
                 "INSERT INTO digital_colleague_triggers(
@@ -615,15 +672,14 @@ impl Database {
                 now,
             )?;
             let trigger = query_trigger(&transaction, &trigger_id)?;
+            let mut prepared_colleague = colleague;
+            prepared_colleague.max_output_tokens = effective_max_output;
             transaction.commit()?;
             Ok(Ok(DigitalColleagueTriggerAcceptance {
                 trigger: trigger.clone(),
                 prepared: Some(PreparedDigitalColleagueTrigger {
-                    remaining_tokens: colleague
-                        .max_tokens_per_day
-                        .saturating_sub(tokens_today)
-                        .max(1),
-                    colleague,
+                    remaining_tokens,
+                    colleague: prepared_colleague,
                     trigger,
                     started,
                 }),
@@ -784,20 +840,34 @@ impl Database {
         let budget = self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT c.max_tool_calls,
-                            (SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1)
+                    "SELECT CAST(json_extract(r.budget_json, '$.maxToolCalls') AS INTEGER),
+                            (SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1),
+                            CAST(json_extract(r.budget_json, '$.maxOutputTokens') AS INTEGER),
+                            t.output_tokens
                      FROM digital_colleague_triggers t
-                     JOIN digital_colleagues c ON c.id = t.colleague_id
+                     JOIN runs r ON r.id = t.run_id
                      WHERE t.run_id = ?1",
                     [run_id],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
                 )
                 .optional()
         })?;
-        if let Some((maximum, used)) = budget {
-            if used >= maximum {
+        if let Some((maximum, used, max_output, used_output)) = budget {
+            if used > maximum {
                 return Err(format!(
-                    "digital_colleague.tool_budget_exceeded: used {used} of {maximum} tool calls"
+                    "digital_colleague.tool_budget_exceeded: found {used} persisted tool calls for {maximum} reserved slots"
+                ));
+            }
+            if used_output >= max_output {
+                return Err(format!(
+                    "digital_colleague.output_budget_exceeded: used {used_output} of {max_output} allowed output tokens in this Run"
                 ));
             }
         }
@@ -808,16 +878,23 @@ impl Database {
         self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT COALESCE(SUM(day_trigger.total_tokens), 0) >= c.max_tokens_per_day
+                    "SELECT COALESCE(SUM(day_trigger.total_tokens), 0) >=
+                                CAST(json_extract(r.budget_json, '$.maxDailyTokens') AS INTEGER)
+                            OR current_trigger.total_tokens >=
+                                CAST(json_extract(r.budget_json, '$.maxTotalTokens') AS INTEGER)
+                            OR current_trigger.output_tokens >=
+                                CAST(json_extract(r.budget_json, '$.maxOutputTokens') AS INTEGER)
                      FROM digital_colleague_triggers current_trigger
-                     JOIN digital_colleagues c ON c.id = current_trigger.colleague_id
+                     JOIN runs r ON r.id = current_trigger.run_id
                      LEFT JOIN digital_colleague_triggers day_trigger
                        ON day_trigger.colleague_id = current_trigger.colleague_id
-                      AND day_trigger.created_at >=
-                          current_trigger.created_at - current_trigger.created_at % 86400000
+                      AND day_trigger.created_at >= CAST(
+                          json_extract(r.budget_json, '$.dailyWindowStartMs') AS INTEGER
+                      )
                       AND day_trigger.status NOT IN ('rejected', 'skipped')
                      WHERE current_trigger.run_id = ?1
-                     GROUP BY c.max_tokens_per_day",
+                     GROUP BY r.budget_json, current_trigger.total_tokens,
+                              current_trigger.output_tokens",
                     [run_id],
                     |row| row.get(0),
                 )
@@ -1168,14 +1245,30 @@ mod tests {
                 2,
                 &json!({
                     "type": "usage.updated",
+                    "inputTokens": 60,
+                    "outputTokens": 15,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": 0,
+                    "totalTokens": 75
+                }),
+            )
+            .expect("project first cumulative usage");
+        database
+            .apply_runtime_event(
+                run_id,
+                3,
+                &json!({
+                    "type": "usage.updated",
                     "inputTokens": 120,
                     "outputTokens": 30,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": 0,
                     "totalTokens": 150
                 }),
             )
-            .expect("project usage");
+            .expect("project final cumulative usage");
         database
-            .apply_runtime_event(run_id, 3, &json!({ "type": "run.completed" }))
+            .apply_runtime_event(run_id, 4, &json!({ "type": "run.completed" }))
             .expect("complete digital colleague run");
     }
 
@@ -1260,6 +1353,789 @@ mod tests {
                 .remaining_tokens,
             colleague.max_tokens_per_day - 150
         );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cumulative_output_budget_is_per_run_while_daily_total_spans_planned_runs() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE digital_colleagues
+                     SET max_output_tokens = 64, max_tokens_per_day = 256
+                     WHERE id = ?1",
+                    [&colleague.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let first = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "manual:output-budget-first",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap()
+            .trigger;
+        let first_run = first.run_id.as_deref().unwrap();
+        database
+            .apply_runtime_event(first_run, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .apply_runtime_event(
+                first_run,
+                2,
+                &json!({
+                    "type":"usage.updated","inputTokens":16,"outputTokens":32,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":48
+                }),
+            )
+            .unwrap();
+        assert!(!database
+            .digital_colleague_budget_exceeded(first_run)
+            .unwrap());
+        database
+            .apply_runtime_event(
+                first_run,
+                3,
+                &json!({
+                    "type":"usage.updated","inputTokens":32,"outputTokens":64,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":96
+                }),
+            )
+            .unwrap();
+        assert!(database
+            .digital_colleague_budget_exceeded(first_run)
+            .unwrap());
+        assert!(database
+            .enforce_digital_colleague_tool_budget(first_run)
+            .unwrap_err()
+            .contains("output_budget_exceeded"));
+        let completion_error = database
+            .apply_runtime_event(first_run, 4, &json!({"type":"run.completed"}))
+            .expect_err("completion cannot race past the per-Run output budget");
+        assert!(completion_error.contains("[digital_colleague.budget_exceeded]"));
+        database
+            .mark_run_failed(
+                first_run,
+                "digital_colleague.budget_exceeded",
+                &completion_error,
+            )
+            .unwrap();
+
+        let second = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "manual:output-budget-second",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap()
+            .trigger;
+        let second_run = second.run_id.as_deref().unwrap();
+        database
+            .apply_runtime_event(second_run, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE runs
+                     SET budget_json = json_set(budget_json, '$.maxTotalTokens', 1000)
+                     WHERE id = ?1",
+                    [second_run],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            !database
+                .digital_colleague_budget_exceeded(second_run)
+                .unwrap(),
+            "a new planned Run gets its own cumulative output budget"
+        );
+        database
+            .apply_runtime_event(
+                second_run,
+                2,
+                &json!({
+                    "type":"usage.updated","inputTokens":150,"outputTokens":10,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":160
+                }),
+            )
+            .unwrap();
+        let second_output: i64 = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT output_tokens FROM digital_colleague_triggers WHERE id = ?1",
+                    [&second.id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(second_output, 10);
+        assert!(
+            database
+                .digital_colleague_budget_exceeded(second_run)
+                .unwrap(),
+            "daily total remains cumulative across independent planned Runs"
+        );
+        let daily_total: i64 = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT SUM(total_tokens) FROM digital_colleague_triggers
+                     WHERE colleague_id = ?1",
+                    [&colleague.id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(daily_total, 256);
+        let completion_error = database
+            .apply_runtime_event(second_run, 3, &json!({"type":"run.completed"}))
+            .expect_err("completion cannot race past the frozen daily budget");
+        assert!(completion_error.contains("[digital_colleague.budget_exceeded]"));
+        database
+            .mark_run_failed(
+                second_run,
+                "digital_colleague.budget_exceeded",
+                &completion_error,
+            )
+            .unwrap();
+
+        let below_colleague = create_colleague(&database);
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE digital_colleagues
+                     SET max_output_tokens = 64, max_tokens_per_day = 1000
+                     WHERE id = ?1",
+                    [&below_colleague.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let below = database
+            .accept_digital_colleague_trigger(
+                &below_colleague.id,
+                "manual",
+                None,
+                "manual:below-budget",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap()
+            .trigger;
+        let below_run = below.run_id.as_deref().unwrap();
+        database
+            .apply_runtime_event(below_run, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .apply_runtime_event(
+                below_run,
+                2,
+                &json!({
+                    "type":"usage.updated","inputTokens":192,"outputTokens":63,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":255
+                }),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(below_run, 3, &json!({"type":"run.completed"}))
+            .expect("one token below the frozen per-Run boundaries may complete");
+
+        let duration = database
+            .accept_digital_colleague_trigger(
+                &below_colleague.id,
+                "manual",
+                None,
+                "manual:duration-boundary",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap()
+            .trigger;
+        let duration_run = duration.run_id.as_deref().unwrap();
+        database
+            .apply_runtime_event(duration_run, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .with_connection(|connection| {
+                let transaction = connection.transaction()?;
+                transaction.execute(
+                    "UPDATE runs
+                     SET started_at = 10000,
+                         budget_json = json_set(budget_json, '$.maxDurationMs', 1000)
+                     WHERE id = ?1",
+                    [duration_run],
+                )?;
+                super::super::enforce_managed_run_completion_budget(
+                    &transaction,
+                    duration_run,
+                    10_999,
+                )?;
+                let at_deadline = super::super::enforce_managed_run_completion_budget(
+                    &transaction,
+                    duration_run,
+                    11_000,
+                );
+                assert!(at_deadline
+                    .unwrap_err()
+                    .to_string()
+                    .contains("[digital_colleague.budget_exceeded]"));
+                transaction.rollback()?;
+                Ok(())
+            })
+            .unwrap();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE runs
+                     SET started_at = ?2,
+                         budget_json = json_set(budget_json, '$.maxDurationMs', 1000)
+                     WHERE id = ?1",
+                    params![duration_run, now_ms().saturating_sub(1_001)],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let duration_error = database
+            .apply_runtime_event(duration_run, 2, &json!({"type":"run.completed"}))
+            .expect_err("duration deadline is a transactional completion boundary");
+        assert!(duration_error.contains("[digital_colleague.budget_exceeded]"));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn trigger_freezes_output_to_remaining_daily_budget_and_rejects_below_minimum() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE digital_colleagues
+                     SET max_output_tokens = 128, max_tokens_per_day = 256
+                     WHERE id = ?1",
+                    [&colleague.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let first = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "manual:consume-daily-budget",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap()
+            .trigger;
+        let first_run = first.run_id.as_deref().unwrap();
+        database
+            .apply_runtime_event(first_run, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .apply_runtime_event(
+                first_run,
+                2,
+                &json!({
+                    "type":"usage.updated","inputTokens":146,"outputTokens":10,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":156
+                }),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(first_run, 3, &json!({"type":"run.completed"}))
+            .unwrap();
+
+        let second = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "manual:remaining-output-cap",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap();
+        let prepared = second.prepared.expect("second trigger is dispatchable");
+        assert_eq!(prepared.remaining_tokens, 100);
+        assert_eq!(prepared.colleague.max_output_tokens, 100);
+        let second_run = prepared.started.run.id;
+        let frozen_output: i64 = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT CAST(json_extract(budget_json, '$.maxOutputTokens') AS INTEGER)
+                     FROM runs WHERE id = ?1",
+                    [&second_run],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(frozen_output, 100);
+        database
+            .apply_runtime_event(&second_run, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &second_run,
+                2,
+                &json!({
+                    "type":"usage.updated","inputTokens":30,"outputTokens":10,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":40
+                }),
+            )
+            .unwrap();
+        database
+            .mark_run_failed(
+                &second_run,
+                "digital_colleague.test_terminal",
+                "finish budget fixture",
+            )
+            .unwrap();
+
+        let trigger_count_before = database
+            .list_digital_colleague_triggers(&colleague.id, 10)
+            .unwrap()
+            .len();
+        let exhausted = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "manual:below-minimum-output",
+                &json!({}),
+                None,
+                "user",
+            )
+            .expect_err("remaining 60 tokens cannot be raised to the provider minimum");
+        assert_eq!(
+            exhausted,
+            "digital_colleague.remaining_output_budget_exhausted"
+        );
+        assert_eq!(
+            database
+                .list_digital_colleague_triggers(&colleague.id, 10)
+                .unwrap()
+                .len(),
+            trigger_count_before,
+            "a below-minimum request never creates a Trigger or Run"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn digital_tool_slots_reserve_once_allow_boundary_and_block_legacy_excess() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE digital_colleagues SET max_tool_calls = 1 WHERE id = ?1",
+                    [&colleague.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let trigger = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "manual:tool-boundary",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap()
+            .trigger;
+        let run_id = trigger.run_id.as_deref().unwrap();
+        database
+            .apply_runtime_event(run_id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let first_started = json!({
+            "type":"tool.started", "toolCallId":"digital-tool-1",
+            "tool":"memory_search", "input":{"query":"bounded"}
+        });
+        database
+            .apply_runtime_event(run_id, 2, &first_started)
+            .unwrap();
+        assert!(database
+            .enforce_digital_colleague_tool_budget(run_id)
+            .is_ok());
+        database
+            .apply_runtime_event(run_id, 3, &first_started)
+            .expect("same identity replays without consuming another slot");
+        let second_error = database
+            .apply_runtime_event(
+                run_id,
+                4,
+                &json!({
+                    "type":"tool.started", "toolCallId":"digital-tool-2",
+                    "tool":"memory_search", "input":{"query":"overflow"}
+                }),
+            )
+            .expect_err("the Pi batch item beyond maxToolCalls must not be inserted");
+        assert!(second_error.contains("digital_colleague.tool_budget_exceeded"));
+        let (promoted, disposition) = database
+            .create_host_tool_call_once(
+                run_id,
+                "digital-tool-1",
+                "memory_search",
+                &json!({"query":"bounded"}),
+                "running",
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            disposition,
+            crate::database::HostToolCallDisposition::PromotedRuntime
+        );
+        database
+            .complete_host_tool_call(run_id, "digital-tool-1", Some(&json!({"ok":true})), None)
+            .unwrap();
+        let count: i64 = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1",
+                    [run_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(promoted.id.is_empty(), false);
+        database
+            .apply_runtime_event(run_id, 4, &json!({"type":"run.completed"}))
+            .expect("count == frozen maxToolCalls may complete");
+
+        let zero = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "manual:text-only",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap();
+        let zero_run = zero.trigger.run_id.as_deref().unwrap();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE runs SET budget_json = json_set(budget_json, '$.maxToolCalls', 0)
+                     WHERE id = ?1",
+                    [zero_run],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        database
+            .apply_runtime_event(zero_run, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        assert!(database
+            .apply_runtime_event(
+                zero_run,
+                2,
+                &json!({
+                    "type":"tool.started", "toolCallId":"forbidden",
+                    "tool":"memory_search", "input":{"query":"none"}
+                }),
+            )
+            .unwrap_err()
+            .contains("digital_colleague.tool_budget_exceeded"));
+        database
+            .apply_runtime_event(zero_run, 2, &json!({"type":"run.completed"}))
+            .expect("a zero-tool digital Run may still complete with text only");
+
+        let legacy = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "manual:legacy-tool-overflow",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap()
+            .trigger;
+        let legacy_run = legacy.run_id.as_deref().unwrap();
+        database
+            .apply_runtime_event(legacy_run, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE runs SET budget_json = json_set(budget_json, '$.maxToolCalls', 1)
+                     WHERE id = ?1",
+                    [legacy_run],
+                )?;
+                for index in 0..2 {
+                    connection.execute(
+                        "INSERT INTO tool_calls(
+                            id, runtime_tool_call_id, run_id, conversation_id, tool_name,
+                            input_json, status, execution_location, requires_approval,
+                            started_at, updated_at
+                         ) SELECT ?1, ?2, id, conversation_id, 'legacy', '{}', 'completed',
+                                  'runtime', 0, ?3, ?3 FROM runs WHERE id = ?4",
+                        params![
+                            Uuid::new_v4().to_string(),
+                            format!("legacy-digital-{index}"),
+                            now_ms(),
+                            legacy_run
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(database
+            .apply_runtime_event(legacy_run, 2, &json!({"type":"run.completed"}))
+            .unwrap_err()
+            .contains("digital_colleague.tool_budget_exceeded"));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn digital_tool_acquisition_rechecks_all_frozen_budgets_and_delayed_promotion() {
+        let (database, path) = test_database();
+        let colleague = create_colleague(&database);
+        let trigger = database
+            .accept_digital_colleague_trigger(
+                &colleague.id,
+                "manual",
+                None,
+                "manual:acquisition-budgets",
+                &json!({}),
+                None,
+                "user",
+            )
+            .unwrap()
+            .trigger;
+        let run_id = trigger.run_id.as_deref().unwrap();
+        database
+            .apply_runtime_event(run_id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+
+        for (update, call_id) in [
+            (
+                "UPDATE digital_colleague_triggers
+                 SET total_tokens = CAST((SELECT json_extract(budget_json, '$.maxTotalTokens')
+                                          FROM runs WHERE id = ?1) AS INTEGER)
+                 WHERE run_id = ?1",
+                "digital-total",
+            ),
+            (
+                "UPDATE digital_colleague_triggers
+                 SET output_tokens = CAST((SELECT json_extract(budget_json, '$.maxOutputTokens')
+                                           FROM runs WHERE id = ?1) AS INTEGER)
+                 WHERE run_id = ?1",
+                "digital-output",
+            ),
+        ] {
+            database
+                .with_connection(|connection| {
+                    connection.execute(update, [run_id])?;
+                    Ok(())
+                })
+                .unwrap();
+            assert!(database
+                .create_host_tool_call_once(
+                    run_id,
+                    call_id,
+                    "memory_search",
+                    &json!({"query":call_id}),
+                    "running",
+                    false,
+                )
+                .unwrap_err()
+                .contains("digital_colleague.budget_exceeded"));
+            database
+                .with_connection(|connection| {
+                    connection.execute(
+                        "UPDATE digital_colleague_triggers
+                         SET total_tokens = 0, output_tokens = 0 WHERE run_id = ?1",
+                        [run_id],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE runs
+                     SET budget_json = json_set(budget_json, '$.maxDailyTokens', 1,
+                                                '$.maxTotalTokens', 10000)
+                     WHERE id = ?1",
+                    [run_id],
+                )?;
+                connection.execute(
+                    "UPDATE digital_colleague_triggers SET total_tokens = 1 WHERE run_id = ?1",
+                    [run_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(database
+            .create_host_tool_call_once(
+                run_id,
+                "digital-daily",
+                "memory_search",
+                &json!({"query":"daily"}),
+                "running",
+                false,
+            )
+            .unwrap_err()
+            .contains("digital_colleague.budget_exceeded"));
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE digital_colleague_triggers SET total_tokens = 0 WHERE run_id = ?1",
+                    [run_id],
+                )?;
+                connection.execute(
+                    "UPDATE runs
+                     SET started_at = ?2,
+                         budget_json = json_set(budget_json, '$.maxDailyTokens', 10000)
+                     WHERE id = ?1",
+                    params![
+                        run_id,
+                        now_ms().saturating_sub(colleague.max_duration_ms + 1)
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(database
+            .create_host_tool_call_once(
+                run_id,
+                "digital-duration",
+                "memory_search",
+                &json!({"query":"late"}),
+                "running",
+                false,
+            )
+            .unwrap_err()
+            .contains("digital_colleague.budget_exceeded"));
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE runs SET started_at = ?2 WHERE id = ?1",
+                    params![run_id, now_ms()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        database
+            .apply_runtime_event(
+                run_id,
+                2,
+                &json!({
+                    "type":"tool.started", "toolCallId":"digital-delayed",
+                    "tool":"memory_search", "input":{"query":"delayed"}
+                }),
+            )
+            .expect("reserve before usage reaches the output boundary");
+        let pending = database
+            .create_host_tool_call(
+                run_id,
+                "digital-approved-delayed",
+                "write",
+                &json!({"path":"digital.md"}),
+                "pending",
+                true,
+            )
+            .expect("approval ToolCall reserves its digital slot before waiting");
+        let approval = database
+            .create_approval(
+                &pending.id,
+                "write digital output",
+                &json!({"path":"digital.md"}),
+            )
+            .unwrap();
+        database
+            .resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce)
+            .unwrap()
+            .expect("approve digital call once");
+        database
+            .apply_runtime_event(
+                run_id,
+                3,
+                &json!({
+                    "type":"usage.updated", "inputTokens":0, "outputTokens":2000,
+                    "cacheReadTokens":0, "cacheWriteTokens":0, "totalTokens":2000
+                }),
+            )
+            .unwrap();
+        assert!(database
+            .create_host_tool_call_once(
+                run_id,
+                "digital-delayed",
+                "memory_search",
+                &json!({"query":"delayed"}),
+                "running",
+                false,
+            )
+            .expect_err("delayed promotion rechecks the frozen output budget")
+            .contains("digital_colleague.budget_exceeded"));
+        let claim_error = database
+            .claim_approved_tool_call(run_id, "digital-approved-delayed")
+            .expect_err("approval claim rechecks the frozen digital output budget");
+        assert!(claim_error.contains("digital_colleague.budget_exceeded"));
+        let state: (String, i64, String, bool) = database
+            .with_connection(|connection| {
+                Ok((
+                    connection.query_row(
+                        "SELECT execution_location FROM tool_calls
+                         WHERE run_id = ?1 AND runtime_tool_call_id = 'digital-delayed'",
+                        [run_id],
+                        |row| row.get(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1",
+                        [run_id],
+                        |row| row.get(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT status FROM tool_calls WHERE id = ?1",
+                        [&pending.id],
+                        |row| row.get(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT claimed_at IS NOT NULL FROM approvals WHERE id = ?1",
+                        [&approval.id],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(state, ("runtime".to_owned(), 2, "failed".to_owned(), true));
 
         drop(database);
         let _ = std::fs::remove_file(path);

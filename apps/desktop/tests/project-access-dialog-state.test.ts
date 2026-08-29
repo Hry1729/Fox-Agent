@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { selectProjectRoot, validPickedProjectFolder } from '../src/features/chat/project-access-dialog-state'
+import { normalizeProjectPermission, selectProjectRoot, validPickedProjectFolder } from '../src/features/chat/project-access-dialog-state'
 import type { ProjectRecord } from '../src/features/conversations/model/types'
 
 function project(rootPath: string, permissionMode: ProjectRecord['permissionMode']): ProjectRecord {
@@ -16,6 +16,13 @@ function project(rootPath: string, permissionMode: ProjectRecord['permissionMode
 }
 
 describe('direct project selection', () => {
+  test('normalizes the saved default permission before creating a project', () => {
+    expect(normalizeProjectPermission('read_only')).toBe('read_only')
+    expect(normalizeProjectPermission('allow')).toBe('allow')
+    expect(normalizeProjectPermission('unknown')).toBe('ask')
+    expect(normalizeProjectPermission(null, 'read_only')).toBe('read_only')
+  })
+
   test('uses ask mode by default for a new folder', () => {
     expect(selectProjectRoot('D:\\projects\\new', [], 'ask')).toEqual({
       path: 'D:\\projects\\new',

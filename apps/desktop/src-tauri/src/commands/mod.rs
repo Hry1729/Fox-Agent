@@ -82,11 +82,35 @@ pub(crate) struct SetKnowledgeBindingsWireRequest {
     pub knowledge_references: Option<Vec<KnowledgeReferenceInput>>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CancelChildRunRequest {
+    pub parent_conversation_id: String,
+    pub child_run_id: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct KnowledgeBindingsSetResponse {
     bindings: Vec<crate::database::KnowledgeBindingRecord>,
     knowledge_references: Vec<KnowledgeReference>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectFileActionRequest {
+    conversation_id: String,
+    path: String,
+    action: String,
+    application_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectFileActionResponse {
+    action: String,
+    completed: bool,
+    applications: Vec<crate::artifact_gateway::ArtifactApplication>,
 }
 
 #[derive(Debug, Serialize)]
@@ -678,6 +702,21 @@ pub fn memory_recalls_list(
 }
 
 #[tauri::command]
+pub fn project_folder_open(
+    state: State<'_, AppState>,
+    request: ProjectFilesRequest,
+) -> ApiResponse<bool> {
+    let root = match project_root(&state, &request.conversation_id) {
+        Ok(root) => root,
+        Err(error) => return ApiResponse::failure("project.root_unavailable", error, false),
+    };
+    match open_project_folder(&root) {
+        Ok(()) => ApiResponse::success(true),
+        Err(error) => ApiResponse::failure("project.folder_open_failed", error, true),
+    }
+}
+
+#[tauri::command]
 pub fn project_files_list(
     state: State<'_, AppState>,
     request: ProjectFilesRequest,
@@ -739,6 +778,57 @@ pub fn project_file_read(
         byte_size: bytes.len().min(i64::MAX as usize) as i64,
         truncated,
     })
+}
+
+#[tauri::command]
+pub fn project_file_action(
+    state: State<'_, AppState>,
+    request: ProjectFileActionRequest,
+) -> ApiResponse<ProjectFileActionResponse> {
+    let root = match project_root(&state, &request.conversation_id) {
+        Ok(root) => root,
+        Err(error) => return ApiResponse::failure("project.root_unavailable", error, false),
+    };
+    let target = match safe_project_target(&root, &request.path) {
+        Ok(target) => target,
+        Err(error) => return ApiResponse::failure("project.path_denied", error, false),
+    };
+    if !target.is_file() {
+        return ApiResponse::failure("project.file_unavailable", "所选路径不是文件", false);
+    }
+    match crate::artifact_gateway::system_file_action(
+        &target,
+        &request.action,
+        request.application_id.as_deref(),
+    ) {
+        Ok(applications) => ApiResponse::success(ProjectFileActionResponse {
+            action: request.action.trim().to_ascii_lowercase(),
+            completed: true,
+            applications,
+        }),
+        Err(error) => ApiResponse::failure(error.code, error.message, error.retryable),
+    }
+}
+
+/// Inspect a persisted artifact through the Host-owned file gateway.  The
+/// gateway performs the conversation-scoped database lookup and all path,
+/// status and integrity checks before returning metadata or preview content.
+#[tauri::command]
+pub fn artifact_inspect(
+    state: State<'_, AppState>,
+    request: crate::artifact_gateway::ArtifactRequest,
+) -> ApiResponse<crate::artifact_gateway::ArtifactInspectResponse> {
+    crate::artifact_gateway::inspect_api(&state, &request)
+}
+
+/// Perform an artifact OS action (preview, open, reveal or copy path).  The
+/// renderer only sends an action name; it never supplies a path to the Host.
+#[tauri::command]
+pub fn artifact_action(
+    state: State<'_, AppState>,
+    request: crate::artifact_gateway::ArtifactActionRequest,
+) -> ApiResponse<crate::artifact_gateway::ArtifactActionResponse> {
+    crate::artifact_gateway::action_api(&state, &request)
 }
 
 fn normalize_project_root(value: Option<&str>) -> Result<Option<String>, String> {
@@ -2214,10 +2304,11 @@ fn dispatch_started_run(
     };
     let attachments = started.attachments.clone();
     if apply_work_gate {
-        let applied_gate = match work_mode_gate::apply_user_request(
+        let applied_gate = match work_mode_gate::apply_user_request_with_intent(
             &state.database,
             &started.run.conversation_id,
             &started.run.id,
+            &runtime_text,
             &started.user_message.content,
         ) {
             Ok(applied) => applied,
@@ -2565,6 +2656,58 @@ pub async fn run_cancel(
             );
             Ok(ApiResponse::failure("runtime.cancel_failed", error, true))
         }
+    }
+}
+
+#[tauri::command]
+pub fn child_run_cancel_by_user(
+    state: State<'_, AppState>,
+    request: CancelChildRunRequest,
+) -> ApiResponse<bool> {
+    let child = match state.database.child_run(&request.child_run_id) {
+        Ok(Some(child)) => child,
+        Ok(None) => return ApiResponse::success(false),
+        Err(error) => return storage_error(error),
+    };
+    let belongs_to_conversation = match state
+        .database
+        .child_runs_for_conversation(&request.parent_conversation_id)
+    {
+        Ok(children) => children
+            .iter()
+            .any(|candidate| candidate.child_run_id == child.child_run_id),
+        Err(error) => return storage_error(error),
+    };
+    if !belongs_to_conversation {
+        return ApiResponse::failure(
+            "child_run.parent_mismatch",
+            "这个子任务不属于当前会话，Fox 已拒绝取消操作",
+            false,
+        );
+    }
+    if matches!(
+        child.status.as_str(),
+        "completed" | "failed" | "cancelled" | "interrupted"
+    ) {
+        return ApiResponse::success(false);
+    }
+    match state
+        .database
+        .graph_attempt_id_for_child_run(&request.child_run_id)
+    {
+        Ok(Some(_)) => {
+            return ApiResponse::failure(
+                "graph.readonly_dedicated_cancel_required",
+                "这个子任务由工作图管理，请从对应的工作图节点取消，避免破坏图状态",
+                false,
+            )
+        }
+        Ok(None) => {}
+        Err(error) => return storage_error(error),
+    }
+    match state.runtime_host.cancel_managed_run(&request.child_run_id) {
+        Ok(cancelled) => ApiResponse::success(cancelled),
+        Err(error) => ApiResponse::failure("child_run.cancel_failed", error, true),
     }
 }
 
@@ -4389,6 +4532,26 @@ pub fn downloaded_file_open(
         Ok(()) => ApiResponse::success(true),
         Err(error) => ApiResponse::failure("knowledge.download_open_failed", error, false),
     }
+}
+
+#[cfg(windows)]
+fn open_project_folder(path: &Path) -> Result<(), String> {
+    let path = path
+        .canonicalize()
+        .map_err(|error| format!("项目文件夹不存在或无法访问：{error}"))?;
+    if !path.is_dir() {
+        return Err("项目路径不是文件夹".to_owned());
+    }
+    std::process::Command::new("explorer.exe")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("系统无法打开项目文件夹：{error}"))
+}
+
+#[cfg(not(windows))]
+fn open_project_folder(_path: &Path) -> Result<(), String> {
+    Err("当前平台暂不支持打开项目文件夹".to_owned())
 }
 
 fn downloaded_file_can_open_directly(path: &Path) -> bool {

@@ -810,7 +810,6 @@
 
 /* Final plugin center layout: kind navigation occupies the page title row. */
 .fox-plugin-topbar,
-.fox-plugin-filterbar,
 .fox-plugin-installed-page-header,
 .fox-plugin-installed-content {
   width: min(1180px, 100%);
@@ -851,11 +850,13 @@
 }
 
 .fox-plugin-filterbar {
+  width: 100%;
   min-height: 45px;
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 7px 30px 4px;
+  margin: -2px 0 10px;
+  padding: 0;
 }
 
 .fox-plugin-filterbar .fox-plugin-categories {
@@ -1052,7 +1053,6 @@
 
 @media (max-width: 700px) {
   .fox-plugin-topbar,
-  .fox-plugin-filterbar,
   .fox-plugin-installed-page-header,
   .fox-plugin-installed-content {
     padding-inline: 17px;
@@ -1080,5 +1080,176 @@
 
   .fox-plugin-installed-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Installed-only center: cards expose status and activation without catalog actions. */
+.fox-plugin-installed-page-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--fox-accent-soft);
+  color: var(--fox-accent);
+}
+
+.fox-plugin-installed-page-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.fox-plugin-installed-page-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.fox-plugin-installed-page-actions .fox-plugin-search {
+  width: min(300px, 32vw);
+  flex-basis: 300px;
+}
+
+.fox-plugin-installed-card {
+  display: flex !important;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px !important;
+  min-height: 0;
+}
+
+.fox-plugin-installed-card-header {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.fox-plugin-installed-card-title {
+  overflow: hidden;
+}
+
+.fox-plugin-installed-card-title .badge {
+  flex: none;
+}
+
+.fox-plugin-status {
+  flex: none;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.fox-plugin-status svg,
+.fox-plugin-installed-card-error svg,
+.fox-plugin-installed-card-activation svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.fox-plugin-installed-card-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  min-width: 0;
+  padding-top: 1px;
+}
+
+.fox-plugin-installed-card-meta > span {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.fox-plugin-installed-card-meta small,
+.fox-plugin-installed-card-footer small {
+  color: var(--fox-muted);
+  font-size: 10px;
+}
+
+.fox-plugin-installed-card-meta strong {
+  overflow: hidden;
+  color: var(--fox-text);
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-plugin-installed-card-meta strong.is-error {
+  color: var(--destructive);
+}
+
+.fox-plugin-installed-card-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  color: var(--destructive);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.fox-plugin-installed-card-footer {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 2px;
+}
+
+.fox-plugin-installed-card-activation,
+.fox-plugin-installed-toggle {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fox-muted);
+  font-size: 10px;
+}
+
+.fox-plugin-installed-card-activation > small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-plugin-host-managed {
+  color: var(--fox-muted);
+  font-size: 10px;
+}
+
+@media (max-width: 700px) {
+  .fox-plugin-installed-page-actions {
+    width: 100%;
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+
+  .fox-plugin-installed-page-actions .fox-plugin-search {
+    width: 100%;
+    flex: 1 1 auto;
+  }
+
+  .fox-plugin-installed-card-header {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .fox-plugin-installed-card-header > .fox-plugin-status {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .fox-plugin-installed-card-footer {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

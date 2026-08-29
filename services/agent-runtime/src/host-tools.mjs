@@ -1,6 +1,61 @@
 import { Type } from 'typebox'
 import { KNOWLEDGE_TOOL_NAMES } from './runtime-contract.mjs'
 import { defineFoxTools } from './tool-adapter.mjs'
+import { VALIDATION_CHECK_TYPES } from './validation-policy.mjs'
+
+const VALIDATION_CHECK_TYPE_SCHEMA = Type.Union(
+  VALIDATION_CHECK_TYPES.map((checkType) => Type.Literal(checkType)),
+)
+
+const TASK_ATTEMPT_STATUS_SCHEMA = Type.Union([
+  Type.Literal('succeeded'),
+  Type.Literal('failed'),
+  Type.Literal('blocked'),
+  Type.Literal('cancelled'),
+])
+
+const TRIMMED_REQUIRED_STRING_PATTERN = '^(?![\\s\\u0085])[\\s\\S]*[^\\s\\u0085]$'
+
+function trimmedRequiredString(maxLength) {
+  return Type.String({
+    minLength: 1,
+    maxLength,
+    pattern: TRIMMED_REQUIRED_STRING_PATTERN,
+  })
+}
+
+const PLAN_NODE_KEY_SCHEMA = Type.String({
+  minLength: 1,
+  maxLength: 100,
+  pattern: '^[A-Za-z0-9._-]+$',
+})
+
+const SERIAL_PLAN_TASK_SCHEMA = Type.Object({
+  title: trimmedRequiredString(500),
+  detail: Type.Optional(Type.Union([trimmedRequiredString(4000), Type.Null()])),
+  ordinal: Type.Integer({ minimum: 0 }),
+}, { additionalProperties: false })
+
+const GRAPH_PLAN_TASK_SCHEMA = Type.Object({
+  nodeKey: PLAN_NODE_KEY_SCHEMA,
+  title: trimmedRequiredString(300),
+  detail: Type.Optional(Type.Union([trimmedRequiredString(4000), Type.Null()])),
+  ordinal: Type.Integer({ minimum: 0 }),
+  dependsOn: Type.Optional(Type.Array(PLAN_NODE_KEY_SCHEMA, {
+    maxItems: 3,
+    uniqueItems: true,
+  })),
+  acceptanceCriteria: Type.Array(trimmedRequiredString(1000), {
+    minItems: 1,
+    maxItems: 8,
+    uniqueItems: true,
+  }),
+}, { additionalProperties: false })
+
+const PLAN_TASKS_SCHEMA = Type.Union([
+  Type.Array(SERIAL_PLAN_TASK_SCHEMA, { minItems: 1, maxItems: 64 }),
+  Type.Array(GRAPH_PLAN_TASK_SCHEMA, { minItems: 1, maxItems: 3 }),
+])
 
 async function executeHostTool(toolCallId, tool, input, requestHost, signal) {
   const response = await requestHost('tool.execute', { toolCallId, tool, input }, signal)
@@ -283,6 +338,127 @@ export function createHostTools(requestHost) {
         executeHostTool(toolCallId, 'work_snapshot_get', params, requestHost, signal),
     },
     {
+      name: 'graph_readonly_activate',
+      label: 'Activate read-only graph',
+      description: 'Atomically activate one approved bounded read-only Graph PlanRevision. Fox injects the current durable_v2 Run and Host ToolCall identity; this input cannot redefine nodes or execution state.',
+      parameters: Type.Object({
+        planRevisionId: trimmedRequiredString(200),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'graph_readonly_activate', params, requestHost, signal),
+    },
+    {
+      name: 'graph_readonly_snapshot_get',
+      label: 'Get read-only graph snapshot',
+      description: 'Read the bounded Host projection for an activated read-only Graph. Readiness is derived from current Task, Attempt, Evidence, and Review facts; this tool never starts or cancels a node.',
+      parameters: Type.Object({
+        goalId: trimmedRequiredString(200),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'graph_readonly_snapshot_get', params, requestHost, signal),
+    },
+    {
+      name: 'graph_readonly_node_start',
+      label: 'Start read-only graph node',
+      description: 'Atomically claim one currently runnable queued Graph Task and dispatch its isolated read-only Child Run. Fox injects the current durable_v2 Lead Run and real Host ToolCall identity, freezes exactly read/ls/find/grep for the Child, and keeps node acceptance separate from Child completion.',
+      parameters: Type.Object({
+        goalId: trimmedRequiredString(200),
+        taskId: trimmedRequiredString(200),
+        expectedTaskVersion: Type.Integer({ minimum: 1 }),
+        attemptId: trimmedRequiredString(200),
+        workerAgentId: trimmedRequiredString(200),
+        objective: trimmedRequiredString(8000),
+        context: trimmedRequiredString(12000),
+        budget: Type.Object({
+          maxDurationMs: Type.Integer({ minimum: 1000, maximum: 45000 }),
+          maxTotalTokens: Type.Integer({ minimum: 256, maximum: 4096 }),
+          maxOutputTokens: Type.Integer({ minimum: 64, maximum: 1024 }),
+          maxToolCalls: Type.Integer({ minimum: 0, maximum: 6 }),
+        }, { additionalProperties: false }),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'graph_readonly_node_start', params, requestHost, signal),
+    },
+    {
+      name: 'graph_readonly_node_review',
+      label: 'Review read-only graph node',
+      description: 'Request an independent review of one running high-risk read-only Graph Attempt whose implementation Child completed. The frozen criteria must be bound to fresh Host-valid Evidence exactly as for node finish; Fox injects the real durable_v2 Lead Run and Host ToolCall identity. A Reviewer pass still does not accept the node or Goal, and the later node finish must reuse this review request unchanged, including the exact criterionEvidence and summary.',
+      parameters: Type.Object({
+        goalId: trimmedRequiredString(200),
+        taskId: trimmedRequiredString(200),
+        attemptId: trimmedRequiredString(200),
+        expectedTaskVersion: Type.Integer({ minimum: 1 }),
+        expectedAttemptVersion: Type.Integer({ minimum: 1 }),
+        criterionEvidence: Type.Array(Type.Object({
+          criterion: trimmedRequiredString(1000),
+          evidenceIds: Type.Array(trimmedRequiredString(200), {
+            minItems: 1,
+            maxItems: 16,
+            uniqueItems: true,
+          }),
+        }, { additionalProperties: false }), {
+          minItems: 1,
+          maxItems: 8,
+        }),
+        summary: trimmedRequiredString(4000),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'graph_readonly_node_review', params, requestHost, signal),
+    },
+    {
+      name: 'graph_readonly_node_finish',
+      label: 'Finish read-only graph node',
+      description: 'Accept one running read-only Graph node only after its delegated Child completed and every frozen criterion is exactly bound to fresh, live, Host-validated Evidence from the current parent Lead Attempt. For a high-risk reviewed node, reuse the passed review request unchanged, including the exact criterionEvidence and summary. Fox injects the durable_v2 Lead Run and real Host ToolCall identity; this tool never creates Goal Acceptance.',
+      parameters: Type.Object({
+        goalId: trimmedRequiredString(200),
+        taskId: trimmedRequiredString(200),
+        attemptId: trimmedRequiredString(200),
+        expectedTaskVersion: Type.Integer({ minimum: 1 }),
+        expectedAttemptVersion: Type.Integer({ minimum: 1 }),
+        criterionEvidence: Type.Array(Type.Object({
+          criterion: trimmedRequiredString(1000),
+          evidenceIds: Type.Array(trimmedRequiredString(200), {
+            minItems: 1,
+            maxItems: 16,
+            uniqueItems: true,
+          }),
+        }, { additionalProperties: false }), {
+          minItems: 1,
+          maxItems: 8,
+        }),
+        summary: trimmedRequiredString(4000),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'graph_readonly_node_finish', params, requestHost, signal),
+    },
+    {
+      name: 'graph_readonly_node_cancel',
+      label: 'Cancel read-only graph node',
+      description: 'Persist a bounded cancellation intent for one running standard-risk read-only Graph Attempt. Fox injects the current durable_v2 parent Lead Run and real Host ToolCall identity, derives the unique delegated Child, finalizes this ToolCall before signalling the Child runtime, and reconciles only authoritative Child terminal facts.',
+      parameters: Type.Object({
+        goalId: trimmedRequiredString(200),
+        taskId: trimmedRequiredString(200),
+        attemptId: trimmedRequiredString(200),
+        expectedTaskVersion: Type.Integer({ minimum: 1 }),
+        expectedAttemptVersion: Type.Integer({ minimum: 1 }),
+        reason: trimmedRequiredString(2000),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'graph_readonly_node_cancel', params, requestHost, signal),
+    },
+    {
+      name: 'graph_readonly_accept',
+      label: 'Accept read-only graph',
+      description: 'Request final Goal Acceptance for the current activated read-only Graph only after the Host snapshot proves every node accepted under the current Plan with no open findings. Fox injects the durable_v2 Lead Run and Host ToolCall identity; generic Goal Acceptance cannot replace this dedicated boundary.',
+      parameters: Type.Object({
+        goalId: trimmedRequiredString(200),
+        expectedGoalVersion: Type.Integer({ minimum: 1 }),
+        summary: trimmedRequiredString(4000),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'graph_readonly_accept', params, requestHost, signal),
+    },
+    {
       name: 'workflow_snapshot_get',
       label: 'Get expert workflow snapshot',
       description: 'Load the active persisted expert Workflow, its current Stage, mapped Host Task, attempts, output checkpoints, and pending Gate. Conversation identity is injected by Fox.',
@@ -453,15 +629,21 @@ export function createHostTools(requestHost) {
     {
       name: 'task_create_many',
       label: 'Create work tasks',
-      description: 'Atomically create ordered tasks under an active goal owned by this conversation. A proposed goal must first be confirmed and activated by Fox Host.',
+      description: 'Atomically create ordered tasks under an active goal owned by this conversation. riskLevel is an elevation hint and never lowers the frozen Host ValidationPolicy. A proposed goal must first be confirmed and activated by Fox Host.',
       parameters: Type.Object({
         goalId: Type.String(),
         tasks: Type.Array(Type.Object({
           title: Type.String(),
           detail: Type.Optional(Type.String()),
           ordinal: Type.Integer({ minimum: 0 }),
-        }), { minItems: 1 }),
-      }),
+          riskLevel: Type.Optional(Type.Union([
+            Type.Literal('low'),
+            Type.Literal('standard'),
+            Type.Literal('high'),
+            Type.Literal('critical'),
+          ])),
+        }, { additionalProperties: false }), { minItems: 1 }),
+      }, { additionalProperties: false }),
       execute: (toolCallId, params, signal) =>
         executeHostTool(toolCallId, 'task_create_many', params, requestHost, signal),
     },
@@ -486,9 +668,83 @@ export function createHostTools(requestHost) {
         executeHostTool(toolCallId, 'task_update', params, requestHost, signal),
     },
     {
+      name: 'task_attempt_start',
+      label: 'Start task attempt',
+      description: 'Start one Host-owned validation attempt for a task. Fox injects the current conversation, Run, and frozen ValidationPolicy, then enforces optimistic task versioning.',
+      parameters: Type.Object({
+        taskId: Type.String({ maxLength: 200 }),
+        attemptId: Type.String({ maxLength: 200 }),
+        expectedVersion: Type.Integer({ minimum: 1 }),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'task_attempt_start', params, requestHost, signal),
+    },
+    {
+      name: 'task_repair_start',
+      label: 'Start task repair',
+      description: 'Start a bounded repair attempt from persisted validation findings. Fox owns the current conversation, Run, frozen ValidationPolicy, repair budget, and final authorization.',
+      parameters: Type.Object({
+        taskId: trimmedRequiredString(200),
+        attemptId: trimmedRequiredString(200),
+        expectedVersion: Type.Integer({ minimum: 1 }),
+        rootCause: trimmedRequiredString(4000),
+        findingIds: Type.Array(trimmedRequiredString(200), {
+          minItems: 1,
+          maxItems: 32,
+          uniqueItems: true,
+        }),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'task_repair_start', params, requestHost, signal),
+    },
+    {
+      name: 'task_repair_escalate_start',
+      label: 'Escalate task repair to a human',
+      description: 'Request one Host-owned repair attempt that requires explicit human approval. Fox injects the current conversation, Run, frozen ValidationPolicy, approval identity, repair budget, and final authorization; this call cannot create or reuse a grant.',
+      parameters: Type.Object({
+        taskId: trimmedRequiredString(200),
+        attemptId: trimmedRequiredString(200),
+        expectedVersion: Type.Integer({ minimum: 1 }),
+        rootCause: trimmedRequiredString(4000),
+        findingIds: Type.Array(trimmedRequiredString(200), {
+          minItems: 1,
+          maxItems: 32,
+          uniqueItems: true,
+        }),
+        escalationReason: trimmedRequiredString(2000),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'task_repair_escalate_start', params, requestHost, signal),
+    },
+    {
+      name: 'task_attempt_finish',
+      label: 'Finish task attempt',
+      description: 'Finish the current Host-owned task attempt. A succeeded attempt cannot declare a failure reason; every other terminal status must provide one.',
+      parameters: Type.Object({
+        taskId: Type.String({ maxLength: 200 }),
+        attemptId: Type.String({ maxLength: 200 }),
+        expectedVersion: Type.Integer({ minimum: 1 }),
+        expectedAttemptVersion: Type.Integer({ minimum: 1 }),
+        status: TASK_ATTEMPT_STATUS_SCHEMA,
+        failureReason: Type.Optional(Type.String({ minLength: 1, maxLength: 4000 })),
+      }, {
+        additionalProperties: false,
+        allOf: [{
+          if: {
+            properties: { status: { const: 'succeeded' } },
+            required: ['status'],
+          },
+          then: { not: { required: ['failureReason'] } },
+          else: { required: ['failureReason'] },
+        }],
+      }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'task_attempt_finish', params, requestHost, signal),
+    },
+    {
       name: 'task_evidence_add',
       label: 'Add task evidence',
-      description: 'Attach validated evidence to a task in this conversation.',
+      description: 'Attach validated evidence to a task in this conversation. validationCheckType must be allowed by the frozen Host ValidationPolicy for the Run.',
       parameters: Type.Object({
         taskId: Type.String(),
         evidenceType: Type.Union([
@@ -502,7 +758,8 @@ export function createHostTools(requestHost) {
         ]),
         refId: Type.String(),
         summary: Type.String(),
-      }),
+        validationCheckType: Type.Optional(VALIDATION_CHECK_TYPE_SCHEMA),
+      }, { additionalProperties: false }),
       execute: (toolCallId, params, signal) =>
         executeHostTool(toolCallId, 'task_evidence_add', params, requestHost, signal),
     },
@@ -517,13 +774,13 @@ export function createHostTools(requestHost) {
     {
       name: 'plan_revision_create',
       label: 'Create plan revision',
-      description: 'Persist a proposed PlanRevision for an active goal. Include the complete ordered task plan rather than only the delta. Fox Host keeps it proposed until the user approves or rejects it.',
+      description: 'Persist a proposed PlanRevision for an active goal. Include the complete ordered task plan rather than only the delta. Ordinary plans use title/detail/ordinal. A read-only Graph plan must give every node nodeKey and 1-8 acceptanceCriteria, with optional dependsOn; Fox Host validates the bounded DAG and never accepts execution state in this input. Fox Host keeps the revision proposed until the user approves or rejects it.',
       parameters: Type.Object({
         goalId: Type.String(),
         title: Type.String(),
         summary: Type.String(),
-        tasks: Type.Array(Type.Object({ title: Type.String(), detail: Type.Optional(Type.String()), ordinal: Type.Integer({ minimum: 0 }) }), { minItems: 1 }),
-      }),
+        tasks: PLAN_TASKS_SCHEMA,
+      }, { additionalProperties: false }),
       execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'plan_revision_create', params, requestHost, signal),
     },
     {

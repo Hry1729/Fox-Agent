@@ -20,6 +20,7 @@ export function LocalKnowledgeSidebarNavigation({
   activeEntityId,
   activeDocumentId,
   navigate,
+  onCreate,
   gateway = defaultLocalKnowledgeGateway,
 }: {
   collapsed: boolean
@@ -27,6 +28,7 @@ export function LocalKnowledgeSidebarNavigation({
   activeEntityId?: string | null
   activeDocumentId?: string | null
   navigate: NavigateWorkspace
+  onCreate?: () => void
   gateway?: LocalKnowledgeGateway
 }) {
   const [bases, setBases] = useState<LocalKnowledgeBase[]>([])
@@ -87,12 +89,12 @@ export function LocalKnowledgeSidebarNavigation({
       {!collapsed && (
         <ScrollArea className="fox-sidebar-scroll">
           <section className="fox-sidebar-section fox-local-knowledge-sidebar-section">
-            <div className="fox-section-head"><span>我的知识库</span><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="新建知识库" onClick={() => navigate('local-knowledge')}><Plus size={14} /></Button></div>
+            <div className="fox-section-head"><span>我的知识库</span><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="新建知识库" onClick={() => { if (onCreate) onCreate(); else navigate('local-knowledge') }}><Plus size={14} /></Button></div>
             <div className="fox-local-knowledge-sidebar-list">
               {bases.map((base) => {
                 const active = activeEntityId === base.id && knowledgeBaseViews.includes(activeView)
                 return <div className="fox-local-knowledge-sidebar-base" key={base.id}>
-                  <button type="button" className={`fox-sidebar-tree-row fox-local-knowledge-sidebar-row ${active ? 'is-active' : ''}`} title={base.name} onClick={() => navigate('local-knowledge-documents', base.id)}>
+                  <button type="button" className={`fox-sidebar-tree-row fox-local-knowledge-sidebar-row ${active ? 'is-active' : ''}`} title={base.name} onClick={() => navigate('local-knowledge-detail', base.id)}>
                     <Database size={14} />
                     <span>{base.name}</span>
                     <small>{base.documentCount}</small>

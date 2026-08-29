@@ -1,0 +1,97 @@
+import { describe, expect, test } from 'bun:test'
+import {
+  allowedApprovalDecisions,
+  repairOverrideApprovalDetails,
+  resolveAllowedApprovalDecision,
+} from '../src/features/conversations/model/approval-decision-policy'
+import type { ApprovalRecord, ApprovalRequest } from '../src/features/conversations/model/types'
+
+function overrideRequest(overrides: Partial<ApprovalRequest> = {}): ApprovalRequest {
+  return {
+    category: 'task_repair_budget_override',
+    availableDecisions: ['allow_once', 'deny'],
+    arguments: {
+      rootCause: '已有修复没有覆盖并发写入路径',
+      findingIds: ['finding-1', 'finding-2'],
+      escalationReason: '普通返工预算已经用完',
+    },
+    ...overrides,
+  }
+}
+
+function approval(request: ApprovalRequest): Pick<ApprovalRecord, 'id' | 'request'> {
+  return { id: 'approval-1', request }
+}
+
+describe('approval decision policy', () => {
+  test('shows only allow once and deny for a repair budget override', () => {
+    expect(allowedApprovalDecisions(overrideRequest())).toEqual(['deny', 'allow_once'])
+    expect(allowedApprovalDecisions(overrideRequest({
+      availableDecisions: ['allow_once', 'deny', 'allow_conversation'],
+    }))).toEqual(['deny', 'allow_once'])
+    expect(repairOverrideApprovalDetails(overrideRequest())).toEqual({
+      rootCause: '已有修复没有覆盖并发写入路径',
+      findingIds: ['finding-1', 'finding-2'],
+    })
+  })
+
+  test('keeps the legacy three choices for an ordinary approval with no declaration', () => {
+    expect(allowedApprovalDecisions({})).toEqual([
+      'deny',
+      'allow_once',
+      'allow_conversation',
+    ])
+    expect(allowedApprovalDecisions({ category: 'tool_execution' })).toEqual([
+      'deny',
+      'allow_once',
+      'allow_conversation',
+    ])
+  })
+
+  test('fails closed for empty, duplicate, or unknown decision declarations', () => {
+    expect(allowedApprovalDecisions({ availableDecisions: [] })).toEqual(['deny'])
+    expect(allowedApprovalDecisions({ availableDecisions: ['allow_once', 'allow_once'] })).toEqual(['deny'])
+    expect(allowedApprovalDecisions({ availableDecisions: ['allow_once', 'allow_forever'] })).toEqual(['deny'])
+    expect(allowedApprovalDecisions({ availableDecisions: 'allow_once' })).toEqual(['deny'])
+  })
+
+  test('does not grant choices to an unknown approval category', () => {
+    expect(allowedApprovalDecisions({
+      category: 'future_super_grant',
+      availableDecisions: ['deny', 'allow_once', 'allow_conversation'],
+    })).toEqual(['deny'])
+  })
+
+  test('does not add allow once when the Host did not declare it', () => {
+    expect(allowedApprovalDecisions({
+      category: 'tool_execution',
+      availableDecisions: ['deny'],
+    })).toEqual(['deny'])
+  })
+
+  test('keeps only deny when repair override context is malformed', () => {
+    expect(allowedApprovalDecisions(overrideRequest({ arguments: { rootCause: '', findingIds: [] } }))).toEqual(['deny'])
+  })
+
+  test('does not send a decision that the Host did not allow', async () => {
+    const sent: Array<[string, string]> = []
+    const resolver = async (approvalId: string, decision: string) => {
+      sent.push([approvalId, decision])
+      return true
+    }
+
+    expect(await resolveAllowedApprovalDecision(
+      approval(overrideRequest()),
+      'allow_conversation',
+      resolver,
+    )).toBeFalse()
+    expect(sent).toEqual([])
+
+    expect(await resolveAllowedApprovalDecision(
+      approval(overrideRequest()),
+      'allow_once',
+      resolver,
+    )).toBeTrue()
+    expect(sent).toEqual([['approval-1', 'allow_once']])
+  })
+})

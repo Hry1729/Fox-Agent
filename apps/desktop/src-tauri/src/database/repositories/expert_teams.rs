@@ -367,7 +367,10 @@ mod tests {
             .expect_err("active member must enforce serial dispatch");
         assert!(!serial_error.is_empty());
         database
-            .apply_runtime_event(&first.child_run_id, 1, &json!({ "type": "run.completed" }))
+            .apply_runtime_event(&first.child_run_id, 1, &json!({ "type": "run.started" }))
+            .expect("start first member");
+        database
+            .apply_runtime_event(&first.child_run_id, 2, &json!({ "type": "run.completed" }))
             .expect("complete first member");
         let (_, second, _) = database
             .create_child_run(CreateChildRunInput {
@@ -383,7 +386,10 @@ mod tests {
             })
             .expect("create second member");
         database
-            .apply_runtime_event(&second.child_run_id, 1, &json!({ "type": "run.completed" }))
+            .apply_runtime_event(&second.child_run_id, 1, &json!({ "type": "run.started" }))
+            .expect("start second member");
+        database
+            .apply_runtime_event(&second.child_run_id, 2, &json!({ "type": "run.completed" }))
             .expect("complete second member");
         let completed = database
             .finalize_expert_team(&team.run.id)

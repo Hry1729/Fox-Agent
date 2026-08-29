@@ -523,6 +523,110 @@ pub struct WorkTaskRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationPolicySnapshot {
+    pub schema_version: u32,
+    pub id: String,
+    pub risk_level: String,
+    pub required_checks: Vec<String>,
+    pub allowed_check_types: Vec<String>,
+    pub reviewer_policy: String,
+    pub max_repair_attempts: u32,
+    pub completion_requires_acceptance: bool,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskValidationPolicyRecord {
+    pub task_id: String,
+    pub snapshot: ValidationPolicySnapshot,
+    pub frozen_at: String,
+    pub legacy_fallback: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskAttemptKind {
+    Execution,
+    Repair,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskAttemptStatus {
+    Running,
+    Succeeded,
+    Failed,
+    Blocked,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskAttemptRecord {
+    pub id: String,
+    pub task_id: String,
+    pub attempt_number: i64,
+    pub kind: TaskAttemptKind,
+    pub status: TaskAttemptStatus,
+    pub run_id: String,
+    pub policy_hash: String,
+    pub root_cause: Option<String>,
+    pub finding_ids: Vec<String>,
+    pub evidence_ids: Vec<String>,
+    pub failure_reason: Option<String>,
+    pub version: i64,
+    pub evidence_rowid_watermark: i64,
+    pub finding_rowid_watermark: i64,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskAttemptStartResult {
+    pub task: WorkTaskRecord,
+    pub attempt: Option<TaskAttemptRecord>,
+    pub budget_exhausted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskAttemptFinishResult {
+    pub task: WorkTaskRecord,
+    pub attempt: TaskAttemptRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRepairOverrideEventRecord {
+    pub id: String,
+    pub task_id: String,
+    pub attempt_id: String,
+    pub approval_id: String,
+    pub tool_call_id: String,
+    pub run_id: String,
+    pub conversation_id: String,
+    pub policy_id: String,
+    pub policy_hash: String,
+    pub normal_repair_budget: i64,
+    pub normal_repair_used: i64,
+    pub override_count: i64,
+    pub input_hash: String,
+    pub escalation_reason: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRepairOverrideStartResult {
+    pub task: WorkTaskRecord,
+    pub attempt: TaskAttemptRecord,
+    pub override_event: TaskRepairOverrideEventRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceType {
     ToolCall,
@@ -605,6 +709,7 @@ pub struct ReviewFindingRecord {
     pub created_by: String,
     pub created_at: String,
     pub resolved_at: Option<String>,
+    pub resolved_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -637,6 +742,284 @@ pub struct WorkEventRecord {
     pub sequence: i64,
     pub timestamp: String,
     pub data: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationDecisionKind {
+    Continue,
+    Repair,
+    WaitApproval,
+    Complete,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationReasonCode {
+    WorkRemaining,
+    ValidationFailed,
+    ApprovalPending,
+    ExternalDependencyUnavailable,
+    BudgetExhausted,
+    UserInputRequired,
+    RetryAvailable,
+    RetryExhausted,
+    AcceptanceMissing,
+    AcceptanceCandidate,
+    AcceptancePassed,
+    HostAuditRequired,
+    ToolFailed,
+    TaskInterrupted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationRetryClass {
+    None,
+    Recoverable,
+    RetryLimited,
+    NonRetryable,
+    HostDecides,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationValidationOutcome {
+    Accepted,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendContinuationDecisionInput {
+    pub schema_version: u32,
+    pub decision_id: String,
+    pub run_id: String,
+    pub event_cursor: i64,
+    pub decision: ContinuationDecisionKind,
+    pub reason_code: ContinuationReasonCode,
+    #[serde(default)]
+    pub active_task_ids: Vec<String>,
+    #[serde(default)]
+    pub evidence_ids: Vec<String>,
+    #[serde(default)]
+    pub missing_acceptance: Vec<String>,
+    pub next_action: Option<String>,
+    pub retry_class: Option<ContinuationRetryClass>,
+    #[serde(default)]
+    pub blocked_dependency_refs: Vec<String>,
+    pub host_validation_outcome: ContinuationValidationOutcome,
+    pub host_validation_error: Option<String>,
+    #[serde(default)]
+    pub expected_projection_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContinuationDecisionRecord {
+    pub schema_version: u32,
+    pub decision_id: String,
+    pub run_id: String,
+    pub event_cursor: i64,
+    pub decision: ContinuationDecisionKind,
+    pub reason_code: ContinuationReasonCode,
+    pub active_task_ids: Vec<String>,
+    pub evidence_ids: Vec<String>,
+    pub missing_acceptance: Vec<String>,
+    pub next_action: Option<String>,
+    pub retry_class: Option<ContinuationRetryClass>,
+    pub blocked_dependency_refs: Vec<String>,
+    pub host_validation_outcome: ContinuationValidationOutcome,
+    pub host_validation_error: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct UnprojectedContinuationProposal {
+    pub conversation_id: String,
+    pub run_id: String,
+    pub seq: i64,
+    pub payload: Value,
+    pub execution_profile_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordContinuationIngestDiagnosticInput {
+    pub run_id: String,
+    pub event_seq: i64,
+    pub execution_profile_id: Option<String>,
+    pub shadow_mode: bool,
+    pub error_code: String,
+    pub error_message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContinuationIngestDiagnosticRecord {
+    pub run_id: String,
+    pub event_seq: i64,
+    pub execution_profile_id: Option<String>,
+    pub shadow_mode: bool,
+    pub error_code: String,
+    pub error_message: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskLedgerGoalProjection {
+    pub id: String,
+    pub title: String,
+    pub status: GoalStatus,
+    pub completion_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskLedgerAcceptanceCheck {
+    pub acceptance_id: String,
+    pub status: String,
+    pub check: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskLedgerEvidenceProjection {
+    pub id: String,
+    pub evidence_type: EvidenceType,
+    pub validity_status: EvidenceValidityStatus,
+    pub summary: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskLedgerTaskProjection {
+    pub task_id: String,
+    pub title: String,
+    pub status: WorkTaskStatus,
+    pub attempt: i64,
+    pub acceptance_checks: Vec<TaskLedgerAcceptanceCheck>,
+    pub latest_evidence: Vec<TaskLedgerEvidenceProjection>,
+    pub blockers: Vec<String>,
+    pub assigned_run_id: Option<String>,
+    pub child_run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskLedgerPendingActionKind {
+    Approval,
+    ExternalWait,
+    Retry,
+    Review,
+    Repair,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskLedgerPendingAction {
+    pub kind: TaskLedgerPendingActionKind,
+    pub reference_id: String,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskLedgerCompletedOutcome {
+    Completed,
+    Accepted,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskLedgerCompletedSummary {
+    pub task_id: String,
+    pub outcome: TaskLedgerCompletedOutcome,
+    pub evidence_ids: Vec<String>,
+    pub accepted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskLedgerPhase {
+    Idle,
+    Queued,
+    Execute,
+    Validate,
+    Repair,
+    WaitApproval,
+    Complete,
+    Blocked,
+    Interrupted,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskLedgerExecutionCursor {
+    pub current_phase: TaskLedgerPhase,
+    pub run_id: Option<String>,
+    pub event_cursor: i64,
+    pub last_event_id: Option<String>,
+    pub resumable_from: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskLedgerRunCursor {
+    pub run_id: String,
+    pub event_cursor: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskLedgerSourceHighWatermark {
+    pub run_cursors: Vec<TaskLedgerRunCursor>,
+    pub work_updated_at: Option<String>,
+    pub acceptance_created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskLedgerEventRange {
+    pub first: i64,
+    pub last: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskLedgerProjectionMeta {
+    pub schema_version: u32,
+    pub projection_hash: String,
+    pub source_high_watermark: TaskLedgerSourceHighWatermark,
+    pub generated_at: i64,
+    pub derived_goal_ids: Vec<String>,
+    pub derived_task_ids: Vec<String>,
+    pub derived_run_ids: Vec<String>,
+    pub event_range: Option<TaskLedgerEventRange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskLedgerProjection {
+    pub schema_version: u32,
+    pub conversation_id: String,
+    pub goal: Option<TaskLedgerGoalProjection>,
+    pub active_tasks: Vec<TaskLedgerTaskProjection>,
+    pub pending_actions: Vec<TaskLedgerPendingAction>,
+    pub completed_summary: Vec<TaskLedgerCompletedSummary>,
+    pub execution_cursor: TaskLedgerExecutionCursor,
+    pub projection_meta: TaskLedgerProjectionMeta,
+    pub latest_host_accepted_decision: Option<ContinuationDecisionRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -938,6 +1321,14 @@ pub struct ToolCallRecord {
     pub span_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostToolCallDisposition {
+    Created,
+    PromotedRuntime,
+    ReplayTerminal,
+    AlreadyInFlight,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalRecord {
@@ -952,6 +1343,9 @@ pub struct ApprovalRecord {
     pub decision: Option<Value>,
     pub requested_at: i64,
     pub resolved_at: Option<i64>,
+    pub category: String,
+    pub claimed_at: Option<i64>,
+    pub claimed_by_run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -1185,6 +1579,8 @@ pub struct PluginCardView {
     pub compatible: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub incompatibility_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub installed_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

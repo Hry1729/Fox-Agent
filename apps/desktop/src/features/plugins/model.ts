@@ -58,6 +58,7 @@ export interface PluginCardView {
   permissions: string[]
   compatible: boolean
   incompatibilityReason?: string
+  lastError?: string
   installedAt?: number
   updatedAt?: number
 }

@@ -9,6 +9,13 @@ use uuid::Uuid;
 pub(crate) const MAX_CHILD_DEPTH: i64 = 1;
 pub(crate) const MAX_CHILDREN_PER_PARENT: i64 = 8;
 pub(crate) const MAX_ACTIVE_CHILDREN_PER_ROOT: i64 = 3;
+const MIN_CHILD_DURATION_MS: i64 = 1_000;
+const MAX_CHILD_DURATION_MS: i64 = 900_000;
+const MIN_CHILD_TOTAL_TOKENS: i64 = 256;
+const MAX_CHILD_TOTAL_TOKENS: i64 = 200_000;
+const MIN_CHILD_OUTPUT_TOKENS: i64 = 64;
+const MAX_CHILD_OUTPUT_TOKENS: i64 = 32_768;
+const MAX_CHILD_TOOL_CALLS: i64 = 100;
 
 pub(crate) struct CreateChildRunInput<'a> {
     pub parent_run_id: &'a str,
@@ -51,196 +58,212 @@ impl Database {
         &self,
         input: CreateChildRunInput<'_>,
     ) -> Result<(StartRunResult, ChildRunRecord, bool), String> {
+        validate_child_run_budget(input.budget)?;
         let now = now_ms();
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
-            if let Some(existing) = query_child_run_by_tool_call(
-                &transaction,
-                input.parent_run_id,
-                input.tool_call_id,
-            )? {
-                let started = query_child_start_result(&transaction, &existing.child_run_id)?;
-                return Ok((started, existing, false));
-            }
+            let result = create_child_run_in_transaction(&transaction, input, now, None)?;
+            transaction.commit()?;
+            Ok(result)
+        })
+    }
+}
 
-            let (
-                parent_conversation_id,
-                project_root,
-                project_id,
-                lineage_root_id,
-                model,
-                root_run_id,
-                parent_depth,
-                parent_status,
-            ): (
-                String,
-                Option<String>,
-                Option<String>,
-                String,
-                String,
-                String,
-                i64,
-                String,
-            ) = transaction.query_row(
-                "SELECT c.id, c.project_root, c.project_id, COALESCE(c.lineage_root_id, c.id),
+pub(super) fn create_child_run_in_transaction(
+    transaction: &Transaction<'_>,
+    input: CreateChildRunInput<'_>,
+    now: i64,
+    graph_task_attempt_id: Option<&str>,
+) -> rusqlite::Result<(StartRunResult, ChildRunRecord, bool)> {
+    if let Some(existing) =
+        query_child_run_by_tool_call(transaction, input.parent_run_id, input.tool_call_id)?
+    {
+        let started = query_child_start_result(transaction, &existing.child_run_id)?;
+        return Ok((started, existing, false));
+    }
+
+    let (
+        parent_conversation_id,
+        project_root,
+        project_id,
+        lineage_root_id,
+        model,
+        root_run_id,
+        parent_depth,
+        parent_status,
+    ): (
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+        String,
+        i64,
+        String,
+    ) = transaction.query_row(
+        "SELECT c.id, c.project_root, c.project_id, COALESCE(c.lineage_root_id, c.id),
                         r.model, COALESCE(r.root_run_id, r.id), r.depth, r.status
                  FROM runs r JOIN conversations c ON c.id = r.conversation_id
                  WHERE r.id = ?1",
-                [input.parent_run_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                    ))
-                },
-            )?;
-            if !matches!(parent_status.as_str(), "queued" | "running") {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            if parent_depth >= MAX_CHILD_DEPTH {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            let worker_name: String = transaction.query_row(
+        [input.parent_run_id],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        },
+    )?;
+    if !matches!(parent_status.as_str(), "queued" | "running") {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    if parent_depth >= MAX_CHILD_DEPTH {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let worker_name: String = transaction.query_row(
                 "SELECT name FROM agents
                  WHERE id = ?1 AND runtime_type = 'pi'
                    AND (agent_kind = 'assistant' OR agent_kind = 'expert' OR agent_kind = 'worker')",
                 [input.worker_agent_id],
                 |row| row.get(0),
             )?;
-            let child_count: i64 = transaction.query_row(
-                "SELECT COUNT(*) FROM child_run_delegations WHERE parent_run_id = ?1",
-                [input.parent_run_id],
-                |row| row.get(0),
-            )?;
-            if child_count >= MAX_CHILDREN_PER_PARENT {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            let active_count: i64 = transaction.query_row(
-                "SELECT COUNT(*) FROM runs
+    let child_count: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM child_run_delegations WHERE parent_run_id = ?1",
+        [input.parent_run_id],
+        |row| row.get(0),
+    )?;
+    if child_count >= MAX_CHILDREN_PER_PARENT {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let active_count: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM runs
                  WHERE root_run_id = ?1 AND run_kind = 'child'
                    AND status IN ('queued', 'running', 'cancelling')",
-                [&root_run_id],
-                |row| row.get(0),
+        [&root_run_id],
+        |row| row.get(0),
+    )?;
+    if active_count >= MAX_ACTIVE_CHILDREN_PER_ROOT {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    if let (Some(team_run_id), Some(team_member_id)) = (input.team_run_id, input.team_member_id) {
+        let (team_parent_run_id, team_status, team_json): (String, String, String) = transaction
+            .query_row(
+                "SELECT parent_run_id, status, team_json FROM expert_team_runs WHERE id = ?1",
+                [team_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
-            if active_count >= MAX_ACTIVE_CHILDREN_PER_ROOT {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            if let (Some(team_run_id), Some(team_member_id)) =
-                (input.team_run_id, input.team_member_id)
-            {
-                let (team_parent_run_id, team_status, team_json): (String, String, String) =
-                    transaction.query_row(
-                        "SELECT parent_run_id, status, team_json FROM expert_team_runs WHERE id = ?1",
-                        [team_run_id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )?;
-                if team_parent_run_id != input.parent_run_id || team_status != "running" {
-                    return Err(rusqlite::Error::InvalidQuery);
-                }
-                let team: Value = serde_json::from_str(&team_json).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        team_json.len(),
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?;
-                let member_exists = team
-                    .get("members")
-                    .and_then(Value::as_array)
-                    .is_some_and(|members| {
-                        members.iter().any(|member| {
-                            member.get("id").and_then(Value::as_str) == Some(team_member_id)
-                                && member.get("agentId").and_then(Value::as_str)
-                                    == Some(input.worker_agent_id)
-                        })
-                    });
-                let active_team_member_count: i64 = transaction.query_row(
-                    "SELECT COUNT(*) FROM child_run_delegations
+        if team_parent_run_id != input.parent_run_id || team_status != "running" {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let team: Value = serde_json::from_str(&team_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                team_json.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        let member_exists = team
+            .get("members")
+            .and_then(Value::as_array)
+            .is_some_and(|members| {
+                members.iter().any(|member| {
+                    member.get("id").and_then(Value::as_str) == Some(team_member_id)
+                        && member.get("agentId").and_then(Value::as_str)
+                            == Some(input.worker_agent_id)
+                })
+            });
+        let active_team_member_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM child_run_delegations
                      WHERE team_run_id = ?1 AND status IN ('queued', 'running')",
-                    [team_run_id],
-                    |row| row.get(0),
-                )?;
-                if !member_exists || active_team_member_count > 0 {
-                    return Err(rusqlite::Error::InvalidQuery);
-                }
-            } else if input.team_run_id.is_some() || input.team_member_id.is_some() {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
+            [team_run_id],
+            |row| row.get(0),
+        )?;
+        if !member_exists || active_team_member_count > 0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    } else if input.team_run_id.is_some() || input.team_member_id.is_some() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
 
-            let delegation_id = Uuid::new_v4().to_string();
-            let child_conversation_id = Uuid::new_v4().to_string();
-            let child_run_id = Uuid::new_v4().to_string();
-            let message_id = Uuid::new_v4().to_string();
-            let title = super::truncate_title(input.objective);
-            let runtime_text = child_runtime_text(input.objective, input.context);
-            transaction.execute(
-                "INSERT INTO conversations(
+    let delegation_id = Uuid::new_v4().to_string();
+    let child_conversation_id = Uuid::new_v4().to_string();
+    let child_run_id = Uuid::new_v4().to_string();
+    let message_id = Uuid::new_v4().to_string();
+    let title = super::truncate_title(input.objective);
+    let runtime_text = child_runtime_text(input.objective, input.context);
+    transaction.execute(
+        "INSERT INTO conversations(
                     id, agent_id, title, project_root, project_id, status, created_at, updated_at,
                     last_message_at, parent_conversation_id, lineage_root_id, conversation_kind
                  ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6, ?6, ?7, ?8, 'child')",
-                params![
-                    child_conversation_id,
-                    input.worker_agent_id,
-                    title,
-                    project_root,
-                    project_id,
-                    now,
-                    parent_conversation_id,
-                    lineage_root_id,
-                ],
-            )?;
-            let budget_json = serde_json::to_string(input.budget)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            let allowed_tools_json = input
-                .allowed_tools
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            transaction.execute(
-                "INSERT INTO runs(
+        params![
+            child_conversation_id,
+            input.worker_agent_id,
+            title,
+            project_root,
+            project_id,
+            now,
+            parent_conversation_id,
+            lineage_root_id,
+        ],
+    )?;
+    let budget_json = serde_json::to_string(input.budget)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let allowed_tools_json = input
+        .allowed_tools
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    transaction.execute(
+        "INSERT INTO runs(
                     id, conversation_id, status, model, created_at, parent_run_id, root_run_id,
                     run_kind, depth, budget_json
                  ) VALUES (?1, ?2, 'queued', ?3, ?4, ?5, ?6, 'child', ?7, ?8)",
-                params![
-                    child_run_id,
-                    child_conversation_id,
-                    model,
-                    now,
-                    input.parent_run_id,
-                    root_run_id,
-                    parent_depth + 1,
-                    budget_json,
-                ],
-            )?;
-            let (trace_id, root_span_id) = observability::initialize_child_run_trace(
-                &transaction,
-                &child_run_id,
-                input.parent_run_id,
-                input.tool_call_id,
-                input.worker_agent_id,
-                &worker_name,
-                now,
-            )?;
-            transaction.execute(
-                "INSERT INTO messages(
+        params![
+            child_run_id,
+            child_conversation_id,
+            model,
+            now,
+            input.parent_run_id,
+            root_run_id,
+            parent_depth + 1,
+            budget_json,
+        ],
+    )?;
+    let (trace_id, root_span_id) = observability::initialize_child_run_trace(
+        transaction,
+        &child_run_id,
+        input.parent_run_id,
+        input.tool_call_id,
+        input.worker_agent_id,
+        &worker_name,
+        now,
+    )?;
+    transaction.execute(
+        "INSERT INTO messages(
                     id, conversation_id, run_id, role, kind, content, status, ordinal,
                     created_at, updated_at
                  ) VALUES (?1, ?2, ?3, 'user', 'text', ?4, 'completed', 1, ?5, ?5)",
-                params![message_id, child_conversation_id, child_run_id, runtime_text, now],
-            )?;
-            transaction.execute(
+        params![
+            message_id,
+            child_conversation_id,
+            child_run_id,
+            runtime_text,
+            now
+        ],
+    )?;
+    transaction.execute(
                 "INSERT INTO child_run_delegations(
                     id, parent_run_id, child_run_id, child_conversation_id, tool_call_id,
                     worker_agent_id, objective, context, status, max_duration_ms,
                     max_total_tokens, max_output_tokens, max_tool_calls, created_at,
-                    team_run_id, team_member_id, allowed_tools_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'queued', ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                    team_run_id, team_member_id, allowed_tools_json, graph_task_attempt_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'queued', ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     delegation_id,
                     input.parent_run_id,
@@ -258,43 +281,69 @@ impl Database {
                     input.team_run_id,
                     input.team_member_id,
                     allowed_tools_json,
+                    graph_task_attempt_id,
                 ],
             )?;
-            let started = StartRunResult {
-                run: RunRecord {
-                    id: child_run_id.clone(),
-                    conversation_id: child_conversation_id.clone(),
-                    runtime_session_id: None,
-                    status: "queued".to_owned(),
-                    model,
-                    started_at: None,
-                    finished_at: None,
-                    error_code: None,
-                    error_message: None,
-                    last_seq: 0,
-                    trace_id: Some(trace_id),
-                    root_span_id: Some(root_span_id),
-                },
-                user_message: MessageRecord {
-                    id: message_id,
-                    conversation_id: child_conversation_id,
-                    run_id: Some(child_run_id.clone()),
-                    role: "user".to_owned(),
-                    kind: "text".to_owned(),
-                    content: runtime_text,
-                    status: "completed".to_owned(),
-                    ordinal: 1,
-                    created_at: now,
-                    updated_at: now,
-                },
-                attachments: Vec::new(),
-            };
-            let child = query_child_run(&transaction, &child_run_id)?;
-            transaction.commit()?;
-            Ok((started, child, true))
-        })
-    }
+    let started = StartRunResult {
+        run: RunRecord {
+            id: child_run_id.clone(),
+            conversation_id: child_conversation_id.clone(),
+            runtime_session_id: None,
+            status: "queued".to_owned(),
+            model,
+            started_at: None,
+            finished_at: None,
+            error_code: None,
+            error_message: None,
+            last_seq: 0,
+            trace_id: Some(trace_id),
+            root_span_id: Some(root_span_id),
+        },
+        user_message: MessageRecord {
+            id: message_id,
+            conversation_id: child_conversation_id,
+            run_id: Some(child_run_id.clone()),
+            role: "user".to_owned(),
+            kind: "text".to_owned(),
+            content: runtime_text,
+            status: "completed".to_owned(),
+            ordinal: 1,
+            created_at: now,
+            updated_at: now,
+        },
+        attachments: Vec::new(),
+    };
+    let child = query_child_run(transaction, &child_run_id)?;
+    Ok((started, child, true))
+}
 
+pub(super) fn validate_child_run_budget(budget: &ChildRunBudget) -> Result<(), String> {
+    if !(MIN_CHILD_DURATION_MS..=MAX_CHILD_DURATION_MS).contains(&budget.max_duration_ms) {
+        return Err(format!(
+            "child maxDurationMs must be between {MIN_CHILD_DURATION_MS} and {MAX_CHILD_DURATION_MS}"
+        ));
+    }
+    if !(MIN_CHILD_TOTAL_TOKENS..=MAX_CHILD_TOTAL_TOKENS).contains(&budget.max_total_tokens) {
+        return Err(format!(
+            "child maxTotalTokens must be between {MIN_CHILD_TOTAL_TOKENS} and {MAX_CHILD_TOTAL_TOKENS}"
+        ));
+    }
+    if !(MIN_CHILD_OUTPUT_TOKENS..=MAX_CHILD_OUTPUT_TOKENS).contains(&budget.max_output_tokens)
+        || budget.max_output_tokens > budget.max_total_tokens
+    {
+        return Err(format!(
+            "child maxOutputTokens must be between {MIN_CHILD_OUTPUT_TOKENS} and {MAX_CHILD_OUTPUT_TOKENS} and cannot exceed maxTotalTokens"
+        ));
+    }
+    if !(0..=MAX_CHILD_TOOL_CALLS).contains(&budget.max_tool_calls) {
+        return Err(format!(
+            "child maxToolCalls must be between 0 and {MAX_CHILD_TOOL_CALLS}"
+        ));
+    }
+    Ok(())
+}
+
+impl Database {
     pub fn child_runs_for_parent(
         &self,
         parent_run_id: &str,
@@ -338,7 +387,8 @@ impl Database {
             let mut statement = connection.prepare(
                 "SELECT a.id, a.tool_call_id, t.run_id, t.conversation_id, t.tool_name,
                         a.status, a.requested_action, a.request_json, a.decision_json,
-                        a.requested_at, a.resolved_at
+                        a.requested_at, a.resolved_at, a.category, a.claimed_at,
+                        a.claimed_by_run_id
                  FROM approvals a
                  JOIN tool_calls t ON t.id = a.tool_call_id
                  JOIN conversations child ON child.id = t.conversation_id
@@ -387,9 +437,9 @@ impl Database {
         let budget = self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT d.max_tool_calls, d.max_total_tokens,
+                    "SELECT d.max_tool_calls, d.max_total_tokens, d.max_output_tokens,
                             (SELECT COUNT(*) FROM tool_calls t WHERE t.run_id = d.child_run_id),
-                            d.total_tokens
+                            d.total_tokens, d.output_tokens
                      FROM child_run_delegations d WHERE d.child_run_id = ?1",
                     [run_id],
                     |row| {
@@ -398,22 +448,31 @@ impl Database {
                             row.get::<_, i64>(1)?,
                             row.get::<_, i64>(2)?,
                             row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, i64>(5)?,
                         ))
                     },
                 )
                 .optional()
         })?;
-        let Some((max_tools, max_tokens, used_tools, used_tokens)) = budget else {
+        let Some((max_tools, max_tokens, max_output, used_tools, used_tokens, used_output)) =
+            budget
+        else {
             return Ok(());
         };
-        if used_tools >= max_tools {
+        if used_tools > max_tools {
             return Err(format!(
-                "child_run.tool_budget_exceeded: Child Run used {used_tools} of {max_tools} allowed tool calls"
+                "child_run.tool_budget_exceeded: Child Run has {used_tools} persisted tool calls for {max_tools} reserved slots"
             ));
         }
         if used_tokens >= max_tokens {
             return Err(format!(
                 "child_run.token_budget_exceeded: Child Run used {used_tokens} of {max_tokens} allowed tokens"
+            ));
+        }
+        if used_output >= max_output {
+            return Err(format!(
+                "child_run.output_budget_exceeded: Child Run used {used_output} of {max_output} allowed output tokens"
             ));
         }
         Ok(())
@@ -422,7 +481,7 @@ impl Database {
     pub(crate) fn child_budget_exceeded(&self, run_id: &str) -> Result<bool, String> {
         self.with_connection(|connection| {
             connection.query_row(
-                "SELECT total_tokens >= max_total_tokens
+                "SELECT total_tokens >= max_total_tokens OR output_tokens >= max_output_tokens
                  FROM child_run_delegations WHERE child_run_id = ?1",
                 [run_id],
                 |row| row.get(0),
@@ -432,7 +491,34 @@ impl Database {
 
     pub(crate) fn sync_child_run_terminal(&self, run_id: &str) -> Result<(), String> {
         let now = now_ms();
-        self.with_connection(|connection| sync_child_terminal(connection, run_id, now))
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            sync_child_terminal(&transaction, run_id, now)?;
+            super::graph_lead::reconcile_graph_child_terminal_in_transaction(
+                &transaction,
+                run_id,
+                now,
+            )
+            .map_err(repository_error_as_sqlite)?;
+            transaction.commit()
+        })
+    }
+
+    pub(crate) fn graph_attempt_id_for_child_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<String>, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT graph_task_attempt_id FROM child_run_delegations
+                     WHERE child_run_id = ?1",
+                    [run_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map(|value| value.flatten())
+        })
     }
 }
 
@@ -488,10 +574,51 @@ pub(super) fn project_child_run_event(
         }
         "run.completed" | "run.cancelled" | "run.failed" | "run.interrupted" => {
             sync_child_terminal(transaction, run_id, now)?;
+            super::graph_lead::reconcile_graph_child_terminal_in_transaction(
+                transaction,
+                run_id,
+                now,
+            )
+            .map_err(repository_error_as_sqlite)?;
         }
         _ => {}
     }
     Ok(())
+}
+
+pub(super) fn reconcile_terminal_graph_children_in_transaction(
+    transaction: &Transaction<'_>,
+    now: i64,
+) -> rusqlite::Result<usize> {
+    let child_run_ids = transaction
+        .prepare(
+            "SELECT delegation.child_run_id
+             FROM child_run_delegations AS delegation
+             JOIN runs AS child_run ON child_run.id = delegation.child_run_id
+             WHERE delegation.graph_task_attempt_id IS NOT NULL
+               AND child_run.status IN ('failed', 'cancelled', 'interrupted')
+             ORDER BY child_run.finished_at, delegation.id",
+        )?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut reconciled = 0;
+    for child_run_id in child_run_ids {
+        sync_child_terminal(transaction, &child_run_id, now)?;
+        if super::graph_lead::reconcile_graph_child_terminal_in_transaction(
+            transaction,
+            &child_run_id,
+            now,
+        )
+        .map_err(repository_error_as_sqlite)?
+        {
+            reconciled += 1;
+        }
+    }
+    Ok(reconciled)
+}
+
+fn repository_error_as_sqlite(error: super::work_graph::RepositoryError) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
 
 fn sync_child_terminal(
@@ -577,7 +704,7 @@ fn map_child_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChildRunRecord> {
     })
 }
 
-fn query_child_run(
+pub(super) fn query_child_run(
     connection: &rusqlite::Connection,
     child_run_id: &str,
 ) -> rusqlite::Result<ChildRunRecord> {
@@ -601,7 +728,7 @@ fn query_child_run_optional(
         .optional()
 }
 
-fn query_child_run_by_tool_call(
+pub(super) fn query_child_run_by_tool_call(
     connection: &rusqlite::Connection,
     parent_run_id: &str,
     tool_call_id: &str,
@@ -635,7 +762,7 @@ fn query_child_runs(
     records
 }
 
-fn query_child_start_result(
+pub(super) fn query_child_start_result(
     connection: &rusqlite::Connection,
     run_id: &str,
 ) -> rusqlite::Result<StartRunResult> {
@@ -796,6 +923,9 @@ mod tests {
             1,
             "hidden child conversations must not enter the primary inbox"
         );
+        database
+            .apply_runtime_event(&child.child_run_id, 1, &json!({ "type": "run.started" }))
+            .expect("start child Run before its Host ToolCall");
         let protected_tool = database
             .create_host_tool_call(
                 &child.child_run_id,
@@ -869,6 +999,8 @@ mod tests {
                     "type": "usage.updated",
                     "inputTokens": 120,
                     "outputTokens": 30,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": 0,
                     "totalTokens": 150
                 }),
             ),
@@ -896,6 +1028,254 @@ mod tests {
             .active_child_run_ids(&parent.run.id)
             .unwrap()
             .is_empty());
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cumulative_usage_enforces_total_and_output_child_budgets_at_the_same_boundary() {
+        let (database, path, parent) = test_database();
+        let (_, total_child, _) = create_child(&database, &parent.run.id, "delegate-total-budget");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE child_run_delegations
+                     SET max_total_tokens = 256, max_output_tokens = 1_000
+                     WHERE child_run_id = ?1",
+                    [&total_child.child_run_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        database
+            .apply_runtime_event(&total_child.child_run_id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &total_child.child_run_id,
+                2,
+                &json!({
+                    "type":"usage.updated","inputTokens":64,"outputTokens":64,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":128
+                }),
+            )
+            .unwrap();
+        assert!(!database
+            .child_budget_exceeded(&total_child.child_run_id)
+            .unwrap());
+        assert!(database
+            .apply_runtime_event(
+                &total_child.child_run_id,
+                3,
+                &json!({
+                    "type":"usage.updated","inputTokens":63,"outputTokens":64,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":127
+                }),
+            )
+            .is_err());
+        let after_rejected = database
+            .child_run(&total_child.child_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (after_rejected.total_tokens, after_rejected.output_tokens),
+            (128, 64)
+        );
+        database
+            .apply_runtime_event(
+                &total_child.child_run_id,
+                4,
+                &json!({
+                    "type":"usage.updated","inputTokens":128,"outputTokens":128,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":256
+                }),
+            )
+            .unwrap();
+        assert!(database
+            .child_budget_exceeded(&total_child.child_run_id)
+            .unwrap());
+        assert!(database
+            .enforce_child_tool_budget(&total_child.child_run_id)
+            .unwrap_err()
+            .contains("token_budget_exceeded"));
+        let completion_error = database
+            .apply_runtime_event(
+                &total_child.child_run_id,
+                5,
+                &json!({"type":"run.completed"}),
+            )
+            .expect_err("completion cannot race past the total-token budget");
+        assert!(completion_error.contains("[child_run.budget_exceeded]"));
+        let total_before_failure = database
+            .child_run(&total_child.child_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(total_before_failure.status, "running");
+        database
+            .mark_run_failed(
+                &total_child.child_run_id,
+                "child_run.budget_exceeded",
+                &completion_error,
+            )
+            .unwrap();
+
+        let (_, output_child, _) =
+            create_child(&database, &parent.run.id, "delegate-output-budget");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE child_run_delegations
+                     SET max_total_tokens = 1_000, max_output_tokens = 64
+                     WHERE child_run_id = ?1",
+                    [&output_child.child_run_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &output_child.child_run_id,
+                1,
+                &json!({"type":"run.started"}),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &output_child.child_run_id,
+                2,
+                &json!({
+                    "type":"usage.updated","inputTokens":16,"outputTokens":32,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":48
+                }),
+            )
+            .unwrap();
+        assert!(!database
+            .child_budget_exceeded(&output_child.child_run_id)
+            .unwrap());
+        database
+            .apply_runtime_event(
+                &output_child.child_run_id,
+                3,
+                &json!({
+                    "type":"usage.updated","inputTokens":32,"outputTokens":64,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":96
+                }),
+            )
+            .unwrap();
+        assert!(database
+            .child_budget_exceeded(&output_child.child_run_id)
+            .unwrap());
+        assert!(database
+            .enforce_child_tool_budget(&output_child.child_run_id)
+            .unwrap_err()
+            .contains("output_budget_exceeded"));
+        let completion_error = database
+            .apply_runtime_event(
+                &output_child.child_run_id,
+                4,
+                &json!({"type":"run.completed"}),
+            )
+            .expect_err("completion cannot race past the output-token budget");
+        assert!(completion_error.contains("[child_run.budget_exceeded]"));
+        database
+            .mark_run_failed(
+                &output_child.child_run_id,
+                "child_run.budget_exceeded",
+                &completion_error,
+            )
+            .unwrap();
+
+        let (_, below_child, _) = create_child(&database, &parent.run.id, "delegate-below-budget");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE child_run_delegations
+                     SET max_total_tokens = 256, max_output_tokens = 64,
+                         max_duration_ms = 60_000
+                     WHERE child_run_id = ?1",
+                    [&below_child.child_run_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        database
+            .apply_runtime_event(&below_child.child_run_id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &below_child.child_run_id,
+                2,
+                &json!({
+                    "type":"usage.updated","inputTokens":192,"outputTokens":63,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":255
+                }),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &below_child.child_run_id,
+                3,
+                &json!({"type":"run.completed"}),
+            )
+            .expect("one token below both frozen boundaries may complete");
+
+        let (_, duration_child, _) =
+            create_child(&database, &parent.run.id, "delegate-duration-budget");
+        database
+            .apply_runtime_event(
+                &duration_child.child_run_id,
+                1,
+                &json!({"type":"run.started"}),
+            )
+            .unwrap();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE child_run_delegations SET max_duration_ms = 1_000
+                     WHERE child_run_id = ?1",
+                    [&duration_child.child_run_id],
+                )?;
+                let transaction = connection.transaction()?;
+                transaction.execute(
+                    "UPDATE runs SET started_at = 10000 WHERE id = ?1",
+                    [&duration_child.child_run_id],
+                )?;
+                super::super::enforce_managed_run_completion_budget(
+                    &transaction,
+                    &duration_child.child_run_id,
+                    10_999,
+                )?;
+                let boundary = super::super::enforce_managed_run_completion_budget(
+                    &transaction,
+                    &duration_child.child_run_id,
+                    11_000,
+                );
+                assert!(boundary
+                    .unwrap_err()
+                    .to_string()
+                    .contains("[child_run.budget_exceeded]"));
+                transaction.rollback()?;
+                Ok(())
+            })
+            .unwrap();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE runs SET started_at = ?2 WHERE id = ?1",
+                    params![duration_child.child_run_id, now_ms().saturating_sub(1_001)],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let duration_error = database
+            .apply_runtime_event(
+                &duration_child.child_run_id,
+                2,
+                &json!({"type":"run.completed"}),
+            )
+            .expect_err("duration deadline is a transactional completion boundary");
+        assert!(duration_error.contains("[child_run.budget_exceeded]"));
 
         drop(database);
         let _ = std::fs::remove_file(path);
@@ -963,6 +1343,9 @@ mod tests {
             .unwrap();
         assert!(database.enforce_child_tool_budget(&first_child_id).is_ok());
         database
+            .apply_runtime_event(&first_child_id, 1, &json!({ "type": "run.started" }))
+            .expect("start child Run before consuming its tool budget");
+        database
             .create_host_tool_call(
                 &first_child_id,
                 "child-tool-1",
@@ -972,10 +1355,383 @@ mod tests {
                 false,
             )
             .unwrap();
+        assert!(
+            database.enforce_child_tool_budget(&first_child_id).is_ok(),
+            "the already-reserved boundary ToolCall remains executable"
+        );
+        let error = database
+            .create_host_tool_call(
+                &first_child_id,
+                "child-tool-2",
+                "memory_search",
+                &json!({ "query": "must not acquire a second slot" }),
+                "running",
+                false,
+            )
+            .expect_err("the next fresh ToolCall must be rejected atomically");
+        assert!(error.contains("child_run.tool_budget_exceeded"));
+        let count: i64 = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1",
+                    [&first_child_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn child_managed_tool_slots_are_atomic_and_completion_allows_the_exact_boundary() {
+        use crate::database::HostToolCallDisposition;
+        use std::sync::{Arc, Barrier};
+
+        let (database, path, parent) = test_database();
+        let (_, child, _) = create_child(&database, &parent.run.id, "atomic-child");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE child_run_delegations SET max_tool_calls = 1
+                     WHERE child_run_id = ?1",
+                    [&child.child_run_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        database
+            .apply_runtime_event(&child.child_run_id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let mut workers = Vec::new();
+        for call_id in ["atomic-a", "atomic-b"] {
+            let contender = Database::open(path.clone()).unwrap();
+            let barrier = barrier.clone();
+            let child_run_id = child.child_run_id.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                contender
+                    .create_host_tool_call_once(
+                        &child_run_id,
+                        call_id,
+                        "memory_search",
+                        &json!({"query":call_id}),
+                        "running",
+                        false,
+                    )
+                    .map(|(_, disposition)| disposition)
+            }));
+        }
+        let outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| { matches!(outcome, Ok(HostToolCallDisposition::Created)) })
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| outcome
+                    .as_ref()
+                    .is_err_and(|error| { error.contains("child_run.tool_budget_exceeded") }))
+                .count(),
+            1
+        );
+        let count: i64 = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1",
+                    [&child.child_run_id],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+        database
+            .apply_runtime_event(&child.child_run_id, 2, &json!({"type":"run.completed"}))
+            .expect("count == maxToolCalls is a valid completed boundary");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn child_tool_acquisition_rechecks_all_budgets_and_delayed_promotion() {
+        let (database, path, parent) = test_database();
+        let (_, child, _) = create_child(&database, &parent.run.id, "budget-child");
+        database
+            .apply_runtime_event(&child.child_run_id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+
+        for (field, call_id) in [
+            ("total_tokens = max_total_tokens", "blocked-total"),
+            ("output_tokens = max_output_tokens", "blocked-output"),
+        ] {
+            database
+                .with_connection(|connection| {
+                    connection.execute(
+                        &format!(
+                            "UPDATE child_run_delegations SET {field} WHERE child_run_id = ?1"
+                        ),
+                        [&child.child_run_id],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            let error = database
+                .create_host_tool_call_once(
+                    &child.child_run_id,
+                    call_id,
+                    "memory_search",
+                    &json!({"query":call_id}),
+                    "running",
+                    false,
+                )
+                .expect_err("a reached cumulative budget cannot acquire a fresh tool slot");
+            assert!(error.contains("child_run.budget_exceeded"));
+            database
+                .with_connection(|connection| {
+                    connection.execute(
+                        "UPDATE child_run_delegations
+                         SET total_tokens = 0, output_tokens = 0 WHERE child_run_id = ?1",
+                        [&child.child_run_id],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE runs SET started_at = ?2 WHERE id = ?1",
+                    params![
+                        child.child_run_id,
+                        now_ms().saturating_sub(default_budget().max_duration_ms + 1)
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         assert!(database
-            .enforce_child_tool_budget(&first_child_id)
-            .expect_err("tool budget must stop the next call")
-            .contains("tool_budget_exceeded"));
+            .create_host_tool_call_once(
+                &child.child_run_id,
+                "blocked-duration",
+                "memory_search",
+                &json!({"query":"late"}),
+                "running",
+                false,
+            )
+            .unwrap_err()
+            .contains("child_run.budget_exceeded"));
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE runs SET started_at = ?2 WHERE id = ?1",
+                    params![child.child_run_id, now_ms()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        database
+            .apply_runtime_event(
+                &child.child_run_id,
+                2,
+                &json!({
+                    "type":"tool.started", "toolCallId":"reserved-before-limit",
+                    "tool":"memory_search", "input":{"query":"reserved"}
+                }),
+            )
+            .expect("the Runtime projection reserves its slot while budgets are below limits");
+        let pending = database
+            .create_host_tool_call(
+                &child.child_run_id,
+                "approved-before-limit",
+                "write",
+                &json!({"path":"bounded.md"}),
+                "pending",
+                true,
+            )
+            .expect("approval ToolCall acquires its slot before waiting for a person");
+        let approval = database
+            .create_approval(
+                &pending.id,
+                "write bounded file",
+                &json!({"path":"bounded.md"}),
+            )
+            .unwrap();
+        database
+            .resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce)
+            .unwrap()
+            .expect("approve once");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE child_run_delegations SET total_tokens = max_total_tokens
+                     WHERE child_run_id = ?1",
+                    [&child.child_run_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(database
+            .create_host_tool_call_once(
+                &child.child_run_id,
+                "reserved-before-limit",
+                "memory_search",
+                &json!({"query":"reserved"}),
+                "running",
+                false,
+            )
+            .expect_err("promotion must recheck non-tool budgets")
+            .contains("child_run.budget_exceeded"));
+        let claim_error = database
+            .claim_approved_tool_call(&child.child_run_id, "approved-before-limit")
+            .expect_err("approval claim must recheck the managed budget");
+        assert!(claim_error.contains("child_run.budget_exceeded"));
+        assert!(!database
+            .claim_approved_tool_call(&child.child_run_id, "approved-before-limit")
+            .unwrap());
+        let state: (String, i64, String, String, bool) = database
+            .with_connection(|connection| {
+                Ok((
+                    connection.query_row(
+                        "SELECT execution_location FROM tool_calls
+                         WHERE run_id = ?1 AND runtime_tool_call_id = 'reserved-before-limit'",
+                        [&child.child_run_id],
+                        |row| row.get(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1",
+                        [&child.child_run_id],
+                        |row| row.get(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT status FROM tool_calls WHERE id = ?1",
+                        [&pending.id],
+                        |row| row.get(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT error_message FROM tool_calls WHERE id = ?1",
+                        [&pending.id],
+                        |row| row.get(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT claimed_at IS NOT NULL FROM approvals WHERE id = ?1",
+                        [&approval.id],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(state.0, "runtime");
+        assert_eq!(state.1, 2);
+        assert_eq!(state.2, "failed");
+        assert_eq!(state.3, claim_error);
+        assert!(state.4);
+        let (replayed, disposition) = database
+            .create_host_tool_call_once(
+                &child.child_run_id,
+                "approved-before-limit",
+                "write",
+                &json!({"path":"bounded.md"}),
+                "pending",
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            disposition,
+            crate::database::HostToolCallDisposition::ReplayTerminal
+        );
+        assert_eq!(
+            replayed.error_message.as_deref(),
+            Some(claim_error.as_str())
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn child_zero_tool_budget_allows_text_only_completion_and_rejects_legacy_excess() {
+        let (database, path, parent) = test_database();
+        let (_, text_only, _) = create_child(&database, &parent.run.id, "text-only-child");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE child_run_delegations SET max_tool_calls = 0
+                     WHERE child_run_id = ?1",
+                    [&text_only.child_run_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        database
+            .apply_runtime_event(&text_only.child_run_id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        assert!(database
+            .apply_runtime_event(
+                &text_only.child_run_id,
+                2,
+                &json!({
+                    "type":"tool.started", "toolCallId":"forbidden",
+                    "tool":"memory_search", "input":{"query":"no slot"}
+                }),
+            )
+            .unwrap_err()
+            .contains("child_run.tool_budget_exceeded"));
+        database
+            .apply_runtime_event(&text_only.child_run_id, 2, &json!({"type":"run.completed"}))
+            .expect("maxToolCalls=0 still permits a pure-text completion");
+
+        let (_, legacy, _) = create_child(&database, &parent.run.id, "legacy-overflow-child");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE child_run_delegations SET max_tool_calls = 1
+                     WHERE child_run_id = ?1",
+                    [&legacy.child_run_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        database
+            .apply_runtime_event(&legacy.child_run_id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .with_connection(|connection| {
+                for index in 0..2 {
+                    connection.execute(
+                        "INSERT INTO tool_calls(
+                            id, runtime_tool_call_id, run_id, conversation_id, tool_name,
+                            input_json, status, execution_location, requires_approval,
+                            started_at, updated_at
+                         ) SELECT ?1, ?2, id, conversation_id, 'legacy', '{}', 'completed',
+                                  'runtime', 0, ?3, ?3 FROM runs WHERE id = ?4",
+                        params![
+                            Uuid::new_v4().to_string(),
+                            format!("legacy-{index}"),
+                            now_ms(),
+                            legacy.child_run_id
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(database
+            .apply_runtime_event(&legacy.child_run_id, 2, &json!({"type":"run.completed"}))
+            .unwrap_err()
+            .contains("child_run.tool_budget_exceeded"));
 
         drop(database);
         let _ = std::fs::remove_file(path);

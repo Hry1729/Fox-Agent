@@ -4,15 +4,30 @@ export type KnowledgeReference = SharedKnowledgeReference
 
 export type KnowledgeBaseStatus = 'empty' | 'indexing' | 'ready' | 'error' | 'migrating'
 
+export type KnowledgeSearchMode = 'keyword' | 'vector' | 'hybrid'
+
+export interface LocalKnowledgeEmbeddingModel {
+  id: string
+  name: string
+  version: string
+  dimension: number
+}
+
 export interface LocalKnowledgeBase {
   id: string
   name: string
   description: string
   status: KnowledgeBaseStatus
   documentCount: number
-  chunkCount: number
-  vectorCount: number
+  /** A null count means that the Host has not measured this capability. */
+  chunkCount: number | null
+  vectorCount: number | null
   activeGeneration: number | null
+  textIndexReady: boolean
+  vectorIndexReady: boolean
+  searchMode: KnowledgeSearchMode
+  embeddingModel: LocalKnowledgeEmbeddingModel | null
+  fallbackReason: string | null
   storagePath: string
   writable: boolean
   lastIndexedAt: string | null
@@ -20,12 +35,10 @@ export interface LocalKnowledgeBase {
 }
 
 export interface LocalKnowledgeBaseDetail extends LocalKnowledgeBase {
-  embeddingModel: string
-  embeddingDimension: number
-  parserVersion: string
+  parserVersion: string | null
   storage: {
-    freeBytes: number
-    totalBytes: number
+    freeBytes: number | null
+    totalBytes: number | null
   }
   recentJobs: KnowledgeJob[]
 }
@@ -232,6 +245,8 @@ export interface LocalKnowledgeGateway {
   revealLocalFile(id: string): Promise<boolean>
   getKnowledgeBase(id: string): Promise<LocalKnowledgeBaseDetail>
   createKnowledgeBase(request: LocalKnowledgeBaseCreateRequest): Promise<LocalKnowledgeBase>
+  updateKnowledgeBase(id: string, request: LocalKnowledgeBaseCreateRequest): Promise<LocalKnowledgeBase>
+  deleteKnowledgeBase(id: string): Promise<boolean>
   listDocuments(id: string, options?: { query?: string }): Promise<Page<LocalKnowledgeDocument>>
   readDocumentFileRange(knowledgeBaseId: string, documentId: string, start: number, end: number): Promise<unknown>
   openDocumentFile(knowledgeBaseId: string, documentId: string): Promise<boolean>

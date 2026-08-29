@@ -13,7 +13,7 @@ async function approvedArgs(tool, params, requestPreflight, signal) {
   return response.input
 }
 
-export function createReadOnlyTools(requestPreflight) {
+export function createReadOnlyTools(requestPreflight, { limits } = {}) {
   return defineFoxTools([
     {
       name: 'read',
@@ -22,7 +22,7 @@ export function createReadOnlyTools(requestPreflight) {
       parameters: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }),
       execute: async (_toolCallId, params, signal) => {
         const input = await approvedArgs('read', params, requestPreflight, signal)
-        return executeReadOnlyTool('read', input, { signal })
+        return executeReadOnlyTool('read', input, { signal, limits })
       },
     },
     {
@@ -32,7 +32,7 @@ export function createReadOnlyTools(requestPreflight) {
       parameters: Type.Object({ path: Type.Optional(Type.String()) }),
       execute: async (_toolCallId, params, signal) => {
         const input = await approvedArgs('ls', params, requestPreflight, signal)
-        return executeReadOnlyTool('ls', input, { signal })
+        return executeReadOnlyTool('ls', input, { signal, limits })
       },
     },
     {
@@ -42,7 +42,7 @@ export function createReadOnlyTools(requestPreflight) {
       parameters: Type.Object({ path: Type.Optional(Type.String()), pattern: Type.String() }),
       execute: async (_toolCallId, params, signal) => {
         const input = await approvedArgs('find', params, requestPreflight, signal)
-        return executeReadOnlyTool('find', input, { signal })
+        return executeReadOnlyTool('find', input, { signal, limits })
       },
     },
     {
@@ -52,7 +52,7 @@ export function createReadOnlyTools(requestPreflight) {
       parameters: Type.Object({ path: Type.Optional(Type.String()), pattern: Type.String() }),
       execute: async (_toolCallId, params, signal) => {
         const input = await approvedArgs('grep', params, requestPreflight, signal)
-        return executeReadOnlyTool('grep', input, { signal })
+        return executeReadOnlyTool('grep', input, { signal, limits })
       },
     },
   ], { source: 'fox-read-only', execution: 'runtime', trusted: true })

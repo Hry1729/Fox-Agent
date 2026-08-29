@@ -133,12 +133,11 @@ export function GoalProgress({ data, className, defaultExpanded = false, onEvide
         </div>
 
         {goal.status === 'proposed' && onResolveConfirmation && (
-          <div className="border-t bg-card px-4 py-3">
-            <p className="mb-3 text-sm text-muted-foreground">Fox 将为这项工作跟踪任务、执行过程和证据。是否进入工作模式并继续执行？</p>
-            <div className="flex justify-end gap-2">
+          <div className="fox-goal-confirmation">
+            <p className="fox-goal-confirmation-copy">Fox 将为这项工作跟踪任务、执行过程和证据。是否进入工作模式并继续执行？</p>
+            <div className="fox-goal-confirmation-actions">
               <Button
                 variant="outline"
-                size="sm"
                 disabled={resolving}
                 onClick={async () => {
                   setResolving(true)
@@ -146,7 +145,6 @@ export function GoalProgress({ data, className, defaultExpanded = false, onEvide
                 }}
               >暂不执行</Button>
               <Button
-                size="sm"
                 disabled={resolving}
                 onClick={async () => {
                   setResolving(true)

@@ -20,6 +20,7 @@ import type {
   LocalKnowledgeBase,
   LocalKnowledgeBaseDetail,
   LocalKnowledgeBaseCreateRequest,
+  KnowledgeSearchMode,
   LocalKnowledgeDocument,
   LocalKnowledgeCatalogFile,
   LocalKnowledgeFileSource,
@@ -60,6 +61,8 @@ export type LocalKnowledgeDesktopClient = Pick<
   | 'openLocalKnowledgeLocalFile'
   | 'getLocalKnowledgeBase'
   | 'createLocalKnowledgeBase'
+  | 'updateLocalKnowledgeBase'
+  | 'deleteLocalKnowledgeBase'
   | 'listLocalKnowledgeDocuments'
   | 'readLocalKnowledgeDocumentFileRange'
   | 'openLocalKnowledgeDocumentFile'
@@ -146,25 +149,41 @@ function parseGenerationSequence(value: string | null): number | null {
 
 function baseStatus(dto: LocalKnowledgeBaseDto): LocalKnowledgeBase['status'] {
   const activeJobStatus = dto.activeJobStatus?.toLowerCase()
-  if (activeJobStatus === 'failed' || activeJobStatus === 'error') return 'error'
-  if (activeJobStatus === 'queued' || activeJobStatus === 'running' || activeJobStatus === 'paused' || activeJobStatus === 'interrupted') return 'indexing'
-  if (dto.activeIndexGeneration) return 'ready'
-  return dto.documentCount > 0 ? 'ready' : 'empty'
+  if (activeJobStatus === 'failed' || activeJobStatus === 'error' || activeJobStatus === 'interrupted') return 'error'
+  if (activeJobStatus === 'queued' || activeJobStatus === 'running' || activeJobStatus === 'paused') return 'indexing'
+  if (dto.textIndexReady === true || dto.vectorIndexReady === true) return 'ready'
+  return dto.documentCount > 0 ? 'error' : 'empty'
+}
+
+function searchMode(value: string | null | undefined): KnowledgeSearchMode {
+  return value === 'vector' || value === 'hybrid' ? value : 'keyword'
+}
+
+function nullableCount(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : null
 }
 
 export function mapLocalKnowledgeBase(dto: LocalKnowledgeBaseDto, storage?: LocalKnowledgeStorageStatusDto): LocalKnowledgeBase {
+  const vectorIndexReady = dto.vectorIndexReady === true
+  const vectorCapabilityReported = 'vectorIndexReady' in dto
+  const embeddingModel = dto.embeddingModel ?? null
   return {
     id: dto.id,
     name: dto.name,
     description: dto.description ?? '',
     status: baseStatus(dto),
     documentCount: Math.max(0, numberValue(dto.documentCount)),
-    chunkCount: 0,
-    vectorCount: 0,
+    chunkCount: nullableCount(dto.chunkCount),
+    vectorCount: nullableCount(dto.vectorCount),
     activeGeneration: parseGenerationSequence(dto.activeIndexGeneration),
+    textIndexReady: dto.textIndexReady === true,
+    vectorIndexReady,
+    searchMode: searchMode(dto.searchMode),
+    embeddingModel,
+    fallbackReason: dto.fallbackReason ?? (vectorIndexReady ? null : vectorCapabilityReported ? '向量索引未就绪' : 'Host 未提供向量索引状态'),
     storagePath: storage?.rootPath ?? '',
     writable: storage?.writable ?? false,
-    lastIndexedAt: null,
+    lastIndexedAt: toIsoTimestamp(dto.lastIndexedAt),
     updatedAt: requiredIsoTimestamp(dto.updatedAt),
   }
 }
@@ -176,10 +195,11 @@ export function mapLocalKnowledgeDetail(
 ): LocalKnowledgeBaseDetail {
   return {
     ...mapLocalKnowledgeBase(dto, storage),
-    embeddingModel: '未提供',
-    embeddingDimension: 0,
-    parserVersion: '未提供',
-    storage: { freeBytes: 0, totalBytes: 0 },
+    parserVersion: dto.parserVersion ?? null,
+    storage: {
+      freeBytes: nullableCount(dto.storageFreeBytes),
+      totalBytes: nullableCount(dto.storageTotalBytes),
+    },
     recentJobs: recentJobs.slice(0, 3),
   }
 }
@@ -451,6 +471,15 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
       if (!name) unavailable('local_knowledge.name_required', '知识库名称不能为空。')
       const description = request.description?.trim() || null
       return mapLocalKnowledgeBase(await client.createLocalKnowledgeBase({ name, description }))
+    },
+    async updateKnowledgeBase(id, request) {
+      const name = request.name.trim()
+      if (!name) unavailable('local_knowledge.name_required', '知识库名称不能为空。')
+      const description = request.description?.trim() || null
+      return mapLocalKnowledgeBase(await client.updateLocalKnowledgeBase({ id, name, description }))
+    },
+    async deleteKnowledgeBase(id) {
+      return client.deleteLocalKnowledgeBase(id)
     },
     async listDocuments(id, options) {
       const items = await client.listLocalKnowledgeDocuments(id, options?.query)

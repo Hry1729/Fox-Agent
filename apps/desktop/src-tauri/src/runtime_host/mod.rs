@@ -1,4 +1,5 @@
 mod capability_tools;
+mod continuation;
 mod protocol;
 mod work_tools;
 
@@ -9,9 +10,10 @@ use crate::yuxi::{get_access_token, YuxiClient};
 use crate::{
     app_state::AppState,
     database::{
-        AgentRecord, ApprovalDecision, AttachmentRecord, ChildRunBudget, ChildRunRecord, Database,
-        EvaluationRunSummary, KnowledgeReference, MemoryProposalInput,
-        PreparedDigitalColleagueTrigger, StartRunResult, ToolCallRecord,
+        AgentRecord, ApprovalDecision, ApprovalRecord, AttachmentRecord, ChildRunBudget,
+        ChildRunRecord, Database, EvaluationRunSummary, HostToolCallDisposition,
+        KnowledgeReference, MemoryProposalInput, PreparedDigitalColleagueTrigger, StartRunResult,
+        ToolCallRecord, MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
     },
     local_knowledge::LocalKnowledgeStore,
 };
@@ -49,6 +51,181 @@ const MAX_ATTACHMENT_TEXT_BYTES: usize = 1024 * 1024;
 const MAX_IMAGE_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u64 = 25_000_000;
 const MAX_IMAGES_PER_MESSAGE: usize = 4;
+const GRAPH_REVIEWER_EXECUTION_PROFILE: &str = "graph_reviewer_v1";
+const GRAPH_REVIEWER_ALLOWED_TOOLS: [&str; 4] = ["read", "ls", "find", "grep"];
+const GRAPH_REVIEWER_MAX_DURATION_MS: i64 = 45_000;
+const GRAPH_REVIEWER_MAX_TOTAL_TOKENS: i64 = 4_096;
+const GRAPH_REVIEWER_MAX_OUTPUT_TOKENS: i64 = 1_024;
+const GRAPH_REVIEWER_MAX_TOOL_CALLS: i64 = 6;
+const MAX_CONTINUATION_RECONCILIATION_ITEMS: usize = 256;
+const MAX_CONTINUATION_RECONCILIATION_ITEMS_PER_PASS: usize = 1_024;
+const MAX_CONTINUATION_RECONCILIATION_PASS_DURATION: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeToolIngress {
+    Preflight,
+    Execute,
+    Event,
+}
+
+fn validate_runtime_tool_authority(
+    active_profile: &continuation::ExecutionProfileSelection,
+    frozen_profile_id: Option<&str>,
+    manifest: &RuntimeCapabilityManifest,
+    run_id: &str,
+    tool: &str,
+    ingress: RuntimeToolIngress,
+) -> Result<(), (&'static str, String)> {
+    manifest
+        .validate()
+        .map_err(|error| ("runtime.capability.invalid", error))?;
+    // A missing snapshot is only retained for Runs created before schema v34.
+    // Any non-Legacy active Runtime will therefore fail the identity comparison.
+    let frozen_profile_id = frozen_profile_id.unwrap_or("legacy");
+    let frozen_profile = continuation::ExecutionProfileSelection::resolve(frozen_profile_id)
+        .map_err(|error| ("runtime.execution_profile.frozen_invalid", error))?;
+    if frozen_profile.id() != active_profile.id() {
+        return Err((
+            "runtime.execution_profile.run_mismatch",
+            format!(
+                "Run '{run_id}' froze execution profile '{}', but the active Runtime uses '{}'",
+                frozen_profile.id(),
+                active_profile.id()
+            ),
+        ));
+    }
+    if !active_profile.allows_host_tool(tool) {
+        return Err((
+            "runtime.execution_profile.tool_blocked",
+            format!(
+                "execution profile '{}' does not allow Runtime tool '{tool}'",
+                active_profile.id()
+            ),
+        ));
+    }
+    if !frozen_profile.allows_host_tool(tool) {
+        return Err((
+            "runtime.execution_profile.run_tool_blocked",
+            format!(
+                "Run '{run_id}' frozen execution profile '{}' does not allow tool '{tool}'",
+                frozen_profile.id()
+            ),
+        ));
+    }
+    let Some(declared) = manifest.tools.iter().find(|declared| declared.name == tool) else {
+        return Err((
+            "runtime.capability.tool_not_declared",
+            format!("runtime did not declare Runtime tool '{tool}' in its ready manifest"),
+        ));
+    };
+    let ingress_allowed = match ingress {
+        RuntimeToolIngress::Preflight => {
+            declared.execution == "runtime" && declared.approval == "preflight"
+        }
+        RuntimeToolIngress::Execute => declared.execution == "host",
+        RuntimeToolIngress::Event => true,
+    };
+    if !ingress_allowed {
+        return Err((
+            "runtime.capability.ingress_mismatch",
+            format!(
+                "Runtime tool '{tool}' cannot enter through {:?} with contract {}/{}/{}",
+                ingress, declared.category, declared.execution, declared.approval
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_fresh_host_tool_call(
+    database: &Database,
+    run_id: &str,
+    runtime_tool_call_id: &str,
+    tool_name: &str,
+    input: &Value,
+    status: &str,
+    requires_approval: bool,
+) -> Result<HostToolCallExecution, String> {
+    let (record, disposition) = database.create_host_tool_call_once(
+        run_id,
+        runtime_tool_call_id,
+        tool_name,
+        input,
+        status,
+        requires_approval,
+    )?;
+    match disposition {
+        HostToolCallDisposition::Created | HostToolCallDisposition::PromotedRuntime => {
+            Ok(HostToolCallExecution::Execute(record))
+        }
+        HostToolCallDisposition::ReplayTerminal => replayed_host_tool_call(record),
+        HostToolCallDisposition::AlreadyInFlight => Err(format!(
+            "[tool_call.already_in_flight] ToolCall '{runtime_tool_call_id}' is already '{}' and cannot start a second handler",
+            record.status
+        )),
+    }
+}
+
+fn inspect_existing_host_tool_call(
+    database: &Database,
+    run_id: &str,
+    runtime_tool_call_id: &str,
+    tool_name: &str,
+    input: &Value,
+) -> Result<Option<Value>, String> {
+    let Some((record, disposition)) =
+        database.inspect_host_tool_call_replay(run_id, runtime_tool_call_id, tool_name, input)?
+    else {
+        return Ok(None);
+    };
+    match disposition {
+        HostToolCallDisposition::ReplayTerminal => match replayed_host_tool_call(record)? {
+            HostToolCallExecution::Replay(response) => Ok(Some(response)),
+            HostToolCallExecution::Execute(_) => unreachable!("terminal replay never executes"),
+        },
+        HostToolCallDisposition::AlreadyInFlight => Err(format!(
+            "[tool_call.already_in_flight] ToolCall '{runtime_tool_call_id}' is already in flight"
+        )),
+        HostToolCallDisposition::Created | HostToolCallDisposition::PromotedRuntime => {
+            unreachable!("read-only inspection cannot create or promote a ToolCall")
+        }
+    }
+}
+
+fn replayed_host_tool_call(record: ToolCallRecord) -> Result<HostToolCallExecution, String> {
+    if record.status == "completed" {
+        return Ok(HostToolCallExecution::Replay(json!({
+            "isError": false,
+            "result": record.result.unwrap_or(Value::Null),
+            "hookAnnotations": [],
+            "replayed": true,
+        })));
+    }
+    if record.status == "failed" {
+        return Ok(HostToolCallExecution::Replay(json!({
+            "isError": true,
+            "error": record
+                .error_message
+                .unwrap_or_else(|| "the persisted ToolCall failed".to_owned()),
+        })));
+    }
+    Err(format!(
+        "[tool_call.replayed_terminal] ToolCall '{}' already ended as '{}': {}",
+        record.runtime_tool_call_id,
+        record.status,
+        record
+            .error_message
+            .as_deref()
+            .unwrap_or("the persisted terminal outcome is authoritative")
+    ))
+}
+
+#[derive(Debug)]
+enum HostToolCallExecution {
+    Execute(ToolCallRecord),
+    Replay(Value),
+}
 
 fn structured_runtime_error(message: &str) -> (&str, &str) {
     let Some(rest) = message.strip_prefix('[') else {
@@ -65,6 +242,61 @@ fn structured_runtime_error(message: &str) -> (&str, &str) {
         return ("runtime.start_failed", message);
     }
     (code, detail.trim_start())
+}
+
+fn event_projection_failure_code(error: &str) -> &'static str {
+    if error.contains("[child_run.tool_budget_exceeded]") {
+        "child_run.tool_budget_exceeded"
+    } else if error.contains("[digital_colleague.tool_budget_exceeded]") {
+        "digital_colleague.tool_budget_exceeded"
+    } else if error.contains("[child_run.budget_exceeded]") {
+        "child_run.budget_exceeded"
+    } else if error.contains("[digital_colleague.budget_exceeded]") {
+        "digital_colleague.budget_exceeded"
+    } else {
+        "storage.event_projection_failed"
+    }
+}
+
+fn effective_digital_colleague_output_limit(
+    configured: i64,
+    remaining: i64,
+    model_maximum: i64,
+) -> Result<i64, String> {
+    let effective = configured.min(remaining).min(model_maximum);
+    if effective < MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS {
+        return Err(format!(
+            "[digital_colleague.budget_exceeded] remaining output budget {effective} is below the Host minimum {MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS}"
+        ));
+    }
+    Ok(effective)
+}
+
+fn validate_envelope_identity_scope(
+    conversation_id: &str,
+    run_id: &str,
+    runtime_session_id: &str,
+    expected_conversation_id: Option<&str>,
+    expected_run_id: Option<&str>,
+    expected_runtime_session_id: Option<&str>,
+    authoritative_conversation_id: &str,
+) -> Result<(), (&'static str, String)> {
+    if expected_conversation_id != Some(conversation_id)
+        || expected_run_id != Some(run_id)
+        || expected_runtime_session_id != Some(runtime_session_id)
+    {
+        return Err((
+            "runtime.identity.active_scope_mismatch",
+            "runtime envelope identity does not match the active Host worker scope".to_owned(),
+        ));
+    }
+    if authoritative_conversation_id != conversation_id {
+        return Err((
+            "runtime.identity.run_conversation_mismatch",
+            "runtime envelope conversationId does not own the active runId".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn runtime_agent_package(
@@ -398,6 +630,7 @@ struct WorkerHandle {
     pending: PendingResponses,
     current_conversation_id: Option<String>,
     active_run_id: Option<String>,
+    current_runtime_session_id: Option<String>,
 }
 
 struct QueuedRun {
@@ -435,6 +668,7 @@ struct RuntimeHostState {
     runtime: String,
     runtime_version: Option<String>,
     capabilities: Value,
+    execution_profile_id: String,
     pending_approvals: PendingApprovals,
     queued_runs: VecDeque<QueuedRun>,
     dispatching_run_id: Option<String>,
@@ -456,6 +690,7 @@ pub struct RuntimeHost {
     yuxi_client: YuxiClient,
     child_hosts: Arc<Mutex<HashMap<String, RuntimeHost>>>,
     run_budget_override: Option<ChildRunBudget>,
+    execution_profile_override: Option<&'static str>,
     tool_allowlist_override: Option<HashSet<String>>,
     mcp_server_scope_override: Option<HashSet<String>>,
     digital_scheduler_started: Arc<AtomicBool>,
@@ -547,7 +782,7 @@ impl RuntimeHost {
         skills_dir: PathBuf,
         yuxi_client: YuxiClient,
     ) -> Self {
-        Self {
+        let host = Self {
             app,
             database,
             state: Arc::new(Mutex::new(RuntimeHostState {
@@ -558,6 +793,7 @@ impl RuntimeHost {
                 runtime: "not-started".to_owned(),
                 runtime_version: None,
                 capabilities: json!({}),
+                execution_profile_id: "legacy".to_owned(),
                 pending_approvals: Arc::new(Mutex::new(HashMap::new())),
                 queued_runs: VecDeque::new(),
                 dispatching_run_id: None,
@@ -573,10 +809,61 @@ impl RuntimeHost {
             yuxi_client,
             child_hosts: Arc::new(Mutex::new(HashMap::new())),
             run_budget_override: None,
+            execution_profile_override: None,
             tool_allowlist_override: None,
             mcp_server_scope_override: None,
             digital_scheduler_started: Arc::new(AtomicBool::new(false)),
             digital_scheduler_stop: Arc::new(AtomicBool::new(false)),
+        };
+        host.reconcile_continuation_proposals();
+        host
+    }
+
+    fn reconcile_continuation_proposals(&self) {
+        if !self.reconcile_continuation_proposals_pass() {
+            return;
+        }
+        let host = self.clone();
+        thread::spawn(move || {
+            while host.reconcile_continuation_proposals_pass() {
+                thread::yield_now();
+            }
+        });
+    }
+
+    fn reconcile_continuation_proposals_pass(&self) -> bool {
+        match continuation::reconcile_unprojected_proposals_until_budget(
+            &self.database,
+            MAX_CONTINUATION_RECONCILIATION_ITEMS,
+            MAX_CONTINUATION_RECONCILIATION_ITEMS_PER_PASS,
+            MAX_CONTINUATION_RECONCILIATION_PASS_DURATION,
+        ) {
+            Ok(sweep) => {
+                for decision in sweep.report.decisions {
+                    let _ = self.app.emit("fox://continuation-decision", decision);
+                }
+                for diagnostic in sweep.report.diagnostics {
+                    if !diagnostic.shadow {
+                        let _ = self.database.mark_run_failed(
+                            &diagnostic.run_id,
+                            &diagnostic.code,
+                            &diagnostic.error,
+                        );
+                    }
+                    let _ = self.app.emit("fox://continuation-diagnostic", diagnostic);
+                }
+                sweep.has_more
+            }
+            Err(error) => {
+                let _ = self.app.emit(
+                    "fox://continuation-diagnostic",
+                    json!({
+                        "code": "runtime.continuation.reconciliation_scan_failed",
+                        "error": error,
+                    }),
+                );
+                false
+            }
         }
     }
 
@@ -940,6 +1227,10 @@ impl RuntimeHost {
         if let Ok(mut state) = self.state.lock() {
             state.recovery_attempts = 0;
         }
+        self.cancel_stale_pending_approvals_for_conversation(
+            &started.run.conversation_id,
+            &started.run.id,
+        );
         let run_kind = if self.database.is_digital_colleague_run(&started.run.id)? {
             "digital_colleague"
         } else if self.run_budget_override.is_some() {
@@ -959,6 +1250,10 @@ impl RuntimeHost {
             }),
         )?;
         self.ensure_worker(&started.run.conversation_id)?;
+        let execution_profile = self.current_execution_profile()?;
+        self.database
+            .freeze_run_execution_profile(&started.run.id, execution_profile.id())
+            .map_err(|error| error.to_string())?;
         let (runtime_session_id, _) = self.open_runtime_session(&started.run.conversation_id)?;
         let images = self.runtime_images(&started.run.conversation_id, attachments)?;
 
@@ -1118,6 +1413,7 @@ impl RuntimeHost {
             }
             if let Some(worker) = state.worker.as_mut() {
                 worker.active_run_id = Some(started.run.id.clone());
+                worker.current_runtime_session_id = Some(runtime_session_id.clone());
             }
             state.state = "busy".to_owned();
         }
@@ -1288,6 +1584,32 @@ impl RuntimeHost {
         child_run: ChildRunRecord,
         parent_conversation_id: String,
     ) -> Result<(), String> {
+        self.start_child_runtime_with_profile(started, child_run, parent_conversation_id, None)
+    }
+
+    fn start_graph_reviewer_runtime(
+        &self,
+        started: StartRunResult,
+        child_run: ChildRunRecord,
+        parent_conversation_id: String,
+        review_request_id: String,
+    ) -> Result<(), String> {
+        validate_graph_reviewer_runtime_contract(&started, &child_run)?;
+        self.start_child_runtime_with_profile(
+            started,
+            child_run,
+            parent_conversation_id,
+            Some(review_request_id),
+        )
+    }
+
+    fn start_child_runtime_with_profile(
+        &self,
+        started: StartRunResult,
+        child_run: ChildRunRecord,
+        parent_conversation_id: String,
+        graph_review_request_id: Option<String>,
+    ) -> Result<(), String> {
         let child_run_id = child_run.child_run_id.clone();
         let mut child_host = RuntimeHost::new(
             self.app.clone(),
@@ -1298,6 +1620,9 @@ impl RuntimeHost {
             self.yuxi_client.clone(),
         );
         child_host.run_budget_override = Some(child_run.budget.clone());
+        if graph_review_request_id.is_some() {
+            child_host.execution_profile_override = Some(GRAPH_REVIEWER_EXECUTION_PROFILE);
+        }
         let shared_pending_approvals = self
             .state
             .lock()
@@ -1309,15 +1634,28 @@ impl RuntimeHost {
             .lock()
             .map_err(|_| "child runtime state lock is poisoned".to_owned())?
             .pending_approvals = shared_pending_approvals;
-        let (mut tool_scope, mcp_scope) =
-            effective_conversation_delegation_scope(&self.database, &parent_conversation_id)?;
-        tool_scope = intersect_optional_scopes(
-            tool_scope,
-            child_run
-                .allowed_tools
-                .as_ref()
-                .map(|tools| tools.iter().cloned().collect()),
-        );
+        let (tool_scope, mcp_scope) = if graph_review_request_id.is_some() {
+            (
+                Some(
+                    GRAPH_REVIEWER_ALLOWED_TOOLS
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                ),
+                Some(HashSet::new()),
+            )
+        } else {
+            let (mut tool_scope, mcp_scope) =
+                effective_conversation_delegation_scope(&self.database, &parent_conversation_id)?;
+            tool_scope = intersect_optional_scopes(
+                tool_scope,
+                child_run
+                    .allowed_tools
+                    .as_ref()
+                    .map(|tools| tools.iter().cloned().collect()),
+            );
+            (tool_scope, mcp_scope)
+        };
         child_host.tool_allowlist_override = tool_scope;
         child_host.mcp_server_scope_override = mcp_scope;
         {
@@ -1353,14 +1691,6 @@ impl RuntimeHost {
                 let deadline =
                     Instant::now() + Duration::from_millis(child_run.budget.max_duration_ms as u64);
                 loop {
-                    let status = coordinator
-                        .database
-                        .child_run_status(&child_run_id)
-                        .ok()
-                        .flatten();
-                    if status.as_deref().is_some_and(run_status_is_terminal) {
-                        break;
-                    }
                     let token_budget_exceeded = coordinator
                         .database
                         .child_budget_exceeded(&child_run_id)
@@ -1385,11 +1715,37 @@ impl RuntimeHost {
                             .mark_run_failed(&child_run_id, code, message);
                         break;
                     }
+                    let status = coordinator
+                        .database
+                        .child_run_status(&child_run_id)
+                        .ok()
+                        .flatten();
+                    if status.as_deref().is_some_and(run_status_is_terminal) {
+                        break;
+                    }
                     thread::sleep(Duration::from_millis(100));
                 }
             }
             let _ = child_host.stop_worker();
             let _ = coordinator.database.sync_child_run_terminal(&child_run_id);
+            if let Some(review_request_id) = graph_review_request_id {
+                match coordinator
+                    .database
+                    .settle_graph_node_review(&review_request_id)
+                {
+                    Ok(decision) => {
+                        let _ = coordinator
+                            .app
+                            .emit("fox://graph-review-decision", decision);
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "[graph.readonly_reviewer_settle_failed] request={} child={} error={}",
+                            review_request_id, child_run_id, error
+                        );
+                    }
+                }
+            }
             if let Ok(Some(record)) = coordinator.database.child_run(&child_run_id) {
                 coordinator.emit_child_run_update(&parent_conversation_id, &record);
             }
@@ -1410,6 +1766,16 @@ impl RuntimeHost {
             .clone()
             .unwrap_or_else(|| prepared.started.run.id.clone());
         let conversation_id = prepared.started.run.conversation_id.clone();
+        let model_max_output = self
+            .database
+            .get_model_service()?
+            .ok_or_else(|| "digital_colleague.model_service_unavailable".to_owned())?
+            .max_output_tokens;
+        let effective_max_output = effective_digital_colleague_output_limit(
+            prepared.colleague.max_output_tokens,
+            prepared.remaining_tokens,
+            model_max_output,
+        )?;
         let mut managed_host = RuntimeHost::new(
             self.app.clone(),
             self.database.clone(),
@@ -1421,7 +1787,7 @@ impl RuntimeHost {
         managed_host.run_budget_override = Some(ChildRunBudget {
             max_duration_ms: prepared.colleague.max_duration_ms,
             max_total_tokens: prepared.remaining_tokens.min(200_000),
-            max_output_tokens: prepared.colleague.max_output_tokens,
+            max_output_tokens: effective_max_output,
             max_tool_calls: prepared.colleague.max_tool_calls,
         });
         let shared_pending_approvals = self
@@ -1467,14 +1833,6 @@ impl RuntimeHost {
                 let deadline = Instant::now()
                     + Duration::from_millis(prepared.colleague.max_duration_ms as u64);
                 loop {
-                    let status = coordinator
-                        .database
-                        .digital_colleague_run_status(&run_id)
-                        .ok()
-                        .flatten();
-                    if status.as_deref().is_some_and(run_status_is_terminal) {
-                        break;
-                    }
                     let token_budget_exceeded = coordinator
                         .database
                         .digital_colleague_budget_exceeded(&run_id)
@@ -1495,6 +1853,14 @@ impl RuntimeHost {
                             )
                         };
                         let _ = coordinator.database.mark_run_failed(&run_id, code, message);
+                        break;
+                    }
+                    let status = coordinator
+                        .database
+                        .digital_colleague_run_status(&run_id)
+                        .ok()
+                        .flatten();
+                    if status.as_deref().is_some_and(run_status_is_terminal) {
                         break;
                     }
                     thread::sleep(Duration::from_millis(100));
@@ -1569,7 +1935,185 @@ impl RuntimeHost {
         Ok(())
     }
 
+    fn ensure_active_envelope_identity(
+        &self,
+        envelope: &RuntimeEnvelope,
+    ) -> Result<(), (&'static str, String)> {
+        let conversation_id = envelope
+            .conversation_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or((
+                "runtime.identity.conversation_missing",
+                "runtime envelope omitted conversationId".to_owned(),
+            ))?;
+        let run_id = envelope
+            .run_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or((
+                "runtime.identity.run_missing",
+                "runtime envelope omitted runId".to_owned(),
+            ))?;
+        let runtime_session_id = envelope
+            .runtime_session_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or((
+                "runtime.identity.session_missing",
+                "runtime envelope omitted runtimeSessionId".to_owned(),
+            ))?;
+        let (expected_conversation_id, expected_run_id, expected_runtime_session_id) = {
+            let state = self.state.lock().map_err(|_| {
+                (
+                    "runtime.state_unavailable",
+                    "runtime state lock is poisoned".to_owned(),
+                )
+            })?;
+            let worker = state.worker.as_ref().ok_or((
+                "runtime.identity.worker_missing",
+                "runtime envelope arrived without an active worker".to_owned(),
+            ))?;
+            (
+                worker.current_conversation_id.clone(),
+                worker.active_run_id.clone(),
+                worker.current_runtime_session_id.clone(),
+            )
+        };
+        let authoritative_conversation_id = self
+            .database
+            .authoritative_run_conversation_id(run_id)
+            .map_err(|error| ("runtime.identity.run_unknown", error.to_string()))?;
+        validate_envelope_identity_scope(
+            conversation_id,
+            run_id,
+            runtime_session_id,
+            expected_conversation_id.as_deref(),
+            expected_run_id.as_deref(),
+            expected_runtime_session_id.as_deref(),
+            &authoritative_conversation_id,
+        )
+    }
+
+    fn current_execution_profile(&self) -> Result<continuation::ExecutionProfileSelection, String> {
+        let profile_id = self
+            .state
+            .lock()
+            .map_err(|_| "runtime state lock is poisoned".to_owned())?
+            .execution_profile_id
+            .clone();
+        continuation::ExecutionProfileSelection::resolve(&profile_id)
+    }
+
+    fn emit_continuation_diagnostic(
+        &self,
+        run_id: Option<&str>,
+        seq: Option<i64>,
+        code: &str,
+        error: &str,
+        shadow: bool,
+    ) {
+        let _ = self.app.emit(
+            "fox://continuation-diagnostic",
+            json!({
+                "runId": run_id,
+                "seq": seq,
+                "code": code,
+                "error": error,
+                "shadow": shadow,
+            }),
+        );
+    }
+
+    fn ensure_runtime_tool_allowed(
+        &self,
+        run_id: &str,
+        tool: &str,
+        ingress: RuntimeToolIngress,
+    ) -> Result<(), (&'static str, String)> {
+        let (active_profile_id, capabilities) = {
+            let state = self.state.lock().map_err(|_| {
+                (
+                    "runtime.state_unavailable",
+                    "runtime state lock is poisoned".to_owned(),
+                )
+            })?;
+            (
+                state.execution_profile_id.clone(),
+                state.capabilities.clone(),
+            )
+        };
+        let active_profile = continuation::ExecutionProfileSelection::resolve(&active_profile_id)
+            .map_err(|error| ("runtime.execution_profile.invalid", error))?;
+        let manifest =
+            serde_json::from_value::<RuntimeCapabilityManifest>(capabilities).map_err(|error| {
+                (
+                    "runtime.capability.invalid",
+                    format!("runtime capability manifest is invalid: {error}"),
+                )
+            })?;
+        let frozen_profile_id = self
+            .database
+            .frozen_run_execution_profile_id(run_id)
+            .map_err(|error| {
+                (
+                    "runtime.execution_profile.frozen_invalid",
+                    error.to_string(),
+                )
+            })?;
+        validate_runtime_tool_authority(
+            &active_profile,
+            frozen_profile_id.as_deref(),
+            &manifest,
+            run_id,
+            tool,
+            ingress,
+        )
+    }
+
+    fn ensure_runtime_tool_event_allowed(
+        &self,
+        run_id: &str,
+        payload: &Value,
+    ) -> Result<(), (&'static str, String)> {
+        if !matches!(
+            payload.get("type").and_then(Value::as_str),
+            Some("tool.started" | "tool.updated" | "tool.completed")
+        ) {
+            return Ok(());
+        }
+        let tool = payload
+            .get("tool")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or((
+                "runtime.tool_event.tool_missing",
+                "Runtime tool event omitted a non-empty tool name".to_owned(),
+            ))?;
+        self.ensure_runtime_tool_allowed(run_id, tool, RuntimeToolIngress::Event)?;
+        self.ensure_delegated_tool_allowed(tool)
+            .map_err(|error| ("runtime.tool_event.delegated_scope_denied", error))?;
+        let conversation_id = self
+            .database
+            .authoritative_run_conversation_id(run_id)
+            .map_err(|error| ("runtime.identity.run_unknown", error.to_string()))?;
+        ensure_expert_tool_allowed(&self.database, &conversation_id, tool)
+            .map_err(|error| ("runtime.tool_event.package_scope_denied", error))
+    }
+
     fn cancel_child_runtime(&self, child_run_id: &str) -> Result<bool, String> {
+        if self
+            .database
+            .child_run_status(child_run_id)?
+            .as_deref()
+            .is_none_or(run_status_is_terminal)
+        {
+            return Ok(false);
+        }
+        if self.database.mark_run_cancelling(child_run_id)?.is_none() {
+            return Ok(false);
+        }
         let child_host = self
             .child_hosts
             .lock()
@@ -1577,14 +2121,6 @@ impl RuntimeHost {
             .get(child_run_id)
             .cloned();
         let Some(child_host) = child_host else {
-            if self
-                .database
-                .child_run_status(child_run_id)?
-                .as_deref()
-                .is_some_and(run_status_is_terminal)
-            {
-                return Ok(false);
-            }
             let seq = self.database.next_run_seq(child_run_id)?;
             return self
                 .database
@@ -1595,7 +2131,6 @@ impl RuntimeHost {
                 )
                 .map_err(|error| error.to_string());
         };
-        let _ = self.database.mark_run_cancelling(child_run_id)?;
         if child_host.cancel_run(child_run_id)? {
             return Ok(true);
         }
@@ -1607,13 +2142,137 @@ impl RuntimeHost {
         )
     }
 
+    fn signal_graph_child_cancel(
+        &self,
+        child_run_id: &str,
+        allow_redelivery: bool,
+    ) -> Result<bool, String> {
+        let child_host = self
+            .child_hosts
+            .lock()
+            .map_err(|_| "child runtime map is poisoned".to_owned())?
+            .get(child_run_id)
+            .cloned();
+        signal_graph_child_cancel_with_transport(
+            &self.database,
+            child_run_id,
+            allow_redelivery,
+            || {
+                child_host
+                    .map(|host| host.cancel_run(child_run_id))
+                    .transpose()
+            },
+        )
+    }
+
+    pub(crate) fn recover_active_graph_node_cancellations(&self) -> Result<usize, String> {
+        let intents = self
+            .database
+            .active_graph_node_cancel_intents_for_recovery()
+            .map_err(|error| error.to_string())?;
+        let mut delivered = 0;
+        for intent in intents {
+            if self.signal_graph_child_cancel(&intent.child_run_id, true)? {
+                delivered += 1;
+            }
+        }
+        Ok(delivered)
+    }
+
+    pub(crate) fn recover_active_graph_node_reviews(&self) -> Result<usize, String> {
+        let requests = self
+            .database
+            .active_graph_node_review_requests_for_recovery()
+            .map_err(|error| error.to_string())?;
+        let mut dispatched = 0;
+        for request in requests {
+            if let Some(child_run_id) = request.reviewer_child_run_id.as_deref() {
+                if let Err(error) = self.database.sync_child_run_terminal(child_run_id) {
+                    eprintln!(
+                        "[graph.readonly_reviewer_recovery_sync_failed] request={} child={} error={}",
+                        request.request_id, child_run_id, error
+                    );
+                    continue;
+                }
+                if self
+                    .database
+                    .child_run_status(child_run_id)?
+                    .as_deref()
+                    .is_some_and(run_status_is_terminal)
+                {
+                    match self.database.settle_graph_node_review(&request.request_id) {
+                        Ok(decision) => {
+                            let _ = self.app.emit("fox://graph-review-decision", decision);
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[graph.readonly_reviewer_recovery_settle_failed] request={} child={} error={}",
+                                request.request_id, child_run_id, error
+                            );
+                        }
+                    }
+                    continue;
+                }
+            }
+            match dispatch_graph_reviewer_child(
+                self,
+                &request.request_id,
+                &request.reviewer_agent_id,
+            ) {
+                Ok(true) => dispatched += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!(
+                        "[graph.readonly_reviewer_recovery_dispatch_failed] request={} error={}",
+                        request.request_id, error
+                    );
+                }
+            }
+        }
+        Ok(dispatched)
+    }
+
+    pub(crate) fn recover_pending_graph_acceptances(&self) -> Result<usize, String> {
+        let intents = self
+            .database
+            .pending_graph_acceptances_for_recovery()
+            .map_err(|error| error.to_string())?;
+        let mut accepted = 0;
+        for intent in intents {
+            match self
+                .database
+                .activate_read_only_graph_acceptance(&intent.acceptance_id)
+            {
+                Ok(result) if result.accepted => {
+                    accepted += 1;
+                    let _ = self.app.emit("fox://graph-acceptance", result);
+                }
+                Ok(result) if result.stale => {
+                    eprintln!(
+                        "[graph.readonly_accept_recovery_stale] acceptance={}",
+                        result.acceptance_id
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!(
+                        "[graph.readonly_accept_recovery_failed] acceptance={} error={}",
+                        intent.acceptance_id, error
+                    );
+                }
+            }
+        }
+        Ok(accepted)
+    }
+
     pub(crate) fn cancel_managed_run(&self, run_id: &str) -> Result<bool, String> {
         let is_managed = self
             .child_hosts
             .lock()
             .map_err(|_| "managed runtime map is poisoned".to_owned())?
             .contains_key(run_id);
-        if is_managed {
+        let is_child = self.database.child_run(run_id)?.is_some();
+        if is_managed || is_child {
             self.cancel_child_runtime(run_id)
         } else {
             self.cancel_run(run_id)
@@ -1752,6 +2411,49 @@ impl RuntimeHost {
                 }
             }
         }
+    }
+
+    fn cancel_stale_pending_approvals_for_conversation(
+        &self,
+        conversation_id: &str,
+        current_run_id: &str,
+    ) {
+        let pending = self
+            .state
+            .lock()
+            .ok()
+            .map(|state| state.pending_approvals.clone());
+        let Some(pending) = pending else {
+            return;
+        };
+        let candidates = pending
+            .lock()
+            .ok()
+            .map(|pending| {
+                pending
+                    .iter()
+                    .filter(|(_, approval)| approval.run_id != current_run_id)
+                    .map(|(approval_id, approval)| (approval_id.clone(), approval.run_id.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let approval_ids = candidates
+            .into_iter()
+            .filter_map(|(approval_id, run_id)| {
+                self.database
+                    .authoritative_run_conversation_id(&run_id)
+                    .ok()
+                    .filter(|owner| owner == conversation_id)
+                    .map(|_| approval_id)
+            })
+            .collect::<Vec<_>>();
+        if let Ok(mut pending) = pending.lock() {
+            for approval_id in approval_ids {
+                if let Some(approval) = pending.remove(&approval_id) {
+                    let _ = approval.sender.send(false);
+                }
+            }
+        };
     }
 
     pub fn remove_conversation(&self, conversation_id: &str) -> Result<(), String> {
@@ -1901,6 +2603,10 @@ impl RuntimeHost {
             state.last_error = None;
         }
 
+        let execution_profile = match self.execution_profile_override {
+            Some(profile_id) => continuation::ExecutionProfileSelection::resolve(profile_id)?,
+            None => continuation::ExecutionProfileSelection::load(&self.database)?,
+        };
         let runtime = self.runtime_command()?;
         let mut command = Command::new(&runtime.program);
         if let Some(script) = runtime.script.as_ref() {
@@ -1940,6 +2646,7 @@ impl RuntimeHost {
                 pending: pending.clone(),
                 current_conversation_id: Some(conversation_id.to_owned()),
                 active_run_id: None,
+                current_runtime_session_id: None,
             });
         }
 
@@ -1951,6 +2658,7 @@ impl RuntimeHost {
             .get_model_service()?
             .ok_or_else(|| "model service is not configured".to_owned())?;
         let api_key = crate::model_service::get_api_key(&model_service.base_url);
+        let execution_profile_fields = execution_profile.initialize_fields();
         let response = self.send_request(
             RuntimeRequest::new("initialize").with_payload(json!({
                 "modelService": {
@@ -1966,7 +2674,9 @@ impl RuntimeHost {
                         .min(model_service.max_output_tokens),
                     "supportsImageInput": model_service.supports_image_input,
                     "apiKey": api_key,
-                }
+                },
+                "executionProfile": execution_profile_fields["executionProfile"].clone(),
+                "executionStrategy": execution_profile_fields["executionStrategy"].clone(),
             })),
             RESPONSE_TIMEOUT,
         )?;
@@ -1976,18 +2686,27 @@ impl RuntimeHost {
             return Err(error);
         }
 
-        let (runtime, runtime_version, capabilities) = match response
+        let ready_payload = response
             .payload
             .as_ref()
-            .ok_or_else(|| "runtime handshake omitted its payload".to_owned())
-            .and_then(parse_runtime_ready_payload)
-        {
-            Ok(handshake) => handshake,
-            Err(error) => {
-                let _ = self.stop_worker();
-                return Err(error);
-            }
-        };
+            .ok_or_else(|| "runtime handshake omitted its payload".to_owned())?;
+        let (runtime, runtime_version, capabilities) =
+            match parse_runtime_ready_payload(ready_payload).and_then(|handshake| {
+                execution_profile.validate_ready_payload(ready_payload)?;
+                let manifest =
+                    serde_json::from_value::<RuntimeCapabilityManifest>(handshake.2.clone())
+                        .map_err(|error| {
+                            format!("runtime capability manifest is invalid: {error}")
+                        })?;
+                execution_profile.validate_capability_manifest(&manifest)?;
+                Ok(handshake)
+            }) {
+                Ok(handshake) => handshake,
+                Err(error) => {
+                    let _ = self.stop_worker();
+                    return Err(error);
+                }
+            };
         let mut state = self
             .state
             .lock()
@@ -1996,6 +2715,7 @@ impl RuntimeHost {
         state.runtime = runtime;
         state.runtime_version = runtime_version;
         state.capabilities = capabilities;
+        state.execution_profile_id = execution_profile.id().to_owned();
         Ok(())
     }
 
@@ -2111,12 +2831,51 @@ impl RuntimeHost {
                 }
 
                 if envelope.kind == "request" && envelope.r#type == "tool.preflight" {
+                    if let Err((code, error)) =
+                        runtime_host.ensure_active_envelope_identity(&envelope)
+                    {
+                        let response = HostResponse::for_request(
+                            &envelope,
+                            "tool.preflight_blocked",
+                            json!({
+                                "decision": "block",
+                                "code": code,
+                                "message": error,
+                            }),
+                        );
+                        if let Err(write_error) = write_protocol_message(&stdin, &response) {
+                            runtime_host.handle_runtime_crash(write_error);
+                            return;
+                        }
+                        continue;
+                    }
                     let tool = envelope
                         .payload
                         .as_ref()
                         .and_then(|payload| payload.get("tool"))
                         .and_then(Value::as_str)
                         .unwrap_or_default();
+                    let run_id = envelope.run_id.as_deref().unwrap_or_default();
+                    if let Err((code, error)) = runtime_host.ensure_runtime_tool_allowed(
+                        run_id,
+                        tool,
+                        RuntimeToolIngress::Preflight,
+                    ) {
+                        let response = HostResponse::for_request(
+                            &envelope,
+                            "tool.preflight_blocked",
+                            json!({
+                                "decision": "block",
+                                "code": code,
+                                "message": error,
+                            }),
+                        );
+                        if let Err(write_error) = write_protocol_message(&stdin, &response) {
+                            runtime_host.handle_runtime_crash(write_error);
+                            return;
+                        }
+                        continue;
+                    }
                     let input = envelope
                         .payload
                         .as_ref()
@@ -2174,12 +2933,57 @@ impl RuntimeHost {
                 }
 
                 if envelope.kind == "request" && envelope.r#type == "tool.execute" {
+                    if let Err((code, error)) =
+                        runtime_host.ensure_active_envelope_identity(&envelope)
+                    {
+                        let response = HostResponse::for_request(
+                            &envelope,
+                            "tool.execute_failed",
+                            json!({
+                                "isError": true,
+                                "error": error,
+                                "errorDetails": {
+                                    "code": code,
+                                    "retryable": false,
+                                }
+                            }),
+                        );
+                        if let Err(write_error) = write_protocol_message(&stdin, &response) {
+                            runtime_host.handle_runtime_crash(write_error);
+                            return;
+                        }
+                        continue;
+                    }
                     let tool = envelope
                         .payload
                         .as_ref()
                         .and_then(|payload| payload.get("tool"))
                         .and_then(Value::as_str)
                         .unwrap_or_default();
+                    let run_id = envelope.run_id.as_deref().unwrap_or_default();
+                    if let Err((code, error)) = runtime_host.ensure_runtime_tool_allowed(
+                        run_id,
+                        tool,
+                        RuntimeToolIngress::Execute,
+                    ) {
+                        let response = HostResponse::for_request(
+                            &envelope,
+                            "tool.execute_failed",
+                            json!({
+                                "isError": true,
+                                "error": error,
+                                "errorDetails": {
+                                    "code": code,
+                                    "retryable": false,
+                                }
+                            }),
+                        );
+                        if let Err(write_error) = write_protocol_message(&stdin, &response) {
+                            runtime_host.handle_runtime_crash(write_error);
+                            return;
+                        }
+                        continue;
+                    }
                     if let Err(error) = runtime_host.ensure_delegated_tool_allowed(tool) {
                         let response = HostResponse::for_request(
                             &envelope,
@@ -2198,6 +3002,69 @@ impl RuntimeHost {
                             return;
                         }
                         continue;
+                    }
+                    let existing_tool_call = (|| -> Result<Option<Value>, String> {
+                        let run_id = envelope
+                            .run_id
+                            .as_deref()
+                            .ok_or_else(|| "tool request is missing runId".to_owned())?;
+                        let payload = envelope
+                            .payload
+                            .as_ref()
+                            .ok_or_else(|| "tool request is missing payload".to_owned())?;
+                        let tool_call_id = payload
+                            .get("toolCallId")
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.trim().is_empty())
+                            .ok_or_else(|| "tool request is missing toolCallId".to_owned())?;
+                        let raw_input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+                        let input = if tool == "task_repair_escalate_start" {
+                            work_tools::canonicalize_task_repair_override_request(&raw_input)
+                                .map_err(|error| error.to_string())?
+                        } else {
+                            raw_input
+                        };
+                        inspect_existing_host_tool_call(
+                            &database,
+                            run_id,
+                            tool_call_id,
+                            tool,
+                            &input,
+                        )
+                    })();
+                    match existing_tool_call {
+                        Ok(Some(result)) => {
+                            let response = HostResponse::for_request(
+                                &envelope,
+                                "tool.execute_completed",
+                                result,
+                            );
+                            if let Err(write_error) = write_protocol_message(&stdin, &response) {
+                                runtime_host.handle_runtime_crash(write_error);
+                                return;
+                            }
+                            continue;
+                        }
+                        Err(error) => {
+                            let response = HostResponse::for_request(
+                                &envelope,
+                                "tool.execute_failed",
+                                json!({
+                                    "isError": true,
+                                    "error": error,
+                                    "errorDetails": {
+                                        "code": "tool_call.replay_rejected",
+                                        "retryable": false,
+                                    }
+                                }),
+                            );
+                            if let Err(write_error) = write_protocol_message(&stdin, &response) {
+                                runtime_host.handle_runtime_crash(write_error);
+                                return;
+                            }
+                            continue;
+                        }
+                        Ok(None) => {}
                     }
                     if let Some(run_id) = envelope.run_id.as_deref() {
                         if let Err(error) = database.enforce_child_tool_budget(run_id) {
@@ -2276,7 +3143,14 @@ impl RuntimeHost {
                                 &app, &database, &state, &stdin, envelope,
                             )
                         } else if work_tools::is_work_tool(tool) {
-                            handle_work_tool_request(&app, &database, &state, &stdin, envelope)
+                            handle_work_tool_request(
+                                &child_runtime_host,
+                                &app,
+                                &database,
+                                &state,
+                                &stdin,
+                                envelope,
+                            )
                         } else if is_memory_tool(tool) {
                             handle_memory_tool_request(&app, &database, &state, &stdin, envelope)
                         } else if is_knowledge_tool(tool) {
@@ -2298,6 +3172,37 @@ impl RuntimeHost {
                 }
 
                 if envelope.kind == "event" && envelope.r#type == "runtime_event" {
+                    if let Err((code, error)) =
+                        runtime_host.ensure_active_envelope_identity(&envelope)
+                    {
+                        let profile = runtime_host.current_execution_profile().ok();
+                        let shadow_proposal = profile.as_ref().is_some_and(|profile| {
+                            envelope.payload.as_ref().is_some_and(|payload| {
+                                profile.treats_proposal_error_as_observation(payload)
+                            })
+                        });
+                        if shadow_proposal {
+                            runtime_host.emit_continuation_diagnostic(
+                                envelope.run_id.as_deref(),
+                                envelope.seq,
+                                code,
+                                &error,
+                                true,
+                            );
+                            continue;
+                        }
+                        let active_run_id = state.lock().ok().and_then(|state| {
+                            state
+                                .worker
+                                .as_ref()
+                                .and_then(|worker| worker.active_run_id.clone())
+                        });
+                        if let Some(active_run_id) = active_run_id {
+                            let _ = database.mark_run_failed(&active_run_id, code, &error);
+                        }
+                        runtime_host.handle_runtime_crash(error);
+                        return;
+                    }
                     let (Some(conversation_id), Some(run_id), Some(seq), Some(payload)) = (
                         envelope.conversation_id.clone(),
                         envelope.run_id.clone(),
@@ -2306,8 +3211,74 @@ impl RuntimeHost {
                     ) else {
                         continue;
                     };
+                    if let Err((code, error)) =
+                        runtime_host.ensure_runtime_tool_event_allowed(&run_id, &payload)
+                    {
+                        let _ = database.mark_run_failed(&run_id, code, &error);
+                        runtime_host.handle_runtime_crash(error);
+                        return;
+                    }
                     match database.apply_runtime_event(&run_id, seq, &payload) {
-                        Ok(true) => {
+                        Ok(applied) => {
+                            let is_continuation_proposal =
+                                payload.get("type").and_then(Value::as_str)
+                                    == Some(continuation::CONTINUATION_PROPOSAL_EVENT_TYPE);
+                            if is_continuation_proposal {
+                                let profile = runtime_host.current_execution_profile();
+                                let shadow =
+                                    profile.as_ref().is_ok_and(|profile| profile.is_shadow());
+                                let persisted = profile.and_then(|profile| {
+                                    continuation::persist_runtime_proposal(
+                                        &database, &run_id, seq, &profile, &payload,
+                                    )
+                                });
+                                match persisted {
+                                    Ok(decision) => {
+                                        let _ = app.emit("fox://continuation-decision", decision);
+                                    }
+                                    Err(error) => {
+                                        let profile_id = runtime_host
+                                            .current_execution_profile()
+                                            .ok()
+                                            .map(|profile| profile.id().to_owned());
+                                        let error_code = if shadow {
+                                            "runtime.continuation.shadow_rejected"
+                                        } else {
+                                            "runtime.continuation.invalid_proposal"
+                                        };
+                                        let error = match continuation::record_ingest_diagnostic(
+                                            &database,
+                                            &run_id,
+                                            seq,
+                                            profile_id.as_deref(),
+                                            shadow,
+                                            error_code,
+                                            &error,
+                                        ) {
+                                            Ok(()) => error,
+                                            Err(diagnostic_error) => format!(
+                                                "{error}; continuation ingest diagnostic persistence failed: {diagnostic_error}"
+                                            ),
+                                        };
+                                        if !shadow {
+                                            let _ = database
+                                                .mark_run_failed(&run_id, error_code, &error);
+                                            runtime_host.handle_runtime_crash(error);
+                                            return;
+                                        }
+                                        runtime_host.emit_continuation_diagnostic(
+                                            Some(&run_id),
+                                            Some(seq),
+                                            error_code,
+                                            &error,
+                                            true,
+                                        );
+                                    }
+                                }
+                            }
+                            if !applied {
+                                continue;
+                            }
                             if payload.get("type").and_then(Value::as_str).is_some_and(
                                 |event_type| {
                                     crate::database::WORK_EVENT_TYPES.contains(&event_type)
@@ -2331,8 +3302,14 @@ impl RuntimeHost {
                             let _ = app.emit("fox://runtime-event", notification);
                             if matches!(
                                 payload.get("type").and_then(Value::as_str),
-                                Some("run.completed" | "run.cancelled" | "run.failed")
+                                Some(
+                                    "run.completed"
+                                        | "run.cancelled"
+                                        | "run.failed"
+                                        | "run.interrupted"
+                                )
                             ) {
+                                runtime_host.cancel_pending_approvals_for_run(&run_id);
                                 let _ = crate::lifecycle_hooks::run_event(
                                     &database,
                                     "after_run",
@@ -2346,11 +3323,25 @@ impl RuntimeHost {
                                 runtime_host.mark_run_ready(&run_id);
                             }
                         }
-                        Ok(false) => {}
                         Err(error) => {
+                            let shadow_proposal = runtime_host
+                                .current_execution_profile()
+                                .is_ok_and(|profile| {
+                                    profile.treats_proposal_error_as_observation(&payload)
+                                });
+                            if shadow_proposal {
+                                runtime_host.emit_continuation_diagnostic(
+                                    Some(&run_id),
+                                    Some(seq),
+                                    "runtime.continuation.shadow_event_storage_failed",
+                                    &error,
+                                    true,
+                                );
+                                continue;
+                            }
                             let _ = database.mark_run_failed(
                                 &run_id,
-                                "storage.event_projection_failed",
+                                event_projection_failure_code(&error),
                                 &error,
                             );
                             runtime_host.handle_runtime_crash(error);
@@ -2425,24 +3416,30 @@ impl RuntimeHost {
                 "message": message,
                 "recoverable": should_recover,
             });
-            if self
-                .database
-                .apply_runtime_event(&run_id, seq, &payload)
-                .ok()
-                == Some(true)
-            {
-                let _ = self.app.emit(
-                    "fox://runtime-event",
-                    RuntimeEventNotification {
-                        conversation_id,
-                        runtime_session_id: None,
-                        run_id,
-                        seq,
-                        timestamp: protocol::timestamp(),
-                        event: payload,
-                    },
-                );
+            match self.database.apply_runtime_event(&run_id, seq, &payload) {
+                Ok(true) => {
+                    let _ = self.app.emit(
+                        "fox://runtime-event",
+                        RuntimeEventNotification {
+                            conversation_id,
+                            runtime_session_id: None,
+                            run_id: run_id.clone(),
+                            seq,
+                            timestamp: protocol::timestamp(),
+                            event: payload,
+                        },
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let _ = self.database.mark_run_failed(
+                        &run_id,
+                        "runtime.process_crashed",
+                        &format!("{message}; failed to persist crash event: {error}"),
+                    );
+                }
             }
+            self.cancel_pending_approvals_for_run(&run_id);
         }
         if !should_recover {
             self.dispatch_next_queued_run();
@@ -2800,13 +3797,14 @@ fn handle_capability_tool_request(
 }
 
 fn handle_work_tool_request(
+    runtime_host: &RuntimeHost,
     app: &AppHandle,
     database: &Database,
     state: &Arc<Mutex<RuntimeHostState>>,
     stdin: &Arc<Mutex<ChildStdin>>,
     envelope: RuntimeEnvelope,
 ) {
-    let response = match execute_work_tool_request(app, database, state, &envelope) {
+    let response = match execute_work_tool_request(runtime_host, app, database, state, &envelope) {
         Ok(response) => response,
         Err(error) => json!({
             "isError": true,
@@ -2830,6 +3828,139 @@ fn handle_work_tool_request(
     if let Err(error) = write_protocol_message(stdin, &response) {
         record_runtime_crash(app, database, state, error);
     }
+}
+
+fn dispatch_created_work_child<T>(
+    dispatch: Option<T>,
+    start: impl FnOnce(T) -> Result<(), String>,
+) -> Result<bool, String> {
+    let Some(dispatch) = dispatch else {
+        return Ok(false);
+    };
+    start(dispatch)?;
+    Ok(true)
+}
+
+fn dispatch_graph_reviewer_child(
+    runtime_host: &RuntimeHost,
+    request_id: &str,
+    reviewer_agent_id: &str,
+) -> Result<bool, String> {
+    let dispatch = runtime_host
+        .database
+        .dispatch_graph_node_reviewer(request_id, reviewer_agent_id)
+        .map_err(|error| error.to_string())?;
+    if !dispatch.dispatch_required {
+        return Ok(false);
+    }
+    let parent_conversation_id = runtime_host
+        .database
+        .authoritative_run_conversation_id(&dispatch.child_run.parent_run_id)
+        .map_err(|error| error.to_string())?;
+    let child_run_id = dispatch.child_run.child_run_id.clone();
+    if let Err(error) = runtime_host.start_graph_reviewer_runtime(
+        dispatch.started,
+        dispatch.child_run,
+        parent_conversation_id,
+        request_id.to_owned(),
+    ) {
+        let _ = runtime_host.database.mark_run_failed(
+            &child_run_id,
+            "graph.readonly_reviewer_dispatch_failed",
+            &error,
+        );
+        let _ = runtime_host.database.sync_child_run_terminal(&child_run_id);
+        let _ = runtime_host.database.settle_graph_node_review(request_id);
+        return Err(error);
+    }
+    Ok(true)
+}
+
+fn signal_graph_child_cancel_with_transport(
+    database: &Database,
+    child_run_id: &str,
+    allow_redelivery: bool,
+    signal: impl FnOnce() -> Result<Option<bool>, String>,
+) -> Result<bool, String> {
+    let Some(status) = database.child_run_status(child_run_id)? else {
+        return Ok(false);
+    };
+    if run_status_is_terminal(&status) {
+        return Ok(false);
+    }
+    if status == "cancelling" {
+        if !allow_redelivery {
+            return Ok(false);
+        }
+    } else if database.mark_run_cancelling(child_run_id)?.is_none() {
+        return Ok(false);
+    }
+    // A durable intent is not a terminal Child fact. With no live transport, leave the Run in
+    // cancelling so startup recovery can redeliver; never synthesize run.cancelled here.
+    signal().map(|delivered| delivered.unwrap_or(false))
+}
+
+fn validate_graph_reviewer_runtime_contract(
+    started: &StartRunResult,
+    child_run: &ChildRunRecord,
+) -> Result<(), String> {
+    let expected_tools = GRAPH_REVIEWER_ALLOWED_TOOLS
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    let actual_tools = child_run
+        .allowed_tools
+        .as_ref()
+        .map(|tools| tools.iter().cloned().collect::<HashSet<_>>())
+        .ok_or_else(|| {
+            "[graph.readonly_reviewer_scope_invalid] Reviewer Child omitted its frozen tool scope"
+                .to_owned()
+        })?;
+    if actual_tools != expected_tools || child_run.allowed_tools.as_ref().unwrap().len() != 4 {
+        return Err(
+            "[graph.readonly_reviewer_scope_invalid] Reviewer Child tools must be exactly read, ls, find, and grep"
+                .to_owned(),
+        );
+    }
+    if child_run.child_run_id != started.run.id
+        || child_run.child_conversation_id != started.run.conversation_id
+        || child_run.parent_run_id == child_run.child_run_id
+        || !matches!(child_run.status.as_str(), "queued" | "running")
+    {
+        return Err(
+            "[graph.readonly_reviewer_identity_invalid] Reviewer Child projection does not match its authoritative Run"
+                .to_owned(),
+        );
+    }
+    if child_run.team_run_id.is_some()
+        || child_run.team_member_id.is_some()
+        || child_run.budget.max_duration_ms != GRAPH_REVIEWER_MAX_DURATION_MS
+        || child_run.budget.max_total_tokens != GRAPH_REVIEWER_MAX_TOTAL_TOKENS
+        || child_run.budget.max_output_tokens != GRAPH_REVIEWER_MAX_OUTPUT_TOKENS
+        || child_run.budget.max_tool_calls != GRAPH_REVIEWER_MAX_TOOL_CALLS
+    {
+        return Err(
+            "[graph.readonly_reviewer_contract_invalid] Reviewer Child must use the fixed bounded review contract"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn ensure_child_cancel_not_graph_bound(
+    database: &Database,
+    child_run_id: &str,
+) -> Result<(), String> {
+    if database
+        .graph_attempt_id_for_child_run(child_run_id)?
+        .is_some()
+    {
+        return Err(
+            "[graph.readonly_dedicated_cancel_required] Graph-bound Child Runs must be cancelled through graph_readonly_node_cancel"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 fn handle_child_run_tool_request(
@@ -2894,12 +4025,18 @@ fn execute_child_run_tool_request(
         .ok_or_else(|| "Child Run tool request has an unsupported tool".to_owned())?;
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(response) =
+        inspect_existing_host_tool_call(database, run_id, tool_call_id, tool, &input)?
+    {
+        return Ok(response);
+    }
     let hook_decision =
         crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)?;
     if let Some(reason) = &hook_decision.blocked {
         return Err(format!("[hook.blocked] {reason}"));
     }
-    let tool_call = database.create_host_tool_call(
+    let tool_call = match create_fresh_host_tool_call(
+        database,
         run_id,
         tool_call_id,
         tool,
@@ -2910,74 +4047,75 @@ fn execute_child_run_tool_request(
             "running"
         },
         hook_decision.requires_approval,
-    )?;
-    if hook_decision.requires_approval {
-        request_declarative_hook_approval(
-            app,
-            database,
-            state,
-            run_id,
-            &tool_call,
-            tool,
-            &input,
-            hook_decision.approval_reason.as_deref(),
-        )?;
-    }
-
-    let outcome: Result<Value, String> = (|| match tool {
-        "team_snapshot_get" => Ok(json!({
-            "team": database.latest_expert_team(conversation_id)?,
-        })),
-        "team_start" => {
-            let objective = required_bounded_text(&input, "objective", 8_000)?;
-            let context = optional_bounded_text(&input, "context", 12_000)?;
-            let team = crate::expert_teams::start_team(
+    )? {
+        HostToolCallExecution::Execute(record) => record,
+        HostToolCallExecution::Replay(response) => return Ok(response),
+    };
+    let outcome: Result<Value, String> = (|| {
+        if hook_decision.requires_approval {
+            request_declarative_hook_approval(
+                app,
                 database,
-                conversation_id,
+                state,
                 run_id,
-                objective,
-                context,
+                &tool_call,
+                tool,
+                &input,
+                hook_decision.approval_reason.as_deref(),
             )?;
-            Ok(json!({ "team": team }))
         }
-        "team_member_start" => {
-            let snapshot = database
-                .active_expert_team(conversation_id)?
-                .ok_or_else(|| "team.not_active".to_owned())?;
-            if snapshot.run.parent_run_id != run_id {
-                return Err("team.parent_run_mismatch".to_owned());
+        match tool {
+            "team_snapshot_get" => Ok(json!({
+                "team": database.latest_expert_team(conversation_id)?,
+            })),
+            "team_start" => {
+                let objective = required_bounded_text(&input, "objective", 8_000)?;
+                let context = optional_bounded_text(&input, "context", 12_000)?;
+                let team = crate::expert_teams::start_team(
+                    database,
+                    conversation_id,
+                    run_id,
+                    objective,
+                    context,
+                )?;
+                Ok(json!({ "team": team }))
             }
-            let member_id = required_bounded_text(&input, "memberId", 128)?;
-            if snapshot
-                .members
-                .iter()
-                .any(|member| member.team_member_id.as_deref() == Some(member_id))
-            {
-                return Err("team.member_already_started".to_owned());
-            }
-            if snapshot
-                .members
-                .iter()
-                .any(|member| matches!(member.status.as_str(), "queued" | "running" | "cancelling"))
-            {
-                return Err("team.serial_member_still_active".to_owned());
-            }
-            let team = crate::expert_teams::parse_team(snapshot.run.team.clone())?;
-            let member = team
-                .members
-                .iter()
-                .find(|member| member.id == member_id)
-                .ok_or_else(|| "team.member_not_found".to_owned())?;
-            let task = required_bounded_text(&input, "task", 8_000)?;
-            let member_context = optional_bounded_text(&input, "context", 12_000)?;
-            let model_max_output = database
-                .get_model_service()?
-                .ok_or_else(|| "model service is not configured".to_owned())?
-                .max_output_tokens;
-            if member.budget.max_output_tokens > model_max_output {
-                return Err("team.member_budget_exceeds_model_output".to_owned());
-            }
-            let isolated_context = format!(
+            "team_member_start" => {
+                let snapshot = database
+                    .active_expert_team(conversation_id)?
+                    .ok_or_else(|| "team.not_active".to_owned())?;
+                if snapshot.run.parent_run_id != run_id {
+                    return Err("team.parent_run_mismatch".to_owned());
+                }
+                let member_id = required_bounded_text(&input, "memberId", 128)?;
+                if snapshot
+                    .members
+                    .iter()
+                    .any(|member| member.team_member_id.as_deref() == Some(member_id))
+                {
+                    return Err("team.member_already_started".to_owned());
+                }
+                if snapshot.members.iter().any(|member| {
+                    matches!(member.status.as_str(), "queued" | "running" | "cancelling")
+                }) {
+                    return Err("team.serial_member_still_active".to_owned());
+                }
+                let team = crate::expert_teams::parse_team(snapshot.run.team.clone())?;
+                let member = team
+                    .members
+                    .iter()
+                    .find(|member| member.id == member_id)
+                    .ok_or_else(|| "team.member_not_found".to_owned())?;
+                let task = required_bounded_text(&input, "task", 8_000)?;
+                let member_context = optional_bounded_text(&input, "context", 12_000)?;
+                let model_max_output = database
+                    .get_model_service()?
+                    .ok_or_else(|| "model service is not configured".to_owned())?
+                    .max_output_tokens;
+                if member.budget.max_output_tokens > model_max_output {
+                    return Err("team.member_budget_exceeds_model_output".to_owned());
+                }
+                let isolated_context = format!(
                 "# Expert Team\n{} ({})\n\n# Member identity\n{} — {}\n\n# Frozen member instructions\n{}\n\n# Lead objective\n{}\n\n# Shared bounded context\n{}\n\n# Member-specific bounded context\n{}",
                 team.title,
                 team.id,
@@ -2988,7 +4126,7 @@ fn execute_child_run_tool_request(
                 snapshot.run.context,
                 member_context,
             );
-            let (started, child_run, created) = database
+                let (started, child_run, created) = database
                 .create_child_run(crate::database::CreateChildRunInput {
                     parent_run_id: run_id,
                     tool_call_id,
@@ -3003,89 +4141,91 @@ fn execute_child_run_tool_request(
                 .map_err(|error| format!(
                     "team.member_start_rejected: Host serial, identity, depth, concurrency, or budget constraints rejected the member ({error})"
                 ))?;
-            if created || child_run.status == "queued" {
-                runtime_host.start_child_runtime(
-                    started,
-                    child_run.clone(),
-                    conversation_id.to_owned(),
-                )?;
+                if created || child_run.status == "queued" {
+                    runtime_host.start_child_runtime(
+                        started,
+                        child_run.clone(),
+                        conversation_id.to_owned(),
+                    )?;
+                }
+                Ok(
+                    json!({ "teamRunId": snapshot.run.id, "childRun": child_run, "created": created }),
+                )
             }
-            Ok(json!({ "teamRunId": snapshot.run.id, "childRun": child_run, "created": created }))
-        }
-        "team_collect" => {
-            let snapshot = database
-                .active_expert_team(conversation_id)?
-                .or_else(|| database.latest_expert_team(conversation_id).ok().flatten())
-                .ok_or_else(|| "team.not_found".to_owned())?;
-            if snapshot.run.parent_run_id != run_id {
-                return Err("team.parent_run_mismatch".to_owned());
-            }
-            let wait_ms = input
-                .get("waitMs")
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-                .clamp(0, 60_000) as u64;
-            let deadline = Instant::now() + Duration::from_millis(wait_ms);
-            let snapshot = loop {
-                let current = database
-                    .get_expert_team(&snapshot.run.id)?
+            "team_collect" => {
+                let snapshot = database
+                    .active_expert_team(conversation_id)?
+                    .or_else(|| database.latest_expert_team(conversation_id).ok().flatten())
                     .ok_or_else(|| "team.not_found".to_owned())?;
-                if current
+                if snapshot.run.parent_run_id != run_id {
+                    return Err("team.parent_run_mismatch".to_owned());
+                }
+                let wait_ms = input
+                    .get("waitMs")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    .clamp(0, 60_000) as u64;
+                let deadline = Instant::now() + Duration::from_millis(wait_ms);
+                let snapshot = loop {
+                    let current = database
+                        .get_expert_team(&snapshot.run.id)?
+                        .ok_or_else(|| "team.not_found".to_owned())?;
+                    if current
+                        .members
+                        .iter()
+                        .all(|member| run_status_is_terminal(&member.status))
+                        || wait_ms == 0
+                        || Instant::now() >= deadline
+                    {
+                        break current;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                };
+                let team = if snapshot
                     .members
                     .iter()
                     .all(|member| run_status_is_terminal(&member.status))
-                    || wait_ms == 0
-                    || Instant::now() >= deadline
                 {
-                    break current;
-                }
-                thread::sleep(Duration::from_millis(100));
-            };
-            let team = if snapshot
-                .members
-                .iter()
-                .all(|member| run_status_is_terminal(&member.status))
-            {
-                database.finalize_expert_team(&snapshot.run.id)?
-            } else {
-                snapshot
-            };
-            Ok(json!({ "team": team }))
-        }
-        "team_cancel" => {
-            let snapshot = database
-                .active_expert_team(conversation_id)?
-                .ok_or_else(|| "team.not_active".to_owned())?;
-            if snapshot.run.parent_run_id != run_id {
-                return Err("team.parent_run_mismatch".to_owned());
-            }
-            let reason = optional_bounded_text(&input, "reason", 2_000)?;
-            let team = runtime_host.cancel_expert_team(
-                &snapshot.run.id,
-                if reason.is_empty() {
-                    "cancelled by Team Lead"
+                    database.finalize_expert_team(&snapshot.run.id)?
                 } else {
-                    reason
-                },
-            )?;
-            Ok(json!({ "team": team }))
-        }
-        "child_agent_list" => Ok(json!({ "agents": database.list_child_agents()? })),
-        "child_run_start" => {
-            let objective = required_bounded_text(&input, "objective", 8_000)?;
-            let context = optional_bounded_text(&input, "context", 12_000)?;
-            let agent_id = input
-                .get("agentId")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("fox-general");
-            let model_max_output = database
-                .get_model_service()?
-                .ok_or_else(|| "model service is not configured".to_owned())?
-                .max_output_tokens;
-            let budget = normalized_child_budget(input.get("budget"), model_max_output)?;
-            let (started, child_run, created) = database
+                    snapshot
+                };
+                Ok(json!({ "team": team }))
+            }
+            "team_cancel" => {
+                let snapshot = database
+                    .active_expert_team(conversation_id)?
+                    .ok_or_else(|| "team.not_active".to_owned())?;
+                if snapshot.run.parent_run_id != run_id {
+                    return Err("team.parent_run_mismatch".to_owned());
+                }
+                let reason = optional_bounded_text(&input, "reason", 2_000)?;
+                let team = runtime_host.cancel_expert_team(
+                    &snapshot.run.id,
+                    if reason.is_empty() {
+                        "cancelled by Team Lead"
+                    } else {
+                        reason
+                    },
+                )?;
+                Ok(json!({ "team": team }))
+            }
+            "child_agent_list" => Ok(json!({ "agents": database.list_child_agents()? })),
+            "child_run_start" => {
+                let objective = required_bounded_text(&input, "objective", 8_000)?;
+                let context = optional_bounded_text(&input, "context", 12_000)?;
+                let agent_id = input
+                    .get("agentId")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("fox-general");
+                let model_max_output = database
+                    .get_model_service()?
+                    .ok_or_else(|| "model service is not configured".to_owned())?
+                    .max_output_tokens;
+                let budget = normalized_child_budget(input.get("budget"), model_max_output)?;
+                let (started, child_run, created) = database
                 .create_child_run(crate::database::CreateChildRunInput {
                     parent_run_id: run_id,
                     tool_call_id,
@@ -3102,98 +4242,93 @@ fn execute_child_run_tool_request(
                         "child_run.start_rejected: the agent, depth, concurrency, or per-parent limit rejected this Child Run ({error})"
                     )
                 })?;
-            if created || child_run.status == "queued" {
-                runtime_host.start_child_runtime(
-                    started,
-                    child_run.clone(),
-                    conversation_id.to_owned(),
-                )?;
-            }
-            Ok(json!({ "childRun": child_run, "created": created }))
-        }
-        "child_run_collect" => {
-            let requested = input
-                .get("childRunIds")
-                .and_then(Value::as_array)
-                .ok_or_else(|| "childRunIds must be a non-empty array".to_owned())?;
-            if requested.is_empty() || requested.len() > 8 {
-                return Err("childRunIds must contain between 1 and 8 items".to_owned());
-            }
-            let requested = requested
-                .iter()
-                .map(|value| {
-                    value
-                        .as_str()
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned)
-                        .ok_or_else(|| "childRunIds contains an invalid ID".to_owned())
-                })
-                .collect::<Result<HashSet<_>, _>>()?;
-            let wait_ms = input
-                .get("waitMs")
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-                .clamp(0, 60_000) as u64;
-            let deadline = Instant::now() + Duration::from_millis(wait_ms);
-            let records = loop {
-                let records = database
-                    .child_runs_for_parent(run_id)?
-                    .into_iter()
-                    .filter(|record| requested.contains(&record.child_run_id))
-                    .collect::<Vec<_>>();
-                if records.len() != requested.len() {
-                    return Err(
-                        "one or more Child Runs do not belong to the current parent Run".to_owned(),
-                    );
+                if created || child_run.status == "queued" {
+                    runtime_host.start_child_runtime(
+                        started,
+                        child_run.clone(),
+                        conversation_id.to_owned(),
+                    )?;
                 }
-                if records
+                Ok(json!({ "childRun": child_run, "created": created }))
+            }
+            "child_run_collect" => {
+                let requested = input
+                    .get("childRunIds")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "childRunIds must be a non-empty array".to_owned())?;
+                if requested.is_empty() || requested.len() > 8 {
+                    return Err("childRunIds must contain between 1 and 8 items".to_owned());
+                }
+                let requested = requested
                     .iter()
-                    .all(|record| run_status_is_terminal(&record.status))
-                    || wait_ms == 0
-                    || Instant::now() >= deadline
-                {
-                    break records;
-                }
-                thread::sleep(Duration::from_millis(100));
-            };
-            let all_terminal = records
-                .iter()
-                .all(|record| run_status_is_terminal(&record.status));
-            Ok(json!({ "childRuns": records, "allTerminal": all_terminal }))
-        }
-        "child_run_cancel" => {
-            let child_run_id = required_bounded_text(&input, "childRunId", 160)?;
-            let child = database
-                .child_run(child_run_id)?
-                .ok_or_else(|| "Child Run was not found".to_owned())?;
-            if child.parent_run_id != run_id {
-                return Err("Child Run does not belong to the current parent Run".to_owned());
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned)
+                            .ok_or_else(|| "childRunIds contains an invalid ID".to_owned())
+                    })
+                    .collect::<Result<HashSet<_>, _>>()?;
+                let wait_ms = input
+                    .get("waitMs")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    .clamp(0, 60_000) as u64;
+                let deadline = Instant::now() + Duration::from_millis(wait_ms);
+                let records = loop {
+                    let records = database
+                        .child_runs_for_parent(run_id)?
+                        .into_iter()
+                        .filter(|record| requested.contains(&record.child_run_id))
+                        .collect::<Vec<_>>();
+                    if records.len() != requested.len() {
+                        return Err(
+                            "one or more Child Runs do not belong to the current parent Run"
+                                .to_owned(),
+                        );
+                    }
+                    if records
+                        .iter()
+                        .all(|record| run_status_is_terminal(&record.status))
+                        || wait_ms == 0
+                        || Instant::now() >= deadline
+                    {
+                        break records;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                };
+                let all_terminal = records
+                    .iter()
+                    .all(|record| run_status_is_terminal(&record.status));
+                Ok(json!({ "childRuns": records, "allTerminal": all_terminal }))
             }
-            let cancelled = runtime_host.cancel_child_runtime(child_run_id)?;
-            let child_run = database.child_run(child_run_id)?;
-            Ok(json!({ "cancelled": cancelled, "childRun": child_run }))
+            "child_run_cancel" => {
+                let child_run_id = required_bounded_text(&input, "childRunId", 160)?;
+                let child = database
+                    .child_run(child_run_id)?
+                    .ok_or_else(|| "Child Run was not found".to_owned())?;
+                if child.parent_run_id != run_id {
+                    return Err("Child Run does not belong to the current parent Run".to_owned());
+                }
+                ensure_child_cancel_not_graph_bound(database, child_run_id)?;
+                let cancelled = runtime_host.cancel_child_runtime(child_run_id)?;
+                let child_run = database.child_run(child_run_id)?;
+                Ok(json!({ "cancelled": cancelled, "childRun": child_run }))
+            }
+            _ => unreachable!(),
         }
-        _ => unreachable!(),
     })();
 
-    match outcome {
-        Ok(result) => {
-            database.complete_host_tool_call(run_id, tool_call_id, Some(&result), None)?;
-            let hook_annotations =
-                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)?;
-            Ok(json!({
-                "isError": false,
-                "result": result,
-                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
-            }))
-        }
-        Err(error) => {
-            database.complete_host_tool_call(run_id, tool_call_id, None, Some(&error))?;
-            let _ = crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, false);
-            Err(error)
-        }
-    }
+    finalize_host_tool_execution(
+        database,
+        run_id,
+        tool_call_id,
+        tool,
+        &input,
+        hook_decision.annotations,
+        outcome,
+    )
 }
 
 fn required_bounded_text<'a>(
@@ -3348,12 +4483,18 @@ fn execute_memory_tool_request(
         .ok_or_else(|| "memory tool request is missing tool".to_owned())?;
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(response) =
+        inspect_existing_host_tool_call(database, run_id, tool_call_id, tool, &input)?
+    {
+        return Ok(response);
+    }
     let hook_decision =
         crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)?;
     if let Some(reason) = &hook_decision.blocked {
         return Err(format!("[hook.blocked] {reason}"));
     }
-    let tool_call = database.create_host_tool_call(
+    let tool_call = match create_fresh_host_tool_call(
+        database,
         run_id,
         tool_call_id,
         tool,
@@ -3364,81 +4505,83 @@ fn execute_memory_tool_request(
             "running"
         },
         hook_decision.requires_approval,
-    )?;
-    if hook_decision.requires_approval {
-        request_declarative_hook_approval(
-            app,
-            database,
-            state,
-            run_id,
-            &tool_call,
-            tool,
-            &input,
-            hook_decision.approval_reason.as_deref(),
-        )?;
-    }
-    let outcome = match tool {
-        "memory_search" => {
-            let query = input.get("query").and_then(Value::as_str).unwrap_or("");
-            let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
-            database
-                .recall_memories(conversation_id, Some(run_id), query, limit, 8_000)
-                .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
-        }
-        "memory_propose" => {
-            let required = |name: &str| {
-                input
-                    .get(name)
-                    .and_then(Value::as_str)
-                    .filter(|value| !value.trim().is_empty())
-                    .map(str::to_owned)
-                    .ok_or_else(|| format!("memory.{name}_required"))
-            };
-            let proposal = MemoryProposalInput {
-                scope: input
-                    .get("scope")
-                    .and_then(Value::as_str)
-                    .unwrap_or("agent")
-                    .to_owned(),
-                kind: required("kind")?,
-                canonical_key: required("canonicalKey")?,
-                content: required("content")?,
-                evidence_excerpt: required("evidenceExcerpt")?,
-                source_message_id: input
-                    .get("sourceMessageId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                confidence: input
-                    .get("confidence")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.7),
-            };
-            database
-                .propose_memory_for_run(conversation_id, run_id, &proposal)
-                .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))
-        }
-        _ => Err(format!("unsupported memory tool: {tool}")),
+    )? {
+        HostToolCallExecution::Execute(record) => record,
+        HostToolCallExecution::Replay(response) => return Ok(response),
     };
-    match outcome {
-        Ok(result) => {
-            database.complete_host_tool_call(run_id, tool_call_id, Some(&result), None)?;
-            let hook_annotations =
-                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)?;
-            Ok(json!({
-                "isError": false,
-                "result": result,
-                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
-            }))
+    let outcome: Result<Value, String> = (|| {
+        if hook_decision.requires_approval {
+            request_declarative_hook_approval(
+                app,
+                database,
+                state,
+                run_id,
+                &tool_call,
+                tool,
+                &input,
+                hook_decision.approval_reason.as_deref(),
+            )?;
         }
-        Err(error) => {
-            database.complete_host_tool_call(run_id, tool_call_id, None, Some(&error))?;
-            let _ = crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, false);
-            Err(error)
+        match tool {
+            "memory_search" => {
+                let query = input.get("query").and_then(Value::as_str).unwrap_or("");
+                let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
+                database
+                    .recall_memories(conversation_id, Some(run_id), query, limit, 8_000)
+                    .and_then(|value| {
+                        serde_json::to_value(value).map_err(|error| error.to_string())
+                    })
+            }
+            "memory_propose" => {
+                let required = |name: &str| {
+                    input
+                        .get(name)
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("memory.{name}_required"))
+                };
+                let proposal = MemoryProposalInput {
+                    scope: input
+                        .get("scope")
+                        .and_then(Value::as_str)
+                        .unwrap_or("agent")
+                        .to_owned(),
+                    kind: required("kind")?,
+                    canonical_key: required("canonicalKey")?,
+                    content: required("content")?,
+                    evidence_excerpt: required("evidenceExcerpt")?,
+                    source_message_id: input
+                        .get("sourceMessageId")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    confidence: input
+                        .get("confidence")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.7),
+                };
+                database
+                    .propose_memory_for_run(conversation_id, run_id, &proposal)
+                    .and_then(|value| {
+                        serde_json::to_value(value).map_err(|error| error.to_string())
+                    })
+            }
+            _ => Err(format!("unsupported memory tool: {tool}")),
         }
-    }
+    })();
+    finalize_host_tool_execution(
+        database,
+        run_id,
+        tool_call_id,
+        tool,
+        &input,
+        hook_decision.annotations,
+        outcome,
+    )
 }
 
 fn execute_work_tool_request(
+    runtime_host: &RuntimeHost,
     app: &AppHandle,
     database: &Database,
     state: &Arc<Mutex<RuntimeHostState>>,
@@ -3480,7 +4623,22 @@ fn execute_work_tool_request(
         .ok_or_else(|| "work tool request is missing tool".to_owned())?;
     ensure_expert_tool_allowed(database, conversation_id, tool)
         .map_err(work_tools::WorkToolError::from)?;
-    let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    let raw_input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    let repair_override = tool == "task_repair_escalate_start";
+    let input = if repair_override {
+        work_tools::canonicalize_task_repair_override_request(&raw_input)?
+    } else {
+        raw_input
+    };
+    if let Some(response) =
+        inspect_existing_host_tool_call(database, run_id, tool_call_id, tool, &input)
+            .map_err(work_tools::WorkToolError::from)?
+    {
+        return Ok(response);
+    }
+    if repair_override {
+        work_tools::preflight_task_repair_override(database, conversation_id, run_id, &input)?;
+    }
     let hook_decision =
         crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)
             .map_err(work_tools::WorkToolError::from)?;
@@ -3489,51 +4647,222 @@ fn execute_work_tool_request(
             "[hook.blocked] {reason}"
         )));
     }
-    let tool_call = database.create_host_tool_call(
+    let requires_approval = repair_override || hook_decision.requires_approval;
+    let tool_call = match create_fresh_host_tool_call(
+        database,
         run_id,
         tool_call_id,
         tool,
         &input,
-        if hook_decision.requires_approval {
+        if requires_approval {
             "pending"
         } else {
             "running"
         },
-        hook_decision.requires_approval,
-    )?;
-    if hook_decision.requires_approval {
-        request_declarative_hook_approval(
-            app,
-            database,
-            state,
-            run_id,
-            &tool_call,
-            tool,
-            &input,
-            hook_decision.approval_reason.as_deref(),
-        )
-        .map_err(work_tools::WorkToolError::from)?;
-    }
-    match work_tools::execute(database, conversation_id, run_id, tool, &input) {
+        requires_approval,
+    )? {
+        HostToolCallExecution::Execute(record) => record,
+        HostToolCallExecution::Replay(response) => return Ok(response),
+    };
+    let outcome = (|| -> Result<work_tools::WorkToolOutcome, work_tools::WorkToolError> {
+        let repair_override_approval = if repair_override {
+            Some(
+                request_task_repair_override_approval(
+                    app,
+                    database,
+                    state,
+                    run_id,
+                    &tool_call,
+                    &input,
+                    hook_decision.approval_reason.as_deref(),
+                )
+                .map_err(work_tools::WorkToolError::from)?,
+            )
+        } else if hook_decision.requires_approval {
+            request_declarative_hook_approval(
+                app,
+                database,
+                state,
+                run_id,
+                &tool_call,
+                tool,
+                &input,
+                hook_decision.approval_reason.as_deref(),
+            )
+            .map_err(work_tools::WorkToolError::from)?;
+            None
+        } else {
+            None
+        };
+        if let Some(approval) = repair_override_approval.as_ref() {
+            work_tools::execute_approved_task_repair_override(
+                database,
+                conversation_id,
+                run_id,
+                &tool_call.id,
+                &approval.id,
+                &input,
+            )
+        } else {
+            work_tools::execute_with_host_tool_call_id(
+                database,
+                conversation_id,
+                run_id,
+                &tool_call.id,
+                tool,
+                &input,
+            )
+        }
+    })();
+    match outcome {
         Ok(outcome) => {
-            database.complete_host_tool_call(run_id, tool_call_id, Some(&outcome.result), None)?;
+            let post_finalize = outcome.post_finalize;
+            let response = finalize_host_tool_execution(
+                database,
+                run_id,
+                tool_call_id,
+                tool,
+                &input,
+                hook_decision.annotations,
+                Ok(outcome.result),
+            )
+            .map_err(work_tools::WorkToolError::from)?;
+            if let Some(directive) = post_finalize {
+                match directive {
+                    work_tools::WorkToolPostFinalizeDirective::StartChild(dispatch) => {
+                        let failed_dispatch_child = dispatch.child_run.clone();
+                        if let Err(error) =
+                            dispatch_created_work_child(Some(dispatch), |dispatch| {
+                                runtime_host.start_child_runtime(
+                                    dispatch.started,
+                                    dispatch.child_run,
+                                    conversation_id.to_owned(),
+                                )
+                            })
+                        {
+                            let _ = database.mark_run_failed(
+                                &failed_dispatch_child.child_run_id,
+                                "graph.readonly_child_dispatch_failed",
+                                &error,
+                            );
+                            let _ = database
+                                .sync_child_run_terminal(&failed_dispatch_child.child_run_id);
+                            if let Ok(Some(record)) =
+                                database.child_run(&failed_dispatch_child.child_run_id)
+                            {
+                                runtime_host.emit_child_run_update(conversation_id, &record);
+                            }
+                        }
+                    }
+                    work_tools::WorkToolPostFinalizeDirective::CancelGraphChild(directive) => {
+                        match database.activate_graph_node_cancel_intent(&directive.intent_id) {
+                            Ok(activation) if activation.activated => {
+                                if let Err(error) = runtime_host
+                                    .signal_graph_child_cancel(&activation.child_run_id, false)
+                                {
+                                    eprintln!(
+                                        "[graph.readonly_node_cancel_signal_failed] intent={} child={} error={}",
+                                        activation.intent_id, activation.child_run_id, error
+                                    );
+                                }
+                            }
+                            Ok(activation) if activation.stale => {
+                                eprintln!(
+                                    "[graph.readonly_node_cancel_activation_stale] intent={} child={}",
+                                    activation.intent_id, activation.child_run_id
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!(
+                                    "[graph.readonly_node_cancel_activation_failed] intent={} child={} error={}",
+                                    directive.intent_id, directive.child_run_id, error
+                                );
+                            }
+                        }
+                    }
+                    work_tools::WorkToolPostFinalizeDirective::StartGraphReviewer(directive) => {
+                        match database.activate_graph_node_review_request(&directive.request_id) {
+                            Ok(activation) if activation.activated => {
+                                match database.conversation_agent_id(conversation_id) {
+                                    Ok(reviewer_agent_id) => {
+                                        if let Err(error) = dispatch_graph_reviewer_child(
+                                            runtime_host,
+                                            &directive.request_id,
+                                            &reviewer_agent_id,
+                                        ) {
+                                            eprintln!(
+                                                "[graph.readonly_reviewer_dispatch_failed] request={} error={}",
+                                                directive.request_id, error
+                                            );
+                                        }
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "[graph.readonly_reviewer_agent_lookup_failed] request={} error={}",
+                                            directive.request_id, error
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(activation) if activation.stale => {
+                                eprintln!(
+                                    "[graph.readonly_reviewer_activation_stale] request={}",
+                                    activation.request_id
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!(
+                                    "[graph.readonly_reviewer_activation_failed] request={} error={}",
+                                    directive.request_id, error
+                                );
+                            }
+                        }
+                    }
+                    work_tools::WorkToolPostFinalizeDirective::AcceptReadOnlyGraph(directive) => {
+                        match database.activate_read_only_graph_acceptance(&directive.acceptance_id)
+                        {
+                            Ok(acceptance) if acceptance.accepted => {
+                                let _ = app.emit("fox://graph-acceptance", acceptance);
+                            }
+                            Ok(acceptance) if acceptance.stale => {
+                                eprintln!(
+                                    "[graph.readonly_accept_activation_stale] acceptance={}",
+                                    acceptance.acceptance_id
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                eprintln!(
+                                    "[graph.readonly_accept_activation_failed] acceptance={} error={}",
+                                    directive.acceptance_id, error
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             for event in outcome.events {
                 let _ = app.emit("fox://work-event", event);
             }
-            let hook_annotations =
-                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)
-                    .map_err(work_tools::WorkToolError::from)?;
-            Ok(json!({
-                "isError": false,
-                "result": outcome.result,
-                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
-            }))
+            Ok(response)
         }
         Err(error) => {
             let message = error.to_string();
-            database.complete_host_tool_call(run_id, tool_call_id, None, Some(&message))?;
-            let _ = crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, false);
-            Err(error)
+            match finalize_host_tool_execution(
+                database,
+                run_id,
+                tool_call_id,
+                tool,
+                &input,
+                hook_decision.annotations,
+                Err(message.clone()),
+            ) {
+                Ok(authoritative) => Ok(authoritative),
+                Err(authoritative) if authoritative == message => Err(error),
+                Err(authoritative) => Err(work_tools::WorkToolError::from(authoritative)),
+            }
         }
     }
 }
@@ -3696,20 +5025,35 @@ fn request_declarative_hook_approval(
             "policyReason": summary,
         }),
     )?;
+    if approval.status != "pending" {
+        return Err(format!(
+            "approval '{}' is already terminal and cannot be reopened",
+            approval.id
+        ));
+    }
     let (sender, receiver) = mpsc::channel();
-    state
+    let pending_approvals = state
         .lock()
         .map_err(|_| "runtime state lock is poisoned".to_owned())?
         .pending_approvals
+        .clone();
+    let mut pending = pending_approvals
         .lock()
-        .map_err(|_| "approval map is poisoned".to_owned())?
-        .insert(
-            approval.id.clone(),
-            PendingApproval {
-                run_id: run_id.to_owned(),
-                sender,
-            },
-        );
+        .map_err(|_| "approval map is poisoned".to_owned())?;
+    if pending.contains_key(&approval.id) {
+        return Err(format!(
+            "approval '{}' is already awaiting a decision",
+            approval.id
+        ));
+    }
+    pending.insert(
+        approval.id.clone(),
+        PendingApproval {
+            run_id: run_id.to_owned(),
+            sender,
+        },
+    );
+    drop(pending);
     let approval_id = approval.id.clone();
     let _ = app.emit("fox://approval-requested", approval);
     let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
@@ -3737,20 +5081,201 @@ fn request_declarative_hook_approval(
         }
     };
     if !approved {
-        database.complete_host_tool_call(
-            run_id,
-            &tool_call.runtime_tool_call_id,
-            None,
-            Some("The user denied the lifecycle Hook policy approval."),
-        )?;
         return Err("The user denied the lifecycle Hook policy approval.".to_owned());
     }
+    claim_approved_tool_call_for_execution(database, run_id, &tool_call.runtime_tool_call_id)?;
     Ok(())
+}
+
+fn request_task_repair_override_approval(
+    app: &AppHandle,
+    database: &Database,
+    state: &Arc<Mutex<RuntimeHostState>>,
+    run_id: &str,
+    tool_call: &ToolCallRecord,
+    input: &Value,
+    policy_reason: Option<&str>,
+) -> Result<ApprovalRecord, String> {
+    let task_id = input
+        .get("taskId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "taskId is required for repair override approval".to_owned())?;
+    let escalation_reason = input
+        .get("escalationReason")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "escalationReason is required for repair override approval".to_owned())?;
+    let approval = database.create_task_repair_override_approval(
+        &tool_call.id,
+        "人工授权一次超出普通预算的 Task Repair",
+        &json!({
+            "category": "task_repair_budget_override",
+            "title": "Task Repair 预算人工升级",
+            "target": task_id,
+            "summary": escalation_reason,
+            "arguments": input,
+            "policyReason": policy_reason.unwrap_or("普通 Repair 预算已耗尽"),
+            "availableDecisions": ["allow_once", "deny"],
+        }),
+    )?;
+    if approval.status != "pending" {
+        return Err(format!(
+            "repair override approval '{}' is already terminal or claimed and cannot be replayed",
+            approval.id
+        ));
+    }
+    let (sender, receiver) = mpsc::channel();
+    let pending_approvals = state
+        .lock()
+        .map_err(|_| "runtime state lock is poisoned".to_owned())?
+        .pending_approvals
+        .clone();
+    let mut pending = pending_approvals
+        .lock()
+        .map_err(|_| "approval map is poisoned".to_owned())?;
+    if pending.contains_key(&approval.id) {
+        return Err(format!(
+            "repair override approval '{}' is already awaiting a decision",
+            approval.id
+        ));
+    }
+    pending.insert(
+        approval.id.clone(),
+        PendingApproval {
+            run_id: run_id.to_owned(),
+            sender,
+        },
+    );
+    drop(pending);
+    let approval_id = approval.id.clone();
+    let _ = app.emit("fox://approval-requested", approval.clone());
+    let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
+    if let Ok(runtime_state) = state.lock() {
+        if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
+            pending.remove(&approval_id);
+        }
+    }
+    let approved = match approval_result {
+        Ok(approved) => approved,
+        Err(error) => {
+            if let Ok(Some(resolved)) =
+                database.resolve_approval(&approval_id, ApprovalDecision::Deny)
+            {
+                let _ = app.emit("fox://approval-resolved", resolved);
+            }
+            let message = match error {
+                std::sync::mpsc::RecvTimeoutError::Timeout => {
+                    "Task repair override approval timed out"
+                }
+                std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                    "Task repair override approval was interrupted"
+                }
+            };
+            return Err(message.to_owned());
+        }
+    };
+    if !approved {
+        let message = "The user denied this one-time Task repair budget override.";
+        return Err(message.to_owned());
+    }
+    Ok(approval)
+}
+
+fn claim_approved_tool_call_for_execution(
+    database: &Database,
+    run_id: &str,
+    runtime_tool_call_id: &str,
+) -> Result<(), String> {
+    database
+        .claim_approved_tool_call(run_id, runtime_tool_call_id)?
+        .then_some(())
+        .ok_or_else(|| {
+            "[approval.execution_context_expired] approved tool call no longer belongs to a running Run"
+                .to_owned()
+        })
 }
 
 fn merge_hook_annotations(mut before: Vec<String>, after: Vec<String>) -> Vec<String> {
     before.extend(after);
     before
+}
+
+fn authoritative_host_tool_terminal(
+    database: &Database,
+    run_id: &str,
+    tool_call_id: &str,
+    tool: &str,
+    input: &Value,
+) -> Option<Result<Value, String>> {
+    let (record, disposition) = database
+        .inspect_host_tool_call_replay(run_id, tool_call_id, tool, input)
+        .ok()??;
+    if disposition != HostToolCallDisposition::ReplayTerminal {
+        return None;
+    }
+    if record.status == "completed" {
+        return Some(Ok(json!({
+            "isError": false,
+            "result": record.result.unwrap_or(Value::Null),
+            "hookAnnotations": [],
+            "replayed": true,
+        })));
+    }
+    (record.status == "failed").then(|| {
+        Err(record
+            .error_message
+            .unwrap_or_else(|| "the persisted ToolCall failed".to_owned()))
+    })
+}
+
+fn finalize_host_tool_execution(
+    database: &Database,
+    run_id: &str,
+    tool_call_id: &str,
+    tool: &str,
+    input: &Value,
+    before_annotations: Vec<String>,
+    outcome: Result<Value, String>,
+) -> Result<Value, String> {
+    match outcome {
+        Ok(result) => {
+            if let Err(persist_error) =
+                database.complete_host_tool_call(run_id, tool_call_id, Some(&result), None)
+            {
+                if let Some(authoritative) =
+                    authoritative_host_tool_terminal(database, run_id, tool_call_id, tool, input)
+                {
+                    return authoritative;
+                }
+                return Err(format!(
+                    "[tool_call.finalize_failed] handler succeeded but its Host ToolCall could not be finalized: {persist_error}"
+                ));
+            }
+            let after_annotations =
+                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)
+                    .unwrap_or_default();
+            Ok(json!({
+                "isError": false,
+                "result": result,
+                "hookAnnotations": merge_hook_annotations(before_annotations, after_annotations),
+            }))
+        }
+        Err(error) => {
+            if let Err(persist_error) =
+                database.complete_host_tool_call(run_id, tool_call_id, None, Some(&error))
+            {
+                if let Some(authoritative) =
+                    authoritative_host_tool_terminal(database, run_id, tool_call_id, tool, input)
+                {
+                    return authoritative;
+                }
+                return Err(format!(
+                    "{error}; [tool_call.finalize_failed] {persist_error}"
+                ));
+            }
+            let _ = crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, false);
+            Err(error)
+        }
+    }
 }
 
 fn handle_mcp_tool_request(
@@ -3819,6 +5344,11 @@ fn execute_mcp_tool_request(
         .ok_or_else(|| "MCP tool request is missing tool".to_owned())?;
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(response) =
+        inspect_existing_host_tool_call(database, run_id, tool_call_id, tool, &input)?
+    {
+        return Ok(response);
+    }
     let hook_decision =
         crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)?;
     if let Some(reason) = &hook_decision.blocked {
@@ -3827,7 +5357,8 @@ fn execute_mcp_tool_request(
     let requires_approval = hook_decision.requires_approval
         || (tool == "call_mcp_tool"
             && !database.conversation_tool_permission_granted(conversation_id, tool)?);
-    let tool_call = database.create_host_tool_call(
+    let tool_call = match create_fresh_host_tool_call(
+        database,
         run_id,
         tool_call_id,
         tool,
@@ -3838,79 +5369,83 @@ fn execute_mcp_tool_request(
             "running"
         },
         requires_approval,
-    )?;
-    let result = if tool == "list_mcp_tools" {
-        let query = input
-            .get("query")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let mut items = Vec::new();
-        for server in database
-            .list_mcp_servers()?
-            .into_iter()
-            .filter(|item| item.enabled)
-            .filter(|item| {
-                allowed_mcp_servers
-                    .as_ref()
-                    .is_none_or(|allowed| allowed.contains(&item.id))
-            })
-        {
-            let health_started = Instant::now();
-            match crate::mcp::list_tools(&server) {
-                Ok(tools) => {
-                    let _ = database.record_mcp_health(
-                        &server.id,
-                        "connected",
-                        None,
-                        Some(health_started.elapsed().as_millis() as i64),
-                        Some(tools.len() as i64),
-                    );
-                    let tools = tools
-                        .into_iter()
-                        .filter(|item| {
-                            query.is_empty()
-                                || item.to_string().to_ascii_lowercase().contains(&query)
-                        })
-                        .collect::<Vec<_>>();
-                    if !tools.is_empty() {
-                        items.push(json!({ "serverId": server.id, "serverName": server.name, "tools": tools }));
+    )? {
+        HostToolCallExecution::Execute(record) => record,
+        HostToolCallExecution::Replay(response) => return Ok(response),
+    };
+    let outcome: Result<Value, String> = (|| {
+        let result = if tool == "list_mcp_tools" {
+            let query = input
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let mut items = Vec::new();
+            for server in database
+                .list_mcp_servers()?
+                .into_iter()
+                .filter(|item| item.enabled)
+                .filter(|item| {
+                    allowed_mcp_servers
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.contains(&item.id))
+                })
+            {
+                let health_started = Instant::now();
+                match crate::mcp::list_tools(&server) {
+                    Ok(tools) => {
+                        let _ = database.record_mcp_health(
+                            &server.id,
+                            "connected",
+                            None,
+                            Some(health_started.elapsed().as_millis() as i64),
+                            Some(tools.len() as i64),
+                        );
+                        let tools = tools
+                            .into_iter()
+                            .filter(|item| {
+                                query.is_empty()
+                                    || item.to_string().to_ascii_lowercase().contains(&query)
+                            })
+                            .collect::<Vec<_>>();
+                        if !tools.is_empty() {
+                            items.push(json!({ "serverId": server.id, "serverName": server.name, "tools": tools }));
+                        }
+                    }
+                    Err(error) => {
+                        let _ = database.record_mcp_health(
+                            &server.id,
+                            "unavailable",
+                            Some(&error),
+                            Some(health_started.elapsed().as_millis() as i64),
+                            None,
+                        );
                     }
                 }
-                Err(error) => {
-                    let _ = database.record_mcp_health(
-                        &server.id,
-                        "unavailable",
-                        Some(&error),
-                        Some(health_started.elapsed().as_millis() as i64),
-                        None,
-                    );
-                }
             }
-        }
-        json!({ "servers": items })
-    } else if tool == "call_mcp_tool" {
-        let server_id = input
-            .get("serverId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "serverId is required".to_owned())?;
-        if allowed_mcp_servers
-            .as_ref()
-            .is_some_and(|allowed| !allowed.contains(server_id))
-        {
-            return Err("this MCP server is not enabled in the expert package".to_owned());
-        }
-        let remote_tool = input
-            .get("tool")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "MCP tool name is required".to_owned())?;
-        let arguments = input.get("arguments").cloned().unwrap_or_else(|| json!({}));
-        let server = database
-            .get_mcp_server(server_id)?
-            .filter(|server| server.enabled)
-            .ok_or_else(|| "MCP Server 不存在或已停用".to_owned())?;
-        if requires_approval {
-            let approval = database.create_approval(
+            json!({ "servers": items })
+        } else if tool == "call_mcp_tool" {
+            let server_id = input
+                .get("serverId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "serverId is required".to_owned())?;
+            if allowed_mcp_servers
+                .as_ref()
+                .is_some_and(|allowed| !allowed.contains(server_id))
+            {
+                return Err("this MCP server is not enabled in the expert package".to_owned());
+            }
+            let remote_tool = input
+                .get("tool")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "MCP tool name is required".to_owned())?;
+            let arguments = input.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let server = database
+                .get_mcp_server(server_id)?
+                .filter(|server| server.enabled)
+                .ok_or_else(|| "MCP Server 不存在或已停用".to_owned())?;
+            if requires_approval {
+                let approval = database.create_approval(
                 &tool_call.id,
                 &format!("调用 MCP 工具 {} / {}", server.name, remote_tool),
                 &json!({
@@ -3924,93 +5459,93 @@ fn execute_mcp_tool_request(
                     "arguments": arguments,
                 }),
             )?;
-            let (sender, receiver) = mpsc::channel();
-            state
-                .lock()
-                .map_err(|_| "runtime state lock is poisoned".to_owned())?
-                .pending_approvals
-                .lock()
-                .map_err(|_| "approval map is poisoned".to_owned())?
-                .insert(
-                    approval.id.clone(),
-                    PendingApproval {
-                        run_id: run_id.to_owned(),
-                        sender,
-                    },
-                );
-            let approval_id = approval.id.clone();
-            let _ = app.emit("fox://approval-requested", approval);
-            let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
-            if let Ok(runtime_state) = state.lock() {
-                if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
-                    pending.remove(&approval_id);
-                }
-            }
-            let approved = match approval_result {
-                Ok(approved) => approved,
-                Err(error) => {
-                    if let Ok(Some(resolved)) =
-                        database.resolve_approval(&approval_id, ApprovalDecision::Deny)
-                    {
-                        let _ = app.emit("fox://approval-resolved", resolved);
+                let (sender, receiver) = mpsc::channel();
+                state
+                    .lock()
+                    .map_err(|_| "runtime state lock is poisoned".to_owned())?
+                    .pending_approvals
+                    .lock()
+                    .map_err(|_| "approval map is poisoned".to_owned())?
+                    .insert(
+                        approval.id.clone(),
+                        PendingApproval {
+                            run_id: run_id.to_owned(),
+                            sender,
+                        },
+                    );
+                let approval_id = approval.id.clone();
+                let _ = app.emit("fox://approval-requested", approval);
+                let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
+                if let Ok(runtime_state) = state.lock() {
+                    if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
+                        pending.remove(&approval_id);
                     }
-                    return Err(match error {
-                        std::sync::mpsc::RecvTimeoutError::Timeout => {
-                            "MCP approval request timed out".to_owned()
-                        }
-                        std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                            "MCP approval request was interrupted".to_owned()
-                        }
-                    });
                 }
-            };
-            if !approved {
-                database.complete_host_tool_call(
-                    run_id,
-                    tool_call_id,
-                    None,
-                    Some("The user denied this MCP operation."),
-                )?;
-                return Err("The user denied this MCP operation.".to_owned());
+                let approved = match approval_result {
+                    Ok(approved) => approved,
+                    Err(error) => {
+                        if let Ok(Some(resolved)) =
+                            database.resolve_approval(&approval_id, ApprovalDecision::Deny)
+                        {
+                            let _ = app.emit("fox://approval-resolved", resolved);
+                        }
+                        return Err(match error {
+                            std::sync::mpsc::RecvTimeoutError::Timeout => {
+                                "MCP approval request timed out".to_owned()
+                            }
+                            std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                                "MCP approval request was interrupted".to_owned()
+                            }
+                        });
+                    }
+                };
+                if !approved {
+                    return Err("The user denied this MCP operation.".to_owned());
+                }
+                claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
             }
-        }
-        let health_started = Instant::now();
-        match crate::mcp::call_tool(&server, remote_tool, &arguments) {
-            Ok(result) => {
-                let _ = database.record_mcp_health(
-                    &server.id,
-                    "connected",
-                    None,
-                    Some(health_started.elapsed().as_millis() as i64),
-                    server.tool_count,
-                );
-                result
+            let health_started = Instant::now();
+            match crate::mcp::call_tool(&server, remote_tool, &arguments) {
+                Ok(result) => {
+                    let _ = database.record_mcp_health(
+                        &server.id,
+                        "connected",
+                        None,
+                        Some(health_started.elapsed().as_millis() as i64),
+                        server.tool_count,
+                    );
+                    result
+                }
+                Err(error) => {
+                    let _ = database.record_mcp_health(
+                        &server.id,
+                        "unavailable",
+                        Some(&error),
+                        Some(health_started.elapsed().as_millis() as i64),
+                        None,
+                    );
+                    return Err(error);
+                }
             }
-            Err(error) => {
-                let _ = database.record_mcp_health(
-                    &server.id,
-                    "unavailable",
-                    Some(&error),
-                    Some(health_started.elapsed().as_millis() as i64),
-                    None,
-                );
-                return Err(error);
-            }
-        }
-    } else {
-        return Err(format!("unsupported MCP proxy tool: {tool}"));
-    };
-    let hook_annotations =
-        crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)?;
-    let wrapped = json!({
-        "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()) }],
-        "details": result,
-        "untrusted": true,
-        "sourceType": "knowledge",
-                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
-    });
-    database.complete_host_tool_call(run_id, tool_call_id, Some(&wrapped), None)?;
-    Ok(json!({ "isError": false, "result": wrapped }))
+        } else {
+            return Err(format!("unsupported MCP proxy tool: {tool}"));
+        };
+        Ok(json!({
+            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()) }],
+            "details": result,
+            "untrusted": true,
+            "sourceType": "knowledge",
+        }))
+    })();
+    finalize_host_tool_execution(
+        database,
+        run_id,
+        tool_call_id,
+        tool,
+        &input,
+        hook_decision.annotations,
+        outcome,
+    )
 }
 
 fn handle_attachment_tool_request(
@@ -4064,6 +5599,11 @@ fn execute_attachment_tool_request(
         .ok_or_else(|| "attachment tool request is missing toolCallId".to_owned())?;
     ensure_expert_tool_allowed(database, conversation_id, "read_attachment")?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(response) =
+        inspect_existing_host_tool_call(database, run_id, tool_call_id, "read_attachment", &input)?
+    {
+        return Ok(response);
+    }
     let hook_decision = crate::lifecycle_hooks::before_tool(
         database,
         run_id,
@@ -4079,7 +5619,8 @@ fn execute_attachment_tool_request(
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "attachmentId is required".to_owned())?;
-    let tool_call = database.create_host_tool_call(
+    let tool_call = match create_fresh_host_tool_call(
+        database,
         run_id,
         tool_call_id,
         "read_attachment",
@@ -4090,51 +5631,39 @@ fn execute_attachment_tool_request(
             "running"
         },
         hook_decision.requires_approval,
-    )?;
-    if hook_decision.requires_approval {
-        request_declarative_hook_approval(
-            app,
-            database,
-            state,
-            run_id,
-            &tool_call,
-            "read_attachment",
-            &input,
-            hook_decision.approval_reason.as_deref(),
-        )?;
-    }
-    match read_attachment_text(database, attachments_dir, conversation_id, attachment_id) {
-        Ok(result) => {
-            let wrapped = json!({
+    )? {
+        HostToolCallExecution::Execute(record) => record,
+        HostToolCallExecution::Replay(response) => return Ok(response),
+    };
+    let outcome: Result<Value, String> = (|| {
+        if hook_decision.requires_approval {
+            request_declarative_hook_approval(
+                app,
+                database,
+                state,
+                run_id,
+                &tool_call,
+                "read_attachment",
+                &input,
+                hook_decision.approval_reason.as_deref(),
+            )?;
+        }
+        let result =
+            read_attachment_text(database, attachments_dir, conversation_id, attachment_id)?;
+        Ok(json!({
                 "content": [{ "type": "text", "text": result["text"] }],
                 "details": result,
-            });
-            database.complete_host_tool_call(run_id, tool_call_id, Some(&wrapped), None)?;
-            let hook_annotations = crate::lifecycle_hooks::after_tool(
-                database,
-                run_id,
-                tool_call_id,
-                "read_attachment",
-                true,
-            )?;
-            Ok(json!({
-                "isError": false,
-                "result": wrapped,
-                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
-            }))
-        }
-        Err(error) => {
-            database.complete_host_tool_call(run_id, tool_call_id, None, Some(&error))?;
-            let _ = crate::lifecycle_hooks::after_tool(
-                database,
-                run_id,
-                tool_call_id,
-                "read_attachment",
-                false,
-            );
-            Err(error)
-        }
-    }
+        }))
+    })();
+    finalize_host_tool_execution(
+        database,
+        run_id,
+        tool_call_id,
+        "read_attachment",
+        &input,
+        hook_decision.annotations,
+        outcome,
+    )
 }
 
 fn read_attachment_text(
@@ -4542,12 +6071,18 @@ async fn execute_knowledge_tool_request(
         .ok_or_else(|| "knowledge tool request is missing tool".to_owned())?;
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(response) =
+        inspect_existing_host_tool_call(database, run_id, tool_call_id, tool, &input)?
+    {
+        return Ok(response);
+    }
     let hook_decision =
         crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)?;
     if let Some(reason) = &hook_decision.blocked {
         return Err(format!("[hook.blocked] {reason}"));
     }
-    let tool_call = database.create_host_tool_call(
+    let tool_call = match create_fresh_host_tool_call(
+        database,
         run_id,
         tool_call_id,
         tool,
@@ -4558,20 +6093,24 @@ async fn execute_knowledge_tool_request(
             "running"
         },
         hook_decision.requires_approval,
-    )?;
-    if hook_decision.requires_approval {
-        request_declarative_hook_approval(
-            app,
-            database,
-            state,
-            run_id,
-            &tool_call,
-            tool,
-            &input,
-            hook_decision.approval_reason.as_deref(),
-        )?;
-    }
-    let bindings = database.conversation_knowledge_reference_bindings(conversation_id)?;
+    )? {
+        HostToolCallExecution::Execute(record) => record,
+        HostToolCallExecution::Replay(response) => return Ok(response),
+    };
+    let outcome: Result<Value, String> = async {
+        if hook_decision.requires_approval {
+            request_declarative_hook_approval(
+                app,
+                database,
+                state,
+                run_id,
+                &tool_call,
+                tool,
+                &input,
+                hook_decision.approval_reason.as_deref(),
+            )?;
+        }
+        let bindings = database.conversation_knowledge_reference_bindings(conversation_id)?;
     let ensure_bound = |target: &KnowledgeToolTarget| {
         bindings
             .iter()
@@ -4727,7 +6266,7 @@ async fn execute_knowledge_tool_request(
                 .and_then(|value| usize::try_from(value).ok());
             ensure_bound(&target)?;
             if target.source == "local" {
-                return local_knowledge
+                local_knowledge
                     .read_document(&target.id, document_id, chunk_id, requested_max_chars)
                     .map(|value| {
                         json!({
@@ -4735,16 +6274,17 @@ async fn execute_knowledge_tool_request(
                             "result": value,
                         })
                     })
-                    .map_err(|error| format!("[{}] {}", error.code(), error));
+                    .map_err(|error| format!("[{}] {}", error.code(), error))?
+            } else {
+                let service = database
+                    .get_yuxi_service()?
+                    .ok_or_else(|| "Yuxi service is not configured".to_owned())?;
+                let token = get_access_token(&service.base_url)
+                    .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
+                yuxi_client
+                    .knowledge_document_content(&service.base_url, &token, &target.id, document_id)
+                    .await?
             }
-            let service = database
-                .get_yuxi_service()?
-                .ok_or_else(|| "Yuxi service is not configured".to_owned())?;
-            let token = get_access_token(&service.base_url)
-                .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
-            yuxi_client
-                .knowledge_document_content(&service.base_url, &token, &target.id, document_id)
-                .await?
         }
         "query_knowledge_graph" => {
             let targets = knowledge_tool_targets(&input, true)?;
@@ -4796,15 +6336,18 @@ async fn execute_knowledge_tool_request(
         }
         _ => return Err(format!("unsupported knowledge tool: {tool}")),
     };
-    let wrapped = bounded_knowledge_tool_result(result);
-    database.complete_host_tool_call(run_id, tool_call_id, Some(&wrapped), None)?;
-    let hook_annotations =
-        crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)?;
-    Ok(json!({
-        "isError": false,
-        "result": wrapped,
-                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
-    }))
+        Ok(bounded_knowledge_tool_result(result))
+    }
+    .await;
+    finalize_host_tool_execution(
+        database,
+        run_id,
+        tool_call_id,
+        tool,
+        &input,
+        hook_decision.annotations,
+        outcome,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -5133,6 +6676,11 @@ fn execute_host_tool_request(
         .ok_or_else(|| "host tool request is missing tool".to_owned())?;
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(response) =
+        inspect_existing_host_tool_call(database, run_id, tool_call_id, tool, &input)?
+    {
+        return Ok(response);
+    }
     let hook_decision =
         crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)?;
     if let Some(reason) = &hook_decision.blocked {
@@ -5150,7 +6698,8 @@ fn execute_host_tool_request(
     let requires_approval = hook_decision.requires_approval
         || ((permission_mode == "ask" || tool == "run_command")
             && !database.conversation_tool_permission_granted(conversation_id, tool)?);
-    let tool_call = database.create_host_tool_call(
+    let tool_call = match create_fresh_host_tool_call(
+        database,
         run_id,
         tool_call_id,
         tool,
@@ -5161,81 +6710,74 @@ fn execute_host_tool_request(
             "running"
         },
         requires_approval,
-    )?;
+    )? {
+        HostToolCallExecution::Execute(record) => record,
+        HostToolCallExecution::Replay(response) => return Ok(response),
+    };
 
-    if requires_approval {
-        let request =
-            serde_json::to_value(prepared.preview()).map_err(|error| error.to_string())?;
-        let approval =
-            database.create_approval(&tool_call.id, &prepared.preview().summary, &request)?;
-        let (sender, receiver) = mpsc::channel();
-        state
-            .lock()
-            .map_err(|_| "runtime state lock is poisoned".to_owned())?
-            .pending_approvals
-            .lock()
-            .map_err(|_| "approval map is poisoned".to_owned())?
-            .insert(
-                approval.id.clone(),
-                PendingApproval {
-                    run_id: run_id.to_owned(),
-                    sender,
-                },
-            );
-        let approval_id = approval.id.clone();
-        let _ = app.emit("fox://approval-requested", approval);
-        let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
-        if let Ok(runtime_state) = state.lock() {
-            if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
-                pending.remove(&approval_id);
-            }
-        }
-        let approved = match approval_result {
-            Ok(approved) => approved,
-            Err(error) => {
-                if let Ok(Some(resolved)) =
-                    database.resolve_approval(&approval_id, ApprovalDecision::Deny)
-                {
-                    let _ = app.emit("fox://approval-resolved", resolved);
+    let outcome = (|| -> Result<Value, String> {
+        if requires_approval {
+            let request =
+                serde_json::to_value(prepared.preview()).map_err(|error| error.to_string())?;
+            let approval =
+                database.create_approval(&tool_call.id, &prepared.preview().summary, &request)?;
+            let (sender, receiver) = mpsc::channel();
+            state
+                .lock()
+                .map_err(|_| "runtime state lock is poisoned".to_owned())?
+                .pending_approvals
+                .lock()
+                .map_err(|_| "approval map is poisoned".to_owned())?
+                .insert(
+                    approval.id.clone(),
+                    PendingApproval {
+                        run_id: run_id.to_owned(),
+                        sender,
+                    },
+                );
+            let approval_id = approval.id.clone();
+            let _ = app.emit("fox://approval-requested", approval);
+            let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
+            if let Ok(runtime_state) = state.lock() {
+                if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
+                    pending.remove(&approval_id);
                 }
-                return Err(match error {
-                    std::sync::mpsc::RecvTimeoutError::Timeout => {
-                        "Approval request timed out".to_owned()
-                    }
-                    std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                        "Approval request was interrupted".to_owned()
-                    }
-                });
             }
-        };
-        if !approved {
-            database.complete_host_tool_call(
-                run_id,
-                tool_call_id,
-                None,
-                Some("The user denied this operation."),
-            )?;
-            return Err("The user denied this operation.".to_owned());
+            let approved = match approval_result {
+                Ok(approved) => approved,
+                Err(error) => {
+                    if let Ok(Some(resolved)) =
+                        database.resolve_approval(&approval_id, ApprovalDecision::Deny)
+                    {
+                        let _ = app.emit("fox://approval-resolved", resolved);
+                    }
+                    return Err(match error {
+                        std::sync::mpsc::RecvTimeoutError::Timeout => {
+                            "Approval request timed out".to_owned()
+                        }
+                        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                            "Approval request was interrupted".to_owned()
+                        }
+                    });
+                }
+            };
+            if !approved {
+                return Err("The user denied this operation.".to_owned());
+            }
+            claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
         }
-    }
 
-    match crate::tool_host::execute(prepared) {
-        Ok(result) => {
-            database.complete_host_tool_call(run_id, tool_call_id, Some(&result), None)?;
-            let hook_annotations =
-                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)?;
-            Ok(json!({
-                "isError": false,
-                "result": result,
-                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
-            }))
-        }
-        Err(error) => {
-            database.complete_host_tool_call(run_id, tool_call_id, None, Some(&error))?;
-            let _ = crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, false);
-            Err(error)
-        }
-    }
+        crate::tool_host::execute(prepared)
+    })();
+    finalize_host_tool_execution(
+        database,
+        run_id,
+        tool_call_id,
+        tool,
+        &input,
+        hook_decision.annotations,
+        outcome,
+    )
 }
 
 fn execute_capability_tool_request(
@@ -5267,6 +6809,11 @@ fn execute_capability_tool_request(
         .ok_or_else(|| "capability tool request is missing tool".to_owned())?;
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    if let Some(response) =
+        inspect_existing_host_tool_call(database, run_id, tool_call_id, tool, &input)?
+    {
+        return Ok(response);
+    }
     let hook_decision =
         crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, tool, &input)?;
     if let Some(reason) = &hook_decision.blocked {
@@ -5287,7 +6834,8 @@ fn execute_capability_tool_request(
     let requires_approval = hook_decision.requires_approval
         || (prepared.requires_approval()
             && !database.conversation_tool_permission_granted(conversation_id, tool)?);
-    let tool_call = database.create_host_tool_call(
+    let tool_call = match create_fresh_host_tool_call(
+        database,
         run_id,
         tool_call_id,
         tool,
@@ -5298,81 +6846,74 @@ fn execute_capability_tool_request(
             "running"
         },
         requires_approval,
-    )?;
+    )? {
+        HostToolCallExecution::Execute(record) => record,
+        HostToolCallExecution::Replay(response) => return Ok(response),
+    };
 
-    if requires_approval {
-        let request =
-            serde_json::to_value(prepared.preview()).map_err(|error| error.to_string())?;
-        let approval =
-            database.create_approval(&tool_call.id, &prepared.preview().summary, &request)?;
-        let (sender, receiver) = mpsc::channel();
-        state
-            .lock()
-            .map_err(|_| "runtime state lock is poisoned".to_owned())?
-            .pending_approvals
-            .lock()
-            .map_err(|_| "approval map is poisoned".to_owned())?
-            .insert(
-                approval.id.clone(),
-                PendingApproval {
-                    run_id: run_id.to_owned(),
-                    sender,
-                },
-            );
-        let approval_id = approval.id.clone();
-        let _ = app.emit("fox://approval-requested", approval);
-        let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
-        if let Ok(runtime_state) = state.lock() {
-            if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
-                pending.remove(&approval_id);
-            }
-        }
-        let approved = match approval_result {
-            Ok(approved) => approved,
-            Err(error) => {
-                if let Ok(Some(resolved)) =
-                    database.resolve_approval(&approval_id, ApprovalDecision::Deny)
-                {
-                    let _ = app.emit("fox://approval-resolved", resolved);
+    let outcome = (|| -> Result<Value, String> {
+        if requires_approval {
+            let request =
+                serde_json::to_value(prepared.preview()).map_err(|error| error.to_string())?;
+            let approval =
+                database.create_approval(&tool_call.id, &prepared.preview().summary, &request)?;
+            let (sender, receiver) = mpsc::channel();
+            state
+                .lock()
+                .map_err(|_| "runtime state lock is poisoned".to_owned())?
+                .pending_approvals
+                .lock()
+                .map_err(|_| "approval map is poisoned".to_owned())?
+                .insert(
+                    approval.id.clone(),
+                    PendingApproval {
+                        run_id: run_id.to_owned(),
+                        sender,
+                    },
+                );
+            let approval_id = approval.id.clone();
+            let _ = app.emit("fox://approval-requested", approval);
+            let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
+            if let Ok(runtime_state) = state.lock() {
+                if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
+                    pending.remove(&approval_id);
                 }
-                let message = match error {
-                    std::sync::mpsc::RecvTimeoutError::Timeout => "Approval request timed out",
-                    std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                        "Approval request was interrupted"
-                    }
-                };
-                database.complete_host_tool_call(run_id, tool_call_id, None, Some(message))?;
-                return Err(message.to_owned());
             }
-        };
-        if !approved {
-            database.complete_host_tool_call(
-                run_id,
-                tool_call_id,
-                None,
-                Some("The user denied this operation."),
-            )?;
-            return Err("The user denied this operation.".to_owned());
+            let approved = match approval_result {
+                Ok(approved) => approved,
+                Err(error) => {
+                    if let Ok(Some(resolved)) =
+                        database.resolve_approval(&approval_id, ApprovalDecision::Deny)
+                    {
+                        let _ = app.emit("fox://approval-resolved", resolved);
+                    }
+                    return Err(match error {
+                        std::sync::mpsc::RecvTimeoutError::Timeout => {
+                            "Approval request timed out".to_owned()
+                        }
+                        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                            "Approval request was interrupted".to_owned()
+                        }
+                    });
+                }
+            };
+            if !approved {
+                return Err("The user denied this operation.".to_owned());
+            }
+            claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
         }
-    }
 
-    match capability_tools::execute(prepared) {
-        Ok(result) => {
-            database.complete_host_tool_call(run_id, tool_call_id, Some(&result), None)?;
-            let hook_annotations =
-                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)?;
-            Ok(json!({
-                "isError": false,
-                "result": result,
-                "hookAnnotations": merge_hook_annotations(hook_decision.annotations, hook_annotations),
-            }))
-        }
-        Err(error) => {
-            database.complete_host_tool_call(run_id, tool_call_id, None, Some(&error))?;
-            let _ = crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, false);
-            Err(error)
-        }
-    }
+        capability_tools::execute(prepared)
+    })();
+    finalize_host_tool_execution(
+        database,
+        run_id,
+        tool_call_id,
+        tool,
+        &input,
+        hook_decision.annotations,
+        outcome,
+    )
 }
 
 fn ensure_plan_approved_before_mutation(
@@ -5472,13 +7013,23 @@ mod attachment_tests {
     use super::{
         apply_delegated_package_scope, attachment_image_media_type, attachment_is_docx,
         attachment_is_text, attachment_looks_like_image, bounded_knowledge_tool_result,
-        ensure_plan_approved_before_mutation, extract_docx_text, intersect_mcp_server_scopes,
-        intersect_optional_scopes, node_dependency_is_available, normalized_child_budget,
-        parse_runtime_ready_payload, pending_approval_ids_for_run, redact_diagnostic_line,
-        runtime_expert_package, should_attempt_recovery, structured_runtime_error, PendingApproval,
+        create_fresh_host_tool_call, dispatch_created_work_child,
+        effective_digital_colleague_output_limit, ensure_plan_approved_before_mutation,
+        event_projection_failure_code, extract_docx_text, finalize_host_tool_execution,
+        inspect_existing_host_tool_call, intersect_mcp_server_scopes, intersect_optional_scopes,
+        node_dependency_is_available, normalized_child_budget, parse_runtime_ready_payload,
+        pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package,
+        should_attempt_recovery, structured_runtime_error, validate_envelope_identity_scope,
+        validate_runtime_tool_authority, HostToolCallExecution, PendingApproval,
+        RuntimeToolIngress,
     };
     use crate::database::{
-        AttachmentRecord, CreateGoalInput, Database, GoalStatus, KnowledgeReference,
+        AddEvidenceInput, AttachmentRecord, CreateGoalInput, CreateTaskInput, Database,
+        EvidenceReferenceKind, EvidenceType, EvidenceValidityStatus, GoalStatus,
+        KnowledgeReference,
+    };
+    use crate::runtime_host::protocol::{
+        RuntimeCapabilityManifest, RuntimeToolCapability, CAPABILITY_MANIFEST_VERSION,
     };
     use flate2::{write::DeflateEncoder, Compression};
     use serde_json::json;
@@ -5490,6 +7041,1558 @@ mod attachment_tests {
         sync::mpsc,
     };
     use uuid::Uuid;
+
+    fn authority_manifest(tool_names: &[&str]) -> RuntimeCapabilityManifest {
+        RuntimeCapabilityManifest {
+            manifest_version: CAPABILITY_MANIFEST_VERSION,
+            streaming_text: true,
+            cancellation: true,
+            reasoning: true,
+            session_resume: true,
+            tool_approval: true,
+            image_input: false,
+            steering: false,
+            context_compaction: true,
+            dynamic_model_switch: false,
+            work_loop: true,
+            tools: tool_names
+                .iter()
+                .map(|name| {
+                    let (category, execution, approval) =
+                        super::protocol::canonical_runtime_tool_contract(name)
+                            .expect("test tool belongs to the canonical catalog");
+                    RuntimeToolCapability {
+                        name: (*name).to_owned(),
+                        category: category.to_owned(),
+                        execution: execution.to_owned(),
+                        approval: approval.to_owned(),
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn runtime_tool_authority_requires_active_frozen_and_manifest_agreement() {
+        let durable = super::continuation::ExecutionProfileSelection::resolve("durable_v2")
+            .expect("durable profile");
+        let graph =
+            super::continuation::ExecutionProfileSelection::resolve("graph_readonly_preview")
+                .expect("graph profile");
+
+        validate_runtime_tool_authority(
+            &durable,
+            Some("durable_v2"),
+            &authority_manifest(&["write_file"]),
+            "run-durable",
+            "write_file",
+            RuntimeToolIngress::Execute,
+        )
+        .expect("all three authorities allow the tool");
+        validate_runtime_tool_authority(
+            &graph,
+            Some("graph_readonly_preview"),
+            &authority_manifest(&["read", "graph_readonly_run"]),
+            "run-graph",
+            "graph_readonly_run",
+            RuntimeToolIngress::Event,
+        )
+        .expect("graph tool requires the graph profile on both sides");
+
+        assert_eq!(
+            validate_runtime_tool_authority(
+                &graph,
+                Some("durable_v2"),
+                &authority_manifest(&["graph_readonly_run"]),
+                "run-profile-mismatch",
+                "graph_readonly_run",
+                RuntimeToolIngress::Event,
+            )
+            .unwrap_err()
+            .0,
+            "runtime.execution_profile.run_mismatch"
+        );
+        assert_eq!(
+            validate_runtime_tool_authority(
+                &durable,
+                Some("durable_v2"),
+                &authority_manifest(&["read"]),
+                "run-manifest-missing",
+                "write_file",
+                RuntimeToolIngress::Execute,
+            )
+            .unwrap_err()
+            .0,
+            "runtime.capability.tool_not_declared"
+        );
+        assert_eq!(
+            validate_runtime_tool_authority(
+                &durable,
+                Some("durable_v2"),
+                &authority_manifest(&["read"]),
+                "run-wrong-ingress",
+                "read",
+                RuntimeToolIngress::Execute,
+            )
+            .unwrap_err()
+            .0,
+            "runtime.capability.ingress_mismatch"
+        );
+        assert_eq!(
+            validate_runtime_tool_authority(
+                &durable,
+                Some("durable_v2"),
+                &authority_manifest(&["write_file"]),
+                "run-wrong-preflight",
+                "write_file",
+                RuntimeToolIngress::Preflight,
+            )
+            .unwrap_err()
+            .0,
+            "runtime.capability.ingress_mismatch"
+        );
+        assert_eq!(
+            validate_runtime_tool_authority(
+                &durable,
+                Some("durable_v2"),
+                &authority_manifest(&["graph_readonly_run"]),
+                "run-tool-blocked",
+                "graph_readonly_run",
+                RuntimeToolIngress::Event,
+            )
+            .unwrap_err()
+            .0,
+            "runtime.execution_profile.tool_blocked"
+        );
+        assert_eq!(
+            validate_runtime_tool_authority(
+                &graph,
+                None,
+                &authority_manifest(&["graph_readonly_run"]),
+                "run-missing-frozen-profile",
+                "graph_readonly_run",
+                RuntimeToolIngress::Event,
+            )
+            .unwrap_err()
+            .0,
+            "runtime.execution_profile.run_mismatch"
+        );
+
+        let legacy = super::continuation::ExecutionProfileSelection::resolve("legacy")
+            .expect("legacy profile");
+        validate_runtime_tool_authority(
+            &legacy,
+            None,
+            &authority_manifest(&["write_file"]),
+            "pre-v34-run",
+            "write_file",
+            RuntimeToolIngress::Execute,
+        )
+        .expect("pre-v34 Legacy runs retain compatibility");
+    }
+
+    #[test]
+    fn common_host_tool_gate_replays_persisted_outcome_without_second_handler() {
+        let path = std::env::temp_dir().join(format!("fox-host-tool-once-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), None, None, None)
+            .unwrap();
+        let run = database
+            .create_run(&conversation.id, "exactly once", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let mut handler_calls = 0;
+        let acquired = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            "memory-once",
+            "memory_propose",
+            &json!({"content":"stable"}),
+            "running",
+            false,
+        )
+        .unwrap();
+        assert!(matches!(acquired, HostToolCallExecution::Execute(_)));
+        handler_calls += 1;
+        database
+            .complete_host_tool_call(
+                &run.id,
+                "memory-once",
+                Some(&json!({"proposalId":"proposal-1"})),
+                None,
+            )
+            .unwrap();
+        let replay = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            "memory-once",
+            "memory_propose",
+            &json!({"content":"stable"}),
+            "running",
+            false,
+        )
+        .unwrap();
+        let HostToolCallExecution::Replay(response) = replay else {
+            panic!("terminal exact replay must not acquire execution");
+        };
+        assert_eq!(response["result"]["proposalId"], "proposal-1");
+        assert_eq!(response["replayed"], true);
+        assert_eq!(handler_calls, 1);
+
+        let first_failure = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            "memory-failed-once",
+            "memory_propose",
+            &json!({"content":"invalid"}),
+            "running",
+            false,
+        )
+        .unwrap();
+        assert!(matches!(first_failure, HostToolCallExecution::Execute(_)));
+        handler_calls += 1;
+        let first_failure_response = json!({"isError":true,"error":"memory proposal was rejected"});
+        database
+            .complete_host_tool_call(
+                &run.id,
+                "memory-failed-once",
+                None,
+                Some("memory proposal was rejected"),
+            )
+            .unwrap();
+        let replayed_failure = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            "memory-failed-once",
+            "memory_propose",
+            &json!({"content":"invalid"}),
+            "running",
+            false,
+        )
+        .expect("failed ToolCall has a persisted replay outcome");
+        let HostToolCallExecution::Replay(replayed_failure_response) = replayed_failure else {
+            panic!("failed replay must not acquire a second handler");
+        };
+        assert_eq!(replayed_failure_response, first_failure_response);
+        assert_eq!(handler_calls, 2);
+
+        assert!(matches!(
+            create_fresh_host_tool_call(
+                &database,
+                &run.id,
+                "in-flight",
+                "child_run_start",
+                &json!({"objective":"once"}),
+                "running",
+                false,
+            )
+            .unwrap(),
+            HostToolCallExecution::Execute(_)
+        ));
+        assert!(create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            "in-flight",
+            "child_run_start",
+            &json!({"objective":"once"}),
+            "running",
+            false,
+        )
+        .unwrap_err()
+        .contains("tool_call.already_in_flight"));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn persistent_graph_activation_uses_host_identity_and_replays_without_second_handler() {
+        let path = std::env::temp_dir().join(format!("fox-graph-host-once-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), None, None, None)
+            .unwrap();
+        let run = database
+            .create_run(&conversation.id, "persistent graph once", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .freeze_run_execution_profile(&run.id, "durable_v2")
+            .unwrap();
+        let goal = database
+            .goals()
+            .create(CreateGoalInput {
+                id: None,
+                conversation_id: conversation.id.clone(),
+                title: "Persistent Graph".to_owned(),
+                objective: "Activate exactly once".to_owned(),
+                acceptance_summary: None,
+                status: GoalStatus::Active,
+                created_by: run.id.clone(),
+            })
+            .unwrap();
+        database
+            .work_tasks()
+            .create_many_with_policy_ids(
+                vec![CreateTaskInput {
+                    id: None,
+                    goal_id: goal.id.clone(),
+                    parent_task_id: None,
+                    ordinal: 0,
+                    title: "Inspect".to_owned(),
+                    detail: None,
+                }],
+                vec!["standard_v1".to_owned()],
+            )
+            .unwrap();
+        let plan = database
+            .create_plan_revision(
+                &conversation.id,
+                &goal.id,
+                "Persistent Graph",
+                "One bounded node",
+                json!([{
+                    "nodeKey": "inspect",
+                    "title": "Inspect",
+                    "ordinal": 0,
+                    "acceptanceCriteria": ["inspection evidence is current"]
+                }]),
+                &run.id,
+            )
+            .unwrap();
+        database
+            .resolve_plan_revision(&conversation.id, &plan.id, "approved")
+            .unwrap();
+
+        let runtime_tool_call_id = "graph-activate-once";
+        let input = json!({"planRevisionId": plan.id});
+        let acquired = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            runtime_tool_call_id,
+            "graph_readonly_activate",
+            &input,
+            "running",
+            false,
+        )
+        .unwrap();
+        let HostToolCallExecution::Execute(host_tool_call) = acquired else {
+            panic!("first activation must acquire the Host ToolCall");
+        };
+        let handler_calls = 1;
+        let outcome = super::work_tools::execute_with_host_tool_call_id(
+            &database,
+            &conversation.id,
+            &run.id,
+            &host_tool_call.id,
+            "graph_readonly_activate",
+            &input,
+        )
+        .unwrap();
+        let first = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            runtime_tool_call_id,
+            "graph_readonly_activate",
+            &input,
+            Vec::new(),
+            Ok(outcome.result),
+        )
+        .unwrap();
+        assert_eq!(first["result"]["details"]["activated"], true);
+
+        let replay = inspect_existing_host_tool_call(
+            &database,
+            &run.id,
+            runtime_tool_call_id,
+            "graph_readonly_activate",
+            &input,
+        )
+        .unwrap()
+        .expect("terminal Graph activation replay");
+        assert_eq!(replay["result"], first["result"]);
+        assert_eq!(replay["replayed"], true);
+        assert_eq!(handler_calls, 1);
+        assert!(database
+            .read_only_graph_snapshot(&goal.id)
+            .unwrap()
+            .is_some());
+
+        let graph = database
+            .read_only_graph_snapshot(&goal.id)
+            .unwrap()
+            .expect("activated Graph");
+        let generic_goal_complete = super::work_tools::execute(
+            &database,
+            &conversation.id,
+            &run.id,
+            "goal_complete",
+            &json!({ "goalId": goal.id, "expectedVersion": 1 }),
+        )
+        .expect_err("Graph Goal completion requires the dedicated acceptance authority");
+        assert_eq!(
+            generic_goal_complete.code,
+            "graph.readonly_dedicated_accept_required"
+        );
+        let generic_acceptance = super::work_tools::execute(
+            &database,
+            &conversation.id,
+            &run.id,
+            "acceptance_submit",
+            &json!({ "goalId": goal.id }),
+        )
+        .expect_err("model-supplied generic Acceptance cannot complete a Graph");
+        assert_eq!(
+            generic_acceptance.code,
+            "graph.readonly_dedicated_accept_required"
+        );
+        let node = &graph.nodes[0];
+        let node_runtime_tool_call_id = "graph-node-start-once";
+        let node_input = json!({
+            "goalId": goal.id.clone(),
+            "taskId": node.task_id.clone(),
+            "expectedTaskVersion": node.task_version,
+            "attemptId": "graph-node-attempt-once",
+            "workerAgentId": database.default_agent_id(),
+            "objective": "Inspect the bounded node.",
+            "context": "Use only read, ls, find, and grep.",
+            "budget": {
+                "maxDurationMs": 45_000,
+                "maxTotalTokens": 4_096,
+                "maxOutputTokens": 1_024,
+                "maxToolCalls": 6,
+            },
+        });
+        let acquired = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            node_runtime_tool_call_id,
+            "graph_readonly_node_start",
+            &node_input,
+            "running",
+            false,
+        )
+        .unwrap();
+        let HostToolCallExecution::Execute(node_tool_call) = acquired else {
+            panic!("first node start must acquire the Host ToolCall");
+        };
+        let node_outcome = super::work_tools::execute_with_host_tool_call_id(
+            &database,
+            &conversation.id,
+            &run.id,
+            &node_tool_call.id,
+            "graph_readonly_node_start",
+            &node_input,
+        )
+        .unwrap();
+        let child_dispatch = match node_outcome.post_finalize {
+            Some(super::work_tools::WorkToolPostFinalizeDirective::StartChild(dispatch)) => {
+                Some(dispatch)
+            }
+            _ => None,
+        };
+        assert!(child_dispatch.is_some());
+        let mut dispatch_calls = 0;
+        assert_eq!(
+            dispatch_calls, 0,
+            "Child dispatch must wait for finalization"
+        );
+        let node_first = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            node_runtime_tool_call_id,
+            "graph_readonly_node_start",
+            &node_input,
+            Vec::new(),
+            Ok(node_outcome.result),
+        )
+        .unwrap();
+        dispatch_created_work_child(child_dispatch, |_| {
+            dispatch_calls += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(dispatch_calls, 1);
+        assert_eq!(node_first["result"]["details"]["created"], true);
+        assert_eq!(
+            node_first["result"]["details"]["graph"]["nodes"][0]["readiness"],
+            "active"
+        );
+        assert_ne!(
+            node_first["result"]["details"]["graph"]["nodes"][0]["readiness"], "accepted",
+            "Child creation must never imply node acceptance"
+        );
+
+        let terminal_node_replay = inspect_existing_host_tool_call(
+            &database,
+            &run.id,
+            node_runtime_tool_call_id,
+            "graph_readonly_node_start",
+            &node_input,
+        )
+        .unwrap()
+        .expect("terminal Graph node-start replay");
+        assert_eq!(terminal_node_replay["result"], node_first["result"]);
+        assert_eq!(terminal_node_replay["replayed"], true);
+        assert_eq!(
+            dispatch_calls, 1,
+            "Host terminal replay must never dispatch the Child twice"
+        );
+
+        let child_run_id = node_first["result"]["details"]["childRun"]["childRunId"]
+            .as_str()
+            .expect("Graph Child Run ID")
+            .to_owned();
+        let child_status_before_generic_cancel = database.child_run_status(&child_run_id).unwrap();
+        let bypass_error = super::ensure_child_cancel_not_graph_bound(&database, &child_run_id)
+            .expect_err("generic Child cancel cannot bypass Graph authority");
+        assert!(bypass_error.contains("graph.readonly_dedicated_cancel_required"));
+        assert_eq!(
+            database.child_run_status(&child_run_id).unwrap(),
+            child_status_before_generic_cancel,
+            "bypass guard must have zero side effects"
+        );
+        let cancel_runtime_tool_call_id = "graph-node-cancel-terminal-once";
+        let cancel_input = json!({
+            "goalId": goal.id.clone(),
+            "taskId": node.task_id.clone(),
+            "attemptId": "graph-node-attempt-once",
+            "expectedTaskVersion": 2,
+            "expectedAttemptVersion": 1,
+            "reason": "The parent no longer needs this bounded node."
+        });
+        let acquired = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            cancel_runtime_tool_call_id,
+            "graph_readonly_node_cancel",
+            &cancel_input,
+            "running",
+            false,
+        )
+        .unwrap();
+        let HostToolCallExecution::Execute(cancel_tool_call) = acquired else {
+            panic!("first node cancel must acquire the Host ToolCall");
+        };
+        let cancel_outcome = super::work_tools::execute_with_host_tool_call_id(
+            &database,
+            &conversation.id,
+            &run.id,
+            &cancel_tool_call.id,
+            "graph_readonly_node_cancel",
+            &cancel_input,
+        )
+        .unwrap();
+        let cancel_directive = match cancel_outcome.post_finalize {
+            Some(super::work_tools::WorkToolPostFinalizeDirective::CancelGraphChild(directive)) => {
+                directive
+            }
+            _ => panic!("fresh cancel intent must provide a post-finalize directive"),
+        };
+        assert!(database
+            .active_graph_node_cancel_intents_for_recovery()
+            .unwrap()
+            .is_empty());
+        let cancel_first = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            cancel_runtime_tool_call_id,
+            "graph_readonly_node_cancel",
+            &cancel_input,
+            Vec::new(),
+            Ok(cancel_outcome.result),
+        )
+        .unwrap();
+        assert_eq!(cancel_first["result"]["details"]["cancelCompleted"], false);
+        let activation = database
+            .activate_graph_node_cancel_intent(&cancel_directive.intent_id)
+            .unwrap();
+        assert!(activation.activated);
+        let mut physical_signals = 0;
+        assert!(!super::signal_graph_child_cancel_with_transport(
+            &database,
+            &child_run_id,
+            false,
+            || Ok(None),
+        )
+        .unwrap());
+        assert_eq!(
+            physical_signals, 0,
+            "missing Host cannot fabricate a signal"
+        );
+        let child = database
+            .child_run(&child_run_id)
+            .unwrap()
+            .expect("Graph Child remains projected");
+        assert_eq!(
+            database.child_run_status(&child_run_id).unwrap().as_deref(),
+            Some("cancelling")
+        );
+        assert_eq!(child.finished_at, None);
+        let attempt = database
+            .list_task_attempts(&node.task_id, 10)
+            .unwrap()
+            .into_iter()
+            .find(|attempt| attempt.id == "graph-node-attempt-once")
+            .expect("Graph Attempt remains live without an authoritative terminal");
+        assert_eq!(attempt.status, crate::database::TaskAttemptStatus::Running);
+        assert!(super::signal_graph_child_cancel_with_transport(
+            &database,
+            &child_run_id,
+            true,
+            || {
+                physical_signals += 1;
+                Ok(Some(true))
+            },
+        )
+        .unwrap());
+        assert_eq!(
+            physical_signals, 1,
+            "startup redelivery may signal an active intent at least once"
+        );
+
+        let terminal_cancel_replay = inspect_existing_host_tool_call(
+            &database,
+            &run.id,
+            cancel_runtime_tool_call_id,
+            "graph_readonly_node_cancel",
+            &cancel_input,
+        )
+        .unwrap()
+        .expect("terminal Graph node-cancel replay");
+        assert_eq!(terminal_cancel_replay["result"], cancel_first["result"]);
+        assert_eq!(terminal_cancel_replay["replayed"], true);
+        assert_eq!(
+            physical_signals, 1,
+            "Host terminal replay must not execute the cancel directive twice"
+        );
+
+        let finish_runtime_tool_call_id = "graph-node-finish-terminal-once";
+        let finish_input = json!({
+            "goalId": goal.id,
+            "taskId": node.task_id,
+            "attemptId": "graph-node-attempt-once",
+            "expectedTaskVersion": 2,
+            "expectedAttemptVersion": 1,
+            "criterionEvidence": [{
+                "criterion": "inspection evidence is current",
+                "evidenceIds": ["evidence-terminal-replay"]
+            }],
+            "summary": "Parent Lead revalidated the frozen criterion."
+        });
+        let acquired = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            finish_runtime_tool_call_id,
+            "graph_readonly_node_finish",
+            &finish_input,
+            "running",
+            false,
+        )
+        .unwrap();
+        assert!(matches!(acquired, HostToolCallExecution::Execute(_)));
+        let finish_handler_calls = 1;
+        let finish_first = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            finish_runtime_tool_call_id,
+            "graph_readonly_node_finish",
+            &finish_input,
+            Vec::new(),
+            Ok(json!({
+                "summary": "Graph node completed",
+                "details": { "replayed": false, "goalAcceptanceCreated": false }
+            })),
+        )
+        .unwrap();
+        let terminal_finish_replay = inspect_existing_host_tool_call(
+            &database,
+            &run.id,
+            finish_runtime_tool_call_id,
+            "graph_readonly_node_finish",
+            &finish_input,
+        )
+        .unwrap()
+        .expect("terminal Graph node-finish replay");
+        assert_eq!(terminal_finish_replay["result"], finish_first["result"]);
+        assert_eq!(terminal_finish_replay["replayed"], true);
+        assert_eq!(
+            finish_handler_calls, 1,
+            "Host terminal replay must not execute Graph node-finish twice"
+        );
+
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let spec_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM work_graph_specs WHERE goal_id = ?1",
+                [&goal.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(spec_count, 1);
+
+        drop(connection);
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn high_risk_graph_review_and_accept_wait_for_finalizers_and_replay_without_side_effects() {
+        let path =
+            std::env::temp_dir().join(format!("fox-graph-review-host-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), None, None, None)
+            .unwrap();
+        let run = database
+            .create_run(&conversation.id, "review the high-risk graph", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .freeze_run_execution_profile(&run.id, "durable_v2")
+            .unwrap();
+        let goal = database
+            .goals()
+            .create(CreateGoalInput {
+                id: None,
+                conversation_id: conversation.id.clone(),
+                title: "High-risk Graph".to_owned(),
+                objective: "Review and accept one bounded node".to_owned(),
+                acceptance_summary: None,
+                status: GoalStatus::Active,
+                created_by: run.id.clone(),
+            })
+            .unwrap();
+        database
+            .work_tasks()
+            .create_many_with_policy_ids(
+                vec![CreateTaskInput {
+                    id: None,
+                    goal_id: goal.id.clone(),
+                    parent_task_id: None,
+                    ordinal: 0,
+                    title: "Inspect high-risk output".to_owned(),
+                    detail: None,
+                }],
+                vec!["high_risk_v1".to_owned()],
+            )
+            .unwrap();
+        let criterion = "the implementation result is independently inspected";
+        let plan = database
+            .create_plan_revision(
+                &conversation.id,
+                &goal.id,
+                "High-risk Graph",
+                "One reviewed node",
+                json!([{
+                    "nodeKey": "reviewed",
+                    "title": "Inspect high-risk output",
+                    "ordinal": 0,
+                    "acceptanceCriteria": [criterion]
+                }]),
+                &run.id,
+            )
+            .unwrap();
+        database
+            .resolve_plan_revision(&conversation.id, &plan.id, "approved")
+            .unwrap();
+
+        let activation_input = json!({"planRevisionId": plan.id});
+        let HostToolCallExecution::Execute(activation_call) = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            "review-graph-activate",
+            "graph_readonly_activate",
+            &activation_input,
+            "running",
+            false,
+        )
+        .unwrap() else {
+            panic!("fresh activation");
+        };
+        let activation = super::work_tools::execute_with_host_tool_call_id(
+            &database,
+            &conversation.id,
+            &run.id,
+            &activation_call.id,
+            "graph_readonly_activate",
+            &activation_input,
+        )
+        .unwrap();
+        finalize_host_tool_execution(
+            &database,
+            &run.id,
+            "review-graph-activate",
+            "graph_readonly_activate",
+            &activation_input,
+            Vec::new(),
+            Ok(activation.result),
+        )
+        .unwrap();
+        let graph = database
+            .read_only_graph_snapshot(&goal.id)
+            .unwrap()
+            .expect("activated Graph");
+        let node = &graph.nodes[0];
+
+        let start_input = json!({
+            "goalId": goal.id,
+            "taskId": node.task_id,
+            "expectedTaskVersion": node.task_version,
+            "attemptId": "reviewed-attempt",
+            "workerAgentId": database.default_agent_id(),
+            "objective": "Produce a bounded read-only implementation result.",
+            "context": "The parent Lead will inspect and independently review it.",
+            "budget": {
+                "maxDurationMs": 45_000,
+                "maxTotalTokens": 4_096,
+                "maxOutputTokens": 1_024,
+                "maxToolCalls": 6
+            }
+        });
+        let HostToolCallExecution::Execute(start_call) = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            "reviewed-node-start",
+            "graph_readonly_node_start",
+            &start_input,
+            "running",
+            false,
+        )
+        .unwrap() else {
+            panic!("fresh node start");
+        };
+        let start = super::work_tools::execute_with_host_tool_call_id(
+            &database,
+            &conversation.id,
+            &run.id,
+            &start_call.id,
+            "graph_readonly_node_start",
+            &start_input,
+        )
+        .unwrap();
+        assert!(matches!(
+            start.post_finalize,
+            Some(super::work_tools::WorkToolPostFinalizeDirective::StartChild(_))
+        ));
+        let start_response = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            "reviewed-node-start",
+            "graph_readonly_node_start",
+            &start_input,
+            Vec::new(),
+            Ok(start.result),
+        )
+        .unwrap();
+        let implementation_child_run_id = start_response["result"]["details"]["childRun"]
+            ["childRunId"]
+            .as_str()
+            .expect("implementation Child Run")
+            .to_owned();
+        database
+            .apply_runtime_event(
+                &implementation_child_run_id,
+                1,
+                &json!({"type":"run.started"}),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &implementation_child_run_id,
+                2,
+                &json!({"type":"message.started"}),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &implementation_child_run_id,
+                3,
+                &json!({"type":"message.delta","delta":"bounded implementation result"}),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &implementation_child_run_id,
+                4,
+                &json!({"type":"message.completed"}),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &implementation_child_run_id,
+                5,
+                &json!({"type":"run.completed"}),
+            )
+            .unwrap();
+        database
+            .sync_child_run_terminal(&implementation_child_run_id)
+            .unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let lead_runtime_tool_call_id = "lead-review-proof";
+        database
+            .apply_runtime_event(
+                &run.id,
+                2,
+                &json!({
+                    "type":"tool.started",
+                    "toolCallId":lead_runtime_tool_call_id,
+                    "tool":"read",
+                    "input":{"path":"review-result.txt"}
+                }),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &run.id,
+                3,
+                &json!({
+                    "type":"tool.completed",
+                    "toolCallId":lead_runtime_tool_call_id,
+                    "tool":"read",
+                    "result":{"content":"inspected"},
+                    "isError":false
+                }),
+            )
+            .unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let lead_tool_call_id = connection
+            .query_row(
+                "SELECT id FROM tool_calls WHERE run_id = ?1 AND runtime_tool_call_id = ?2",
+                [&run.id, lead_runtime_tool_call_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        drop(connection);
+        let evidence = database
+            .task_evidence()
+            .add(AddEvidenceInput {
+                id: None,
+                task_id: node.task_id.clone(),
+                source_run_id: Some(run.id.clone()),
+                evidence_type: EvidenceType::ToolCall,
+                ref_kind: EvidenceReferenceKind::ToolCall,
+                ref_id: lead_tool_call_id,
+                summary: "Lead inspected the implementation result".to_owned(),
+                metadata: json!({"validationCheckType":"inspection"}),
+                trace_id: None,
+                span_id: None,
+            })
+            .unwrap();
+        assert_eq!(
+            database.task_evidence().validate(&evidence.id).unwrap(),
+            EvidenceValidityStatus::Valid
+        );
+
+        let candidate = json!({
+            "goalId": goal.id,
+            "taskId": node.task_id,
+            "attemptId": "reviewed-attempt",
+            "expectedTaskVersion": 2,
+            "expectedAttemptVersion": 1,
+            "criterionEvidence": [{
+                "criterion": criterion,
+                "evidenceIds": [evidence.id]
+            }],
+            "summary": "Lead verified the exact candidate before independent review."
+        });
+
+        let HostToolCallExecution::Execute(failed_review_call) = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            "review-finalizer-fails",
+            "graph_readonly_node_review",
+            &candidate,
+            "running",
+            false,
+        )
+        .unwrap() else {
+            panic!("fresh failed-finalizer review");
+        };
+        let failed_review = super::work_tools::execute_with_host_tool_call_id(
+            &database,
+            &conversation.id,
+            &run.id,
+            &failed_review_call.id,
+            "graph_readonly_node_review",
+            &candidate,
+        )
+        .unwrap();
+        let failed_request_id = match failed_review.post_finalize {
+            Some(super::work_tools::WorkToolPostFinalizeDirective::StartGraphReviewer(
+                directive,
+            )) => directive.request_id,
+            _ => panic!("fresh review request must defer Reviewer dispatch"),
+        };
+        finalize_host_tool_execution(
+            &database,
+            &run.id,
+            "review-finalizer-fails",
+            "graph_readonly_node_review",
+            &candidate,
+            Vec::new(),
+            Err("simulated common finalizer failure".to_owned()),
+        )
+        .expect_err("failed handler result must still terminalize the ToolCall");
+        assert!(database
+            .active_graph_node_review_requests_for_recovery()
+            .unwrap()
+            .is_empty());
+        assert!(
+            database
+                .activate_graph_node_review_request(&failed_request_id)
+                .unwrap()
+                .stale
+        );
+
+        let review_runtime_tool_call_id = "review-finalizer-succeeds";
+        let HostToolCallExecution::Execute(review_call) = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            review_runtime_tool_call_id,
+            "graph_readonly_node_review",
+            &candidate,
+            "running",
+            false,
+        )
+        .unwrap() else {
+            panic!("fresh review");
+        };
+        let review = super::work_tools::execute_with_host_tool_call_id(
+            &database,
+            &conversation.id,
+            &run.id,
+            &review_call.id,
+            "graph_readonly_node_review",
+            &candidate,
+        )
+        .unwrap();
+        let request_id = match review.post_finalize {
+            Some(super::work_tools::WorkToolPostFinalizeDirective::StartGraphReviewer(
+                directive,
+            )) => directive.request_id,
+            _ => panic!("fresh review request must defer Reviewer dispatch"),
+        };
+        assert!(database
+            .active_graph_node_review_requests_for_recovery()
+            .unwrap()
+            .is_empty());
+        let review_response = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            review_runtime_tool_call_id,
+            "graph_readonly_node_review",
+            &candidate,
+            Vec::new(),
+            Ok(review.result),
+        )
+        .unwrap();
+        let activated = database
+            .activate_graph_node_review_request(&request_id)
+            .unwrap();
+        assert!(activated.activated);
+        let dispatched = database
+            .dispatch_graph_node_reviewer(&request_id, database.default_agent_id())
+            .unwrap();
+        assert!(dispatched.created);
+        assert!(dispatched.dispatch_required);
+        assert_ne!(
+            dispatched.child_run.parent_run_id,
+            dispatched.child_run.child_run_id
+        );
+        assert_ne!(
+            implementation_child_run_id,
+            dispatched.child_run.child_run_id
+        );
+        super::validate_graph_reviewer_runtime_contract(&dispatched.started, &dispatched.child_run)
+            .unwrap();
+        let reviewer_child_run_id = dispatched.child_run.child_run_id.clone();
+        assert_eq!(
+            database
+                .active_graph_node_review_requests_for_recovery()
+                .unwrap()
+                .len(),
+            1
+        );
+        let review_replay = inspect_existing_host_tool_call(
+            &database,
+            &run.id,
+            review_runtime_tool_call_id,
+            "graph_readonly_node_review",
+            &candidate,
+        )
+        .unwrap()
+        .expect("terminal review ToolCall replay");
+        assert_eq!(review_replay["result"], review_response["result"]);
+        assert_eq!(review_replay["replayed"], true);
+        assert!(
+            !database
+                .dispatch_graph_node_reviewer(&request_id, database.default_agent_id())
+                .unwrap()
+                .created
+        );
+
+        database
+            .freeze_run_execution_profile(&reviewer_child_run_id, "graph_reviewer_v1")
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        database
+            .apply_runtime_event(&reviewer_child_run_id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let reviewer_proof_runtime_id = "reviewer-proof-read";
+        database
+            .apply_runtime_event(
+                &reviewer_child_run_id,
+                2,
+                &json!({
+                    "type":"tool.started",
+                    "toolCallId":reviewer_proof_runtime_id,
+                    "tool":"read",
+                    "input":{"path":"review-result.txt"}
+                }),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &reviewer_child_run_id,
+                3,
+                &json!({
+                    "type":"tool.completed",
+                    "toolCallId":reviewer_proof_runtime_id,
+                    "tool":"read",
+                    "result":{"content":"verified"},
+                    "isError":false
+                }),
+            )
+            .unwrap();
+        let reviewer_result = serde_json::to_string(&json!({
+            "criteria": [{
+                "criterion": criterion,
+                "status": "passed",
+                "toolCallIds": [reviewer_proof_runtime_id]
+            }],
+            "recommendation": "pass",
+            "summary": "Independent read proof covers the frozen criterion.",
+            "findings": []
+        }))
+        .unwrap();
+        database
+            .apply_runtime_event(
+                &reviewer_child_run_id,
+                4,
+                &json!({"type":"message.started"}),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &reviewer_child_run_id,
+                5,
+                &json!({"type":"message.delta","delta":reviewer_result}),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &reviewer_child_run_id,
+                6,
+                &json!({"type":"message.completed"}),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(&reviewer_child_run_id, 7, &json!({"type":"run.completed"}))
+            .unwrap();
+        database
+            .sync_child_run_terminal(&reviewer_child_run_id)
+            .unwrap();
+        let decision = database
+            .settle_graph_node_review_for_child(&reviewer_child_run_id)
+            .unwrap();
+        assert_eq!(
+            decision.outcome,
+            crate::database::GraphNodeReviewOutcome::Pass
+        );
+        assert!(!decision.replayed);
+        assert!(
+            database
+                .settle_graph_node_review_for_child(&reviewer_child_run_id)
+                .unwrap()
+                .replayed
+        );
+        assert!(database
+            .active_graph_node_review_requests_for_recovery()
+            .unwrap()
+            .is_empty());
+
+        let finish_runtime_tool_call_id = "reviewed-node-finish";
+        let HostToolCallExecution::Execute(finish_call) = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            finish_runtime_tool_call_id,
+            "graph_readonly_node_finish",
+            &candidate,
+            "running",
+            false,
+        )
+        .unwrap() else {
+            panic!("fresh reviewed finish");
+        };
+        let finish = super::work_tools::execute_with_host_tool_call_id(
+            &database,
+            &conversation.id,
+            &run.id,
+            &finish_call.id,
+            "graph_readonly_node_finish",
+            &candidate,
+        )
+        .unwrap();
+        finalize_host_tool_execution(
+            &database,
+            &run.id,
+            finish_runtime_tool_call_id,
+            "graph_readonly_node_finish",
+            &candidate,
+            Vec::new(),
+            Ok(finish.result),
+        )
+        .unwrap();
+
+        let failed_accept_runtime_id = "graph-accept-finalizer-fails";
+        let accept_input = json!({
+            "goalId": goal.id,
+            "expectedGoalVersion": 1,
+            "summary": "Every reviewed Graph node is accepted."
+        });
+        let HostToolCallExecution::Execute(failed_accept_call) = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            failed_accept_runtime_id,
+            "graph_readonly_accept",
+            &accept_input,
+            "running",
+            false,
+        )
+        .unwrap() else {
+            panic!("fresh failed-finalizer acceptance");
+        };
+        let failed_accept = super::work_tools::execute_with_host_tool_call_id(
+            &database,
+            &conversation.id,
+            &run.id,
+            &failed_accept_call.id,
+            "graph_readonly_accept",
+            &accept_input,
+        )
+        .unwrap();
+        let failed_acceptance_id = match failed_accept.post_finalize {
+            Some(super::work_tools::WorkToolPostFinalizeDirective::AcceptReadOnlyGraph(
+                directive,
+            )) => directive.acceptance_id,
+            _ => panic!("fresh acceptance must defer activation"),
+        };
+        finalize_host_tool_execution(
+            &database,
+            &run.id,
+            failed_accept_runtime_id,
+            "graph_readonly_accept",
+            &accept_input,
+            Vec::new(),
+            Err("simulated acceptance finalizer failure".to_owned()),
+        )
+        .expect_err("failed handler result must still terminalize the ToolCall");
+        assert!(database
+            .pending_graph_acceptances_for_recovery()
+            .unwrap()
+            .is_empty());
+        assert!(
+            database
+                .activate_read_only_graph_acceptance(&failed_acceptance_id)
+                .is_err(),
+            "a failed finalizer must leave the pending acceptance inert"
+        );
+
+        let accept_runtime_tool_call_id = "graph-accept-finalizer-succeeds";
+        let HostToolCallExecution::Execute(accept_call) = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            accept_runtime_tool_call_id,
+            "graph_readonly_accept",
+            &accept_input,
+            "running",
+            false,
+        )
+        .unwrap() else {
+            panic!("fresh acceptance");
+        };
+        let accept = super::work_tools::execute_with_host_tool_call_id(
+            &database,
+            &conversation.id,
+            &run.id,
+            &accept_call.id,
+            "graph_readonly_accept",
+            &accept_input,
+        )
+        .unwrap();
+        let acceptance_id = match accept.post_finalize {
+            Some(super::work_tools::WorkToolPostFinalizeDirective::AcceptReadOnlyGraph(
+                directive,
+            )) => directive.acceptance_id,
+            _ => panic!("fresh acceptance must defer activation"),
+        };
+        let accept_response = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            accept_runtime_tool_call_id,
+            "graph_readonly_accept",
+            &accept_input,
+            Vec::new(),
+            Ok(accept.result),
+        )
+        .unwrap();
+        assert_eq!(
+            database
+                .pending_graph_acceptances_for_recovery()
+                .unwrap()
+                .len(),
+            1
+        );
+        let accepted = database
+            .activate_read_only_graph_acceptance(&acceptance_id)
+            .unwrap();
+        assert!(accepted.accepted);
+        assert_eq!(
+            database.goals().get(&goal.id).unwrap().unwrap().status,
+            GoalStatus::Completed
+        );
+        assert!(
+            database
+                .activate_read_only_graph_acceptance(&acceptance_id)
+                .unwrap()
+                .replayed
+        );
+        let accept_replay = inspect_existing_host_tool_call(
+            &database,
+            &run.id,
+            accept_runtime_tool_call_id,
+            "graph_readonly_accept",
+            &accept_input,
+        )
+        .unwrap()
+        .expect("terminal acceptance ToolCall replay");
+        assert_eq!(accept_replay["result"], accept_response["result"]);
+        assert_eq!(accept_replay["replayed"], true);
+        assert!(database
+            .pending_graph_acceptances_for_recovery()
+            .unwrap()
+            .is_empty());
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn common_finalizer_persists_errors_and_replays_without_repeating_after_hooks() {
+        let path = std::env::temp_dir().join(format!("fox-host-finalizer-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), None, None, None)
+            .unwrap();
+        let run = database
+            .create_run(&conversation.id, "finalize once", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .save_lifecycle_hook(
+                "after-finalizer",
+                "After finalizer",
+                "after_tool",
+                "memory_propose",
+                "annotate",
+                "recorded once",
+                true,
+                1,
+            )
+            .unwrap();
+        let input = json!({"content":"missing required fields"});
+        let acquired = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            "memory-finalized-error",
+            "memory_propose",
+            &input,
+            "running",
+            false,
+        )
+        .unwrap();
+        assert!(matches!(acquired, HostToolCallExecution::Execute(_)));
+
+        let first_error = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            "memory-finalized-error",
+            "memory_propose",
+            &input,
+            Vec::new(),
+            Err("memory.kind_required".to_owned()),
+        )
+        .unwrap_err();
+        assert_eq!(first_error, "memory.kind_required");
+
+        let (_, _, tool_calls) = database
+            .load_conversation_trace_records(&conversation.id)
+            .unwrap();
+        let stored = tool_calls
+            .iter()
+            .find(|record| record.runtime_tool_call_id == "memory-finalized-error")
+            .expect("finalized ToolCall");
+        assert_eq!(stored.status, "failed");
+        assert_eq!(stored.error_message.as_deref(), Some(first_error.as_str()));
+
+        let replay = inspect_existing_host_tool_call(
+            &database,
+            &run.id,
+            "memory-finalized-error",
+            "memory_propose",
+            &input,
+        )
+        .unwrap()
+        .expect("terminal replay");
+        assert_eq!(replay, json!({"isError":true,"error":first_error}));
+
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let hook_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM lifecycle_hook_executions
+                 WHERE hook_id = 'after-finalizer' AND tool_call_id = 'memory-finalized-error'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(hook_count, 1);
+
+        drop(connection);
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn common_finalizer_preserves_an_already_terminal_managed_error() {
+        let path =
+            std::env::temp_dir().join(format!("fox-managed-finalizer-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), None, None, None)
+            .unwrap();
+        let run = database
+            .create_run(&conversation.id, "managed failure", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let input = json!({"objective":"bounded"});
+        assert!(matches!(
+            create_fresh_host_tool_call(
+                &database,
+                &run.id,
+                "managed-finalized-error",
+                "child_run_start",
+                &input,
+                "running",
+                false,
+            )
+            .unwrap(),
+            HostToolCallExecution::Execute(_)
+        ));
+        let managed_error = "[child_run.budget_exceeded] reserved execution expired";
+        database
+            .complete_host_tool_call(
+                &run.id,
+                "managed-finalized-error",
+                None,
+                Some(managed_error),
+            )
+            .unwrap();
+
+        let returned = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            "managed-finalized-error",
+            "child_run_start",
+            &input,
+            Vec::new(),
+            Err("generic late handler error".to_owned()),
+        )
+        .unwrap_err();
+        assert_eq!(returned, managed_error);
+        let replay = inspect_existing_host_tool_call(
+            &database,
+            &run.id,
+            "managed-finalized-error",
+            "child_run_start",
+            &input,
+        )
+        .unwrap()
+        .expect("managed terminal replay");
+        assert_eq!(replay, json!({"isError":true,"error":managed_error}));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn runtime_envelope_identity_is_bound_to_active_worker_and_database_run() {
+        validate_envelope_identity_scope(
+            "conversation-1",
+            "run-1",
+            "session-1",
+            Some("conversation-1"),
+            Some("run-1"),
+            Some("session-1"),
+            "conversation-1",
+        )
+        .unwrap();
+        assert_eq!(
+            validate_envelope_identity_scope(
+                "conversation-1",
+                "run-2",
+                "session-1",
+                Some("conversation-1"),
+                Some("run-1"),
+                Some("session-1"),
+                "conversation-1",
+            )
+            .unwrap_err()
+            .0,
+            "runtime.identity.active_scope_mismatch"
+        );
+        assert_eq!(
+            validate_envelope_identity_scope(
+                "conversation-2",
+                "run-1",
+                "session-1",
+                Some("conversation-2"),
+                Some("run-1"),
+                Some("session-1"),
+                "conversation-1",
+            )
+            .unwrap_err()
+            .0,
+            "runtime.identity.run_conversation_mismatch"
+        );
+    }
 
     #[test]
     fn proposed_plan_blocks_project_mutations_but_not_read_tools() {
@@ -5684,6 +8787,30 @@ mod attachment_tests {
         assert_eq!(
             structured_runtime_error("ordinary failure"),
             ("runtime.start_failed", "ordinary failure")
+        );
+        assert_eq!(
+            event_projection_failure_code(
+                "Invalid parameter name: [child_run.budget_exceeded] total"
+            ),
+            "child_run.budget_exceeded"
+        );
+        assert_eq!(
+            event_projection_failure_code(
+                "Invalid parameter name: [digital_colleague.budget_exceeded] output"
+            ),
+            "digital_colleague.budget_exceeded"
+        );
+        assert_eq!(
+            event_projection_failure_code(
+                "Invalid parameter name: [child_run.tool_budget_exceeded] slots"
+            ),
+            "child_run.tool_budget_exceeded"
+        );
+        assert_eq!(
+            event_projection_failure_code(
+                "Invalid parameter name: [digital_colleague.tool_budget_exceeded] slots"
+            ),
+            "digital_colleague.tool_budget_exceeded"
         );
     }
 
@@ -5984,6 +9111,14 @@ mod attachment_tests {
                 .expect_err("duration budget must be bounded")
                 .contains("maxDurationMs")
         );
+        assert_eq!(
+            effective_digital_colleague_output_limit(128, 100, 8_192).unwrap(),
+            100,
+            "the Runtime provider request cannot exceed the remaining daily budget"
+        );
+        assert!(effective_digital_colleague_output_limit(128, 63, 8_192)
+            .unwrap_err()
+            .contains("digital_colleague.budget_exceeded"));
     }
 
     #[test]

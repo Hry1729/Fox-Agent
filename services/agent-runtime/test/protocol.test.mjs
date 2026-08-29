@@ -41,6 +41,44 @@ test('creates and validates the versioned capability manifest', () => {
   assert.equal(manifest.workLoop, true)
   assert.deepEqual(manifest.tools, RUNTIME_TOOL_CATALOG)
   assert.equal(validateCapabilityManifest(manifest), null)
+  assert.deepEqual(
+    manifest.tools.find(({ name }) => name === 'graph_readonly_run'),
+    { name: 'graph_readonly_run', category: 'project-read', execution: 'runtime', approval: 'none' },
+  )
+  assert.deepEqual(
+    manifest.tools.filter(({ name }) => [
+      'graph_readonly_activate',
+      'graph_readonly_snapshot_get',
+      'graph_readonly_node_start',
+      'graph_readonly_node_review',
+      'graph_readonly_node_finish',
+      'graph_readonly_node_cancel',
+      'graph_readonly_accept',
+    ].includes(name)),
+    [
+      { name: 'graph_readonly_activate', category: 'work', execution: 'host', approval: 'none' },
+      { name: 'graph_readonly_snapshot_get', category: 'work', execution: 'host', approval: 'none' },
+      { name: 'graph_readonly_node_start', category: 'work', execution: 'host', approval: 'none' },
+      { name: 'graph_readonly_node_review', category: 'work', execution: 'host', approval: 'none' },
+      { name: 'graph_readonly_node_finish', category: 'work', execution: 'host', approval: 'none' },
+      { name: 'graph_readonly_node_cancel', category: 'work', execution: 'host', approval: 'none' },
+      { name: 'graph_readonly_accept', category: 'work', execution: 'host', approval: 'none' },
+    ],
+  )
+  assert.deepEqual(
+    manifest.tools.filter(({ name }) => [
+      'task_attempt_start',
+      'task_repair_start',
+      'task_repair_escalate_start',
+      'task_attempt_finish',
+    ].includes(name)),
+    [
+      { name: 'task_attempt_start', category: 'work', execution: 'host', approval: 'none' },
+      { name: 'task_repair_start', category: 'work', execution: 'host', approval: 'none' },
+      { name: 'task_repair_escalate_start', category: 'work', execution: 'host', approval: 'always' },
+      { name: 'task_attempt_finish', category: 'work', execution: 'host', approval: 'none' },
+    ],
+  )
 })
 
 test('accepts a v1 manifest as a normal conversation without work tools', () => {

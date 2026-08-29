@@ -1,4 +1,5 @@
 mod app_state;
+mod artifact_gateway;
 mod commands;
 mod database;
 mod digital_colleagues;
@@ -59,6 +60,9 @@ pub fn run() {
                 skills_dir.clone(),
                 yuxi_client.clone(),
             );
+            runtime_host.recover_active_graph_node_reviews()?;
+            runtime_host.recover_active_graph_node_cancellations()?;
+            runtime_host.recover_pending_graph_acceptances()?;
             runtime_host.start_digital_colleague_scheduler();
             let yuxi_runtime = yuxi::runtime::YuxiRuntimeHost::new(
                 app.handle().clone(),
@@ -165,9 +169,13 @@ pub fn run() {
             commands::projects_list,
             commands::project_delete,
             commands::project_folder_pick,
+            commands::project_folder_open,
             commands::external_url_open,
             commands::project_files_list,
             commands::project_file_read,
+            commands::project_file_action,
+            commands::artifact_inspect,
+            commands::artifact_action,
             commands::project_permission_update,
             commands::conversation_create,
             commands::conversation_expert_bind,
@@ -189,6 +197,7 @@ pub fn run() {
             commands::run_rewind,
             commands::run_resume,
             commands::run_cancel,
+            commands::child_run_cancel_by_user,
             commands::approval_resolve,
             commands::plan_revision_resolve,
             commands::work_mode_confirmation_resolve,
@@ -243,6 +252,7 @@ pub fn run() {
             local_knowledge::local_knowledge_base_get,
             local_knowledge::local_knowledge_base_create,
             local_knowledge::local_knowledge_base_update,
+            local_knowledge::local_knowledge_base_delete,
             local_knowledge::local_knowledge_documents_list,
             local_knowledge::local_knowledge_document_file_read,
             local_knowledge::local_knowledge_document_file_open,

@@ -5,6 +5,10 @@ export interface ProjectAccessSelection {
   permissionMode: ProjectRecord['permissionMode']
 }
 
+export function normalizeProjectPermission(value: unknown, fallback: ProjectRecord['permissionMode'] = 'ask'): ProjectRecord['permissionMode'] {
+  return value === 'read_only' || value === 'ask' || value === 'allow' ? value : fallback
+}
+
 function normalizedProjectRoot(path: string) {
   return path.trim().replace(/[\\/]+$/, '').toLocaleLowerCase()
 }

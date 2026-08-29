@@ -18,6 +18,19 @@ import type {
 
 type OperationListener = (event: OperationEvent) => void
 
+function keywordCapability(chunkCount: number | null, lastIndexedAt: string | null, textIndexReady: boolean) {
+  return {
+    textIndexReady,
+    vectorIndexReady: false,
+    searchMode: 'keyword' as const,
+    embeddingModel: null,
+    chunkCount,
+    vectorCount: null,
+    lastIndexedAt,
+    fallbackReason: '未配置向量模型',
+  }
+}
+
 const baseSeed: LocalKnowledgeBase[] = [
   {
     id: 'fox-user-guide',
@@ -25,12 +38,11 @@ const baseSeed: LocalKnowledgeBase[] = [
     description: 'Fox Agent 页面、功能和常用操作的内置使用教程。',
     status: 'ready',
     documentCount: 11,
-    chunkCount: 38,
-    vectorCount: 0,
     activeGeneration: null,
+    ...keywordCapability(38, '2026-08-22T09:30:00.000Z', true),
     storagePath: 'FoxData/knowledge/fox-user-guide',
     writable: true,
-    lastIndexedAt: null,
+    lastIndexedAt: '2026-08-22T09:30:00.000Z',
     updatedAt: '2026-08-22T09:30:00.000Z',
   },
   {
@@ -39,9 +51,8 @@ const baseSeed: LocalKnowledgeBase[] = [
     description: '产品手册、发布说明和内部使用指南。',
     status: 'ready',
     documentCount: 18,
-    chunkCount: 426,
-    vectorCount: 0,
-    activeGeneration: 4,
+    activeGeneration: null,
+    ...keywordCapability(426, '2026-08-22T08:20:00.000Z', true),
     storagePath: 'FoxData/knowledge/product-docs',
     writable: true,
     lastIndexedAt: '2026-08-22T08:20:00.000Z',
@@ -53,12 +64,11 @@ const baseSeed: LocalKnowledgeBase[] = [
     description: '调研记录和待整理的参考资料。',
     status: 'indexing',
     documentCount: 7,
-    chunkCount: 143,
-    vectorCount: 0,
-    activeGeneration: 2,
+    activeGeneration: null,
+    ...keywordCapability(143, null, false),
     storagePath: 'FoxData/knowledge/research-notes',
     writable: true,
-    lastIndexedAt: '2026-08-21T16:40:00.000Z',
+    lastIndexedAt: null,
     updatedAt: '2026-08-22T09:03:00.000Z',
   },
 ]
@@ -456,10 +466,8 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
       if (!base) throw new Error(`本地知识库不存在：${id}`)
       return copy({
         ...base,
-        embeddingModel: '尚未启用',
-        embeddingDimension: 0,
         parserVersion: 'fox-parser-1',
-        storage: { freeBytes: 128 * 1024 * 1024 * 1024, totalBytes: 512 * 1024 * 1024 * 1024 },
+        storage: { freeBytes: null, totalBytes: null },
         recentJobs: [...jobs.values()].filter((job) => job.knowledgeBaseId === id).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, 5),
       } satisfies LocalKnowledgeBaseDetail)
     },
@@ -475,9 +483,8 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
         description: request.description?.trim() ?? '',
         status: 'empty',
         documentCount: 0,
-        chunkCount: 0,
-        vectorCount: 0,
         activeGeneration: null,
+        ...keywordCapability(0, null, false),
         storagePath: `FoxData/knowledge/${id}`,
         writable: true,
         lastIndexedAt: null,
@@ -486,6 +493,32 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
       bases.set(id, base)
       documents.set(id, [])
       return copy(base)
+    },
+
+    async updateKnowledgeBase(id, request) {
+      const base = bases.get(id)
+      if (!base) throw new Error(`本地知识库不存在：${id}`)
+      if (id === 'fox-user-guide') throw new Error('Fox 使用指南是内置知识库，不能修改。')
+      const name = request.name.trim()
+      if (!name) throw new Error('知识库名称不能为空。')
+      const updated = {
+        ...base,
+        name,
+        description: request.description?.trim() ?? '',
+        updatedAt: now(),
+      }
+      bases.set(id, updated)
+      return copy(updated)
+    },
+
+    async deleteKnowledgeBase(id) {
+      if (id === 'fox-user-guide') throw new Error('Fox 使用指南是内置知识库，不能删除。')
+      if (!bases.delete(id)) throw new Error(`本地知识库不存在：${id}`)
+      documents.delete(id)
+      for (const [jobId, job] of jobs) {
+        if (job.knowledgeBaseId === id) jobs.delete(jobId)
+      }
+      return true
     },
 
     async listDocuments(id, options = {}) {

@@ -5,6 +5,64 @@ const USER_FACING_ANSWER_PATTERN = /^(?:好的|好嘞|当然|没问题|已经|�
 const INLINE_USER_FACING_ANSWER_PATTERN = /(?:好的|好嘞|当然|没问题|已经|完成|以下是|这里是|结果如下|结论(?:如下|是)?[：:]?|下面是|最终结果|汇总完毕|请你确认|脚本已|文件已|我已经|我为你)/u
 const REASONING_TAIL_CHARS = 160
 const STARTUP_CLASSIFICATION_CHARS = 220
+const USAGE_COMPONENT_FIELDS = Object.freeze([
+  ['input', 'inputTokens'],
+  ['output', 'outputTokens'],
+  ['cacheRead', 'cacheReadTokens'],
+  ['cacheWrite', 'cacheWriteTokens'],
+])
+
+function usageContractError(kind, detail) {
+  return new Error(`[runtime.usage.${kind}] ${detail}`)
+}
+
+function normalizeUsageCounter(value, field) {
+  if (value === undefined) return 0
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw usageContractError('invalid', `${field} must be a finite non-negative safe integer.`)
+  }
+  return value
+}
+
+function addUsageCounters(left, right, field) {
+  if (right > Number.MAX_SAFE_INTEGER - left) {
+    throw usageContractError('overflow', `${field} exceeds Number.MAX_SAFE_INTEGER.`)
+  }
+  return left + right
+}
+
+function sumUsageCounters(values, field) {
+  return values.reduce((total, value) => addUsageCounters(total, value, field), 0)
+}
+
+function normalizeUsageStep(usage) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
+    throw usageContractError('invalid', 'provider usage must be an object.')
+  }
+  const normalized = Object.fromEntries(USAGE_COMPONENT_FIELDS.map(([source, target]) => [
+    target,
+    normalizeUsageCounter(usage[source], source),
+  ]))
+  const componentTotal = sumUsageCounters(
+    USAGE_COMPONENT_FIELDS.map(([, target]) => normalized[target]),
+    'provider component total',
+  )
+  const reportedTotal = normalizeUsageCounter(usage.totalTokens, 'totalTokens')
+  return { ...normalized, totalTokens: Math.max(reportedTotal, componentTotal) }
+}
+
+function accumulateUsage(current, step) {
+  const next = Object.fromEntries(USAGE_COMPONENT_FIELDS.map(([, field]) => [
+    field,
+    addUsageCounters(current[field], step[field], `cumulative ${field}`),
+  ]))
+  const componentTotal = sumUsageCounters(
+    USAGE_COMPONENT_FIELDS.map(([, field]) => next[field]),
+    'cumulative component total',
+  )
+  const billedTotal = addUsageCounters(current.totalTokens, step.totalTokens, 'cumulative totalTokens')
+  return { ...next, totalTokens: Math.max(billedTotal, componentTotal) }
+}
 
 function textUnits(text) {
   const units = []
@@ -172,6 +230,14 @@ export function createPiEventMapper(emit, options = {}) {
   let reasoningEmittedUntil = 0
   let answerEmittedUntil = 0
   const providerReasoningByIndex = new Map()
+  const accountedUsageEvents = new WeakSet()
+  let cumulativeUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 0,
+  }
 
   function ensureMessageStarted() {
     if (messageStarted) return
@@ -324,13 +390,12 @@ export function createPiEventMapper(emit, options = {}) {
             reconcileProviderReasoning(event.message)
             flushPendingText(event.message)
             const usage = event.message.usage
-            if (usage) emit('usage.updated', {
-              inputTokens: usage.input ?? 0,
-              outputTokens: usage.output ?? 0,
-              cacheReadTokens: usage.cacheRead ?? 0,
-              cacheWriteTokens: usage.cacheWrite ?? 0,
-              totalTokens: usage.totalTokens ?? 0,
-            })
+            if (usage !== undefined && !accountedUsageEvents.has(event)) {
+              const nextUsage = accumulateUsage(cumulativeUsage, normalizeUsageStep(usage))
+              emit('usage.updated', nextUsage)
+              cumulativeUsage = nextUsage
+              accountedUsageEvents.add(event)
+            }
             if (event.message.stopReason === 'error') {
               pendingTerminal = {
                 type: 'run.failed',

@@ -35,6 +35,117 @@ test('maps Pi streaming, tool and completion events to stable Fox events', () =>
   })
 })
 
+test('emits Run-cumulative usage across a tool round without double-counting other events', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  const firstMessageEnd = {
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'toolCall', id: 'tool-1', name: 'read', arguments: { path: 'a.txt' } }],
+      stopReason: 'toolUse',
+      usage: { input: 100, output: 20, cacheRead: 10, cacheWrite: 0, totalTokens: 130 },
+    },
+  }
+  mapper.handle(firstMessageEnd)
+  mapper.handle({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'checking' } })
+  mapper.handle({ type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'read', args: { path: 'a.txt' } })
+  mapper.handle({ type: 'tool_execution_end', toolCallId: 'tool-1', toolName: 'read', result: {}, isError: false })
+  const secondMessageEnd = {
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Done.' }],
+      stopReason: 'stop',
+      usage: { input: 150, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 155 },
+    },
+  }
+  mapper.handle(secondMessageEnd)
+  mapper.handle(secondMessageEnd)
+
+  assert.deepEqual(events.filter(({ type }) => type === 'usage.updated'), [
+    {
+      type: 'usage.updated',
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: 10,
+      cacheWriteTokens: 0,
+      totalTokens: 130,
+    },
+    {
+      type: 'usage.updated',
+      inputTokens: 250,
+      outputTokens: 25,
+      cacheReadTokens: 10,
+      cacheWriteTokens: 0,
+      totalTokens: 285,
+    },
+  ])
+})
+
+test('resets cumulative usage for every mapper Run and raises low provider totals to component totals', () => {
+  const firstRun = []
+  const firstMapper = createPiEventMapper((type, payload = {}) => firstRun.push({ type, ...payload }))
+  firstMapper.handle({
+    type: 'message_end',
+    message: { role: 'assistant', usage: { input: 20, output: 5, cacheRead: 3, cacheWrite: 2, totalTokens: 1 } },
+  })
+  const resumedSessionNewRun = []
+  const secondMapper = createPiEventMapper((type, payload = {}) => resumedSessionNewRun.push({ type, ...payload }))
+  secondMapper.handle({
+    type: 'message_end',
+    message: { role: 'assistant', usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 3 } },
+  })
+
+  assert.equal(firstRun.find(({ type }) => type === 'usage.updated').totalTokens, 30)
+  assert.deepEqual(resumedSessionNewRun.find(({ type }) => type === 'usage.updated'), {
+    type: 'usage.updated',
+    inputTokens: 2,
+    outputTokens: 1,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 3,
+  })
+})
+
+test('fails closed on invalid or overflowing provider usage without emitting a downgrade', () => {
+  for (const [field, value] of [
+    ['input', Number.NaN],
+    ['output', -1],
+    ['cacheRead', 1.5],
+    ['cacheWrite', Number.POSITIVE_INFINITY],
+    ['totalTokens', Number.MAX_SAFE_INTEGER + 1],
+    ['input', '1'],
+    ['output', null],
+  ]) {
+    const events = []
+    const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+    assert.throws(() => mapper.handle({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, [field]: value },
+      },
+    }), /\[runtime\.usage\.invalid\]/)
+    assert.equal(events.some(({ type }) => type === 'usage.updated'), false)
+  }
+
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  mapper.handle({
+    type: 'message_end',
+    message: {
+      role: 'assistant',
+      usage: { input: Number.MAX_SAFE_INTEGER, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: Number.MAX_SAFE_INTEGER },
+    },
+  })
+  assert.throws(() => mapper.handle({
+    type: 'message_end',
+    message: { role: 'assistant', usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1 } },
+  }), /\[runtime\.usage\.overflow\]/)
+  assert.equal(events.filter(({ type }) => type === 'usage.updated').length, 1)
+})
+
 test('moves text from tool-calling turns into the reasoning stream', () => {
   const events = []
   const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))

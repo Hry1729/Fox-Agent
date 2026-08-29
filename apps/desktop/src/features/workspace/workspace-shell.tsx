@@ -41,8 +41,8 @@ export interface WorkspaceShellProps {
   onAskKnowledge: (knowledgeBase: KnowledgeBaseRecord) => void
   localKnowledgeGateway?: LocalKnowledgeGateway
   pluginGateway?: PluginGateway
-  onCreateLocalKnowledge?: () => void
-  onAddPlugin?: () => void
+  localKnowledgeCreateRequest?: number
+  onLocalKnowledgeCreateRequestHandled?: () => void
   onConfigurePluginAgent?: (plugin: PluginCardView) => void
 }
 
@@ -63,8 +63,8 @@ export function WorkspaceShell({
   onAskKnowledge,
   localKnowledgeGateway,
   pluginGateway,
-  onCreateLocalKnowledge,
-  onAddPlugin,
+  localKnowledgeCreateRequest,
+  onLocalKnowledgeCreateRequestHandled,
   onConfigurePluginAgent,
 }: WorkspaceShellProps) {
   const localKnowledgeView = localKnowledgeViewForWorkspace(activeView)
@@ -79,7 +79,7 @@ export function WorkspaceShell({
 
   let rawWorkspacePage: ReactNode = null
   if (activeView === 'plugins') {
-    rawWorkspacePage = <PluginCenterPage gateway={pluginGateway} onAddPlugin={onAddPlugin} onConfigureAgent={onConfigurePluginAgent} />
+    rawWorkspacePage = <PluginCenterPage gateway={pluginGateway} onConfigureAgent={onConfigurePluginAgent} />
   } else if (localKnowledgeView) {
     rawWorkspacePage = (
       <LocalKnowledgeWorkspace
@@ -89,7 +89,8 @@ export function WorkspaceShell({
         documentId={activeDocumentId ?? undefined}
         onNavigate={navigateLocalKnowledge}
         onBack={backFromLocalKnowledge}
-        onCreate={onCreateLocalKnowledge}
+        createRequest={localKnowledgeCreateRequest}
+        onCreateRequestHandled={onLocalKnowledgeCreateRequestHandled}
       />
     )
   } else if (activeView === 'agents') {

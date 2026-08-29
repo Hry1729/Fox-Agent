@@ -13,7 +13,7 @@ use super::{
     RuntimeSessionRecord, SaveAgentRequest, StartRunResult, ToolCallRecord, YuxiAgentRecord,
     YuxiConnectionTest, YuxiServiceRecord,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
@@ -28,20 +28,38 @@ mod child_runs;
 mod digital_colleagues;
 mod expert_teams;
 mod expert_workflows;
+mod graph_lead;
 mod memory;
 mod observability;
 mod work_events;
 mod work_graph;
 
+pub(crate) use digital_colleagues::MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS;
+
 pub(crate) use child_runs::CreateChildRunInput;
+#[allow(unused_imports)]
+pub use graph_lead::{
+    ActivateReadOnlyGraphInput, ActiveGraphNodeCancelIntent, ActiveGraphNodeReviewRequest,
+    CreateGraphNodeCancelIntentInput, CreateGraphNodeReviewRequestInput,
+    CreateReadOnlyGraphAcceptanceInput, FinishReadOnlyGraphNodeInput, GraphAcceptanceIntentResult,
+    GraphAcceptanceResult, GraphCriterionEvidenceInput, GraphLeadActivationResult,
+    GraphLeadEdgeSnapshot, GraphLeadNodeFinishResult, GraphLeadNodeReadiness,
+    GraphLeadNodeSnapshot, GraphLeadNodeStartResult, GraphLeadSnapshot,
+    GraphNodeCancelActivationResult, GraphNodeCancelIntentResult, GraphNodeReviewActivationResult,
+    GraphNodeReviewDecisionResult, GraphNodeReviewOutcome, GraphNodeReviewRequestResult,
+    GraphReviewerDispatchResult, PendingGraphAcceptance, StartReadyReadOnlyGraphNodeInput,
+};
 pub use work_events::WORK_EVENT_TYPES;
 #[allow(unused_imports)]
 pub use work_graph::{
-    AddEvidenceInput, CreateGoalInput, CreateTaskInput, GoalRepository, RepositoryError,
-    TaskEvidenceRepository, WorkTaskRepository,
+    AddEvidenceInput, CreateGoalInput, CreateTaskInput, FinishTaskAttemptInput, GoalRepository,
+    PreflightTaskRepairOverrideInput, RepositoryError, StartTaskAttemptInput,
+    StartTaskRepairOverrideInput, TaskEvidenceRepository, WorkTaskRepository,
 };
 
 const DEFAULT_AGENT_ID: &str = "fox-general";
+pub(crate) const TOOL_EXECUTION_APPROVAL_CATEGORY: &str = "tool_execution";
+pub(crate) const TASK_REPAIR_OVERRIDE_APPROVAL_CATEGORY: &str = "task_repair_budget_override";
 const BUILTIN_AGENTS: &[(&str, &str, &str, &str)] = &[
     (
         DEFAULT_AGENT_ID,
@@ -708,7 +726,7 @@ impl Database {
                     "skills": [],
                     "knowledge": [],
                     "mcpServers": [],
-                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
+                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_attempt_start", "task_attempt_finish", "task_repair_start", "task_repair_escalate_start", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
                 });
                 let (agent_kind, invocation_mode, visibility) = if *id == DEFAULT_AGENT_ID {
                     ("assistant", "primary", "chat_selector")
@@ -738,7 +756,10 @@ impl Database {
     pub fn repair_interrupted_runs(&self) -> Result<(), String> {
         let now = now_ms();
         self.with_connection(|connection| {
-            connection.execute(
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            child_runs::reconcile_terminal_graph_children_in_transaction(&transaction, now)?;
+            transaction.execute(
                 "UPDATE runs
                  SET status = 'interrupted', finished_at = ?1,
                      error_code = 'runtime.application_restarted',
@@ -751,7 +772,7 @@ impl Database {
                    )",
                 [now],
             )?;
-            connection.execute(
+            transaction.execute(
                 "UPDATE messages SET status = 'interrupted', updated_at = ?1
                  WHERE status = 'streaming'
                    AND NOT EXISTS (
@@ -764,7 +785,7 @@ impl Database {
                    )",
                 [now],
             )?;
-            connection.execute(
+            transaction.execute(
                 "UPDATE tool_calls SET status = 'interrupted', completed_at = ?1, updated_at = ?1
                  WHERE status IN ('pending', 'running')
                    AND NOT EXISTS (
@@ -777,10 +798,10 @@ impl Database {
                    )",
                 [now],
             )?;
-            connection.execute(
+            transaction.execute(
                 "UPDATE approvals
-                 SET status = 'cancelled', decision_json = '{\"reason\":\"application_restarted\"}',
-                     resolved_at = ?1
+                 SET status = 'expired', decision_json = '{\"reason\":\"application_restarted\"}',
+                      resolved_at = ?1
                  WHERE status = 'pending'
                    AND NOT EXISTS (
                        SELECT 1 FROM tool_calls t
@@ -793,14 +814,20 @@ impl Database {
                    )",
                 [now],
             )?;
+            child_runs::reconcile_terminal_graph_children_in_transaction(&transaction, now)?;
+            interrupt_tasks_owned_by_terminal_runs(&transaction, &now.to_string())?;
+            transaction.commit()?;
             Ok(())
         })
     }
 
     pub fn audit_interrupted_tasks(&self) -> Result<(), String> {
-        let now = now_ms().to_string();
+        let now = now_ms();
         self.with_connection(|connection| {
-            interrupt_tasks_owned_by_terminal_runs(connection, &now)?;
+            let transaction = connection.transaction()?;
+            child_runs::reconcile_terminal_graph_children_in_transaction(&transaction, now)?;
+            interrupt_tasks_owned_by_terminal_runs(&transaction, &now.to_string())?;
+            transaction.commit()?;
             Ok(())
         })
     }
@@ -895,6 +922,10 @@ impl Database {
                 "goal_complete",
                 "task_create_many",
                 "task_update",
+                "task_attempt_start",
+                "task_attempt_finish",
+                "task_repair_start",
+                "task_repair_escalate_start",
                 "task_evidence_add",
                 "task_evidence_validate",
                 "plan_revision_create",
@@ -1478,19 +1509,51 @@ impl Database {
                  ), run_days AS (
                     SELECT date(created_at / 1000, 'unixepoch', 'localtime') AS day, COUNT(*) AS count
                     FROM runs GROUP BY day
-                 ), usage_days AS (
-                    SELECT date(e.created_at / 1000, 'unixepoch', 'localtime') AS day,
-                           SUM(MAX(
+                 ), raw_usage AS (
+                    SELECT e.run_id, e.seq, e.created_at,
+                           CAST(COALESCE(json_extract(e.event_json, '$.inputTokens'), 0) AS INTEGER) AS input_tokens,
+                           CAST(COALESCE(json_extract(e.event_json, '$.outputTokens'), 0) AS INTEGER) AS output_tokens,
+                           CAST(COALESCE(json_extract(e.event_json, '$.cacheReadTokens'), 0) AS INTEGER) AS cache_read_tokens,
+                           CAST(COALESCE(json_extract(e.event_json, '$.cacheWriteTokens'), 0) AS INTEGER) AS cache_write_tokens,
+                           MAX(
                              CAST(COALESCE(json_extract(e.event_json, '$.totalTokens'), 0) AS INTEGER),
                              CAST(COALESCE(json_extract(e.event_json, '$.inputTokens'), 0) AS INTEGER) +
                              CAST(COALESCE(json_extract(e.event_json, '$.outputTokens'), 0) AS INTEGER) +
                              CAST(COALESCE(json_extract(e.event_json, '$.cacheReadTokens'), 0) AS INTEGER) +
                              CAST(COALESCE(json_extract(e.event_json, '$.cacheWriteTokens'), 0) AS INTEGER)
-                           )) AS total_tokens
-                    FROM run_events e
-                    WHERE e.event_type = 'usage.updated'
-                      AND e.seq = (SELECT MAX(e2.seq) FROM run_events e2
-                                   WHERE e2.run_id = e.run_id AND e2.event_type = 'usage.updated')
+                           ) AS total_tokens
+                    FROM run_events e WHERE e.event_type = 'usage.updated'
+                 ), usage_with_lag AS (
+                    SELECT run_id, seq, created_at, input_tokens, output_tokens,
+                           cache_read_tokens, cache_write_tokens, total_tokens,
+                           LAG(input_tokens) OVER (PARTITION BY run_id ORDER BY seq) AS previous_input,
+                           LAG(output_tokens) OVER (PARTITION BY run_id ORDER BY seq) AS previous_output,
+                           LAG(cache_read_tokens) OVER (PARTITION BY run_id ORDER BY seq) AS previous_cache_read,
+                           LAG(cache_write_tokens) OVER (PARTITION BY run_id ORDER BY seq) AS previous_cache_write,
+                           LAG(total_tokens) OVER (PARTITION BY run_id ORDER BY seq) AS previous_total,
+                           ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY seq DESC) AS reverse_position
+                    FROM raw_usage
+                 ), usage_contract AS (
+                    SELECT run_id,
+                           MAX(CASE WHEN previous_total IS NOT NULL AND (
+                             input_tokens < previous_input OR output_tokens < previous_output OR
+                             cache_read_tokens < previous_cache_read OR
+                             cache_write_tokens < previous_cache_write OR total_tokens < previous_total
+                           ) THEN 1 ELSE 0 END) AS legacy_non_cumulative
+                    FROM usage_with_lag GROUP BY run_id
+                 ), usage_deltas AS (
+                    SELECT usage.run_id, usage.created_at,
+                           CASE WHEN contract.legacy_non_cumulative = 0
+                             THEN usage.total_tokens - COALESCE(usage.previous_total, 0)
+                             WHEN usage.reverse_position = 1 THEN usage.total_tokens
+                             ELSE 0
+                           END AS delta_tokens
+                    FROM usage_with_lag usage
+                    JOIN usage_contract contract ON contract.run_id = usage.run_id
+                 ), usage_days AS (
+                    SELECT date(created_at / 1000, 'unixepoch', 'localtime') AS day,
+                           SUM(delta_tokens) AS total_tokens
+                    FROM usage_deltas
                     GROUP BY day
                  )
                  SELECT days.day, COALESCE(c.count, 0), COALESCE(r.count, 0),
@@ -2820,6 +2883,44 @@ impl Database {
         })
     }
 
+    /// Load one artifact only when both the artifact id and conversation id
+    /// match.  Artifact paths are untrusted data and must never be looked up
+    /// by id alone; the host gateway performs the filesystem checks after this
+    /// scoped query returns.
+    pub fn artifact_for_conversation(
+        &self,
+        conversation_id: &str,
+        artifact_id: &str,
+    ) -> Result<Option<ArtifactRecord>, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT id, conversation_id, run_id, display_name, artifact_type, storage_path,
+                            media_type, byte_size, sha256, status, created_at, updated_at
+                     FROM artifacts
+                     WHERE id = ?1 AND conversation_id = ?2",
+                    params![artifact_id, conversation_id],
+                    |row| {
+                        Ok(ArtifactRecord {
+                            id: row.get(0)?,
+                            conversation_id: row.get(1)?,
+                            run_id: row.get(2)?,
+                            display_name: row.get(3)?,
+                            artifact_type: row.get(4)?,
+                            storage_path: row.get(5)?,
+                            media_type: row.get(6)?,
+                            byte_size: row.get(7)?,
+                            sha256: row.get(8)?,
+                            status: row.get(9)?,
+                            created_at: row.get(10)?,
+                            updated_at: row.get(11)?,
+                        })
+                    },
+                )
+                .optional()
+        })
+    }
+
     pub fn set_knowledge_bindings(
         &self,
         conversation_id: &str,
@@ -3304,7 +3405,13 @@ impl Database {
                 "INSERT INTO lifecycle_hook_executions(
                     id, hook_id, run_id, tool_call_id, event, tool_name, action,
                     outcome, details_json, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 )
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+                 WHERE NOT EXISTS (
+                    SELECT 1 FROM lifecycle_hook_executions
+                    WHERE hook_id = ?2 AND run_id IS ?3 AND tool_call_id IS ?4
+                      AND event = ?5 AND action = ?7 AND outcome = ?8
+                 )",
                 params![
                     Uuid::new_v4().to_string(),
                     hook_id,
@@ -3388,7 +3495,8 @@ impl Database {
         })
     }
 
-    pub fn create_host_tool_call(
+    #[cfg(test)]
+    pub(crate) fn create_host_tool_call(
         &self,
         run_id: &str,
         runtime_tool_call_id: &str,
@@ -3397,39 +3505,168 @@ impl Database {
         status: &str,
         requires_approval: bool,
     ) -> Result<super::ToolCallRecord, String> {
+        self.create_host_tool_call_once(
+            run_id,
+            runtime_tool_call_id,
+            tool_name,
+            input,
+            status,
+            requires_approval,
+        )
+        .map(|(record, _)| record)
+    }
+
+    pub(crate) fn create_host_tool_call_once(
+        &self,
+        run_id: &str,
+        runtime_tool_call_id: &str,
+        tool_name: &str,
+        input: &Value,
+        status: &str,
+        requires_approval: bool,
+    ) -> Result<(super::ToolCallRecord, super::HostToolCallDisposition), String> {
+        if !matches!(status, "pending" | "running") {
+            return Err("a Host ToolCall must start as pending or running".to_owned());
+        }
+        if requires_approval != (status == "pending") {
+            return Err(
+                "a Host ToolCall requiring approval must start pending; every other Host ToolCall must start running"
+                    .to_owned(),
+            );
+        }
         let now = now_ms();
         let input_json = serde_json::to_string(input).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
-            let conversation_id: String = connection.query_row(
-                "SELECT conversation_id FROM runs WHERE id = ?1",
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let (conversation_id, run_status): (String, String) = transaction.query_row(
+                "SELECT conversation_id, status FROM runs WHERE id = ?1",
                 [run_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            let id = Uuid::new_v4().to_string();
-            connection.execute(
-                "INSERT INTO tool_calls(
-                    id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
-                    status, execution_location, requires_approval, started_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'host', ?8, ?9, ?9)
-                 ON CONFLICT(run_id, runtime_tool_call_id) DO UPDATE SET
-                    input_json = excluded.input_json,
-                    status = excluded.status,
-                    execution_location = 'host',
-                    requires_approval = excluded.requires_approval,
-                    updated_at = excluded.updated_at",
-                params![
-                    id,
-                    runtime_tool_call_id,
-                    run_id,
-                    conversation_id,
-                    tool_name,
-                    input_json,
-                    status,
-                    requires_approval as i64,
-                    now
-                ],
-            )?;
-            query_tool_call(connection, run_id, runtime_tool_call_id)
+            let existing = query_tool_call(&transaction, run_id, runtime_tool_call_id).optional()?;
+            let inserted = if existing.is_none() {
+                if run_status != "running" {
+                    return Err(projection_violation(format!(
+                        "Run '{run_id}' is '{run_status}' and cannot create fresh Host ToolCall '{runtime_tool_call_id}'"
+                    )));
+                }
+                validate_managed_tool_acquisition(&transaction, run_id, now, true)?;
+                transaction.execute(
+                    "INSERT INTO tool_calls(
+                        id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
+                        status, execution_location, requires_approval, started_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'host', ?8, ?9, ?9)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        runtime_tool_call_id,
+                        run_id,
+                        conversation_id,
+                        tool_name,
+                        input_json,
+                        status,
+                        requires_approval as i64,
+                        now
+                    ],
+                )?
+            } else {
+                0
+            };
+            let mut record = existing
+                .map(Ok)
+                .unwrap_or_else(|| query_tool_call(&transaction, run_id, runtime_tool_call_id))?;
+            if record.conversation_id != conversation_id
+                || record.tool_name != tool_name
+                || record.input != *input
+            {
+                return Err(projection_violation(format!(
+                    "Host ToolCall '{runtime_tool_call_id}' conflicts with existing immutable content"
+                )));
+            }
+            let mut disposition = if inserted == 1 {
+                super::HostToolCallDisposition::Created
+            } else if matches!(record.status.as_str(), "pending" | "running") {
+                super::HostToolCallDisposition::AlreadyInFlight
+            } else {
+                super::HostToolCallDisposition::ReplayTerminal
+            };
+            if record.execution_location == "runtime" {
+                validate_managed_tool_acquisition(&transaction, run_id, now, false)?;
+                let changed = transaction.execute(
+                    "UPDATE tool_calls
+                     SET status = ?3, execution_location = 'host', requires_approval = ?4,
+                         updated_at = ?5
+                     WHERE run_id = ?1 AND runtime_tool_call_id = ?2
+                       AND execution_location = 'runtime' AND status = 'running'
+                       AND requires_approval = 0
+                       AND EXISTS(
+                           SELECT 1 FROM runs
+                           WHERE runs.id = tool_calls.run_id AND runs.status = 'running'
+                       )",
+                    params![
+                        run_id,
+                        runtime_tool_call_id,
+                        status,
+                        requires_approval as i64,
+                        now
+                    ],
+                )?;
+                record = query_tool_call(&transaction, run_id, runtime_tool_call_id)?;
+                if changed == 1 {
+                    disposition = super::HostToolCallDisposition::PromotedRuntime;
+                } else if record.execution_location != "host" {
+                    return Err(projection_violation(format!(
+                        "Host ToolCall '{runtime_tool_call_id}' cannot claim a terminal Runtime projection or a ToolCall from terminal Run '{run_id}'"
+                    )));
+                }
+            }
+            if record.execution_location != "host" || record.requires_approval != requires_approval {
+                return Err(projection_violation(format!(
+                    "Host ToolCall '{runtime_tool_call_id}' conflicts with existing immutable execution authority"
+                )));
+            }
+            transaction.commit()?;
+            Ok((record, disposition))
+        })
+    }
+
+    pub(crate) fn inspect_host_tool_call_replay(
+        &self,
+        run_id: &str,
+        runtime_tool_call_id: &str,
+        tool_name: &str,
+        input: &Value,
+    ) -> Result<Option<(super::ToolCallRecord, super::HostToolCallDisposition)>, String> {
+        self.with_connection(|connection| {
+            let existing = query_tool_call(connection, run_id, runtime_tool_call_id).optional()?;
+            let Some(record) = existing else {
+                return Ok(None);
+            };
+            if record.tool_name != tool_name || record.input != *input {
+                return Err(projection_violation(format!(
+                    "ToolCall '{runtime_tool_call_id}' replay conflicts with immutable tool/input identity"
+                )));
+            }
+            if record.execution_location == "runtime" {
+                if record.status == "running" {
+                    return Ok(None);
+                }
+                return Err(projection_violation(format!(
+                    "Host execution cannot replay or claim terminal Runtime ToolCall '{runtime_tool_call_id}'"
+                )));
+            }
+            if record.execution_location != "host" {
+                return Err(projection_violation(format!(
+                    "ToolCall '{runtime_tool_call_id}' has unknown execution authority '{}'",
+                    record.execution_location
+                )));
+            }
+            let disposition = if matches!(record.status.as_str(), "pending" | "running") {
+                super::HostToolCallDisposition::AlreadyInFlight
+            } else {
+                super::HostToolCallDisposition::ReplayTerminal
+            };
+            Ok(Some((record, disposition)))
         })
     }
 
@@ -3441,31 +3678,58 @@ impl Database {
         error_message: Option<&str>,
     ) -> Result<(), String> {
         let now = now_ms();
-        let result_json = result
-            .map(compact_tool_result)
-            .map(|value| serde_json::to_string(&value))
+        let compact_result = result.map(compact_tool_result);
+        let result_json = compact_result
+            .as_ref()
+            .map(serde_json::to_string)
             .transpose()
             .map_err(|error| error.to_string())?;
+        let terminal_status = if error_message.is_some() {
+            "failed"
+        } else {
+            "completed"
+        };
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
-            transaction.execute(
+            let changed = transaction.execute(
                 "UPDATE tool_calls
                  SET status = ?3, result_json = ?4, error_message = ?5,
                      completed_at = ?6, updated_at = ?6
-                 WHERE run_id = ?1 AND runtime_tool_call_id = ?2",
+                 WHERE run_id = ?1 AND runtime_tool_call_id = ?2
+                  AND execution_location = 'host'
+                  AND (status = 'running' OR (status = 'pending' AND ?3 = 'failed'))
+                  AND EXISTS(
+                      SELECT 1 FROM runs
+                      WHERE runs.id = tool_calls.run_id AND runs.status = 'running'
+                  )",
                 params![
                     run_id,
                     runtime_tool_call_id,
-                    if error_message.is_some() {
-                        "failed"
-                    } else {
-                        "completed"
-                    },
+                    terminal_status,
                     result_json,
                     error_message,
                     now
                 ],
             )?;
+            if changed == 0 {
+                let existing = query_tool_call(&transaction, run_id, runtime_tool_call_id)?;
+                if existing.execution_location != "host" {
+                    return Err(projection_violation(format!(
+                        "Host completion cannot claim Runtime ToolCall '{runtime_tool_call_id}'"
+                    )));
+                }
+                if existing.status == terminal_status
+                    && existing.result == compact_result
+                    && existing.error_message.as_deref() == error_message
+                {
+                    transaction.commit()?;
+                    return Ok(());
+                }
+                return Err(projection_violation(format!(
+                    "Host ToolCall '{runtime_tool_call_id}' cannot transition from terminal/non-authoritative status '{}' to '{terminal_status}'",
+                    existing.status
+                )));
+            }
             if error_message.is_none() {
                 if let Some(result) = result {
                     let tool_name: Option<String> = transaction.query_row(
@@ -3477,15 +3741,34 @@ impl Database {
                         if let Some(path) = result.get("details").and_then(|details| details.get("path")).and_then(Value::as_str) {
                             let display_name = PathBuf::from(path).file_name().and_then(|value| value.to_str()).unwrap_or(path).to_owned();
                             let byte_size = result.get("details").and_then(|details| details.get("bytes")).and_then(Value::as_i64).unwrap_or(0);
-                            transaction.execute(
-                                "INSERT INTO artifacts(id, conversation_id, run_id, display_name,
-                                                       artifact_type, storage_path, byte_size,
-                                                       status, created_at, updated_at)
-                                 SELECT ?1, conversation_id, run_id, ?2, 'file', ?3, ?4,
-                                        'ready', ?5, ?5 FROM tool_calls
-                                 WHERE run_id = ?6 AND runtime_tool_call_id = ?7",
-                                params![Uuid::new_v4().to_string(), display_name, path, byte_size, now, run_id, runtime_tool_call_id],
+                            let operation = result.get("details").and_then(|details| details.get("operation")).and_then(Value::as_str);
+                            let artifact_type = if tool_name.as_deref() == Some("edit_file") || operation == Some("modified") {
+                                "modified_file"
+                            } else {
+                                "created_file"
+                            };
+                            let updated = transaction.execute(
+                                "UPDATE artifacts
+                                 SET display_name = ?1,
+                                     artifact_type = CASE
+                                       WHEN artifact_type = 'created_file' THEN artifact_type
+                                       ELSE ?2
+                                     END,
+                                     byte_size = ?3, status = 'ready', updated_at = ?4
+                                 WHERE run_id = ?5 AND storage_path = ?6",
+                                params![display_name, artifact_type, byte_size, now, run_id, path],
                             )?;
+                            if updated == 0 {
+                                transaction.execute(
+                                    "INSERT INTO artifacts(id, conversation_id, run_id, display_name,
+                                                           artifact_type, storage_path, byte_size,
+                                                           status, created_at, updated_at)
+                                     SELECT ?1, conversation_id, run_id, ?2, ?3, ?4, ?5,
+                                            'ready', ?6, ?6 FROM tool_calls
+                                     WHERE run_id = ?7 AND runtime_tool_call_id = ?8",
+                                    params![Uuid::new_v4().to_string(), display_name, artifact_type, path, byte_size, now, run_id, runtime_tool_call_id],
+                                )?;
+                            }
                         }
                     }
                 }
@@ -3500,22 +3783,84 @@ impl Database {
         requested_action: &str,
         request: &Value,
     ) -> Result<super::ApprovalRecord, String> {
+        self.create_approval_with_category(
+            tool_call_id,
+            requested_action,
+            request,
+            TOOL_EXECUTION_APPROVAL_CATEGORY,
+        )
+    }
+
+    pub(crate) fn create_approval_with_category(
+        &self,
+        tool_call_id: &str,
+        requested_action: &str,
+        request: &Value,
+        category: &str,
+    ) -> Result<super::ApprovalRecord, String> {
+        if !matches!(
+            category,
+            TOOL_EXECUTION_APPROVAL_CATEGORY | TASK_REPAIR_OVERRIDE_APPROVAL_CATEGORY
+        ) {
+            return Err(format!("unsupported approval category '{category}'"));
+        }
         let now = now_ms();
         let id = Uuid::new_v4().to_string();
         let request_json = serde_json::to_string(request).map_err(|error| error.to_string())?;
-        self.with_connection(|connection| {
+        let approval = self.with_connection(|connection| {
             connection.execute(
                 "INSERT INTO approvals(
-                    id, tool_call_id, status, requested_action, request_json, requested_at
-                 ) VALUES (?1, ?2, 'pending', ?3, ?4, ?5)
-                 ON CONFLICT(tool_call_id) DO UPDATE SET
-                    status = 'pending', requested_action = excluded.requested_action,
-                    request_json = excluded.request_json, decision_json = NULL,
-                    requested_at = excluded.requested_at, resolved_at = NULL",
-                params![id, tool_call_id, requested_action, request_json, now],
+                    id, tool_call_id, status, requested_action, request_json, requested_at,
+                    category
+                 )
+                 SELECT ?1, ?2, 'pending', ?3, ?4, ?5, ?6
+                 WHERE EXISTS(
+                    SELECT 1 FROM tool_calls
+                    WHERE id = ?2 AND status = 'pending' AND requires_approval = 1
+                 )
+                 ON CONFLICT(tool_call_id) DO NOTHING",
+                params![
+                    id,
+                    tool_call_id,
+                    requested_action,
+                    request_json,
+                    now,
+                    category
+                ],
             )?;
-            query_approval_by_tool_call(connection, tool_call_id)
-        })
+            query_approval_by_tool_call(connection, tool_call_id).optional()
+        })?;
+        let Some(approval) = approval else {
+            return Err(format!(
+                "ToolCall '{tool_call_id}' is not pending explicit approval"
+            ));
+        };
+        if approval.requested_action != requested_action || approval.request != *request {
+            return Err(format!(
+                "approval for ToolCall '{tool_call_id}' conflicts with existing immutable content"
+            ));
+        }
+        if approval.category != category {
+            return Err(format!(
+                "approval for ToolCall '{tool_call_id}' conflicts with immutable category '{}'; requested '{category}'",
+                approval.category
+            ));
+        }
+        Ok(approval)
+    }
+
+    pub(crate) fn create_task_repair_override_approval(
+        &self,
+        tool_call_id: &str,
+        requested_action: &str,
+        request: &Value,
+    ) -> Result<super::ApprovalRecord, String> {
+        self.create_approval_with_category(
+            tool_call_id,
+            requested_action,
+            request,
+            TASK_REPAIR_OVERRIDE_APPROVAL_CATEGORY,
+        )
     }
 
     pub fn resolve_approval(
@@ -3523,11 +3868,21 @@ impl Database {
         approval_id: &str,
         decision: super::ApprovalDecision,
     ) -> Result<Option<super::ApprovalRecord>, String> {
+        let existing =
+            self.with_connection(|connection| query_approval(connection, approval_id))?;
+        if existing.category == TASK_REPAIR_OVERRIDE_APPROVAL_CATEGORY
+            && decision == super::ApprovalDecision::AllowConversation
+        {
+            return Err(
+                "task repair budget override approvals only accept allow_once or deny".to_owned(),
+            );
+        }
         let now = now_ms();
         let approved = decision.approved();
         let decision_json = serde_json::to_string(&json!({
             "approved": approved,
             "scope": decision.scope(),
+            "category": existing.category,
         }))
         .map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
@@ -3535,7 +3890,14 @@ impl Database {
             let updated = transaction.execute(
                 "UPDATE approvals
                  SET status = ?2, decision_json = ?3, resolved_at = ?4
-                 WHERE id = ?1 AND status = 'pending'",
+                 WHERE id = ?1 AND status = 'pending'
+                   AND EXISTS (
+                       SELECT 1
+                       FROM tool_calls t JOIN runs r ON r.id = t.run_id
+                       WHERE t.id = approvals.tool_call_id
+                         AND t.status = 'pending'
+                         AND r.status = 'running'
+                   )",
                 params![
                     approval_id,
                     if approved { "approved" } else { "denied" },
@@ -3557,6 +3919,85 @@ impl Database {
             }
             transaction.commit()?;
             Ok(Some(approval))
+        })
+    }
+
+    pub fn claim_approved_tool_call(
+        &self,
+        run_id: &str,
+        runtime_tool_call_id: &str,
+    ) -> Result<bool, String> {
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let approval_id = transaction
+                .query_row(
+                    "SELECT a.id
+                     FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
+                     JOIN runs r ON r.id = t.run_id
+                     WHERE t.run_id = ?1 AND t.runtime_tool_call_id = ?2
+                       AND t.status = 'pending' AND r.status = 'running'
+                       AND a.status = 'approved' AND a.claimed_at IS NULL
+                       AND a.category = 'tool_execution'
+                       AND json_extract(a.decision_json, '$.approved') = 1
+                       AND json_extract(a.decision_json, '$.scope') IN ('once', 'conversation')",
+                    params![run_id, runtime_tool_call_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            let Some(approval_id) = approval_id else {
+                return Ok(false);
+            };
+            if let Err(error) = validate_managed_tool_acquisition(&transaction, run_id, now, false)
+            {
+                let error_message = error.to_string();
+                let tool_failed = transaction.execute(
+                    "UPDATE tool_calls
+                     SET status = 'failed', error_message = ?3,
+                         completed_at = ?4, updated_at = ?4
+                     WHERE run_id = ?1 AND runtime_tool_call_id = ?2
+                       AND execution_location = 'host' AND status = 'pending'",
+                    params![run_id, runtime_tool_call_id, error_message, now],
+                )?;
+                let approval_claimed = transaction.execute(
+                    "UPDATE approvals
+                     SET claimed_at = ?2, claimed_by_run_id = ?3
+                     WHERE id = ?1 AND status = 'approved' AND claimed_at IS NULL
+                       AND category = 'tool_execution'",
+                    params![approval_id, now, run_id],
+                )?;
+                if tool_failed != 1 || approval_claimed != 1 {
+                    return Err(projection_violation(
+                        "managed approval budget rejection lost its terminal CAS".to_owned(),
+                    ));
+                }
+                transaction.commit()?;
+                return Err(error);
+            }
+            let tool_updated = transaction.execute(
+                "UPDATE tool_calls
+                 SET status = 'running', updated_at = ?3
+                 WHERE run_id = ?1 AND runtime_tool_call_id = ?2 AND status = 'pending'
+                   AND EXISTS (
+                       SELECT 1 FROM runs r
+                       WHERE r.id = tool_calls.run_id AND r.status = 'running'
+                   )
+                    ",
+                params![run_id, runtime_tool_call_id, now],
+            )?;
+            let approval_updated = transaction.execute(
+                "UPDATE approvals
+                 SET claimed_at = ?2, claimed_by_run_id = ?3
+                 WHERE id = ?1 AND status = 'approved' AND claimed_at IS NULL
+                   AND category = 'tool_execution'",
+                params![approval_id, now, run_id],
+            )?;
+            if tool_updated != 1 || approval_updated != 1 {
+                return Ok(false);
+            }
+            transaction.commit()?;
+            Ok(true)
         })
     }
 
@@ -3586,7 +4027,8 @@ impl Database {
             let mut statement = connection.prepare(
                 "SELECT a.id, a.tool_call_id, t.run_id, t.conversation_id, t.tool_name,
                         a.status, a.requested_action, a.request_json, a.decision_json,
-                        a.requested_at, a.resolved_at
+                        a.requested_at, a.resolved_at, a.category, a.claimed_at,
+                        a.claimed_by_run_id
                  FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
                  WHERE t.conversation_id = ?1 AND t.tool_name = ?2 AND a.status = 'pending'
                  ORDER BY a.requested_at ASC, a.id ASC",
@@ -3739,6 +4181,26 @@ impl Database {
                 .is_some();
             if active_run {
                 return Err(rusqlite::Error::InvalidQuery);
+            }
+
+            let crosses_repair_override_boundary: bool = transaction.query_row(
+                "SELECT EXISTS(
+                    SELECT 1
+                    FROM task_repair_override_events override_event
+                    WHERE override_event.conversation_id = ?1
+                      AND override_event.run_id IN (
+                        SELECT DISTINCT run_id FROM messages
+                        WHERE conversation_id = ?1 AND ordinal >= ?2 AND run_id IS NOT NULL
+                      )
+                 )",
+                params![conversation_id, target_ordinal],
+                |row| row.get(0),
+            )?;
+            if crosses_repair_override_boundary {
+                return Err(projection_violation(
+                    "rewind.repair_override_boundary: cannot rewind across an operator-authorized repair budget override; fork or start a new conversation so the append-only audit fact and Task lifetime limit remain intact"
+                        .to_owned(),
+                ));
             }
 
             let attachment_ids = {
@@ -3916,6 +4378,19 @@ impl Database {
                 clean_text,
                 requested_model,
             )?;
+            let replacement_message_id = started.user_message.id.clone();
+            transaction.execute(
+                "UPDATE messages SET id = ?1, created_at = ?3
+                 WHERE id = ?2 AND conversation_id = ?4",
+                params![
+                    message_id,
+                    replacement_message_id,
+                    target_created_at,
+                    conversation_id
+                ],
+            )?;
+            started.user_message.id = message_id.to_owned();
+            started.user_message.created_at = target_created_at;
             for attachment_id in &attachment_ids {
                 transaction.execute(
                     "UPDATE attachments SET message_id = ?2 WHERE id = ?1 AND conversation_id = ?3",
@@ -4064,17 +4539,42 @@ impl Database {
 
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
-            let parent_exists = transaction
+            let parent_status = transaction
                 .query_row(
-                    "SELECT 1 FROM runs
+                    "SELECT status FROM runs
                      WHERE id = ?1 AND conversation_id = ?2",
                     params![parent_run_id, conversation_id],
-                    |_| Ok(()),
+                    |row| row.get::<_, String>(0),
                 )
-                .optional()?
-                .is_some();
-            if !parent_exists {
+                .optional()?;
+            if parent_status.as_deref() != Some("completed") {
                 return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
+            let mut terminal_statement = transaction.prepare(
+                "SELECT event_json FROM run_events
+                 WHERE run_id = ?1 AND event_type = 'run.completed'
+                 ORDER BY seq ASC",
+            )?;
+            let terminal_payloads = terminal_statement
+                .query_map([parent_run_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(terminal_statement);
+            let first_terminal = terminal_payloads
+                .first()
+                .and_then(|json| serde_json::from_str::<Value>(json).ok())
+                .ok_or(rusqlite::Error::InvalidQuery)?;
+            if first_terminal.get("type").and_then(Value::as_str) != Some("run.completed")
+                || first_terminal
+                    .get("completionReason")
+                    .and_then(Value::as_str)
+                    != Some("awaiting_user")
+                || terminal_payloads.iter().any(|json| {
+                    serde_json::from_str::<Value>(json)
+                        .map(|payload| payload != first_terminal)
+                        .unwrap_or(true)
+                })
+            {
+                return Err(rusqlite::Error::InvalidQuery);
             }
 
             let (latest_requested_seq, latest_responded_seq): (Option<i64>, Option<i64>) =
@@ -4305,8 +4805,10 @@ impl Database {
     }
 
     pub fn mark_run_cancelling(&self, run_id: &str) -> Result<Option<String>, String> {
+        let now = now_ms();
         self.with_connection(|connection| {
-            let conversation_id = connection
+            let transaction = connection.transaction()?;
+            let conversation_id = transaction
                 .query_row(
                     "SELECT conversation_id FROM runs WHERE id = ?1 AND status IN ('queued', 'running')",
                     [run_id],
@@ -4314,7 +4816,7 @@ impl Database {
                 )
                 .optional()?;
             if conversation_id.is_some() {
-                let updated = connection.execute(
+                let updated = transaction.execute(
                     "UPDATE runs SET status = 'cancelling'
                      WHERE id = ?1 AND status IN ('queued', 'running')",
                     [run_id],
@@ -4322,7 +4824,14 @@ impl Database {
                 if updated == 0 {
                     return Ok(None);
                 }
+                cancel_pending_approvals_for_run(
+                    &transaction,
+                    run_id,
+                    "run_cancellation_requested",
+                    now,
+                )?;
             }
+            transaction.commit()?;
             Ok(conversation_id)
         })
     }
@@ -4331,16 +4840,56 @@ impl Database {
         let now = now_ms();
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
-            transaction.execute(
+            let (status, existing_code, existing_message): (
+                String,
+                Option<String>,
+                Option<String>,
+            ) = transaction.query_row(
+                "SELECT status, error_code, error_message FROM runs WHERE id = ?1",
+                [run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            if status == "failed"
+                && existing_code.as_deref() == Some(code)
+                && existing_message.as_deref() == Some(message)
+            {
+                transaction.commit()?;
+                return Ok(());
+            }
+            if matches!(
+                status.as_str(),
+                "completed" | "failed" | "cancelled" | "interrupted"
+            ) {
+                return Err(projection_violation(format!(
+                    "late Host failure cannot replace terminal Run '{run_id}' outcome '{status}'"
+                )));
+            }
+            let changed = transaction.execute(
                 "UPDATE runs SET status = 'failed', finished_at = ?2, error_code = ?3, error_message = ?4
-                 WHERE id = ?1",
+                 WHERE id = ?1 AND status IN ('queued', 'running', 'cancelling')",
                 params![run_id, now, code, message],
+            )?;
+            if changed != 1 {
+                return Err(projection_violation(format!(
+                    "Run '{run_id}' is not eligible for Host failure transition"
+                )));
+            }
+            transaction.execute(
+                "UPDATE messages SET status = 'interrupted', updated_at = ?2
+                 WHERE run_id = ?1 AND role = 'assistant' AND status = 'streaming'",
+                params![run_id, now],
             )?;
             transaction.execute(
                 "UPDATE tool_calls
                  SET status = 'interrupted', error_message = ?2, completed_at = ?3, updated_at = ?3
                  WHERE run_id = ?1 AND status IN ('pending', 'running')",
                 params![run_id, message, now],
+            )?;
+            expire_pending_approvals_for_run(
+                &transaction,
+                run_id,
+                "run_failed",
+                now,
             )?;
             observability::close_run_trace_in_transaction(
                 &transaction,
@@ -4364,7 +4913,13 @@ impl Database {
                 &json!({ "type": "run.failed", "code": code, "message": message }),
                 now,
             )?;
-            interrupt_tasks_owned_by_run(&transaction, run_id, &now.to_string())?;
+            interrupt_tasks_owned_by_run(
+                &transaction,
+                run_id,
+                &now.to_string(),
+                "failed",
+                message,
+            )?;
             transaction.commit()?;
             Ok(())
         })
@@ -4379,12 +4934,41 @@ impl Database {
         let now = now_ms();
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
-            transaction.execute(
+            let (status, existing_code, existing_message): (
+                String,
+                Option<String>,
+                Option<String>,
+            ) = transaction.query_row(
+                "SELECT status, error_code, error_message FROM runs WHERE id = ?1",
+                [run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            if status == "interrupted"
+                && existing_code.as_deref() == Some(code)
+                && existing_message.as_deref() == Some(message)
+            {
+                transaction.commit()?;
+                return Ok(());
+            }
+            if matches!(
+                status.as_str(),
+                "completed" | "failed" | "cancelled" | "interrupted"
+            ) {
+                return Err(projection_violation(format!(
+                    "late Host interruption cannot replace terminal Run '{run_id}' outcome '{status}'"
+                )));
+            }
+            let changed = transaction.execute(
                 "UPDATE runs SET status = 'interrupted', finished_at = ?2,
                                  error_code = ?3, error_message = ?4
                  WHERE id = ?1 AND status IN ('queued', 'running', 'cancelling')",
                 params![run_id, now, code, message],
             )?;
+            if changed != 1 {
+                return Err(projection_violation(format!(
+                    "Run '{run_id}' is not eligible for Host interruption transition"
+                )));
+            }
             transaction.execute(
                 "UPDATE messages SET status = 'interrupted', updated_at = ?2
                  WHERE run_id = ?1 AND status = 'streaming'",
@@ -4396,6 +4980,7 @@ impl Database {
                  WHERE run_id = ?1 AND status IN ('pending', 'running')",
                 params![run_id, message, now],
             )?;
+            expire_pending_approvals_for_run(&transaction, run_id, "run_interrupted", now)?;
             observability::close_run_trace_in_transaction(
                 &transaction,
                 run_id,
@@ -4418,7 +5003,13 @@ impl Database {
                 &json!({ "type": "run.interrupted", "code": code, "message": message }),
                 now,
             )?;
-            interrupt_tasks_owned_by_run(&transaction, run_id, &now.to_string())?;
+            interrupt_tasks_owned_by_run(
+                &transaction,
+                run_id,
+                &now.to_string(),
+                "failed",
+                message,
+            )?;
             transaction.commit()?;
             Ok(())
         })
@@ -4790,18 +5381,73 @@ impl Database {
         let now = now_ms();
 
         self.with_connection(|connection| {
-            let transaction = connection.transaction()?;
-            let (trace_id, span_id) =
-                observability::project_runtime_span(&transaction, run_id, event_type, payload, now)?;
-            let last_seq: i64 = transaction.query_row(
-                "SELECT last_seq FROM runs WHERE id = ?1",
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let (run_status, last_seq): (String, i64) = transaction.query_row(
+                "SELECT status, last_seq FROM runs WHERE id = ?1",
                 [run_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
             if seq <= last_seq {
                 transaction.rollback()?;
                 return Ok(false);
             }
+            let run_is_terminal = matches!(
+                run_status.as_str(),
+                "completed" | "failed" | "cancelled" | "interrupted"
+            );
+            if run_is_terminal {
+                let frozen_terminal_type = format!("run.{run_status}");
+                if event_type == frozen_terminal_type {
+                    authorize_runtime_event_payload_replay(
+                        &transaction,
+                        run_id,
+                        event_type,
+                        payload,
+                        seq,
+                    )?;
+                    transaction.execute(
+                        "UPDATE runs SET last_seq = ?2 WHERE id = ?1 AND status = ?3",
+                        params![run_id, seq, run_status],
+                    )?;
+                    transaction.commit()?;
+                    return Ok(true);
+                }
+                return Err(projection_violation(format!(
+                    "Runtime event '{event_type}' is not allowed after Run '{run_id}' reached terminal status '{run_status}'"
+                )));
+            }
+            if run_status == "cancelling"
+                && !matches!(
+                    event_type,
+                    "usage.updated"
+                        | "run.completed"
+                        | "run.cancelled"
+                        | "run.interrupted"
+                        | "run.failed"
+                )
+            {
+                transaction.rollback()?;
+                return Ok(false);
+            }
+            if event_type == "usage.updated" {
+                if !matches!(run_status.as_str(), "running" | "cancelling") {
+                    return Err(projection_violation(format!(
+                        "Runtime usage.updated requires active Run '{run_id}', found '{run_status}'"
+                    )));
+                }
+                validate_runtime_usage_update(&transaction, run_id, payload, seq)?;
+            }
+            if event_type == "run.completed" {
+                enforce_managed_run_completion_budget(&transaction, run_id, now)?;
+            }
+            let (trace_id, span_id) = observability::project_runtime_span(
+                &transaction,
+                run_id,
+                event_type,
+                payload,
+                now,
+            )?;
             let inserted = transaction.execute(
                 "INSERT OR IGNORE INTO run_events(
                     id, run_id, seq, event_type, event_json, created_at, trace_id, span_id
@@ -4825,15 +5471,35 @@ impl Database {
             let assistant_message_id = format!("assistant-{run_id}");
             match event_type {
                 "run.started" => {
-                    transaction.execute(
+                    let changed = transaction.execute(
                         "UPDATE runs SET status = 'running', started_at = COALESCE(started_at, ?2),
                                          finished_at = NULL, error_code = NULL, error_message = NULL,
                                          last_seq = ?3
-                         WHERE id = ?1",
+                         WHERE id = ?1 AND status = 'queued'",
                         params![run_id, now, seq],
                     )?;
+                    if changed != 1 {
+                        let status: String = transaction.query_row(
+                            "SELECT status FROM runs WHERE id = ?1",
+                            [run_id],
+                            |row| row.get(0),
+                        )?;
+                        return Err(projection_violation(format!(
+                            "Runtime run.started cannot reopen Run '{run_id}' from authoritative status '{status}'"
+                        )));
+                    }
                 }
                 "message.started" => {
+                    let run_status: String = transaction.query_row(
+                        "SELECT status FROM runs WHERE id = ?1",
+                        [run_id],
+                        |row| row.get(0),
+                    )?;
+                    if run_status != "running" {
+                        return Err(projection_violation(format!(
+                            "Runtime message.started requires running Run '{run_id}', found '{run_status}'"
+                        )));
+                    }
                     let (conversation_id, ordinal): (String, i64) = transaction.query_row(
                         "SELECT conversation_id,
                                 (SELECT COALESCE(MAX(ordinal), 0) + 1 FROM messages WHERE conversation_id = runs.conversation_id)
@@ -4842,30 +5508,81 @@ impl Database {
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )?;
                     transaction.execute(
-                        "INSERT OR IGNORE INTO messages(
+                        "INSERT INTO messages(
                             id, conversation_id, run_id, role, kind, content, status, ordinal, created_at, updated_at
                          ) VALUES (?1, ?2, ?3, 'assistant', 'text', '', 'streaming', ?4, ?5, ?5)",
                         params![assistant_message_id, conversation_id, run_id, ordinal, now],
                     )?;
-                    transaction.execute(
-                        "UPDATE messages SET status = 'streaming', updated_at = ?2 WHERE id = ?1",
-                        params![assistant_message_id, now],
-                    )?;
                     update_last_seq(&transaction, run_id, seq)?;
                 }
                 "message.delta" => {
+                    let (run_status, message_status): (String, Option<String>) =
+                        transaction.query_row(
+                            "SELECT runs.status,
+                                    (SELECT status FROM messages WHERE id = ?2 AND run_id = runs.id)
+                             FROM runs WHERE id = ?1",
+                            params![run_id, assistant_message_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )?;
+                    if run_status != "running" || message_status.as_deref() != Some("streaming") {
+                        return Err(projection_violation(format!(
+                            "Runtime message.delta requires running Run and streaming assistant Message for '{run_id}'"
+                        )));
+                    }
                     let delta = payload.get("delta").and_then(Value::as_str).unwrap_or_default();
-                    transaction.execute(
-                        "UPDATE messages SET content = content || ?2, updated_at = ?3 WHERE id = ?1",
-                        params![assistant_message_id, delta, now],
+                    let changed = transaction.execute(
+                        "UPDATE messages SET content = content || ?2, updated_at = ?3
+                         WHERE id = ?1 AND run_id = ?4 AND status = 'streaming'",
+                        params![assistant_message_id, delta, now, run_id],
                     )?;
+                    if changed != 1 {
+                        return Err(projection_violation(format!(
+                            "Assistant Message for Run '{run_id}' changed concurrently before delta projection"
+                        )));
+                    }
                     update_last_seq(&transaction, run_id, seq)?;
                 }
                 "message.completed" => {
-                    transaction.execute(
-                        "UPDATE messages SET status = 'completed', updated_at = ?2 WHERE id = ?1",
-                        params![assistant_message_id, now],
+                    let (run_status, message_status): (String, Option<String>) =
+                        transaction.query_row(
+                            "SELECT runs.status,
+                                    (SELECT status FROM messages WHERE id = ?2 AND run_id = runs.id)
+                             FROM runs WHERE id = ?1",
+                            params![run_id, assistant_message_id],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )?;
+                    if run_status != "running" {
+                        return Err(projection_violation(format!(
+                            "Runtime message.completed requires running Run '{run_id}', found '{run_status}'"
+                        )));
+                    }
+                    if message_status.as_deref() == Some("completed") {
+                        authorize_runtime_event_payload_replay(
+                            &transaction,
+                            run_id,
+                            event_type,
+                            payload,
+                            seq,
+                        )?;
+                        update_last_seq(&transaction, run_id, seq)?;
+                        transaction.commit()?;
+                        return Ok(true);
+                    }
+                    if message_status.as_deref() != Some("streaming") {
+                        return Err(projection_violation(format!(
+                            "Runtime message.completed requires a streaming assistant Message for Run '{run_id}'"
+                        )));
+                    }
+                    let changed = transaction.execute(
+                        "UPDATE messages SET status = 'completed', updated_at = ?2
+                         WHERE id = ?1 AND run_id = ?3 AND status = 'streaming'",
+                        params![assistant_message_id, now, run_id],
                     )?;
+                    if changed != 1 {
+                        return Err(projection_violation(format!(
+                            "Assistant Message for Run '{run_id}' changed concurrently before completion"
+                        )));
+                    }
                     update_last_seq(&transaction, run_id, seq)?;
                 }
                 "tool.started" => {
@@ -4895,23 +5612,80 @@ impl Database {
                     update_last_seq(&transaction, run_id, seq)?;
                 }
                 "run.completed" => {
-                    transaction.execute(
+                    if !authorize_runtime_terminal_transition(
+                        &transaction,
+                        run_id,
+                        "completed",
+                        None,
+                        None,
+                        payload,
+                        seq,
+                    )? {
+                        transaction.commit()?;
+                        return Ok(true);
+                    }
+                    let changed = transaction.execute(
                         "UPDATE runs SET status = 'completed', finished_at = ?2,
                                          error_code = NULL, error_message = NULL, last_seq = ?3
-                         WHERE id = ?1",
+                         WHERE id = ?1 AND status IN ('queued', 'running', 'cancelling')",
                         params![run_id, now, seq],
                     )?;
+                    if changed != 1 {
+                        return Err(projection_violation(format!(
+                            "Run '{run_id}' changed concurrently before completion"
+                        )));
+                    }
                     transaction.execute(
                         "UPDATE messages SET status = 'completed', updated_at = ?2
                          WHERE id = ?1 AND status IN ('streaming', 'interrupted')",
                         params![assistant_message_id, now],
                     )?;
+                    transaction.execute(
+                        "UPDATE tool_calls
+                         SET status = 'interrupted',
+                             error_message = 'Run completed before the ToolCall reached a terminal state',
+                             completed_at = ?2, updated_at = ?2
+                         WHERE run_id = ?1 AND status IN ('pending', 'running')",
+                        params![run_id, now],
+                    )?;
+                    expire_pending_approvals_for_run(
+                        &transaction,
+                        run_id,
+                        "run_completed",
+                        now,
+                    )?;
+                    interrupt_tasks_owned_by_run(
+                        &transaction,
+                        run_id,
+                        &now.to_string(),
+                        "failed",
+                        "Run completed before its running Attempt reached a terminal state",
+                    )?;
                 }
                 "run.cancelled" => {
-                    transaction.execute(
-                        "UPDATE runs SET status = 'cancelled', finished_at = ?2, last_seq = ?3 WHERE id = ?1",
+                    if !authorize_runtime_terminal_transition(
+                        &transaction,
+                        run_id,
+                        "cancelled",
+                        None,
+                        None,
+                        payload,
+                        seq,
+                    )? {
+                        transaction.commit()?;
+                        return Ok(true);
+                    }
+                    let changed = transaction.execute(
+                        "UPDATE runs SET status = 'cancelled', finished_at = ?2,
+                                         error_code = NULL, error_message = NULL, last_seq = ?3
+                         WHERE id = ?1 AND status IN ('queued', 'running', 'cancelling')",
                         params![run_id, now, seq],
                     )?;
+                    if changed != 1 {
+                        return Err(projection_violation(format!(
+                            "Run '{run_id}' changed concurrently before cancellation"
+                        )));
+                    }
                     transaction.execute(
                         "UPDATE messages SET status = 'interrupted', updated_at = ?2
                          WHERE id = ?1 AND status = 'streaming'",
@@ -4923,17 +5697,46 @@ impl Database {
                          WHERE run_id = ?1 AND status IN ('pending', 'running')",
                         params![run_id, now],
                     )?;
-                    interrupt_tasks_owned_by_run(&transaction, run_id, &now.to_string())?;
+                    cancel_pending_approvals_for_run(
+                        &transaction,
+                        run_id,
+                        "run_cancelled",
+                        now,
+                    )?;
+                    interrupt_tasks_owned_by_run(
+                        &transaction,
+                        run_id,
+                        &now.to_string(),
+                        "cancelled",
+                        "Run was cancelled before its Attempt finished",
+                    )?;
                 }
                 "run.interrupted" => {
                     let code = payload.get("code").and_then(Value::as_str);
                     let message = payload.get("message").and_then(Value::as_str);
-                    transaction.execute(
+                    if !authorize_runtime_terminal_transition(
+                        &transaction,
+                        run_id,
+                        "interrupted",
+                        code,
+                        message,
+                        payload,
+                        seq,
+                    )? {
+                        transaction.commit()?;
+                        return Ok(true);
+                    }
+                    let changed = transaction.execute(
                         "UPDATE runs SET status = 'interrupted', finished_at = ?2,
                                          error_code = ?3, error_message = ?4, last_seq = ?5
-                         WHERE id = ?1",
+                         WHERE id = ?1 AND status IN ('queued', 'running', 'cancelling')",
                         params![run_id, now, code, message, seq],
                     )?;
+                    if changed != 1 {
+                        return Err(projection_violation(format!(
+                            "Run '{run_id}' changed concurrently before interruption"
+                        )));
+                    }
                     transaction.execute(
                         "UPDATE messages SET status = 'interrupted', updated_at = ?2
                          WHERE id = ?1 AND status = 'streaming'",
@@ -4945,16 +5748,46 @@ impl Database {
                          WHERE run_id = ?1 AND status IN ('pending', 'running')",
                         params![run_id, message, now],
                     )?;
-                    interrupt_tasks_owned_by_run(&transaction, run_id, &now.to_string())?;
+                    expire_pending_approvals_for_run(
+                        &transaction,
+                        run_id,
+                        "run_interrupted",
+                        now,
+                    )?;
+                    interrupt_tasks_owned_by_run(
+                        &transaction,
+                        run_id,
+                        &now.to_string(),
+                        "failed",
+                        message.unwrap_or("Run was interrupted before its Attempt finished"),
+                    )?;
                 }
                 "run.failed" => {
                     let code = payload.get("code").and_then(Value::as_str);
                     let message = payload.get("message").and_then(Value::as_str);
-                    transaction.execute(
+                    if !authorize_runtime_terminal_transition(
+                        &transaction,
+                        run_id,
+                        "failed",
+                        code,
+                        message,
+                        payload,
+                        seq,
+                    )? {
+                        transaction.commit()?;
+                        return Ok(true);
+                    }
+                    let changed = transaction.execute(
                         "UPDATE runs SET status = 'failed', finished_at = ?2, error_code = ?3,
-                                         error_message = ?4, last_seq = ?5 WHERE id = ?1",
+                                         error_message = ?4, last_seq = ?5
+                         WHERE id = ?1 AND status IN ('queued', 'running', 'cancelling')",
                         params![run_id, now, code, message, seq],
                     )?;
+                    if changed != 1 {
+                        return Err(projection_violation(format!(
+                            "Run '{run_id}' changed concurrently before failure"
+                        )));
+                    }
                     transaction.execute(
                         "UPDATE messages SET status = 'interrupted', updated_at = ?2
                          WHERE id = ?1 AND status = 'streaming'",
@@ -4967,7 +5800,19 @@ impl Database {
                          WHERE run_id = ?1 AND status IN ('pending', 'running')",
                         params![run_id, message, now],
                     )?;
-                    interrupt_tasks_owned_by_run(&transaction, run_id, &now.to_string())?;
+                    expire_pending_approvals_for_run(
+                        &transaction,
+                        run_id,
+                        "run_failed",
+                        now,
+                    )?;
+                    interrupt_tasks_owned_by_run(
+                        &transaction,
+                        run_id,
+                        &now.to_string(),
+                        "failed",
+                        message.unwrap_or("Run failed before its Attempt finished"),
+                    )?;
                 }
                 _ => update_last_seq(&transaction, run_id, seq)?,
             }
@@ -5005,6 +5850,22 @@ fn interrupt_tasks_owned_by_terminal_runs(
     now: &str,
 ) -> rusqlite::Result<usize> {
     connection.execute(
+        "UPDATE task_attempts
+         SET status = CASE
+                 WHEN (SELECT status FROM runs WHERE runs.id = task_attempts.run_id) = 'cancelled'
+                 THEN 'cancelled' ELSE 'failed' END,
+             failure_reason = CASE
+                 WHEN (SELECT status FROM runs WHERE runs.id = task_attempts.run_id) = 'cancelled'
+                 THEN 'Owning Run was cancelled before the Attempt finished'
+                 ELSE 'Owning Run became terminal before the Attempt finished' END,
+             finished_at = ?1, version = version + 1
+         WHERE status = 'running' AND EXISTS (
+             SELECT 1 FROM runs WHERE runs.id = task_attempts.run_id
+               AND runs.status NOT IN ('queued', 'running', 'cancelling', 'awaiting_confirmation')
+         )",
+        [now],
+    )?;
+    connection.execute(
         "UPDATE work_tasks
          SET status = 'interrupted', version = version + 1,
              finished_at = COALESCE(finished_at, ?1), updated_at = ?1
@@ -5023,7 +5884,15 @@ fn interrupt_tasks_owned_by_run(
     connection: &Connection,
     run_id: &str,
     now: &str,
+    attempt_status: &str,
+    failure_reason: &str,
 ) -> rusqlite::Result<usize> {
+    connection.execute(
+        "UPDATE task_attempts
+         SET status = ?3, failure_reason = ?4, finished_at = ?2, version = version + 1
+         WHERE run_id = ?1 AND status = 'running'",
+        params![run_id, now, attempt_status, failure_reason],
+    )?;
     connection.execute(
         "UPDATE work_tasks
          SET status = 'interrupted', version = version + 1,
@@ -5042,6 +5911,7 @@ fn create_run_in_transaction(
     let run_id = Uuid::new_v4().to_string();
     let message_id = Uuid::new_v4().to_string();
     let now = now_ms();
+    interrupt_tasks_owned_by_terminal_runs(transaction, &now.to_string())?;
     let (model, current_title): (String, String) = transaction.query_row(
         "SELECT CASE WHEN a.runtime_type = 'yuxi'
                     THEN COALESCE(?2, '')
@@ -5068,6 +5938,13 @@ fn create_run_in_transaction(
     if active_run.is_some() {
         return Err(rusqlite::Error::InvalidQuery);
     }
+
+    expire_pending_approvals_for_conversation(
+        transaction,
+        conversation_id,
+        "new_run_started",
+        now,
+    )?;
 
     let ordinal: i64 = transaction.query_row(
         "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM messages WHERE conversation_id = ?1",
@@ -5127,6 +6004,58 @@ fn create_run_in_transaction(
         },
         attachments: Vec::new(),
     })
+}
+
+fn expire_pending_approvals_for_run(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    reason: &str,
+    now: i64,
+) -> rusqlite::Result<usize> {
+    let decision_json = json!({ "reason": reason }).to_string();
+    transaction.execute(
+        "UPDATE approvals
+         SET status = 'expired', decision_json = ?2, resolved_at = ?3
+         WHERE status = 'pending'
+           AND tool_call_id IN (SELECT id FROM tool_calls WHERE run_id = ?1)",
+        params![run_id, decision_json, now],
+    )
+}
+
+fn cancel_pending_approvals_for_run(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    reason: &str,
+    now: i64,
+) -> rusqlite::Result<usize> {
+    let decision_json = json!({ "reason": reason }).to_string();
+    transaction.execute(
+        "UPDATE approvals
+         SET status = 'cancelled', decision_json = ?2, resolved_at = ?3
+         WHERE status = 'pending'
+           AND tool_call_id IN (SELECT id FROM tool_calls WHERE run_id = ?1)",
+        params![run_id, decision_json, now],
+    )
+}
+
+fn expire_pending_approvals_for_conversation(
+    transaction: &rusqlite::Transaction<'_>,
+    conversation_id: &str,
+    reason: &str,
+    now: i64,
+) -> rusqlite::Result<usize> {
+    let decision_json = json!({ "reason": reason }).to_string();
+    transaction.execute(
+        "UPDATE approvals
+         SET status = 'expired', decision_json = ?2, resolved_at = ?3
+         WHERE status = 'pending'
+           AND tool_call_id IN (
+               SELECT t.id
+               FROM tool_calls t JOIN runs r ON r.id = t.run_id
+               WHERE r.conversation_id = ?1
+           )",
+        params![conversation_id, decision_json, now],
+    )
 }
 
 fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationSummary> {
@@ -5587,7 +6516,8 @@ fn query_approvals_window(
     let mut statement = connection.prepare(
         "SELECT a.id, a.tool_call_id, t.run_id, t.conversation_id, t.tool_name,
                 a.status, a.requested_action, a.request_json, a.decision_json,
-                a.requested_at, a.resolved_at
+                a.requested_at, a.resolved_at, a.category, a.claimed_at,
+                a.claimed_by_run_id
          FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
          WHERE t.conversation_id = ?1
            AND EXISTS(SELECT 1 FROM messages m WHERE m.run_id = t.run_id AND m.role = 'user'
@@ -5832,7 +6762,8 @@ fn query_approval_by_tool_call(
     connection.query_row(
         "SELECT a.id, a.tool_call_id, t.run_id, t.conversation_id, t.tool_name,
                 a.status, a.requested_action, a.request_json, a.decision_json,
-                a.requested_at, a.resolved_at
+                a.requested_at, a.resolved_at, a.category, a.claimed_at,
+                a.claimed_by_run_id
          FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
          WHERE a.tool_call_id = ?1",
         [tool_call_id],
@@ -5847,7 +6778,8 @@ fn query_approval(
     connection.query_row(
         "SELECT a.id, a.tool_call_id, t.run_id, t.conversation_id, t.tool_name,
                 a.status, a.requested_action, a.request_json, a.decision_json,
-                a.requested_at, a.resolved_at
+                a.requested_at, a.resolved_at, a.category, a.claimed_at,
+                a.claimed_by_run_id
          FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
          WHERE a.id = ?1",
         [approval_id],
@@ -5870,6 +6802,9 @@ fn map_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<super::ApprovalReco
         decision: decision_json.as_deref().map(parse_json),
         requested_at: row.get(9)?,
         resolved_at: row.get(10)?,
+        category: row.get(11)?,
+        claimed_at: row.get(12)?,
+        claimed_by_run_id: row.get(13)?,
     })
 }
 
@@ -5929,36 +6864,89 @@ fn project_tool_started(
         .unwrap_or("unknown");
     let input_json = serde_json::to_string(payload.get("input").unwrap_or(&Value::Null))
         .unwrap_or_else(|_| "null".to_owned());
-    let conversation_id: String = transaction.query_row(
-        "SELECT conversation_id FROM runs WHERE id = ?1",
+    let (conversation_id, run_status): (String, String) = transaction.query_row(
+        "SELECT conversation_id, status FROM runs WHERE id = ?1",
         [run_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    transaction.execute(
-        "INSERT INTO tool_calls(
-            id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
-            status, execution_location, requires_approval, started_at, updated_at,
-            trace_id, span_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', 'runtime', 0, ?7, ?7, ?8, ?9)
-         ON CONFLICT(run_id, runtime_tool_call_id) DO UPDATE SET
-            tool_name = excluded.tool_name,
-            input_json = excluded.input_json,
-            status = 'running',
-            updated_at = excluded.updated_at,
-            trace_id = excluded.trace_id,
-            span_id = excluded.span_id",
-        params![
-            Uuid::new_v4().to_string(),
-            runtime_tool_call_id,
-            run_id,
-            conversation_id,
-            tool_name,
-            input_json,
-            now,
-            trace_id,
-            span_id,
-        ],
-    )?;
+    let existing = transaction
+        .query_row(
+            "SELECT conversation_id, tool_name, input_json, execution_location, status
+             FROM tool_calls WHERE run_id = ?1 AND runtime_tool_call_id = ?2",
+            params![run_id, runtime_tool_call_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    if existing.is_none() {
+        if run_status != "running" {
+            return Err(projection_violation(format!(
+                "Runtime tool.started cannot create ToolCall '{runtime_tool_call_id}' while Run '{run_id}' is '{run_status}'"
+            )));
+        }
+        validate_managed_tool_acquisition(transaction, run_id, now, true)?;
+        transaction.execute(
+            "INSERT INTO tool_calls(
+                id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
+                status, execution_location, requires_approval, started_at, updated_at,
+                trace_id, span_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', 'runtime', 0, ?7, ?7, ?8, ?9)
+            ",
+            params![
+                Uuid::new_v4().to_string(),
+                runtime_tool_call_id,
+                run_id,
+                conversation_id,
+                tool_name,
+                input_json,
+                now,
+                trace_id,
+                span_id,
+            ],
+        )?;
+    }
+    let existing = existing.map(Ok).unwrap_or_else(|| {
+        transaction.query_row(
+            "SELECT conversation_id, tool_name, input_json, execution_location, status
+                 FROM tool_calls WHERE run_id = ?1 AND runtime_tool_call_id = ?2",
+            params![run_id, runtime_tool_call_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+    })?;
+    let existing_input =
+        serde_json::from_str::<Value>(&existing.2).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let incoming_input = payload.get("input").unwrap_or(&Value::Null);
+    if existing.0 != conversation_id
+        || existing.1 != tool_name
+        || existing_input != *incoming_input
+        || !matches!(existing.3.as_str(), "runtime" | "host")
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    if run_status == "running" && existing.3 == "runtime" && existing.4 == "running" {
+        transaction.execute(
+            "UPDATE tool_calls
+             SET trace_id = COALESCE(trace_id, ?3), span_id = COALESCE(span_id, ?4)
+             WHERE run_id = ?1 AND runtime_tool_call_id = ?2
+               AND execution_location = 'runtime' AND status = 'running'",
+            params![run_id, runtime_tool_call_id, trace_id, span_id],
+        )?;
+    }
     Ok(())
 }
 
@@ -5975,11 +6963,40 @@ fn project_tool_updated(
         payload.get("update").unwrap_or(&Value::Null),
     ))
     .unwrap_or_else(|_| "null".to_owned());
-    transaction.execute(
+    let incoming_tool_name = payload.get("tool").and_then(Value::as_str);
+    let changed = transaction.execute(
         "UPDATE tool_calls SET result_json = ?3, updated_at = ?4
-         WHERE run_id = ?1 AND runtime_tool_call_id = ?2",
-        params![run_id, runtime_tool_call_id, result_json, now],
+         WHERE run_id = ?1 AND runtime_tool_call_id = ?2
+           AND execution_location = 'runtime' AND status = 'running'
+           AND (?5 IS NULL OR tool_name = ?5)
+           AND EXISTS(
+               SELECT 1 FROM runs
+               WHERE runs.id = tool_calls.run_id AND runs.status = 'running'
+           )",
+        params![
+            run_id,
+            runtime_tool_call_id,
+            result_json,
+            now,
+            incoming_tool_name
+        ],
     )?;
+    if changed == 0 {
+        let existing = query_tool_call(transaction, run_id, runtime_tool_call_id)?;
+        let reason = if incoming_tool_name.is_some_and(|tool| tool != existing.tool_name) {
+            format!("Runtime update tool name conflicts with ToolCall '{runtime_tool_call_id}'")
+        } else if existing.execution_location == "host" {
+            // Pi emits lifecycle events around Host callbacks too. Keep the raw RunEvent for
+            // diagnostics, but never let a Runtime update overwrite the Host-owned ToolCall.
+            return Ok(());
+        } else {
+            format!(
+                "Runtime update cannot mutate ToolCall '{runtime_tool_call_id}' in terminal status '{}'",
+                existing.status
+            )
+        };
+        return Err(projection_violation(reason));
+    }
     Ok(())
 }
 
@@ -6002,21 +7019,602 @@ fn project_tool_completed(
         .get("isError")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    transaction.execute(
+    let incoming_tool_name = payload.get("tool").and_then(Value::as_str);
+    let terminal_status = if is_error { "failed" } else { "completed" };
+    let changed = transaction.execute(
         "UPDATE tool_calls
          SET status = ?3, result_json = ?4, completed_at = ?5, updated_at = ?5,
-             trace_id = COALESCE(?6, trace_id), span_id = COALESCE(?7, span_id)
-         WHERE run_id = ?1 AND runtime_tool_call_id = ?2",
+             trace_id = COALESCE(trace_id, ?6), span_id = COALESCE(span_id, ?7)
+         WHERE run_id = ?1 AND runtime_tool_call_id = ?2
+           AND execution_location = 'runtime' AND status = 'running'
+           AND (?8 IS NULL OR tool_name = ?8)
+           AND EXISTS(
+               SELECT 1 FROM runs
+               WHERE runs.id = tool_calls.run_id AND runs.status = 'running'
+           )",
         params![
             run_id,
             runtime_tool_call_id,
-            if is_error { "failed" } else { "completed" },
+            terminal_status,
             result_json,
             now,
             trace_id,
             span_id,
+            incoming_tool_name,
         ],
     )?;
+    if changed == 0 {
+        let existing = query_tool_call(transaction, run_id, runtime_tool_call_id)?;
+        if incoming_tool_name.is_some_and(|tool| tool != existing.tool_name) {
+            return Err(projection_violation(format!(
+                "Runtime completion tool name conflicts with ToolCall '{runtime_tool_call_id}'"
+            )));
+        }
+        if existing.execution_location == "host" {
+            // The Host response is already authoritative. A matching Runtime lifecycle event is
+            // an acknowledged no-op, regardless of the Runtime's echoed result payload.
+            return Ok(());
+        }
+        let incoming_result = parse_json(&result_json);
+        if existing.status == terminal_status
+            && existing.result.as_ref() == Some(&incoming_result)
+            && existing.error_message.is_none()
+        {
+            return Ok(());
+        }
+        return Err(projection_violation(format!(
+            "Runtime completion for ToolCall '{runtime_tool_call_id}' conflicts with terminal status '{}'",
+            existing.status
+        )));
+    }
+    Ok(())
+}
+
+fn authorize_runtime_terminal_transition(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    terminal_status: &str,
+    error_code: Option<&str>,
+    error_message: Option<&str>,
+    payload: &Value,
+    seq: i64,
+) -> rusqlite::Result<bool> {
+    let (current_status, current_code, current_message): (String, Option<String>, Option<String>) =
+        transaction.query_row(
+            "SELECT status, error_code, error_message FROM runs WHERE id = ?1",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+    if current_status == terminal_status {
+        let same_content = match terminal_status {
+            "completed" | "cancelled" => {
+                error_code.is_none()
+                    && error_message.is_none()
+                    && current_code.is_none()
+                    && current_message.is_none()
+            }
+            "failed" | "interrupted" => {
+                current_code.as_deref() == error_code && current_message.as_deref() == error_message
+            }
+            _ => false,
+        };
+        if !same_content {
+            return Err(projection_violation(format!(
+                "Runtime terminal replay for Run '{run_id}' conflicts with the frozen '{terminal_status}' outcome"
+            )));
+        }
+        authorize_runtime_event_payload_replay(
+            transaction,
+            run_id,
+            &format!("run.{terminal_status}"),
+            payload,
+            seq,
+        )?;
+        transaction.execute(
+            "UPDATE runs SET last_seq = ?2 WHERE id = ?1 AND status = ?3",
+            params![run_id, seq, terminal_status],
+        )?;
+        return Ok(false);
+    }
+    if matches!(
+        current_status.as_str(),
+        "completed" | "failed" | "cancelled" | "interrupted"
+    ) {
+        return Err(projection_violation(format!(
+            "Runtime cannot replace terminal Run '{run_id}' status '{current_status}' with '{terminal_status}'"
+        )));
+    }
+    if !matches!(current_status.as_str(), "queued" | "running" | "cancelling") {
+        return Err(projection_violation(format!(
+            "Runtime cannot transition Run '{run_id}' from '{current_status}' to '{terminal_status}'"
+        )));
+    }
+    Ok(true)
+}
+
+fn authorize_runtime_event_payload_replay(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    event_type: &str,
+    payload: &Value,
+    seq: i64,
+) -> rusqlite::Result<()> {
+    let frozen_json = transaction
+        .query_row(
+            "SELECT event_json FROM run_events
+             WHERE run_id = ?1 AND event_type = ?2 AND seq < ?3
+             ORDER BY seq ASC LIMIT 1",
+            params![run_id, event_type, seq],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            projection_violation(format!(
+                "Runtime replay for '{event_type}' on Run '{run_id}' has no frozen prior payload"
+            ))
+        })?;
+    let frozen_payload = serde_json::from_str::<Value>(&frozen_json).map_err(|_| {
+        projection_violation(format!(
+            "Frozen '{event_type}' payload for Run '{run_id}' is invalid"
+        ))
+    })?;
+    if frozen_payload != *payload {
+        return Err(projection_violation(format!(
+            "Runtime replay for '{event_type}' on Run '{run_id}' conflicts with its frozen canonical payload"
+        )));
+    }
+    Ok(())
+}
+
+const MAX_RUNTIME_USAGE_COUNTER: i64 = 1_000_000_000_000;
+
+fn validate_runtime_usage_update(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    payload: &Value,
+    seq: i64,
+) -> rusqlite::Result<()> {
+    let incoming = runtime_usage_counters(payload)?;
+    let previous_json = transaction
+        .query_row(
+            "SELECT event_json FROM run_events
+             WHERE run_id = ?1 AND event_type = 'usage.updated' AND seq < ?2
+             ORDER BY seq DESC LIMIT 1",
+            params![run_id, seq],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(previous_json) = previous_json {
+        let previous_payload = serde_json::from_str::<Value>(&previous_json).map_err(|_| {
+            projection_violation(format!(
+                "Frozen usage.updated payload for Run '{run_id}' is invalid"
+            ))
+        })?;
+        let previous = runtime_usage_counters(&previous_payload)?;
+        if incoming
+            .iter()
+            .zip(previous.iter())
+            .any(|(next, prior)| next < prior)
+        {
+            return Err(projection_violation(format!(
+                "Runtime cumulative usage counters cannot decrease for Run '{run_id}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn runtime_usage_counters(payload: &Value) -> rusqlite::Result<[i64; 5]> {
+    let object = payload.as_object().ok_or_else(|| {
+        projection_violation("usage.updated payload must be an object".to_owned())
+    })?;
+    const REQUIRED_FIELDS: [&str; 6] = [
+        "type",
+        "inputTokens",
+        "outputTokens",
+        "cacheReadTokens",
+        "cacheWriteTokens",
+        "totalTokens",
+    ];
+    if object.len() != REQUIRED_FIELDS.len()
+        || REQUIRED_FIELDS
+            .iter()
+            .any(|field| !object.contains_key(*field))
+    {
+        return Err(projection_violation(
+            "usage.updated must match the exact run_cumulative_v1 schema".to_owned(),
+        ));
+    }
+    let counter = |field: &str| -> rusqlite::Result<i64> {
+        object
+            .get(field)
+            .and_then(Value::as_i64)
+            .filter(|value| (0..=MAX_RUNTIME_USAGE_COUNTER).contains(value))
+            .ok_or_else(|| {
+                projection_violation(format!(
+                    "usage.updated field '{field}' must be a bounded non-negative integer"
+                ))
+            })
+    };
+    let input = counter("inputTokens")?;
+    let output = counter("outputTokens")?;
+    let cache_read = counter("cacheReadTokens")?;
+    let cache_write = counter("cacheWriteTokens")?;
+    let total = counter("totalTokens")?;
+    let component_total = input
+        .saturating_add(output)
+        .saturating_add(cache_read)
+        .saturating_add(cache_write);
+    if total < component_total {
+        return Err(projection_violation(
+            "usage.updated totalTokens cannot be lower than its cumulative components".to_owned(),
+        ));
+    }
+    Ok([input, output, cache_read, cache_write, total])
+}
+
+fn projection_violation(reason: String) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(reason)
+}
+
+fn validate_managed_tool_acquisition(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    now: i64,
+    fresh_slot: bool,
+) -> rusqlite::Result<()> {
+    let run_status: String =
+        transaction.query_row("SELECT status FROM runs WHERE id = ?1", [run_id], |row| {
+            row.get(0)
+        })?;
+    if run_status != "running" {
+        return Err(projection_violation(format!(
+            "Managed ToolCall acquisition requires running Run '{run_id}', found '{run_status}'"
+        )));
+    }
+    let child_budget = transaction
+        .query_row(
+            "SELECT r.started_at, d.max_duration_ms, d.max_total_tokens,
+                    d.max_output_tokens, d.max_tool_calls, d.total_tokens, d.output_tokens,
+                    (SELECT COUNT(*) FROM tool_calls t WHERE t.run_id = d.child_run_id)
+             FROM child_run_delegations d
+             JOIN runs r ON r.id = d.child_run_id
+             WHERE d.child_run_id = ?1",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((
+        started_at,
+        max_duration,
+        max_total,
+        max_output,
+        max_tools,
+        total,
+        output,
+        used_tools,
+    )) = child_budget
+    {
+        enforce_completion_deadline(run_id, "child_run", started_at, max_duration, now)?;
+        if total >= max_total {
+            return Err(projection_violation(format!(
+                "[child_run.budget_exceeded] Child Run '{run_id}' reached its frozen total-token budget ({total}/{max_total})"
+            )));
+        }
+        if output >= max_output {
+            return Err(projection_violation(format!(
+                "[child_run.budget_exceeded] Child Run '{run_id}' reached its frozen output-token budget ({output}/{max_output})"
+            )));
+        }
+        if max_tools < 0 || (fresh_slot && used_tools >= max_tools) || used_tools > max_tools {
+            return Err(projection_violation(format!(
+                "[child_run.tool_budget_exceeded] Child Run '{run_id}' used {used_tools} of {max_tools} frozen tool slots"
+            )));
+        }
+        return Ok(());
+    }
+
+    let digital_budget = transaction
+        .query_row(
+            "SELECT r.started_at, r.budget_json, t.colleague_id,
+                    t.total_tokens, t.output_tokens,
+                    (SELECT COUNT(*) FROM tool_calls calls WHERE calls.run_id = t.run_id)
+             FROM digital_colleague_triggers t
+             JOIN runs r ON r.id = t.run_id
+             WHERE t.run_id = ?1",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((started_at, budget_json, colleague_id, total, output, used_tools)) = digital_budget
+    else {
+        return Ok(());
+    };
+    let budget: Value = serde_json::from_str(&budget_json).map_err(|_| {
+        projection_violation(format!(
+            "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' has an invalid frozen budget"
+        ))
+    })?;
+    if budget.get("contract").and_then(Value::as_str) != Some("digital_colleague_run_budget_v1") {
+        return Err(projection_violation(format!(
+            "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' is missing its frozen budget contract"
+        )));
+    }
+    let positive_counter = |field: &str| -> rusqlite::Result<i64> {
+        budget
+            .get(field)
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                projection_violation(format!(
+                    "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' has an invalid frozen '{field}'"
+                ))
+            })
+    };
+    let max_duration = positive_counter("maxDurationMs")?;
+    let max_total = positive_counter("maxTotalTokens")?;
+    let max_output = positive_counter("maxOutputTokens")?;
+    let max_daily = positive_counter("maxDailyTokens")?;
+    let max_tools = budget
+        .get("maxToolCalls")
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            projection_violation(format!(
+                "[digital_colleague.tool_budget_exceeded] Digital colleague Run '{run_id}' has an invalid frozen 'maxToolCalls'"
+            ))
+        })?;
+    let day_start = budget
+        .get("dailyWindowStartMs")
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            projection_violation(format!(
+                "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' has an invalid frozen daily window"
+            ))
+        })?;
+    enforce_completion_deadline(run_id, "digital_colleague", started_at, max_duration, now)?;
+    if total >= max_total {
+        return Err(projection_violation(format!(
+            "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' reached its frozen per-Run total-token budget ({total}/{max_total})"
+        )));
+    }
+    if output >= max_output {
+        return Err(projection_violation(format!(
+            "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' reached its frozen per-Run output-token budget ({output}/{max_output})"
+        )));
+    }
+    let daily_total: i64 = transaction.query_row(
+        "SELECT COALESCE(SUM(total_tokens), 0)
+         FROM digital_colleague_triggers
+         WHERE colleague_id = ?1 AND created_at >= ?2
+           AND status NOT IN ('rejected', 'skipped')",
+        params![colleague_id, day_start],
+        |row| row.get(0),
+    )?;
+    if daily_total >= max_daily {
+        return Err(projection_violation(format!(
+            "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' reached its frozen daily token budget ({daily_total}/{max_daily})"
+        )));
+    }
+    if (fresh_slot && used_tools >= max_tools) || used_tools > max_tools {
+        return Err(projection_violation(format!(
+            "[digital_colleague.tool_budget_exceeded] Digital colleague Run '{run_id}' used {used_tools} of {max_tools} frozen tool slots"
+        )));
+    }
+    Ok(())
+}
+
+fn enforce_managed_run_completion_budget(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    let child_budget = transaction
+        .query_row(
+            "SELECT r.started_at, d.max_duration_ms, d.max_total_tokens,
+                    d.max_output_tokens, d.max_tool_calls, d.total_tokens, d.output_tokens,
+                    (SELECT COUNT(*) FROM tool_calls t WHERE t.run_id = d.child_run_id)
+             FROM child_run_delegations d
+             JOIN runs r ON r.id = d.child_run_id
+             WHERE d.child_run_id = ?1",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((
+        started_at,
+        max_duration,
+        max_total,
+        max_output,
+        max_tools,
+        total,
+        output,
+        used_tools,
+    )) = child_budget
+    {
+        enforce_completion_deadline(run_id, "child_run", started_at, max_duration, now)?;
+        if total >= max_total {
+            return Err(projection_violation(format!(
+                "[child_run.budget_exceeded] Child Run '{run_id}' reached its frozen total-token budget ({total}/{max_total})"
+            )));
+        }
+        if output >= max_output {
+            return Err(projection_violation(format!(
+                "[child_run.budget_exceeded] Child Run '{run_id}' reached its frozen output-token budget ({output}/{max_output})"
+            )));
+        }
+        if max_tools < 0 || used_tools > max_tools {
+            return Err(projection_violation(format!(
+                "[child_run.tool_budget_exceeded] Child Run '{run_id}' exceeded its frozen tool-call budget ({used_tools}/{max_tools})"
+            )));
+        }
+        return Ok(());
+    }
+
+    let digital_budget = transaction
+        .query_row(
+            "SELECT r.started_at, r.budget_json, t.colleague_id,
+                    t.total_tokens, t.output_tokens,
+                    (SELECT COUNT(*) FROM tool_calls calls WHERE calls.run_id = t.run_id)
+             FROM digital_colleague_triggers t
+             JOIN runs r ON r.id = t.run_id
+             WHERE t.run_id = ?1",
+            [run_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((started_at, budget_json, colleague_id, total, output, used_tools)) = digital_budget
+    else {
+        return Ok(());
+    };
+    let budget: Value = serde_json::from_str(&budget_json).map_err(|_| {
+        projection_violation(format!(
+            "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' has an invalid frozen budget"
+        ))
+    })?;
+    if budget.get("contract").and_then(Value::as_str) != Some("digital_colleague_run_budget_v1") {
+        return Err(projection_violation(format!(
+            "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' is missing its frozen budget contract"
+        )));
+    }
+    let frozen_counter = |field: &str| -> rusqlite::Result<i64> {
+        budget
+            .get(field)
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                projection_violation(format!(
+                    "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' has an invalid frozen '{field}'"
+                ))
+            })
+    };
+    let max_duration = frozen_counter("maxDurationMs")?;
+    let max_total = frozen_counter("maxTotalTokens")?;
+    let max_output = frozen_counter("maxOutputTokens")?;
+    let max_tools = budget
+        .get("maxToolCalls")
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            projection_violation(format!(
+                "[digital_colleague.tool_budget_exceeded] Digital colleague Run '{run_id}' has an invalid frozen 'maxToolCalls'"
+            ))
+        })?;
+    let max_daily = frozen_counter("maxDailyTokens")?;
+    let day_start = budget
+        .get("dailyWindowStartMs")
+        .and_then(Value::as_i64)
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| {
+            projection_violation(format!(
+                "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' has an invalid frozen daily window"
+            ))
+        })?;
+    enforce_completion_deadline(run_id, "digital_colleague", started_at, max_duration, now)?;
+    if total >= max_total {
+        return Err(projection_violation(format!(
+            "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' reached its frozen per-Run total-token budget ({total}/{max_total})"
+        )));
+    }
+    if output >= max_output {
+        return Err(projection_violation(format!(
+            "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' reached its frozen per-Run output-token budget ({output}/{max_output})"
+        )));
+    }
+    if used_tools > max_tools {
+        return Err(projection_violation(format!(
+            "[digital_colleague.tool_budget_exceeded] Digital colleague Run '{run_id}' exceeded its frozen tool-call budget ({used_tools}/{max_tools})"
+        )));
+    }
+    let daily_total: i64 = transaction.query_row(
+        "SELECT COALESCE(SUM(total_tokens), 0)
+         FROM digital_colleague_triggers
+         WHERE colleague_id = ?1 AND created_at >= ?2
+           AND status NOT IN ('rejected', 'skipped')",
+        params![colleague_id, day_start],
+        |row| row.get(0),
+    )?;
+    if daily_total >= max_daily {
+        return Err(projection_violation(format!(
+            "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' reached its frozen daily token budget ({daily_total}/{max_daily})"
+        )));
+    }
+    Ok(())
+}
+
+fn enforce_completion_deadline(
+    run_id: &str,
+    budget_owner: &str,
+    started_at: Option<i64>,
+    max_duration_ms: i64,
+    now: i64,
+) -> rusqlite::Result<()> {
+    let code = if budget_owner == "child_run" {
+        "child_run.budget_exceeded"
+    } else {
+        "digital_colleague.budget_exceeded"
+    };
+    let started_at = started_at.ok_or_else(|| {
+        projection_violation(format!(
+            "[{code}] Managed Run '{run_id}' cannot complete before its authoritative start"
+        ))
+    })?;
+    let deadline = started_at.checked_add(max_duration_ms).ok_or_else(|| {
+        projection_violation(format!(
+            "[{code}] Managed Run '{run_id}' has an overflowing frozen duration budget"
+        ))
+    })?;
+    if max_duration_ms <= 0 || started_at < 0 || now < started_at {
+        return Err(projection_violation(format!(
+            "[{code}] Managed Run '{run_id}' has an invalid authoritative duration boundary"
+        )));
+    }
+    if now >= deadline {
+        return Err(projection_violation(format!(
+            "[{code}] Managed Run '{run_id}' reached its frozen duration deadline"
+        )));
+    }
     Ok(())
 }
 
@@ -6227,7 +7825,7 @@ fn connection_type(base_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::GoalStatus;
+    use crate::database::{GoalStatus, HostToolCallDisposition};
 
     fn test_database() -> (Database, PathBuf) {
         let path = std::env::temp_dir().join(format!("fox-test-{}.db", Uuid::new_v4()));
@@ -7622,6 +9220,139 @@ mod tests {
     }
 
     #[test]
+    fn resume_requires_one_canonical_awaiting_user_completion_and_rolls_back_other_terminals() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .unwrap();
+        for (label, terminal) in [
+            ("ordinary-completed", json!({"type":"run.completed"})),
+            (
+                "stop-completed",
+                json!({"type":"run.completed","completionReason":"stop"}),
+            ),
+            (
+                "failed",
+                json!({"type":"run.failed","code":"failed","message":"failed"}),
+            ),
+            ("cancelled", json!({"type":"run.cancelled"})),
+            (
+                "interrupted",
+                json!({"type":"run.interrupted","code":"interrupted","message":"interrupted"}),
+            ),
+        ] {
+            let parent = database
+                .create_run(&conversation.id, label, None)
+                .unwrap()
+                .run;
+            for (seq, event) in [
+                json!({"type":"run.started"}),
+                json!({
+                    "type":"user.question.requested",
+                    "questions":[{"question_id":"scope","question":"scope?"}]
+                }),
+                terminal,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                database
+                    .apply_runtime_event(&parent.id, seq as i64 + 1, &event)
+                    .unwrap();
+            }
+            let before: (i64, i64, i64) = database
+                .with_connection(|connection| {
+                    connection.query_row(
+                        "SELECT
+                           (SELECT COUNT(*) FROM runs WHERE conversation_id = ?1),
+                           (SELECT COUNT(*) FROM messages WHERE conversation_id = ?1),
+                           (SELECT COUNT(*) FROM run_events
+                            WHERE run_id = ?2 AND event_type = 'user.question.responded')",
+                        params![conversation.id, parent.id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                })
+                .unwrap();
+            assert!(database
+                .create_resumed_run(&conversation.id, &parent.id, "must not persist")
+                .is_err());
+            let after: (i64, i64, i64, i64) = database
+                .with_connection(|connection| {
+                    connection.query_row(
+                        "SELECT
+                           (SELECT COUNT(*) FROM runs WHERE conversation_id = ?1),
+                           (SELECT COUNT(*) FROM messages WHERE conversation_id = ?1),
+                           (SELECT COUNT(*) FROM run_events
+                            WHERE run_id = ?2 AND event_type = 'user.question.responded'),
+                           (SELECT last_seq FROM runs WHERE id = ?2)",
+                        params![conversation.id, parent.id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                })
+                .unwrap();
+            assert_eq!((after.0, after.1, after.2), before);
+            assert_eq!(after.3, 3);
+        }
+
+        let conflicting = database
+            .create_run(&conversation.id, "legacy conflicting terminal", None)
+            .unwrap()
+            .run;
+        for (seq, event) in [
+            json!({"type":"run.started"}),
+            json!({
+                "type":"user.question.requested",
+                "questions":[{"question_id":"scope","question":"scope?"}]
+            }),
+            json!({"type":"run.completed","completionReason":"awaiting_user"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            database
+                .apply_runtime_event(&conflicting.id, seq as i64 + 1, &event)
+                .unwrap();
+        }
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO run_events(id, run_id, seq, event_type, event_json, created_at)
+                     VALUES (?1, ?2, 4, 'run.completed', ?3, ?4)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        conflicting.id,
+                        serde_json::to_string(
+                            &json!({"type":"run.completed","completionReason":"stop"})
+                        )
+                        .unwrap(),
+                        now_ms()
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(database
+            .create_resumed_run(&conversation.id, &conflicting.id, "conflict")
+            .is_err());
+        let residue: (i64, i64) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT
+                       (SELECT COUNT(*) FROM run_events
+                        WHERE run_id = ?1 AND event_type = 'user.question.responded'),
+                       (SELECT COUNT(*) FROM runs WHERE parent_run_id = ?1)",
+                    [&conflicting.id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(residue, (0, 0));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn resume_targets_the_latest_unanswered_question_on_the_parent_run() {
         let (database, path) = test_database();
         let conversation = database
@@ -7828,11 +9559,17 @@ mod tests {
             replacement.user_message.ordinal,
             second.user_message.ordinal
         );
+        assert_eq!(replacement.user_message.id, second.user_message.id);
+        assert_eq!(
+            replacement.user_message.created_at,
+            second.user_message.created_at
+        );
 
         let detail = database
             .load_conversation(&conversation.id)
             .expect("load rewound conversation");
         assert_eq!(detail.messages.len(), 3);
+        assert_eq!(detail.messages[2].id, second.user_message.id);
         assert_eq!(detail.messages[2].content, "edited second question");
         assert!(!detail
             .messages
@@ -7858,17 +9595,20 @@ mod tests {
                 .create_run(&conversation.id, &format!("question-{index}"), None)
                 .expect("create run");
             database
-                .apply_runtime_event(&started.run.id, 1, &json!({"type":"message.started"}))
+                .apply_runtime_event(&started.run.id, 1, &json!({"type":"run.started"}))
+                .expect("start run");
+            database
+                .apply_runtime_event(&started.run.id, 2, &json!({"type":"message.started"}))
                 .expect("start answer");
             database
                 .apply_runtime_event(
                     &started.run.id,
-                    2,
+                    3,
                     &json!({"type":"message.delta", "delta": format!("answer-{index}")}),
                 )
                 .expect("append answer");
             database
-                .apply_runtime_event(&started.run.id, 3, &json!({"type":"run.completed"}))
+                .apply_runtime_event(&started.run.id, 4, &json!({"type":"run.completed"}))
                 .expect("complete run");
         }
 
@@ -7911,6 +9651,7 @@ mod tests {
                 .create_run(&conversation.id, &format!("question {index}"), None)
                 .expect("create run");
             for (seq, event) in [
+                json!({"type":"run.started"}),
                 json!({"type":"message.started"}),
                 json!({"type":"message.delta","delta":format!("answer {index}")}),
                 json!({"type":"run.completed"}),
@@ -8255,12 +9996,15 @@ mod tests {
             .create_run(&conversation.id, "trigger failure", None)
             .expect("create run");
         database
-            .apply_runtime_event(&started.run.id, 1, &json!({"type":"message.started"}))
+            .apply_runtime_event(&started.run.id, 1, &json!({"type":"run.started"}))
+            .expect("start run");
+        database
+            .apply_runtime_event(&started.run.id, 2, &json!({"type":"message.started"}))
             .expect("start assistant message");
         database
             .apply_runtime_event(
                 &started.run.id,
-                2,
+                3,
                 &json!({"type":"run.failed","code":"test.failed","message":"boom"}),
             )
             .expect("fail run");
@@ -8270,6 +10014,60 @@ mod tests {
             .expect("load conversation");
         assert_eq!(detail.last_run.unwrap().status, "failed");
         assert_eq!(detail.messages.last().unwrap().status, "interrupted");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn host_failure_interrupts_streaming_message_once_without_mutating_exact_replay() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .unwrap();
+        let run = database
+            .create_run(&conversation.id, "host failure cleanup", None)
+            .unwrap()
+            .run;
+        for (seq, event) in [
+            json!({"type":"run.started"}),
+            json!({"type":"message.started"}),
+            json!({"type":"message.delta","delta":"preserved partial answer"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            database
+                .apply_runtime_event(&run.id, seq as i64 + 1, &event)
+                .unwrap();
+        }
+        database
+            .mark_run_failed(&run.id, "host.failed", "Host failure")
+            .unwrap();
+        let frozen: (String, String, i64) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status, content, updated_at FROM messages WHERE id = ?1",
+                    [format!("assistant-{}", run.id)],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(frozen.0, "interrupted");
+        assert_eq!(frozen.1, "preserved partial answer");
+        database
+            .mark_run_failed(&run.id, "host.failed", "Host failure")
+            .expect("exact Host failure replay is a no-op");
+        let replayed: (String, String, i64) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status, content, updated_at FROM messages WHERE id = ?1",
+                    [format!("assistant-{}", run.id)],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(replayed, frozen);
 
         drop(database);
         let _ = std::fs::remove_file(path);
@@ -8287,6 +10085,13 @@ mod tests {
         let started = database
             .create_run(&conversation.id, "phase two", None)
             .expect("create run");
+        database
+            .apply_runtime_event(
+                &started.run.id,
+                1,
+                &json!({ "type": "run.started", "model": "test" }),
+            )
+            .expect("start run");
 
         database
             .add_attachments(&[AttachmentRecord {
@@ -8331,6 +10136,9 @@ mod tests {
             .conversation_tool_permission_granted(&conversation.id, "write_file")
             .expect("check one-time approval"));
         assert!(database
+            .claim_approved_tool_call(&started.run.id, "write-1")
+            .expect("claim approved one-time tool"));
+        assert!(database
             .resolve_approval(&approval.id, crate::database::ApprovalDecision::Deny)
             .expect("repeat approval")
             .is_none());
@@ -8360,6 +10168,9 @@ mod tests {
             .expect("approve conversation tool")
             .expect("resolved conversation approval");
         assert!(database
+            .claim_approved_tool_call(&started.run.id, "write-2")
+            .expect("claim approved conversation tool"));
+        assert!(database
             .conversation_tool_permission_granted(&conversation.id, "write_file")
             .expect("check conversation approval"));
 
@@ -8369,11 +10180,22 @@ mod tests {
                 "write-1",
                 Some(&json!({
                     "content": [{"type":"text","text":"done"}],
-                    "details": {"path":"D:\\data\\result.md","bytes":4}
+                    "details": {"path":"D:\\data\\result.md","bytes":4,"operation":"created"}
                 })),
                 None,
             )
             .expect("complete tool");
+        database
+            .complete_host_tool_call(
+                &started.run.id,
+                "write-2",
+                Some(&json!({
+                    "content": [{"type":"text","text":"updated"}],
+                    "details": {"path":"D:\\data\\result.md","bytes":7,"operation":"modified"}
+                })),
+                None,
+            )
+            .expect("complete repeated file result");
         let detail = database
             .load_conversation(&conversation.id)
             .expect("load phase two data");
@@ -8388,8 +10210,1488 @@ mod tests {
             .expect("scoped lookup")
             .is_none());
         assert_eq!(detail.artifacts.len(), 1);
+        let artifact = database
+            .artifact_for_conversation(&conversation.id, &detail.artifacts[0].id)
+            .expect("scoped artifact lookup")
+            .expect("artifact exists");
+        assert_eq!(artifact.conversation_id, conversation.id);
+        assert_eq!(artifact.artifact_type, "created_file");
+        assert_eq!(artifact.byte_size, 7);
+        assert!(database
+            .artifact_for_conversation("another-conversation", &artifact.id)
+            .expect("cross-conversation artifact lookup")
+            .is_none());
         assert_eq!(detail.knowledge_bindings.len(), 1);
         assert_eq!(detail.approvals[0].status, "approved");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn terminal_tool_calls_and_approvals_are_insert_once_and_never_reopened() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        let started = database
+            .create_run(&conversation.id, "immutable approval facts", None)
+            .expect("create run");
+        database
+            .apply_runtime_event(
+                &started.run.id,
+                1,
+                &json!({ "type": "run.started", "model": "test" }),
+            )
+            .expect("start run");
+
+        let completed = database
+            .create_host_tool_call(
+                &started.run.id,
+                "read-once",
+                "read",
+                &json!({"path":"README.md"}),
+                "running",
+                false,
+            )
+            .expect("create running ToolCall");
+        database
+            .complete_host_tool_call(
+                &started.run.id,
+                "read-once",
+                Some(&json!({"content":"done"})),
+                None,
+            )
+            .expect("complete ToolCall");
+        let replay = database
+            .create_host_tool_call(
+                &started.run.id,
+                "read-once",
+                "read",
+                &json!({"path":"README.md"}),
+                "running",
+                false,
+            )
+            .expect("exact ToolCall replay");
+        assert_eq!(replay.id, completed.id);
+        assert_eq!(replay.status, "completed");
+        database
+            .record_external_event(
+                &started.run.id,
+                &json!({
+                    "type": "tool.started",
+                    "toolCallId": "read-once",
+                    "tool": "read",
+                    "input": {"path":"README.md"}
+                }),
+            )
+            .expect("exact late Runtime projection must remain idempotent");
+        assert_eq!(
+            database
+                .create_host_tool_call(
+                    &started.run.id,
+                    "read-once",
+                    "read",
+                    &json!({"path":"README.md"}),
+                    "running",
+                    false,
+                )
+                .expect("late Runtime replay keeps terminal Host fact")
+                .status,
+            "completed"
+        );
+        assert!(database
+            .record_external_event(
+                &started.run.id,
+                &json!({
+                    "type": "tool.started",
+                    "toolCallId": "read-once",
+                    "tool": "read",
+                    "input": {"path":"runtime-conflict.md"}
+                }),
+            )
+            .is_err());
+        assert!(database
+            .create_host_tool_call(
+                &started.run.id,
+                "read-once",
+                "read",
+                &json!({"path":"different.md"}),
+                "running",
+                false,
+            )
+            .expect_err("conflicting ToolCall replay must fail")
+            .contains("immutable content"));
+
+        for (runtime_id, decision, expected_status) in [
+            (
+                "approval-approved",
+                crate::database::ApprovalDecision::AllowOnce,
+                "approved",
+            ),
+            (
+                "approval-denied",
+                crate::database::ApprovalDecision::Deny,
+                "denied",
+            ),
+        ] {
+            let tool = database
+                .create_host_tool_call(
+                    &started.run.id,
+                    runtime_id,
+                    "write_file",
+                    &json!({"path":format!("{runtime_id}.md")}),
+                    "pending",
+                    true,
+                )
+                .expect("create approval ToolCall");
+            let request = json!({"target":format!("{runtime_id}.md")});
+            let approval = database
+                .create_approval(&tool.id, "write file", &request)
+                .expect("create approval");
+            database
+                .resolve_approval(&approval.id, decision)
+                .expect("resolve approval")
+                .expect("pending approval resolved");
+            let replay = database
+                .create_approval(&tool.id, "write file", &request)
+                .expect("exact approval replay");
+            assert_eq!(replay.id, approval.id);
+            assert_eq!(replay.status, expected_status);
+            assert!(database
+                .create_approval(&tool.id, "different action", &request)
+                .expect_err("conflicting approval replay must fail")
+                .contains("immutable content"));
+        }
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn runtime_projection_and_late_host_completion_cannot_mutate_foreign_or_terminal_tool_calls() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .unwrap();
+        let started = database
+            .create_run(&conversation.id, "tool projection authority", None)
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &started.run.id,
+                1,
+                &json!({ "type": "run.started", "model": "test" }),
+            )
+            .unwrap();
+
+        let failed_host = database
+            .create_host_tool_call(
+                &started.run.id,
+                "host-failed",
+                "run_command",
+                &json!({"command":"false"}),
+                "running",
+                false,
+            )
+            .unwrap();
+        database
+            .complete_host_tool_call(&started.run.id, "host-failed", None, Some("command failed"))
+            .unwrap();
+        for payload in [
+            json!({
+                "type":"tool.updated", "toolCallId":"host-failed",
+                "tool":"run_command", "update":{"passed":true}
+            }),
+            json!({
+                "type":"tool.completed", "toolCallId":"host-failed",
+                "tool":"run_command", "result":{"passed":true}, "isError":false
+            }),
+            json!({
+                "type":"tool.completed", "toolCallId":"host-failed",
+                "tool":"run_command", "result":{"passed":true}, "isError":true
+            }),
+        ] {
+            database
+                .record_external_event(&started.run.id, &payload)
+                .expect("matching Runtime lifecycle events are no-ops for Host-owned ToolCalls");
+        }
+        assert!(database
+            .record_external_event(
+                &started.run.id,
+                &json!({
+                    "type":"tool.completed", "toolCallId":"host-failed",
+                    "tool":"write_file", "result":{"passed":true}, "isError":false
+                }),
+            )
+            .is_err());
+        let preserved = query_tool_call(
+            &database.connection.lock().unwrap(),
+            &started.run.id,
+            "host-failed",
+        )
+        .unwrap();
+        assert_eq!(preserved.status, "failed");
+        assert!(preserved.result.is_none());
+        assert_eq!(preserved.error_message.as_deref(), Some("command failed"));
+
+        let goal = database
+            .goals()
+            .create(crate::database::CreateGoalInput {
+                id: None,
+                conversation_id: conversation.id.clone(),
+                title: "Evidence authority".to_owned(),
+                objective: "Reject forged completed ToolCalls".to_owned(),
+                acceptance_summary: None,
+                status: GoalStatus::Active,
+                created_by: started.run.id.clone(),
+            })
+            .unwrap();
+        let task = database
+            .work_tasks()
+            .create(crate::database::CreateTaskInput {
+                id: None,
+                goal_id: goal.id,
+                parent_task_id: None,
+                ordinal: 0,
+                title: "Do not trust Runtime overwrite".to_owned(),
+                detail: None,
+            })
+            .unwrap();
+        assert!(database
+            .task_evidence()
+            .add(crate::database::AddEvidenceInput {
+                id: None,
+                task_id: task.id,
+                source_run_id: Some(started.run.id.clone()),
+                evidence_type: crate::database::EvidenceType::ToolCall,
+                ref_kind: crate::database::EvidenceReferenceKind::ToolCall,
+                ref_id: failed_host.id,
+                summary: "forged success must not validate".to_owned(),
+                metadata: json!({"validationCheckType":"inspection"}),
+                trace_id: None,
+                span_id: None,
+            })
+            .is_err());
+
+        database
+            .record_external_event(
+                &started.run.id,
+                &json!({
+                    "type":"tool.started", "toolCallId":"runtime-owned",
+                    "tool":"read", "input":{"path":"README.md"}
+                }),
+            )
+            .unwrap();
+        let exact_completion = json!({
+            "type":"tool.completed", "toolCallId":"runtime-owned", "tool":"read",
+            "result":{"content":"ok"}, "isError":false
+        });
+        database
+            .record_external_event(&started.run.id, &exact_completion)
+            .unwrap();
+        database
+            .record_external_event(&started.run.id, &exact_completion)
+            .expect("exact late Runtime completion is a read-only no-op");
+        assert!(database
+            .record_external_event(
+                &started.run.id,
+                &json!({
+                    "type":"tool.completed", "toolCallId":"runtime-owned", "tool":"write",
+                    "result":{"content":"changed"}, "isError":false
+                }),
+            )
+            .is_err());
+
+        database
+            .record_external_event(
+                &started.run.id,
+                &json!({
+                    "type":"tool.started",
+                    "toolCallId":"padded-override",
+                    "tool":"task_repair_escalate_start",
+                    "input":{
+                        "taskId":" task-1 ", "attemptId":"attempt-1",
+                        "expectedVersion":1, "rootCause":"root",
+                        "findingIds":["finding-1"], "escalationReason":"reason"
+                    }
+                }),
+            )
+            .unwrap();
+        assert!(database
+            .create_host_tool_call_once(
+                &started.run.id,
+                "padded-override",
+                "task_repair_escalate_start",
+                &json!({
+                    "taskId":"task-1", "attemptId":"attempt-1",
+                    "expectedVersion":1, "rootCause":"root",
+                    "findingIds":["finding-1"], "escalationReason":"reason"
+                }),
+                "pending",
+                true,
+            )
+            .is_err());
+        let padded_state: (String, String, i64) = database
+            .with_connection(|connection| {
+                Ok((
+                    connection.query_row(
+                        "SELECT execution_location FROM tool_calls
+                         WHERE run_id = ?1 AND runtime_tool_call_id = 'padded-override'",
+                        [started.run.id.as_str()],
+                        |row| row.get(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT status FROM tool_calls
+                         WHERE run_id = ?1 AND runtime_tool_call_id = 'padded-override'",
+                        [started.run.id.as_str()],
+                        |row| row.get(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT COUNT(*) FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
+                         WHERE t.run_id = ?1 AND t.runtime_tool_call_id = 'padded-override'",
+                        [started.run.id.as_str()],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(
+            padded_state,
+            ("runtime".to_owned(), "running".to_owned(), 0)
+        );
+
+        let cancellable = database
+            .create_host_tool_call(
+                &started.run.id,
+                "cancel-race",
+                "read_attachment",
+                &json!({"attachmentId":"a"}),
+                "running",
+                false,
+            )
+            .unwrap();
+        database
+            .record_external_event(&started.run.id, &json!({"type":"run.cancelled"}))
+            .unwrap();
+        assert!(database
+            .complete_host_tool_call(
+                &started.run.id,
+                "cancel-race",
+                Some(&json!({"content":"late"})),
+                None,
+            )
+            .is_err());
+        let cancelled_status: String = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status FROM tool_calls WHERE id = ?1",
+                    [cancellable.id.as_str()],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(cancelled_status, "cancelled");
+
+        let irreversible = database
+            .create_run(&conversation.id, "terminal runs are irreversible", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&irreversible.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &irreversible.id,
+                2,
+                &json!({
+                    "type":"tool.started", "toolCallId":"before-terminal",
+                    "tool":"read", "input":{"path":"README.md"}
+                }),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(&irreversible.id, 3, &json!({"type":"run.completed"}))
+            .unwrap();
+        assert!(
+            database
+                .apply_runtime_event(
+                    &irreversible.id,
+                    4,
+                    &json!({
+                        "type":"tool.started", "toolCallId":"before-terminal",
+                        "tool":"read", "input":{"path":"README.md"}
+                    }),
+                )
+                .is_err(),
+            "terminal allowlist rejects even exact late ToolCall projections"
+        );
+        assert!(database
+            .apply_runtime_event(
+                &irreversible.id,
+                5,
+                &json!({
+                    "type":"tool.started", "toolCallId":"after-terminal",
+                    "tool":"write", "input":{"path":"late.md"}
+                }),
+            )
+            .is_err());
+        assert!(database
+            .apply_runtime_event(&irreversible.id, 6, &json!({"type":"run.started"}))
+            .is_err());
+        let (run_status, old_tool_status, fresh_tool_count): (String, String, i64) = database
+            .with_connection(|connection| {
+                Ok((
+                    connection.query_row(
+                        "SELECT status FROM runs WHERE id = ?1",
+                        [irreversible.id.as_str()],
+                        |row| row.get(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT status FROM tool_calls
+                         WHERE run_id = ?1 AND runtime_tool_call_id = 'before-terminal'",
+                        [irreversible.id.as_str()],
+                        |row| row.get(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT COUNT(*) FROM tool_calls
+                         WHERE run_id = ?1 AND runtime_tool_call_id = 'after-terminal'",
+                        [irreversible.id.as_str()],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(run_status, "completed");
+        assert_eq!(old_tool_status, "interrupted");
+        assert_eq!(fresh_tool_count, 0);
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn host_tool_call_execution_disposition_has_one_concurrent_winner() {
+        use std::sync::{Arc, Barrier};
+
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .unwrap();
+        let started = database
+            .create_run(&conversation.id, "exactly once host tool", None)
+            .unwrap();
+        database
+            .apply_runtime_event(&started.run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let contender = Database::open(path.clone()).unwrap();
+            let barrier = barrier.clone();
+            let run_id = started.run.id.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                contender
+                    .create_host_tool_call_once(
+                        &run_id,
+                        "same-call",
+                        "memory_propose",
+                        &json!({"content":"one proposal"}),
+                        "running",
+                        false,
+                    )
+                    .unwrap()
+                    .1
+            }));
+        }
+        let dispositions = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            dispositions
+                .iter()
+                .filter(|value| **value == HostToolCallDisposition::Created)
+                .count(),
+            1
+        );
+        assert_eq!(
+            dispositions
+                .iter()
+                .filter(|value| **value == HostToolCallDisposition::AlreadyInFlight)
+                .count(),
+            1
+        );
+        database
+            .complete_host_tool_call(
+                &started.run.id,
+                "same-call",
+                Some(&json!({"stored":"authoritative"})),
+                None,
+            )
+            .unwrap();
+        let (_, replay) = database
+            .create_host_tool_call_once(
+                &started.run.id,
+                "same-call",
+                "memory_propose",
+                &json!({"content":"one proposal"}),
+                "running",
+                false,
+            )
+            .unwrap();
+        assert_eq!(replay, HostToolCallDisposition::ReplayTerminal);
+        database
+            .apply_runtime_event(&started.run.id, 2, &json!({"type":"run.completed"}))
+            .unwrap();
+
+        for terminal_event in [
+            json!({"type":"run.completed"}),
+            json!({"type":"run.failed", "code":"failed", "message":"failed"}),
+            json!({"type":"run.cancelled"}),
+            json!({"type":"run.interrupted", "code":"interrupted", "message":"interrupted"}),
+        ] {
+            let terminal_run = database
+                .create_run(&conversation.id, "late request", None)
+                .unwrap()
+                .run;
+            database
+                .apply_runtime_event(&terminal_run.id, 1, &json!({"type":"run.started"}))
+                .unwrap();
+            database
+                .apply_runtime_event(&terminal_run.id, 2, &terminal_event)
+                .unwrap();
+            let late_call_id = format!(
+                "late-{}",
+                terminal_event["type"].as_str().unwrap_or("terminal")
+            );
+            assert!(database
+                .create_host_tool_call_once(
+                    &terminal_run.id,
+                    &late_call_id,
+                    "run_command",
+                    &json!({"command":"must-not-run"}),
+                    "running",
+                    false,
+                )
+                .is_err());
+            let count: i64 = database
+                .with_connection(|connection| {
+                    connection.query_row(
+                        "SELECT COUNT(*) FROM tool_calls
+                         WHERE run_id = ?1 AND runtime_tool_call_id = ?2",
+                        params![terminal_run.id, late_call_id],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(count, 0, "late fresh request must not leave a ToolCall");
+        }
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn run_terminal_outcomes_are_immutable_across_runtime_and_late_host_events() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .unwrap();
+
+        let completed = database
+            .create_run(&conversation.id, "complete once", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&completed.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let completed_outcome = json!({"type":"run.completed","completionReason":"awaiting_user"});
+        database
+            .apply_runtime_event(&completed.id, 2, &completed_outcome)
+            .unwrap();
+        let root_trace_before: (
+            Option<i64>,
+            Option<i64>,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT ended_at, duration_ms, status, attributes_json, error_type, error_message
+                     FROM trace_spans WHERE run_id = ?1 AND category = 'run'",
+                    [completed.id.as_str()],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+            })
+            .unwrap();
+        database
+            .apply_runtime_event(&completed.id, 3, &completed_outcome)
+            .expect("same completed terminal outcome is idempotent");
+        let root_trace_after: (
+            Option<i64>,
+            Option<i64>,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT ended_at, duration_ms, status, attributes_json, error_type, error_message
+                     FROM trace_spans WHERE run_id = ?1 AND category = 'run'",
+                    [completed.id.as_str()],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            root_trace_after, root_trace_before,
+            "exact terminal replay must not rewrite closed trace facts"
+        );
+        assert!(database
+            .apply_runtime_event(&completed.id, 4, &json!({"type":"run.completed"}))
+            .is_err());
+        assert!(database
+            .apply_runtime_event(
+                &completed.id,
+                5,
+                &json!({"type":"run.failed","code":"late","message":"late crash"}),
+            )
+            .is_err());
+        assert!(database
+            .apply_runtime_event(&completed.id, 6, &json!({"type":"run.cancelled"}))
+            .is_err());
+        assert!(database
+            .mark_run_failed(&completed.id, "late.host", "late Host crash")
+            .is_err());
+
+        let failed = database
+            .create_run(&conversation.id, "fail once", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&failed.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let failed_outcome =
+            json!({"type":"run.failed","code":"runtime.failed","message":"stable failure"});
+        database
+            .apply_runtime_event(&failed.id, 2, &failed_outcome)
+            .unwrap();
+        database
+            .apply_runtime_event(&failed.id, 3, &failed_outcome)
+            .expect("same failed terminal outcome is idempotent");
+        assert!(database
+            .apply_runtime_event(
+                &failed.id,
+                4,
+                &json!({"type":"run.failed","code":"runtime.failed","message":"changed"}),
+            )
+            .is_err());
+        assert!(database
+            .apply_runtime_event(
+                &failed.id,
+                5,
+                &json!({
+                    "type":"run.failed",
+                    "code":"runtime.failed",
+                    "message":"stable failure",
+                    "futureSemanticField": true
+                }),
+            )
+            .is_err());
+        assert!(database
+            .apply_runtime_event(&failed.id, 6, &json!({"type":"run.completed"}))
+            .is_err());
+
+        let cancelled = database
+            .create_run(&conversation.id, "cancel once", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&cancelled.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .apply_runtime_event(&cancelled.id, 2, &json!({"type":"run.cancelled"}))
+            .unwrap();
+        database
+            .apply_runtime_event(&cancelled.id, 3, &json!({"type":"run.cancelled"}))
+            .expect("same cancelled terminal outcome is idempotent");
+        assert!(database
+            .apply_runtime_event(
+                &cancelled.id,
+                4,
+                &json!({"type":"run.cancelled","reason":"late semantic change"}),
+            )
+            .is_err());
+        assert!(database
+            .apply_runtime_event(&cancelled.id, 5, &json!({"type":"run.completed"}))
+            .is_err());
+
+        let completed_without_reason = database
+            .create_run(&conversation.id, "complete without reason", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(
+                &completed_without_reason.id,
+                1,
+                &json!({"type":"run.completed"}),
+            )
+            .unwrap();
+        assert!(database
+            .apply_runtime_event(
+                &completed_without_reason.id,
+                2,
+                &json!({"type":"run.completed","completionReason":"awaiting_user"}),
+            )
+            .is_err());
+
+        let interrupted = database
+            .create_run(&conversation.id, "interrupt once", None)
+            .unwrap()
+            .run;
+        let interrupted_outcome = json!({"type":"run.interrupted","code":"runtime.interrupted","message":"stable interruption"});
+        database
+            .apply_runtime_event(&interrupted.id, 1, &interrupted_outcome)
+            .unwrap();
+        database
+            .apply_runtime_event(&interrupted.id, 2, &interrupted_outcome)
+            .expect("same interrupted terminal outcome is idempotent");
+        assert!(database
+            .apply_runtime_event(
+                &interrupted.id,
+                3,
+                &json!({
+                    "type":"run.interrupted",
+                    "code":"runtime.interrupted",
+                    "message":"stable interruption",
+                    "futureSemanticField":"different"
+                }),
+            )
+            .is_err());
+
+        for (label, first_terminal, conflicting_terminal, expected_status) in [
+            (
+                "queued-completed",
+                json!({"type":"run.completed"}),
+                json!({"type":"run.failed","code":"late","message":"late"}),
+                "completed",
+            ),
+            (
+                "queued-failed",
+                json!({"type":"run.failed","code":"queued.failed","message":"queued failed"}),
+                json!({"type":"run.completed"}),
+                "failed",
+            ),
+        ] {
+            let run = database
+                .create_run(&conversation.id, label, None)
+                .unwrap()
+                .run;
+            database
+                .apply_runtime_event(&run.id, 1, &first_terminal)
+                .unwrap();
+            assert!(database
+                .apply_runtime_event(&run.id, 2, &conflicting_terminal)
+                .is_err());
+            let status: String = database
+                .with_connection(|connection| {
+                    connection.query_row(
+                        "SELECT status FROM runs WHERE id = ?1",
+                        [run.id.as_str()],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(status, expected_status);
+        }
+
+        for (label, first_terminal, conflicting_terminal, expected_status) in [
+            (
+                "cancelling-completed",
+                json!({"type":"run.completed"}),
+                json!({"type":"run.failed","code":"late","message":"late"}),
+                "completed",
+            ),
+            (
+                "cancelling-failed",
+                json!({"type":"run.failed","code":"cancel.failed","message":"cancel failed"}),
+                json!({"type":"run.completed"}),
+                "failed",
+            ),
+        ] {
+            let run = database
+                .create_run(&conversation.id, label, None)
+                .unwrap()
+                .run;
+            database
+                .apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+                .unwrap();
+            assert!(database.mark_run_cancelling(&run.id).unwrap().is_some());
+            database
+                .apply_runtime_event(&run.id, 2, &first_terminal)
+                .unwrap();
+            assert!(database
+                .apply_runtime_event(&run.id, 3, &conflicting_terminal)
+                .is_err());
+            let status: String = database
+                .with_connection(|connection| {
+                    connection.query_row(
+                        "SELECT status FROM runs WHERE id = ?1",
+                        [run.id.as_str()],
+                        |row| row.get(0),
+                    )
+                })
+                .unwrap();
+            assert_eq!(status, expected_status);
+        }
+
+        let outcomes: Vec<(String, Option<String>, Option<String>)> = database
+            .with_connection(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT status, error_code, error_message FROM runs
+                     WHERE id IN (?1, ?2, ?3) ORDER BY id",
+                )?;
+                let rows = statement
+                    .query_map(params![completed.id, failed.id, cancelled.id], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .unwrap();
+        assert!(outcomes.iter().any(|outcome| outcome.0 == "completed"));
+        assert!(outcomes.iter().any(|outcome| {
+            outcome.0 == "failed"
+                && outcome.1.as_deref() == Some("runtime.failed")
+                && outcome.2.as_deref() == Some("stable failure")
+        }));
+        assert!(outcomes.iter().any(|outcome| {
+            outcome.0 == "cancelled" && outcome.1.is_none() && outcome.2.is_none()
+        }));
+
+        for (run_id, event_type, expected_payload) in [
+            (&completed.id, "run.completed", &completed_outcome),
+            (&failed.id, "run.failed", &failed_outcome),
+            (&interrupted.id, "run.interrupted", &interrupted_outcome),
+        ] {
+            let (count, latest_json): (i64, String) = database
+                .with_connection(|connection| {
+                    connection.query_row(
+                        "SELECT COUNT(*),
+                                (SELECT event_json FROM run_events
+                                 WHERE run_id = ?1 AND event_type = ?2
+                                 ORDER BY seq DESC LIMIT 1)
+                         FROM run_events WHERE run_id = ?1 AND event_type = ?2",
+                        params![run_id, event_type],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                })
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "exact terminal replay advances sequence without duplicating UI facts"
+            );
+            assert_eq!(parse_json(&latest_json), *expected_payload);
+        }
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn cancelling_run_ignores_late_non_terminal_runtime_events() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        let run = database
+            .create_run(&conversation.id, "cancel during model startup", None)
+            .expect("create run")
+            .run;
+        database
+            .apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+            .expect("start run");
+        assert!(database.mark_run_cancelling(&run.id).unwrap().is_some());
+
+        for (seq, event) in [
+            json!({"type":"message.started"}),
+            json!({"type":"message.delta","delta":"late answer"}),
+            json!({"type":"tool.started","toolCallId":"late-tool","tool":"read","input":{}}),
+            json!({"type":"run.phase","phase":"finalizing"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(!database
+                .apply_runtime_event(&run.id, seq as i64 + 2, &event)
+                .expect("ignore stale event while cancelling"));
+        }
+        database
+            .apply_runtime_event(&run.id, 6, &json!({"type":"run.cancelled"}))
+            .expect("finish cancellation");
+
+        let detail = database
+            .load_conversation(&conversation.id)
+            .expect("load cancelled conversation");
+        assert_eq!(
+            detail.last_run.as_ref().map(|item| item.status.as_str()),
+            Some("cancelled")
+        );
+        assert!(!detail
+            .messages
+            .iter()
+            .any(|message| message.role == "assistant"));
+        assert!(detail.tool_calls.is_empty());
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn terminal_runs_reject_late_message_mutation_and_message_completion_replay_is_exact() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .unwrap();
+
+        for (terminal, expected_message_status) in [
+            (json!({"type":"run.completed"}), "completed"),
+            (
+                json!({"type":"run.failed","code":"runtime.failed","message":"failed"}),
+                "interrupted",
+            ),
+            (json!({"type":"run.cancelled"}), "interrupted"),
+            (
+                json!({"type":"run.interrupted","code":"runtime.interrupted","message":"interrupted"}),
+                "interrupted",
+            ),
+        ] {
+            let run = database
+                .create_run(&conversation.id, "terminal message immutability", None)
+                .unwrap()
+                .run;
+            database
+                .apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+                .unwrap();
+            database
+                .apply_runtime_event(&run.id, 2, &json!({"type":"message.started"}))
+                .unwrap();
+            database
+                .apply_runtime_event(
+                    &run.id,
+                    3,
+                    &json!({"type":"message.delta","delta":"frozen answer"}),
+                )
+                .unwrap();
+            let terminal_seq = if expected_message_status == "completed" {
+                database
+                    .apply_runtime_event(&run.id, 4, &json!({"type":"message.completed"}))
+                    .unwrap();
+                5
+            } else {
+                4
+            };
+            database
+                .apply_runtime_event(&run.id, terminal_seq, &terminal)
+                .unwrap();
+
+            for late in [
+                json!({"type":"message.started"}),
+                json!({"type":"message.delta","delta":"tampered"}),
+                json!({"type":"message.completed"}),
+            ] {
+                assert!(database
+                    .apply_runtime_event(&run.id, terminal_seq + 10, &late)
+                    .is_err());
+            }
+            let (status, content, late_events): (String, String, i64) = database
+                .with_connection(|connection| {
+                    connection.query_row(
+                        "SELECT status, content,
+                                (SELECT COUNT(*) FROM run_events
+                                 WHERE run_id = ?2 AND seq > ?3)
+                         FROM messages WHERE id = ?1",
+                        params![format!("assistant-{}", run.id), run.id, terminal_seq],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                })
+                .unwrap();
+            assert_eq!(status, expected_message_status);
+            assert_eq!(content, "frozen answer");
+            assert_eq!(
+                late_events, 0,
+                "rejected message mutations must roll back events"
+            );
+        }
+
+        let replay = database
+            .create_run(&conversation.id, "message completion replay", None)
+            .unwrap()
+            .run;
+        for (seq, event) in [
+            json!({"type":"run.started"}),
+            json!({"type":"message.started"}),
+            json!({"type":"message.delta","delta":"stable"}),
+            json!({"type":"message.completed","finishReason":"stop"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            database
+                .apply_runtime_event(&replay.id, seq as i64 + 1, &event)
+                .unwrap();
+        }
+        database
+            .apply_runtime_event(
+                &replay.id,
+                5,
+                &json!({"finishReason":"stop","type":"message.completed"}),
+            )
+            .expect("object key order is canonicalized by JSON value equality");
+        assert!(database
+            .apply_runtime_event(
+                &replay.id,
+                6,
+                &json!({"type":"message.completed","finishReason":"length"}),
+            )
+            .is_err());
+        let (status, content): (String, String) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT status, content FROM messages WHERE id = ?1",
+                    [format!("assistant-{}", replay.id)],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(status, "completed");
+        assert_eq!(content, "stable");
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn terminal_run_event_allowlist_accepts_only_exact_outcome_replay() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .unwrap();
+        let run = database
+            .create_run(&conversation.id, "terminal allowlist", None)
+            .unwrap()
+            .run;
+        for (seq, event) in [
+            json!({"type":"run.started"}),
+            json!({
+                "type":"usage.updated",
+                "inputTokens":10,
+                "outputTokens":5,
+                "cacheReadTokens":2,
+                "cacheWriteTokens":1,
+                "totalTokens":18
+            }),
+            json!({"type":"run.completed","completionReason":"stop"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            database
+                .apply_runtime_event(&run.id, seq as i64 + 1, &event)
+                .unwrap();
+        }
+        assert!(
+            database
+                .apply_runtime_event(
+                    &run.id,
+                    4,
+                    &json!({
+                        "type":"usage.updated",
+                        "inputTokens":12,
+                        "outputTokens":7,
+                        "cacheReadTokens":2,
+                        "cacheWriteTokens":1,
+                        "totalTokens":22
+                    }),
+                )
+                .is_err(),
+            "terminal Run rejects even well-formed late usage"
+        );
+        for rejected in [
+            json!({
+                "type":"usage.updated",
+                "inputTokens":11,
+                "outputTokens":7,
+                "cacheReadTokens":2,
+                "cacheWriteTokens":1,
+                "totalTokens":21
+            }),
+            json!({
+                "type":"usage.updated",
+                "inputTokens":12,
+                "outputTokens":-1,
+                "cacheReadTokens":2,
+                "cacheWriteTokens":1,
+                "totalTokens":22
+            }),
+            json!({
+                "type":"usage.updated",
+                "inputTokens":12,
+                "outputTokens":7,
+                "cacheReadTokens":2,
+                "cacheWriteTokens":1,
+                "totalTokens":22,
+                "futureCost":0
+            }),
+            json!({"type":"message.delta","delta":"late mutation"}),
+            json!({"type":"reasoning.delta","delta":"late reasoning"}),
+            json!({"type":"tool.started","toolCallId":"late","tool":"write_file","input":{}}),
+            json!({"type":"user.question.requested","questions":[]}),
+            json!({"type":"task.completed","taskId":"runtime-spoof"}),
+            json!({"type":"continuation_proposed","decision":"complete"}),
+            json!({"type":"runtime.unknown"}),
+        ] {
+            assert!(database.apply_runtime_event(&run.id, 5, &rejected).is_err());
+        }
+        database
+            .apply_runtime_event(
+                &run.id,
+                6,
+                &json!({"completionReason":"stop","type":"run.completed"}),
+            )
+            .expect("canonical exact terminal replay remains idempotent");
+
+        let (last_seq, event_count, work_event_count, latest_usage): (
+            i64,
+            i64,
+            i64,
+            String,
+        ) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT runs.last_seq,
+                            (SELECT COUNT(*) FROM run_events WHERE run_id = runs.id),
+                            (SELECT COUNT(*) FROM work_events WHERE conversation_id = runs.conversation_id),
+                            (SELECT event_json FROM run_events
+                             WHERE run_id = runs.id AND event_type = 'usage.updated'
+                             ORDER BY seq DESC LIMIT 1)
+                     FROM runs WHERE id = ?1",
+                    [run.id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(last_seq, 6);
+        assert_eq!(
+            event_count, 3,
+            "rejected events and exact terminal replay add no rows"
+        );
+        assert_eq!(
+            work_event_count, 0,
+            "late Runtime work events cannot project facts"
+        );
+        assert_eq!(parse_json(&latest_usage)["totalTokens"], 18);
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn repair_override_approval_rejects_conversation_grants_and_generic_claims() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+        let started = database
+            .create_run(&conversation.id, "bounded repair override", None)
+            .expect("create run");
+        database
+            .apply_runtime_event(
+                &started.run.id,
+                1,
+                &json!({ "type": "run.started", "model": "test" }),
+            )
+            .expect("start run");
+        let tool = database
+            .create_host_tool_call(
+                &started.run.id,
+                "repair-override",
+                "task_repair_escalate_start",
+                &json!({
+                    "taskId":"task-1",
+                    "attemptId":"attempt-1",
+                    "expectedVersion":3,
+                    "rootCause":"root",
+                    "findingIds":["finding-1"],
+                    "escalationReason":"operator reviewed the exhausted budget"
+                }),
+                "pending",
+                true,
+            )
+            .expect("create override ToolCall");
+        let approval = database
+            .create_task_repair_override_approval(
+                &tool.id,
+                "operator override",
+                &json!({ "category":"task_repair_budget_override" }),
+            )
+            .expect("create override approval");
+        assert!(database
+            .create_approval(&tool.id, "operator override", &approval.request)
+            .expect_err("generic category replay must fail closed")
+            .contains("immutable category"));
+        assert!(database
+            .resolve_approval(
+                &approval.id,
+                crate::database::ApprovalDecision::AllowConversation,
+            )
+            .expect_err("override cannot create a reusable conversation grant")
+            .contains("allow_once"));
+        let still_pending = database
+            .pending_approvals_for_conversation_tool(&conversation.id, "task_repair_escalate_start")
+            .expect("load pending override approval");
+        assert_eq!(still_pending.len(), 1);
+        assert_eq!(still_pending[0].status, "pending");
+        let approved = database
+            .resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce)
+            .expect("resolve allow_once")
+            .expect("pending override approval resolved");
+        assert_eq!(approved.category, TASK_REPAIR_OVERRIDE_APPROVAL_CATEGORY);
+        assert!(!database
+            .claim_approved_tool_call(&started.run.id, "repair-override")
+            .expect("generic claim path rejects override approval"));
+        let (tool_status, claimed_at): (String, Option<i64>) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT t.status, a.claimed_at
+                     FROM tool_calls t JOIN approvals a ON a.tool_call_id = t.id
+                     WHERE t.id = ?1",
+                    [tool.id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("load immutable override state");
+        assert_eq!(tool_status, "pending");
+        assert!(claimed_at.is_none());
+        assert!(!database
+            .conversation_tool_permission_granted(&conversation.id, "task_repair_escalate_start",)
+            .expect("override approval must never persist a grant"));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn terminal_crash_cancel_new_run_and_startup_repair_close_pending_approvals() {
+        let (database, path) = test_database();
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .expect("create conversation");
+
+        let crashed = database
+            .create_run(&conversation.id, "crash", None)
+            .expect("create crashed run");
+        database
+            .apply_runtime_event(
+                &crashed.run.id,
+                1,
+                &json!({ "type": "run.started", "model": "test" }),
+            )
+            .expect("start crashed run");
+        let crashed_tool = database
+            .create_host_tool_call(
+                &crashed.run.id,
+                "crash-write",
+                "write_file",
+                &json!({ "path": "crash.txt" }),
+                "pending",
+                true,
+            )
+            .expect("create crashed tool");
+        let crashed_approval = database
+            .create_approval(&crashed_tool.id, "write after crash", &json!({}))
+            .expect("create crashed approval");
+        database
+            .mark_run_failed(&crashed.run.id, "runtime.process_crashed", "crashed")
+            .expect("mark run failed");
+        assert!(database
+            .resolve_approval(
+                &crashed_approval.id,
+                crate::database::ApprovalDecision::AllowConversation,
+            )
+            .expect("reject late crash approval")
+            .is_none());
+        assert!(!database
+            .claim_approved_tool_call(&crashed.run.id, "crash-write")
+            .expect("reject crashed tool claim"));
+        assert!(!database
+            .conversation_tool_permission_granted(&conversation.id, "write_file")
+            .expect("crash must not grant conversation permission"));
+
+        let cancelled = database
+            .create_run(&conversation.id, "cancel", None)
+            .expect("create cancelled run");
+        database
+            .apply_runtime_event(
+                &cancelled.run.id,
+                1,
+                &json!({ "type": "run.started", "model": "test" }),
+            )
+            .expect("start cancelled run");
+        let cancelled_tool = database
+            .create_host_tool_call(
+                &cancelled.run.id,
+                "cancel-write",
+                "write_file",
+                &json!({ "path": "cancel.txt" }),
+                "pending",
+                true,
+            )
+            .expect("create cancelled tool");
+        let cancelled_approval = database
+            .create_approval(&cancelled_tool.id, "write after cancel", &json!({}))
+            .expect("create cancelled approval");
+        assert_eq!(
+            database
+                .mark_run_cancelling(&cancelled.run.id)
+                .expect("request cancellation")
+                .as_deref(),
+            Some(conversation.id.as_str())
+        );
+        assert!(database
+            .resolve_approval(
+                &cancelled_approval.id,
+                crate::database::ApprovalDecision::AllowConversation,
+            )
+            .expect("reject late cancelled approval")
+            .is_none());
+        assert!(!database
+            .claim_approved_tool_call(&cancelled.run.id, "cancel-write")
+            .expect("reject cancelled tool claim"));
+        database
+            .apply_runtime_event(&cancelled.run.id, 2, &json!({ "type": "run.cancelled" }))
+            .expect("finish cancellation");
+
+        // A pre-fix database could contain a pending Host ToolCall after its Run
+        // became terminal. Build that historical corruption directly: the
+        // production create path must continue to reject this state.
+        let stale_tool_id = "legacy-stale-tool-row";
+        let stale_approval_id = "legacy-stale-approval-row";
+        database
+            .with_connection(|connection| {
+                let now = now_ms();
+                connection.execute(
+                    "INSERT INTO tool_calls(
+                        id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
+                        status, execution_location, requires_approval, started_at, updated_at
+                     ) VALUES (?1, 'legacy-stale-write', ?2, ?3, 'write_file', ?4,
+                               'pending', 'host', 1, ?5, ?5)",
+                    params![
+                        stale_tool_id,
+                        cancelled.run.id,
+                        conversation.id,
+                        serde_json::to_string(&json!({ "path": "stale.txt" })).unwrap(),
+                        now,
+                    ],
+                )?;
+                connection.execute(
+                    "INSERT INTO approvals(
+                        id, tool_call_id, status, requested_action, request_json, requested_at
+                     ) VALUES (?1, ?2, 'pending', 'legacy stale', '{}', ?3)",
+                    params![stale_approval_id, stale_tool_id, now],
+                )?;
+                Ok(())
+            })
+            .expect("simulate pre-fix stale approval by controlled raw fixture");
+        let restarted = database
+            .create_run(&conversation.id, "new run", None)
+            .expect("new run expires stale approval");
+        let detail = database
+            .load_conversation(&conversation.id)
+            .expect("load approval audit");
+        assert_eq!(
+            detail
+                .approvals
+                .iter()
+                .find(|approval| approval.id == crashed_approval.id)
+                .unwrap()
+                .status,
+            "expired"
+        );
+        assert_eq!(
+            detail
+                .approvals
+                .iter()
+                .find(|approval| approval.id == cancelled_approval.id)
+                .unwrap()
+                .status,
+            "cancelled"
+        );
+        assert_eq!(
+            detail
+                .approvals
+                .iter()
+                .find(|approval| approval.id == stale_approval_id)
+                .unwrap()
+                .status,
+            "expired"
+        );
+
+        database
+            .apply_runtime_event(
+                &restarted.run.id,
+                1,
+                &json!({ "type": "run.started", "model": "test" }),
+            )
+            .expect("start restart-repair run");
+        let restart_tool = database
+            .create_host_tool_call(
+                &restarted.run.id,
+                "restart-write",
+                "write_file",
+                &json!({ "path": "restart.txt" }),
+                "pending",
+                true,
+            )
+            .expect("create restart tool");
+        let restart_approval = database
+            .create_approval(&restart_tool.id, "restart approval", &json!({}))
+            .expect("create restart approval");
+        database
+            .repair_interrupted_runs()
+            .expect("repair startup state");
+        assert!(database
+            .resolve_approval(
+                &restart_approval.id,
+                crate::database::ApprovalDecision::AllowConversation,
+            )
+            .expect("reject late restart approval")
+            .is_none());
+        assert!(!database
+            .conversation_tool_permission_granted(&conversation.id, "write_file")
+            .expect("terminal approvals never grant permission"));
 
         drop(database);
         let _ = std::fs::remove_file(path);
@@ -8744,7 +12046,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_statistics_counts_latest_usage_once_per_run() {
+    fn cumulative_usage_is_strict_monotonic_atomic_and_counted_once_per_run() {
         let (database, path) = test_database();
         let conversation = database
             .create_conversation(DEFAULT_AGENT_ID, None, None, None)
@@ -8752,23 +12054,241 @@ mod tests {
         let started = database
             .create_run(&conversation.id, "test", Some("model"))
             .expect("start run");
-        for (seq, total) in [(1, 12), (2, 25)] {
+        database
+            .apply_runtime_event(&started.run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        for (seq, usage) in [
+            (
+                2,
+                json!({"type":"usage.updated","inputTokens":10,"outputTokens":15,"cacheReadTokens":8,"cacheWriteTokens":2,"totalTokens":35}),
+            ),
+            (
+                3,
+                json!({"type":"usage.updated","inputTokens":12,"outputTokens":20,"cacheReadTokens":8,"cacheWriteTokens":2,"totalTokens":42}),
+            ),
+        ] {
             database
-                .apply_runtime_event(
-                    &started.run.id,
-                    seq,
-                    &json!({"type":"usage.updated","inputTokens":10,"outputTokens":15,"cacheReadTokens":8,"cacheWriteTokens":2,"totalTokens":total}),
-                )
+                .apply_runtime_event(&started.run.id, seq, &usage)
                 .expect("append usage event");
+        }
+        assert!(!database
+            .apply_runtime_event(
+                &started.run.id,
+                3,
+                &json!({"type":"usage.updated","inputTokens":12,"outputTokens":20,"cacheReadTokens":8,"cacheWriteTokens":2,"totalTokens":42}),
+            )
+            .expect("same sequence replay is ignored"));
+        for invalid in [
+            json!({"type":"usage.updated","inputTokens":11,"outputTokens":20,"cacheReadTokens":8,"cacheWriteTokens":2,"totalTokens":41}),
+            json!({"type":"usage.updated","inputTokens":12,"outputTokens":-1,"cacheReadTokens":8,"cacheWriteTokens":2,"totalTokens":42}),
+            json!({"type":"usage.updated","inputTokens":12,"outputTokens":20,"cacheReadTokens":8,"cacheWriteTokens":2,"totalTokens":41}),
+            json!({"type":"usage.updated","inputTokens":12,"outputTokens":20,"cacheReadTokens":8,"cacheWriteTokens":2,"totalTokens":42,"unexpected":true}),
+            json!({"type":"usage.updated","inputTokens":1_000_000_000_001_i64,"outputTokens":20,"cacheReadTokens":8,"cacheWriteTokens":2,"totalTokens":1_000_000_000_031_i64}),
+        ] {
+            assert!(database
+                .apply_runtime_event(&started.run.id, 4, &invalid)
+                .is_err());
         }
         let statistics = database.usage_statistics().expect("usage statistics");
         assert_eq!(statistics.conversation_count, 1);
-        assert_eq!(statistics.input_tokens, 10);
-        assert_eq!(statistics.output_tokens, 15);
+        assert_eq!(statistics.input_tokens, 12);
+        assert_eq!(statistics.output_tokens, 20);
         assert_eq!(statistics.cache_read_tokens, 8);
         assert_eq!(statistics.cache_write_tokens, 2);
-        assert_eq!(statistics.total_tokens, 35);
-        assert_eq!(statistics.agents[0].total_tokens, 35);
+        assert_eq!(statistics.total_tokens, 42);
+        assert_eq!(statistics.agents[0].total_tokens, 42);
+        let (last_seq, usage_events): (i64, i64) = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT last_seq,
+                            (SELECT COUNT(*) FROM run_events
+                             WHERE run_id = runs.id AND event_type = 'usage.updated')
+                     FROM runs WHERE id = ?1",
+                    [started.run.id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!((last_seq, usage_events), (3, 2));
+
+        let first_usage_at = now_ms().saturating_sub(2 * 86_400_000);
+        let second_usage_at = now_ms().saturating_sub(86_400_000);
+        let (first_day, second_day): (String, String) = database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE run_events SET created_at = CASE seq
+                       WHEN 2 THEN ?2 WHEN 3 THEN ?3 ELSE created_at END
+                     WHERE run_id = ?1 AND event_type = 'usage.updated'",
+                    params![started.run.id, first_usage_at, second_usage_at],
+                )?;
+                connection.query_row(
+                    "SELECT date(?1 / 1000, 'unixepoch', 'localtime'),
+                            date(?2 / 1000, 'unixepoch', 'localtime')",
+                    params![first_usage_at, second_usage_at],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .unwrap();
+        assert_ne!(first_day, second_day);
+        let daily = database.usage_statistics().expect("daily usage deltas");
+        assert_eq!(daily.total_tokens, 42, "global total stays latest-per-Run");
+        assert_eq!(
+            daily
+                .days
+                .iter()
+                .find(|day| day.date == first_day)
+                .unwrap()
+                .total_tokens,
+            35,
+            "the first cumulative amount belongs to its event day"
+        );
+        assert_eq!(
+            daily
+                .days
+                .iter()
+                .find(|day| day.date == second_day)
+                .unwrap()
+                .total_tokens,
+            7,
+            "only the cumulative delta belongs to the later event day"
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn daily_usage_falls_back_to_latest_event_for_legacy_non_cumulative_runs() {
+        let (database, path) = test_database();
+        let legacy_conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .unwrap();
+        let legacy = database
+            .create_run(&legacy_conversation.id, "legacy usage", None)
+            .unwrap()
+            .run;
+        let cumulative_conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .unwrap();
+        let cumulative = database
+            .create_run(&cumulative_conversation.id, "cumulative usage", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&cumulative.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &cumulative.id,
+                2,
+                &json!({
+                    "type":"usage.updated","inputTokens":30,"outputTokens":10,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":40
+                }),
+            )
+            .unwrap();
+        database
+            .apply_runtime_event(
+                &cumulative.id,
+                3,
+                &json!({
+                    "type":"usage.updated","inputTokens":45,"outputTokens":15,
+                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":60
+                }),
+            )
+            .unwrap();
+
+        let current = now_ms();
+        let legacy_first_at = current.saturating_sub(4 * 86_400_000);
+        let legacy_last_at = current.saturating_sub(3 * 86_400_000);
+        let cumulative_first_at = current.saturating_sub(2 * 86_400_000);
+        let cumulative_last_at = current.saturating_sub(86_400_000);
+        let dates: Vec<String> = database
+            .with_connection(|connection| {
+                for (seq, created_at, payload) in [
+                    (
+                        1_i64,
+                        legacy_first_at,
+                        json!({
+                            "type":"usage.updated","inputTokens":80,"outputTokens":20,
+                            "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":100
+                        }),
+                    ),
+                    (
+                        2_i64,
+                        legacy_last_at,
+                        json!({
+                            "type":"usage.updated","inputTokens":40,"outputTokens":10,
+                            "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":50
+                        }),
+                    ),
+                ] {
+                    connection.execute(
+                        "INSERT INTO run_events(
+                           id, run_id, seq, event_type, event_json, created_at
+                         ) VALUES (?1, ?2, ?3, 'usage.updated', ?4, ?5)",
+                        params![
+                            Uuid::new_v4().to_string(),
+                            legacy.id,
+                            seq,
+                            payload.to_string(),
+                            created_at
+                        ],
+                    )?;
+                }
+                connection.execute("UPDATE runs SET last_seq = 2 WHERE id = ?1", [&legacy.id])?;
+                connection.execute(
+                    "UPDATE run_events SET created_at = CASE seq
+                       WHEN 2 THEN ?2 WHEN 3 THEN ?3 ELSE created_at END
+                     WHERE run_id = ?1 AND event_type = 'usage.updated'",
+                    params![cumulative.id, cumulative_first_at, cumulative_last_at],
+                )?;
+                [
+                    legacy_first_at,
+                    legacy_last_at,
+                    cumulative_first_at,
+                    cumulative_last_at,
+                ]
+                .into_iter()
+                .map(|at| {
+                    connection.query_row(
+                        "SELECT date(?1 / 1000, 'unixepoch', 'localtime')",
+                        [at],
+                        |row| row.get(0),
+                    )
+                })
+                .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap();
+        assert_eq!(
+            dates.iter().collect::<std::collections::HashSet<_>>().len(),
+            4
+        );
+
+        let statistics = database.usage_statistics().unwrap();
+        let tokens_for = |date: &str| {
+            statistics
+                .days
+                .iter()
+                .find(|day| day.date == date)
+                .unwrap()
+                .total_tokens
+        };
+        assert_eq!(tokens_for(&dates[0]), 0);
+        assert_eq!(tokens_for(&dates[1]), 50);
+        assert_eq!(tokens_for(&dates[2]), 40);
+        assert_eq!(tokens_for(&dates[3]), 20);
+        assert_eq!(statistics.total_tokens, 110);
+        assert_eq!(statistics.agents[0].total_tokens, 110);
+        assert_eq!(
+            statistics
+                .days
+                .iter()
+                .map(|day| day.total_tokens)
+                .sum::<i64>(),
+            statistics.total_tokens,
+            "mixed legacy and cumulative Runs must keep daily and global totals equal"
+        );
 
         drop(database);
         let _ = std::fs::remove_file(path);

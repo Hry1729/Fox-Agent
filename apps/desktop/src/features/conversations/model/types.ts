@@ -261,6 +261,12 @@ export interface ProjectFilePreview {
   truncated: boolean
 }
 
+export interface ProjectFileActionResponse {
+  action: 'inspect' | 'open' | 'open_with' | 'reveal' | 'copy_path'
+  completed: boolean
+  applications: ArtifactApplication[]
+}
+
 export interface ConversationSummary {
   id: string
   agentId: string
@@ -409,7 +415,7 @@ export interface ChildRunRecord {
   teamRunId: string | null
   teamMemberId: string | null
   allowedTools: string[] | null
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  status: 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
   depth: number
   budget: ChildRunBudget
   resultText: string | null
@@ -519,6 +525,23 @@ export interface ToolCallRecord {
   updatedAt: number
 }
 
+export interface ApprovalRequest {
+  tool?: string
+  title?: string
+  target?: string
+  summary?: string
+  diff?: string | null
+  command?: string | null
+  cwd?: string | null
+  /** Untrusted wire value. Parse through the approval decision policy before use. */
+  category?: unknown
+  /** Untrusted wire value. Parse through the approval decision policy before use. */
+  availableDecisions?: unknown
+  /** Tool-specific, untrusted approval context. */
+  arguments?: unknown
+  [key: string]: unknown
+}
+
 export interface ApprovalRecord {
   id: string
   toolCallId: string
@@ -527,16 +550,7 @@ export interface ApprovalRecord {
   toolName: string
   status: 'pending' | 'approved' | 'denied' | 'cancelled' | 'expired'
   requestedAction: string
-  request: {
-    tool?: string
-    title?: string
-    target?: string
-    summary?: string
-    diff?: string | null
-    command?: string | null
-    cwd?: string | null
-    [key: string]: unknown
-  }
+  request: ApprovalRequest
   decision: unknown | null
   requestedAt: number
   resolvedAt: number | null
@@ -830,6 +844,57 @@ export interface ModelProviderRecord {
   models: ProviderModelRecord[]
   createdAt: number
   updatedAt: number
+}
+
+export type ArtifactPreviewKind = 'text' | 'markdown' | 'html' | 'image' | 'pdf' | 'unknown'
+
+/** Host-validated artifact metadata. The renderer intentionally receives no storage path. */
+export interface ArtifactGatewayArtifact {
+  id: string
+  conversationId: string
+  runId: string | null
+  displayName: string
+  artifactType: string
+  mediaType: string | null
+  byteSize: number
+  sha256: string | null
+  status: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ArtifactCapabilities {
+  preview: boolean
+  open: boolean
+  reveal: boolean
+  copyPath: boolean
+  openWith: boolean
+}
+
+export interface ArtifactApplication {
+  id: string
+  label: string
+}
+
+export interface ArtifactPreview {
+  kind: ArtifactPreviewKind
+  available: boolean
+  content: string | null
+  truncated: boolean
+  byteSize: number
+  reason: string | null
+}
+
+export interface ArtifactInspectResponse {
+  artifact: ArtifactGatewayArtifact
+  capabilities: ArtifactCapabilities
+  applications: ArtifactApplication[]
+  preview: ArtifactPreview
+}
+
+export interface ArtifactActionResponse extends ArtifactInspectResponse {
+  action: 'preview' | 'open' | 'open_with' | 'reveal' | 'copy_path'
+  completed: boolean
 }
 
 export type KnowledgeReference =

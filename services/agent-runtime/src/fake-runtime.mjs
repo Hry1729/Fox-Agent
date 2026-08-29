@@ -9,10 +9,18 @@ import {
 import { createCapabilityManifest, RUNTIME_TOOL_CATALOG } from './runtime-contract.mjs'
 import { runOfflineEvals } from './offline-evaluator.mjs'
 import { createWorkEvent } from './work-events.mjs'
+import {
+  executionProfileAllowsTool,
+  executionProfileCatalogTools,
+  executionProfileSnapshot,
+  resolveExecutionProfile,
+} from './execution-profile.mjs'
+import { continuationDecisionContract } from './continuation-decision.mjs'
 
 const sessions = new Map()
 const activeRuns = new Map()
 const pendingHostRequests = new Map()
+let executionProfile = resolveExecutionProfile('legacy')
 
 function write(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`)
@@ -64,11 +72,22 @@ function fakeAnswer(text) {
 }
 
 async function streamPrompt(request) {
+  const activeExecutionProfile = executionProfile
+  const activeExecutionProfileSnapshot = executionProfileSnapshot(activeExecutionProfile)
   const controller = { cancelled: false }
   activeRuns.set(request.runId, controller)
 
   let seq = 1
-  emitRuntimeEvent(request, seq++, 'run.started', { model: request.payload?.model ?? 'fake-model' })
+  emitRuntimeEvent(request, seq++, 'run.started', {
+    model: request.payload?.model ?? 'fake-model',
+    executionProfileId: activeExecutionProfile.id,
+  })
+  emitRuntimeEvent(request, seq++, 'run.request_snapshot', {
+    schemaVersion: 1,
+    executionProfile: activeExecutionProfileSnapshot,
+    continuationDecisionContract: continuationDecisionContract(activeExecutionProfile),
+    toolNames: executionProfileCatalogTools(RUNTIME_TOOL_CATALOG, activeExecutionProfile).map(({ name }) => name),
+  })
   emitRuntimeEvent(request, seq++, 'message.started', { role: 'assistant', kind: 'text' })
 
   if (request.payload?.toolProbe) {
@@ -92,23 +111,31 @@ async function streamPrompt(request) {
       tool: probe.tool,
       input: probe.input,
     })
-    const response = await requestHost(request, 'tool.execute', {
-      toolCallId: 'fake-work-loop-probe',
-      tool: probe.tool,
-      input: probe.input,
-    })
-    if (response.payload?.isError || !response.payload?.result) {
-      throw new Error(response.payload?.error || 'fake work-loop probe failed')
-    }
-    emitRuntimeEvent(request, seq++, 'tool.completed', {
-      toolCallId: 'fake-work-loop-probe',
-      tool: probe.tool,
-      isError: false,
-    })
-    const details = response.payload.result.details ?? {}
-    const goal = details.goal ?? null
-    if (probe.tool === 'goal_propose' && goal?.id) {
-      const event = details.workEvents?.[0] ?? createWorkEvent({
+    if (!executionProfileAllowsTool(activeExecutionProfile, probe.tool)) {
+      emitRuntimeEvent(request, seq++, 'tool.completed', {
+        toolCallId: 'fake-work-loop-probe',
+        tool: probe.tool,
+        isError: true,
+        code: 'runtime.execution_profile.tool_blocked',
+      })
+    } else {
+      const response = await requestHost(request, 'tool.execute', {
+        toolCallId: 'fake-work-loop-probe',
+        tool: probe.tool,
+        input: probe.input,
+      })
+      if (response.payload?.isError || !response.payload?.result) {
+        throw new Error(response.payload?.error || 'fake work-loop probe failed')
+      }
+      emitRuntimeEvent(request, seq++, 'tool.completed', {
+        toolCallId: 'fake-work-loop-probe',
+        tool: probe.tool,
+        isError: false,
+      })
+      const details = response.payload.result.details ?? {}
+      const goal = details.goal ?? null
+      if (probe.tool === 'goal_propose' && goal?.id) {
+        const event = details.workEvents?.[0] ?? createWorkEvent({
           type: 'goal.proposed',
           conversationId: request.conversationId,
           goalId: goal.id,
@@ -116,7 +143,8 @@ async function streamPrompt(request) {
           sequence: probe.sequence ?? 1,
           data: { goal },
         })
-      emitRuntimeEvent(request, seq++, 'goal.proposed', event)
+        emitRuntimeEvent(request, seq++, 'goal.proposed', event)
+      }
     }
   }
 
@@ -131,12 +159,15 @@ async function streamPrompt(request) {
     emitRuntimeEvent(request, seq++, 'message.delta', { delta: `${word} ` })
   }
 
+  const inputTokens = Math.max(1, Math.ceil((request.payload?.text?.length ?? 0) / 4))
+  const outputTokens = words.length * 2
   emitRuntimeEvent(request, seq++, 'message.completed')
   emitRuntimeEvent(request, seq++, 'usage.updated', {
-    inputTokens: Math.max(1, Math.ceil((request.payload?.text?.length ?? 0) / 4)),
-    outputTokens: words.length * 2,
+    inputTokens,
+    outputTokens,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
+    totalTokens: inputTokens + outputTokens,
   })
   emitRuntimeEvent(request, seq++, 'run.completed')
   activeRuns.delete(request.runId)
@@ -157,23 +188,38 @@ async function handleRequest(request) {
       break
     case 'initialize':
       {
-      const workLoop = request.payload?.workLoop === true
-      respond(request, 'ready', {
-        protocol: PROTOCOL_NAME,
-        protocolVersion: PROTOCOL_VERSION,
-        runtime: 'fox-fake-runtime',
-        runtimeVersion: '0.1.0',
-        capabilities: createCapabilityManifest({
-          reasoning: false,
-          toolApproval: false,
-          contextCompaction: false,
-          workLoop,
-          tools: workLoop
-            ? RUNTIME_TOOL_CATALOG.filter(({ category }) => category === 'work').map((tool) => ({ ...tool }))
-            : [],
-        }),
-      })
-      break
+        const workLoop = request.payload?.workLoop === true
+        try {
+          executionProfile = resolveExecutionProfile({
+            id: request.payload?.executionProfile ?? request.payload?.execution_profile ?? 'legacy',
+            strategy: request.payload?.executionStrategy ?? request.payload?.execution_strategy,
+          })
+        } catch (error) {
+          respond(request, 'request_failed', {
+            code: 'runtime.execution_profile.invalid',
+            message: error instanceof Error ? error.message : String(error),
+          })
+          break
+        }
+        const tools = workLoop
+          ? RUNTIME_TOOL_CATALOG.filter(({ category }) => category === 'work')
+          : []
+        respond(request, 'ready', {
+          protocol: PROTOCOL_NAME,
+          protocolVersion: PROTOCOL_VERSION,
+          runtime: 'fox-fake-runtime',
+          runtimeVersion: '0.1.0',
+          capabilities: createCapabilityManifest({
+            reasoning: false,
+            toolApproval: false,
+            contextCompaction: false,
+            workLoop,
+            tools: executionProfileCatalogTools(tools, executionProfile),
+          }),
+          executionProfile: executionProfileSnapshot(executionProfile),
+          continuationDecisionContract: continuationDecisionContract(executionProfile),
+        })
+        break
       }
     case 'create_session': {
       const runtimeSessionId = request.runtimeSessionId || `fake-session-${request.conversationId}`

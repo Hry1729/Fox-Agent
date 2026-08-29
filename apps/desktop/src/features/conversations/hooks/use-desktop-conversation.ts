@@ -51,10 +51,10 @@ interface DesktopConversationState {
   streamingText: string
   error: string | null
   errorDetails: DesktopErrorDetails | null
-  send: (text: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>) => Promise<boolean>
+  send: (text: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => Promise<boolean>
   rerunFromMessage: (messageId: string, text: string, model?: string) => Promise<boolean>
   resumeQuestion: (parentRunId: string, text: string, answers: Record<string, string | string[]>) => Promise<boolean>
-  cancel: () => Promise<void>
+  cancel: () => Promise<boolean>
   resolveApproval: (approvalId: string, decision: ApprovalDecision | boolean) => Promise<boolean>
   resolveWorkModeConfirmation: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>
   resolvePlanRevision: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>
@@ -813,8 +813,9 @@ export function useDesktopConversation(): DesktopConversationState {
     }
   }, [activeConversationId, activeRunId, activeRunStatus, detail?.lastRun?.errorCode, refreshList])
 
-  const send = useCallback(async (text: string, model?: string, files: Array<{ filename?: string; mediaType?: string; url?: string }> = []) => {
+  const send = useCallback(async (text: string, model?: string, files: Array<{ filename?: string; mediaType?: string; url?: string }> = [], runtimeText?: string) => {
     const cleanText = text.trim()
+    const cleanRuntimeText = runtimeText?.trim() || cleanText
     if (!cleanText) return false
     setError(null)
     setErrorDetails(null)
@@ -903,7 +904,7 @@ export function useDesktopConversation(): DesktopConversationState {
       const started = await desktopClient.startRun({
         conversationId: activeConversation.conversation.id,
         text: cleanText,
-        runtimeText: `${cleanText}${attachmentNote}${extractedContext}`,
+        runtimeText: `${cleanRuntimeText}${attachmentNote}${extractedContext}`,
         model,
         attachmentIds: attachments.map((item) => item.id),
       })
@@ -956,13 +957,11 @@ export function useDesktopConversation(): DesktopConversationState {
     if (!target) return false
     setError(null)
     const pendingRun = optimisticRun(active.conversation.id, model)
-    const pendingMessageId = optimisticId('pending-message')
     const affectedRunIds = new Set(active.messages
       .filter((message) => message.ordinal >= target.ordinal && message.runId)
       .map((message) => message.runId as string))
     const optimisticMessage: ConversationMessage = {
       ...target,
-      id: pendingMessageId,
       runId: pendingRun.id,
       content: cleanText,
       status: 'sending',
@@ -981,9 +980,6 @@ export function useDesktopConversation(): DesktopConversationState {
           toolCalls: current.toolCalls.filter((toolCall) => !affectedRunIds.has(toolCall.runId)),
           approvals: current.approvals.filter((approval) => !affectedRunIds.has(approval.runId)),
           artifacts: current.artifacts.filter((artifact) => !artifact.runId || !affectedRunIds.has(artifact.runId)),
-          attachments: current.attachments.map((attachment) => attachment.messageId === messageId
-            ? { ...attachment, messageId: pendingMessageId }
-            : attachment),
           lastRun: pendingRun,
         }
       })
@@ -1091,10 +1087,42 @@ export function useDesktopConversation(): DesktopConversationState {
   }, [detail, openConversation, refreshList])
 
   const cancel = useCallback(async () => {
-    const runId = detail?.lastRun?.id
-    if (!runId) return
-    await desktopClient.cancelRun(runId)
-  }, [detail?.lastRun?.id])
+    const conversationId = activeConversationIdRef.current ?? detail?.conversation.id
+    const runId = activeRunIdRef.current ?? detail?.lastRun?.id
+    if (!conversationId || !runId || runId.startsWith('pending-run-')) return true
+    setError(null)
+    setErrorDetails(null)
+    try {
+      await desktopClient.cancelRun(runId)
+      const deadline = Date.now() + 8_000
+      let persisted = await desktopClient.loadConversation(conversationId)
+      while (persisted.lastRun?.id === runId && runRecordIsActive(persisted.lastRun) && Date.now() < deadline) {
+        await new Promise((resolve) => window.setTimeout(resolve, 100))
+        persisted = await desktopClient.loadConversation(conversationId)
+      }
+      if (persisted.lastRun?.id === runId && runRecordIsActive(persisted.lastRun)) {
+        const details = {
+          code: 'runtime.cancel_timeout',
+          message: '停止任务仍在处理中，请稍候再编辑或重新发送',
+          retryable: true,
+        }
+        setDetail(persisted)
+        setError(details.message)
+        setErrorDetails(details)
+        return false
+      }
+      activeRunIdRef.current = null
+      uiDispatchStartedRef.current.delete(conversationId)
+      setDetail(persisted)
+      void refreshList()
+      return true
+    } catch (cause) {
+      const details = desktopErrorDetails(cause)
+      setError(details.message)
+      setErrorDetails(details)
+      return false
+    }
+  }, [detail?.conversation.id, detail?.lastRun?.id, refreshList])
 
   const resolveApproval = useCallback(async (approvalId: string, requestedDecision: ApprovalDecision | boolean) => {
     const decision: ApprovalDecision = typeof requestedDecision === 'boolean'

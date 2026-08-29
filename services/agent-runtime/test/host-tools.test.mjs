@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { Check } from 'typebox/value'
 import {
   createHostTools,
   createKnowledgeTools,
@@ -10,6 +11,7 @@ import {
   KNOWLEDGE_TOOL_NAMES,
   runtimeToolNames,
 } from '../src/runtime-contract.mjs'
+import { VALIDATION_CHECK_TYPES } from '../src/validation-policy.mjs'
 
 function toolByName(tools, name) {
   const tool = tools.find((entry) => entry.name === name)
@@ -125,6 +127,514 @@ test('forwards expanded Host capability calls without transforming inputs', asyn
     type: 'tool.execute',
     payload: { toolCallId: `call-${name}`, tool: name, input },
   })))
+})
+
+test('publishes backward-compatible serial and strict bounded Graph PlanRevision schemas', () => {
+  const schema = toolByName(createHostTools(() => {}), 'plan_revision_create').parameters
+  assert.equal(schema.additionalProperties, false)
+  assert.equal(schema.properties.tasks.anyOf.length, 2)
+
+  const serial = {
+    goalId: 'goal-1',
+    title: 'Serial plan',
+    summary: 'Keep the existing ordered plan shape.',
+    tasks: [{ title: 'Implement', detail: null, ordinal: 0 }],
+  }
+  const graph = {
+    goalId: 'goal-1',
+    title: 'Read-only Graph plan',
+    summary: 'One root and two bounded readers.',
+    tasks: [
+      { nodeKey: 'root', title: 'Root', ordinal: 0, acceptanceCriteria: ['root report is non-empty'] },
+      { nodeKey: 'left', title: 'Left', ordinal: 1, dependsOn: ['root'], acceptanceCriteria: ['left report inspected'] },
+      { nodeKey: 'right', title: 'Right', ordinal: 2, dependsOn: ['root'], acceptanceCriteria: ['right report inspected'] },
+    ],
+  }
+  assert.equal(Check(schema, serial), true)
+  assert.equal(Check(schema, graph), true)
+  assert.equal(Check(schema, { ...serial, tasks: [{ title: 'x'.repeat(500), ordinal: 0 }] }), true)
+  assert.equal(Check(schema, { ...serial, tasks: [{ title: 'x'.repeat(501), ordinal: 0 }] }), false)
+  assert.equal(Check(schema, { ...graph, tasks: [{ ...graph.tasks[0], title: 'x'.repeat(300) }] }), true)
+  assert.equal(Check(schema, { ...graph, tasks: [{ ...graph.tasks[0], title: 'x'.repeat(301) }] }), false)
+
+  const invalid = [
+    { ...serial, tasks: [{ title: 'Implement', ordinal: 0, status: 'completed' }] },
+    { ...graph, tasks: graph.tasks.map(({ acceptanceCriteria: _criteria, ...task }) => task) },
+    { ...graph, tasks: [...graph.tasks, { nodeKey: 'fourth', title: 'Fourth', ordinal: 3, acceptanceCriteria: ['fourth'] }] },
+    { ...graph, tasks: [{ ...graph.tasks[0], nodeKey: 'bad key' }] },
+    { ...graph, tasks: [{ ...graph.tasks[0], acceptanceCriteria: [] }] },
+    { ...graph, tasks: [{ ...graph.tasks[0], acceptanceCriteria: Array.from({ length: 9 }, (_, index) => `criterion-${index}`) }] },
+    { ...graph, tasks: [{ ...graph.tasks[0], acceptanceCriteria: ['duplicate', 'duplicate'] }] },
+    { ...graph, tasks: [{ ...graph.tasks[0], dependsOn: ['left', 'left'] }] },
+    { ...graph, tasks: [{ ...graph.tasks[0], title: ' Root' }] },
+    { ...graph, tasks: [{ ...graph.tasks[0], acceptanceCriteria: ['\u00a0criterion'] }] },
+    { ...graph, runId: 'model-controlled' },
+  ]
+  for (const value of invalid) assert.equal(Check(schema, value), false, JSON.stringify(value))
+})
+
+test('publishes and forwards only bounded persistent read-only Graph inputs', async () => {
+  const requests = []
+  const requestHost = async (type, payload) => {
+    requests.push({ type, payload })
+    return { payload: { result: { activated: false, graph: null } } }
+  }
+  const tools = createHostTools(requestHost)
+  const activate = toolByName(tools, 'graph_readonly_activate')
+  const snapshot = toolByName(tools, 'graph_readonly_snapshot_get')
+  const start = toolByName(tools, 'graph_readonly_node_start')
+  const review = toolByName(tools, 'graph_readonly_node_review')
+  const finish = toolByName(tools, 'graph_readonly_node_finish')
+  const cancel = toolByName(tools, 'graph_readonly_node_cancel')
+  const accept = toolByName(tools, 'graph_readonly_accept')
+  const nodeStart = {
+    goalId: 'goal-1',
+    taskId: 'task-1',
+    expectedTaskVersion: 1,
+    attemptId: 'attempt-1',
+    workerAgentId: 'fox-general',
+    objective: 'Inspect the bounded node inputs.',
+    context: 'Read only the authorized project files.',
+    budget: {
+      maxDurationMs: 45000,
+      maxTotalTokens: 4096,
+      maxOutputTokens: 1024,
+      maxToolCalls: 6,
+    },
+  }
+  const nodeFinish = {
+    goalId: 'goal-1',
+    taskId: 'task-1',
+    attemptId: 'attempt-1',
+    expectedTaskVersion: 2,
+    expectedAttemptVersion: 1,
+    criterionEvidence: [
+      { criterion: 'The inspection is complete.', evidenceIds: ['evidence-1'] },
+    ],
+    summary: 'The parent Lead inspected and validated the delegated result.',
+  }
+  const nodeCancel = {
+    goalId: 'goal-1',
+    taskId: 'task-1',
+    attemptId: 'attempt-1',
+    expectedTaskVersion: 2,
+    expectedAttemptVersion: 1,
+    reason: 'The bounded inspection is no longer required.',
+  }
+  const graphAccept = {
+    goalId: 'goal-1',
+    expectedGoalVersion: 3,
+    summary: 'Every node is accepted under the current Plan with no open findings.',
+  }
+  assert.match(review.description, /running high-risk read-only Graph Attempt whose implementation Child completed/)
+  assert.doesNotMatch(review.description, /completed high-risk read-only Graph Attempt/)
+  assert.match(review.description, /later node finish must reuse this review request unchanged.*exact criterionEvidence and summary/)
+  assert.match(finish.description, /high-risk reviewed node.*passed review request unchanged.*exact criterionEvidence and summary/)
+
+  assert.equal(Check(activate.parameters, { planRevisionId: 'plan-1' }), true)
+  assert.equal(Check(activate.parameters, { planRevisionId: ' plan-1' }), false)
+  assert.equal(Check(activate.parameters, { planRevisionId: 'plan-1', nodes: [] }), false)
+  assert.equal(Check(snapshot.parameters, { goalId: 'goal-1' }), true)
+  assert.equal(Check(snapshot.parameters, { goalId: '' }), false)
+  assert.equal(Check(snapshot.parameters, { goalId: 'goal-1', start: true }), false)
+  assert.equal(Check(start.parameters, nodeStart), true)
+  assert.equal(Check(start.parameters, { ...nodeStart, allowedTools: ['write_file'] }), false)
+  assert.equal(Check(start.parameters, { ...nodeStart, executionProfile: 'legacy' }), false)
+  assert.equal(Check(start.parameters, { ...nodeStart, profile: 'durable_v2' }), false)
+  assert.equal(Check(start.parameters, { ...nodeStart, authority: 'host' }), false)
+  assert.equal(Check(start.parameters, { ...nodeStart, runId: 'model-controlled' }), false)
+  assert.equal(Check(start.parameters, { ...nodeStart, toolCallId: 'model-controlled' }), false)
+  assert.equal(Check(start.parameters, { ...nodeStart, expectedTaskVersion: 0 }), false)
+  assert.equal(Check(start.parameters, { ...nodeStart, context: ' context' }), false)
+  assert.equal(Check(start.parameters, {
+    ...nodeStart,
+    budget: { ...nodeStart.budget, maxDurationMs: 45001 },
+  }), false)
+  assert.equal(Check(start.parameters, {
+    ...nodeStart,
+    budget: { ...nodeStart.budget, maxToolCalls: 7 },
+  }), false)
+  assert.equal(Check(finish.parameters, nodeFinish), true)
+  assert.equal(Check(finish.parameters, { ...nodeFinish, runId: 'model-controlled' }), false)
+  assert.equal(Check(finish.parameters, { ...nodeFinish, childRunId: 'model-controlled' }), false)
+  assert.equal(Check(finish.parameters, { ...nodeFinish, validationPolicyId: 'model-controlled' }), false)
+  assert.equal(Check(finish.parameters, { ...nodeFinish, authority: 'host' }), false)
+  assert.equal(Check(finish.parameters, { ...nodeFinish, criterionEvidence: [] }), false)
+  assert.equal(Check(finish.parameters, {
+    ...nodeFinish,
+    criterionEvidence: [{ criterion: 'The inspection is complete.', evidenceIds: [] }],
+  }), false)
+  assert.equal(Check(finish.parameters, {
+    ...nodeFinish,
+    criterionEvidence: [{ criterion: 'The inspection is complete.', evidenceIds: ['same', 'same'] }],
+  }), false)
+  assert.deepEqual(review.parameters, finish.parameters)
+  assert.equal(Check(review.parameters, nodeFinish), true)
+  assert.equal(Check(review.parameters, { ...nodeFinish, reviewerRunId: 'model-controlled' }), false)
+  assert.equal(Check(review.parameters, { ...nodeFinish, reviewerKind: 'lead' }), false)
+  assert.equal(Check(review.parameters, { ...nodeFinish, reviewOutcome: 'pass' }), false)
+  assert.equal(Check(review.parameters, { ...nodeFinish, criterionEvidence: [] }), false)
+  assert.equal(Check(cancel.parameters, nodeCancel), true)
+  assert.equal(Check(cancel.parameters, { ...nodeCancel, childRunId: 'model-controlled' }), false)
+  assert.equal(Check(cancel.parameters, { ...nodeCancel, parentRunId: 'model-controlled' }), false)
+  assert.equal(Check(cancel.parameters, { ...nodeCancel, status: 'cancelled' }), false)
+  assert.equal(Check(cancel.parameters, { ...nodeCancel, authority: 'host' }), false)
+  assert.equal(Check(cancel.parameters, { ...nodeCancel, reason: ' reason' }), false)
+  assert.equal(Check(cancel.parameters, { ...nodeCancel, expectedAttemptVersion: 0 }), false)
+  assert.equal(Check(accept.parameters, graphAccept), true)
+  assert.deepEqual(Object.keys(accept.parameters.properties), ['goalId', 'expectedGoalVersion', 'summary'])
+  assert.deepEqual(accept.parameters.required, ['goalId', 'expectedGoalVersion', 'summary'])
+  assert.equal(accept.parameters.additionalProperties, false)
+  assert.equal(Check(accept.parameters, { ...graphAccept, planRevisionId: 'model-controlled' }), false)
+  assert.equal(Check(accept.parameters, { ...graphAccept, reviewerRunId: 'model-controlled' }), false)
+  assert.equal(Check(accept.parameters, { ...graphAccept, expectedGoalVersion: 0 }), false)
+  assert.equal(Check(accept.parameters, { ...graphAccept, summary: ' summary' }), false)
+
+  await activate.execute('activate-call', { planRevisionId: 'plan-1' })
+  await snapshot.execute('snapshot-call', { goalId: 'goal-1' })
+  await start.execute('node-start-call', nodeStart)
+  await review.execute('node-review-call', nodeFinish)
+  await finish.execute('node-finish-call', nodeFinish)
+  await cancel.execute('node-cancel-call', nodeCancel)
+  await accept.execute('graph-accept-call', graphAccept)
+  assert.deepEqual(requests, [
+    {
+      type: 'tool.execute',
+      payload: {
+        toolCallId: 'activate-call',
+        tool: 'graph_readonly_activate',
+        input: { planRevisionId: 'plan-1' },
+      },
+    },
+    {
+      type: 'tool.execute',
+      payload: {
+        toolCallId: 'snapshot-call',
+        tool: 'graph_readonly_snapshot_get',
+        input: { goalId: 'goal-1' },
+      },
+    },
+    {
+      type: 'tool.execute',
+      payload: {
+        toolCallId: 'node-start-call',
+        tool: 'graph_readonly_node_start',
+        input: nodeStart,
+      },
+    },
+    {
+      type: 'tool.execute',
+      payload: {
+        toolCallId: 'node-review-call',
+        tool: 'graph_readonly_node_review',
+        input: nodeFinish,
+      },
+    },
+    {
+      type: 'tool.execute',
+      payload: {
+        toolCallId: 'node-finish-call',
+        tool: 'graph_readonly_node_finish',
+        input: nodeFinish,
+      },
+    },
+    {
+      type: 'tool.execute',
+      payload: {
+        toolCallId: 'node-cancel-call',
+        tool: 'graph_readonly_node_cancel',
+        input: nodeCancel,
+      },
+    },
+    {
+      type: 'tool.execute',
+      payload: {
+        toolCallId: 'graph-accept-call',
+        tool: 'graph_readonly_accept',
+        input: graphAccept,
+      },
+    },
+  ])
+})
+
+test('publishes fail-closed schemas for task attempts, repair, risk, and validation checks', () => {
+  const tools = createHostTools(() => {})
+  const attemptStart = toolByName(tools, 'task_attempt_start').parameters
+  const repairStart = toolByName(tools, 'task_repair_start').parameters
+  const repairEscalateStart = toolByName(tools, 'task_repair_escalate_start').parameters
+  const attemptFinish = toolByName(tools, 'task_attempt_finish').parameters
+  const taskCreateMany = toolByName(tools, 'task_create_many').parameters
+  const evidenceAdd = toolByName(tools, 'task_evidence_add').parameters
+
+  assert.deepEqual(
+    runtimeToolNames().filter((name) => [
+      'task_attempt_start',
+      'task_repair_start',
+      'task_repair_escalate_start',
+      'task_attempt_finish',
+    ].includes(name)),
+    ['task_attempt_start', 'task_repair_start', 'task_repair_escalate_start', 'task_attempt_finish'],
+  )
+  assert.equal(attemptStart.additionalProperties, false)
+  assert.equal(attemptStart.properties.taskId.maxLength, 200)
+  assert.equal(attemptStart.properties.attemptId.maxLength, 200)
+  assert.equal(attemptStart.properties.expectedVersion.minimum, 1)
+  assert.equal(Check(attemptStart, {
+    taskId: 'task-1', attemptId: 'attempt-1', expectedVersion: 1,
+  }), true)
+  assert.equal(Check(attemptStart, {
+    taskId: 'task-1', attemptId: 'attempt-1', expectedVersion: 1, runId: 'model-run',
+  }), false)
+  assert.equal(Check(attemptStart, {
+    taskId: 'x'.repeat(201), attemptId: 'attempt-1', expectedVersion: 1,
+  }), false)
+
+  assert.equal(repairStart.additionalProperties, false)
+  assert.equal(repairStart.properties.rootCause.minLength, 1)
+  assert.equal(repairStart.properties.rootCause.maxLength, 4000)
+  assert.equal(repairStart.properties.findingIds.minItems, 1)
+  assert.equal(repairStart.properties.findingIds.maxItems, 32)
+  assert.equal(repairStart.properties.findingIds.uniqueItems, true)
+  assert.equal(repairStart.properties.findingIds.items.minLength, 1)
+  assert.equal(repairStart.properties.findingIds.items.maxLength, 200)
+  const validRepair = {
+    taskId: 'task-1',
+    attemptId: 'repair-1',
+    expectedVersion: 2,
+    rootCause: 'Validation failed after an API change.',
+    findingIds: ['finding-1'],
+  }
+  assert.equal(Check(repairStart, validRepair), true)
+  for (const field of ['taskId', 'attemptId', 'rootCause']) {
+    assert.match(repairStart.properties[field].pattern, /\\s/)
+    for (const invalid of ['', '   ', ' leading', 'trailing ', '\u00a0unicode-leading', 'unicode-trailing\u2028', '\u0085rust-trim-leading', 'rust-trim-trailing\u0085']) {
+      assert.equal(Check(repairStart, { ...validRepair, [field]: invalid }), false, `${field}: ${JSON.stringify(invalid)}`)
+    }
+    for (const valid of ['internal space', 'internal\nline']) {
+      assert.equal(Check(repairStart, { ...validRepair, [field]: valid }), true, `${field}: ${JSON.stringify(valid)}`)
+    }
+  }
+  assert.match(repairStart.properties.findingIds.items.pattern, /\\s/)
+  assert.match(repairStart.properties.findingIds.items.pattern, /\\u0085/)
+  for (const invalid of ['', '   ', ' leading', 'trailing ', '\u00a0unicode-leading', 'unicode-trailing\u2028', '\u0085rust-trim-leading', 'rust-trim-trailing\u0085']) {
+    assert.equal(Check(repairStart, { ...validRepair, findingIds: [invalid] }), false, `findingIds: ${JSON.stringify(invalid)}`)
+  }
+  for (const valid of ['internal space', 'internal\nline']) {
+    assert.equal(Check(repairStart, { ...validRepair, findingIds: [valid] }), true, `findingIds: ${JSON.stringify(valid)}`)
+  }
+  assert.equal(Check(repairStart, {
+    taskId: 'task-1',
+    attemptId: 'repair-1',
+    expectedVersion: 2,
+    rootCause: 'duplicate findings',
+    findingIds: ['finding-1', 'finding-1'],
+  }), false)
+
+  assert.equal(repairEscalateStart.additionalProperties, false)
+  assert.deepEqual(Object.keys(repairEscalateStart.properties), [
+    'taskId',
+    'attemptId',
+    'expectedVersion',
+    'rootCause',
+    'findingIds',
+    'escalationReason',
+  ])
+  assert.deepEqual(repairEscalateStart.required, [
+    'taskId',
+    'attemptId',
+    'expectedVersion',
+    'rootCause',
+    'findingIds',
+    'escalationReason',
+  ])
+  assert.equal(repairEscalateStart.properties.taskId.minLength, 1)
+  assert.equal(repairEscalateStart.properties.taskId.maxLength, 200)
+  assert.equal(repairEscalateStart.properties.attemptId.minLength, 1)
+  assert.equal(repairEscalateStart.properties.attemptId.maxLength, 200)
+  assert.equal(repairEscalateStart.properties.expectedVersion.minimum, 1)
+  assert.equal(repairEscalateStart.properties.rootCause.minLength, 1)
+  assert.equal(repairEscalateStart.properties.rootCause.maxLength, 4000)
+  assert.equal(repairEscalateStart.properties.findingIds.minItems, 1)
+  assert.equal(repairEscalateStart.properties.findingIds.maxItems, 32)
+  assert.equal(repairEscalateStart.properties.findingIds.uniqueItems, true)
+  assert.equal(repairEscalateStart.properties.findingIds.items.minLength, 1)
+  assert.equal(repairEscalateStart.properties.findingIds.items.maxLength, 200)
+  assert.equal(repairEscalateStart.properties.escalationReason.minLength, 1)
+  assert.equal(repairEscalateStart.properties.escalationReason.maxLength, 2000)
+  const validEscalation = {
+    taskId: 'task-1',
+    attemptId: 'repair-human-1',
+    expectedVersion: 3,
+    rootCause: 'Automated repair attempts exhausted the frozen budget.',
+    findingIds: ['finding-1', 'finding-2'],
+    escalationReason: 'A human must authorize the next repair attempt.',
+  }
+  assert.equal(Check(repairEscalateStart, validEscalation), true)
+  for (const field of ['taskId', 'attemptId', 'rootCause', 'escalationReason']) {
+    assert.match(repairEscalateStart.properties[field].pattern, /\\s/)
+    for (const invalid of ['', '   ', ' leading', 'trailing ', '\u00a0unicode-leading', 'unicode-trailing\u2028', '\u0085rust-trim-leading', 'rust-trim-trailing\u0085']) {
+      assert.equal(Check(repairEscalateStart, { ...validEscalation, [field]: invalid }), false, `${field}: ${JSON.stringify(invalid)}`)
+    }
+    for (const valid of ['internal space', 'internal\nline']) {
+      assert.equal(Check(repairEscalateStart, { ...validEscalation, [field]: valid }), true, `${field}: ${JSON.stringify(valid)}`)
+    }
+  }
+  assert.match(repairEscalateStart.properties.findingIds.items.pattern, /\\s/)
+  assert.match(repairEscalateStart.properties.findingIds.items.pattern, /\\u0085/)
+  for (const invalid of ['', '   ', ' leading', 'trailing ', '\u00a0unicode-leading', 'unicode-trailing\u2028', '\u0085rust-trim-leading', 'rust-trim-trailing\u0085']) {
+    assert.equal(Check(repairEscalateStart, { ...validEscalation, findingIds: [invalid] }), false, `findingIds: ${JSON.stringify(invalid)}`)
+  }
+  for (const valid of ['internal space', 'internal\nline']) {
+    assert.equal(Check(repairEscalateStart, { ...validEscalation, findingIds: [valid] }), true, `findingIds: ${JSON.stringify(valid)}`)
+  }
+  const { escalationReason: _omittedEscalationReason, ...withoutEscalationReason } = validEscalation
+  assert.equal(Check(repairEscalateStart, withoutEscalationReason), false)
+  for (const forbiddenField of ['runId', 'conversationId', 'approval', 'policy', 'grant', 'count']) {
+    assert.equal(Check(repairEscalateStart, {
+      ...validEscalation,
+      [forbiddenField]: forbiddenField === 'count' ? 1 : 'model-controlled',
+    }), false, forbiddenField)
+  }
+  assert.equal(Check(repairEscalateStart, { ...validEscalation, expectedVersion: 0 }), false)
+  assert.equal(Check(repairEscalateStart, { ...validEscalation, findingIds: [] }), false)
+  assert.equal(Check(repairEscalateStart, { ...validEscalation, findingIds: ['finding-1', 'finding-1'] }), false)
+  assert.equal(Check(repairEscalateStart, { ...validEscalation, escalationReason: 'x'.repeat(2001) }), false)
+
+  assert.equal(attemptFinish.additionalProperties, false)
+  assert.equal(attemptFinish.properties.expectedAttemptVersion.minimum, 1)
+  assert.deepEqual(
+    attemptFinish.properties.status.anyOf.map(({ const: value }) => value),
+    ['succeeded', 'failed', 'blocked', 'cancelled'],
+  )
+  assert.equal(Check(attemptFinish, {
+    taskId: 'task-1',
+    attemptId: 'attempt-1',
+    expectedVersion: 3,
+    expectedAttemptVersion: 1,
+    status: 'succeeded',
+  }), true)
+  assert.equal(Check(attemptFinish, {
+    taskId: 'task-1',
+    attemptId: 'attempt-1',
+    expectedVersion: 3,
+    expectedAttemptVersion: 1,
+    status: 'succeeded',
+    failureReason: 'must not be present',
+  }), false)
+  assert.equal(Check(attemptFinish, {
+    taskId: 'task-1',
+    attemptId: 'attempt-1',
+    expectedVersion: 3,
+    expectedAttemptVersion: 1,
+    status: 'failed',
+  }), false)
+  assert.equal(Check(attemptFinish, {
+    taskId: 'task-1',
+    attemptId: 'attempt-1',
+    expectedVersion: 3,
+    expectedAttemptVersion: 1,
+    status: 'blocked',
+    failureReason: 'External dependency is unavailable.',
+  }), true)
+
+  const taskItem = taskCreateMany.properties.tasks.items
+  assert.equal(taskCreateMany.additionalProperties, false)
+  assert.equal(taskItem.additionalProperties, false)
+  assert.deepEqual(
+    taskItem.properties.riskLevel.anyOf.map(({ const: value }) => value),
+    ['low', 'standard', 'high', 'critical'],
+  )
+  assert.equal(Check(taskCreateMany, {
+    goalId: 'goal-1',
+    tasks: [{ title: 'Verify change', ordinal: 0, riskLevel: 'critical' }],
+  }), true)
+  assert.equal(Check(taskCreateMany, {
+    goalId: 'goal-1',
+    tasks: [{ title: 'Verify change', ordinal: 0, riskLevel: 'none' }],
+  }), false)
+
+  assert.equal(evidenceAdd.additionalProperties, false)
+  assert.deepEqual(
+    evidenceAdd.properties.validationCheckType.anyOf.map(({ const: value }) => value),
+    VALIDATION_CHECK_TYPES,
+  )
+  const validEvidence = {
+    taskId: 'task-1',
+    evidenceType: 'test_result',
+    refKind: 'tool_call',
+    refId: 'tool-1',
+    summary: 'Focused tests passed.',
+    validationCheckType: 'test',
+  }
+  assert.equal(Check(evidenceAdd, validEvidence), true)
+  assert.equal(Check(evidenceAdd, { ...validEvidence, validationCheckType: 'shell' }), false)
+  assert.equal(Check(evidenceAdd, { ...validEvidence, policy: 'model-policy' }), false)
+})
+
+test('forwards task attempt and validation inputs unchanged without authority fields', async () => {
+  const requests = []
+  const requestHost = async (type, payload) => {
+    requests.push({ type, payload })
+    return { payload: { result: { ok: true } } }
+  }
+  const tools = createHostTools(requestHost)
+  const cases = [
+    ['task_attempt_start', {
+      taskId: 'task-1', attemptId: 'attempt-1', expectedVersion: 2,
+    }],
+    ['task_repair_start', {
+      taskId: 'task-1',
+      attemptId: 'repair-1',
+      expectedVersion: 3,
+      rootCause: 'The first validation found a stale fixture.',
+      findingIds: ['finding-1', 'finding-2'],
+    }],
+    ['task_repair_escalate_start', {
+      taskId: 'task-1',
+      attemptId: 'repair-human-1',
+      expectedVersion: 4,
+      rootCause: 'Automated repairs cannot safely choose the external migration.',
+      findingIds: ['finding-3'],
+      escalationReason: 'A human must approve the migration-specific repair.',
+    }],
+    ['task_attempt_finish', {
+      taskId: 'task-1',
+      attemptId: 'repair-1',
+      expectedVersion: 4,
+      expectedAttemptVersion: 1,
+      status: 'failed',
+      failureReason: 'The repaired fixture still fails.',
+    }],
+    ['task_create_many', {
+      goalId: 'goal-1',
+      tasks: [{ title: 'Verify authorization', ordinal: 0, riskLevel: 'high' }],
+    }],
+    ['task_evidence_add', {
+      taskId: 'task-1',
+      evidenceType: 'test_result',
+      refKind: 'tool_call',
+      refId: 'tool-1',
+      summary: 'Authorization tests passed.',
+      validationCheckType: 'test',
+    }],
+  ]
+
+  for (const [name, input] of cases) {
+    await toolByName(tools, name).execute(`call-${name}`, input)
+  }
+
+  assert.deepEqual(requests, cases.map(([name, input]) => ({
+    type: 'tool.execute',
+    payload: { toolCallId: `call-${name}`, tool: name, input },
+  })))
+  for (const { payload } of requests) {
+    assert.equal('conversationId' in payload.input, false)
+    assert.equal('runId' in payload.input, false)
+    assert.equal('policy' in payload.input, false)
+    assert.equal('approval' in payload.input, false)
+    assert.equal('grant' in payload.input, false)
+    assert.equal('count' in payload.input, false)
+  }
 })
 
 test('publishes bounded Child Run schemas in delegation catalog order', () => {

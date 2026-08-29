@@ -1,6 +1,6 @@
 use super::{now_ms, Database};
 use crate::database::{AcceptanceRecord, PlanRevisionRecord, ReviewFindingRecord};
-use rusqlite::{params, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -121,12 +121,14 @@ impl Database {
         self.with_connection(|connection| {
             connection.execute(
                 "INSERT INTO review_findings(id, goal_id, task_id, plan_revision_id, conversation_id,
-                     severity, category, title, detail, status, created_by, created_at, resolved_at)
+                     severity, category, title, detail, status, created_by, created_at, resolved_at,
+                     resolved_by)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                     CASE WHEN ?10 IN ('resolved', 'waived') THEN ?12 ELSE NULL END)",
+                     CASE WHEN ?10 IN ('resolved', 'waived') THEN ?12 ELSE NULL END,
+                     CASE WHEN ?10 IN ('resolved', 'waived') THEN ?11 ELSE NULL END)",
                 params![id, goal_id, task_id, plan_revision_id, conversation_id, severity, category, title, detail, status, created_by, created_at],
             )?;
-            connection.query_row("SELECT id, goal_id, task_id, plan_revision_id, conversation_id, severity, category, title, detail, status, created_by, created_at, resolved_at FROM review_findings WHERE id = ?1", [&id], review_finding_from_row)
+            connection.query_row("SELECT id, goal_id, task_id, plan_revision_id, conversation_id, severity, category, title, detail, status, created_by, created_at, resolved_at, resolved_by FROM review_findings WHERE id = ?1", [&id], review_finding_from_row)
         })
     }
 
@@ -134,35 +136,12 @@ impl Database {
         &self,
         id: &str,
         status: &str,
+        resolved_by: &str,
     ) -> Result<Option<ReviewFindingRecord>, String> {
         let resolved_at = now_ms().to_string();
         self.with_connection(|connection| {
-            connection.execute("UPDATE review_findings SET status = ?2, resolved_at = ?3 WHERE id = ?1", params![id, status, resolved_at])?;
-            connection.query_row("SELECT id, goal_id, task_id, plan_revision_id, conversation_id, severity, category, title, detail, status, created_by, created_at, resolved_at FROM review_findings WHERE id = ?1", [id], review_finding_from_row).optional()
-        })
-    }
-
-    pub fn create_acceptance(
-        &self,
-        conversation_id: &str,
-        goal_id: &str,
-        plan_revision_id: Option<&str>,
-        status: &str,
-        summary: &str,
-        checks: Value,
-        reviewer: &str,
-    ) -> Result<AcceptanceRecord, String> {
-        let id = Uuid::new_v4().to_string();
-        let created_at = now_ms().to_string();
-        self.with_connection(|connection| {
-            connection.execute(
-                "INSERT INTO acceptances(id, goal_id, plan_revision_id, conversation_id, status,
-                     summary, checks_json, reviewer, created_at, resolved_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
-                     CASE WHEN ?5 IN ('accepted', 'rejected') THEN ?9 ELSE NULL END)",
-                params![id, goal_id, plan_revision_id, conversation_id, status, summary, checks.to_string(), reviewer, created_at],
-            )?;
-            connection.query_row("SELECT id, goal_id, plan_revision_id, conversation_id, status, summary, checks_json, reviewer, created_at, resolved_at FROM acceptances WHERE id = ?1", [&id], acceptance_from_row)
+            connection.execute("UPDATE review_findings SET status = ?2, resolved_at = ?3, resolved_by = ?4 WHERE id = ?1", params![id, status, resolved_at, resolved_by])?;
+            connection.query_row("SELECT id, goal_id, task_id, plan_revision_id, conversation_id, severity, category, title, detail, status, created_by, created_at, resolved_at, resolved_by FROM review_findings WHERE id = ?1", [id], review_finding_from_row).optional()
         })
     }
 
@@ -178,15 +157,86 @@ impl Database {
         String,
     > {
         self.with_connection(|connection| {
-            let plans = connection.prepare("SELECT id, goal_id, conversation_id, revision, title, summary, tasks_json, status, created_by, created_at, approved_at FROM plan_revisions WHERE conversation_id = ?1 ORDER BY revision DESC")?
-                .query_map([conversation_id], plan_revision_from_row)?.collect::<Result<Vec<_>, _>>()?;
-            let findings = connection.prepare("SELECT id, goal_id, task_id, plan_revision_id, conversation_id, severity, category, title, detail, status, created_by, created_at, resolved_at FROM review_findings WHERE conversation_id = ?1 ORDER BY created_at DESC")?
-                .query_map([conversation_id], review_finding_from_row)?.collect::<Result<Vec<_>, _>>()?;
-            let acceptances = connection.prepare("SELECT id, goal_id, plan_revision_id, conversation_id, status, summary, checks_json, reviewer, created_at, resolved_at FROM acceptances WHERE conversation_id = ?1 ORDER BY created_at DESC")?
-                .query_map([conversation_id], acceptance_from_row)?.collect::<Result<Vec<_>, _>>()?;
-            Ok((plans, findings, acceptances))
+            load_a1_snapshot_from_connection(connection, conversation_id)
         })
     }
+}
+
+pub(super) fn load_a1_snapshot_from_connection(
+    connection: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<(
+    Vec<PlanRevisionRecord>,
+    Vec<ReviewFindingRecord>,
+    Vec<AcceptanceRecord>,
+)> {
+    let plans = connection.prepare("SELECT id, goal_id, conversation_id, revision, title, summary, tasks_json, status, created_by, created_at, approved_at FROM plan_revisions WHERE conversation_id = ?1 ORDER BY revision DESC")?
+        .query_map([conversation_id], plan_revision_from_row)?.collect::<Result<Vec<_>, _>>()?;
+    let findings = connection.prepare("SELECT id, goal_id, task_id, plan_revision_id, conversation_id, severity, category, title, detail, status, created_by, created_at, resolved_at, resolved_by FROM review_findings WHERE conversation_id = ?1 ORDER BY created_at DESC")?
+        .query_map([conversation_id], review_finding_from_row)?.collect::<Result<Vec<_>, _>>()?;
+    let acceptances = connection.prepare("SELECT id, goal_id, plan_revision_id, conversation_id, status, summary, checks_json, reviewer, created_at, resolved_at FROM acceptances WHERE conversation_id = ?1 ORDER BY created_at DESC")?
+        .query_map([conversation_id], acceptance_from_row)?.collect::<Result<Vec<_>, _>>()?;
+    Ok((plans, findings, acceptances))
+}
+
+pub(super) fn load_bounded_a1_snapshot_for_goal(
+    connection: &Connection,
+    conversation_id: &str,
+    goal_id: &str,
+    plan_limit: usize,
+    finding_limit: usize,
+    acceptance_limit: usize,
+) -> rusqlite::Result<(
+    Vec<PlanRevisionRecord>,
+    Vec<ReviewFindingRecord>,
+    Vec<AcceptanceRecord>,
+)> {
+    let plans = connection
+        .prepare(
+            "SELECT id, goal_id, conversation_id, revision, title, summary, tasks_json, status,
+                    created_by, created_at, approved_at
+             FROM plan_revisions
+             WHERE conversation_id = ?1 AND goal_id = ?2
+             ORDER BY CASE status WHEN 'proposed' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END,
+                      revision DESC, id DESC
+             LIMIT ?3",
+        )?
+        .query_map(
+            params![conversation_id, goal_id, plan_limit as i64],
+            plan_revision_from_row,
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let findings = connection
+        .prepare(
+            "SELECT id, goal_id, task_id, plan_revision_id, conversation_id, severity, category,
+                    title, detail, status, created_by, created_at, resolved_at, resolved_by
+             FROM review_findings
+             WHERE conversation_id = ?1 AND goal_id = ?2
+             ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END,
+                      COALESCE(resolved_at, created_at) DESC, id DESC
+             LIMIT ?3",
+        )?
+        .query_map(
+            params![conversation_id, goal_id, finding_limit as i64],
+            review_finding_from_row,
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let acceptances = connection
+        .prepare(
+            "SELECT id, goal_id, plan_revision_id, conversation_id, status, summary, checks_json,
+                    reviewer, created_at, resolved_at
+             FROM acceptances
+             WHERE conversation_id = ?1 AND goal_id = ?2
+             ORDER BY CASE WHEN status IN ('accepted', 'rejected') THEN 1 ELSE 0 END,
+                      created_at DESC, id DESC
+             LIMIT ?3",
+        )?
+        .query_map(
+            params![conversation_id, goal_id, acceptance_limit as i64],
+            acceptance_from_row,
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((plans, findings, acceptances))
 }
 
 fn plan_revision_from_row(row: &Row<'_>) -> rusqlite::Result<PlanRevisionRecord> {
@@ -220,6 +270,7 @@ fn review_finding_from_row(row: &Row<'_>) -> rusqlite::Result<ReviewFindingRecor
         created_by: row.get(10)?,
         created_at: row.get(11)?,
         resolved_at: row.get(12)?,
+        resolved_by: row.get(13)?,
     })
 }
 

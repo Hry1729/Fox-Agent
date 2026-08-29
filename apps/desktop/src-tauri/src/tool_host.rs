@@ -86,6 +86,7 @@ pub fn execute(action: PreparedToolAction) -> Result<Value, String> {
             ..
         } => {
             revalidate_target(&root, &path, None)?;
+            let operation = if path.exists() { "modified" } else { "created" };
             if create_directories {
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent)
@@ -96,7 +97,7 @@ pub fn execute(action: PreparedToolAction) -> Result<Value, String> {
                 .map_err(|error| format!("failed to write file: {error}"))?;
             Ok(text_result(
                 format!("Wrote {} bytes to {}", content.len(), path.display()),
-                json!({ "path": path, "bytes": content.len() }),
+                json!({ "path": path, "bytes": content.len(), "operation": operation }),
             ))
         }
         PreparedToolAction::EditFile {
@@ -110,7 +111,7 @@ pub fn execute(action: PreparedToolAction) -> Result<Value, String> {
                 .map_err(|error| format!("failed to edit file: {error}"))?;
             Ok(text_result(
                 format!("Updated {}", path.display()),
-                json!({ "path": path, "bytes": content.len() }),
+                json!({ "path": path, "bytes": content.len(), "operation": "modified" }),
             ))
         }
         PreparedToolAction::RunCommand {
@@ -586,7 +587,8 @@ mod tests {
         )
         .unwrap();
         assert!(action.preview().diff.as_deref().unwrap().contains("+Fox"));
-        execute(action).unwrap();
+        let result = execute(action).unwrap();
+        assert_eq!(result["details"]["operation"], "modified");
         assert_eq!(
             fs::read_to_string(root.join("src/note.txt")).unwrap(),
             "hello\nFox\n"
@@ -603,7 +605,8 @@ mod tests {
             root.to_str().unwrap(),
         )
         .unwrap();
-        execute(action).unwrap();
+        let result = execute(action).unwrap();
+        assert_eq!(result["details"]["operation"], "created");
         assert_eq!(
             fs::read_to_string(root.join("generated/report.md")).unwrap(),
             "# Report"

@@ -19,8 +19,6 @@ pub struct GateEvaluation {
 #[derive(Debug, Clone, Copy)]
 pub struct WorkModeGateInput<'a> {
     pub request: &'a str,
-    pub estimated_file_count: Option<usize>,
-    pub requires_verification: bool,
     pub runtime_proposed: bool,
 }
 
@@ -28,8 +26,6 @@ impl<'a> WorkModeGateInput<'a> {
     pub fn user_request(request: &'a str) -> Self {
         Self {
             request,
-            estimated_file_count: None,
-            requires_verification: false,
             runtime_proposed: false,
         }
     }
@@ -74,106 +70,32 @@ const NO_CHANGE_PHRASES: &[&str] = &[
     "explain only",
 ];
 
-const HIGH_RISK_PHRASES: &[&str] = &[
-    "删除所有",
-    "清空",
-    "强制推送",
-    "生产环境",
-    "管理员权限",
-    "提升权限",
-    "密钥",
-    "凭据",
-    "drop database",
-    "delete all",
-    "force push",
-    "production",
-    "administrator",
-    "credential",
-    "secret",
-    "sudo",
-];
-
-const COMPLEX_ACTION_PHRASES: &[&str] = &[
-    "实现",
-    "修复",
-    "重构",
-    "迁移",
-    "构建",
-    "验证",
-    "implement",
-    "fix",
-    "refactor",
-    "migrate",
-    "build",
-    "verify",
-];
-
-const MULTI_STEP_PHRASES: &[&str] = &[
-    "跨文件",
-    "多个文件",
-    "两个文件",
-    "两处",
-    "多步骤",
-    "端到端",
-    "运行测试",
-    "执行测试",
-    "测试通过",
-    "运行构建",
-    "并验证",
-    "cross-file",
-    "multiple files",
-    "multi-step",
-    "end-to-end",
-    "run tests",
-    "run the tests",
-    "and verify",
-];
-
-const TRACKED_WORK_PHRASES: &[&str] = &[
-    "创建任务",
-    "制定计划",
-    "持续跟进",
-    "工作计划",
-    "create a task",
-    "create tasks",
-    "make a plan",
-    "track this",
-    "follow up",
-];
-
-const READ_ONLY_PHRASES: &[&str] = &[
-    "解释",
-    "摘要",
-    "总结",
-    "检索",
-    "搜索",
-    "列出",
-    "查看",
-    "几点",
-    "什么是",
-    "是什么",
-    "为什么",
-    "explain",
-    "summarize",
-    "search",
-    "list",
-    "read only",
-    "what is",
-    "why",
-];
-
-const AMBIGUOUS_CHANGE_PHRASES: &[&str] = &[
-    "修改",
-    "改一下",
-    "优化一下",
-    "处理一下",
-    "完善一下",
-    "帮我弄",
-    "调整一下",
-    "change this",
-    "improve this",
-    "handle this",
-    "do it",
+const EXPLICIT_GOAL_PREFIXES: &[&str] = &[
+    "/目标",
+    "请创建一个目标",
+    "请帮我创建一个目标",
+    "帮我创建一个目标",
+    "创建一个目标",
+    "请新建一个目标",
+    "新建一个目标",
+    "请建立一个目标",
+    "建立一个目标",
+    "列个目标",
+    "列一个目标",
+    "请列个目标",
+    "请列一个目标",
+    "请把这项工作设为目标",
+    "把这项工作设为目标",
+    "请把这个任务作为目标跟踪",
+    "把这个任务作为目标跟踪",
+    "进入工作模式",
+    "请进入工作模式",
+    "/goal",
+    "create a goal",
+    "new goal",
+    "set a goal",
+    "track as a goal",
+    "enter work mode",
 ];
 
 pub fn evaluate(input: WorkModeGateInput<'_>) -> GateEvaluation {
@@ -184,55 +106,24 @@ pub fn evaluate(input: WorkModeGateInput<'_>) -> GateEvaluation {
             "user_explicitly_requested_no_changes",
         );
     }
-    if contains_any(&normalized, HIGH_RISK_PHRASES) {
-        return evaluation(
-            WorkModeDecision::RequestConfirmation,
-            "high_risk_operation_requires_confirmation",
-        );
-    }
-
-    let estimated_cross_file = input.estimated_file_count.is_some_and(|count| count >= 2);
-    let tracked_work = contains_any(&normalized, TRACKED_WORK_PHRASES);
-    let complex_action = contains_any(&normalized, COMPLEX_ACTION_PHRASES);
-    let multi_step = contains_any(&normalized, MULTI_STEP_PHRASES);
-    if tracked_work {
-        return evaluation(
-            WorkModeDecision::RequestConfirmation,
-            "user_requested_tracked_work",
-        );
-    }
-    if estimated_cross_file || input.requires_verification || (complex_action && multi_step) {
-        let reason = if estimated_cross_file {
-            "estimated_cross_file_change"
-        } else if input.requires_verification {
-            "change_requires_verification"
-        } else {
-            "explicit_multi_step_change"
-        };
-        return evaluation(WorkModeDecision::AutoActivate, reason);
-    }
-
-    if contains_any(&normalized, READ_ONLY_PHRASES) {
-        return evaluation(
-            WorkModeDecision::StayConversation,
-            "request_is_read_only_or_explanatory",
-        );
-    }
-    if complex_action || contains_any(&normalized, AMBIGUOUS_CHANGE_PHRASES) {
-        return evaluation(
-            WorkModeDecision::RequestConfirmation,
-            "change_scope_or_acceptance_is_ambiguous",
-        );
-    }
     if input.runtime_proposed {
         return evaluation(
             WorkModeDecision::RequestConfirmation,
-            "runtime_proposal_is_not_deterministically_complex",
+            "runtime_proposal_passed_explicit_user_gate",
+        );
+    }
+    if EXPLICIT_GOAL_PREFIXES
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+    {
+        return evaluation(
+            WorkModeDecision::RequestConfirmation,
+            "user_explicitly_requested_goal",
         );
     }
     evaluation(
         WorkModeDecision::StayConversation,
-        "request_does_not_require_persistent_work_state",
+        "user_did_not_explicitly_request_goal",
     )
 }
 
@@ -242,13 +133,23 @@ pub fn apply_user_request(
     run_id: &str,
     request: &str,
 ) -> Result<AppliedGate, String> {
+    apply_user_request_with_intent(database, conversation_id, run_id, request, request)
+}
+
+pub fn apply_user_request_with_intent(
+    database: &Database,
+    conversation_id: &str,
+    run_id: &str,
+    intent_request: &str,
+    user_request: &str,
+) -> Result<AppliedGate, String> {
     apply(
         database,
         conversation_id,
         Some(run_id),
-        WorkModeGateInput::user_request(request),
-        goal_title(request),
-        request.trim().to_owned(),
+        WorkModeGateInput::user_request(intent_request),
+        goal_title(user_request),
+        user_request.trim().to_owned(),
         None,
         "host:work-mode-gate".to_owned(),
     )
@@ -512,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_file_fix_enters_work_mode() {
+    fn cross_file_fix_stays_in_conversation_without_explicit_goal_intent() {
         let (database, path, conversation_id) = setup();
         let request = "修复跨文件登录问题并运行测试";
         let run = database
@@ -521,19 +422,16 @@ mod tests {
             .run;
         let applied =
             apply_user_request(&database, &conversation_id, &run.id, request).expect("apply gate");
-        assert_eq!(applied.evaluation.decision, WorkModeDecision::AutoActivate);
         assert_eq!(
-            applied.goal.expect("active goal").status,
-            GoalStatus::Active
+            applied.evaluation.decision,
+            WorkModeDecision::StayConversation
         );
-        assert_eq!(
-            database
-                .goals()
-                .get_by_conversation(&conversation_id)
-                .unwrap()
-                .len(),
-            1
-        );
+        assert!(applied.goal.is_none());
+        assert!(database
+            .goals()
+            .get_by_conversation(&conversation_id)
+            .unwrap()
+            .is_empty());
         drop(database);
         let _ = std::fs::remove_file(path);
     }
@@ -569,13 +467,7 @@ mod tests {
         let (database, path, conversation_id) = setup();
         let request = "先只讨论方案，暂不修改代码，也不要运行测试";
         assert_eq!(
-            evaluate(WorkModeGateInput {
-                request,
-                estimated_file_count: Some(4),
-                requires_verification: true,
-                runtime_proposed: true,
-            })
-            .decision,
+            evaluate(WorkModeGateInput::runtime_proposal(request)).decision,
             WorkModeDecision::StayConversation
         );
         let run = database
@@ -595,14 +487,70 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_and_high_risk_requests_require_confirmation() {
+    fn changes_and_high_risk_requests_do_not_imply_goal_intent() {
         for request in ["优化一下登录逻辑", "删除所有生产环境数据"] {
+            assert_eq!(
+                evaluate(WorkModeGateInput::user_request(request)).decision,
+                WorkModeDecision::StayConversation,
+                "request: {request}"
+            );
+        }
+    }
+
+    #[test]
+    fn delegated_subtask_seed_does_not_create_a_goal() {
+        for request in [
+            "请把下面这个独立子任务委派给合适的子 Agent，并在完成后汇总、验证它的结果：\n\n优化下前面生成的代码",
+            "目标生成窗口的按钮太矮了，请优化一下",
+        ] {
+            assert_eq!(
+                evaluate(WorkModeGateInput::user_request(request)).decision,
+                WorkModeDecision::StayConversation,
+                "request: {request}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_goal_language_and_slash_command_require_confirmation() {
+        for request in [
+            "/目标 优化前面生成的代码",
+            "请创建一个目标来持续跟踪这个改造",
+            "列个目标，再制定计划，依次修改这几个问题",
+        ] {
             assert_eq!(
                 evaluate(WorkModeGateInput::user_request(request)).decision,
                 WorkModeDecision::RequestConfirmation,
                 "request: {request}"
             );
         }
+    }
+
+    #[test]
+    fn hidden_goal_mode_uses_the_visible_prompt_for_goal_copy() {
+        let (database, path, conversation_id) = setup();
+        let visible_request = "优化前面生成的代码";
+        let run = database
+            .create_run(&conversation_id, visible_request, None)
+            .expect("create run")
+            .run;
+        let applied = apply_user_request_with_intent(
+            &database,
+            &conversation_id,
+            &run.id,
+            "/目标 优化前面生成的代码",
+            visible_request,
+        )
+        .expect("apply hidden goal mode");
+        assert_eq!(
+            applied.evaluation.decision,
+            WorkModeDecision::RequestConfirmation
+        );
+        let goal = applied.goal.expect("proposed goal");
+        assert_eq!(goal.title, visible_request);
+        assert_eq!(goal.objective, visible_request);
+        drop(database);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

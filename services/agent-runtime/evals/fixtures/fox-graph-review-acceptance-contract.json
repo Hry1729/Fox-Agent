@@ -1,0 +1,9 @@
+{
+  "name": "Fox persistent Graph review and final Acceptance contract",
+  "scope": "Deterministic Runtime surface and Prompt checks for the hidden graph_reviewer_v1 high-risk read-only proof boundary, exact four-key criteria/recommendation/summary/findings output, independent node review, distinct node/Goal acceptance stages, and dedicated current-Plan Graph Acceptance. SQLite transaction, crash, and replay behavior remains a Rust responsibility.",
+  "cases": [
+    { "id": "node-review-independent-current-attempt", "scenario": "node-review-independent-current-attempt", "requiresStructuredFindings": true },
+    { "id": "separate-node-review-and-goal-acceptance", "scenario": "separate-node-review-and-goal-acceptance" },
+    { "id": "final-current-plan-clean-findings-only", "scenario": "final-current-plan-clean-findings-only" }
+  ]
+}

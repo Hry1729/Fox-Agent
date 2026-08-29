@@ -8,6 +8,7 @@ import type {
   ConversationSummary,
   ConversationHistoryPage,
   ChildRunNotification,
+  ChildRunRecord,
   RuntimeEventNotification,
   RuntimeInitialization,
   RuntimeStatus,
@@ -21,6 +22,7 @@ import type {
   ProjectRecord,
   ProjectFileEntry,
   ProjectFilePreview,
+  ProjectFileActionResponse,
   UsageStatistics,
   ObservabilityStatistics,
   EvaluationRunSummary,
@@ -37,6 +39,8 @@ import type {
   SetGoalRunningResult,
   ApprovalRecord,
   AttachmentRecord,
+  ArtifactActionResponse,
+  ArtifactInspectResponse,
   KnowledgeBaseRecord,
   KnowledgeDetailRecord,
   KnowledgeDocumentDownloadResult,
@@ -150,6 +154,23 @@ export interface LocalKnowledgeBaseDto {
   activeIndexGeneration: string | null
   documentCount: number
   activeJobStatus: string | null
+  /** Capability fields are optional for older Hosts; absence is treated as unavailable. */
+  textIndexReady?: boolean
+  vectorIndexReady?: boolean
+  searchMode?: string | null
+  embeddingModel?: {
+    id: string
+    name: string
+    version: string
+    dimension: number
+  } | null
+  chunkCount?: number | null
+  vectorCount?: number | null
+  lastIndexedAt?: number | null
+  fallbackReason?: string | null
+  parserVersion?: string | null
+  storageFreeBytes?: number | null
+  storageTotalBytes?: number | null
   createdAt: number
   updatedAt: number
 }
@@ -443,8 +464,16 @@ export const desktopClient = {
   listProjects: () => command<ProjectRecord[]>('projects_list'),
   listProjectFiles: (conversationId: string) =>
     command<ProjectFileEntry[]>('project_files_list', { conversationId }),
+  openProjectFolder: (conversationId: string) =>
+    command<boolean>('project_folder_open', { conversationId }),
   readProjectFile: (conversationId: string, path: string) =>
     command<ProjectFilePreview>('project_file_read', { conversationId, path }),
+  projectFileAction: (conversationId: string, path: string, action: ProjectFileActionResponse['action'], applicationId?: string) =>
+    command<ProjectFileActionResponse>('project_file_action', { conversationId, path, action, applicationId }),
+  inspectArtifact: (conversationId: string, artifactId: string) =>
+    command<ArtifactInspectResponse>('artifact_inspect', { conversationId, artifactId }),
+  artifactAction: (conversationId: string, artifactId: string, action: ArtifactActionResponse['action'], applicationId?: string) =>
+    command<ArtifactActionResponse>('artifact_action', { conversationId, artifactId, action, applicationId }),
   pickProjectFolder: () => command<string | null>('project_folder_pick'),
   openExternalUrl: (url: string) => command<boolean>('external_url_open', { url }),
   updateProjectPermission: (projectId: string, permissionMode: ProjectRecord['permissionMode']) =>
@@ -512,6 +541,8 @@ export const desktopClient = {
   resumeRun: (request: { conversationId: string; parentRunId: string; text: string; answers: Record<string, string | string[]> }) =>
     command<StartRunResult>('run_resume', request),
   cancelRun: (runId: string) => command<boolean>('run_cancel', { runId }),
+  cancelChildRun: (parentConversationId: string, childRunId: string) =>
+    command<boolean>('child_run_cancel_by_user', { parentConversationId, childRunId }),
   resolveApproval: (approvalId: string, decision: import('../model/types').ApprovalDecision) =>
     command<boolean>('approval_resolve', { approvalId, decision }),
   resolveWorkModeConfirmation: (conversationId: string, goalId: string, expectedVersion: number, approved: boolean) =>
@@ -559,6 +590,8 @@ export const desktopClient = {
     command<LocalKnowledgeBaseDto>('local_knowledge_base_create', request),
   updateLocalKnowledgeBase: (request: { id: string; name: string; description?: string | null }) =>
     command<LocalKnowledgeBaseDto>('local_knowledge_base_update', request),
+  deleteLocalKnowledgeBase: (id: string) =>
+    command<boolean>('local_knowledge_base_delete', { id }),
   listLocalKnowledgeDocuments: (knowledgeBaseId: string, query?: string) =>
     command<LocalKnowledgeDocumentDto[]>('local_knowledge_documents_list', { knowledgeBaseId, query }),
   readLocalKnowledgeDocumentFileRange: (knowledgeBaseId: string, documentId: string, start: number, end: number) =>

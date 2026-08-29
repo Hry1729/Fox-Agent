@@ -141,6 +141,7 @@ fn aggregate_plugin_cards(
             runtime_status,
             permissions: Vec::new(),
             compatible: true,
+            last_error: server.last_error.clone(),
             incompatibility_reason: None,
             installed_at: installation_for(&installations, &aliases)
                 .map(|value| value.installed_at),
@@ -189,6 +190,7 @@ fn aggregate_plugin_cards(
             runtime_status: None,
             permissions: record.required_tools,
             compatible: record.valid,
+            last_error: record.validation_error.clone(),
             incompatibility_reason: record.validation_error,
             installed_at: installation.map(|value| value.installed_at),
             updated_at: installation.map(|value| value.updated_at),
@@ -218,6 +220,7 @@ fn aggregate_plugin_cards(
             runtime_status: None,
             permissions: Vec::new(),
             compatible: true,
+            last_error: None,
             incompatibility_reason: None,
             installed_at: None,
             updated_at: None,
@@ -231,6 +234,9 @@ fn aggregate_plugin_cards(
             card.install_status = installation.install_status.clone();
             card.installed_at = Some(installation.installed_at);
             card.updated_at = Some(installation.updated_at);
+            if card.last_error.is_none() {
+                card.last_error = installation.last_error_message.clone();
+            }
             if card.version.is_none() {
                 card.version = Some(installation.installed_version.clone());
             }
@@ -376,6 +382,7 @@ fn catalog_cards(entries: &[PluginCatalogEntryRecord]) -> Vec<PluginCardView> {
                     .get("compatible")
                     .and_then(Value::as_bool)
                     .unwrap_or(true),
+                last_error: None,
                 incompatibility_reason: manifest_string(manifest, "incompatibilityReason"),
                 installed_at: None,
                 updated_at: Some(entry.fetched_at),
@@ -651,6 +658,10 @@ fn builtin_tool_description(tool: &str) -> &'static str {
         "goal_complete" => "在任务与证据满足条件后提交目标完成。",
         "task_create_many" => "为当前目标批量创建有明确顺序的执行任务。",
         "task_update" => "更新任务状态、阻塞原因与并发版本信息。",
+        "task_attempt_start" => "为当前持久任务启动唯一的执行 Attempt，并冻结验证策略与证据水位。",
+        "task_attempt_finish" => "按冻结策略校验本次 Attempt 的新证据与审查结果后结束执行。",
+        "task_repair_start" => "关联根因和未关闭 Finding，按任务级修复预算启动追加式 Repair Attempt。",
+        "task_repair_escalate_start" => "普通修复预算耗尽后，请求真人一次性批准额外的 Repair Attempt。",
         "task_evidence_add" => "为任务关联工具调用、测试或文件修改等执行证据。",
         "task_evidence_validate" => "重新检查任务证据是否仍然有效。",
         "plan_revision_create" => "保存完整的新计划版本及其任务顺序。",

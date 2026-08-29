@@ -23,6 +23,7 @@ function startRuntime() {
 
   return {
     child,
+    messages,
     send(type, fields = {}) {
       const request = createEnvelope('request', type, fields)
       child.stdin.write(`${JSON.stringify(request)}\n`)
@@ -205,4 +206,44 @@ test('exercises the A0 work loop through tool.execute and emits a versioned even
   assert.equal(event.payload.conversationId, 'conversation-work')
   assert.equal(event.payload.goalId, 'goal-work')
   assert.equal(event.payload.sequence, 4)
+})
+
+test('rejects unsupported profiles and blocks fake Host mutations in shadow mode', async (context) => {
+  const runtime = startRuntime()
+  context.after(() => runtime.close())
+
+  const invalid = runtime.send('initialize', {
+    payload: { executionProfile: 'durable_v2', executionStrategy: { validationPolicy: 'legacy' } },
+  })
+  const rejected = await runtime.waitFor((message) => message.requestId === invalid.id)
+  assert.equal(rejected.type, 'request_failed')
+  assert.equal(rejected.payload.code, 'runtime.execution_profile.invalid')
+
+  const initialize = runtime.send('initialize', {
+    payload: { workLoop: true, executionProfile: 'durable_v2_shadow' },
+  })
+  const ready = await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+  assert.equal(ready.payload.executionProfile.id, 'durable_v2_shadow')
+  assert.ok(!ready.payload.capabilities.tools.some(({ name }) => name === 'goal_propose'))
+
+  runtime.send('create_session', { conversationId: 'conversation-shadow', runtimeSessionId: 'session-shadow' })
+  runtime.send('prompt', {
+    conversationId: 'conversation-shadow',
+    runtimeSessionId: 'session-shadow',
+    runId: 'run-shadow',
+    payload: {
+      text: 'shadow probe',
+      workLoopProbe: { tool: 'goal_propose', input: { title: 'must not persist' } },
+    },
+  })
+  const blocked = await runtime.waitFor((message) => (
+    message.runId === 'run-shadow'
+    && message.payload?.type === 'tool.completed'
+    && message.payload?.code === 'runtime.execution_profile.tool_blocked'
+  ))
+  assert.equal(blocked.payload.isError, true)
+  assert.equal(runtime.messages.some((message) => (
+    message.kind === 'request' && message.type === 'tool.execute' && message.runId === 'run-shadow'
+  )), false)
+  await runtime.waitFor((message) => message.runId === 'run-shadow' && message.payload?.type === 'run.completed')
 })

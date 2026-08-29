@@ -24,11 +24,15 @@ You are Fox Planner, an internal planning stage for a desktop coding agent.
 
 const ACTION_PATTERN = /(?:修复|修改|改造|实现|开发|新增|添加|删除|重构|迁移|升级|优化|排查|检查项目|探索项目|分析代码|执行|运行测试|构建|写(?:代码|文件)|创建(?:文件|功能)|制定计划|列个目标|建立目标|完成目标|fix\b|implement\b|build\b|refactor\b|migrate\b|upgrade\b|debug\b|inspect\s+(?:the\s+)?project|create\s+(?:a\s+)?(?:file|feature)|run\s+(?:the\s+)?tests?)/iu
 const MULTI_STEP_PATTERN = /(?:然后|并且|以及|依次|分别|同时|再|多个|几个|全部|完整|端到端|计划|目标|步骤|first|then|after|before|multiple|several|plan|goal|steps?)/iu
+const DIRECT_CHILD_DELEGATION_PATTERN = /(?:(?:委派|委托|交给)[\s\S]{0,48}(?:子\s*Agent|子\s*代理|子\s*智能体)|(?:delegate|hand\s*off)[\s\S]{0,48}(?:sub[-\s]?agent|child\s+agent))/iu
+const EXPLICIT_PLAN_PATTERN = /^\/(?:plan|计划)(?:\s|$)/iu
 
 export function shouldUsePlanner(text, { approvalDemo = false, apiType = '', hasProject = false, force = false } = {}) {
   const normalized = String(text || '').trim()
-  if (!normalized || approvalDemo || (!force && apiType === 'faux') || !hasProject) return false
-  if (force) return true
+  if (!normalized || approvalDemo || !hasProject) return false
+  if (force || EXPLICIT_PLAN_PATTERN.test(normalized)) return true
+  if (apiType === 'faux') return false
+  if (DIRECT_CHILD_DELEGATION_PATTERN.test(normalized)) return false
   return ACTION_PATTERN.test(normalized)
     && (MULTI_STEP_PATTERN.test(normalized) || normalized.length >= 48)
 }

@@ -219,6 +219,15 @@ pub struct LocalKnowledgeStore {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct LocalKnowledgeEmbeddingModel {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub dimension: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalKnowledgeBase {
     pub id: String,
     pub name: String,
@@ -226,6 +235,14 @@ pub struct LocalKnowledgeBase {
     pub active_index_generation: Option<String>,
     pub document_count: i64,
     pub active_job_status: Option<String>,
+    pub text_index_ready: bool,
+    pub vector_index_ready: bool,
+    pub search_mode: String,
+    pub embedding_model: Option<LocalKnowledgeEmbeddingModel>,
+    pub chunk_count: Option<i64>,
+    pub vector_count: Option<i64>,
+    pub last_indexed_at: Option<i64>,
+    pub fallback_reason: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -1043,7 +1060,100 @@ impl LocalKnowledgeStore {
             .query_map([], map_knowledge_base)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(LocalKnowledgeError::from)?;
+        let mut items = items;
+        for base in &mut items {
+            self.populate_capability_status(&connection, base)?;
+        }
         Ok(items)
+    }
+
+    fn populate_capability_status(
+        &self,
+        connection: &Connection,
+        base: &mut LocalKnowledgeBase,
+    ) -> Result<(), LocalKnowledgeError> {
+        let chunk_count: i64 = connection.query_row(
+            "SELECT COUNT(c.id)
+             FROM local_kb_chunks c
+             JOIN local_kb_documents d ON d.id = c.document_id
+             WHERE d.knowledge_base_id = ?1
+               AND d.parse_status = 'ready'
+               AND c.document_revision = d.current_revision",
+            [&base.id],
+            |row| row.get(0),
+        )?;
+        let ready_document_count: i64 = connection.query_row(
+            "SELECT COUNT(d.id)
+             FROM local_kb_documents d
+             WHERE d.knowledge_base_id = ?1
+               AND d.parse_status = 'ready'
+               AND EXISTS (
+                 SELECT 1 FROM local_kb_chunks c
+                 WHERE c.document_id = d.id
+                   AND c.document_revision = d.current_revision
+               )",
+            [&base.id],
+            |row| row.get(0),
+        )?;
+        let last_indexed_at: Option<i64> = connection.query_row(
+            "SELECT MAX(updated_at)
+             FROM local_kb_documents
+             WHERE knowledge_base_id = ?1
+               AND parse_status = 'ready'",
+            [&base.id],
+            |row| row.get(0),
+        )?;
+        let embedding_model: Option<LocalKnowledgeEmbeddingModel> =
+            match base.active_index_generation.as_deref() {
+                Some(generation_id) => connection
+                    .query_row(
+                        "SELECT g.embedding_model_id, m.version, g.dimension
+                     FROM local_kb_index_generations g
+                     JOIN local_embedding_models m
+                       ON m.model_id = g.embedding_model_id
+                      AND m.dimension = g.dimension
+                      AND m.status = 'ready'
+                     WHERE g.id = ?1
+                       AND g.knowledge_base_id = ?2
+                       AND g.status = 'active'
+                     LIMIT 1",
+                        params![generation_id, &base.id],
+                        |row| {
+                            let id: String = row.get(0)?;
+                            Ok(LocalKnowledgeEmbeddingModel {
+                                name: id.clone(),
+                                id,
+                                version: row.get(1)?,
+                                dimension: row.get(2)?,
+                            })
+                        },
+                    )
+                    .optional()?,
+                None => None,
+            };
+
+        // The current LocalKnowledgeStore only exposes the SQLite lexical path.
+        // An active generation is metadata, not proof that its vector store can
+        // be opened, read, and written, so it must not make the UI claim vector
+        // readiness by itself.
+        base.text_index_ready = base.document_count > 0
+            && ready_document_count == base.document_count
+            && chunk_count > 0;
+        base.vector_index_ready = false;
+        base.search_mode = "keyword".to_owned();
+        base.embedding_model = embedding_model;
+        base.chunk_count = Some(chunk_count.max(0));
+        base.vector_count = None;
+        base.last_indexed_at = last_indexed_at;
+        base.fallback_reason = Some(
+            if base.embedding_model.is_none() {
+                "未配置向量模型"
+            } else {
+                "向量索引尚未完成读写校验"
+            }
+            .to_owned(),
+        );
+        Ok(())
     }
 
     pub fn list_file_sources(&self) -> Result<Vec<LocalKnowledgeFileSource>, LocalKnowledgeError> {
@@ -1584,7 +1694,7 @@ impl LocalKnowledgeStore {
 
     pub fn get_base(&self, id: &str) -> Result<LocalKnowledgeBase, LocalKnowledgeError> {
         let connection = self.connection()?;
-        connection
+        let mut base = connection
             .query_row(
                 "SELECT b.id, b.name, b.description, b.active_index_generation,
                         COUNT(d.id) AS document_count,
@@ -1601,7 +1711,9 @@ impl LocalKnowledgeStore {
                 map_knowledge_base,
             )
             .optional()?
-            .ok_or_else(|| LocalKnowledgeError::not_found("knowledge base"))
+            .ok_or_else(|| LocalKnowledgeError::not_found("knowledge base"))?;
+        self.populate_capability_status(&connection, &mut base)?;
+        Ok(base)
     }
 
     pub fn create_base(
@@ -1623,6 +1735,11 @@ impl LocalKnowledgeStore {
         &self,
         request: UpdateLocalKnowledgeBaseRequest,
     ) -> Result<LocalKnowledgeBase, LocalKnowledgeError> {
+        if request.id == DEFAULT_FOX_GUIDE_ID {
+            return Err(LocalKnowledgeError::conflict(
+                "Fox 使用指南是内置知识库，不能修改",
+            ));
+        }
         let name = normalized_name(&request.name)?;
         let changed = self.connection()?.execute(
             "UPDATE local_knowledge_bases
@@ -1639,6 +1756,91 @@ impl LocalKnowledgeStore {
             return Err(LocalKnowledgeError::not_found("knowledge base"));
         }
         self.get_base(&request.id)
+    }
+
+    pub fn delete_base(&self, id: &str) -> Result<bool, LocalKnowledgeError> {
+        let id = id.trim();
+        if id.is_empty()
+            || !id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+        {
+            return Err(LocalKnowledgeError::invalid("knowledge base id is invalid"));
+        }
+        if id == DEFAULT_FOX_GUIDE_ID {
+            return Err(LocalKnowledgeError::conflict(
+                "Fox 使用指南是内置知识库，不能删除",
+            ));
+        }
+        if self.migration_active() {
+            return Err(LocalKnowledgeError::conflict(
+                "知识库存储迁移进行中，暂不能删除知识库",
+            ));
+        }
+
+        let source_directory = self.root.join("knowledge-bases").join(id);
+        let staged_directory = self
+            .root
+            .join("staging")
+            .join(format!("deleted-{id}-{}", Uuid::new_v4()));
+        let connection = self.connection()?;
+        let exists = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_knowledge_bases WHERE id = ?1)",
+            [id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !exists {
+            return Err(LocalKnowledgeError::not_found("knowledge base"));
+        }
+        let active_jobs = connection.query_row(
+            "SELECT COUNT(*) FROM local_kb_jobs
+             WHERE knowledge_base_id = ?1 AND status IN ('queued', 'running', 'paused')",
+            [id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if active_jobs > 0 {
+            return Err(LocalKnowledgeError::conflict(
+                "知识库仍有任务正在执行，请等待任务结束后再删除",
+            ));
+        }
+
+        let moved = if source_directory.exists() {
+            let metadata = std::fs::symlink_metadata(&source_directory)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(LocalKnowledgeError::invalid(
+                    "knowledge base storage directory is invalid",
+                ));
+            }
+            std::fs::rename(&source_directory, &staged_directory)?;
+            true
+        } else {
+            false
+        };
+
+        let deleted = connection.execute("DELETE FROM local_knowledge_bases WHERE id = ?1", [id]);
+        match deleted {
+            Ok(1) => {
+                drop(connection);
+                if moved {
+                    let _ = std::fs::remove_dir_all(staged_directory);
+                }
+                Ok(true)
+            }
+            Ok(_) => {
+                drop(connection);
+                if moved {
+                    let _ = std::fs::rename(staged_directory, source_directory);
+                }
+                Err(LocalKnowledgeError::not_found("knowledge base"))
+            }
+            Err(error) => {
+                drop(connection);
+                if moved {
+                    let _ = std::fs::rename(staged_directory, source_directory);
+                }
+                Err(LocalKnowledgeError::from(error))
+            }
+        }
     }
 
     pub fn list_jobs(
@@ -2501,6 +2703,14 @@ fn map_knowledge_base(row: &Row<'_>) -> rusqlite::Result<LocalKnowledgeBase> {
         active_index_generation: row.get(3)?,
         document_count: row.get(4)?,
         active_job_status: row.get(5)?,
+        text_index_ready: false,
+        vector_index_ready: false,
+        search_mode: "keyword".to_owned(),
+        embedding_model: None,
+        chunk_count: None,
+        vector_count: None,
+        last_indexed_at: None,
+        fallback_reason: Some("未配置向量模型".to_owned()),
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
     })
@@ -2895,6 +3105,14 @@ pub fn local_knowledge_base_update(
 }
 
 #[tauri::command]
+pub fn local_knowledge_base_delete(
+    state: State<'_, AppState>,
+    request: LocalKnowledgeBaseIdRequest,
+) -> ApiResponse<bool> {
+    local_response(state.local_knowledge.delete_base(&request.id))
+}
+
+#[tauri::command]
 pub fn local_knowledge_documents_list(
     state: State<'_, AppState>,
     request: LocalKnowledgeDocumentsRequest,
@@ -3030,7 +3248,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_and_updates_knowledge_bases() {
+    fn creates_updates_and_deletes_knowledge_bases() {
         let (store, root) = test_store();
         let created = store
             .create_base(CreateLocalKnowledgeBaseRequest {
@@ -3040,6 +3258,13 @@ mod tests {
             .unwrap();
         assert_eq!(created.name, "项目资料");
         assert_eq!(created.description.as_deref(), Some("本地文档"));
+        assert!(!created.text_index_ready);
+        assert!(!created.vector_index_ready);
+        assert_eq!(created.search_mode, "keyword");
+        assert_eq!(created.embedding_model, None);
+        assert_eq!(created.chunk_count, Some(0));
+        assert_eq!(created.vector_count, None);
+        assert_eq!(created.fallback_reason.as_deref(), Some("未配置向量模型"));
         assert_eq!(store.list_bases().unwrap().len(), 1);
 
         let updated = store
@@ -3051,6 +3276,16 @@ mod tests {
             .unwrap();
         assert_eq!(updated.name, "产品资料");
         assert_eq!(updated.description, None);
+        let base_directory = root
+            .join("knowledge-bases")
+            .join(&updated.id)
+            .join("documents");
+        std::fs::create_dir_all(&base_directory).unwrap();
+        std::fs::write(base_directory.join("sample.txt"), b"sample").unwrap();
+
+        assert!(store.delete_base(&updated.id).unwrap());
+        assert!(store.list_bases().unwrap().is_empty());
+        assert!(!root.join("knowledge-bases").join(&updated.id).exists());
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -3327,6 +3562,12 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, base.id);
         assert_eq!(listed[0].document_count, 1);
+        assert!(listed[0].text_index_ready);
+        assert!(!listed[0].vector_index_ready);
+        assert_eq!(listed[0].search_mode, "keyword");
+        assert_eq!(listed[0].chunk_count, Some(1));
+        assert_eq!(listed[0].vector_count, None);
+        assert_eq!(listed[0].fallback_reason.as_deref(), Some("未配置向量模型"));
 
         let search = store
             .search_lexical(&base.id, "第二段", Some(3), Some(1_000))
