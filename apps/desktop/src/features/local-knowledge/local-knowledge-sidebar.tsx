@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Clock3, Database, FileStack, House, LoaderCircle, Plus } from 'lucide-react'
+import { Clock3, Cpu, Database, FileStack, House, LoaderCircle, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import type { NavigateWorkspace, WorkspaceView } from '@/features/workspace/types'
@@ -12,6 +12,7 @@ const knowledgeBaseViews: WorkspaceView[] = [
   'local-knowledge-detail',
   'local-knowledge-documents',
   'local-knowledge-import',
+  'local-knowledge-retrieval',
 ]
 
 export function LocalKnowledgeSidebarNavigation({
@@ -84,6 +85,7 @@ export function LocalKnowledgeSidebarNavigation({
         <button className={`fox-sidebar-command ${activeView === 'local-knowledge-home' ? 'is-active' : ''}`} onClick={() => navigate('local-knowledge-home')}><House size={16} /><span>最近</span></button>
         <button className={`fox-sidebar-command ${activeView === 'local-files' ? 'is-active' : ''}`} onClick={() => navigate('local-files')}><FileStack size={16} /><span>本地文件</span></button>
         <button className={`fox-sidebar-command ${knowledgeBaseActive ? 'is-active' : ''}`} onClick={() => navigate('local-knowledge')}><Database size={16} /><span>本地知识库</span></button>
+        <button className={`fox-sidebar-command ${activeView === 'local-knowledge-models' ? 'is-active' : ''}`} onClick={() => navigate('local-knowledge-models')}><Cpu size={16} /><span>向量模型</span></button>
         <button className={`fox-sidebar-command ${globalJobsActive ? 'is-active' : ''}`} onClick={() => navigate('local-knowledge-jobs')}><Clock3 size={16} /><span>任务中心</span></button>
       </div>
       {!collapsed && (

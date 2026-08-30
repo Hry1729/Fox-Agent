@@ -3308,7 +3308,11 @@ mod tests {
             .create_conversation(database.default_agent_id(), Some("work tools"), None, None)
             .expect("create conversation");
         let run = database
-            .create_run(&conversation.id, "创建目标并制定计划，修复跨文件问题", None)
+            .create_run(
+                &conversation.id,
+                "/goal 创建目标并制定计划，修复跨文件问题",
+                None,
+            )
             .expect("create run")
             .run;
         (database, path, conversation.id, run.id)
@@ -4170,6 +4174,17 @@ mod tests {
         assert!(activation_error
             .to_string()
             .contains("unsupported work tool"));
+        let proposed_goal = database.goals().get(&goal_id).unwrap().unwrap();
+        crate::work_mode_gate::resolve_confirmation(
+            &database,
+            &crate::work_mode_gate::ResolveWorkModeConfirmationRequest {
+                conversation_id: conversation_id.clone(),
+                goal_id: goal_id.clone(),
+                approved: true,
+                expected_version: proposed_goal.version,
+            },
+        )
+        .expect("Host confirmation activates the proposed goal");
         assert_eq!(
             database.goals().get(&goal_id).unwrap().unwrap().status,
             GoalStatus::Active
@@ -4241,12 +4256,13 @@ mod tests {
             &json!({ "taskId": task_id, "status": "completed", "expectedVersion": 2 }),
         )
         .expect("complete task");
+        let active_goal_version = database.goals().get(&goal_id).unwrap().unwrap().version;
         let completed = execute(
             &database,
             &conversation_id,
             &run_id,
             "goal_complete",
-            &json!({ "goalId": goal_id, "expectedVersion": 1 }),
+            &json!({ "goalId": goal_id, "expectedVersion": active_goal_version }),
         )
         .expect("complete goal");
         assert_eq!(completed.result["details"]["goal"]["status"], "completed");
@@ -4741,6 +4757,17 @@ mod tests {
             .as_str()
             .expect("goal id")
             .to_owned();
+        let proposed_goal = database.goals().get(&goal_id).unwrap().unwrap();
+        crate::work_mode_gate::resolve_confirmation(
+            &database,
+            &crate::work_mode_gate::ResolveWorkModeConfirmationRequest {
+                conversation_id: conversation_id.clone(),
+                goal_id: goal_id.clone(),
+                approved: true,
+                expected_version: proposed_goal.version,
+            },
+        )
+        .expect("Host confirmation activates the proposed goal");
         let created = execute(
             &database,
             &conversation_id,
@@ -4941,12 +4968,13 @@ mod tests {
                 crate::database::EvidenceValidityStatus::Valid
             );
         }
+        let active_goal_version = database.goals().get(&goal_id).unwrap().unwrap().version;
         execute(
             &database,
             &conversation_id,
             &run_id,
             "goal_complete",
-            &json!({ "goalId": goal_id, "expectedVersion": 1 }),
+            &json!({ "goalId": goal_id, "expectedVersion": active_goal_version }),
         )
         .expect("complete acceptance goal");
 

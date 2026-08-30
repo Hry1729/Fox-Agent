@@ -5,12 +5,14 @@ import {
   type LocalKnowledgeCatalogFileDto,
   type LocalKnowledgeDocumentDto,
   type LocalKnowledgeFileSourceDto,
+  type LocalKnowledgeFolderDto,
   type LocalKnowledgeJobDto,
   type LocalKnowledgeOperationAcceptedDto,
   type LocalKnowledgeStorageDirectoryDto,
   type LocalKnowledgeStorageMigrationDto,
   type PickedLocalKnowledgeFileDto,
   type LocalKnowledgeStorageStatusDto,
+  type LocalEmbeddingModelDto,
 } from '@/features/conversations/api/desktop-client'
 import { mockLocalKnowledgeGateway } from './mock-gateway'
 import type {
@@ -24,6 +26,7 @@ import type {
   LocalKnowledgeDocument,
   LocalKnowledgeCatalogFile,
   LocalKnowledgeFileSource,
+  LocalKnowledgeFolder,
   LocalKnowledgeGateway,
   LocalKnowledgeImportRequest,
   LocalKnowledgeStorageMigration,
@@ -34,6 +37,10 @@ import type {
   OperationEvent,
   OperationSnapshot,
   Page,
+  LocalEmbeddingModel,
+  KnowledgeRetrievalCase,
+  KnowledgeRetrievalResult,
+  KnowledgeChunkPreview,
 } from './model'
 
 export class LocalKnowledgeGatewayError extends Error {
@@ -64,9 +71,12 @@ export type LocalKnowledgeDesktopClient = Pick<
   | 'updateLocalKnowledgeBase'
   | 'deleteLocalKnowledgeBase'
   | 'listLocalKnowledgeDocuments'
+  | 'listLocalKnowledgeFolders'
+  | 'createLocalKnowledgeFolder'
   | 'readLocalKnowledgeDocumentFileRange'
   | 'openLocalKnowledgeDocumentFile'
   | 'pickLocalKnowledgeImportFiles'
+  | 'pickLocalKnowledgeImportFolder'
   | 'startLocalKnowledgeImport'
   | 'listLocalKnowledgeJobs'
   | 'getLocalKnowledgeJob'
@@ -76,6 +86,24 @@ export type LocalKnowledgeDesktopClient = Pick<
   | 'pickLocalKnowledgeStorageDirectory'
   | 'startLocalKnowledgeStorageMigration'
   | 'getLocalKnowledgeStorageMigration'
+  | 'listLocalEmbeddingModels'
+  | 'startLocalEmbeddingModelInstall'
+  | 'cancelLocalEmbeddingModelDownload'
+  | 'retryLocalEmbeddingModelDownload'
+  | 'testLocalEmbeddingModel'
+  | 'setDefaultLocalEmbeddingModel'
+  | 'deleteLocalEmbeddingModel'
+  | 'importLocalEmbeddingModelPackage'
+  | 'getLocalVectorBackendHealth'
+  | 'startLocalKnowledgeIndex'
+  | 'testLocalKnowledgeRetrieval'
+  | 'listLocalKnowledgeRetrievalCases'
+  | 'saveLocalKnowledgeRetrievalCase'
+  | 'deleteLocalKnowledgeRetrievalCase'
+  | 'exportLocalKnowledgeRetrievalCases'
+  | 'listLocalKnowledgeDocumentChunks'
+  | 'deleteLocalKnowledgeDocument'
+  | 'reparseLocalKnowledgeDocument'
 >
 
 const operationStages: ReadonlySet<string> = new Set([
@@ -179,6 +207,9 @@ export function mapLocalKnowledgeBase(dto: LocalKnowledgeBaseDto, storage?: Loca
     textIndexReady: dto.textIndexReady === true,
     vectorIndexReady,
     searchMode: searchMode(dto.searchMode),
+    configuredEmbeddingModelId: dto.configuredEmbeddingModelId ?? null,
+    chunkSize: Math.max(128, Math.trunc(numberValue(dto.chunkSize) || 512)),
+    chunkOverlap: Math.max(0, Math.trunc(numberValue(dto.chunkOverlap) || 50)),
     embeddingModel,
     fallbackReason: dto.fallbackReason ?? (vectorIndexReady ? null : vectorCapabilityReported ? '向量索引未就绪' : 'Host 未提供向量索引状态'),
     storagePath: storage?.rootPath ?? '',
@@ -356,6 +387,16 @@ function mapPickedFile(dto: PickedLocalKnowledgeFileDto) {
     sourcePath: dto.sourcePath,
     mimeType: dto.mimeType,
     sizeBytes: Math.max(0, numberValue(dto.sizeBytes)),
+    relativePath: dto.relativePath,
+  }
+}
+
+function mapFolder(dto: LocalKnowledgeFolderDto): LocalKnowledgeFolder {
+  return {
+    knowledgeBaseId: dto.knowledgeBaseId,
+    name: dto.name,
+    relativePath: dto.relativePath,
+    documentCount: Math.max(0, numberValue(dto.documentCount)),
   }
 }
 
@@ -366,6 +407,23 @@ function mapPickedStorageDirectory(dto: LocalKnowledgeStorageDirectoryDto | stri
 
 function mapAccepted(dto: LocalKnowledgeOperationAcceptedDto): OperationAccepted {
   return { operationId: dto.operationId, acceptedAt: requiredIsoTimestamp(dto.acceptedAt) }
+}
+
+function mapEmbeddingModel(dto: LocalEmbeddingModelDto): LocalEmbeddingModel {
+  const status: LocalEmbeddingModel['status'] = dto.status === 'installing' || dto.status === 'ready' || dto.status === 'error' ? dto.status : 'not_installed'
+  const integrityStatus: LocalEmbeddingModel['integrityStatus'] = dto.integrityStatus === 'verifying' || dto.integrityStatus === 'verified' || dto.integrityStatus === 'failed' ? dto.integrityStatus : 'pending'
+  const downloadStatus = dto.download?.status
+  return {
+    ...dto,
+    status,
+    integrityStatus,
+    languages: Array.isArray(dto.languages) ? dto.languages : [],
+    files: Array.isArray(dto.files) ? dto.files : [],
+    download: dto.download ? {
+      ...dto.download,
+      status: downloadStatus === 'running' || downloadStatus === 'paused' || downloadStatus === 'completed' || downloadStatus === 'failed' || downloadStatus === 'cancelled' ? downloadStatus : 'queued',
+    } : null,
+  }
 }
 
 function operationEvent(operationId: string, jobs: KnowledgeJob[]): OperationEvent {
@@ -470,13 +528,28 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
       const name = request.name.trim()
       if (!name) unavailable('local_knowledge.name_required', '知识库名称不能为空。')
       const description = request.description?.trim() || null
-      return mapLocalKnowledgeBase(await client.createLocalKnowledgeBase({ name, description }))
+      return mapLocalKnowledgeBase(await client.createLocalKnowledgeBase({
+        name,
+        description,
+        embeddingModelId: request.embeddingModelId,
+        chunkSize: request.chunkSize,
+        chunkOverlap: request.chunkOverlap,
+        searchMode: request.searchMode,
+      }))
     },
     async updateKnowledgeBase(id, request) {
       const name = request.name.trim()
       if (!name) unavailable('local_knowledge.name_required', '知识库名称不能为空。')
       const description = request.description?.trim() || null
-      return mapLocalKnowledgeBase(await client.updateLocalKnowledgeBase({ id, name, description }))
+      return mapLocalKnowledgeBase(await client.updateLocalKnowledgeBase({
+        id,
+        name,
+        description,
+        embeddingModelId: request.embeddingModelId,
+        chunkSize: request.chunkSize,
+        chunkOverlap: request.chunkOverlap,
+        searchMode: request.searchMode,
+      }))
     },
     async deleteKnowledgeBase(id) {
       return client.deleteLocalKnowledgeBase(id)
@@ -484,6 +557,14 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
     async listDocuments(id, options) {
       const items = await client.listLocalKnowledgeDocuments(id, options?.query)
       return { items: items.map(mapLocalKnowledgeDocument), total: items.length } satisfies Page<LocalKnowledgeDocument>
+    },
+    async listFolders(id) {
+      return (await client.listLocalKnowledgeFolders(id)).map(mapFolder)
+    },
+    async createFolder(knowledgeBaseId, name, parentPath) {
+      const normalizedName = name.trim()
+      if (!normalizedName) unavailable('local_knowledge.folder_name_required', '文件夹名称不能为空。')
+      return mapFolder(await client.createLocalKnowledgeFolder(knowledgeBaseId, normalizedName, parentPath))
     },
     async readDocumentFileRange(knowledgeBaseId, documentId, start, end) {
       return client.readLocalKnowledgeDocumentFileRange(knowledgeBaseId, documentId, start, end)
@@ -497,12 +578,15 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
     async pickImportFiles() {
       return (await client.pickLocalKnowledgeImportFiles()).map(mapPickedFile)
     },
+    async pickImportFolder() {
+      return (await client.pickLocalKnowledgeImportFolder()).map(mapPickedFile)
+    },
     async startImport(request: LocalKnowledgeImportRequest): Promise<OperationAccepted> {
       const files = request.files.map((file) => {
         if (!file.sourcePath) {
           unavailable('local_knowledge.import_source_path_missing', `无法读取「${file.name}」的本地路径，请使用系统文件选择器重新选择。`)
         }
-        return { sourcePath: file.sourcePath }
+        return { sourcePath: file.sourcePath, relativePath: file.relativePath }
       })
       return mapAccepted(await client.startLocalKnowledgeImport({
         knowledgeBaseId: request.knowledgeBaseId,
@@ -567,6 +651,60 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
     },
     async getStorageMigration(migrationId) {
       return mapLocalKnowledgeStorageMigration(await client.getLocalKnowledgeStorageMigration(migrationId))
+    },
+    async listEmbeddingModels() {
+      return (await client.listLocalEmbeddingModels()).map(mapEmbeddingModel)
+    },
+    async startEmbeddingModelInstall(modelId) {
+      return mapAccepted(await client.startLocalEmbeddingModelInstall(modelId))
+    },
+    async cancelEmbeddingModelDownload(downloadId) {
+      return client.cancelLocalEmbeddingModelDownload(downloadId)
+    },
+    async retryEmbeddingModelDownload(downloadId) {
+      return mapAccepted(await client.retryLocalEmbeddingModelDownload(downloadId))
+    },
+    async testEmbeddingModel(modelId) {
+      return client.testLocalEmbeddingModel(modelId)
+    },
+    async setDefaultEmbeddingModel(modelId) {
+      return client.setDefaultLocalEmbeddingModel(modelId)
+    },
+    async deleteEmbeddingModel(modelId) {
+      return client.deleteLocalEmbeddingModel(modelId)
+    },
+    async importEmbeddingModelPackage(packagePath) {
+      return mapEmbeddingModel(await client.importLocalEmbeddingModelPackage(packagePath))
+    },
+    async getVectorBackendHealth() {
+      return client.getLocalVectorBackendHealth()
+    },
+    async startIndex(knowledgeBaseId, rebuild = false) {
+      return mapAccepted(await client.startLocalKnowledgeIndex(knowledgeBaseId, rebuild))
+    },
+    async testRetrieval(knowledgeBaseId, query, mode, limit) {
+      return await client.testLocalKnowledgeRetrieval(knowledgeBaseId, query, mode, limit) as KnowledgeRetrievalResult
+    },
+    async listRetrievalCases(knowledgeBaseId) {
+      return await client.listLocalKnowledgeRetrievalCases(knowledgeBaseId) as KnowledgeRetrievalCase[]
+    },
+    async saveRetrievalCase(request) {
+      return await client.saveLocalKnowledgeRetrievalCase(request) as KnowledgeRetrievalCase
+    },
+    async deleteRetrievalCase(id) {
+      return client.deleteLocalKnowledgeRetrievalCase(id)
+    },
+    async exportRetrievalCases(knowledgeBaseId) {
+      return await client.exportLocalKnowledgeRetrievalCases(knowledgeBaseId) as { json: unknown; markdown: string }
+    },
+    async listDocumentChunks(knowledgeBaseId, documentId, options) {
+      return await client.listLocalKnowledgeDocumentChunks(knowledgeBaseId, documentId, options?.limit, options?.offset) as KnowledgeChunkPreview[]
+    },
+    async deleteDocument(knowledgeBaseId, documentId) {
+      return client.deleteLocalKnowledgeDocument(knowledgeBaseId, documentId)
+    },
+    async reparseDocument(knowledgeBaseId, documentId) {
+      return mapAccepted(await client.reparseLocalKnowledgeDocument(knowledgeBaseId, documentId))
     },
   }
 }

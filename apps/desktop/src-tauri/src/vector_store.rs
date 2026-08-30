@@ -566,6 +566,7 @@ fn resolve_zvec_library_dir(resource_dir: Option<&Path>) -> Result<PathBuf, Vect
     if let Some(resource_dir) = resource_dir {
         candidates.push(resource_dir.to_path_buf());
     }
+    candidates.extend(bundled_zvec_library_dirs());
     candidates
         .into_iter()
         .find(|path| path.join(zvec_library_name()).is_file())
@@ -574,6 +575,35 @@ fn resolve_zvec_library_dir(resource_dir: Option<&Path>) -> Result<PathBuf, Vect
                 "Zvec is unavailable: set ZVEC_LIB_DIR or provide resources/vector/zvec_c_api.dll",
             )
         })
+}
+
+#[cfg(feature = "zvec")]
+fn bundled_zvec_library_dirs() -> Vec<PathBuf> {
+    let Ok(executable) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    if let Some(directory) = executable.parent() {
+        candidates.push(directory.to_path_buf());
+        candidates.push(directory.join("vector"));
+    }
+    for ancestor in executable.ancestors().take(4) {
+        let build_root = ancestor.join("build");
+        let Ok(entries) = std::fs::read_dir(build_root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("zvec-rust-sys-")
+            {
+                continue;
+            }
+            candidates.push(entry.path().join("out").join("zvec-prebuilt"));
+        }
+    }
+    candidates
 }
 
 #[cfg(feature = "zvec")]
@@ -1099,12 +1129,9 @@ mod tests {
     #[cfg(all(feature = "zvec", target_os = "windows"))]
     #[test]
     fn zvec_vector_store_offline_smoke() {
-        let library_dir = std::env::var_os("ZVEC_LIB_DIR")
-            .map(PathBuf::from)
-            .expect("ZVEC_LIB_DIR must point to a directory containing zvec_c_api.dll");
         let root =
             std::env::temp_dir().join(format!("fox-zvec-smoke-{}", uuid::Uuid::new_v4().simple()));
-        let store = ZvecVectorStore::new_with_library_dir(&root, &library_dir)
+        let store = ZvecVectorStore::new(&root)
             .expect("Zvec library must be available for the offline smoke");
         store
             .create_generation("kb-smoke", "generation-smoke")

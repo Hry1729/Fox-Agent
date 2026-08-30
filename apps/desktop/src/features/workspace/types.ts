@@ -16,6 +16,8 @@ export type WorkspaceView =
   | 'local-knowledge-documents'
   | 'local-knowledge-import'
   | 'local-knowledge-jobs'
+  | 'local-knowledge-models'
+  | 'local-knowledge-retrieval'
   | 'skills'
   | 'mcp'
   | 'maintenance'

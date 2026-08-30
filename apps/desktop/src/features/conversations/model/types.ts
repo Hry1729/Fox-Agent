@@ -186,6 +186,77 @@ export interface UsageStatistics {
   days: UsageDayStat[]
 }
 
+export interface ProjectManagementRecord {
+  id: string
+  name: string
+  rootPath: string
+  permissionMode: ProjectRecord['permissionMode']
+  status: ProjectRecord['status']
+  pathExists: boolean
+  isGitRepository: boolean
+  gitBranch: string | null
+  diskBytes: number | null
+  conversationCount: number
+  artifactCount: number
+  recentConversationTitle: string | null
+  recentArtifactName: string | null
+  lastOpenedAt: number | null
+  archivedAt: number | null
+  updatedAt: number
+}
+
+export interface AppNotificationRecord {
+  id: string
+  mergeKey: string
+  kind: 'approval' | 'question' | 'progress' | 'completed' | 'failed'
+  severity: 'quiet' | 'normal' | 'high'
+  title: string
+  body: string
+  sourceType: string
+  sourceId: string
+  workspaceView: string | null
+  entityId: string | null
+  progress: number | null
+  status: string
+  action: Record<string, unknown>
+  readAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface NotificationPreferencesRecord {
+  systemPopup: boolean
+  sound: boolean
+  soundId: 'soft' | 'chime' | 'pop' | 'signal'
+  badge: boolean
+  quietProgress: boolean
+  updatedAt: number
+}
+
+export interface MessageFeedbackRecord {
+  id: string
+  messageId: string
+  conversationId: string
+  runId: string | null
+  sentiment: 'positive' | 'negative'
+  category: 'irrelevant' | 'code_error' | 'misunderstanding' | 'other' | null
+  comment: string | null
+  model: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface GlobalSearchRecord {
+  id: string
+  kind: 'conversation' | 'project' | 'agent' | 'digital_colleague' | 'knowledge_base' | 'knowledge_document' | 'task' | 'artifact'
+  title: string
+  subtitle: string
+  workspaceView: string
+  entityId: string | null
+  documentId: string | null
+  updatedAt: number
+}
+
 export interface TraceRunSummary {
   runId: string
   conversationId: string

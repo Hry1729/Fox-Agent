@@ -24,6 +24,7 @@ use std::{
 use uuid::Uuid;
 
 mod a1_workflow;
+mod app_management;
 mod child_runs;
 mod digital_colleagues;
 mod expert_teams;
@@ -34,6 +35,10 @@ mod observability;
 mod work_events;
 mod work_graph;
 
+pub use app_management::{
+    AppNotificationRecord, AppNotificationUpsert, GlobalSearchRecord, MessageFeedbackRecord,
+    NotificationPreferencesRecord, ProjectManagementRecord,
+};
 pub(crate) use digital_colleagues::MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS;
 
 pub(crate) use child_runs::CreateChildRunInput;

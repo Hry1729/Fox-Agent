@@ -26,6 +26,9 @@ export interface LocalKnowledgeBase {
   textIndexReady: boolean
   vectorIndexReady: boolean
   searchMode: KnowledgeSearchMode
+  configuredEmbeddingModelId: string | null
+  chunkSize: number
+  chunkOverlap: number
   embeddingModel: LocalKnowledgeEmbeddingModel | null
   fallbackReason: string | null
   storagePath: string
@@ -105,6 +108,13 @@ export interface LocalKnowledgeImportFile {
   relativePath?: string
   mimeType: string
   sizeBytes: number
+}
+
+export interface LocalKnowledgeFolder {
+  knowledgeBaseId: string
+  name: string
+  relativePath: string
+  documentCount: number
 }
 
 export type LocalFileCategory = 'all' | 'text' | 'document' | 'pdf' | 'presentation' | 'spreadsheet'
@@ -188,7 +198,7 @@ export interface OperationEvent {
   occurredAt: string
 }
 
-export type KnowledgeJobType = 'import' | 'index' | 'delete' | 'rebuild'
+export type KnowledgeJobType = 'import' | 'parse' | 'index' | 'delete' | 'rebuild'
 export type KnowledgeJobStatus = OperationStatus | 'interrupted'
 
 export interface KnowledgeJob {
@@ -230,6 +240,109 @@ export interface OperationSnapshot {
 export interface LocalKnowledgeBaseCreateRequest {
   name: string
   description?: string | null
+  embeddingModelId?: string | null
+  chunkSize?: number
+  chunkOverlap?: number
+  searchMode?: KnowledgeSearchMode
+}
+
+export type EmbeddingModelStatus = 'not_installed' | 'installing' | 'ready' | 'error'
+export type EmbeddingIntegrityStatus = 'pending' | 'verifying' | 'verified' | 'failed'
+
+export interface EmbeddingModelAsset {
+  name: string
+  downloadName: string
+  url: string
+  sha256: string
+  sizeBytes: number
+}
+
+export interface EmbeddingModelDownload {
+  id: string
+  status: 'queued' | 'running' | 'paused' | 'completed' | 'failed' | 'cancelled'
+  progress: number
+  downloadedBytes: number
+  totalBytes: number
+  currentFile: string | null
+  errorCode: string | null
+  errorMessage: string | null
+  updatedAt: number
+}
+
+export interface LocalEmbeddingModel {
+  id: string
+  name: string
+  version: string
+  languages: string[]
+  dimension: number
+  license: string
+  sourceUrl: string
+  status: EmbeddingModelStatus
+  integrityStatus: EmbeddingIntegrityStatus
+  isDefault: boolean
+  recommended: boolean
+  sizeBytes: number
+  installedAt: number | null
+  packagePath: string | null
+  loadReady: boolean
+  lastErrorCode: string | null
+  lastErrorMessage: string | null
+  files: EmbeddingModelAsset[]
+  download: EmbeddingModelDownload | null
+}
+
+export interface EmbeddingModelTestResult {
+  integrityVerified: boolean
+  loadReady: boolean
+  dimension: number
+  elapsedMs: number
+  message: string
+}
+
+export interface VectorBackendHealth {
+  backend: string
+  available: boolean
+  readWriteVerified: boolean
+  fallbackActive: boolean
+  message: string
+}
+
+export interface KnowledgeRetrievalResult {
+  knowledgeBaseId: string
+  query: string
+  mode: KnowledgeSearchMode
+  fusionVersion: string | null
+  timings: { keywordMs: number; vectorMs: number; totalMs: number }
+  items: Array<{
+    documentId: string
+    documentName: string
+    relativePath: string
+    chunkId: string
+    anchor: string | null
+    content: string
+    score: number
+    keywordScore: number | null
+    vectorScore: number | null
+  }>
+}
+
+export interface KnowledgeRetrievalCase {
+  id: string
+  knowledgeBaseId: string
+  question: string
+  expectedDocumentIds: string[]
+  expectedKeywords: string[]
+  createdAt: number
+  updatedAt: number
+}
+
+export interface KnowledgeChunkPreview {
+  id: string
+  chunkIndex: number
+  content: string
+  anchor: string | null
+  startOffset: number | null
+  endOffset: number | null
 }
 
 export interface LocalKnowledgeGateway {
@@ -248,10 +361,13 @@ export interface LocalKnowledgeGateway {
   updateKnowledgeBase(id: string, request: LocalKnowledgeBaseCreateRequest): Promise<LocalKnowledgeBase>
   deleteKnowledgeBase(id: string): Promise<boolean>
   listDocuments(id: string, options?: { query?: string }): Promise<Page<LocalKnowledgeDocument>>
+  listFolders(id: string): Promise<LocalKnowledgeFolder[]>
+  createFolder(knowledgeBaseId: string, name: string, parentPath?: string): Promise<LocalKnowledgeFolder>
   readDocumentFileRange(knowledgeBaseId: string, documentId: string, start: number, end: number): Promise<unknown>
   openDocumentFile(knowledgeBaseId: string, documentId: string): Promise<boolean>
   revealDocumentFile(knowledgeBaseId: string, documentId: string): Promise<boolean>
   pickImportFiles?(): Promise<LocalKnowledgeImportFile[]>
+  pickImportFolder?(): Promise<LocalKnowledgeImportFile[]>
   startImport(request: LocalKnowledgeImportRequest): Promise<OperationAccepted>
   listJobs(knowledgeBaseId?: string): Promise<KnowledgeJob[]>
   getOperation(operationId: string): Promise<OperationSnapshot>
@@ -262,6 +378,24 @@ export interface LocalKnowledgeGateway {
   pickStorageDirectory(): Promise<string | null>
   startStorageMigration(destinationPath: string): Promise<OperationAccepted>
   getStorageMigration(migrationId: string): Promise<LocalKnowledgeStorageMigration>
+  listEmbeddingModels(): Promise<LocalEmbeddingModel[]>
+  startEmbeddingModelInstall(modelId: string): Promise<OperationAccepted>
+  cancelEmbeddingModelDownload(downloadId: string): Promise<boolean>
+  retryEmbeddingModelDownload(downloadId: string): Promise<OperationAccepted>
+  testEmbeddingModel(modelId: string): Promise<EmbeddingModelTestResult>
+  setDefaultEmbeddingModel(modelId: string): Promise<boolean>
+  deleteEmbeddingModel(modelId: string): Promise<boolean>
+  importEmbeddingModelPackage(packagePath: string): Promise<LocalEmbeddingModel>
+  getVectorBackendHealth(): Promise<VectorBackendHealth>
+  startIndex(knowledgeBaseId: string, rebuild?: boolean): Promise<OperationAccepted>
+  testRetrieval(knowledgeBaseId: string, query: string, mode: KnowledgeSearchMode, limit?: number): Promise<KnowledgeRetrievalResult>
+  listRetrievalCases(knowledgeBaseId: string): Promise<KnowledgeRetrievalCase[]>
+  saveRetrievalCase(request: { id?: string; knowledgeBaseId: string; question: string; expectedDocumentIds?: string[]; expectedKeywords?: string[] }): Promise<KnowledgeRetrievalCase>
+  deleteRetrievalCase(id: string): Promise<boolean>
+  exportRetrievalCases(knowledgeBaseId: string): Promise<{ json: unknown; markdown: string }>
+  listDocumentChunks(knowledgeBaseId: string, documentId: string, options?: { limit?: number; offset?: number }): Promise<KnowledgeChunkPreview[]>
+  deleteDocument(knowledgeBaseId: string, documentId: string): Promise<boolean>
+  reparseDocument(knowledgeBaseId: string, documentId: string): Promise<OperationAccepted>
 }
 
 export function knowledgeReferenceLabel(reference: KnowledgeReference): string {

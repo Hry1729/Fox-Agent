@@ -1,3 +1,4 @@
+mod app_capabilities;
 mod app_state;
 mod artifact_gateway;
 mod commands;
@@ -7,10 +8,13 @@ mod expert_packages;
 mod expert_teams;
 mod expert_workflows;
 mod lifecycle_hooks;
+#[cfg(feature = "local-embedding")]
+mod local_embedding;
 mod local_knowledge;
 mod local_knowledge_import;
 mod local_knowledge_picker;
 mod local_knowledge_storage;
+mod local_knowledge_vector;
 mod maintenance;
 mod mcp;
 mod mcp_openapi;
@@ -77,7 +81,8 @@ pub fn run() {
                 &app_data_dir,
                 configured_local_knowledge_root.as_deref(),
             );
-            let local_knowledge = LocalKnowledgeStore::open(local_knowledge_root)?;
+            let local_knowledge = LocalKnowledgeStore::open(local_knowledge_root)?
+                .with_zvec_resource_dir(app.path().resource_dir()?.join("vector"));
             local_knowledge.ensure_default_fox_guide()?;
             app.manage(AppState::new(
                 database,
@@ -167,6 +172,19 @@ pub fn run() {
             commands::memory_revisions_list,
             commands::memory_recalls_list,
             commands::projects_list,
+            app_capabilities::projects_management_list,
+            app_capabilities::project_path_update,
+            app_capabilities::project_archive,
+            app_capabilities::project_root_open,
+            app_capabilities::digital_colleague_run_detail,
+            app_capabilities::app_notifications_list,
+            app_capabilities::app_notification_read,
+            app_capabilities::app_notifications_mark_all_read,
+            app_capabilities::app_notifications_clear_read,
+            app_capabilities::notification_preferences_get,
+            app_capabilities::notification_preferences_save,
+            app_capabilities::message_feedback_save,
+            app_capabilities::app_global_search,
             commands::project_delete,
             commands::project_folder_pick,
             commands::project_folder_open,
@@ -254,10 +272,13 @@ pub fn run() {
             local_knowledge::local_knowledge_base_update,
             local_knowledge::local_knowledge_base_delete,
             local_knowledge::local_knowledge_documents_list,
+            local_knowledge::local_knowledge_folders_list,
+            local_knowledge::local_knowledge_folder_create,
             local_knowledge::local_knowledge_document_file_read,
             local_knowledge::local_knowledge_document_file_open,
             local_knowledge::local_knowledge_documents_import_start,
             local_knowledge_picker::local_knowledge_import_files_pick,
+            local_knowledge_picker::local_knowledge_import_folder_pick,
             local_knowledge_picker::local_knowledge_source_folder_pick,
             local_knowledge::local_knowledge_jobs_list,
             local_knowledge::local_knowledge_job_get,
@@ -267,6 +288,24 @@ pub fn run() {
             local_knowledge_storage::local_knowledge_storage_directory_pick,
             local_knowledge::local_knowledge_storage_migrate_start,
             local_knowledge::local_knowledge_storage_migration_get,
+            local_knowledge_vector::local_embedding_models_list,
+            local_knowledge_vector::local_embedding_model_install_start,
+            local_knowledge_vector::local_embedding_model_download_cancel,
+            local_knowledge_vector::local_embedding_model_download_retry,
+            local_knowledge_vector::local_embedding_model_test,
+            local_knowledge_vector::local_embedding_model_set_default,
+            local_knowledge_vector::local_embedding_model_delete,
+            local_knowledge_vector::local_embedding_model_import,
+            local_knowledge_vector::local_vector_backend_health,
+            local_knowledge_vector::local_knowledge_index_start,
+            local_knowledge_vector::local_knowledge_retrieval_test,
+            local_knowledge_vector::local_knowledge_retrieval_cases_list,
+            local_knowledge_vector::local_knowledge_retrieval_case_save,
+            local_knowledge_vector::local_knowledge_retrieval_case_delete,
+            local_knowledge_vector::local_knowledge_retrieval_cases_export,
+            local_knowledge_vector::local_knowledge_document_chunks,
+            local_knowledge_vector::local_knowledge_document_delete,
+            local_knowledge_vector::local_knowledge_document_reparse,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Fox");

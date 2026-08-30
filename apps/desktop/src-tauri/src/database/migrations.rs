@@ -5619,6 +5619,69 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_expert_bindings_single_active
     ON conversation_expert_bindings(conversation_id) WHERE state = 'active';
 "#;
 
+const MIGRATION_40: &str = r#"
+ALTER TABLE projects ADD COLUMN archived_at INTEGER;
+
+CREATE TABLE app_notifications (
+    id TEXT PRIMARY KEY,
+    merge_key TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL CHECK(kind IN ('approval', 'question', 'progress', 'completed', 'failed')),
+    severity TEXT NOT NULL CHECK(severity IN ('quiet', 'normal', 'high')),
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    workspace_view TEXT,
+    entity_id TEXT,
+    progress INTEGER CHECK(progress IS NULL OR progress BETWEEN 0 AND 100),
+    status TEXT NOT NULL,
+    action_json TEXT NOT NULL DEFAULT '{}'
+        CHECK(json_valid(action_json) AND json_type(action_json) = 'object'),
+    read_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX idx_app_notifications_read_updated
+    ON app_notifications(read_at, updated_at DESC, id);
+CREATE INDEX idx_app_notifications_kind_status
+    ON app_notifications(kind, status, updated_at DESC);
+
+CREATE TABLE notification_preferences (
+    singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+    system_popup INTEGER NOT NULL DEFAULT 0 CHECK(system_popup IN (0, 1)),
+    sound INTEGER NOT NULL DEFAULT 0 CHECK(sound IN (0, 1)),
+    badge INTEGER NOT NULL DEFAULT 1 CHECK(badge IN (0, 1)),
+    quiet_progress INTEGER NOT NULL DEFAULT 1 CHECK(quiet_progress IN (0, 1)),
+    updated_at INTEGER NOT NULL
+);
+INSERT INTO notification_preferences(
+    singleton_id, system_popup, sound, badge, quiet_progress, updated_at
+) VALUES (1, 0, 0, 1, 1, 0);
+
+CREATE TABLE message_feedback (
+    id TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+    sentiment TEXT NOT NULL CHECK(sentiment IN ('positive', 'negative')),
+    category TEXT CHECK(category IN ('irrelevant', 'code_error', 'misunderstanding', 'other')),
+    comment TEXT,
+    model TEXT,
+    context_json TEXT NOT NULL DEFAULT '{}'
+        CHECK(json_valid(context_json) AND json_type(context_json) = 'object'),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX idx_message_feedback_created
+    ON message_feedback(created_at DESC, id);
+"#;
+
+const MIGRATION_41: &str = r#"
+ALTER TABLE notification_preferences
+ADD COLUMN sound_id TEXT NOT NULL DEFAULT 'soft'
+    CHECK(sound_id IN ('soft', 'chime', 'pop', 'signal'));
+"#;
+
 const AGENT_EXPERT_SCHEMA_VERSION: i64 = 20;
 const EXPERT_PACKAGE_SNAPSHOT_SCHEMA_VERSION: i64 = 21;
 const EXPERT_PACKAGE_SNAPSHOT_SCHEMA: &str = r#"
@@ -5832,6 +5895,8 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     apply_migration(&transaction, 37, MIGRATION_37, now)?;
     apply_migration(&transaction, 38, MIGRATION_38, now)?;
     apply_graph_review_acceptance_migration(&transaction, now)?;
+    apply_migration(&transaction, 40, MIGRATION_40, now)?;
+    apply_migration(&transaction, 41, MIGRATION_41, now)?;
     transaction.commit()
 }
 
@@ -10714,5 +10779,74 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(foreign_key_errors.is_empty());
+    }
+
+    #[test]
+    fn app_capability_migration_is_idempotent_and_enforces_defaults() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run(&mut connection, 1).expect("apply current schema");
+        run(&mut connection, 2).expect("repeat current schema");
+
+        assert_eq!(
+            connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ),)
+                .unwrap(),
+            DATABASE_SCHEMA_VERSION
+        );
+        for table in [
+            "app_notifications",
+            "notification_preferences",
+            "message_feedback",
+        ] {
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                        [table],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                1,
+                "missing app capability table {table}"
+            );
+        }
+        let project_columns = connection
+            .prepare("PRAGMA table_info(projects)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(project_columns.contains(&"archived_at".to_owned()));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT system_popup, sound, sound_id, badge, quiet_progress
+                     FROM notification_preferences WHERE singleton_id = 1",
+                    [],
+                    |row| Ok((
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, bool>(3)?,
+                        row.get::<_, bool>(4)?,
+                    )),
+                )
+                .unwrap(),
+            (false, false, "soft".to_owned(), true, true)
+        );
+        assert!(connection
+            .execute(
+                "INSERT INTO app_notifications(
+                    id, merge_key, kind, severity, title, body, source_type, source_id,
+                    progress, status, created_at, updated_at
+                 ) VALUES ('bad', 'bad', 'progress', 'normal', 'Bad', 'Bad', 'run', 'run',
+                           101, 'running', 1, 1)",
+                [],
+            )
+            .is_err());
     }
 }

@@ -2,17 +2,19 @@ mod migrations;
 mod models;
 mod repositories;
 
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 39;
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 41;
 pub use models::*;
 #[allow(unused_imports)]
 pub use repositories::{
     now_ms, ActivateReadOnlyGraphInput, ActiveGraphNodeReviewRequest, AddEvidenceInput,
-    CreateGoalInput, CreateGraphNodeCancelIntentInput, CreateGraphNodeReviewRequestInput,
+    AppNotificationRecord, AppNotificationUpsert, CreateGoalInput,
+    CreateGraphNodeCancelIntentInput, CreateGraphNodeReviewRequestInput,
     CreateReadOnlyGraphAcceptanceInput, CreateTaskInput, Database, FinishReadOnlyGraphNodeInput,
-    FinishTaskAttemptInput, GraphAcceptanceIntentResult, GraphAcceptanceResult,
+    FinishTaskAttemptInput, GlobalSearchRecord, GraphAcceptanceIntentResult, GraphAcceptanceResult,
     GraphCriterionEvidenceInput, GraphNodeReviewActivationResult, GraphNodeReviewDecisionResult,
     GraphNodeReviewOutcome, GraphNodeReviewRequestResult, GraphReviewerDispatchResult,
-    PendingGraphAcceptance, PreflightTaskRepairOverrideInput, RepositoryError,
+    MessageFeedbackRecord, NotificationPreferencesRecord, PendingGraphAcceptance,
+    PreflightTaskRepairOverrideInput, ProjectManagementRecord, RepositoryError,
     StartReadyReadOnlyGraphNodeInput, StartTaskAttemptInput, StartTaskRepairOverrideInput,
     WORK_EVENT_TYPES,
 };

@@ -75,6 +75,11 @@ import type {
   DigitalColleagueRecord,
   DigitalColleagueScheduleRecord,
   DigitalColleagueTriggerRecord,
+  AppNotificationRecord,
+  GlobalSearchRecord,
+  MessageFeedbackRecord,
+  NotificationPreferencesRecord,
+  ProjectManagementRecord,
 } from '../model/types'
 import {
   pluginActivationUpdateToWire,
@@ -158,6 +163,9 @@ export interface LocalKnowledgeBaseDto {
   textIndexReady?: boolean
   vectorIndexReady?: boolean
   searchMode?: string | null
+  configuredEmbeddingModelId?: string | null
+  chunkSize?: number | null
+  chunkOverlap?: number | null
   embeddingModel?: {
     id: string
     name: string
@@ -272,11 +280,67 @@ export interface PickedLocalKnowledgeFileDto {
   name: string
   mimeType: string
   sizeBytes: number
+  relativePath: string
+}
+
+export interface LocalKnowledgeFolderDto {
+  knowledgeBaseId: string
+  name: string
+  relativePath: string
+  documentCount: number
 }
 
 export interface LocalKnowledgeOperationAcceptedDto {
   operationId: string
   acceptedAt: number
+}
+
+export interface LocalEmbeddingModelDto {
+  id: string
+  name: string
+  version: string
+  languages: string[]
+  dimension: number
+  license: string
+  sourceUrl: string
+  status: string
+  integrityStatus: string
+  isDefault: boolean
+  recommended: boolean
+  sizeBytes: number
+  installedAt: number | null
+  packagePath: string | null
+  loadReady: boolean
+  lastErrorCode: string | null
+  lastErrorMessage: string | null
+  files: Array<{ name: string; downloadName: string; url: string; sha256: string; sizeBytes: number }>
+  download: {
+    id: string
+    status: string
+    progress: number
+    downloadedBytes: number
+    totalBytes: number
+    currentFile: string | null
+    errorCode: string | null
+    errorMessage: string | null
+    updatedAt: number
+  } | null
+}
+
+export interface LocalEmbeddingModelTestDto {
+  integrityVerified: boolean
+  loadReady: boolean
+  dimension: number
+  elapsedMs: number
+  message: string
+}
+
+export interface LocalVectorBackendHealthDto {
+  backend: string
+  available: boolean
+  readWriteVerified: boolean
+  fallbackActive: boolean
+  message: string
 }
 
 export class DesktopCommandError extends Error {
@@ -396,6 +460,8 @@ export const desktopClient = {
     command<DigitalColleagueTriggerRecord>('digital_colleague_trigger_channel', request),
   listDigitalColleagueTriggers: (colleagueId: string) =>
     command<DigitalColleagueTriggerRecord[]>('digital_colleague_triggers_list', { colleagueId }),
+  getDigitalColleagueRunDetail: (runId: string) =>
+    command<ConversationDetail>('digital_colleague_run_detail', { runId }),
   listDigitalColleagueAudit: (colleagueId: string) =>
     command<DigitalColleagueAuditRecord[]>('digital_colleague_audit_list', { colleagueId }),
   listSkills: (agentId: string) => command<SkillRecord[]>('skills_list', { agentId }),
@@ -462,6 +528,24 @@ export const desktopClient = {
   searchConversations: (query: string, limit = 50) =>
     command<ConversationSummary[]>('conversations_search', { query, limit }),
   listProjects: () => command<ProjectRecord[]>('projects_list'),
+  listManagedProjects: () => command<ProjectManagementRecord[]>('projects_management_list'),
+  updateProjectPath: (projectId: string, rootPath: string) =>
+    command<ProjectManagementRecord>('project_path_update', { projectId, rootPath }),
+  setProjectArchived: (projectId: string, archived: boolean) =>
+    command<boolean>('project_archive', { projectId, archived }),
+  openProjectRoot: (projectId: string) => command<boolean>('project_root_open', { projectId }),
+  listAppNotifications: (unreadOnly = false, limit = 100) =>
+    command<AppNotificationRecord[]>('app_notifications_list', { unreadOnly, limit }),
+  setAppNotificationRead: (id: string, read: boolean) =>
+    command<boolean>('app_notification_read', { id, read }),
+  markAllAppNotificationsRead: () => command<number>('app_notifications_mark_all_read'),
+  clearReadAppNotifications: () => command<number>('app_notifications_clear_read'),
+  getNotificationPreferences: () => command<NotificationPreferencesRecord>('notification_preferences_get'),
+  saveNotificationPreferences: (request: NotificationPreferencesRecord) =>
+    command<NotificationPreferencesRecord>('notification_preferences_save', request),
+  saveMessageFeedback: (messageId: string, sentiment: 'positive' | 'negative', category?: 'irrelevant' | 'code_error' | 'misunderstanding' | 'other', comment?: string) =>
+    command<MessageFeedbackRecord>('message_feedback_save', { messageId, sentiment, category, comment }),
+  globalSearch: (query: string, limit = 40) => command<GlobalSearchRecord[]>('app_global_search', { query, limit }),
   listProjectFiles: (conversationId: string) =>
     command<ProjectFileEntry[]>('project_files_list', { conversationId }),
   openProjectFolder: (conversationId: string) =>
@@ -586,21 +670,27 @@ export const desktopClient = {
     command<boolean>('local_knowledge_local_file_open', { id, reveal }),
   getLocalKnowledgeBase: (id: string) =>
     command<LocalKnowledgeBaseDto>('local_knowledge_base_get', { id }),
-  createLocalKnowledgeBase: (request: { name: string; description?: string | null }) =>
+  createLocalKnowledgeBase: (request: { name: string; description?: string | null; embeddingModelId?: string | null; chunkSize?: number; chunkOverlap?: number; searchMode?: string }) =>
     command<LocalKnowledgeBaseDto>('local_knowledge_base_create', request),
-  updateLocalKnowledgeBase: (request: { id: string; name: string; description?: string | null }) =>
+  updateLocalKnowledgeBase: (request: { id: string; name: string; description?: string | null; embeddingModelId?: string | null; chunkSize?: number; chunkOverlap?: number; searchMode?: string }) =>
     command<LocalKnowledgeBaseDto>('local_knowledge_base_update', request),
   deleteLocalKnowledgeBase: (id: string) =>
     command<boolean>('local_knowledge_base_delete', { id }),
   listLocalKnowledgeDocuments: (knowledgeBaseId: string, query?: string) =>
     command<LocalKnowledgeDocumentDto[]>('local_knowledge_documents_list', { knowledgeBaseId, query }),
+  listLocalKnowledgeFolders: (knowledgeBaseId: string) =>
+    command<LocalKnowledgeFolderDto[]>('local_knowledge_folders_list', { knowledgeBaseId }),
+  createLocalKnowledgeFolder: (knowledgeBaseId: string, name: string, parentPath?: string) =>
+    command<LocalKnowledgeFolderDto>('local_knowledge_folder_create', { knowledgeBaseId, name, parentPath }),
   readLocalKnowledgeDocumentFileRange: (knowledgeBaseId: string, documentId: string, start: number, end: number) =>
     command<unknown>('local_knowledge_document_file_read', { knowledgeBaseId, documentId, start, end }),
   openLocalKnowledgeDocumentFile: (knowledgeBaseId: string, documentId: string, reveal = false) =>
     command<boolean>('local_knowledge_document_file_open', { knowledgeBaseId, documentId, reveal }),
   pickLocalKnowledgeImportFiles: () =>
     command<PickedLocalKnowledgeFileDto[]>('local_knowledge_import_files_pick'),
-  startLocalKnowledgeImport: (request: { knowledgeBaseId: string; files: Array<{ sourcePath: string }>; parserVersion?: string; chunkConfigHash?: string }) =>
+  pickLocalKnowledgeImportFolder: () =>
+    command<PickedLocalKnowledgeFileDto[]>('local_knowledge_import_folder_pick'),
+  startLocalKnowledgeImport: (request: { knowledgeBaseId: string; files: Array<{ sourcePath: string; relativePath?: string }>; parserVersion?: string; chunkConfigHash?: string }) =>
     command<LocalKnowledgeOperationAcceptedDto>('local_knowledge_documents_import_start', request),
   listLocalKnowledgeJobs: (knowledgeBaseId?: string) =>
     command<LocalKnowledgeJobDto[]>('local_knowledge_jobs_list', knowledgeBaseId ? { knowledgeBaseId } : undefined),
@@ -618,6 +708,42 @@ export const desktopClient = {
     command<LocalKnowledgeOperationAcceptedDto>('local_knowledge_storage_migrate_start', { destinationPath }),
   getLocalKnowledgeStorageMigration: (id: string) =>
     command<LocalKnowledgeStorageMigrationDto>('local_knowledge_storage_migration_get', { id }),
+  listLocalEmbeddingModels: () =>
+    command<LocalEmbeddingModelDto[]>('local_embedding_models_list'),
+  startLocalEmbeddingModelInstall: (modelId: string) =>
+    command<LocalKnowledgeOperationAcceptedDto>('local_embedding_model_install_start', { modelId }),
+  cancelLocalEmbeddingModelDownload: (id: string) =>
+    command<boolean>('local_embedding_model_download_cancel', { id }),
+  retryLocalEmbeddingModelDownload: (id: string) =>
+    command<LocalKnowledgeOperationAcceptedDto>('local_embedding_model_download_retry', { id }),
+  testLocalEmbeddingModel: (modelId: string) =>
+    command<LocalEmbeddingModelTestDto>('local_embedding_model_test', { modelId }),
+  setDefaultLocalEmbeddingModel: (modelId: string) =>
+    command<boolean>('local_embedding_model_set_default', { modelId }),
+  deleteLocalEmbeddingModel: (modelId: string) =>
+    command<boolean>('local_embedding_model_delete', { modelId }),
+  importLocalEmbeddingModelPackage: (packagePath: string) =>
+    command<LocalEmbeddingModelDto>('local_embedding_model_import', { packagePath }),
+  getLocalVectorBackendHealth: () =>
+    command<LocalVectorBackendHealthDto>('local_vector_backend_health'),
+  startLocalKnowledgeIndex: (knowledgeBaseId: string, rebuild = false) =>
+    command<LocalKnowledgeOperationAcceptedDto>('local_knowledge_index_start', { knowledgeBaseId, rebuild }),
+  testLocalKnowledgeRetrieval: (knowledgeBaseId: string, query: string, mode: string, limit?: number) =>
+    command<unknown>('local_knowledge_retrieval_test', { knowledgeBaseId, query, mode, limit }),
+  listLocalKnowledgeRetrievalCases: (knowledgeBaseId: string) =>
+    command<unknown[]>('local_knowledge_retrieval_cases_list', { knowledgeBaseId }),
+  saveLocalKnowledgeRetrievalCase: (request: { id?: string; knowledgeBaseId: string; question: string; expectedDocumentIds?: string[]; expectedKeywords?: string[] }) =>
+    command<unknown>('local_knowledge_retrieval_case_save', request),
+  deleteLocalKnowledgeRetrievalCase: (id: string) =>
+    command<boolean>('local_knowledge_retrieval_case_delete', { id }),
+  exportLocalKnowledgeRetrievalCases: (knowledgeBaseId: string) =>
+    command<unknown>('local_knowledge_retrieval_cases_export', { knowledgeBaseId }),
+  listLocalKnowledgeDocumentChunks: (knowledgeBaseId: string, documentId: string, limit?: number, offset?: number) =>
+    command<unknown[]>('local_knowledge_document_chunks', { knowledgeBaseId, documentId, limit, offset }),
+  deleteLocalKnowledgeDocument: (knowledgeBaseId: string, documentId: string) =>
+    command<boolean>('local_knowledge_document_delete', { knowledgeBaseId, documentId }),
+  reparseLocalKnowledgeDocument: (knowledgeBaseId: string, documentId: string) =>
+    command<LocalKnowledgeOperationAcceptedDto>('local_knowledge_document_reparse', { knowledgeBaseId, documentId }),
   getKnowledgeDocument: (knowledgeBaseId: string, documentId: string) =>
     command<unknown>('knowledge_document_content', { knowledgeBaseId, documentId }),
   getKnowledgeDocumentActivity: (knowledgeBaseId: string, documentId: string) =>

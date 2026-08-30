@@ -370,13 +370,11 @@ function AgentWorkRecord({ agentId, conversationsOnly = false }: { agentId: stri
           <TabsList>
             <TabsTrigger value="timeline"><CalendarDays />时间线图</TabsTrigger>
             <TabsTrigger value="conversations"><History />对话任务</TabsTrigger>
-            <TabsTrigger value="scheduled"><Clock3 />自动任务</TabsTrigger>
           </TabsList>
         </div>
         <TabsContent value="timeline" className="fox-agent-work-content">
           <div className="fox-agent-work-metrics">
             <div><strong>{record.activeDays}<small>天</small></strong><span>活跃天数 <Info /></span></div>
-            <div><strong>0</strong><span>自动任务 <Info /></span></div>
             <div><strong>{conversations.length}</strong><span>对话任务 <Info /></span></div>
             <div><strong>{record.projects}</strong><span>参与项目 <Info /></span></div>
           </div>
@@ -395,7 +393,6 @@ function AgentWorkRecord({ agentId, conversationsOnly = false }: { agentId: stri
         <TabsContent value="conversations" className="fox-agent-work-list">
           {conversationList}
         </TabsContent>
-        <TabsContent value="scheduled" className="fox-agent-work-empty"><Clock3 /><p>当前阶段尚未启用自动任务。</p></TabsContent>
       </Tabs>
     </Card>
   )

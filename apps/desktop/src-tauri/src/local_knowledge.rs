@@ -2,11 +2,12 @@ use crate::{
     app_state::AppState,
     database::{ApiResponse, Database},
     local_knowledge_import::{
-        import_document, parse_imported_document, ImportOptions, ImportedDocument, ParsedDocument,
-        DEFAULT_CHUNK_MAX_BYTES,
+        import_document_at_relative_path, parse_imported_document, ImportOptions, ImportedDocument,
+        ParsedDocument, DEFAULT_CHUNK_MAX_BYTES,
     },
     local_knowledge_picker::{
-        is_supported_file_name, mime_type_for_file_name, MAX_PICKED_FILE_SIZE,
+        is_supported_file_name, mime_type_for_file_name, validate_path_component,
+        MAX_PICKED_FILE_SIZE,
     },
     local_knowledge_storage::{
         cleanup_staging, commit_staging, copy_managed_directory, create_staging_path,
@@ -24,7 +25,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
     thread,
     time::{Duration, UNIX_EPOCH},
@@ -32,7 +33,9 @@ use std::{
 use tauri::State;
 use uuid::Uuid;
 
-const KNOWLEDGE_SCHEMA_VERSION: i64 = 2;
+const KNOWLEDGE_SCHEMA_VERSION: i64 = 3;
+pub(crate) const DEFAULT_CHUNK_SIZE: i64 = 512;
+pub(crate) const DEFAULT_CHUNK_OVERLAP: i64 = 50;
 const MAX_LOCAL_FILE_CATALOG_ITEMS: usize = 100_000;
 const DEFAULT_LOCAL_FILE_LIST_LIMIT: usize = 500;
 const MAX_LOCAL_FILE_LIST_LIMIT: usize = 2_000;
@@ -140,7 +143,11 @@ impl LocalKnowledgeError {
         self.code
     }
 
-    fn not_found(entity: &str) -> Self {
+    pub(crate) fn retryable(&self) -> bool {
+        self.retryable
+    }
+
+    pub(crate) fn not_found(entity: &str) -> Self {
         Self {
             code: "local_knowledge.not_found",
             message: format!("{entity} was not found"),
@@ -148,7 +155,7 @@ impl LocalKnowledgeError {
         }
     }
 
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self {
             code: "local_knowledge.invalid_request",
             message: message.into(),
@@ -156,7 +163,7 @@ impl LocalKnowledgeError {
         }
     }
 
-    fn storage(error: impl std::fmt::Display) -> Self {
+    pub(crate) fn storage(error: impl std::fmt::Display) -> Self {
         Self {
             code: "local_knowledge.storage_failed",
             message: error.to_string(),
@@ -164,7 +171,7 @@ impl LocalKnowledgeError {
         }
     }
 
-    fn conflict(message: impl Into<String>) -> Self {
+    pub(crate) fn conflict(message: impl Into<String>) -> Self {
         Self {
             code: "local_knowledge.job_conflict",
             message: message.into(),
@@ -210,8 +217,9 @@ impl From<std::io::Error> for LocalKnowledgeError {
 
 #[derive(Clone)]
 pub struct LocalKnowledgeStore {
-    connection: Arc<Mutex<Connection>>,
-    root: Arc<PathBuf>,
+    pub(crate) connection: Arc<Mutex<Connection>>,
+    pub(crate) root: Arc<PathBuf>,
+    pub(crate) zvec_resource_dir: Arc<Option<PathBuf>>,
     database_path: Arc<PathBuf>,
     storage_migration_active: Arc<Mutex<Option<String>>>,
     pending_root_path: Arc<Mutex<Option<PathBuf>>>,
@@ -238,6 +246,9 @@ pub struct LocalKnowledgeBase {
     pub text_index_ready: bool,
     pub vector_index_ready: bool,
     pub search_mode: String,
+    pub configured_embedding_model_id: Option<String>,
+    pub chunk_size: i64,
+    pub chunk_overlap: i64,
     pub embedding_model: Option<LocalKnowledgeEmbeddingModel>,
     pub chunk_count: Option<i64>,
     pub vector_count: Option<i64>,
@@ -252,6 +263,10 @@ pub struct LocalKnowledgeBase {
 pub struct CreateLocalKnowledgeBaseRequest {
     pub name: String,
     pub description: Option<String>,
+    pub embedding_model_id: Option<String>,
+    pub chunk_size: Option<i64>,
+    pub chunk_overlap: Option<i64>,
+    pub search_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -260,6 +275,10 @@ pub struct UpdateLocalKnowledgeBaseRequest {
     pub id: String,
     pub name: String,
     pub description: Option<String>,
+    pub embedding_model_id: Option<String>,
+    pub chunk_size: Option<i64>,
+    pub chunk_overlap: Option<i64>,
+    pub search_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -292,6 +311,29 @@ pub struct LocalKnowledgeDocument {
 pub struct LocalKnowledgeDocumentsRequest {
     pub knowledge_base_id: String,
     pub query: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalKnowledgeFolder {
+    pub knowledge_base_id: String,
+    pub name: String,
+    pub relative_path: String,
+    pub document_count: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalKnowledgeFoldersRequest {
+    pub knowledge_base_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateLocalKnowledgeFolderRequest {
+    pub knowledge_base_id: String,
+    pub parent_path: Option<String>,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -391,6 +433,7 @@ struct CatalogFileCandidate {
 #[serde(rename_all = "camelCase")]
 pub struct LocalKnowledgeImportFileRequest {
     pub source_path: String,
+    pub relative_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -472,13 +515,20 @@ impl LocalKnowledgeStore {
         let store = Self {
             connection: Arc::new(Mutex::new(connection)),
             root: Arc::new(root),
+            zvec_resource_dir: Arc::new(None),
             database_path: Arc::new(database_path),
             storage_migration_active: Arc::new(Mutex::new(None)),
             pending_root_path: Arc::new(Mutex::new(None)),
         };
         store.reconcile_storage_migration_on_open()?;
         store.recover_startup_jobs()?;
+        store.recover_embedding_downloads()?;
         Ok(store)
+    }
+
+    pub fn with_zvec_resource_dir(mut self, resource_dir: impl AsRef<Path>) -> Self {
+        self.zvec_resource_dir = Arc::new(Some(resource_dir.as_ref().to_path_buf()));
+        self
     }
 
     pub fn ensure_default_fox_guide(&self) -> Result<(), LocalKnowledgeError> {
@@ -638,7 +688,7 @@ impl LocalKnowledgeStore {
         Ok(())
     }
 
-    fn connection(&self) -> Result<MutexGuard<'_, Connection>, LocalKnowledgeError> {
+    pub(crate) fn connection(&self) -> Result<MutexGuard<'_, Connection>, LocalKnowledgeError> {
         self.connection
             .lock()
             .map_err(|_| LocalKnowledgeError::storage("knowledge database lock is poisoned"))
@@ -1028,13 +1078,19 @@ impl LocalKnowledgeStore {
              WHERE status = 'running'",
             [now],
         )?;
-        let queued_imports = self
+        let queued_jobs = self
             .list_jobs(None)?
             .into_iter()
-            .filter(|job| job.job_type == "import" && job.status == "queued")
+            .filter(|job| job.status == "queued")
             .collect::<Vec<_>>();
-        for job in queued_imports {
-            if let Err(error) = self.resume_import_job(&job) {
+        for job in queued_jobs {
+            let resumed = match job.job_type.as_str() {
+                "import" => self.resume_import_job(&job),
+                "parse" => self.resume_reparse_job(&job),
+                "index" | "rebuild" => self.resume_index_job(&job),
+                _ => Ok(()),
+            };
+            if let Err(error) = resumed {
                 self.fail_job(&job.id, &error)?;
             }
         }
@@ -1072,6 +1128,16 @@ impl LocalKnowledgeStore {
         connection: &Connection,
         base: &mut LocalKnowledgeBase,
     ) -> Result<(), LocalKnowledgeError> {
+        let (configured_model_id, chunk_size, chunk_overlap, configured_search_mode) = connection
+            .query_row(
+            "SELECT embedding_model_id, chunk_size, chunk_overlap, search_mode
+                 FROM local_knowledge_bases WHERE id = ?1",
+            [&base.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        base.configured_embedding_model_id = configured_model_id;
+        base.chunk_size = chunk_size;
+        base.chunk_overlap = chunk_overlap;
         let chunk_count: i64 = connection.query_row(
             "SELECT COUNT(c.id)
              FROM local_kb_chunks c
@@ -1104,55 +1170,87 @@ impl LocalKnowledgeStore {
             |row| row.get(0),
         )?;
         let embedding_model: Option<LocalKnowledgeEmbeddingModel> =
-            match base.active_index_generation.as_deref() {
-                Some(generation_id) => connection
+            match base.configured_embedding_model_id.as_deref() {
+                Some(model_id) => connection
                     .query_row(
-                        "SELECT g.embedding_model_id, m.version, g.dimension
-                     FROM local_kb_index_generations g
-                     JOIN local_embedding_models m
-                       ON m.model_id = g.embedding_model_id
-                      AND m.dimension = g.dimension
-                      AND m.status = 'ready'
-                     WHERE g.id = ?1
-                       AND g.knowledge_base_id = ?2
-                       AND g.status = 'active'
-                     LIMIT 1",
-                        params![generation_id, &base.id],
+                        "SELECT model_id, name, version, dimension
+                         FROM local_embedding_models
+                         WHERE model_id = ?1 AND status = 'ready'
+                           AND integrity_status = 'verified'
+                         ORDER BY updated_at DESC LIMIT 1",
+                        [model_id],
                         |row| {
-                            let id: String = row.get(0)?;
                             Ok(LocalKnowledgeEmbeddingModel {
-                                name: id.clone(),
-                                id,
-                                version: row.get(1)?,
-                                dimension: row.get(2)?,
+                                id: row.get(0)?,
+                                name: row.get(1)?,
+                                version: row.get(2)?,
+                                dimension: row.get(3)?,
                             })
                         },
                     )
                     .optional()?,
                 None => None,
             };
+        let active_generation_matches_configuration = match (
+            base.active_index_generation.as_deref(),
+            base.configured_embedding_model_id.as_deref(),
+        ) {
+            (Some(generation_id), Some(model_id)) => connection.query_row(
+                "SELECT EXISTS(
+                        SELECT 1 FROM local_kb_index_generations
+                        WHERE id = ?1 AND knowledge_base_id = ?2 AND status = 'active'
+                          AND embedding_model_id = ?3 AND chunk_config_hash = ?4
+                     )",
+                params![
+                    generation_id,
+                    &base.id,
+                    model_id,
+                    format!("chars-{}-overlap-{}", base.chunk_size, base.chunk_overlap)
+                ],
+                |row| row.get::<_, bool>(0),
+            )?,
+            _ => false,
+        };
 
-        // The current LocalKnowledgeStore only exposes the SQLite lexical path.
-        // An active generation is metadata, not proof that its vector store can
-        // be opened, read, and written, so it must not make the UI claim vector
-        // readiness by itself.
+        let vector_count = match base.active_index_generation.as_deref() {
+            Some(generation_id) => Some(connection.query_row(
+                "SELECT COUNT(*) FROM local_kb_vectors WHERE generation_id = ?1",
+                [generation_id],
+                |row| row.get::<_, i64>(0),
+            )?),
+            None => None,
+        };
         base.text_index_ready = base.document_count > 0
             && ready_document_count == base.document_count
             && chunk_count > 0;
-        base.vector_index_ready = false;
-        base.search_mode = "keyword".to_owned();
+        base.vector_index_ready = embedding_model.is_some()
+            && active_generation_matches_configuration
+            && vector_count.is_some_and(|count| count > 0 && count == chunk_count);
+        base.search_mode =
+            if configured_search_mode == "vector" || configured_search_mode == "hybrid" {
+                if base.vector_index_ready {
+                    configured_search_mode
+                } else {
+                    "keyword".to_owned()
+                }
+            } else {
+                "keyword".to_owned()
+            };
         base.embedding_model = embedding_model;
         base.chunk_count = Some(chunk_count.max(0));
-        base.vector_count = None;
+        base.vector_count = vector_count;
         base.last_indexed_at = last_indexed_at;
-        base.fallback_reason = Some(
-            if base.embedding_model.is_none() {
-                "未配置向量模型"
+        base.fallback_reason = if base.vector_index_ready {
+            None
+        } else {
+            Some(if base.configured_embedding_model_id.is_none() {
+                "未配置向量模型".to_owned()
+            } else if base.embedding_model.is_none() {
+                "向量模型未安装或未通过完整性校验".to_owned()
             } else {
-                "向量索引尚未完成读写校验"
-            }
-            .to_owned(),
-        );
+                "向量索引尚未完成读写校验".to_owned()
+            })
+        };
         Ok(())
     }
 
@@ -1721,13 +1819,33 @@ impl LocalKnowledgeStore {
         request: CreateLocalKnowledgeBaseRequest,
     ) -> Result<LocalKnowledgeBase, LocalKnowledgeError> {
         let name = normalized_name(&request.name)?;
+        let connection = self.connection()?;
+        let configuration = normalized_base_configuration(
+            &connection,
+            request.embedding_model_id,
+            request.chunk_size.unwrap_or(DEFAULT_CHUNK_SIZE),
+            request.chunk_overlap.unwrap_or(DEFAULT_CHUNK_OVERLAP),
+            request.search_mode.as_deref().unwrap_or("keyword"),
+        )?;
         let id = Uuid::new_v4().to_string();
         let now = crate::database::now_ms();
-        self.connection()?.execute(
-            "INSERT INTO local_knowledge_bases(id, name, description, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![id, name, normalized_description(request.description), now],
+        connection.execute(
+            "INSERT INTO local_knowledge_bases(
+                id, name, description, embedding_model_id, chunk_size,
+                chunk_overlap, search_mode, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+            params![
+                id,
+                name,
+                normalized_description(request.description),
+                configuration.0,
+                configuration.1,
+                configuration.2,
+                configuration.3,
+                now
+            ],
         )?;
+        drop(connection);
         self.get_base(&id)
     }
 
@@ -1741,19 +1859,82 @@ impl LocalKnowledgeStore {
             ));
         }
         let name = normalized_name(&request.name)?;
-        let changed = self.connection()?.execute(
+        let connection = self.connection()?;
+        let existing = connection
+            .query_row(
+                "SELECT embedding_model_id, chunk_size, chunk_overlap, search_mode
+                 FROM local_knowledge_bases WHERE id = ?1",
+                [&request.id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| LocalKnowledgeError::not_found("knowledge base"))?;
+        let requested_model = request.embedding_model_id.or_else(|| existing.0.clone());
+        let configuration = normalized_base_configuration(
+            &connection,
+            requested_model,
+            request.chunk_size.unwrap_or(existing.1),
+            request.chunk_overlap.unwrap_or(existing.2),
+            request.search_mode.as_deref().unwrap_or(&existing.3),
+        )?;
+        let index_configuration_changed = existing.0 != configuration.0
+            || existing.1 != configuration.1
+            || existing.2 != configuration.2;
+        if index_configuration_changed {
+            let active_index_jobs: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM local_kb_jobs
+                 WHERE knowledge_base_id = ?1 AND job_type IN ('index', 'rebuild')
+                   AND status IN ('queued', 'running', 'paused')",
+                [&request.id],
+                |row| row.get(0),
+            )?;
+            if active_index_jobs > 0 {
+                return Err(LocalKnowledgeError::conflict(
+                    "knowledge base index configuration cannot change while an index job is active",
+                ));
+            }
+        }
+        let changed = connection.execute(
             "UPDATE local_knowledge_bases
-             SET name = ?2, description = ?3, updated_at = ?4
+             SET name = ?2, description = ?3, embedding_model_id = ?4,
+                 chunk_size = ?5, chunk_overlap = ?6, search_mode = ?7, updated_at = ?8
              WHERE id = ?1",
             params![
                 request.id,
                 name,
                 normalized_description(request.description),
+                configuration.0,
+                configuration.1,
+                configuration.2,
+                configuration.3,
                 crate::database::now_ms()
             ],
         )?;
         if changed == 0 {
             return Err(LocalKnowledgeError::not_found("knowledge base"));
+        }
+        let has_parsed_chunks: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM local_kb_chunks c
+                JOIN local_kb_documents d ON d.id = c.document_id
+                WHERE d.knowledge_base_id = ?1 AND d.parse_status = 'ready'
+                  AND c.document_revision = d.current_revision
+             )",
+            [&request.id],
+            |row| row.get(0),
+        )?;
+        let should_rebuild =
+            index_configuration_changed && configuration.0.is_some() && has_parsed_chunks;
+        drop(connection);
+        if should_rebuild {
+            self.start_index_generation(&request.id, "rebuild")?;
         }
         self.get_base(&request.id)
     }
@@ -1907,9 +2088,16 @@ impl LocalKnowledgeStore {
                         "sourcePath is required for every import file",
                     ));
                 }
+                let relative_path = file
+                    .relative_path
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned);
                 let job_id = Uuid::new_v4().to_string();
                 let checkpoint = json!({
                     "sourcePath": source_path,
+                    "relativePath": relative_path,
                     "parserVersion": parser_version,
                     "chunkConfigHash": chunk_config_hash,
                 })
@@ -1928,7 +2116,7 @@ impl LocalKnowledgeStore {
                         accepted_at
                     ],
                 )?;
-                work.push((job_id, source_path));
+                work.push((job_id, source_path, relative_path));
             }
             transaction.commit()?;
         }
@@ -1939,11 +2127,12 @@ impl LocalKnowledgeStore {
         let spawn_result = thread::Builder::new()
             .name(format!("fox-kb-import-{operation_id_for_thread}"))
             .spawn(move || {
-                for (job_id, source_path) in work {
+                for (job_id, source_path, relative_path) in work {
                     store.run_import_job(
                         &job_id,
                         &knowledge_base_id,
                         &source_path,
+                        relative_path.as_deref(),
                         &parser_version,
                         &chunk_config_hash,
                     );
@@ -1969,6 +2158,7 @@ impl LocalKnowledgeStore {
         job_id: &str,
         knowledge_base_id: &str,
         source_path: &str,
+        relative_path: Option<&str>,
         parser_version: &str,
         chunk_config_hash: &str,
     ) {
@@ -1976,6 +2166,7 @@ impl LocalKnowledgeStore {
             job_id,
             knowledge_base_id,
             source_path,
+            relative_path,
             parser_version,
             chunk_config_hash,
         ) {
@@ -1988,6 +2179,7 @@ impl LocalKnowledgeStore {
         job_id: &str,
         knowledge_base_id: &str,
         source_path: &str,
+        relative_path: Option<&str>,
         parser_version: &str,
         chunk_config_hash: &str,
     ) -> Result<(), LocalKnowledgeError> {
@@ -1997,13 +2189,38 @@ impl LocalKnowledgeStore {
         let cancellation_store = self.clone();
         let cancellation_job_id = job_id.to_owned();
         let cancelled = move || cancellation_store.job_is_cancelled(&cancellation_job_id);
-        let imported = import_document(
+        let imported = import_document_at_relative_path(
             self.root.as_ref(),
             knowledge_base_id,
             source_path,
+            relative_path,
             ImportOptions::default().with_cancellation(&cancelled),
         )
         .map_err(LocalKnowledgeError::import)?;
+
+        let duplicate_document_id = self
+            .connection()?
+            .query_row(
+                "SELECT id FROM local_kb_documents
+             WHERE knowledge_base_id = ?1 AND content_hash = ?2 LIMIT 1",
+                params![knowledge_base_id, imported.content_hash],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if let Some(existing_id) = duplicate_document_id {
+            let _ = std::fs::remove_file(&imported.stored_path);
+            let now = crate::database::now_ms();
+            self.connection()?.execute(
+                "UPDATE local_kb_jobs SET status = 'completed', stage = 'committing',
+                    progress = 100, outcome = 'success', last_sequence = last_sequence + 1,
+                    heartbeat_at = ?2, updated_at = ?2, completed_at = ?2,
+                    data_json = json_set(COALESCE(data_json, '{}'), '$.resultEntityId', ?3,
+                                         '$.deduplicated', json('true'))
+                 WHERE id = ?1 AND status IN ('queued', 'running', 'paused')",
+                params![job_id, now, existing_id],
+            )?;
+            return Ok(());
+        }
 
         if !self.advance_job(job_id, "running", "parsing", 65)? {
             let _ = std::fs::remove_file(&imported.stored_path);
@@ -2086,10 +2303,18 @@ impl LocalKnowledgeStore {
             params![knowledge_base_id, now],
         )?;
         transaction.commit()?;
+        drop(connection);
+        if self
+            .get_base(knowledge_base_id)?
+            .configured_embedding_model_id
+            .is_some()
+        {
+            let _ = self.start_index_generation(knowledge_base_id, "index");
+        }
         Ok(())
     }
 
-    fn advance_job(
+    pub(crate) fn advance_job(
         &self,
         job_id: &str,
         status: &str,
@@ -2118,7 +2343,7 @@ impl LocalKnowledgeStore {
         )? > 0)
     }
 
-    fn job_is_cancelled(&self, job_id: &str) -> bool {
+    pub(crate) fn job_is_cancelled(&self, job_id: &str) -> bool {
         if self.migration_active() {
             return true;
         }
@@ -2135,7 +2360,7 @@ impl LocalKnowledgeStore {
             .unwrap_or(true)
     }
 
-    fn fail_job(
+    pub(crate) fn fail_job(
         &self,
         job_id: &str,
         error: &LocalKnowledgeError,
@@ -2208,6 +2433,115 @@ impl LocalKnowledgeStore {
         Ok(documents)
     }
 
+    pub fn list_folders(
+        &self,
+        request: LocalKnowledgeFoldersRequest,
+    ) -> Result<Vec<LocalKnowledgeFolder>, LocalKnowledgeError> {
+        self.get_base(&request.knowledge_base_id)?;
+        let documents = self.list_documents(LocalKnowledgeDocumentsRequest {
+            knowledge_base_id: request.knowledge_base_id.clone(),
+            query: None,
+        })?;
+        let root = self
+            .root
+            .join("knowledge-bases")
+            .join(&request.knowledge_base_id)
+            .join("documents");
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let metadata = std::fs::symlink_metadata(&root)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(LocalKnowledgeError::invalid(
+                "knowledge base documents directory is invalid",
+            ));
+        }
+        let mut paths = Vec::new();
+        collect_knowledge_folder_paths(&root, &root, &mut paths)?;
+        paths.sort();
+        Ok(paths
+            .into_iter()
+            .map(|relative_path| {
+                let prefix = format!("{relative_path}/");
+                let document_count = documents
+                    .iter()
+                    .filter(|document| document.relative_path.starts_with(&prefix))
+                    .count() as i64;
+                let name = relative_path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(relative_path.as_str())
+                    .to_owned();
+                LocalKnowledgeFolder {
+                    knowledge_base_id: request.knowledge_base_id.clone(),
+                    name,
+                    relative_path,
+                    document_count,
+                }
+            })
+            .collect())
+    }
+
+    pub fn create_folder(
+        &self,
+        request: CreateLocalKnowledgeFolderRequest,
+    ) -> Result<LocalKnowledgeFolder, LocalKnowledgeError> {
+        self.get_base(&request.knowledge_base_id)?;
+        let name = request.name.trim();
+        validate_path_component(name.as_ref()).map_err(LocalKnowledgeError::invalid)?;
+        let parent_path =
+            normalize_relative_folder_path(request.parent_path.as_deref().unwrap_or_default())?;
+        let relative_path = if parent_path.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{parent_path}/{name}")
+        };
+        let root = self
+            .root
+            .join("knowledge-bases")
+            .join(&request.knowledge_base_id)
+            .join("documents");
+        std::fs::create_dir_all(&root)?;
+        let root_metadata = std::fs::symlink_metadata(&root)?;
+        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+            return Err(LocalKnowledgeError::invalid(
+                "knowledge base documents directory is invalid",
+            ));
+        }
+        let mut current = root;
+        for component in Path::new(&parent_path).components() {
+            let Component::Normal(value) = component else {
+                return Err(LocalKnowledgeError::invalid(
+                    "folder path contains an unsafe component",
+                ));
+            };
+            current.push(value);
+            let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    LocalKnowledgeError::invalid("parent folder does not exist")
+                } else {
+                    LocalKnowledgeError::storage(error)
+                }
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(LocalKnowledgeError::invalid(
+                    "parent folder is not a safe directory",
+                ));
+            }
+        }
+        let destination = current.join(name);
+        if destination.exists() {
+            return Err(LocalKnowledgeError::conflict("folder already exists"));
+        }
+        std::fs::create_dir(&destination)?;
+        Ok(LocalKnowledgeFolder {
+            knowledge_base_id: request.knowledge_base_id,
+            name: name.to_owned(),
+            relative_path,
+            document_count: 0,
+        })
+    }
+
     pub fn get_job(&self, id: &str) -> Result<LocalKnowledgeJob, LocalKnowledgeError> {
         let connection = self.connection()?;
         query_job(&connection, id)?.ok_or_else(|| LocalKnowledgeError::not_found("knowledge job"))
@@ -2238,7 +2572,7 @@ impl LocalKnowledgeStore {
             "UPDATE local_kb_jobs
              SET status = 'queued', stage = NULL, progress = 0,
                  retry_count = retry_count + 1, last_sequence = last_sequence + 1,
-                 outcome = NULL, heartbeat_at = NULL, checkpoint_json = NULL,
+                 outcome = NULL, heartbeat_at = NULL,
                  error_code = NULL, error_message = NULL, started_at = NULL,
                  completed_at = NULL, updated_at = ?2
              WHERE id = ?1 AND status IN ('failed', 'cancelled', 'interrupted')",
@@ -2265,6 +2599,10 @@ impl LocalKnowledgeStore {
         let job = self.get_job(id)?;
         if job.job_type == "import" {
             self.resume_import_job(&job)?;
+        } else if job.job_type == "parse" {
+            self.resume_reparse_job(&job)?;
+        } else if matches!(job.job_type.as_str(), "index" | "rebuild") {
+            self.resume_index_job(&job)?;
         }
         Ok(job)
     }
@@ -2286,6 +2624,10 @@ impl LocalKnowledgeStore {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("fox-text-v1")
             .to_owned();
+        let relative_path = checkpoint
+            .get("relativePath")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         let chunk_config_hash = checkpoint
             .get("chunkConfigHash")
             .and_then(serde_json::Value::as_str)
@@ -2301,6 +2643,7 @@ impl LocalKnowledgeStore {
                     &job_id,
                     &knowledge_base_id,
                     &source_path,
+                    relative_path.as_deref(),
                     &parser_version,
                     &chunk_config_hash,
                 );
@@ -2358,6 +2701,54 @@ impl LocalKnowledgeStore {
     }
 }
 
+fn normalize_relative_folder_path(value: &str) -> Result<String, LocalKnowledgeError> {
+    let normalized = value.trim().replace('\\', "/");
+    if normalized.is_empty() {
+        return Ok(String::new());
+    }
+    let path = Path::new(&normalized);
+    if path.is_absolute() {
+        return Err(LocalKnowledgeError::invalid(
+            "folder path must be relative to the knowledge base",
+        ));
+    }
+    let mut components = Vec::new();
+    for component in path.components() {
+        let Component::Normal(value) = component else {
+            return Err(LocalKnowledgeError::invalid(
+                "folder path contains an unsafe component",
+            ));
+        };
+        validate_path_component(value).map_err(LocalKnowledgeError::invalid)?;
+        components.push(value.to_string_lossy().into_owned());
+    }
+    Ok(components.join("/"))
+}
+
+fn collect_knowledge_folder_paths(
+    root: &Path,
+    current: &Path,
+    paths: &mut Vec<String>,
+) -> Result<(), LocalKnowledgeError> {
+    let mut entries = std::fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        let relative_path = path
+            .strip_prefix(root)
+            .map_err(LocalKnowledgeError::storage)?
+            .to_string_lossy()
+            .replace('\\', "/");
+        paths.push(relative_path);
+        collect_knowledge_folder_paths(root, &path, paths)?;
+    }
+    Ok(())
+}
+
 fn initialize_schema(connection: &Connection) -> Result<(), LocalKnowledgeError> {
     connection.execute_batch(&format!(
         r#"
@@ -2366,6 +2757,10 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalKnowledgeError>
             name TEXT NOT NULL,
             description TEXT,
             active_index_generation TEXT,
+            embedding_model_id TEXT,
+            chunk_size INTEGER NOT NULL DEFAULT 512 CHECK(chunk_size BETWEEN 128 AND 4096),
+            chunk_overlap INTEGER NOT NULL DEFAULT 50 CHECK(chunk_overlap >= 0 AND chunk_overlap < chunk_size),
+            search_mode TEXT NOT NULL DEFAULT 'keyword' CHECK(search_mode IN ('keyword', 'vector', 'hybrid')),
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         );
@@ -2513,9 +2908,16 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalKnowledgeError>
 
         CREATE TABLE IF NOT EXISTS local_embedding_models (
             model_id TEXT NOT NULL,
+            name TEXT,
             version TEXT NOT NULL,
             dimension INTEGER NOT NULL CHECK(dimension > 0),
             status TEXT NOT NULL CHECK(status IN ('not_installed', 'installing', 'ready', 'error')),
+            languages_json TEXT NOT NULL DEFAULT '[]',
+            license TEXT,
+            source_url TEXT,
+            package_path TEXT,
+            integrity_status TEXT NOT NULL DEFAULT 'pending' CHECK(integrity_status IN ('pending', 'verifying', 'verified', 'failed')),
+            is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0, 1)),
             package_hash TEXT,
             size_bytes INTEGER,
             installed_at INTEGER,
@@ -2525,21 +2927,113 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalKnowledgeError>
             PRIMARY KEY(model_id, version)
         );
 
+        CREATE TABLE IF NOT EXISTS local_embedding_model_downloads (
+            id TEXT PRIMARY KEY,
+            model_id TEXT NOT NULL,
+            version TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'paused', 'completed', 'failed', 'cancelled')),
+            progress INTEGER NOT NULL DEFAULT 0 CHECK(progress BETWEEN 0 AND 100),
+            downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            current_file TEXT,
+            checkpoint_json TEXT,
+            error_code TEXT,
+            error_message TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            completed_at INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS local_kb_vectors (
+            generation_id TEXT NOT NULL,
+            chunk_id TEXT NOT NULL,
+            dimension INTEGER NOT NULL CHECK(dimension > 0),
+            vector_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY(generation_id, chunk_id),
+            FOREIGN KEY (generation_id) REFERENCES local_kb_index_generations(id) ON DELETE CASCADE,
+            FOREIGN KEY (chunk_id) REFERENCES local_kb_chunks(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_local_kb_vectors_generation
+        ON local_kb_vectors(generation_id);
+
+        CREATE TABLE IF NOT EXISTS local_kb_retrieval_cases (
+            id TEXT PRIMARY KEY,
+            knowledge_base_id TEXT NOT NULL,
+            question TEXT NOT NULL,
+            expected_document_ids_json TEXT NOT NULL DEFAULT '[]',
+            expected_keywords_json TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (knowledge_base_id) REFERENCES local_knowledge_bases(id) ON DELETE CASCADE
+        );
+
         PRAGMA user_version = {KNOWLEDGE_SCHEMA_VERSION};
         "#
     ))?;
-    let has_restart_required = connection
-        .prepare("PRAGMA table_info(local_kb_storage_migrations)")?
+    ensure_schema_column(
+        connection,
+        "local_kb_storage_migrations",
+        "restart_required",
+        "ALTER TABLE local_kb_storage_migrations ADD COLUMN restart_required INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_schema_column(
+        connection,
+        "local_knowledge_bases",
+        "embedding_model_id",
+        "ALTER TABLE local_knowledge_bases ADD COLUMN embedding_model_id TEXT",
+    )?;
+    ensure_schema_column(
+        connection,
+        "local_knowledge_bases",
+        "chunk_size",
+        "ALTER TABLE local_knowledge_bases ADD COLUMN chunk_size INTEGER NOT NULL DEFAULT 512",
+    )?;
+    ensure_schema_column(
+        connection,
+        "local_knowledge_bases",
+        "chunk_overlap",
+        "ALTER TABLE local_knowledge_bases ADD COLUMN chunk_overlap INTEGER NOT NULL DEFAULT 50",
+    )?;
+    ensure_schema_column(
+        connection,
+        "local_knowledge_bases",
+        "search_mode",
+        "ALTER TABLE local_knowledge_bases ADD COLUMN search_mode TEXT NOT NULL DEFAULT 'keyword'",
+    )?;
+    for (column, statement) in [
+        ("name", "ALTER TABLE local_embedding_models ADD COLUMN name TEXT"),
+        ("languages_json", "ALTER TABLE local_embedding_models ADD COLUMN languages_json TEXT NOT NULL DEFAULT '[]'"),
+        ("license", "ALTER TABLE local_embedding_models ADD COLUMN license TEXT"),
+        ("source_url", "ALTER TABLE local_embedding_models ADD COLUMN source_url TEXT"),
+        ("package_path", "ALTER TABLE local_embedding_models ADD COLUMN package_path TEXT"),
+        ("integrity_status", "ALTER TABLE local_embedding_models ADD COLUMN integrity_status TEXT NOT NULL DEFAULT 'pending'"),
+        ("is_default", "ALTER TABLE local_embedding_models ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        ensure_schema_column(connection, "local_embedding_models", column, statement)?;
+    }
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_local_embedding_one_default
+         ON local_embedding_models(is_default) WHERE is_default = 1",
+        [],
+    )?;
+    connection.pragma_update(None, "user_version", KNOWLEDGE_SCHEMA_VERSION)?;
+    Ok(())
+}
+
+fn ensure_schema_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    alter_statement: &str,
+) -> Result<(), LocalKnowledgeError> {
+    let columns = connection
+        .prepare(&format!("PRAGMA table_info({table})"))?
         .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .any(|name| name == "restart_required");
-    if !has_restart_required {
-        connection.execute(
-            "ALTER TABLE local_kb_storage_migrations
-             ADD COLUMN restart_required INTEGER NOT NULL DEFAULT 0",
-            [],
-        )?;
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|name| name == column) {
+        connection.execute(alter_statement, [])?;
     }
     Ok(())
 }
@@ -2695,6 +3189,55 @@ fn normalized_description(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn normalized_base_configuration(
+    connection: &Connection,
+    embedding_model_id: Option<String>,
+    chunk_size: i64,
+    chunk_overlap: i64,
+    search_mode: &str,
+) -> Result<(Option<String>, i64, i64, String), LocalKnowledgeError> {
+    if !(128..=4096).contains(&chunk_size) {
+        return Err(LocalKnowledgeError::invalid(
+            "chunkSize must be between 128 and 4096 characters",
+        ));
+    }
+    if chunk_overlap < 0 || chunk_overlap >= chunk_size {
+        return Err(LocalKnowledgeError::invalid(
+            "chunkOverlap must be non-negative and smaller than chunkSize",
+        ));
+    }
+    let search_mode = search_mode.trim().to_ascii_lowercase();
+    if !matches!(search_mode.as_str(), "keyword" | "vector" | "hybrid") {
+        return Err(LocalKnowledgeError::invalid(
+            "searchMode must be keyword, vector, or hybrid",
+        ));
+    }
+    let embedding_model_id = embedding_model_id
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if let Some(model_id) = embedding_model_id.as_deref() {
+        let ready = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM local_embedding_models
+                WHERE model_id = ?1 AND status = 'ready' AND integrity_status = 'verified'
+             )",
+            [model_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !ready {
+            return Err(LocalKnowledgeError::conflict(
+                "selected embedding model is not installed or has not passed integrity verification",
+            ));
+        }
+    }
+    if search_mode != "keyword" && embedding_model_id.is_none() {
+        return Err(LocalKnowledgeError::invalid(
+            "vector and hybrid search require an installed embedding model",
+        ));
+    }
+    Ok((embedding_model_id, chunk_size, chunk_overlap, search_mode))
+}
+
 fn map_knowledge_base(row: &Row<'_>) -> rusqlite::Result<LocalKnowledgeBase> {
     Ok(LocalKnowledgeBase {
         id: row.get(0)?,
@@ -2706,6 +3249,9 @@ fn map_knowledge_base(row: &Row<'_>) -> rusqlite::Result<LocalKnowledgeBase> {
         text_index_ready: false,
         vector_index_ready: false,
         search_mode: "keyword".to_owned(),
+        configured_embedding_model_id: None,
+        chunk_size: DEFAULT_CHUNK_SIZE,
+        chunk_overlap: DEFAULT_CHUNK_OVERLAP,
         embedding_model: None,
         chunk_count: None,
         vector_count: None,
@@ -3121,6 +3667,22 @@ pub fn local_knowledge_documents_list(
 }
 
 #[tauri::command]
+pub fn local_knowledge_folders_list(
+    state: State<'_, AppState>,
+    request: LocalKnowledgeFoldersRequest,
+) -> ApiResponse<Vec<LocalKnowledgeFolder>> {
+    local_response(state.local_knowledge.list_folders(request))
+}
+
+#[tauri::command]
+pub fn local_knowledge_folder_create(
+    state: State<'_, AppState>,
+    request: CreateLocalKnowledgeFolderRequest,
+) -> ApiResponse<LocalKnowledgeFolder> {
+    local_response(state.local_knowledge.create_folder(request))
+}
+
+#[tauri::command]
 pub fn local_knowledge_document_file_read(
     state: State<'_, AppState>,
     request: LocalKnowledgeDocumentFileRangeRequest,
@@ -3254,6 +3816,10 @@ mod tests {
             .create_base(CreateLocalKnowledgeBaseRequest {
                 name: " 项目资料 ".to_owned(),
                 description: Some(" 本地文档 ".to_owned()),
+                embedding_model_id: None,
+                chunk_size: None,
+                chunk_overlap: None,
+                search_mode: None,
             })
             .unwrap();
         assert_eq!(created.name, "项目资料");
@@ -3272,6 +3838,10 @@ mod tests {
                 id: created.id,
                 name: "产品资料".to_owned(),
                 description: None,
+                embedding_model_id: None,
+                chunk_size: None,
+                chunk_overlap: None,
+                search_mode: None,
             })
             .unwrap();
         assert_eq!(updated.name, "产品资料");
@@ -3297,6 +3867,10 @@ mod tests {
             .create_base(CreateLocalKnowledgeBaseRequest {
                 name: "基准库".to_owned(),
                 description: None,
+                embedding_model_id: None,
+                chunk_size: None,
+                chunk_overlap: None,
+                search_mode: None,
             })
             .unwrap();
         let connection = store.raw_connection().unwrap();
@@ -3494,6 +4068,10 @@ mod tests {
             .create_base(CreateLocalKnowledgeBaseRequest {
                 name: "导入测试".to_owned(),
                 description: None,
+                embedding_model_id: None,
+                chunk_size: None,
+                chunk_overlap: None,
+                search_mode: None,
             })
             .unwrap();
         let source_root = std::env::temp_dir().join(format!("fox-kb-source-{}", Uuid::new_v4()));
@@ -3506,6 +4084,7 @@ mod tests {
                 knowledge_base_id: base.id.clone(),
                 files: vec![LocalKnowledgeImportFileRequest {
                     source_path: source_path.to_string_lossy().into_owned(),
+                    relative_path: None,
                 }],
                 parser_version: None,
                 chunk_config_hash: None,
@@ -3602,6 +4181,10 @@ mod tests {
             .create_base(CreateLocalKnowledgeBaseRequest {
                 name: "迁移测试".to_owned(),
                 description: None,
+                embedding_model_id: None,
+                chunk_size: None,
+                chunk_overlap: None,
+                search_mode: None,
             })
             .unwrap();
         let destination = root.parent().unwrap().join(format!(

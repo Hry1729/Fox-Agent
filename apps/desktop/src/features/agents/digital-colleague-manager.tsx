@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Bot, Clock3, Copy, KeyRound, LoaderCircle, Pause, Play, Plus, RefreshCw, Send, ShieldCheck, Webhook } from 'lucide-react'
+import { Bot, ChevronRight, CircleStop, Clock3, Copy, FileText, KeyRound, LoaderCircle, Pause, Play, Plus, RefreshCw, RotateCcw, Send, ShieldCheck, Webhook } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -18,6 +18,7 @@ import type {
   DigitalColleagueRecord,
   DigitalColleagueScheduleRecord,
   DigitalColleagueTriggerRecord,
+  ConversationDetail,
   KnowledgeBaseRecord,
   ProjectRecord,
 } from '@/features/conversations/model/types'
@@ -44,6 +45,14 @@ function formatTime(value: number | null) {
   return value ? new Date(value).toLocaleString('zh-CN') : '—'
 }
 
+function formatTriggerDuration(trigger: DigitalColleagueTriggerRecord) {
+  if (!trigger.completedAt) return ['accepted', 'queued', 'running'].includes(trigger.status) ? '进行中' : '—'
+  const duration = Math.max(0, trigger.completedAt - trigger.createdAt)
+  if (duration < 1000) return `${duration} ms`
+  if (duration < 60_000) return `${(duration / 1000).toFixed(1)} s`
+  return `${Math.round(duration / 60_000)} min`
+}
+
 export function DigitalColleagueManager({ open, onOpenChange, experts }: Props) {
   const availableExperts = useMemo(() => experts.filter((expert) => expert.runtimeType === 'pi' && expert.available), [experts])
   const [tab, setTab] = useState<'manage' | 'create'>('manage')
@@ -56,6 +65,10 @@ export function DigitalColleagueManager({ open, onOpenChange, experts }: Props) 
   const [channels, setChannels] = useState<DigitalColleagueChannelRecord[]>([])
   const [triggers, setTriggers] = useState<DigitalColleagueTriggerRecord[]>([])
   const [audit, setAudit] = useState<DigitalColleagueAuditRecord[]>([])
+  const [selectedTriggerId, setSelectedTriggerId] = useState('')
+  const [runDetail, setRunDetail] = useState<ConversationDetail | null>(null)
+  const [runDetailBusy, setRunDetailBusy] = useState(false)
+  const [runDetailError, setRunDetailError] = useState<string | null>(null)
   const [oneTimeSecret, setOneTimeSecret] = useState('')
   const [name, setName] = useState('')
   const [expertId, setExpertId] = useState('')
@@ -84,8 +97,27 @@ export function DigitalColleagueManager({ open, onOpenChange, experts }: Props) 
     setSchedules(nextSchedules)
     setChannels(nextChannels)
     setTriggers(nextTriggers)
+    setSelectedTriggerId((current) => nextTriggers.some((item) => item.id === current) ? current : nextTriggers[0]?.id ?? '')
     setAudit(nextAudit)
   }
+
+  const selectedTrigger = triggers.find((item) => item.id === selectedTriggerId) ?? triggers[0] ?? null
+  useEffect(() => {
+    if (!selectedTrigger?.runId) {
+      setRunDetail(null)
+      setRunDetailError(null)
+      return
+    }
+    let cancelled = false
+    setRunDetailBusy(true)
+    setRunDetailError(null)
+    void desktopClient.getDigitalColleagueRunDetail(selectedTrigger.runId).then((value) => {
+      if (!cancelled) setRunDetail(value)
+    }).catch((cause) => {
+      if (!cancelled) setRunDetailError(cause instanceof Error ? cause.message : String(cause))
+    }).finally(() => { if (!cancelled) setRunDetailBusy(false) })
+    return () => { cancelled = true }
+  }, [selectedTrigger?.runId])
 
   const refresh = async (preferredId?: string) => {
     const records = await desktopClient.listDigitalColleagues()
@@ -215,7 +247,30 @@ export function DigitalColleagueManager({ open, onOpenChange, experts }: Props) 
               <section><header><span><Send />手动触发</span><b>外部数据按低权限上下文处理</b></header><Textarea value={manualPayload} onChange={(event) => setManualPayload(event.target.value)} /><Button size="sm" disabled={busy || selected.status !== 'active'} onClick={() => void triggerManual()}><Send />运行一次</Button></section>
               <section><header><span><Clock3 />持久调度</span><b>{schedules.length} 条</b></header><div className="fox-agent-editor-profile-row"><Input value={scheduleName} onChange={(event) => setScheduleName(event.target.value)} placeholder="调度名称" /><Input type="number" min="1" value={intervalMinutes} onChange={(event) => setIntervalMinutes(event.target.value)} aria-label="间隔分钟" /><Button size="sm" disabled={busy || selected.status !== 'active'} onClick={() => void runAction(() => desktopClient.saveDigitalColleagueSchedule({ colleagueId: selected.id, name: scheduleName, intervalSeconds: Number(intervalMinutes) * 60, catchupWindowSeconds: 300, enabled: true }), '调度已保存')}><Plus />添加</Button></div><div className="fox-agent-resource-list">{schedules.map((item) => <div key={item.id}><span><Clock3 /></span><p><b>{item.name}</b><small>每 {Math.round(item.intervalSeconds / 60)} 分钟 · 下次 {formatTime(item.nextDueAt)}</small></p><Switch checked={item.enabled} disabled={busy || selected.status !== 'active'} onCheckedChange={(enabled) => void runAction(() => desktopClient.saveDigitalColleagueSchedule({ scheduleId: item.id, colleagueId: selected.id, name: item.name, intervalSeconds: item.intervalSeconds, catchupWindowSeconds: item.catchupWindowSeconds, enabled }), enabled ? '调度已启用' : '调度已停用')} /></div>)}</div></section>
               <section><header><span><Webhook />签名 Channel</span><b>{channels.filter((item) => item.status === 'active').length} 个活动入口</b></header><div className="fox-agent-editor-profile-row"><Input value={channelName} onChange={(event) => setChannelName(event.target.value)} placeholder="入口名称" /><Input value={channelIdentity} onChange={(event) => setChannelIdentity(event.target.value)} placeholder="精确发送方身份" /><Button size="sm" disabled={busy || selected.status !== 'active' || !channelIdentity.trim()} onClick={() => void createChannel()}><KeyRound />创建</Button></div>{oneTimeSecret && <Card className="fox-agent-section-card"><p><ShieldCheck />一次性签名密钥</p><code>{oneTimeSecret}</code><Button variant="outline" size="sm" onClick={() => void navigator.clipboard.writeText(oneTimeSecret).then(() => toast.success('密钥已复制'))}><Copy />复制</Button></Card>}<div className="fox-agent-resource-list">{channels.map((item) => <div key={item.id}><span><Webhook /></span><p><b>{item.name}<em>{item.status}</em></b><small>{item.externalIdentity} · {item.secretPrefix}… · {item.rateLimitPerMinute}/分钟</small></p>{item.status === 'active' && <Button variant="outline" size="sm" disabled={busy} onClick={() => void runAction(() => desktopClient.revokeDigitalColleagueChannel(item.id), 'Channel 已撤销')} >撤销</Button>}</div>)}</div></section>
-              <section><header><span><RefreshCw />运行与审计</span><b>{triggers.length} 次触发</b></header><div className="fox-agent-resource-list">{triggers.slice(0, 12).map((item) => <div key={item.id}><span><Bot /></span><p><b>{item.sourceType} · {triggerStatusLabel[item.status]}</b><small>{formatTime(item.createdAt)} · {item.totalTokens} tokens · {item.toolCallCount} tools{item.errorMessage ? ` · ${item.errorMessage}` : ''}</small></p></div>)}{!triggers.length && <p className="fox-agent-resource-empty">暂无运行记录。</p>}</div><details><summary>审计日志（{audit.length}）</summary><div className="fox-agent-resource-list">{audit.slice(0, 30).map((item) => <div key={item.id}><span><ShieldCheck /></span><p><b>{item.event} · {item.outcome}</b><small>{formatTime(item.createdAt)} · {item.actor}</small></p></div>)}</div></details></section>
+              <section className="fox-colleague-run-section">
+                <header><span><RefreshCw />运行与审计</span><b>{triggers.length} 次触发</b></header>
+                <div className="fox-colleague-run-layout">
+                  <div className="fox-agent-resource-list fox-colleague-run-list">
+                    {triggers.slice(0, 24).map((item) => <button type="button" key={item.id} className={selectedTrigger?.id === item.id ? 'is-active' : ''} onClick={() => setSelectedTriggerId(item.id)}><span><Bot /></span><p><b>{item.sourceType} · {triggerStatusLabel[item.status]}</b><small>{formatTime(item.createdAt)} · {formatTriggerDuration(item)} · {item.totalTokens} tokens</small></p><ChevronRight /></button>)}
+                    {!triggers.length && <p className="fox-agent-resource-empty">暂无运行记录。</p>}
+                  </div>
+                  {selectedTrigger && <Card className="fox-colleague-run-detail">
+                    <div className="fox-agent-work-head"><h2>{triggerStatusLabel[selectedTrigger.status]}</h2><Badge variant={selectedTrigger.status === 'failed' ? 'destructive' : 'secondary'}>{selectedTrigger.sourceType}</Badge></div>
+                    <div className="fox-colleague-run-facts"><span><small>触发时间</small><b>{formatTime(selectedTrigger.createdAt)}</b></span><span><small>执行时长</small><b>{formatTriggerDuration(selectedTrigger)}</b></span><span><small>工具</small><b>{selectedTrigger.toolCallCount}</b></span><span><small>Token</small><b>{selectedTrigger.totalTokens.toLocaleString()}</b></span></div>
+                    {selectedTrigger.errorMessage && <p className="fox-setting-error">{selectedTrigger.errorMessage}</p>}
+                    {runDetailBusy ? <div className="fox-colleague-run-state"><LoaderCircle className="animate-spin" />正在读取运行详情</div> : runDetailError ? <div className="fox-colleague-run-state is-error">{runDetailError}</div> : runDetail && <>
+                      <div className="fox-colleague-run-summary"><span><Bot />子 Agent <b>{runDetail.childRuns.length}</b></span><span><FileText />产物 <b>{runDetail.artifacts.length}</b></span><span><ShieldCheck />证据 <b>{runDetail.evidence.length}</b></span></div>
+                      {runDetail.artifacts.length > 0 && <div className="fox-colleague-run-artifacts">{runDetail.artifacts.slice(0, 8).map((artifact) => <div key={artifact.id}><FileText /><span><b>{artifact.displayName}</b><small>{artifact.storagePath}</small></span></div>)}</div>}
+                    </>}
+                    <p className="fox-colleague-adoption">采用状态：独立调度任务没有上层任务；结果保存在本次运行记录中。</p>
+                    <div className="fox-agent-editor-actions">
+                      {selectedTrigger.runId && ['accepted', 'queued', 'running'].includes(selectedTrigger.status) && <Button variant="outline" size="sm" disabled={busy} onClick={() => void runAction(() => desktopClient.cancelRun(selectedTrigger.runId!), '已发送停止信号')}><CircleStop />停止</Button>}
+                      {!['accepted', 'queued', 'running'].includes(selectedTrigger.status) && <Button variant="outline" size="sm" disabled={busy} onClick={() => void runAction(() => desktopClient.triggerDigitalColleague(selected!.id, selectedTrigger.payload), '已按原始输入创建重试任务')}><RotateCcw />重试</Button>}
+                    </div>
+                  </Card>}
+                </div>
+                <details><summary>审计日志（{audit.length}）</summary><div className="fox-agent-resource-list">{audit.slice(0, 30).map((item) => <div key={item.id}><span><ShieldCheck /></span><p><b>{item.event} · {item.outcome}</b><small>{formatTime(item.createdAt)} · {item.actor}</small></p></div>)}</div></details>
+              </section>
             </>}
           </TabsContent>
           <TabsContent value="create" className="fox-agent-editor-resources">

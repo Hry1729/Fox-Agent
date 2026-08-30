@@ -91,6 +91,14 @@ pub struct ModelPackageManifest {
     pub tokenizer: String,
     pub hash: String,
     pub license: String,
+    #[serde(default = "default_pooling")]
+    pub pooling: String,
+    #[serde(default)]
+    pub normalize: bool,
+}
+
+fn default_pooling() -> String {
+    "mean".to_owned()
 }
 
 impl ModelPackageManifest {
@@ -120,6 +128,11 @@ impl ModelPackageManifest {
         if self.license.trim().is_empty() || self.license.len() > 256 {
             return Err(EmbeddingError::InvalidManifest(
                 "license must be 1-256 non-whitespace characters".to_owned(),
+            ));
+        }
+        if !matches!(self.pooling.as_str(), "mean" | "cls") {
+            return Err(EmbeddingError::InvalidManifest(
+                "pooling must be mean or cls".to_owned(),
             ));
         }
         let hash = normalize_sha256(&self.hash).ok_or_else(|| {
@@ -322,26 +335,46 @@ impl EmbeddingProvider for OnnxEmbeddingProvider {
         }
 
         let row_count = values.len() / dimension;
-        let mut embedding = vec![0.0_f32; dimension];
-        let mut selected_rows = 0usize;
-        for (row_index, row) in values.chunks_exact(dimension).enumerate() {
-            if row_index < input.attention_mask.len() && input.attention_mask[row_index] == 0 {
-                continue;
+        let mut embedding = if self.manifest.pooling == "cls" {
+            values[..dimension].to_vec()
+        } else {
+            let mut pooled = vec![0.0_f32; dimension];
+            let mut selected_rows = 0usize;
+            for (row_index, row) in values.chunks_exact(dimension).enumerate() {
+                if row_index < input.attention_mask.len() && input.attention_mask[row_index] == 0 {
+                    continue;
+                }
+                for (output, value) in pooled.iter_mut().zip(row) {
+                    *output += *value;
+                }
+                selected_rows += 1;
             }
-            for (output, value) in embedding.iter_mut().zip(row) {
-                *output += *value;
+            if selected_rows == 0 {
+                return Err(EmbeddingError::Inference(
+                    "attention_mask selected no output rows".to_owned(),
+                ));
             }
-            selected_rows += 1;
-        }
-        if selected_rows == 0 {
-            return Err(EmbeddingError::Inference(
-                "attention_mask selected no output rows".to_owned(),
-            ));
-        }
-        if row_count > 1 {
-            let divisor = selected_rows as f32;
+            if row_count > 1 {
+                let divisor = selected_rows as f32;
+                for value in &mut pooled {
+                    *value /= divisor;
+                }
+            }
+            pooled
+        };
+        if self.manifest.normalize {
+            let norm = embedding
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt();
+            if !norm.is_finite() || norm <= f32::EPSILON {
+                return Err(EmbeddingError::Inference(
+                    "model returned an embedding with zero or invalid norm".to_owned(),
+                ));
+            }
             for value in &mut embedding {
-                *value /= divisor;
+                *value /= norm;
             }
         }
         Ok(embedding)
@@ -403,6 +436,19 @@ fn resolve_runtime_path(package_dir: &Path) -> Result<PathBuf, EmbeddingError> {
     let packaged_path = package_dir.join(runtime_library_name());
     if packaged_path.is_file() {
         return Ok(packaged_path);
+    }
+    if let Some(executable_dir) = env::current_exe()?.parent() {
+        let bundled_path = executable_dir.join(runtime_library_name());
+        if bundled_path.is_file() {
+            return Ok(bundled_path);
+        }
+        let resource_path = executable_dir
+            .join("resources")
+            .join("models")
+            .join(runtime_library_name());
+        if resource_path.is_file() {
+            return Ok(resource_path);
+        }
     }
     Err(EmbeddingError::RuntimeNotFound(packaged_path))
 }
@@ -478,6 +524,8 @@ mod tests {
             hash: "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
                 .to_owned(),
             license: "Apache-2.0".to_owned(),
+            pooling: "mean".to_owned(),
+            normalize: true,
         };
         assert!(manifest.validate().is_ok());
         assert_eq!(manifest.normalized_hash().unwrap(), "a".repeat(64));
@@ -492,6 +540,8 @@ mod tests {
             tokenizer: "tokenizer.json".to_owned(),
             hash: "bad".to_owned(),
             license: "Apache-2.0".to_owned(),
+            pooling: "mean".to_owned(),
+            normalize: false,
         };
         assert!(manifest.validate().is_err());
     }

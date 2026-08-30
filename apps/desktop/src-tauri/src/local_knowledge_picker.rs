@@ -3,12 +3,13 @@ use serde::Serialize;
 use std::{
     ffi::OsStr,
     fs,
-    path::{Component, Path, Prefix},
+    path::{Component, Path, PathBuf, Prefix},
 };
 
 pub(crate) const MAX_PICKED_FILE_SIZE: u64 = 256 * 1024 * 1024;
 const SUPPORTED_EXTENSIONS: &[&str] = &["txt", "md", "pdf", "docx", "pptx", "xlsx"];
 const FILE_DIALOG_FILTER: &str = "*.txt;*.md;*.pdf;*.docx;*.pptx;*.xlsx";
+const MAX_PICKED_FOLDER_FILES: usize = 5_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +18,7 @@ pub struct PickedLocalKnowledgeFile {
     pub name: String,
     pub mime_type: String,
     pub size_bytes: u64,
+    pub relative_path: String,
 }
 
 fn extension_for_file_name(file_name: &str) -> Option<String> {
@@ -45,7 +47,7 @@ pub(crate) fn is_supported_file_name(file_name: &str) -> bool {
         .is_some_and(|extension| SUPPORTED_EXTENSIONS.contains(&extension))
 }
 
-fn validate_path_component(component: &OsStr) -> Result<(), String> {
+pub(crate) fn validate_path_component(component: &OsStr) -> Result<(), String> {
     let value = component
         .to_str()
         .ok_or_else(|| "所选路径包含无法处理的字符".to_owned())?;
@@ -140,7 +142,64 @@ fn validate_picked_file(path: &Path) -> Result<PickedLocalKnowledgeFile, String>
         name: name.to_owned(),
         mime_type: mime_type.to_owned(),
         size_bytes: metadata.len(),
+        relative_path: name.to_owned(),
     })
+}
+
+fn collect_folder_files(root: &Path) -> Result<Vec<PickedLocalKnowledgeFile>, String> {
+    validate_source_path(root)?;
+    let metadata =
+        fs::symlink_metadata(root).map_err(|error| format!("无法读取所选文件夹：{error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("所选路径不是普通文件夹".to_owned());
+    }
+    let root_name = root
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| "无法读取所选文件夹名称".to_owned())?;
+    validate_path_component(OsStr::new(root_name))?;
+
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let entries = fs::read_dir(&directory)
+            .map_err(|error| format!("无法读取文件夹 {}：{error}", directory.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("无法读取文件夹条目：{error}"))?;
+            let path: PathBuf = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+                return Err("文件夹中包含无法读取名称的文件".to_owned());
+            };
+            if !is_supported_file_name(name) {
+                continue;
+            }
+            if files.len() >= MAX_PICKED_FOLDER_FILES {
+                return Err(format!("单次最多导入 {MAX_PICKED_FOLDER_FILES} 个文件"));
+            }
+            let mut picked = validate_picked_file(&path)?;
+            let nested = path
+                .strip_prefix(root)
+                .map_err(|_| "无法计算文件相对路径".to_owned())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            picked.relative_path = format!("{root_name}/{nested}");
+            files.push(picked);
+        }
+    }
+    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(files)
 }
 
 #[cfg(windows)]
@@ -237,6 +296,22 @@ pub fn local_knowledge_import_files_pick() -> ApiResponse<Vec<PickedLocalKnowled
         "当前平台暂不支持系统文件选择器",
         false,
     )
+}
+
+#[tauri::command]
+pub fn local_knowledge_import_folder_pick() -> ApiResponse<Vec<PickedLocalKnowledgeFile>> {
+    match crate::local_knowledge_storage::pick_storage_directory() {
+        Ok(Some(path)) => match collect_folder_files(Path::new(&path)) {
+            Ok(files) => ApiResponse::success(files),
+            Err(error) => {
+                ApiResponse::failure("local_knowledge.import_folder_invalid", error, false)
+            }
+        },
+        Ok(None) => ApiResponse::success(Vec::new()),
+        Err(error) => {
+            ApiResponse::failure("local_knowledge.import_folder_picker_failed", error, true)
+        }
+    }
 }
 
 #[tauri::command]

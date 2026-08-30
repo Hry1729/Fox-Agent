@@ -183,6 +183,16 @@ pub fn import_document(
     source_path: impl AsRef<Path>,
     options: ImportOptions<'_>,
 ) -> Result<ImportedDocument, ImportError> {
+    import_document_at_relative_path(managed_root, knowledge_base_id, source_path, None, options)
+}
+
+pub fn import_document_at_relative_path(
+    managed_root: impl AsRef<Path>,
+    knowledge_base_id: &str,
+    source_path: impl AsRef<Path>,
+    requested_relative_path: Option<&str>,
+    options: ImportOptions<'_>,
+) -> Result<ImportedDocument, ImportError> {
     check_cancelled(&options)?;
 
     let managed_root = managed_root.as_ref();
@@ -229,16 +239,26 @@ pub fn import_document(
     }
 
     let staging_parent = ensure_managed_directory(managed_root, &[STAGING_DIRECTORY])?;
-    let documents_directory = ensure_managed_directory(
-        managed_root,
-        &[
-            KNOWLEDGE_BASES_DIRECTORY,
-            knowledge_base_id,
-            DOCUMENTS_DIRECTORY,
-        ],
-    )?;
-    let final_path = documents_directory.join(&display_name);
-    if destination_conflicts(&documents_directory, &display_name)? {
+    let relative_path = normalize_import_relative_path(requested_relative_path, &display_name)?;
+    let mut directory_components = vec![
+        KNOWLEDGE_BASES_DIRECTORY.to_owned(),
+        knowledge_base_id.to_owned(),
+        DOCUMENTS_DIRECTORY.to_owned(),
+    ];
+    if let Some(parent) = relative_path.parent() {
+        for component in parent.components() {
+            if let Component::Normal(value) = component {
+                directory_components.push(value.to_string_lossy().into_owned());
+            }
+        }
+    }
+    let directory_component_refs = directory_components
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let destination_directory = ensure_managed_directory(managed_root, &directory_component_refs)?;
+    let final_path = destination_directory.join(&display_name);
+    if destination_conflicts(&destination_directory, &display_name)? {
         return Err(ImportError::new(
             CODE_DESTINATION_EXISTS,
             format!("the destination already exists: {display_name}"),
@@ -253,6 +273,7 @@ pub fn import_document(
         &staging_path,
         &final_path,
         display_name,
+        relative_path.to_string_lossy().replace('\\', "/"),
         mime_type,
         options,
     );
@@ -279,6 +300,7 @@ fn import_into_staging(
     staging_path: &Path,
     final_path: &Path,
     display_name: String,
+    relative_path: String,
     mime_type: String,
     options: ImportOptions<'_>,
 ) -> Result<ImportedDocument, ImportError> {
@@ -303,16 +325,55 @@ fn import_into_staging(
 
     Ok(ImportedDocument {
         display_name,
-        relative_path: final_path
-            .file_name()
-            .and_then(OsStr::to_str)
-            .unwrap_or_default()
-            .to_owned(),
+        relative_path,
         content_hash,
         file_size,
         mime_type,
         stored_path: final_path.to_path_buf(),
     })
+}
+
+fn normalize_import_relative_path(
+    requested_relative_path: Option<&str>,
+    display_name: &str,
+) -> Result<PathBuf, ImportError> {
+    let value = requested_relative_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(display_name)
+        .replace('\\', "/");
+    let path = Path::new(&value);
+    if path.is_absolute() {
+        return Err(ImportError::new(
+            CODE_UNSAFE_PATH,
+            "the import destination must be relative to the knowledge base",
+        ));
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => {
+                validate_path_component(value, "import destination component")?;
+                normalized.push(value);
+            }
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(ImportError::new(
+                    CODE_UNSAFE_PATH,
+                    "the import destination contains an unsafe path component",
+                ));
+            }
+        }
+    }
+    if normalized.file_name().and_then(OsStr::to_str) != Some(display_name) {
+        return Err(ImportError::new(
+            CODE_UNSAFE_PATH,
+            "the import destination filename must match the source filename",
+        ));
+    }
+    Ok(normalized)
 }
 
 fn copy_and_hash(
@@ -1842,6 +1903,33 @@ mod tests {
             .unwrap()
             .next()
             .is_none());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn imports_document_into_a_safe_nested_relative_path() {
+        let root = test_root("nested-relative-path");
+        let source = root.join("source.md");
+        fs::write(&source, "nested knowledge").unwrap();
+
+        let document = import_document_at_relative_path(
+            &root,
+            "kb-one",
+            &source,
+            Some("产品资料/发布记录/source.md"),
+            ImportOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(document.relative_path, "产品资料/发布记录/source.md");
+        assert!(document
+            .stored_path
+            .ends_with(Path::new("产品资料/发布记录/source.md")));
+        assert_eq!(
+            fs::read_to_string(&document.stored_path).unwrap(),
+            "nested knowledge"
+        );
+
         cleanup(&root);
     }
 

@@ -6,6 +6,7 @@ import type {
   LocalKnowledgeCatalogFile,
   LocalKnowledgeDocument,
   LocalKnowledgeFileSource,
+  LocalKnowledgeFolder,
   LocalKnowledgeGateway,
   LocalKnowledgeImportRequest,
   LocalKnowledgeStorageMigration,
@@ -23,6 +24,9 @@ function keywordCapability(chunkCount: number | null, lastIndexedAt: string | nu
     textIndexReady,
     vectorIndexReady: false,
     searchMode: 'keyword' as const,
+    configuredEmbeddingModelId: null,
+    chunkSize: 512,
+    chunkOverlap: 50,
     embeddingModel: null,
     chunkCount,
     vectorCount: null,
@@ -295,10 +299,16 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
   const fileSources = new Map(fileSourceSeed.map((source) => [source.id, copy(source)]))
   const catalogFiles = new Map(catalogFileSeed.map((file) => [file.id, copy(file)]))
   const documents = new Map<string, LocalKnowledgeDocument[]>()
+  const folders = new Map<string, Set<string>>()
+  for (const base of baseSeed) folders.set(base.id, new Set())
   for (const document of documentSeed) {
     const collection = documents.get(document.knowledgeBaseId) ?? []
     collection.push(copy(document))
     documents.set(document.knowledgeBaseId, collection)
+    const parts = document.relativePath.split('/').filter(Boolean)
+    const baseFolders = folders.get(document.knowledgeBaseId) ?? new Set<string>()
+    for (let index = 1; index < parts.length; index += 1) baseFolders.add(parts.slice(0, index).join('/'))
+    folders.set(document.knowledgeBaseId, baseFolders)
   }
 
   const jobs = new Map(jobSeed.map((job) => [job.id, copy(job)]))
@@ -485,6 +495,10 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
         documentCount: 0,
         activeGeneration: null,
         ...keywordCapability(0, null, false),
+        configuredEmbeddingModelId: request.embeddingModelId ?? null,
+        chunkSize: request.chunkSize ?? 512,
+        chunkOverlap: request.chunkOverlap ?? 50,
+        searchMode: request.searchMode ?? 'keyword',
         storagePath: `FoxData/knowledge/${id}`,
         writable: true,
         lastIndexedAt: null,
@@ -492,6 +506,7 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
       }
       bases.set(id, base)
       documents.set(id, [])
+      folders.set(id, new Set())
       return copy(base)
     },
 
@@ -505,6 +520,10 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
         ...base,
         name,
         description: request.description?.trim() ?? '',
+        configuredEmbeddingModelId: request.embeddingModelId === undefined ? base.configuredEmbeddingModelId : request.embeddingModelId,
+        chunkSize: request.chunkSize ?? base.chunkSize,
+        chunkOverlap: request.chunkOverlap ?? base.chunkOverlap,
+        searchMode: request.searchMode ?? base.searchMode,
         updatedAt: now(),
       }
       bases.set(id, updated)
@@ -515,6 +534,7 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
       if (id === 'fox-user-guide') throw new Error('Fox 使用指南是内置知识库，不能删除。')
       if (!bases.delete(id)) throw new Error(`本地知识库不存在：${id}`)
       documents.delete(id)
+      folders.delete(id)
       for (const [jobId, job] of jobs) {
         if (job.knowledgeBaseId === id) jobs.delete(jobId)
       }
@@ -526,6 +546,32 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
       const query = options.query?.trim().toLocaleLowerCase() ?? ''
       const items = (documents.get(id) ?? []).filter((document) => !query || [document.name, document.relativePath, document.extension].some((value) => value.toLocaleLowerCase().includes(query)))
       return copy({ items, total: items.length } satisfies Page<LocalKnowledgeDocument>)
+    },
+
+    async listFolders(id) {
+      if (!bases.has(id)) throw new Error(`本地知识库不存在：${id}`)
+      const collection = documents.get(id) ?? []
+      return [...(folders.get(id) ?? new Set<string>())]
+        .sort((left, right) => left.localeCompare(right, 'zh-CN'))
+        .map((relativePath): LocalKnowledgeFolder => ({
+          knowledgeBaseId: id,
+          name: relativePath.split('/').pop() ?? relativePath,
+          relativePath,
+          documentCount: collection.filter((document) => document.relativePath.startsWith(`${relativePath}/`)).length,
+        }))
+        .map(copy)
+    },
+
+    async createFolder(knowledgeBaseId, name, parentPath = '') {
+      if (!bases.has(knowledgeBaseId)) throw new Error(`本地知识库不存在：${knowledgeBaseId}`)
+      const normalizedName = name.trim()
+      if (!normalizedName || /[<>:"/\\|?*]/.test(normalizedName) || normalizedName === '.' || normalizedName === '..') throw new Error('文件夹名称无效')
+      const relativePath = [parentPath.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, ''), normalizedName].filter(Boolean).join('/')
+      const collection = folders.get(knowledgeBaseId) ?? new Set<string>()
+      if (collection.has(relativePath)) throw new Error('文件夹已存在')
+      collection.add(relativePath)
+      folders.set(knowledgeBaseId, collection)
+      return { knowledgeBaseId, name: normalizedName, relativePath, documentCount: 0 }
     },
 
     async readDocumentFileRange(knowledgeBaseId, documentId, start, end) {
@@ -575,6 +621,12 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
         })
       }
       documents.set(request.knowledgeBaseId, collection)
+      const baseFolders = folders.get(request.knowledgeBaseId) ?? new Set<string>()
+      for (const file of request.files) {
+        const parts = (file.relativePath ?? file.name).split('/').filter(Boolean)
+        for (let index = 1; index < parts.length; index += 1) baseFolders.add(parts.slice(0, index).join('/'))
+      }
+      folders.set(request.knowledgeBaseId, baseFolders)
       bases.set(request.knowledgeBaseId, {
         ...base,
         status: 'indexing',
@@ -682,6 +734,32 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
       }
       return copy(storageMigrations.get(migrationId)!)
     },
+    async listEmbeddingModels() {
+      return [{
+        id: 'bge-small-zh-v1.5', name: 'BGE Small 中文 v1.5', version: '75c43b0',
+        languages: ['中文'], dimension: 512, license: 'MIT', sourceUrl: 'https://huggingface.co/BAAI/bge-small-zh-v1.5',
+        status: 'not_installed', integrityStatus: 'pending', isDefault: false, recommended: true,
+        sizeBytes: 24_452_059, installedAt: null, packagePath: null, loadReady: false,
+        lastErrorCode: null, lastErrorMessage: null, files: [], download: null,
+      }]
+    },
+    async startEmbeddingModelInstall() { return { operationId: `mock-model-${Date.now()}`, acceptedAt: now() } },
+    async cancelEmbeddingModelDownload() { return true },
+    async retryEmbeddingModelDownload() { return { operationId: `mock-model-${Date.now()}`, acceptedAt: now() } },
+    async testEmbeddingModel() { return { integrityVerified: true, loadReady: true, dimension: 512, elapsedMs: 42, message: '测试通过' } },
+    async setDefaultEmbeddingModel() { return true },
+    async deleteEmbeddingModel() { return true },
+    async importEmbeddingModelPackage() { throw new Error('浏览器预览不支持导入本地模型包。') },
+    async getVectorBackendHealth() { return { backend: 'mock-vector', available: true, readWriteVerified: true, fallbackActive: false, message: '预览环境向量后端正常。' } },
+    async startIndex(knowledgeBaseId) { return { operationId: `mock-index-${knowledgeBaseId}-${Date.now()}`, acceptedAt: now() } },
+    async testRetrieval(knowledgeBaseId, query, mode) { return { knowledgeBaseId, query, mode, fusionVersion: mode === 'hybrid' ? 'rrf-v1-k60' : null, timings: { keywordMs: 1, vectorMs: mode === 'keyword' ? 0 : 2, totalMs: mode === 'keyword' ? 1 : 3 }, items: [] } },
+    async listRetrievalCases() { return [] },
+    async saveRetrievalCase(request) { return { id: request.id ?? `mock-case-${Date.now()}`, knowledgeBaseId: request.knowledgeBaseId, question: request.question, expectedDocumentIds: request.expectedDocumentIds ?? [], expectedKeywords: request.expectedKeywords ?? [], createdAt: Date.now(), updatedAt: Date.now() } },
+    async deleteRetrievalCase() { return true },
+    async exportRetrievalCases(knowledgeBaseId) { return { json: { schemaVersion: 1, knowledgeBaseId, cases: [] }, markdown: '# 本地知识库检索测试集\n' } },
+    async listDocumentChunks() { return [] },
+    async deleteDocument() { return true },
+    async reparseDocument(knowledgeBaseId) { return { operationId: `mock-reparse-${knowledgeBaseId}-${Date.now()}`, acceptedAt: now() } },
   }
 }
 

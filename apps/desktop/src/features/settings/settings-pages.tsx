@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Activity, Archive, Bot, Cable, Check, ChevronDown, ChevronRight, Download, ExternalLink, FileText, FileWarning, FolderOpen, HardDrive, Info, Keyboard, LoaderCircle, LogIn, MessageSquare, Minus, Moon, MoreHorizontal, Pencil, Plus, Puzzle, RotateCcw, Server, Shield, ShieldCheck, Sparkles, Sun, Trash2, Wrench, Zap } from 'lucide-react'
+import { Activity, Archive, BellRing, Bot, Cable, Check, ChevronDown, ChevronRight, Copy, Download, ExternalLink, FileText, FileWarning, FolderOpen, HardDrive, Info, Keyboard, LoaderCircle, LogIn, MessageSquare, Minus, Moon, MoreHorizontal, Pencil, Plus, Puzzle, RotateCcw, Server, Shield, ShieldCheck, Sparkles, Sun, Trash2, Volume2, Wrench, Zap } from 'lucide-react'
 import { toast } from 'sonner'
 import { AnimatePresence, motion } from 'motion/react'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -19,16 +19,26 @@ import { useYuxiService } from './use-yuxi-service'
 import { useModelService } from './use-model-service'
 import { useModelProviders, type SaveModelProviderInput } from './use-model-providers'
 import { useYuxiUser } from './use-yuxi-user'
-import { desktopClient } from '@/features/conversations/api/desktop-client'
+import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable } from '@/features/conversations/api/desktop-client'
 import { useSkills } from './use-skills'
 import { useMcpServers, type SaveMcpServerInput } from './use-mcp-servers'
 import { useLifecycleHooks } from './use-lifecycle-hooks'
-import type { KnowledgePreviewCacheStatistics, LifecycleHookRecord, McpServerRecord, ModelProviderRecord, ObservabilityStatistics, ProjectRecord, UsageStatistics } from '@/features/conversations/model/types'
+import type { KnowledgePreviewCacheStatistics, LifecycleHookRecord, McpServerRecord, ModelProviderRecord, NotificationPreferencesRecord, ObservabilityStatistics, ProjectManagementRecord, ProjectRecord, UsageStatistics } from '@/features/conversations/model/types'
 import { Grainient } from '@/components/effects/grainient'
 import { SpecularButton } from '@/components/effects/specular-button'
 import { UserProfileDialog, useUserProfile } from '@/features/profile/user-profile'
 import { resolveYuxiLoginReturn, resolveYuxiServiceReturn, YUXI_LOGIN_RETURN_KEY, YUXI_SERVICE_RETURN_KEY } from '@/features/knowledge/knowledge-navigation'
 import { normalizeTextScale, persistTextScale, readTextScale, TEXT_SCALE_MAX, TEXT_SCALE_MIN } from './text-scale'
+import { defaultLocalKnowledgeGateway } from '@/features/local-knowledge/tauri-gateway'
+import { defaultPluginGateway } from '@/features/plugins/tauri-gateway'
+import {
+  DEFAULT_NOTIFICATION_SOUND,
+  NOTIFICATION_SOUND_OPTIONS,
+  dispatchNotificationPreferencesChanged,
+  dispatchNotificationPreview,
+  normalizeNotificationSoundId,
+  playNotificationSound,
+} from '@/features/notifications'
 
 function serviceStatusLabel(status?: string) {
   if (status === 'connected') return '已连接'
@@ -72,6 +82,80 @@ function PreferenceRow({ title, description, children }: { title: string; descri
   return <div className="fox-setting-row fox-setting-row-bordered"><span><b>{title}</b><small>{description}</small></span>{children}</div>
 }
 
+const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferencesRecord = {
+  systemPopup: false,
+  sound: false,
+  soundId: DEFAULT_NOTIFICATION_SOUND,
+  badge: true,
+  quietProgress: true,
+  updatedAt: 0,
+}
+
+function NotificationSettingsSection() {
+  const [preferences, setPreferences] = useState<NotificationPreferencesRecord | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    if (!desktopRuntimeAvailable) {
+      setPreferences(DEFAULT_NOTIFICATION_PREFERENCES)
+      return
+    }
+    void desktopClient.getNotificationPreferences().then((value) => {
+      if (!cancelled) setPreferences({ ...value, soundId: normalizeNotificationSoundId(value.soundId) })
+    }).catch((cause) => {
+      if (!cancelled) {
+        setPreferences(DEFAULT_NOTIFICATION_PREFERENCES)
+        toast.error('通知设置读取失败', { description: desktopErrorDetails(cause).message })
+      }
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  const updatePreferences = async (changes: Partial<NotificationPreferencesRecord>) => {
+    if (!preferences || saving) return
+    let nextChanges = changes
+    if (changes.systemPopup === true && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+      const permission = await Notification.requestPermission()
+      if (permission !== 'granted') {
+        toast.error('系统通知权限未开启')
+        nextChanges = { ...changes, systemPopup: false }
+      }
+    }
+    const next = { ...preferences, ...nextChanges }
+    setPreferences(next)
+    if (!desktopRuntimeAvailable) {
+      dispatchNotificationPreferencesChanged(next)
+      return
+    }
+    setSaving(true)
+    try {
+      const saved = await desktopClient.saveNotificationPreferences(next)
+      const normalized = { ...saved, soundId: normalizeNotificationSoundId(saved.soundId) }
+      setPreferences(normalized)
+      dispatchNotificationPreferencesChanged(normalized)
+    } catch (cause) {
+      setPreferences(preferences)
+      toast.error('通知设置保存失败', { description: desktopErrorDetails(cause).message })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (!preferences) {
+    return <Card className="fox-settings-section fox-notification-settings"><div className="fox-notification-settings-loading"><LoaderCircle className="animate-spin" />正在读取通知设置</div></Card>
+  }
+
+  const soundId = normalizeNotificationSoundId(preferences.soundId)
+  return <Card className="fox-settings-section fox-notification-settings">
+    <div className="fox-settings-section-head"><div><h2>通知</h2><p>管理通知展示、提示音与普通进度的打扰程度。</p></div><Button variant="outline" size="sm" onClick={() => dispatchNotificationPreview(soundId)}><BellRing />测试通知</Button></div>
+    <PreferenceRow title="系统弹窗" description="允许 Fox 同时发送操作系统通知"><Switch checked={preferences.systemPopup} disabled={saving} onCheckedChange={(value) => void updatePreferences({ systemPopup: value })} /></PreferenceRow>
+    <PreferenceRow title="通知声音" description="为需要关注的通知播放提示音"><div className="fox-notification-sound-control"><Switch checked={preferences.sound} disabled={saving} onCheckedChange={(value) => void updatePreferences({ sound: value })} /><Select value={soundId} disabled={saving || !preferences.sound} onValueChange={(value) => { const next = normalizeNotificationSoundId(value); playNotificationSound(next); void updatePreferences({ soundId: next }) }}><SelectTrigger className="fox-settings-select"><Volume2 /><SelectValue /></SelectTrigger><SelectContent>{NOTIFICATION_SOUND_OPTIONS.map((option) => <SelectItem key={option.id} value={option.id} title={option.description}>{option.label}</SelectItem>)}</SelectContent></Select></div></PreferenceRow>
+    <PreferenceRow title="未读提示点" description="有未读通知时在右上角显示红点"><Switch checked={preferences.badge} disabled={saving} onCheckedChange={(value) => void updatePreferences({ badge: value })} /></PreferenceRow>
+    <PreferenceRow title="静默普通进度" description="合并普通进度通知，审批、提问和失败仍会提醒"><Switch checked={preferences.quietProgress} disabled={saving} onCheckedChange={(value) => void updatePreferences({ quietProgress: value })} /></PreferenceRow>
+  </Card>
+}
+
 export function SettingsPage({ sidebarCollapsed, onSidebar, navigate, dark, onDark }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace; dark: boolean; onDark: () => void }) {
   const yuxi = useYuxiService()
   const yuxiUser = useYuxiUser(Boolean(yuxi.service?.credentialConfigured))
@@ -94,6 +178,7 @@ export function SettingsPage({ sidebarCollapsed, onSidebar, navigate, dark, onDa
       <SettingsScaffold kicker="桌面偏好" title="应用" description="调整 Fox 在这台设备上的显示和界面密度。">
           <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>个人资料</h2><p>设置 Fox 在这台设备上显示的头像与用户名。</p></div><div className="fox-profile-setting-actions"><Button variant="outline" size="sm" onClick={() => setProfileDialogOpen(true)}><Pencil />编辑资料</Button>{!yuxiUser.user && <Button variant="outline" size="sm" onClick={() => navigate('login')}>知识库登录</Button>}</div></div><div className="fox-profile-setting"><Avatar><AvatarImage src={profile.avatar} alt="" /><AvatarFallback>{profileFallback}</AvatarFallback></Avatar><span><b>{profileName}</b><small>{yuxiUser.user?.uid ?? 'fox-local'}</small><em>{profileDetail}</em></span></div></Card>
           <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>外观</h2><p>保持 Fox 的主题、字体和界面密度一致。</p></div></div><div className="fox-theme-grid"><button className={!dark ? 'is-active' : ''} onClick={() => dark && onDark()}><span className="fox-theme-preview is-light"><i /><b /></span><em><Sun />浅色{!dark && <Check />}</em></button><button className={dark ? 'is-active' : ''} onClick={() => !dark && onDark()}><span className="fox-theme-preview is-dark"><i /><b /></span><em><Moon />深色{dark && <Check />}</em></button></div><PreferenceRow title="文字大小" description="调整 Fox 各界面的文字显示比例"><div className="fox-text-scale-control"><span className="fox-text-scale-a is-small" aria-hidden="true">A</span><input type="range" min={TEXT_SCALE_MIN} max={TEXT_SCALE_MAX} step={1} value={textScale} aria-label="文字大小" onChange={(event) => changeTextScale(Number(event.target.value))} /><span className="fox-text-scale-a is-large" aria-hidden="true">A</span><div className="fox-text-scale-stepper"><Button type="button" variant="ghost" size="icon" aria-label="缩小文字" onClick={() => changeTextScale(textScale - 5)}><Minus /></Button><label><input type="number" min={TEXT_SCALE_MIN} max={TEXT_SCALE_MAX} step={1} value={textScale} aria-label="文字大小百分比" onChange={(event) => changeTextScale(Number(event.target.value))} /><span>%</span></label><Button type="button" variant="ghost" size="icon" aria-label="放大文字" onClick={() => changeTextScale(textScale + 5)}><Plus /></Button></div></div></PreferenceRow></Card>
+          <NotificationSettingsSection />
           <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>首次设置向导</h2></div></div><PreferenceRow title="重新运行设置向导" description="检查模型服务、知识库连接和 Fox 的基础使用方式"><Button variant="outline" size="sm" onClick={() => navigate('onboarding')}><Sparkles />打开向导</Button></PreferenceRow></Card>
         <UserProfileDialog open={profileDialogOpen} onOpenChange={setProfileDialogOpen} profile={profile} detail={profileDetail} onSave={async (next) => { await saveProfile(next); toast.success('个人资料已更新') }} />
       </SettingsScaffold>
@@ -388,16 +473,110 @@ export function YuxiSettingsPage({ sidebarCollapsed, onSidebar, navigate }: { si
   return <WorkspacePage title="知识库服务" subtitle="知识与远程专家" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="服务连接" title="知识库服务" description="管理 Fox 使用的唯一知识库服务和账户身份。"><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>服务连接</h2><p>支持本机、局域网和远程 HTTPS 地址。</p></div><Badge variant="secondary">{yuxi.service ? serviceStatusLabel(yuxi.service.lastStatus) : '未配置'}</Badge></div><button className="fox-service-card" onClick={openService}><span><Server /></span><p><b>{yuxi.service ? knowledgeServiceName(yuxi.service.name) : '配置知识库服务'}</b><small>{yuxi.service?.baseUrl ?? '专家、知识库和知识图谱能力的来源'}</small></p><em><b>{yuxi.service?.lastLatencyMs != null ? `${yuxi.service.lastLatencyMs} ms` : '--'}</b><small>{connectionTypeLabel(yuxi.service?.connectionType)}</small></em><ChevronRight /></button><div className="fox-setting-actions"><Button variant="outline" size="sm" disabled={!yuxi.service || yuxi.testing} onClick={() => void yuxi.test()}>{yuxi.testing && <LoaderCircle className="animate-spin" />}测试连接</Button><Button size="sm" onClick={openService}>{yuxi.service ? '编辑地址' : '开始配置'}</Button></div></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>账户</h2><p>Fox 与浏览器中的知识库登录态相互独立。</p></div>{user.user ? <Badge variant="secondary">已登录</Badge> : <Badge variant="outline">未登录</Badge>}</div>{user.user ? <div className="fox-profile-setting"><Avatar>{user.user.avatar && <AvatarImage src={user.user.avatar} alt="" />}<AvatarFallback>{user.user.username.charAt(0).toUpperCase()}</AvatarFallback></Avatar><span><b>{user.user.username}</b><small>{user.user.uid}</small><em>{[user.user.departmentName, user.user.role].filter(Boolean).join(' · ')}</em></span></div> : <Button variant="outline" onClick={openLogin}><LogIn />知识库登录</Button>}</Card></SettingsScaffold></WorkspacePage>
 }
 
+function projectStorageLabel(bytes: number | null) {
+  if (bytes === null) return '未统计'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  return `${(bytes / 1024 ** 3).toFixed(1)} GB`
+}
+
 export function ProjectPermissionsPage({ sidebarCollapsed, onSidebar }: { sidebarCollapsed: boolean; onSidebar: () => void }) {
-  const [projects, setProjects] = useState<ProjectRecord[]>([])
+  const [projects, setProjects] = useState<ProjectManagementRecord[]>([])
   const [defaultPermission, setDefaultPermission] = useStoredPreference('fox.preferences.defaultPermission', 'ask')
-  useEffect(() => { void desktopClient.listProjects().then(setProjects).catch(() => undefined) }, [])
-  const updatePermission = async (project: ProjectRecord, permissionMode: ProjectRecord['permissionMode']) => {
-    const updated = await desktopClient.updateProjectPermission(project.id, permissionMode)
-    setProjects((items) => items.map((item) => item.id === updated.id ? updated : item))
-    toast.success(`已更新 ${updated.name} 的执行方式`)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [busyId, setBusyId] = useState<string | null>(null)
+  const loadProjects = async () => {
+    setLoading(true)
+    try {
+      setProjects(await desktopClient.listManagedProjects())
+      setError(null)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setLoading(false)
+    }
   }
-  return <WorkspacePage title="项目与权限" subtitle="本地文件边界" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="安全边界" title="项目与权限" description="管理已授权文件夹及 Fox 对本地文件和命令的默认处理方式。"><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>默认执行方式</h2><p>只影响之后加入的新项目；已有项目保持各自设置。</p></div><ShieldCheck /></div><PreferenceRow title="新项目默认权限" description="建议使用“询问”，在写入或运行命令前确认"><Select value={defaultPermission} onValueChange={setDefaultPermission}><SelectTrigger className="fox-settings-select"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="read_only">只读</SelectItem><SelectItem value="ask">询问</SelectItem><SelectItem value="allow">允许</SelectItem></SelectContent></Select></PreferenceRow></Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>已授权项目</h2><p>这里的边界由 Tauri 主进程校验，不只是界面提示。</p></div><FolderOpen /></div>{projects.length ? <div className="fox-settings-project-list">{projects.map((project) => <div key={project.id}><span><b>{project.name}</b><small title={project.rootPath}>{project.rootPath}</small></span><Select value={project.permissionMode} onValueChange={(value) => void updatePermission(project, value as ProjectRecord['permissionMode'])}><SelectTrigger className="fox-settings-select"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="read_only">只读</SelectItem><SelectItem value="ask">询问</SelectItem><SelectItem value="allow">允许</SelectItem></SelectContent></Select></div>)}</div> : <p className="fox-settings-empty-copy">尚未授权项目文件夹，可从主界面的“添加项目”选择。</p>}</Card><Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>高风险操作</h2><p>命令、MCP 工具和项目外写入仍然需要单独审批。</p></div><Shield /></div><PreferenceRow title="命令执行" description="当前阶段始终询问，后续再提供自动审批规则"><Badge className="fox-settings-status-pill is-wide" variant="secondary">始终询问</Badge></PreferenceRow><PreferenceRow title="知识库内容注入" description="知识检索结果不能绕过工具权限和项目边界"><Badge className="fox-settings-status-pill" variant="secondary">受保护</Badge></PreferenceRow></Card></SettingsScaffold></WorkspacePage>
+  useEffect(() => { void loadProjects() }, [])
+  const updatePermission = async (project: ProjectManagementRecord, permissionMode: ProjectRecord['permissionMode']) => {
+    setBusyId(project.id)
+    try {
+      const updated = await desktopClient.updateProjectPermission(project.id, permissionMode)
+      setProjects((items) => items.map((item) => item.id === updated.id ? { ...item, permissionMode: updated.permissionMode, updatedAt: updated.updatedAt } : item))
+      toast.success(`已更新 ${updated.name} 的执行方式`)
+    } catch (cause) {
+      toast.error('权限更新失败', { description: cause instanceof Error ? cause.message : String(cause) })
+    } finally {
+      setBusyId(null)
+    }
+  }
+  const chooseProjectPath = async (project: ProjectManagementRecord) => {
+    setBusyId(project.id)
+    try {
+      const rootPath = await desktopClient.pickProjectFolder()
+      if (!rootPath) return
+      const updated = await desktopClient.updateProjectPath(project.id, rootPath)
+      setProjects((items) => items.map((item) => item.id === updated.id ? updated : item))
+      toast.success(`已迁移 ${updated.name} 的项目路径`)
+    } catch (cause) {
+      toast.error('项目路径更新失败', { description: cause instanceof Error ? cause.message : String(cause) })
+    } finally {
+      setBusyId(null)
+    }
+  }
+  const setArchived = async (project: ProjectManagementRecord, archived: boolean) => {
+    setBusyId(project.id)
+    try {
+      await desktopClient.setProjectArchived(project.id, archived)
+      setProjects((items) => items.map((item) => item.id === project.id ? { ...item, archivedAt: archived ? Date.now() : null } : item))
+      toast.success(archived ? `已归档 ${project.name}` : `已恢复 ${project.name}`)
+    } catch (cause) {
+      toast.error(archived ? '项目归档失败' : '项目恢复失败', { description: cause instanceof Error ? cause.message : String(cause) })
+    } finally {
+      setBusyId(null)
+    }
+  }
+  const openRoot = async (project: ProjectManagementRecord) => {
+    try {
+      await desktopClient.openProjectRoot(project.id)
+    } catch (cause) {
+      toast.error('无法打开项目目录', { description: cause instanceof Error ? cause.message : String(cause) })
+    }
+  }
+  const activeProjects = projects.filter((project) => project.archivedAt === null)
+  const archivedProjects = projects.filter((project) => project.archivedAt !== null)
+  const renderProject = (project: ProjectManagementRecord) => <article key={project.id} className={`fox-managed-project ${project.pathExists ? '' : 'is-missing'} ${project.archivedAt ? 'is-archived' : ''}`}>
+    <header>
+      <span className="fox-managed-project-icon"><FolderOpen /></span>
+      <span><strong>{project.name}</strong><small title={project.rootPath}>{project.rootPath}</small></span>
+      <Badge variant={project.pathExists ? 'secondary' : 'destructive'}>{project.pathExists ? '路径正常' : '路径失效'}</Badge>
+    </header>
+    <div className="fox-managed-project-metrics">
+      <span><b>{project.isGitRepository ? project.gitBranch || 'Git' : '普通目录'}</b><small>版本状态</small></span>
+      <span><b>{projectStorageLabel(project.diskBytes)}</b><small>目录占用</small></span>
+      <span><b>{project.conversationCount}</b><small>关联会话</small></span>
+      <span><b>{project.artifactCount}</b><small>产物</small></span>
+    </div>
+    <div className="fox-managed-project-latest"><span><MessageSquare /><small>最近对话</small><b>{project.recentConversationTitle ?? '暂无'}</b></span><span><FileText /><small>最近产物</small><b>{project.recentArtifactName ?? '暂无'}</b></span></div>
+    <footer>
+      <Select disabled={busyId === project.id || Boolean(project.archivedAt)} value={project.permissionMode} onValueChange={(value) => void updatePermission(project, value as ProjectRecord['permissionMode'])}>
+        <SelectTrigger className="fox-settings-select" aria-label={`${project.name} 执行方式`}><SelectValue /></SelectTrigger>
+        <SelectContent><SelectItem value="read_only">只读</SelectItem><SelectItem value="ask">询问</SelectItem><SelectItem value="allow">允许</SelectItem></SelectContent>
+      </Select>
+      <div>
+        {!project.archivedAt && <Button variant="outline" size="sm" disabled={!project.pathExists} onClick={() => void openRoot(project)}><ExternalLink />打开目录</Button>}
+        {!project.archivedAt && <Button variant="outline" size="sm" disabled={busyId === project.id} onClick={() => void chooseProjectPath(project)}>{busyId === project.id ? <LoaderCircle className="animate-spin" /> : <FolderOpen />}迁移目录</Button>}
+        <Button variant="ghost" size="sm" disabled={busyId === project.id} onClick={() => void setArchived(project, !project.archivedAt)}>{project.archivedAt ? <RotateCcw /> : <Archive />}{project.archivedAt ? '恢复' : '归档'}</Button>
+      </div>
+    </footer>
+  </article>
+  return <WorkspacePage title="项目与权限" subtitle="本地文件边界" sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar}><SettingsScaffold kicker="安全边界" title="项目与权限" description="管理已授权文件夹、运行边界与项目生命周期。">
+    <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>默认执行方式</h2><p>只影响之后加入的新项目；已有项目保持各自设置。</p></div><ShieldCheck /></div><PreferenceRow title="新项目默认权限" description="建议使用“询问”，在写入或运行命令前确认"><Select value={defaultPermission} onValueChange={setDefaultPermission}><SelectTrigger className="fox-settings-select"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="read_only">只读</SelectItem><SelectItem value="ask">询问</SelectItem><SelectItem value="allow">允许</SelectItem></SelectContent></Select></PreferenceRow></Card>
+    <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>项目</h2><p>状态、路径与统计信息均来自本地运行时。</p></div><Button variant="outline" size="sm" disabled={loading} onClick={() => void loadProjects()}>{loading ? <LoaderCircle className="animate-spin" /> : <RotateCcw />}刷新</Button></div>{error ? <div className="fox-managed-project-state is-error"><FileWarning /><span><b>项目列表加载失败</b><small>{error}</small></span><Button variant="outline" size="sm" onClick={() => void loadProjects()}>重试</Button></div> : loading ? <div className="fox-managed-project-state"><LoaderCircle className="animate-spin" /><span><b>正在读取项目</b><small>正在检查目录、Git 状态与占用空间</small></span></div> : activeProjects.length ? <div className="fox-managed-project-grid">{activeProjects.map(renderProject)}</div> : <div className="fox-managed-project-state"><FolderOpen /><span><b>还没有项目</b><small>可从主界面的“添加项目”选择一个本地文件夹。</small></span></div>}</Card>
+    {archivedProjects.length > 0 && <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>已归档</h2><p>归档项目不会出现在日常项目列表中，可以随时恢复。</p></div><Archive /></div><div className="fox-managed-project-grid">{archivedProjects.map(renderProject)}</div></Card>}
+    <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>高风险操作</h2><p>命令、MCP 工具和项目外写入仍然需要单独审批。</p></div><Shield /></div><PreferenceRow title="命令执行" description="当前阶段始终询问，后续再提供自动审批规则"><Badge className="fox-settings-status-pill is-wide" variant="secondary">始终询问</Badge></PreferenceRow><PreferenceRow title="知识库内容注入" description="知识检索结果不能绕过工具权限和项目边界"><Badge className="fox-settings-status-pill" variant="secondary">受保护</Badge></PreferenceRow></Card>
+  </SettingsScaffold></WorkspacePage>
 }
 
 export function ConversationSettingsPage({ sidebarCollapsed, onSidebar }: { sidebarCollapsed: boolean; onSidebar: () => void }) {
@@ -622,8 +801,23 @@ export function McpPage({ sidebarCollapsed, onSidebar, navigate }: { sidebarColl
   )
 }
 
+type AppDiagnosticCheck = {
+  id: string
+  label: string
+  status: 'ok' | 'warning' | 'error' | 'offline'
+  summary: string
+  route?: Parameters<NavigateWorkspace>[0]
+  actionLabel?: string
+}
+
+function diagnosticStatusLabel(status: AppDiagnosticCheck['status']) {
+  return ({ ok: '正常', warning: '需注意', error: '异常', offline: '离线' })[status]
+}
+
 export function MaintenancePage({ sidebarCollapsed, onSidebar, navigate }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace }) {
   const [diagnostics, setDiagnostics] = useState<Awaited<ReturnType<typeof desktopClient.runtimeDiagnostics>> | null>(null)
+  const [diagnosticChecks, setDiagnosticChecks] = useState<AppDiagnosticCheck[]>([])
+  const [diagnosticsLoading, setDiagnosticsLoading] = useState(false)
   const [previewCache, setPreviewCache] = useState<KnowledgePreviewCacheStatistics | null>(null)
   const [restorePath, setRestorePath] = useState('')
   const [retentionDays, setRetentionDays] = useState('30')
@@ -659,8 +853,73 @@ export function MaintenancePage({ sidebarCollapsed, onSidebar, navigate }: { sid
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { setBusy(null) }
   }
+  const runFullDiagnostics = async () => {
+    setDiagnosticsLoading(true)
+    const checks: AppDiagnosticCheck[] = []
+    const [runtimeResult, providersResult, storageResult, basesResult, jobsResult, modelsResult, vectorResult, mcpResult, pluginsResult, projectsResult] = await Promise.allSettled([
+      desktopClient.runtimeDiagnostics(),
+      desktopClient.listModelProviders(),
+      defaultLocalKnowledgeGateway.getStorageStatus(),
+      defaultLocalKnowledgeGateway.listKnowledgeBases(),
+      defaultLocalKnowledgeGateway.listJobs(),
+      defaultLocalKnowledgeGateway.listEmbeddingModels(),
+      defaultLocalKnowledgeGateway.getVectorBackendHealth(),
+      desktopClient.listMcpServers(),
+      defaultPluginGateway.installationsList(),
+      desktopClient.listManagedProjects(),
+    ])
+    if (runtimeResult.status === 'fulfilled') {
+      setDiagnostics(runtimeResult.value)
+      checks.push({ id: 'runtime', label: 'Runtime Host', status: runtimeResult.value.state === 'ready' ? 'ok' : 'warning', summary: `${runtimeResult.value.runtime} · 协议 v${runtimeResult.value.protocolVersion} · ${runtimeResult.value.state}` })
+    } else checks.push({ id: 'runtime', label: 'Runtime Host', status: 'error', summary: '无法读取 Runtime 诊断信息' })
+    if (providersResult.status === 'fulfilled') {
+      const enabled = providersResult.value.filter((item) => item.enabled)
+      const healthy = enabled.filter((item) => item.lastStatus === 'connected')
+      checks.push({ id: 'models', label: '模型连接', status: enabled.length === 0 ? 'warning' : healthy.length === enabled.length ? 'ok' : 'warning', summary: enabled.length === 0 ? '尚未启用模型供应商' : `${healthy.length} / ${enabled.length} 个已启用供应商连接正常`, route: 'settings-models', actionLabel: '查看模型' })
+    } else checks.push({ id: 'models', label: '模型连接', status: 'error', summary: '模型供应商状态读取失败', route: 'settings-models', actionLabel: '检查配置' })
+    if (storageResult.status === 'fulfilled') {
+      checks.push({ id: 'knowledge-storage', label: '本地知识库', status: storageResult.value.writable && !storageResult.value.restartRequired ? 'ok' : 'warning', summary: `数据库 v${storageResult.value.schemaVersion} · ${storageResult.value.writable ? '目录可写' : '目录不可写'}${storageResult.value.restartRequired ? ' · 等待重启完成迁移' : ''}`, route: 'local-knowledge-home', actionLabel: '查看存储' })
+    } else checks.push({ id: 'knowledge-storage', label: '本地知识库', status: 'error', summary: '无法读取数据库与目录权限', route: 'local-knowledge-home', actionLabel: '查看存储' })
+    if (basesResult.status === 'fulfilled' && jobsResult.status === 'fulfilled') {
+      const activeJobs = jobsResult.value.filter((item) => ['queued', 'running', 'paused'].includes(item.status))
+      const failedJobs = jobsResult.value.filter((item) => item.status === 'failed')
+      checks.push({ id: 'knowledge-jobs', label: '知识任务队列', status: failedJobs.length ? 'warning' : 'ok', summary: `${basesResult.value.length} 个知识库 · ${activeJobs.length} 个活动任务 · ${failedJobs.length} 个失败任务`, route: 'local-knowledge-jobs', actionLabel: '查看任务' })
+    } else checks.push({ id: 'knowledge-jobs', label: '知识任务队列', status: 'offline', summary: '知识任务队列不可用', route: 'local-knowledge-jobs', actionLabel: '查看任务' })
+    if (modelsResult.status === 'fulfilled') {
+      const readyModels = modelsResult.value.filter((item) => item.status === 'ready' && item.integrityStatus === 'verified' && item.loadReady)
+      const damagedModels = modelsResult.value.filter((item) => item.status === 'error' || item.integrityStatus === 'failed')
+      checks.push({ id: 'embedding', label: '向量模型', status: damagedModels.length ? 'error' : readyModels.length ? 'ok' : 'warning', summary: `${readyModels.length} 个可加载模型${damagedModels.length ? ` · ${damagedModels.length} 个完整性异常` : ''}`, route: 'local-knowledge-models', actionLabel: readyModels.length ? '管理模型' : '安装模型' })
+    } else checks.push({ id: 'embedding', label: '向量模型', status: 'error', summary: '模型清单或 ONNX 运行状态读取失败', route: 'local-knowledge-models', actionLabel: '检查模型' })
+    if (vectorResult.status === 'fulfilled') {
+      checks.push({ id: 'zvec', label: 'Zvec 向量后端', status: vectorResult.value.readWriteVerified ? 'ok' : vectorResult.value.fallbackActive ? 'warning' : 'error', summary: `${vectorResult.value.backend} · ${vectorResult.value.message}${vectorResult.value.fallbackActive ? ' · 已启用降级存储' : ''}`, route: 'local-knowledge-models', actionLabel: '查看向量模型' })
+    } else checks.push({ id: 'zvec', label: 'Zvec 向量后端', status: 'error', summary: '读写自检未完成', route: 'local-knowledge-models', actionLabel: '重新检查' })
+    if (mcpResult.status === 'fulfilled') {
+      const enabled = mcpResult.value.filter((item) => item.enabled)
+      const failed = enabled.filter((item) => item.status === 'unavailable' || Boolean(item.lastError))
+      checks.push({ id: 'mcp', label: 'MCP 与连接器', status: failed.length ? 'warning' : 'ok', summary: `${enabled.length} 个已启用 · ${failed.length} 个最近失败`, route: 'settings-extensions', actionLabel: '查看扩展' })
+    } else checks.push({ id: 'mcp', label: 'MCP 与连接器', status: 'error', summary: '扩展连接状态读取失败', route: 'settings-extensions', actionLabel: '检查扩展' })
+    if (pluginsResult.status === 'fulfilled') {
+      const failed = pluginsResult.value.items.filter((item) => !item.compatible || Boolean(item.lastError))
+      checks.push({ id: 'plugins', label: '插件', status: failed.length ? 'warning' : 'ok', summary: `${pluginsResult.value.total} 个已安装 · ${failed.length} 个兼容性或运行异常`, route: 'plugins', actionLabel: '查看插件' })
+    } else checks.push({ id: 'plugins', label: '插件', status: 'error', summary: '已安装插件状态读取失败', route: 'plugins', actionLabel: '查看插件' })
+    if (projectsResult.status === 'fulfilled') {
+      const missing = projectsResult.value.filter((item) => item.archivedAt === null && !item.pathExists)
+      checks.push({ id: 'system-paths', label: '系统与项目路径', status: missing.length ? 'warning' : 'ok', summary: `${projectsResult.value.length} 个项目 · ${missing.length} 个路径失效`, route: 'settings-projects', actionLabel: '管理项目' })
+    } else checks.push({ id: 'system-paths', label: '系统与项目路径', status: 'error', summary: '系统路径能力读取失败', route: 'settings-projects', actionLabel: '检查项目' })
+    setDiagnosticChecks(checks)
+    setDiagnosticsLoading(false)
+  }
+  const copyDiagnosticSummary = async () => {
+    const lines = ['Fox 脱敏诊断摘要', `生成时间：${new Date().toLocaleString('zh-CN')}`, ...diagnosticChecks.map((item) => `[${diagnosticStatusLabel(item.status)}] ${item.label}：${item.summary}`)]
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'))
+      toast.success('脱敏诊断摘要已复制')
+    } catch {
+      toast.error('无法访问剪贴板')
+    }
+  }
   useEffect(() => {
-    void desktopClient.runtimeDiagnostics().then(setDiagnostics).catch(() => undefined)
+    void runFullDiagnostics()
     void refreshPreviewCache()
   }, [])
   const cacheRatio = previewCache?.limitBytes ? Math.min(1, previewCache.totalBytes / previewCache.limitBytes) : 0
@@ -669,7 +928,7 @@ export function MaintenancePage({ sidebarCollapsed, onSidebar, navigate }: { sid
     <div className="fox-settings-layout">
       <main><header><span>系统维护</span><h1>数据与诊断</h1><p>管理 Fox 本地数据。备份不包含 API Key、Token 或其他系统凭证库内容。</p></header>
         {error && <p className="fox-setting-error">{error}</p>}
-        <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>运行诊断</h2><p>导出协议版本、能力、连接状态与脱敏错误，不包含对话正文和项目文件。</p></div><Badge variant="secondary">{diagnostics?.state ?? '未检测'}</Badge></div><div className="fox-maintenance-stats"><span><b>{diagnostics?.runtime ?? '--'}</b><small>Runtime</small></span><span><b>v{diagnostics?.protocolVersion ?? '--'}</b><small>协议</small></span><span><b>{diagnostics?.sessionFileCount ?? '--'}</b><small>Session</small></span><span><b>{diagnostics?.recoveryAttempts ?? 0}</b><small>恢复尝试</small></span></div><div className="fox-setting-actions"><Button variant="outline" size="sm" disabled={busy != null} onClick={() => void desktopClient.runtimeDiagnostics().then(setDiagnostics)}><RotateCcw />刷新状态</Button><Button size="sm" disabled={busy != null} onClick={() => void run('diagnostics', desktopClient.exportDiagnostics)}>{busy === 'diagnostics' ? <LoaderCircle className="animate-spin" /> : <Download />}导出诊断包</Button></div></Card>
+        <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>统一诊断</h2><p>检查 Runtime、模型、知识库、向量、扩展与系统路径；摘要不包含凭证、正文或文件内容。</p></div><Badge variant={diagnosticChecks.some((item) => item.status === 'error') ? 'destructive' : 'secondary'}>{diagnosticsLoading ? '检测中' : diagnosticChecks.some((item) => item.status === 'error') ? '发现异常' : '检查完成'}</Badge></div><div className="fox-diagnostic-checks" aria-live="polite">{diagnosticsLoading && diagnosticChecks.length === 0 ? <div className="fox-diagnostic-loading"><LoaderCircle className="animate-spin" />正在逐项运行自检</div> : diagnosticChecks.map((item) => <div key={item.id} className={`is-${item.status}`}><span>{item.status === 'ok' ? <Check /> : item.status === 'warning' ? <FileWarning /> : item.status === 'offline' ? <Minus /> : <FileWarning />}</span><p><b>{item.label}</b><small>{item.summary}</small></p><Badge className="fox-diagnostic-status" variant={item.status === 'error' ? 'destructive' : 'outline'}>{diagnosticStatusLabel(item.status)}</Badge>{item.route && <Button variant="ghost" size="sm" onClick={() => navigate(item.route!)}>{item.actionLabel ?? '查看'}<ChevronRight /></Button>}</div>)}</div><div className="fox-maintenance-stats"><span><b>{diagnostics?.runtime ?? '--'}</b><small>Runtime</small></span><span><b>v{diagnostics?.protocolVersion ?? '--'}</b><small>协议</small></span><span><b>{diagnostics?.sessionFileCount ?? '--'}</b><small>Session</small></span><span><b>{diagnostics?.recoveryAttempts ?? 0}</b><small>恢复尝试</small></span></div><div className="fox-setting-actions"><Button variant="outline" size="sm" disabled={diagnosticsLoading || busy != null} onClick={() => void runFullDiagnostics()}><RotateCcw className={diagnosticsLoading ? 'animate-spin' : undefined} />重新检查</Button><Button variant="outline" size="sm" disabled={!diagnosticChecks.length} onClick={() => void copyDiagnosticSummary()}><Copy />复制脱敏摘要</Button><Button size="sm" disabled={busy != null} onClick={() => void run('diagnostics', desktopClient.exportDiagnostics)}>{busy === 'diagnostics' ? <LoaderCircle className="animate-spin" /> : <Download />}导出诊断包</Button></div></Card>
         <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>预览缓存</h2><p>Fox 缓存知识库原文件以加快再次预览，达到上限后会自动按最近使用时间清理。</p></div><Badge variant="secondary">{previewCache ? `${Math.round(cacheRatio * 100)}%` : '读取中'}</Badge></div><div className="fox-preview-cache-meter" aria-label="预览缓存占用"><i style={{ width: `${cacheRatio * 100}%` }} /></div><div className="fox-maintenance-stats"><span><b>{previewCache ? formatStorageSize(previewCache.totalBytes) : '--'}</b><small>已使用</small></span><span><b>{previewCache ? formatStorageSize(clearableBytes) : '--'}</b><small>可清理</small></span><span><b>{previewCache?.activeFiles ?? '--'}</b><small>正在使用</small></span><span><b>{previewCache ? formatStorageSize(previewCache.limitBytes) : '--'}</b><small>缓存上限</small></span></div><PreferenceRow title="最大缓存空间" description="调小后会立即淘汰未使用的旧文件，正在打开的预览会保留"><Select value={previewCache ? String(previewCache.limitBytes) : undefined} disabled={busy != null || !previewCache} onValueChange={(value) => void updatePreviewCacheLimit(value)}><SelectTrigger className="fox-settings-select"><SelectValue placeholder="选择上限" /></SelectTrigger><SelectContent><SelectItem value={String(250 * 1024 * 1024)}>250 MB</SelectItem><SelectItem value={String(500 * 1024 * 1024)}>500 MB</SelectItem><SelectItem value={String(1024 * 1024 * 1024)}>1 GB</SelectItem><SelectItem value={String(2 * 1024 * 1024 * 1024)}>2 GB</SelectItem><SelectItem value={String(5 * 1024 * 1024 * 1024)}>5 GB</SelectItem></SelectContent></Select></PreferenceRow><div className="fox-setting-actions"><Button variant="outline" size="sm" disabled={busy != null} onClick={() => void refreshPreviewCache()}><RotateCcw />刷新占用</Button><Button variant="outline" size="sm" disabled={busy != null || !previewCache || clearableBytes === 0} onClick={() => { if (window.confirm('清理所有未使用的知识库预览缓存？正在打开的文件会保留。')) void clearPreviewCache() }}>{busy === 'preview-cache' ? <LoaderCircle className="animate-spin" /> : <Trash2 />}清理未使用缓存</Button></div></Card>
         <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>备份 Fox</h2><p>包含 SQLite、附件、Skills 与 Runtime Session。Session 仅尽力跨版本恢复。</p></div><Archive /></div><div className="fox-setting-actions"><Button disabled={busy != null} onClick={() => void run('backup', desktopClient.createBackup)}>{busy === 'backup' ? <LoaderCircle className="animate-spin" /> : <HardDrive />}创建备份</Button></div></Card>
         <Card className="fox-settings-section"><div className="fox-settings-section-head"><div><h2>恢复备份</h2><p>先验证清单、哈希、路径与数据库完整性，下次启动 Fox 时应用。</p></div><FileWarning /></div><label className="fox-maintenance-field">备份文件路径<Input value={restorePath} onChange={(event) => setRestorePath(event.target.value)} placeholder="D:\\Backups\\fox-backup-....foxbackup" /></label><div className="fox-setting-actions"><Button variant="outline" disabled={busy != null || !restorePath.trim()} onClick={() => { if (window.confirm('恢复会在下次启动时替换当前 Fox 核心数据，是否继续？')) void run('restore', () => desktopClient.restoreBackup(restorePath.trim())) }}>{busy === 'restore' ? <LoaderCircle className="animate-spin" /> : <RotateCcw />}验证并安排恢复</Button></div></Card>
