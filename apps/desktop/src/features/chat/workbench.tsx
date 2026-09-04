@@ -233,7 +233,11 @@ import type { LocalKnowledgeBaseDto } from '@/features/conversations/api/desktop
 import type { KnowledgeSourceLocator, NavigateWorkspace, WorkspaceView } from '@/features/workspace/types'
 import { captureManagementReturnRoutes, managementExitRoute, SETTINGS_WORKSPACE_VIEWS, type ManagementReturnRoutes } from '@/features/workspace/management-navigation'
 import { WorkspaceShell } from '@/features/workspace/workspace-shell'
-import { LocalKnowledgeSidebarNavigation } from '@/features/local-knowledge'
+// Import from the lightweight sidebar module directly, NOT the barrel: the
+// local-knowledge barrel re-exports local-knowledge-pages (which statically
+// imports message-response/streamdown), and a value import here would pull the
+// heavy markdown renderer into the cold-start entry. Type-only imports are safe.
+import { LocalKnowledgeSidebarNavigation } from '@/features/local-knowledge/local-knowledge-sidebar'
 import { idleMascots, mascotAt, mascotLibrary, workingMascots } from './mascot-library'
 import { GoalProgress } from './components/GoalProgress'
 import { ExpertActivationCard, ExpertBindingChip, type ExpertBindingView } from './components/ExpertBindingChip'
