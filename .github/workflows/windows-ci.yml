@@ -56,6 +56,13 @@ jobs:
       - name: Build desktop and run typecheck
         run: pnpm build
 
+      # Profile build must compile with react-dom/profiling and pass the
+      # profile isolation check (telemetry, harness, real-app controller, foxPerf
+      # entry and profiling renderer all present). Browser perf smoke stays a
+      # manual/periodic task (see apps/desktop/scripts/prof-smoke.mjs).
+      - name: Build profile variant and verify isolation
+        run: pnpm --dir apps/desktop build:profile
+
       - name: Test Agent Runtime
         run: pnpm runtime:test
 
