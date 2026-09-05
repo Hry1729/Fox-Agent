@@ -50,7 +50,10 @@ jobs:
         run: pnpm contract-fixtures:test
 
       - name: Test desktop
-        run: pnpm desktop:test
+        run: bun test ./apps/desktop/tests --path-ignore-patterns "**/a0-performance.test.tsx"
+
+      - name: Test desktop performance baseline in isolation
+        run: bun test ./apps/desktop/tests/a0-performance.test.tsx --max-concurrency=1
 
       - name: Build desktop and run typecheck
         run: pnpm build
@@ -118,7 +121,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Test Rust Host without optional Zvec
-        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features -- --skip a0_snapshot_and_state_update_p95_stay_within_budget
+
+      - name: Test Rust Host performance baseline in isolation
+        run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features a0_snapshot_and_state_update_p95_stay_within_budget -- --test-threads=1
 
   vector-runtime-smoke:
     name: Zvec offline smoke (resource-gated)
