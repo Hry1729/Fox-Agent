@@ -37,8 +37,10 @@ import type {
   HighlighterCore,
   ThemedToken,
 } from "shiki/types";
-import { createHighlighterCore } from "shiki/core";
-import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
+
+// Shiki core, regex engine and themes are all loaded lazily on the first code
+// block render, so the highlighter never enters the cold-start entry. A raw
+// plaintext render is shown meanwhile (see createRawTokens).
 
 // Shiki uses bitflags for font styles: 1=italic, 2=bold, 4=underline
 // oxlint-disable-next-line eslint(no-bitwise)
@@ -173,14 +175,23 @@ const normalizeLanguage = (language: string): SupportedLanguage => {
   return normalized in languageLoaders ? normalized as keyof typeof languageLoaders : "plaintext";
 };
 
-const highlighterPromise: Promise<HighlighterCore> = Promise.all([
-  import("@shikijs/themes/github-light"),
-  import("@shikijs/themes/github-dark"),
-]).then(([light, dark]) => createHighlighterCore({
-  engine: createJavaScriptRegexEngine(),
-  langs: [],
-  themes: [light.default, dark.default],
-}));
+let highlighterPromise: Promise<HighlighterCore> | null = null;
+
+const loadHighlighter = () => {
+  if (!highlighterPromise) {
+    highlighterPromise = Promise.all([
+      import("shiki/core"),
+      import("shiki/engine/javascript"),
+      import("@shikijs/themes/github-light"),
+      import("@shikijs/themes/github-dark"),
+    ]).then(([core, engine, light, dark]) => core.createHighlighterCore({
+      engine: engine.createJavaScriptRegexEngine(),
+      langs: [],
+      themes: [light.default, dark.default],
+    }));
+  }
+  return highlighterPromise;
+};
 
 const languageLoadCache = new Map<string, Promise<void>>();
 
@@ -198,7 +209,7 @@ const getTokensCacheKey = (code: string, language: string) => {
 
 const getHighlighter = async (language: string) => {
   const normalized = normalizeLanguage(language);
-  const highlighter = await highlighterPromise;
+  const highlighter = await loadHighlighter();
   if (normalized === "plaintext" || highlighter.getLoadedLanguages().includes(normalized)) {
     return { highlighter, language: normalized };
   }

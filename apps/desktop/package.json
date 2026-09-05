@@ -6,10 +6,16 @@
   "scripts": {
     "predev": "node scripts/generate-profile-avatars.mjs",
     "dev": "vite --host 127.0.0.1",
+    "dev:profile": "vite --host 127.0.0.1 --mode profile --port 1422 --strictPort",
     "prebuild": "node scripts/generate-profile-avatars.mjs",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && node scripts/check-bundle-budget.mjs && node scripts/check-build-isolation.mjs --mode=release",
+    "build:profile": "tsc && vite build --mode profile && node scripts/check-build-isolation.mjs --mode=profile",
+    "check:bundle": "node scripts/check-bundle-budget.mjs",
+    "check:isolation": "node scripts/check-build-isolation.mjs",
     "preview": "vite preview --host 127.0.0.1",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:profile": "tauri dev --config src-tauri/tauri.profile.conf.json",
+    "tauri:profile:build": "tauri build --config src-tauri/tauri.profile.conf.json"
   },
   "dependencies": {
     "@aiden0z/pptx-renderer": "^1.2.4",
@@ -63,6 +69,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.21",
     "postcss": "^8.5.3",
+    "rollup-plugin-visualizer": "^7.1.1",
     "tailwindcss": "^4.3.2",
     "typescript": "^5.8.2",
     "vite": "^6.2.0"
