@@ -4202,19 +4202,24 @@ mod tests {
         let migration = wait_for_storage_migration(&store, &accepted.id);
         assert_eq!(migration.status, "completed");
         assert!(migration.restart_required);
+        let normalized_destination =
+            crate::local_knowledge_storage::normalize_storage_path(&destination, None)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
         assert_eq!(
             database
                 .app_setting(crate::local_knowledge_storage::LOCAL_KNOWLEDGE_STORAGE_PATH_KEY)
                 .unwrap()
                 .as_deref(),
-            Some(destination.to_string_lossy().as_ref())
+            Some(normalized_destination.as_str())
         );
         let status = store.storage_status().unwrap();
         assert!(status.restart_required);
         assert_eq!(status.migration_id.as_deref(), Some(accepted.id.as_str()));
         assert_eq!(
             status.pending_root_path.as_deref(),
-            Some(destination.to_string_lossy().as_ref())
+            Some(normalized_destination.as_str())
         );
 
         drop(store);
