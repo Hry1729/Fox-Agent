@@ -128,4 +128,6 @@ test('renders a 500 Task Goal view with P95 below 120ms', () => {
       roundP95s.map((value) => value.toFixed(2)).join(','),
   )
   expect(p95).toBeLessThan(120)
-})
+// Five rounds of 20 samples may take 12s at the unchanged 120ms P95 budget.
+// Allow the full measurement to finish on CI; this does not relax that budget.
+}, 30_000)
