@@ -1,3 +1,4 @@
+import { filterKnowledgePickerItems, knowledgePickerStatus } from './knowledge-picker-state'
 import { lazy, Suspense, Profiler, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactNode } from 'react'
 
 // Profile-build only: forward React Profiler commits to the telemetry collector.
@@ -99,7 +100,7 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Sheet, SheetContent } from '@/components/ui/sheet'
@@ -2833,13 +2834,17 @@ type KnowledgePickerItem = {
   description: string
   source: 'local' | 'remote'
   status?: string | null
+  unavailable?: boolean
 }
 
-function KnowledgeBindingDialog({ open, remoteItems, localItems, localLoading, bindings, references, busy, error, onOpenChange, onConfirm }: {
+export function KnowledgeBindingDialog({ open, remoteItems, localItems, localLoading, remoteLoading, remoteError, onRetry, bindings, references, busy, error, onOpenChange, onConfirm }: {
   open: boolean
   remoteItems: KnowledgeBaseRecord[]
   localItems: LocalKnowledgeBaseDto[]
   localLoading: boolean
+  remoteLoading: boolean
+  remoteError?: string | null
+  onRetry: () => void
   bindings: KnowledgeBindingRecord[]
   references?: KnowledgeReference[]
   busy: boolean
@@ -2848,6 +2853,8 @@ function KnowledgeBindingDialog({ open, remoteItems, localItems, localLoading, b
   onConfirm: (references: KnowledgeReference[], names: Record<string, string>) => void
 }) {
   const [selected, setSelected] = useState<string[]>([])
+  const [source, setSource] = useState<'local' | 'remote'>('local')
+  const [query, setQuery] = useState('')
   const configuredReferences = Array.isArray(references)
     ? references
     : bindings.filter((item) => item.enabled).map(knowledgeReferenceFromLegacyBinding)
@@ -2856,6 +2863,12 @@ function KnowledgeBindingDialog({ open, remoteItems, localItems, localLoading, b
     if (!open) return
     setSelected(configuredReferences.map(knowledgeReferenceKey))
   }, [bindings, open, references])
+
+  useEffect(() => {
+    if (!open) return
+    setSource('local')
+    setQuery('')
+  }, [open])
 
   const pickerItems: KnowledgePickerItem[] = [
     ...remoteItems.map((item) => ({
@@ -2879,7 +2892,8 @@ function KnowledgeBindingDialog({ open, remoteItems, localItems, localLoading, b
       name: item.name,
       description: item.description || `${item.documentCount} 个文档`,
       source: 'local' as const,
-      status: item.activeJobStatus ?? (item.activeIndexGeneration ? '已索引' : '待导入'),
+      status: knowledgePickerStatus(item.activeJobStatus, Boolean(item.activeIndexGeneration)),
+      unavailable: !item.activeIndexGeneration,
     })),
   ]
   const knownReferenceKeys = new Set(pickerItems.map((item) => knowledgeReferenceKey(item.reference)))
@@ -2891,8 +2905,12 @@ function KnowledgeBindingDialog({ open, remoteItems, localItems, localLoading, b
       description: '当前绑定但暂时无法从目录读取',
       source: reference.source,
       status: '不可用',
+      unavailable: true,
     })))
   const itemByKey = new Map(pickerItems.map((item) => [knowledgeReferenceKey(item.reference), item]))
+  const search = query.trim().toLocaleLowerCase()
+  const visibleItems = filterKnowledgePickerItems(pickerItems, source, query)
+  const loading = source === 'local' ? localLoading : remoteLoading
   const toggle = (reference: KnowledgeReference) => {
     const key = knowledgeReferenceKey(reference)
     setSelected((current) => current.includes(key)
@@ -2914,29 +2932,36 @@ function KnowledgeBindingDialog({ open, remoteItems, localItems, localLoading, b
       <DialogContent className="fox-knowledge-binding-dialog">
         <DialogHeader>
           <DialogTitle>选择会话知识库</DialogTitle>
-          <DialogDescription>远程知识库来自 Yuxi 服务，本地知识库由 Fox 管理；只会把你明确选择的知识库开放给当前会话。</DialogDescription>
+          <DialogDescription>仅所选知识库可用于当前会话。</DialogDescription>
         </DialogHeader>
-        <Command className="fox-knowledge-binding-command">
-          <CommandList>
-            <CommandEmpty>{localLoading ? '正在读取本地知识库…' : '当前没有可访问的知识库。'}</CommandEmpty>
-            <CommandGroup heading="远程知识库 · Yuxi">
-              {remoteItems.map((item) => {
-                const reference: KnowledgeReference = { source: 'remote', providerKey: 'yuxi-primary', connectionId: 'yuxi-primary', id: item.id }
-                const checked = selected.includes(knowledgeReferenceKey(reference))
-                return <CommandItem key={`remote:${item.id}`} value={`远程 ${item.name} ${item.description}`} onSelect={() => toggle(reference)}><span className={`fox-knowledge-check ${checked ? 'is-checked' : ''}`}>{checked && <Check />}</span><span><strong>{item.name}</strong><small><em>远程</em>{item.description || `${item.fileCount} 个文件`}</small></span></CommandItem>
+        <Tabs value={source} onValueChange={(value) => setSource(value as 'local' | 'remote')} className="fox-knowledge-picker-tabs">
+          <TabsList aria-label="知识库来源" className="fox-knowledge-picker-sources">
+            <TabsTrigger value="local">本地 · {localItems.length}</TabsTrigger>
+            <TabsTrigger value="remote">远程 · {remoteLoading ? '读取中' : remoteError ? '未连接' : remoteItems.length}{remoteError && <AlertTriangle aria-hidden="true" className="fox-knowledge-connection-warning" />}</TabsTrigger>
+          </TabsList>
+          <label className="fox-knowledge-picker-search">
+            <Search aria-hidden="true" />
+            <Input aria-label="搜索知识库" placeholder="搜索知识库" value={query} onChange={(event) => setQuery(event.target.value)} />
+          </label>
+          <TabsContent value={source} className="fox-knowledge-picker-panel">
+            {source === 'remote' && remoteError && <div role="status" className="fox-knowledge-picker-notice"><AlertTriangle aria-hidden="true" /><div><strong>远程连接暂不可用</strong><p>{remoteError}</p><p>本地知识库仍可使用。</p></div><Button variant="ghost" disabled={remoteLoading} onClick={onRetry}>重试</Button></div>}
+            <div className="fox-knowledge-picker-list" aria-label={source === 'local' ? '本地知识库' : '远程知识库'} aria-busy={loading}>
+              {visibleItems.map((item) => {
+                const key = knowledgeReferenceKey(item.reference)
+                const checked = selected.includes(key)
+                return <label key={key} className={`fox-knowledge-picker-row${checked ? ' is-checked' : ''}${item.unavailable ? ' is-unavailable' : ''}`}>
+                  <input type="checkbox" checked={checked} disabled={busy || (item.unavailable && !checked)} onChange={() => toggle(item.reference)} aria-label={item.name} />
+                  <span className="fox-knowledge-picker-copy"><strong>{item.name}</strong><span>{item.description}{!item.unavailable && item.status ? ` · ${item.status}` : ''}</span></span>
+                  {item.unavailable && <span className="fox-knowledge-picker-status">{item.status}</span>}
+                </label>
               })}
-            </CommandGroup>
-            <CommandGroup heading="本地知识库 · Fox">
-              {localItems.map((item) => {
-                const reference: KnowledgeReference = { source: 'local', providerKey: 'local', id: item.id }
-                const checked = selected.includes(knowledgeReferenceKey(reference))
-                return <CommandItem key={`local:${item.id}`} value={`本地 ${item.name} ${item.description ?? ''}`} onSelect={() => toggle(reference)}><span className={`fox-knowledge-check ${checked ? 'is-checked' : ''}`}>{checked && <Check />}</span><span><strong>{item.name}</strong><small><em>本地</em>{item.description || `${item.documentCount} 个文档`} · {item.activeJobStatus ?? (item.activeIndexGeneration ? '已索引' : '待导入')}</small></span></CommandItem>
-              })}
-            </CommandGroup>
-          </CommandList>
-        </Command>
-        {error && <p className="fox-setting-error">{error}</p>}
-        <DialogFooter><Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button><Button disabled={busy} onClick={confirm}>{busy && <LoaderCircle className="animate-spin" />}保存选择</Button></DialogFooter>
+              {!visibleItems.length && <p className="fox-knowledge-picker-empty" role="status">{loading ? '正在读取知识库…' : search ? '没有匹配的知识库，请换个关键词。' : source === 'local' ? '暂无本地知识库，请先在知识库页面导入。' : remoteError ? '连接恢复后可查看远程知识库。' : '暂无可访问的远程知识库。'}</p>}
+            </div>
+            {source === 'local' && <p className="fox-knowledge-picker-hint"><CircleHelp aria-hidden="true" />待导入的知识库暂不可选。</p>}
+          </TabsContent>
+        </Tabs>
+        {error && <p role="alert" className="fox-knowledge-picker-error">{error}</p>}
+        <DialogFooter className="fox-knowledge-picker-footer"><span aria-live="polite">已选 <strong>{selected.length}</strong> 个</span><div><Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>取消</Button><Button disabled={busy} onClick={confirm}>{busy && <LoaderCircle className="animate-spin" />}保存选择</Button></div></DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -4594,7 +4619,7 @@ export function Workbench() {
           <RightPanel compact mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenEvidence={openEvidence} onOpenArtifact={openArtifact} onRequestChildTask={requestChildTask} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} />
         </SheetContent>
       </Sheet>
-      <KnowledgeBindingDialog open={knowledgeDialogOpen} remoteItems={knowledge.items} localItems={localKnowledgeBases} localLoading={localKnowledgeLoading} references={desktopConversation.detail?.knowledgeReferences} bindings={desktopConversation.knowledgeBindings} busy={knowledgeDialogBusy || knowledge.loading} error={knowledgeDialogError ?? knowledge.error} onOpenChange={setKnowledgeDialogOpen} onConfirm={(references, names) => void saveKnowledgeBindings(references, names)} />
+      <KnowledgeBindingDialog open={knowledgeDialogOpen} remoteItems={knowledge.items} localItems={localKnowledgeBases} localLoading={localKnowledgeLoading} remoteLoading={knowledge.loading} remoteError={knowledge.error} onRetry={() => void knowledge.refresh()} references={desktopConversation.detail?.knowledgeReferences} bindings={desktopConversation.knowledgeBindings} busy={knowledgeDialogBusy} error={knowledgeDialogError} onOpenChange={setKnowledgeDialogOpen} onConfirm={(references, names) => void saveKnowledgeBindings(references, names)} />
       <ConversationManagementDialogs conversation={conversationDialog?.conversation ?? null} mode={conversationDialog?.mode ?? null} busy={conversationDialogBusy} error={conversationDialogError} onClose={() => { setConversationDialog(null); setConversationDialogError(null) }} onRename={(title) => void renameManagedConversation(title)} onDelete={() => void purgeManagedConversation()} />
       <ProjectDeleteDialog project={projectDeleteDialog} busy={projectDeleteBusy} onClose={() => setProjectDeleteDialog(null)} onDelete={() => void deleteManagedProject()} />
     </main>
