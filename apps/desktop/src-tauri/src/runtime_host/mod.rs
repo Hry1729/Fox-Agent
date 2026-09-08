@@ -1,5 +1,6 @@
 mod capability_tools;
 mod continuation;
+pub(crate) mod kernel_coordinator;
 mod protocol;
 pub(crate) mod shadow_reconcile;
 #[cfg(test)]

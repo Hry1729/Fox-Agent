@@ -685,6 +685,33 @@ impl Database {
         wall_now_ms: i64,
         cmd: &crate::kernel::KernelPersistCommand,
     ) -> Result<(), String> {
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None)
+    }
+
+    /// Commit a tool result only while this executor still owns its dispatch.
+    /// Ownership, result, batch barrier and outbox completion share one transaction.
+    pub fn kernel_commit_tool_result(
+        &self,
+        run_id: &str,
+        wall_now_ms: i64,
+        cmd: &crate::kernel::KernelPersistCommand,
+        tool_call_id: &str,
+        lease_owner: &str,
+    ) -> Result<(), String> {
+        if lease_owner.trim().is_empty() { return Err("kernel result lease owner must be non-empty".into()); }
+        if cmd.settled_dispatch_tool_call_ids.len() != 1 || cmd.settled_dispatch_tool_call_ids[0] != tool_call_id {
+            return Err("kernel result must settle exactly its owned tool dispatch".into());
+        }
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, Some((tool_call_id, lease_owner)))
+    }
+
+    fn kernel_commit_decision_with_dispatch_lease(
+        &self,
+        run_id: &str,
+        wall_now_ms: i64,
+        cmd: &crate::kernel::KernelPersistCommand,
+        dispatch_lease: Option<(&str, &str)>,
+    ) -> Result<(), String> {
         if !valid_run_state(cmd.run_state.as_str()) {
             return Err(format!(
                 "unsupported kernel run state: {}",
@@ -706,6 +733,16 @@ impl Database {
             .map_err(|error| format!("serialize kernel compaction state: {error}"))?;
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
+            if let Some((tool_call_id, lease_owner)) = dispatch_lease {
+                let owns: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM kernel_effect_outbox
+                     WHERE run_id=?1 AND effect_key=?2 AND tool_call_id=?3
+                       AND effect_type='dispatch_tool' AND status='leased' AND lease_owner=?4)",
+                    params![run_id, crate::kernel::dispatch_effect_key(tool_call_id), tool_call_id, lease_owner],
+                    |row| row.get(0),
+                )?;
+                if !owns { return Err(kernel_err("kernel result lost dispatch lease ownership")); }
+            }
             let (
                 current_state,
                 persisted_last_seq,
@@ -1815,7 +1852,7 @@ impl Database {
                    FROM kernel_effect_outbox o
                    JOIN kernel_runs r ON r.run_id=o.run_id
                   WHERE o.run_id=?1 AND o.status='pending'
-                    AND r.kernel_mode <> 'shadow'
+                    AND r.kernel_mode = 'authoritative'
                     AND (
                         r.state NOT IN ('completed','failed','cancelled','budget_exhausted')
                         OR o.effect_type IN ('cancel_engine_turn','cancel_tool_call')
@@ -1846,7 +1883,43 @@ impl Database {
         })
     }
 
-    /// Lease pending outbox effects across ALL non-terminal runs (startup).
+    /// Claim one observed effect only when its executor is ready. Unrelated
+    /// pending work remains recoverable if this process stops before dispatch.
+    pub fn kernel_outbox_lease_effect(
+        &self,
+        run_id: &str,
+        effect_key: &str,
+        lease_owner: &str,
+    ) -> Result<Option<crate::kernel::OutboxEffect>, String> {
+        if lease_owner.trim().is_empty() { return Err("kernel outbox lease owner must be non-empty".into()); }
+        self.with_connection(|connection| {
+            let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let effect = transaction.query_row(
+                "SELECT o.effect_key, o.effect_type, o.idempotency_key, o.tool_call_id,
+                        o.batch_id, o.payload_json, o.status, o.attempts
+                 FROM kernel_effect_outbox o JOIN kernel_runs r ON r.run_id=o.run_id
+                 WHERE o.run_id=?1 AND o.effect_key=?2 AND o.status='pending'
+                   AND r.kernel_mode='authoritative'
+                   AND (r.state NOT IN ('completed','failed','cancelled','budget_exhausted')
+                        OR o.effect_type IN ('cancel_engine_turn','cancel_tool_call'))",
+                params![run_id, effect_key], map_outbox_effect,
+            ).optional()?;
+            let Some(mut effect) = effect else { return Ok(None); };
+            let changed = transaction.execute(
+                "UPDATE kernel_effect_outbox SET status='leased',lease_owner=?3,leased_at=?4,
+                     attempts=attempts+1,updated_at=?4
+                 WHERE run_id=?1 AND effect_key=?2 AND status='pending'",
+                params![run_id, effect_key, lease_owner, now_ms()],
+            )?;
+            if changed != 1 { return Err(kernel_err("kernel single-effect lease lost pending CAS")); }
+            effect.status = crate::kernel::OutboxStatus::Leased;
+            effect.attempts = effect.attempts.saturating_add(1);
+            transaction.commit()?;
+            Ok(Some(effect))
+        })
+    }
+
+    /// Lease pending outbox effects across authoritative runs (startup).
     pub fn kernel_outbox_lease_all_pending(
         &self,
         lease_owner: &str,
@@ -1862,7 +1935,7 @@ impl Database {
                    FROM kernel_effect_outbox o
                    JOIN kernel_runs r ON r.run_id = o.run_id
                   WHERE o.status='pending'
-                    AND r.kernel_mode <> 'shadow'
+                    AND r.kernel_mode = 'authoritative'
                     AND (
                         r.state NOT IN ('completed','failed','cancelled','budget_exhausted')
                         OR o.effect_type IN ('cancel_engine_turn','cancel_tool_call')
@@ -1977,19 +2050,23 @@ impl Database {
         &self,
         run_id: &str,
         effect_key: &str,
+        expected_lease_owner: &str,
     ) -> Result<(), String> {
+        if expected_lease_owner.trim().is_empty() {
+            return Err("kernel reconcile lease owner must be non-empty".into());
+        }
         self.with_connection(|connection| {
             let affected = connection.execute(
                 "UPDATE kernel_effect_outbox
                     SET status='failed',
                         last_error='requires_reconcile: side effect uncertain after crash',
                         updated_at=?3, lease_owner=NULL
-                  WHERE run_id=?1 AND effect_key=?2 AND status='leased'",
-                params![run_id, effect_key, now_ms()],
+                  WHERE run_id=?1 AND effect_key=?2 AND status='leased' AND lease_owner=?4",
+                params![run_id, effect_key, now_ms(), expected_lease_owner],
             )?;
             if affected != 1 {
                 return Err(kernel_err(format!(
-                    "kernel reconcile marker requires a leased effect for {run_id}/{effect_key}"
+                    "kernel reconcile marker lost lease ownership for {run_id}/{effect_key}"
                 )));
             }
             Ok(())
@@ -3690,6 +3767,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn single_effect_lease_is_authoritative_scoped_and_does_not_prelease_siblings() {
+        let db = Database::open(temporary_db_path("single-effect-lease")).unwrap();
+        for mode in ["legacy", "authoritative"] {
+            let config = crate::kernel::RunFrozenConfig { kernel_mode: mode.into(), ..phase3b_config() };
+            db.kernel_create_run(mode, "pi", mode, 2, "perm-1", "legacy", "h", &serde_json::to_string(&config).unwrap()).unwrap();
+            db.kernel_update_run_state(mode, "running").unwrap();
+            for key in ["one", "two"] {
+                db.with_connection(|connection| connection.execute(
+                    "INSERT INTO kernel_effect_outbox(run_id,effect_key,effect_type,idempotency_key,payload_json,status,attempts,created_at,updated_at)
+                     VALUES(?1,?2,'publish_snapshot',?2,'{}','pending',0,0,0)", params![mode, key],
+                )).unwrap();
+            }
+        }
+        assert!(db.kernel_outbox_lease_effect("legacy", "one", "owner").unwrap().is_none());
+        assert!(db.kernel_outbox_lease_pending("legacy", "owner").unwrap().is_empty());
+        assert!(db.kernel_outbox_lease_effect("authoritative", "one", "").is_err());
+        assert_eq!(db.kernel_outbox_lease_effect("authoritative", "one", "owner-a").unwrap().unwrap().attempts, 1);
+        assert!(db.kernel_outbox_lease_effect("authoritative", "one", "owner-b").unwrap().is_none());
+        let facts = db.kernel_recovery_facts("authoritative").unwrap().unwrap();
+        assert_eq!(facts.open_outbox.iter().find(|effect| effect.effect_key == "two").unwrap().status, crate::kernel::OutboxStatus::Pending);
+        assert!(db.kernel_outbox_complete("authoritative", "one", "foreign").is_err());
+        assert!(db.kernel_outbox_fail("authoritative", "one", "failed", "foreign").is_err());
+        db.kernel_outbox_complete("authoritative", "one", "owner-a").unwrap();
+        assert!(db.kernel_outbox_mark_requires_reconcile("authoritative", "one", "owner-a").is_err());
+        let global = db.kernel_outbox_lease_all_pending("startup").unwrap();
+        assert_eq!(global.len(), 1);
+        assert_eq!(global[0].0, "authoritative");
+        assert_eq!(global[0].1.effect_key, "two");
+    }
+
     fn frozen_config_json(kernel_mode: &str, permission: &str, prompt_hash: &str) -> String {
         let mut config = phase3b_config();
         config.kernel_mode = kernel_mode.to_string();
@@ -3936,7 +4044,10 @@ mod tests {
         assert_eq!(plan.uncertain_leased.len(), 1);
         // Marking it requires_reconcile prevents any future duplicate side effect.
         let key = plan.uncertain_leased[0].effect.effect_key.clone();
-        db.kernel_outbox_mark_requires_reconcile(run_id, &key)
+        assert!(db.kernel_outbox_mark_requires_reconcile(run_id, &key, "").is_err());
+        assert!(db.kernel_outbox_mark_requires_reconcile(run_id, &key, "foreign-executor").is_err());
+        assert_eq!(db.kernel_recovery_facts(run_id).unwrap().unwrap().open_outbox[0].status, crate::kernel::OutboxStatus::Leased);
+        db.kernel_outbox_mark_requires_reconcile(run_id, &key, "executor-doomed")
             .unwrap();
         assert!(db
             .kernel_outbox_lease_pending(run_id, "executor-3")

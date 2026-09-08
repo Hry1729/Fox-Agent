@@ -169,6 +169,7 @@ pub struct RehydratedRun {
 
 /// Per-run aggregate. Constructed via [`RunController::start`] for a new run or
 /// [`RunController::rehydrate`] after a restart.
+#[derive(Clone)]
 pub struct RunController {
     run_id: String,
     turn_id: String,
