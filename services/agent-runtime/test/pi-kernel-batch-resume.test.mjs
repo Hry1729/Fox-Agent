@@ -7,6 +7,17 @@ import { prepareKernelBatchResume, resumePiKernelBatch } from '../src/pi-kernel-
 import { validatePromptControl } from '../src/control-binding.mjs'
 
 const identity = { runId: 'kernel-run', conversationId: 'kernel-conversation', runtimeSessionId: 'kernel-session', executionProfileId: 'legacy' }
+function controlledSession(continueModel, abortModel = async () => {}) {
+  const session = {
+    isIdle: true, state: { isStreaming: false }, abort: abortModel,
+    settingsManager: {
+      getRetryEnabled: () => false, getRetrySettings: () => ({ maxRetries: 0 }),
+      getProviderRetrySettings: () => ({ maxRetries: 0 }), getCompactionEnabled: () => false,
+    },
+    agent: { state: { messages: [], tools: [] }, continue: () => continueModel(session) },
+  }
+  return session
+}
 function fixture() {
   const permission = { mode: 'read_only', projectRoot: null, grants: [] }
   return { ...identity, payload: {
@@ -30,6 +41,48 @@ function fixture() {
     },
   } }
 }
+
+test('frozen model deadline cancels and settles the engine without allowing a replay', async () => {
+  const request = fixture()
+  request.payload.controlBinding.budgets.modelRequestMs = 10
+  let finish
+  let aborts = 0
+  let settled = false
+  const session = controlledSession(async current => {
+    await new Promise(resolve => { finish = resolve })
+    settled = true
+    current.agent.state.messages.push({ role: 'assistant', stopReason: 'stop', content: [] })
+  }, async () => { aborts++; finish() })
+  await assert.rejects(resumePiKernelBatch(session, request, identity, new AbortController().signal), /deadline exceeded/)
+  assert.equal(aborts, 1)
+  assert.equal(settled, true)
+  await assert.rejects(resumePiKernelBatch(session, request, identity, new AbortController().signal), /already claimed/)
+})
+
+test('Host cancellation is observed even when the engine returns an apparently successful response', async () => {
+  const host = new AbortController()
+  let aborts = 0
+  const session = controlledSession(async current => {
+    host.abort()
+    current.agent.state.messages.push({ role: 'assistant', stopReason: 'stop', content: [] })
+  }, async () => { aborts++ })
+  await assert.rejects(resumePiKernelBatch(session, fixture(), identity, host.signal), /Host cancelled/)
+  assert.equal(aborts, 1)
+})
+
+test('an unfinished model response cannot acknowledge a durable batch delivery', async () => {
+  for (const final of [null, { role: 'assistant', stopReason: 'error', content: [] },
+    { role: 'assistant', stopReason: 'toolUse', content: [] },
+    { role: 'assistant', stopReason: 'stop', content: [{ type: 'toolCall', id: 'new', name: 'read', arguments: {} }] }]) {
+    const session = controlledSession(async current => { if (final) current.agent.state.messages.push(final) })
+    await assert.rejects(resumePiKernelBatch(session, fixture(), identity, new AbortController().signal), /no completed response/)
+  }
+  const session = controlledSession(async current => {
+    current.agent.state.messages.push({ role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'done' }] })
+  })
+  const result = await resumePiKernelBatch(session, fixture(), identity, new AbortController().signal)
+  assert.equal(result.idempotencyKey, 'tool-batch-delivery:batch-1')
+})
 
 test('Kernel batch resume requires the complete barrier and preserves source order without repairing facts', () => {
   const request = fixture()

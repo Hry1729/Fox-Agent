@@ -331,6 +331,40 @@ impl<'a> KernelCoordinator<'a> {
         Ok(frame)
     }
 
+    /// Deliver a committed barrier to the engine. The callback acknowledges
+    /// acceptance, not a Run terminal; the next model event must still settle
+    /// the persisted request budget through a Kernel decision.
+    pub(crate) fn dispatch_batch(
+        &self, batch_id: &str, owner: &str,
+        deliver: impl FnOnce(&RunControlBinding, &fox_engine_protocol::KernelBatchResumeFrame,
+            &kernel::CancellationToken) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let frame = self.prepare_stored_batch_resume(batch_id)?;
+        let token = self.cancellation.run_token(&self.binding.run_id)?;
+        token.check()?;
+        {
+            let mut guard = self.controller.lock().map_err(|_| "Kernel coordinator lock poisoned")?;
+            if guard.last_event_seq() != frame.checkpoint_seq
+                || self.database.run_control_binding(&self.binding.run_id)?.as_ref() != Some(&self.binding) {
+                return Err("Kernel changed before batch dispatch; rebuild the frame".into());
+            }
+            let mut candidate = guard.clone();
+            let now = self.clock.read();
+            let effects = candidate.begin_batch_model_request(batch_id, now.monotonic_ms, now.wall_ms)
+                .map_err(|error| error.to_string())?;
+            self.database.kernel_commit_batch_dispatch(&self.binding.run_id, now.wall_ms,
+                &candidate.persist_command(&effects), batch_id, owner)?;
+            *guard = candidate;
+        }
+        token.check()?;
+        // No lock is held across engine I/O. Uncertain failures retain the lease.
+        deliver(&self.binding, &frame, &token)?;
+        self.tick()?;
+        token.check()?;
+        self.database.kernel_outbox_complete(&self.binding.run_id,
+            &kernel::batch_delivery_effect_key(batch_id), owner)
+    }
+
     /// Dispatch exactly one durable intent. Err after lease is uncertain and is
     /// deliberately left leased; neither this method nor reopen retries it.
     /// The callback runs outside the controller lock, permitting cancellation and

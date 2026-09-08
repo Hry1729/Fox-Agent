@@ -1527,6 +1527,20 @@ impl RunController {
         self.arm_model_request(monotonic_ms, wall_ms);
     }
 
+    /// The host must persist this decision together with its batch-delivery
+    /// lease before invoking the engine. Never renew an in-flight request.
+    pub fn begin_batch_model_request(&mut self, batch_id: &str, monotonic_ms: i64, wall_ms: i64) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Running || self.model_request_in_flight
+            || !self.batches.iter().any(|batch| batch.batch_id == batch_id && batch.barrier_emitted) {
+            return Err(KernelError::FailClosed("model dispatch requires a settled batch and no in-flight request".into()));
+        }
+        self.arm_model_request(monotonic_ms, wall_ms);
+        Ok(vec![self.append_event("engine.batch_dispatched", serde_json::json!({
+            "batchId": batch_id, "turnId": self.turn_id, "engineId": self.config.engine_id,
+            "idempotencyKey": batch_delivery_idempotency_key(batch_id), "startedAt": wall_ms,
+        }))])
+    }
+
     /// Settle the in-flight model request (first output / tool batch / terminal).
     /// Disarms the model-request timeout; the tool-execution timeout governs
     /// any dispatched tools instead.

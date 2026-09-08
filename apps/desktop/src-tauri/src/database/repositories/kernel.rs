@@ -702,7 +702,7 @@ impl Database {
         wall_now_ms: i64,
         cmd: &crate::kernel::KernelPersistCommand,
     ) -> Result<(), String> {
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None)
     }
 
     /// Commit a tool result only while this executor still owns its dispatch.
@@ -719,7 +719,26 @@ impl Database {
         if cmd.settled_dispatch_tool_call_ids.len() != 1 || cmd.settled_dispatch_tool_call_ids[0] != tool_call_id {
             return Err("kernel result must settle exactly its owned tool dispatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, Some((tool_call_id, lease_owner)))
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, Some((tool_call_id, lease_owner)), None)
+    }
+
+    /// Claim exactly one pending result delivery and persist its model deadline
+    /// in the same transaction. A crash after this point requires reconciliation.
+    pub fn kernel_commit_batch_dispatch(&self, run_id: &str, wall_now_ms: i64,
+        cmd: &crate::kernel::KernelPersistCommand, batch_id: &str, lease_owner: &str) -> Result<(), String> {
+        if batch_id.trim().is_empty() || lease_owner.trim().is_empty()
+            || cmd.run_state != crate::kernel::RunState::Running
+            || cmd.model_request_since_wall_ms != Some(wall_now_ms)
+            || cmd.events.len() != 1 || cmd.events[0].event_type != "engine.batch_dispatched" {
+            return Err("invalid Kernel batch dispatch decision".into());
+        }
+        let payload: serde_json::Value = serde_json::from_str(&cmd.events[0].payload_json).map_err(|error| error.to_string())?;
+        if payload["batchId"].as_str() != Some(batch_id)
+            || payload["idempotencyKey"] != crate::kernel::batch_delivery_idempotency_key(batch_id)
+            || payload["startedAt"].as_i64() != Some(wall_now_ms) {
+            return Err("Kernel batch dispatch identity mismatch".into());
+        }
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, Some((batch_id, lease_owner)))
     }
 
     fn kernel_commit_decision_with_dispatch_lease(
@@ -728,6 +747,7 @@ impl Database {
         wall_now_ms: i64,
         cmd: &crate::kernel::KernelPersistCommand,
         dispatch_lease: Option<(&str, &str)>,
+        batch_lease: Option<(&str, &str)>,
     ) -> Result<(), String> {
         if !valid_run_state(cmd.run_state.as_str()) {
             return Err(format!(
@@ -750,6 +770,22 @@ impl Database {
             .map_err(|error| format!("serialize kernel compaction state: {error}"))?;
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
+            if let Some((batch_id, lease_owner)) = batch_lease {
+                let changed = transaction.execute(
+                    "UPDATE kernel_effect_outbox SET status='leased', lease_owner=?3, leased_at=?4,
+                         attempts=attempts+1, updated_at=?4
+                     WHERE run_id=?1 AND batch_id=?2 AND effect_key=?5
+                       AND effect_type='deliver_tool_batch' AND status='pending'
+                       AND idempotency_key=?6
+                       AND EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1
+                           AND r.kernel_mode='authoritative' AND r.state='running'
+                           AND r.model_request_since_wall_ms IS NULL)",
+                    params![run_id, batch_id, lease_owner, wall_now_ms,
+                        crate::kernel::batch_delivery_effect_key(batch_id),
+                        crate::kernel::batch_delivery_idempotency_key(batch_id)],
+                )?;
+                if changed != 1 { return Err(kernel_err("Kernel batch delivery lost pending lease or model request already active")); }
+            }
             if let Some((tool_call_id, lease_owner)) = dispatch_lease {
                 let owns: bool = transaction.query_row(
                     "SELECT EXISTS(SELECT 1 FROM kernel_effect_outbox

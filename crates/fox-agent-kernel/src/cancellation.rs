@@ -43,6 +43,11 @@ impl CancellationRegistry {
         let scope = runs.get_mut(run_id).ok_or("unknown cancellation Run")?;
         Ok(CancellationToken { run: scope.cancelled.clone(), tool: scope.tools.entry(tool_call_id.into()).or_default().clone() })
     }
+    pub fn run_token(&self, run_id: &str) -> Result<CancellationToken, String> {
+        let runs = self.runs.lock().map_err(|_| "cancellation registry poisoned")?;
+        let scope = runs.get(run_id).ok_or("unknown cancellation Run")?;
+        Ok(CancellationToken { run: scope.cancelled.clone(), tool: Arc::new(AtomicBool::new(false)) })
+    }
     /// Drop terminal scope bookkeeping only after dispatch is fenced. Old
     /// tokens remain cancelled even if another scope is later registered.
     pub fn retire_run(&self, run_id: &str) {

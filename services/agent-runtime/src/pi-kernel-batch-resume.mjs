@@ -123,17 +123,32 @@ export async function resumePiKernelBatch(session, request, identity, signal) {
   if (session.agent.state.messages?.length || session.agent.hasQueuedMessages?.()) fail('resume requires an empty replacement session')
   claimed.add(key)
   deliveries.set(session, claimed)
-  const abort = () => { void session.abort() }
+  let abortError
+  let aborting
+  let timedOut = false
+  // Keep the cancellation request observed, but still await the engine settling:
+  // a timeout must never make a live model request look safe to replay.
+  const abort = () => {
+    aborting ??= Promise.resolve().then(() => session.abort()).catch(error => { abortError = error })
+  }
   signal.addEventListener('abort', abort, { once: true })
+  const timer = setTimeout(() => { timedOut = true; abort() }, request.payload.controlBinding.budgets.modelRequestMs)
   try {
     // Pi 0.84's documented public state setter copies the message array.
     session.agent.state.messages = prepared.messages
     await session.agent.continue()
+    if (aborting) await aborting
+    if (abortError) fail(`engine cancellation failed: ${abortError.message ?? String(abortError)}`)
+    if (timedOut) fail('frozen model request deadline exceeded')
     if (signal.aborted) fail('Host cancelled the resume')
     const final = session.agent.state.messages.at(-1)
-    if (final?.role === 'assistant' && ['error', 'aborted'].includes(final.stopReason)) fail(`model continuation ended with ${final.stopReason}`)
+    if (final?.role !== 'assistant' || !['stop', 'length'].includes(final.stopReason)
+        || !Array.isArray(final.content) || final.content.some(block => block?.type === 'toolCall')) {
+      fail(`model continuation has no completed response (${final?.stopReason ?? final?.role ?? 'missing'})`)
+    }
     return { idempotencyKey: prepared.idempotencyKey, checkpointSeq: prepared.checkpointSeq }
   } finally {
+    clearTimeout(timer)
     signal.removeEventListener('abort', abort)
   }
 }

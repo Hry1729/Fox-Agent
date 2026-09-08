@@ -501,26 +501,21 @@ fn pi_checkpoint_sqlite_reopen_rust_readers_and_replacement_pi_share_one_result_
             })
             .unwrap();
     }
-    let frame = coordinator.prepare_stored_batch_resume("pi-batch").unwrap();
-    let binding = db.run_control_binding(&run_id).unwrap().unwrap();
-    let identity = json!({"runId":run_id,"conversationId":binding.conversation_id,"runtimeSessionId":"replacement-pi","executionProfileId":binding.execution_profile_id});
-    let request = json!({"runId":run_id,"conversationId":binding.conversation_id,"runtimeSessionId":"replacement-pi",
-        "payload":{"controlBinding":binding,"batchResume":frame}});
-    let effect_key = kernel::batch_delivery_effect_key("pi-batch");
-    db.kernel_outbox_lease_effect(&run_id, &effect_key, "pi-delivery")
-        .unwrap()
-        .unwrap();
-    assert!(coordinator.prepare_stored_batch_resume("pi-batch").is_err());
-    let resumed = pi_batch_probe(
-        "resume",
-        json!({"request":request,"identity":identity,
-        "expectedResults":["Rust persisted result A 中文","Rust persisted result B 😀"]}),
-    );
-    assert_eq!(resumed["executions"], 0);
-    assert_eq!(resumed["consumed"], json!(["read-a", "read-b"]));
-    assert_eq!(resumed["answer"], "durable batch consumed");
-    db.kernel_outbox_complete(&run_id, &effect_key, "pi-delivery")
-        .unwrap();
+    coordinator.dispatch_batch("pi-batch", "pi-delivery", |binding, frame, token| {
+        token.check()?;
+        assert!(coordinator.prepare_stored_batch_resume("pi-batch").is_err());
+        let facts = db.kernel_rehydrate(&run_id)?.unwrap();
+        assert_eq!(facts.model_request_since_wall_ms, Some(clock.now_wall_ms()));
+        let identity = json!({"runId":run_id,"conversationId":binding.conversation_id,"runtimeSessionId":"replacement-pi","executionProfileId":binding.execution_profile_id});
+        let request = json!({"runId":run_id,"conversationId":binding.conversation_id,"runtimeSessionId":"replacement-pi",
+            "payload":{"controlBinding":binding,"batchResume":frame}});
+        let resumed = pi_batch_probe("resume", json!({"request":request,"identity":identity,
+            "expectedResults":["Rust persisted result A 中文","Rust persisted result B 😀"]}));
+        assert_eq!(resumed["executions"], 0);
+        assert_eq!(resumed["consumed"], json!(["read-a", "read-b"]));
+        assert_eq!(resumed["answer"], "durable batch consumed");
+        Ok(())
+    }).unwrap();
     assert!(coordinator.prepare_stored_batch_resume("pi-batch").is_err());
     assert!(coordinator.snapshot().unwrap().pending_effects.is_empty());
 }
@@ -566,4 +561,48 @@ fn original_engine_checkpoint_and_proposal_commit_atomically_and_replay_exactly(
         .prepare_stored_batch_resume("checkpoint-batch")
         .unwrap_err()
         .contains("hash"));
+}
+
+#[test]
+fn batch_dispatch_claim_and_deadline_are_atomic_and_uncertain_delivery_is_not_replayed() {
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture(&clock);
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.propose_engine_batch(fox_engine_protocol::KernelEngineBatchCheckpoint {
+        schema_version: 1, batch_id: "batch".into(),
+        history: vec![json!({"role":"user","content":"read"})],
+        assistant_message: json!({"role":"assistant","stopReason":"toolUse","content":[
+            {"type":"toolCall","id":"read-a","name":"read","arguments":{"path":"proof.txt"}}]}),
+    }, &Allow).unwrap();
+    coordinator.dispatch_tool("read-a", "reader", |_, _, _| Ok((true,
+        json!({"content":[{"type":"text","text":"durable"}]})))).unwrap();
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_model_dispatch BEFORE INSERT ON kernel_events WHEN NEW.event_type='engine.batch_dispatched' BEGIN SELECT RAISE(ABORT,'injected model dispatch failure'); END;").unwrap();
+    let executions = AtomicUsize::new(0);
+    assert!(coordinator.dispatch_batch("batch", "model", |_, _, _| {
+        executions.fetch_add(1, Ordering::SeqCst); Ok(())
+    }).is_err());
+    assert_eq!(executions.load(Ordering::SeqCst), 0);
+    assert_eq!(db.kernel_rehydrate(&run_id).unwrap().unwrap().model_request_since_wall_ms, None);
+    assert!(coordinator.prepare_stored_batch_resume("batch").is_ok());
+    connection.execute_batch("DROP TRIGGER reject_model_dispatch;").unwrap();
+    assert!(coordinator.dispatch_batch("batch", "model", |_, _, token| {
+        token.check()?;
+        executions.fetch_add(1, Ordering::SeqCst);
+        Err("connection lost after sending request".into())
+    }).is_err());
+    let started_at = db.kernel_rehydrate(&run_id).unwrap().unwrap().model_request_since_wall_ms;
+    assert_eq!(started_at, Some(1_000));
+    drop(coordinator);
+    let reopened = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    assert!(reopened.dispatch_batch("batch", "new-owner", |_, _, _| {
+        executions.fetch_add(1, Ordering::SeqCst); Ok(())
+    }).is_err());
+    assert_eq!(executions.load(Ordering::SeqCst), 1);
+    assert_eq!(db.kernel_rehydrate(&run_id).unwrap().unwrap().model_request_since_wall_ms, started_at);
+    clock.advance(120_001);
+    reopened.tick().unwrap();
+    assert!(db.kernel_rehydrate(&run_id).unwrap().unwrap().state.is_terminal());
+    assert!(reopened.dispatch_batch("batch", "expired", |_, _, _| panic!("expired model dispatched")).is_err());
 }
