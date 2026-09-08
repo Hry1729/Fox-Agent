@@ -121,6 +121,7 @@ pub(crate) struct ConversationLoadResponse {
     #[serde(flatten)]
     detail: ConversationDetail,
     knowledge_references: Vec<KnowledgeReference>,
+    kernel_snapshot: Option<fox_engine_protocol::KernelRunSnapshot>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1838,16 +1839,28 @@ pub fn conversation_load(
         .yuxi_runtime
         .recover_conversation_detached(&request.conversation_id);
     match state.database.load_conversation(&request.conversation_id) {
-        Ok(detail) => match state
-            .database
-            .conversation_knowledge_references(&request.conversation_id)
-        {
-            Ok(knowledge_references) => ApiResponse::success(ConversationLoadResponse {
-                detail,
-                knowledge_references,
-            }),
-            Err(error) => storage_error(error),
-        },
+        Ok(detail) => {
+            let kernel_snapshot = match detail.last_run.as_ref() {
+                Some(run) => match state.database.kernel_conversation_snapshot(
+                    &request.conversation_id, &run.id,
+                ) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => return storage_error(error),
+                },
+                None => None,
+            };
+            match state
+                .database
+                .conversation_knowledge_references(&request.conversation_id)
+            {
+                Ok(knowledge_references) => ApiResponse::success(ConversationLoadResponse {
+                    detail,
+                    knowledge_references,
+                    kernel_snapshot,
+                }),
+                Err(error) => storage_error(error),
+            }
+        }
         Err(error) => ApiResponse::failure("conversation.not_found", error, false),
     }
 }

@@ -11,6 +11,7 @@ import type {
   RuntimeEventNotification,
   WorkEventRecord,
 } from './types'
+import { mergeKernelSnapshot } from './kernel-snapshot'
 
 export function runRecordIsActive(run: RunRecord | null) {
   return run?.status === 'queued' || run?.status === 'running' || run?.status === 'cancelling'
@@ -123,6 +124,7 @@ function preferRun(persisted: RunRecord | null, current: RunRecord | null) {
 
 export function mergeConversationDetail(persisted: ConversationDetail, current: ConversationDetail | null) {
   if (!current || current.conversation.id !== persisted.conversation.id) return persisted
+  const lastRun = preferRun(persisted.lastRun, current.lastRun)
   const runtimeEvents = mergeRecords(
     persisted.runtimeEvents,
     current.runtimeEvents,
@@ -131,6 +133,7 @@ export function mergeConversationDetail(persisted: ConversationDetail, current: 
 
   return {
     ...persisted,
+    kernelSnapshot: mergeKernelSnapshot(persisted, current, lastRun?.id),
     messages: mergeMessages(persisted.messages, current.messages),
     runtimeEvents,
     toolCalls: mergeRecords(persisted.toolCalls, current.toolCalls, (toolCall) => toolCall.id),
@@ -143,7 +146,7 @@ export function mergeConversationDetail(persisted: ConversationDetail, current: 
       (binding) => `${binding.serviceConnectionId}:${binding.knowledgeBaseId}`,
     ),
     hasEarlierMessages: persisted.hasEarlierMessages || current.hasEarlierMessages,
-    lastRun: preferRun(persisted.lastRun, current.lastRun),
+    lastRun,
     // A0 Work Loop merge
     goals: mergeRecords(persisted.goals, current.goals, (goal) => goal.id),
     tasks: mergeRecords(persisted.tasks, current.tasks, (task) => task.id),

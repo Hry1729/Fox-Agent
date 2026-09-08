@@ -217,6 +217,129 @@
       "title": "KernelModelResponse",
       "type": "object"
     },
+    "KernelRunSnapshot": {
+      "$defs": {
+        "KernelToolSnapshot": {
+          "additionalProperties": false,
+          "properties": {
+            "approvalState": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "batchId": {
+              "type": "string"
+            },
+            "sourceOrder": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "toolCallId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "toolCallId",
+            "batchId",
+            "tool",
+            "sourceOrder",
+            "state"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "approvalDeadlineWallMs": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "compactions": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "engineId": {
+          "type": "string"
+        },
+        "lastEventSeq": {
+          "description": "Decimal string: SQLite sequences must not lose precision in JavaScript.",
+          "type": "string"
+        },
+        "providerAttempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retryDueWallMs": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "runningElapsedMs": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "terminalWritten": {
+          "type": "boolean"
+        },
+        "tools": {
+          "items": {
+            "$ref": "#/$defs/KernelToolSnapshot"
+          },
+          "type": "array"
+        },
+        "turnAttempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "runId",
+        "turnId",
+        "engineId",
+        "state",
+        "lastEventSeq",
+        "runningElapsedMs",
+        "terminalWritten",
+        "tools",
+        "providerAttempts",
+        "turnAttempts",
+        "compactions"
+      ],
+      "title": "KernelRunSnapshot",
+      "type": "object"
+    },
     "RunControlBinding": {
       "$defs": {
         "ExecutionAuthority": {

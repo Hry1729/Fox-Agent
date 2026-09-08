@@ -2509,8 +2509,63 @@ impl Database {
         &self,
         run_id: &str,
     ) -> Result<crate::kernel::KernelSnapshot, String> {
+        self.kernel_build_scoped_snapshot(run_id, None)?
+            .ok_or_else(|| "kernel run not found".to_string())
+    }
+
+    /// Conversation ownership and all authoritative facts share one read transaction.
+    /// Missing executable Kernel rows mean Legacy, never an inferred authority switch.
+    pub fn kernel_conversation_snapshot(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+    ) -> Result<Option<fox_engine_protocol::KernelRunSnapshot>, String> {
+        Ok(self.kernel_build_scoped_snapshot(run_id, Some(conversation_id))?.map(|s| {
+            fox_engine_protocol::KernelRunSnapshot {
+                schema_version: 1,
+                run_id: s.run_id,
+                turn_id: s.turn_id.expect("snapshot validates turn identity"),
+                engine_id: s.engine_id,
+                state: s.state,
+                last_event_seq: s.last_event_seq.to_string(),
+                running_elapsed_ms: s.running_elapsed_ms,
+                approval_deadline_wall_ms: s.approval_deadline_wall_ms,
+                terminal_written: s.terminal_written,
+                tools: s.tool_calls.into_iter().map(|t| fox_engine_protocol::KernelToolSnapshot {
+                    tool_call_id: t.tool_call_id,
+                    batch_id: t.batch_id,
+                    tool: t.tool,
+                    source_order: t.source_order,
+                    state: t.state,
+                    approval_state: t.approval_state,
+                }).collect(),
+                provider_attempts: s.retry.provider_attempts,
+                turn_attempts: s.retry.turn_attempts,
+                retry_due_wall_ms: s.retry.due_wall_ms,
+                compactions: s.compaction.compactions,
+            }
+        }))
+    }
+
+    fn kernel_build_scoped_snapshot(
+        &self,
+        run_id: &str,
+        conversation_id: Option<&str>,
+    ) -> Result<Option<crate::kernel::KernelSnapshot>, String> {
         self.with_connection(|connection| {
             let txn = connection.transaction()?;
+            if let Some(conversation_id) = conversation_id {
+                let owned: bool = txn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runs WHERE id=?1 AND conversation_id=?2)",
+                    params![run_id, conversation_id], |row| row.get(0),
+                )?;
+                if !owned { return Err(kernel_err("kernel snapshot run does not belong to conversation")); }
+                let authoritative: bool = txn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM kernel_runs WHERE run_id=?1 AND kernel_mode='authoritative')",
+                    params![run_id], |row| row.get(0),
+                )?;
+                if !authoritative { return Ok(None); }
+            }
             let (
                 state,
                 engine_id,
@@ -2701,7 +2756,7 @@ impl Database {
                 )));
             }
             txn.commit()?;
-            Ok(crate::kernel::KernelSnapshot {
+            Ok(Some(crate::kernel::KernelSnapshot {
                 run_id: run_id.to_string(),
                 turn_id,
                 state,
@@ -2717,7 +2772,7 @@ impl Database {
                 pending_effects,
                 retry,
                 compaction,
-            })
+            }))
         })
     }
 
@@ -3859,6 +3914,44 @@ mod tests {
             provider_max_retries: 2,
             turn_max_retries: 1,
         }
+    }
+
+    #[test]
+    fn conversation_snapshot_is_owned_authoritative_and_payload_free() {
+        let db = fresh_db();
+        db.with_connection(|connection| {
+            connection.execute("INSERT INTO conversations(id, agent_id, title, status, created_at, updated_at)
+                SELECT 'snapshot-conversation', id, 'snapshot', 'active', 1, 1 FROM agents LIMIT 1", [])?;
+            for run in ["snapshot-auth", "snapshot-legacy"] {
+                connection.execute("INSERT INTO runs(id, conversation_id, status, model, created_at)
+                    VALUES (?1, 'snapshot-conversation', 'running', 'test', 1)", [run])?;
+            }
+            Ok(())
+        }).unwrap();
+        assert!(db.kernel_conversation_snapshot("snapshot-conversation", "snapshot-legacy").unwrap().is_none());
+        assert!(db.kernel_conversation_snapshot("other-conversation", "snapshot-legacy").is_err());
+        assert!(db.kernel_conversation_snapshot("snapshot-conversation", "missing").is_err());
+        let config = phase3b_config();
+        db.kernel_create_run("snapshot-auth", "pi", "authoritative", 2, "perm-1", "legacy", "h",
+            &serde_json::to_string(&config).unwrap()).unwrap();
+        let (controller, effects) = crate::kernel::RunController::start(
+            "snapshot-auth", "turn-1", config, &crate::kernel::TestClock::new(0)).unwrap();
+        db.kernel_commit_decision("snapshot-auth", 0, &controller.persist_command(&effects)).unwrap();
+        let snapshot = db.kernel_conversation_snapshot("snapshot-conversation", "snapshot-auth").unwrap().unwrap();
+        assert_eq!(snapshot.run_id, "snapshot-auth");
+        assert_eq!(snapshot.state, "running");
+        assert_eq!(snapshot.last_event_seq, controller.last_event_seq().to_string());
+        let json = serde_json::to_string(&snapshot).unwrap();
+        for forbidden in ["payloadJson", "resultJson", "permissionSnapshot", "pendingEffects"] {
+            assert!(!json.contains(forbidden));
+        }
+        assert!(db.kernel_conversation_snapshot("other-conversation", "snapshot-auth").is_err());
+        // Corrupt authority must fail closed, never turn into a Legacy fallback.
+        db.with_connection(|connection| {
+            connection.execute("UPDATE kernel_runs SET frozen_config_json='{}' WHERE run_id='snapshot-auth'", [])?;
+            Ok(())
+        }).unwrap();
+        assert!(db.kernel_conversation_snapshot("snapshot-conversation", "snapshot-auth").is_err());
     }
 
     #[test]

@@ -9,6 +9,8 @@ mod control;
 pub use control::*;
 mod resume;
 pub use resume::*;
+mod snapshot;
+pub use snapshot::*;
 
 pub const PROTOCOL_NAME: &str = "fox-runtime-jsonl";
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -321,7 +323,8 @@ pub fn schema_bundle() -> Value {
             "RunControlBinding": schemars::schema_for!(RunControlBinding),
             "KernelBatchResumeFrame": schemars::schema_for!(KernelBatchResumeFrame),
             "KernelEngineBatchCheckpoint": schemars::schema_for!(KernelEngineBatchCheckpoint),
-            "KernelModelResponse": schemars::schema_for!(KernelModelResponse)
+            "KernelModelResponse": schemars::schema_for!(KernelModelResponse),
+            "KernelRunSnapshot": schemars::schema_for!(KernelRunSnapshot)
         },
         "toolContracts": TOOL_CONTRACTS.iter().map(|t| serde_json::json!({
             "name": t.0, "category": t.1, "execution": t.2, "approval": t.3

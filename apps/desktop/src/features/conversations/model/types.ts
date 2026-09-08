@@ -1,3 +1,7 @@
+import type { KernelRunSnapshot } from '../../../../../../packages/fox-engine-protocol'
+
+export type { KernelRunSnapshot } from '../../../../../../packages/fox-engine-protocol'
+
 export interface DesktopErrorDetails {
   code: string
   message: string
@@ -509,6 +513,8 @@ export interface ChildRunNotification {
 }
 
 export interface ConversationDetail {
+  /** Authoritative-only, independently versioned read model; never a Legacy sequence. */
+  kernelSnapshot?: KernelRunSnapshot | null
   conversation: ConversationSummary
   messages: ConversationMessage[]
   runtimeEvents: RunEventRecord[]
