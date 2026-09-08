@@ -337,9 +337,17 @@ impl<'a> KernelCoordinator<'a> {
         Ok(frame)
     }
 
-    /// Formal isolated transport, with configuration checked before claiming.
-    /// Callers must recover the matching config; current settings are not a fallback.
-    pub(super) fn dispatch_batch_with_worker(
+    /// Only the durable snapshot can configure a formal worker dispatch.
+    pub(super) fn dispatch_stored_batch_with_worker(
+        &self, batch_id: &str, owner: &str, policy: &dyn PolicyDecisionPort,
+        runtime: &super::RuntimeCommand, api_key: &str,
+    ) -> Result<(), String> {
+        let config = self.database.kernel_model_config(&self.binding.run_id)?;
+        self.dispatch_batch_with_worker(batch_id, owner, policy, runtime, &config, api_key)
+    }
+
+    /// Internal transport, with configuration checked before claiming.
+    fn dispatch_batch_with_worker(
         &self, batch_id: &str, owner: &str, policy: &dyn PolicyDecisionPort,
         runtime: &super::RuntimeCommand, config: &super::kernel_model_worker::KernelModelConfig,
         api_key: &str,

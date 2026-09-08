@@ -6259,6 +6259,28 @@ END;
 "#;
 
 const CONVERSATION_TOOL_PERMISSION_SCHEMA_VERSION: i64 = 23;
+const MIGRATION_55: &str = r#"
+CREATE TABLE kernel_model_configs (
+    run_id TEXT PRIMARY KEY REFERENCES kernel_runs(run_id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+    adapter_version TEXT NOT NULL,
+    config_json TEXT NOT NULL CHECK(json_valid(config_json)),
+    config_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TRIGGER kernel_model_config_immutable BEFORE UPDATE ON kernel_model_configs
+BEGIN SELECT RAISE(ABORT, 'Kernel model configuration is immutable'); END;
+CREATE TRIGGER kernel_model_config_insert_guard BEFORE INSERT ON kernel_model_configs
+WHEN NOT EXISTS (
+    SELECT 1 FROM kernel_runs r JOIN run_control_bindings b ON b.run_id=r.run_id
+    WHERE r.run_id=NEW.run_id AND r.kernel_mode='authoritative' AND r.engine_id='pi'
+      AND b.authority='authoritative' AND b.engine_id='pi'
+      AND r.state='created' AND r.last_event_seq=0
+      AND r.prompt_config_hash=NEW.config_hash
+      AND r.execution_profile_id=json_extract(NEW.config_json,'$.executionProfileId')
+)
+BEGIN SELECT RAISE(ABORT, 'Kernel model configuration must be frozen before Run start'); END;
+"#;
 const MIGRATION_54: &str = r#"
 CREATE TABLE run_control_bindings (
     run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
@@ -6359,6 +6381,7 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
         now,
     )?;
     apply_migration(&transaction, 54, MIGRATION_54, now)?;
+    apply_migration(&transaction, 55, MIGRATION_55, now)?;
     transaction.commit()
 }
 
@@ -11557,6 +11580,7 @@ mod tests {
                 execution_profile_id, prompt_config_hash, frozen_config_json, created_at)
              VALUES ('old-shadow','old-run','old-conversation','old-turn','pi','shadow',2,'manifest','permission','legacy','prompt','{}',1);
              DROP TABLE kernel_shadow_checkpoints;
+             DROP TABLE kernel_model_configs;
              DROP TABLE run_control_bindings;
              DELETE FROM schema_migrations WHERE version>=53;"
         ).unwrap();

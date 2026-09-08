@@ -1,6 +1,6 @@
 import {
   DefaultResourceLoader, SessionManager, SettingsManager, createFoxAgentSession,
-  createFoxModelRuntime, fauxAssistantMessage, registerFauxProvider,
+  createFoxModelRuntime, fauxAssistantMessage, registerFauxProvider, PI_PACKAGE_VERSION,
 } from './pi-adapter.mjs'
 import { createEnvelope, validateEnvelope } from './protocol.mjs'
 import { resolveModelProfile, transportProvider } from './model-profile.mjs'
@@ -66,7 +66,8 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
     installKernelProposalTools(session, definitions)
     if (state !== 'initializing') throw new Error('Kernel initialization was cancelled')
     state = 'ready'
-    respond(request, 'kernel.ready', { singleUse: true, resourceExecution: false, automaticReplay: false })
+    respond(request, 'kernel.ready', { singleUse: true, resourceExecution: false, automaticReplay: false,
+      adapterVersion: `pi-${PI_PACKAGE_VERSION}/fox-kernel-worker-v1` })
   }
 
   async function handle(request) {

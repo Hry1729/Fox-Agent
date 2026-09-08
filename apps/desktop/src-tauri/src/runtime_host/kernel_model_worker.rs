@@ -2,9 +2,8 @@
 use super::RuntimeCommand;
 use crate::kernel::CancellationToken;
 use fox_engine_protocol::{KernelBatchResumeFrame, KernelModelResponse, RunControlBinding, PROTOCOL_NAME, PROTOCOL_VERSION};
-use serde::Serialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+pub(super) use crate::kernel_model_config::KernelModelConfig;
 use std::{
     io::{BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, Command, Stdio},
@@ -14,29 +13,6 @@ use std::{
 };
 
 const MAX_FRAME: usize = 1_048_576;
-
-/// Credentials are supplied separately, never persisted in this hash or argv.
-/// The caller must recover this exact configuration, not read current settings.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct KernelModelConfig {
-    pub execution_profile_id: String,
-    pub model_service: Value,
-    pub system_prompt: String,
-    pub proposal_tools: Vec<Value>,
-}
-
-impl KernelModelConfig {
-    pub(crate) fn hash(&self) -> Result<String, String> {
-        let service = self.model_service.as_object().ok_or("invalid Kernel model service")?;
-        if service.contains_key("apiKey") || service.contains_key("api_key") {
-            return Err("Kernel credentials must be supplied separately".into());
-        }
-        let bytes = serde_json::to_vec(self).map_err(|_| "invalid Kernel model configuration")?;
-        if bytes.len() > MAX_FRAME { return Err("Kernel model configuration exceeds frame limit".into()); }
-        Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
-    }
-}
 
 // Drop always terminates/reaps only the child created here, then joins bounded
 // readers/writers. A timeout never leaves a pipe writer or model process alive.
@@ -155,7 +131,8 @@ pub(crate) fn deliver(
     initialization["modelService"]["apiKey"] = Value::String(api_key.into());
     let mut worker = Worker::spawn(runtime)?;
     let ready = worker.exchange(request("kernel.initialize", initialization), "kernel.ready", token, deadline)?;
-    if ready["singleUse"] != true || ready["resourceExecution"] != false || ready["automaticReplay"] != false {
+    if ready["singleUse"] != true || ready["resourceExecution"] != false || ready["automaticReplay"] != false
+        || ready["adapterVersion"] != crate::kernel_model_config::KERNEL_MODEL_ADAPTER {
         return Err("Kernel worker lacks isolated single-use capability".into());
     }
     let payload = worker.exchange(request("kernel.resume_batch", json!({"controlBinding":binding,"batchResume":frame})),

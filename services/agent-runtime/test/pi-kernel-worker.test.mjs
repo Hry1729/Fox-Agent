@@ -67,7 +67,9 @@ async function worker(t, args = ['--kernel-worker']) {
 
 test('real isolated worker returns one model response and refuses replay or Legacy commands', { timeout: 30000 }, async t => {
   const child = await worker(t)
-  assert.equal((await child.request('kernel.initialize', initialization())).type, 'kernel.ready')
+  const ready = await child.request('kernel.initialize', initialization())
+  assert.equal(ready.type, 'kernel.ready')
+  assert.equal(ready.payload.adapterVersion, 'pi-0.84.2/fox-kernel-worker-v1')
   assert.equal((await child.request('prompt', {})).type, 'request_failed')
   assert.equal((await child.request('kernel.initialize', initialization())).type, 'request_failed')
   const result = await child.request('kernel.resume_batch', resumePayload())

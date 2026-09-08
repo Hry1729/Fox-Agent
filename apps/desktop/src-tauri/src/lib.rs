@@ -8,6 +8,7 @@ mod expert_packages;
 mod expert_teams;
 mod expert_workflows;
 mod kernel;
+mod kernel_model_config;
 mod kernel_state_publisher;
 mod lifecycle_hooks;
 #[cfg(feature = "local-embedding")]

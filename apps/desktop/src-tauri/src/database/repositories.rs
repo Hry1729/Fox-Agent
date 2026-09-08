@@ -33,6 +33,7 @@ mod expert_workflows;
 mod graph_lead;
 mod kernel;
 mod run_control;
+mod kernel_model_config;
 mod memory;
 mod observability;
 mod work_events;

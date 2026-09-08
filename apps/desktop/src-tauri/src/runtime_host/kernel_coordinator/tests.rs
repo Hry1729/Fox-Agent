@@ -25,6 +25,14 @@ fn fixture(clock: &TestClock) -> (Database, PathBuf, String) {
 }
 
 fn fixture_with_prompt(clock: &TestClock, prompt_hash: &str) -> (Database, PathBuf, String) {
+    fixture_with_model_opt(clock, prompt_hash, None)
+}
+
+fn fixture_with_model(clock: &TestClock, config: &crate::kernel_model_config::KernelModelConfig) -> (Database, PathBuf, String) {
+    fixture_with_model_opt(clock, &config.hash().unwrap(), Some(config))
+}
+
+fn fixture_with_model_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>) -> (Database, PathBuf, String) {
     let root = std::env::temp_dir().join(format!("fox-coordinator-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("proof.txt"), "durable coordinator 中文 😀").unwrap();
@@ -86,6 +94,7 @@ fn fixture_with_prompt(clock: &TestClock, prompt_hash: &str) -> (Database, PathB
         &serde_json::to_string(&config).unwrap(),
     )
     .unwrap();
+    if let Some(model) = model { db.freeze_kernel_model_config(&run_id, model).unwrap(); }
     let (controller, effects) = RunController::start(&run_id, "turn-1", config, clock).unwrap();
     db.kernel_commit_decision(
         &run_id,
@@ -824,4 +833,82 @@ fn formal_worker_uses_remaining_run_budget_instead_of_a_fresh_full_window() {
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     assert!(coordinator.prepare_stored_batch_resume("worker-batch").is_err());
     assert_ne!(db.kernel_rehydrate(&run_id).unwrap().unwrap().state, kernel::RunState::Completed);
+}
+
+#[test]
+fn stored_model_configuration_reopens_and_drives_real_pi_without_caller_configuration() {
+    let mut config = worker_configuration();
+    let frozen = config.clone();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_model(&clock, &config);
+    db.freeze_kernel_model_config(&run_id, &config).unwrap(); // Exact replay only.
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+    config.model_service["fauxResponses"] = json!(["Changed current configuration must not be used"]);
+    assert!(db.freeze_kernel_model_config(&run_id, &config).is_err());
+    drop(coordinator); drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    assert_eq!(db.kernel_model_config(&run_id).unwrap(), frozen);
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.dispatch_stored_batch_with_worker("worker-batch", "stored-worker", &Allow,
+        &real_worker_command(), "test-key").unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "completed");
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let response: String = connection.query_row("SELECT payload_json FROM kernel_events WHERE run_id=?1 AND event_type='engine.batch_response'",
+        [&run_id], |row| row.get(0)).unwrap();
+    assert!(response.contains("Host consumed the durable batch"));
+    assert!(!response.contains("Changed current configuration"));
+}
+
+#[test]
+fn model_snapshot_is_immutable_and_tampering_fails_before_any_dispatch_lease() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_model(&clock, &config);
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    assert!(connection.execute("UPDATE kernel_model_configs SET config_json=config_json WHERE run_id=?1", [&run_id]).is_err());
+    connection.execute_batch("DROP TRIGGER kernel_model_config_immutable;").unwrap();
+    let original = serde_json::to_string(&config).unwrap();
+    for (column, changed) in [
+        ("config_json", "{}"), ("config_hash", "wrong-hash"), ("adapter_version", "pi-future-incompatible"),
+    ] {
+        connection.execute(&format!("UPDATE kernel_model_configs SET {column}=?1 WHERE run_id=?2"),
+            rusqlite::params![changed,run_id]).unwrap();
+        let before = coordinator.snapshot().unwrap();
+        assert!(db.kernel_model_config(&run_id).is_err(), "{column}");
+        assert!(coordinator.dispatch_stored_batch_with_worker("worker-batch", "must-not-dispatch", &Allow,
+            &real_worker_command(), "test-key").is_err(), "{column}");
+        assert_eq!(coordinator.snapshot().unwrap(), before);
+        assert!(coordinator.prepare_stored_batch_resume("worker-batch").is_ok());
+        connection.execute("UPDATE kernel_model_configs SET config_json=?1,config_hash=?2,adapter_version=?3 WHERE run_id=?4",
+            rusqlite::params![original,config.hash().unwrap(),crate::kernel_model_config::KERNEL_MODEL_ADAPTER,run_id]).unwrap();
+    }
+    connection.execute("DELETE FROM kernel_model_configs WHERE run_id=?1", [&run_id]).unwrap();
+    assert!(coordinator.dispatch_stored_batch_with_worker("worker-batch", "missing", &Allow,
+        &real_worker_command(), "test-key").is_err());
+    // An active historical Run may not backfill configuration from today's settings.
+    assert!(db.freeze_kernel_model_config(&run_id, &config).is_err());
+}
+
+#[test]
+fn v54_model_snapshot_upgrade_preserves_existing_runs_without_backfilling() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let (db, root, run_id) = fixture_with_model(&clock, &config);
+    let expected_binding = db.run_control_binding(&run_id).unwrap().unwrap();
+    drop(db);
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    connection.execute_batch("DROP TABLE kernel_model_configs; DELETE FROM schema_migrations WHERE version=55;").unwrap();
+    drop(connection);
+    for _ in 0..2 {
+        let db = Database::open(root.join("facts.db")).unwrap();
+        assert_eq!(db.run_control_binding(&run_id).unwrap().unwrap(), expected_binding);
+        assert_eq!(db.kernel_rehydrate(&run_id).unwrap().unwrap().state, kernel::RunState::Running);
+        assert!(db.kernel_model_config(&run_id).unwrap_err().contains("missing"));
+        assert!(db.freeze_kernel_model_config(&run_id, &config).is_err());
+    }
 }
