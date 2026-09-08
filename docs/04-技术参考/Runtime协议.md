@@ -431,6 +431,16 @@ Fox 只在确有差异时做模型家族分支：MiniMax、DeepSeek、Claude、O
 
 ## 错误
 
+### 隔离 Kernel 批次进程（受控接线）
+
+正式 Runtime 的 `--kernel-worker` 启动参数选择独立的一次性进程模式；默认 Legacy 进程不接受此协议。仅支持以下请求，均使用原 JSONL envelope：
+
+- `kernel.initialize`：绑定 envelope 的 Run/Conversation/Session，以及 payload 的 `executionProfileId`、`modelService`、`systemPrompt`、`proposalTools`。返回 `kernel.ready`；重复初始化拒绝。模型凭证仅经 stdin 提供，不作为命令行参数。
+- `kernel.resume_batch`：payload 使用共享 `controlBinding` 与 `batchResume`，完整匹配初始化身份。返回 `kernel.model_response`，payload 为 `{idempotencyKey, checkpointSeq, response: KernelModelResponse}`。仅返回模型响应/提议，不执行资源；真正派发后进程永久 consumed，失败必须由 Host 对持久交付事实进行核对，不能重发。
+- `kernel.cancel`：核对完整身份后请求取消，`kernel.cancelling` 只表示接收取消，不代表模型已退出或 Run 已提交终态。原批次请求会在模型结束后失败。关闭 stdin 同样触发取消及清理。
+
+初始化与批次请求上限均为 1 MiB；错误不包含原始凭证、历史或 Provider 响应。模型请求受冻结预算约束，取消后仍等待引擎结束；Host 需独立控制进程失联和不确定交付。本模式尚未挂接默认桌面启动，也不替代 Host 持久配置校验、Outbox 租约或 Kernel 决策事务。
+
 协议错误：`protocol.invalid_message`、`protocol.unknown_request`；Runtime 请求错误：`runtime.request_failed`；Pi 执行错误：`runtime.pi_failed`；Provider 错误：`provider.request_failed`。
 
 取消分类：用户或 Host 取消（包括工具等待 Host 预检期间）终止为 `run.cancelled`。取消会 abort 在途 Provider 请求，Pi 可能据此产生 `stopReason=error/aborted`，但该 abort 诱发的 provider 错误**不得**投影为 `run.failed/provider.request_failed`；取消是权威终态，优先级高于迟到失败。取消按 `runId` 隔离，只中止该 Run 的在途 Host 请求，不做影响其它 Run 的全局清理；终态只写一次，取消后的迟到成功结果只进审计。
