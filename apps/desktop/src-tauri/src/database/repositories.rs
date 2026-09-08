@@ -4033,16 +4033,21 @@ impl Database {
                     .to_owned(),
             );
         }
-        let now = now_ms();
-        let approved = decision.approved();
-        let decision_json = serde_json::to_string(&json!({
-            "approved": approved,
-            "scope": decision.scope(),
-            "category": existing.category,
-        }))
-        .map_err(|error| error.to_string())?;
+        // Denial cleanup must remain possible even if a frozen binding is corrupt.
+        let window = if decision.approved() {
+            Some(self.run_approval_window(&existing.run_id, approval_id)?)
+        } else { None };
         self.with_connection(|connection| {
-            let transaction = connection.transaction()?;
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let now = now_ms();
+            let expired = window.is_some_and(|(start, deadline)| now < start || now >= deadline);
+            let approved = decision.approved() && !expired;
+            let decision_json = json!({
+                "approved": approved,
+                "scope": if expired { "none" } else { decision.scope() },
+                "category": existing.category,
+                "reason": if expired { Some("approval_wait_timeout") } else { None },
+            }).to_string();
             let updated = transaction.execute(
                 "UPDATE approvals
                  SET status = ?2, decision_json = ?3, resolved_at = ?4
@@ -4056,7 +4061,7 @@ impl Database {
                    )",
                 params![
                     approval_id,
-                    if approved { "approved" } else { "denied" },
+                    if expired { "expired" } else if approved { "approved" } else { "denied" },
                     decision_json,
                     now
                 ],
@@ -4065,7 +4070,7 @@ impl Database {
                 return Ok(None);
             }
             let approval = query_approval(&transaction, approval_id)?;
-            if decision == super::ApprovalDecision::AllowConversation {
+            if approved && decision == super::ApprovalDecision::AllowConversation {
                 let scope_key = permission_scope.expect("validated conversation permission scope");
                 transaction.execute(
                     "INSERT INTO conversation_tool_permissions(

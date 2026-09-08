@@ -31,6 +31,52 @@ mod tests {
     }
 
     #[test]
+    fn approval_window_survives_reopen_and_rejects_late_grants() {
+        use crate::database::ApprovalDecision;
+        let (db, path, run_id) = fixture();
+        db.apply_runtime_event(&run_id, 1, &serde_json::json!({"type":"run.started"})).unwrap();
+        let binding = db.freeze_legacy_run_control(&run_id, "test-profile").unwrap();
+        let tool = db.create_host_tool_call(&run_id, "deadline-tool", "write_file", &serde_json::json!({"path":"test.txt"}), "pending", true).unwrap();
+        let approval = db.create_approval(&tool.id, "write", &serde_json::json!({"permissionScope":"project"})).unwrap();
+        let start = approval.requested_at;
+        let budget = binding.budgets.approval_wait_ms;
+        assert_eq!(db.run_approval_wait_remaining_ms(&run_id, &approval.id, start + 17).unwrap(), (budget - 17) as u64);
+        assert_eq!(db.run_approval_wait_remaining_ms(&run_id, &approval.id, start + budget).unwrap(), 0);
+        assert!(db.run_approval_wait_remaining_ms(&run_id, &approval.id, start - 1).is_err());
+        assert!(db.run_approval_window("foreign", &approval.id).is_err());
+        drop(db);
+        let db = Database::open(path).unwrap();
+        assert_eq!(db.run_approval_wait_remaining_ms(&run_id, &approval.id, start + 31).unwrap(), (budget - 31) as u64);
+        db.with_connection(|connection| connection.execute("UPDATE approvals SET requested_at=1 WHERE id=?1", [&approval.id])).unwrap();
+        let expired = db.resolve_approval(&approval.id, ApprovalDecision::AllowConversation).unwrap().unwrap();
+        assert_eq!(expired.status, "expired");
+        assert_eq!(expired.decision.unwrap()["approved"], false);
+        assert!(!db.conversation_tool_permission_granted(&binding.conversation_id, "write_file", "project").unwrap());
+        assert!(!db.claim_approved_tool_call(&run_id, "deadline-tool").unwrap());
+        assert!(db.resolve_approval(&approval.id, ApprovalDecision::AllowOnce).unwrap().is_none());
+    }
+
+    #[test]
+    fn approval_clock_rollback_expires_and_corrupt_binding_still_allows_denial() {
+        use crate::database::ApprovalDecision;
+        let (db, _path, run_id) = fixture();
+        db.apply_runtime_event(&run_id, 1, &serde_json::json!({"type":"run.started"})).unwrap();
+        db.freeze_legacy_run_control(&run_id, "test-profile").unwrap();
+        for (call_id, corrupt) in [("future", false), ("corrupt", true)] {
+            let tool = db.create_host_tool_call(&run_id, call_id, "write_file", &serde_json::json!({}), "pending", true).unwrap();
+            let approval = db.create_approval(&tool.id, "write", &serde_json::json!({"permissionScope":"project"})).unwrap();
+            if corrupt {
+                db.with_connection(|connection| connection.execute("UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1", [&run_id])).unwrap();
+                assert!(db.resolve_approval(&approval.id, ApprovalDecision::AllowOnce).is_err());
+                assert_eq!(db.resolve_approval(&approval.id, ApprovalDecision::Deny).unwrap().unwrap().status, "denied");
+            } else {
+                db.with_connection(|connection| connection.execute("UPDATE approvals SET requested_at=?2 WHERE id=?1", params![approval.id, now_ms() + 60_000])).unwrap();
+                assert_eq!(db.resolve_approval(&approval.id, ApprovalDecision::AllowOnce).unwrap().unwrap().status, "expired");
+            }
+        }
+    }
+
+    #[test]
     fn run_control_shadow_projection_preserves_grants_and_legacy_compatibility() {
         let (db, _path, run_id) = fixture();
         let conversation: String = db.with_connection(|connection| connection.query_row(
@@ -101,6 +147,25 @@ mod tests {
 }
 
 impl Database {
+    /// Absolute approval window survives re-entry and process restarts.
+    pub fn run_approval_window(&self, run_id: &str, approval_id: &str) -> Result<(i64, i64), String> {
+        let budget = self.run_time_budgets(run_id)?.approval_wait_ms;
+        let requested_at: i64 = self.with_connection(|connection| connection.query_row(
+            "SELECT a.requested_at FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id WHERE a.id=?1 AND t.run_id=?2",
+            params![approval_id, run_id], |row| row.get(0),
+        ))?;
+        if requested_at < 0 || budget <= 0 { return Err("invalid approval window".into()); }
+        let deadline = requested_at.checked_add(budget).ok_or("approval deadline overflow")?;
+        Ok((requested_at, deadline))
+    }
+
+    pub fn run_approval_wait_remaining_ms(&self, run_id: &str, approval_id: &str, now: i64) -> Result<u64, String> {
+        let (requested_at, deadline) = self.run_approval_window(run_id, approval_id)?;
+        // Clock rollback is not permission to extend the window.
+        if now < requested_at { return Err("approval clock moved backwards".into()); }
+        Ok(deadline.saturating_sub(now).max(0) as u64)
+    }
+
     /// Project the same frozen policy used by execution into Shadow's legacy
     /// JSON contract. Only pre-binding Runs may use the compatibility reader;
     /// corrupt or mismatched bindings must never fall back to live permissions.

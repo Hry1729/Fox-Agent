@@ -2837,7 +2837,7 @@ impl RuntimeHost {
             .map_err(|_| "approval map is poisoned".to_owned())?
             .remove(approval_id);
         if let Some(pending) = sender {
-            let _ = pending.sender.send(decision.approved());
+            let _ = pending.sender.send(approval.status == "approved");
         }
         let _ = self.app.emit("fox://approval-resolved", approval);
         Ok(true)
@@ -5703,10 +5703,12 @@ fn attach_permission_scope(request: &mut Value, scope: Option<&str>) {
 fn receive_run_approval(
     database: &Database,
     run_id: &str,
+    approval_id: &str,
     receiver: &mpsc::Receiver<bool>,
 ) -> Result<bool, String> {
-    let budgets = database.run_time_budgets(run_id)?;
-    receiver.recv_timeout(Duration::from_millis(budgets.approval_wait_ms as u64))
+    let remaining = database.run_approval_wait_remaining_ms(run_id, approval_id, chrono::Utc::now().timestamp_millis())?;
+    if remaining == 0 { return Err("Approval request timed out".into()); }
+    receiver.recv_timeout(Duration::from_millis(remaining))
         .map_err(|error| match error {
             mpsc::RecvTimeoutError::Timeout => "Approval request timed out".to_owned(),
             mpsc::RecvTimeoutError::Disconnected => "Approval request was interrupted".to_owned(),
@@ -5716,6 +5718,12 @@ fn receive_run_approval(
 #[cfg(test)]
 mod frozen_approval_tests {
     use super::*;
+
+    fn pending_approval(db: &Database, run_id: &str) -> String {
+        db.apply_runtime_event(run_id, 1, &json!({"type":"run.started"})).unwrap();
+        let tool = db.create_host_tool_call(run_id, "budget-tool", "write_file", &json!({"path":"test.txt"}), "pending", true).unwrap();
+        db.create_approval(&tool.id, "write", &json!({})).unwrap().id
+    }
 
     #[test]
     fn frozen_approval_deadline_is_enforced_and_corruption_cannot_fall_back() {
@@ -5730,19 +5738,21 @@ mod frozen_approval_tests {
         binding.conversation_id = short_conversation.id;
         binding.budgets.approval_wait_ms = 1;
         db.freeze_run_control(&binding).unwrap();
+        let approval_id = pending_approval(&db, &run.run.id);
+        rusqlite::Connection::open(&path).unwrap().execute("UPDATE approvals SET requested_at=1 WHERE id=?1", [&approval_id]).unwrap();
         drop(db);
         let db = Database::open(path.clone()).unwrap();
         assert_eq!(db.run_time_budgets(&run.run.id).unwrap().approval_wait_ms, 1);
         let (sender, receiver) = mpsc::channel();
-        assert_eq!(receive_run_approval(&db, &run.run.id, &receiver).unwrap_err(), "Approval request timed out");
+        assert_eq!(receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap_err(), "Approval request timed out");
         sender.send(true).unwrap();
-        assert!(receive_run_approval(&db, &run.run.id, &receiver).unwrap());
+        assert_eq!(receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap_err(), "Approval request timed out");
         rusqlite::Connection::open(path).unwrap().execute(
             "UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1", [&run.run.id],
         ).unwrap();
         sender.send(true).unwrap();
-        assert!(receive_run_approval(&db, &run.run.id, &receiver).unwrap_err().contains("hash mismatch"));
-        assert!(receive_run_approval(&db, "unknown-run", &receiver).is_err());
+        assert!(receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap_err().contains("hash mismatch"));
+        assert!(receive_run_approval(&db, "unknown-run", &approval_id, &receiver).is_err());
     }
 
     #[test]
@@ -5752,11 +5762,14 @@ mod frozen_approval_tests {
         let conversation = db.create_conversation("fox-general", Some("legacy budget"), None, None).unwrap();
         let run = db.create_run(&conversation.id, "legacy", None).unwrap();
         assert_eq!(db.run_time_budgets(&run.run.id).unwrap().approval_wait_ms, 300_000);
+        let approval_id = pending_approval(&db, &run.run.id);
         let (sender, receiver) = mpsc::channel();
+        sender.send(true).unwrap();
+        assert!(receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap());
         sender.send(false).unwrap();
-        assert!(!receive_run_approval(&db, &run.run.id, &receiver).unwrap());
+        assert!(!receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap());
         drop(sender);
-        assert_eq!(receive_run_approval(&db, &run.run.id, &receiver).unwrap_err(), "Approval request was interrupted");
+        assert_eq!(receive_run_approval(&db, &run.run.id, &approval_id, &receiver).unwrap_err(), "Approval request was interrupted");
     }
 }
 
@@ -5817,7 +5830,7 @@ fn request_declarative_hook_approval(
     drop(pending);
     let approval_id = approval.id.clone();
     let _ = app.emit("fox://approval-requested", approval);
-    let approval_result = receive_run_approval(database, run_id, &receiver);
+    let approval_result = receive_run_approval(database, run_id, &approval_id, &receiver);
     if let Ok(runtime_state) = state.lock() {
         if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
             pending.remove(&approval_id);
@@ -5902,7 +5915,7 @@ fn request_task_repair_override_approval(
     drop(pending);
     let approval_id = approval.id.clone();
     let _ = app.emit("fox://approval-requested", approval.clone());
-    let approval_result = receive_run_approval(database, run_id, &receiver);
+    let approval_result = receive_run_approval(database, run_id, &approval_id, &receiver);
     if let Ok(runtime_state) = state.lock() {
         if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
             pending.remove(&approval_id);
@@ -6265,7 +6278,7 @@ fn execute_mcp_tool_request(
                     );
                 let approval_id = approval.id.clone();
                 let _ = app.emit("fox://approval-requested", approval);
-                let approval_result = receive_run_approval(database, run_id, &receiver);
+                let approval_result = receive_run_approval(database, run_id, &approval_id, &receiver);
                 if let Ok(runtime_state) = state.lock() {
                     if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
                         pending.remove(&approval_id);
@@ -7588,7 +7601,7 @@ fn execute_host_tool_request(
                 );
             let approval_id = approval.id.clone();
             let _ = app.emit("fox://approval-requested", approval);
-            let approval_result = receive_run_approval(database, run_id, &receiver);
+            let approval_result = receive_run_approval(database, run_id, &approval_id, &receiver);
             if let Ok(runtime_state) = state.lock() {
                 if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
                     pending.remove(&approval_id);
@@ -7762,7 +7775,7 @@ fn execute_capability_tool_request(
                 );
             let approval_id = approval.id.clone();
             let _ = app.emit("fox://approval-requested", approval);
-            let approval_result = receive_run_approval(database, run_id, &receiver);
+            let approval_result = receive_run_approval(database, run_id, &approval_id, &receiver);
             if let Ok(runtime_state) = state.lock() {
                 if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
                     pending.remove(&approval_id);
