@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   createGraphReadonlyTools,
+  createGraphNodeReadTools,
   runReadonlyGraph,
   validateReadonlyGraph,
 } from '../src/graph-readonly-tools.mjs'
@@ -11,6 +12,37 @@ const graphPolicy = Object.freeze({
   maxNodes: 3,
   maxDepth: 1,
   writersAllowed: false,
+})
+
+test('graph node Rust reads retain scoped identity, bounds and no-fallback behavior', async () => {
+  const requests = []
+  const preflights = []
+  const preflight = async (id, tool, input, signal, metadata) => {
+    preflights.push({ id, metadata })
+    return { decision: 'allow', input, executionRoute: 'rust', permissionSnapshotId: 'frozen' }
+  }
+  const executeHost = async (type, payload, signal) => {
+    requests.push({ type, payload, signal })
+    return { type: 'tool.execute_completed', payload: { isError: false, result: { content: [{ type: 'text', text: payload.graphNodeId }] } } }
+  }
+  const first = createGraphNodeReadTools({ nodeId: 'first', parentToolCallId: 'parent', preflight, executeHost })
+  const second = createGraphNodeReadTools({ nodeId: 'second', parentToolCallId: 'parent', preflight, executeHost })
+  const controller = new AbortController()
+  const results = await Promise.all([first, second].map(tools => tools[0].execute('same-model-id', { path: 'not-on-disk.txt' }, controller.signal)))
+  assert.deepEqual(results.map(result => result.content[0].text), ['first', 'second'])
+  assert.notEqual(requests[0].payload.toolCallId, requests[1].payload.toolCallId)
+  assert.equal(requests[0].payload.toolCallId, preflights[0].id)
+  assert.equal(requests[1].payload.toolCallId, preflights[1].id)
+  assert.equal(requests[0].payload.parentToolCallId, 'parent')
+  assert.equal(requests[0].payload.nodeToolCallId, 'same-model-id')
+  assert.equal(requests[0].payload.permissionSnapshotId, 'frozen')
+  assert.equal(requests[0].signal, controller.signal)
+  for (let index = 1; index < 6; index++) await first[0].execute(`read-${index}`, { path: 'not-on-disk.txt' })
+  await assert.rejects(first[0].execute('seventh', { path: 'not-on-disk.txt' }), /limit 6/)
+  const failed = createGraphNodeReadTools({ nodeId: 'a', parentToolCallId: 'p', preflight,
+    executeHost: async () => ({ type: 'tool.execute_failed', payload: { error: 'denied by gateway' } }),
+  })
+  await assert.rejects(failed[0].execute('one', { path: 'not-on-disk.txt' }), /denied by gateway/)
 })
 
 function node(id, dependsOn = []) {

@@ -54,7 +54,7 @@ test('Rust reader routing keeps the frozen identity and never falls back on fail
   const preflight = async (_id, _tool, input) => ({ decision: 'allow', input, executionRoute: 'rust', permissionSnapshotId: 'sha256:frozen' })
   const tools = createReadOnlyTools(preflight, { executeHost: async (...args) => {
     calls.push(args)
-    return { type: 'tool.execute_completed', payload: { content: [{ type: 'text', text: 'host result' }], details: {} } }
+    return { type: 'tool.execute_completed', payload: { isError: false, result: { content: [{ type: 'text', text: 'host result' }], details: {} } } }
   } })
   const read = tools.find(tool => tool.name === 'read')
   const result = await read.execute('reader-1', { path: 'does-not-exist.txt' })

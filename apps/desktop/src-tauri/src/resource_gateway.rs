@@ -11,6 +11,19 @@ const MAX_CHARS: usize = 120_000;
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 
+#[derive(Clone, Copy)]
+struct ReadLimits { entries: usize, matches: usize, read_chars: usize, output_chars: usize, line_chars: usize }
+
+impl ReadLimits {
+    fn for_profile(profile: &str) -> Self {
+        if profile == "graph_readonly_preview" {
+            Self { entries: 1_000, matches: 50, read_chars: 24_000, output_chars: 24_000, line_chars: 1_000 }
+        } else {
+            Self { entries: MAX_ENTRIES, matches: MAX_MATCHES, read_chars: MAX_CHARS, output_chars: MAX_CHARS, line_chars: 8_000 }
+        }
+    }
+}
+
 pub fn is_reader(tool: &str) -> bool { matches!(tool, "read" | "ls" | "find" | "grep") }
 
 struct Gateway<'a> {
@@ -18,6 +31,7 @@ struct Gateway<'a> {
     cancellation: &'a CancellationToken,
     deadline: Instant,
     remaining_bytes: u64,
+    limits: ReadLimits,
 }
 
 impl Gateway<'_> {
@@ -85,12 +99,12 @@ impl Gateway<'_> {
         let mut queue = VecDeque::from([path.to_path_buf()]);
         let mut found = Vec::new();
         while let Some(directory) = queue.pop_front() {
-            let (entries, truncated) = self.entries(&directory, MAX_ENTRIES - found.len())?;
+            let (entries, truncated) = self.entries(&directory, self.limits.entries - found.len())?;
             for entry in entries {
                 if entry.directory { queue.push_back(entry.path.clone()); }
                 found.push(entry);
             }
-            if truncated || found.len() == MAX_ENTRIES { return Ok((found, truncated || !queue.is_empty())); }
+            if truncated || found.len() == self.limits.entries { return Ok((found, truncated || !queue.is_empty())); }
         }
         Ok((found, false))
     }
@@ -125,10 +139,10 @@ fn verify_opened_path(file: &File, requested: &Path, root: &Path) -> Result<(), 
 fn slice_utf16(text: &str, offset: usize, limit: usize) -> String {
     String::from_utf16_lossy(&text.encode_utf16().skip(offset).take(limit).collect::<Vec<_>>())
 }
-fn result(text: String, mut details: Value) -> Value {
+fn result(text: String, mut details: Value, max_chars: usize) -> Value {
     let length = text.encode_utf16().count();
-    details["outputTruncated"] = json!(length > MAX_CHARS);
-    json!({ "content": [{"type":"text", "text": slice_utf16(&text, 0, MAX_CHARS)}], "details": details })
+    details["outputTruncated"] = json!(length > max_chars);
+    json!({ "content": [{"type":"text", "text": slice_utf16(&text, 0, max_chars)}], "details": details })
 }
 
 pub fn execute(binding: &RunControlBinding, tool: &str, input: &Value, cancellation: &CancellationToken) -> Result<Value, String> {
@@ -138,19 +152,20 @@ pub fn execute(binding: &RunControlBinding, tool: &str, input: &Value, cancellat
     }
     let approved = crate::tool_guard::approve_read_only_tool(tool, input, binding.permission.project_root.as_deref())?;
     let root = Path::new(binding.permission.project_root.as_deref().ok_or("missing frozen project root")?).canonicalize().map_err(|error| error.to_string())?;
-    let mut gateway = Gateway { root, cancellation, deadline: Instant::now() + Duration::from_millis(binding.budgets.tool_execution_ms as u64), remaining_bytes: MAX_SCAN_BYTES };
+    let limits = ReadLimits::for_profile(&binding.execution_profile_id);
+    let mut gateway = Gateway { root, cancellation, deadline: Instant::now() + Duration::from_millis(binding.budgets.tool_execution_ms as u64), remaining_bytes: MAX_SCAN_BYTES, limits };
     gateway.check()?;
     let path = approved.resolved_path;
     if tool == "read" {
         let text = gateway.text(&path)?;
         let offset = input.get("offset").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as usize;
-        let limit = input.get("limit").and_then(Value::as_f64).filter(|v| *v != 0.0).unwrap_or(MAX_CHARS as f64).clamp(1.0, MAX_CHARS as f64) as usize;
+        let limit = input.get("limit").and_then(Value::as_f64).filter(|v| *v != 0.0).unwrap_or(limits.read_chars as f64).clamp(1.0, limits.read_chars as f64) as usize;
         let truncated = offset.saturating_add(limit) < text.encode_utf16().count();
-        return Ok(result(slice_utf16(&text, offset, limit), json!({"path":path,"truncated":truncated})));
+        return Ok(result(slice_utf16(&text, offset, limit), json!({"path":path,"truncated":truncated}), limits.output_chars));
     }
     if tool == "ls" {
-        let (entries, truncated) = gateway.entries(&path, MAX_ENTRIES)?;
-        return Ok(result(entries.iter().map(|e| format!("{} {}", if e.directory {"[dir]"} else {"[file]"}, e.name)).collect::<Vec<_>>().join("\n"), json!({"path":path,"count":entries.len(),"truncated":truncated})));
+        let (entries, truncated) = gateway.entries(&path, limits.entries)?;
+        return Ok(result(entries.iter().map(|e| format!("{} {}", if e.directory {"[dir]"} else {"[file]"}, e.name)).collect::<Vec<_>>().join("\n"), json!({"path":path,"count":entries.len(),"truncated":truncated}), limits.output_chars));
     }
     let needle = input.get("pattern").and_then(Value::as_str).unwrap_or_default().to_lowercase();
     let (entries, scan_truncated) = gateway.walk(&path)?;
@@ -159,7 +174,7 @@ pub fn execute(binding: &RunControlBinding, tool: &str, input: &Value, cancellat
         for entry in entries {
             gateway.check()?;
             if entry.name.to_lowercase().contains(&needle) { matches.push(entry.path.to_string_lossy().into_owned()); }
-            if matches.len() == MAX_MATCHES { break; }
+            if matches.len() == limits.matches { break; }
         }
     } else {
         for entry in entries.into_iter().filter(|e| !e.directory) {
@@ -168,14 +183,14 @@ pub fn execute(binding: &RunControlBinding, tool: &str, input: &Value, cancellat
                 gateway.check()?;
                 let line = line.strip_suffix('\r').unwrap_or(line);
                 if line.to_lowercase().contains(&needle) {
-                    matches.push(format!("{}:{}:{}",entry.path.display(),index+1,slice_utf16(line,0,8_000)));
+                    matches.push(format!("{}:{}:{}",entry.path.display(),index+1,slice_utf16(line,0,limits.line_chars)));
                 }
-                if matches.len() == MAX_MATCHES { break; }
+                if matches.len() == limits.matches { break; }
             }
-            if matches.len() == MAX_MATCHES { break; }
+            if matches.len() == limits.matches { break; }
         }
     }
-    Ok(result(matches.join("\n"), json!({"count":matches.len(),"scanTruncated":scan_truncated,"matchLimitReached":matches.len()==MAX_MATCHES})))
+    Ok(result(matches.join("\n"), json!({"count":matches.len(),"scanTruncated":scan_truncated,"matchLimitReached":matches.len()==limits.matches}), limits.output_chars))
 }
 
 #[cfg(test)]
@@ -213,6 +228,23 @@ mod tests {
         let searched = execute(&binding, "grep", &json!({"path":".","pattern":"fox"}), &token).unwrap();
         assert_eq!(searched["details"]["count"], 2);
         assert!(searched["content"][0]["text"].as_str().unwrap().contains(":2:second Fox line"));
+    }
+
+    #[test]
+    fn graph_profile_keeps_stricter_read_match_and_output_limits() {
+        let (mut binding, _, token) = fixture();
+        binding.execution_profile_id = "graph_readonly_preview".into();
+        let file = Path::new(binding.permission.project_root.as_ref().unwrap()).join("large.txt");
+        fs::write(&file, "x".repeat(30_000)).unwrap();
+        let read = execute(&binding, "read", &json!({"path":file,"limit":120_000}), &token).unwrap();
+        assert_eq!(read["content"][0]["text"].as_str().unwrap().len(), 24_000);
+        assert_eq!(read["details"]["truncated"], true);
+        fs::write(&file, format!("{}\n", "x".repeat(2_000)).repeat(100)).unwrap();
+        let grep = execute(&binding, "grep", &json!({"path":".","pattern":"x"}), &token).unwrap();
+        assert_eq!(grep["details"]["count"], 50);
+        assert_eq!(grep["details"]["matchLimitReached"], true);
+        assert_eq!(grep["details"]["outputTruncated"], true);
+        assert!(grep["content"][0]["text"].as_str().unwrap().encode_utf16().count() <= 24_000);
     }
 
     #[test]

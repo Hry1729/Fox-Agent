@@ -3500,7 +3500,8 @@ impl RuntimeHost {
                             .and_then(Value::as_str)
                             .filter(|value| !value.trim().is_empty())
                             .ok_or_else(|| "tool request is missing toolCallId".to_owned())?;
-                        let raw_input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+                        let raw_input = if readonly_execution { payload.get("originalInput").or_else(|| payload.get("input")) } else { payload.get("input") }
+                            .cloned().unwrap_or_else(|| json!({}));
                         let input = if tool == "task_repair_escalate_start" {
                             work_tools::canonicalize_task_repair_override_request(&raw_input)
                                 .map_err(|error| error.to_string())?
@@ -7456,10 +7457,26 @@ fn require_rust_reader_binding(database: &Database, envelope: &RuntimeEnvelope) 
     let payload = envelope.payload.as_ref().ok_or("reader request has no payload")?;
     let binding = database.run_control_binding(run_id)?.ok_or("reader request has no frozen control binding")?;
     if envelope.conversation_id.as_deref() != Some(binding.conversation_id.as_str())
+        || binding.authority != fox_engine_protocol::ExecutionAuthority::Legacy
+        || binding.engine_id != "pi"
         || binding.read_only_executor != fox_engine_protocol::ResourceExecutor::Rust
         || !payload.get("tool").and_then(Value::as_str).is_some_and(crate::resource_gateway::is_reader)
         || payload.get("permissionSnapshotId").and_then(Value::as_str) != Some(binding.permission_snapshot_id.as_str()) {
         return Err("reader identity, executor or permission snapshot does not match the frozen Run".into());
+    }
+    if payload.get("observationScope").is_some() || payload.get("parentToolCallId").is_some() {
+        let parent_id = payload.get("parentToolCallId").and_then(Value::as_str).ok_or("nested reader has no parent identity")?;
+        let node_id = payload.get("graphNodeId").and_then(Value::as_str).ok_or("nested reader has no node identity")?;
+        let raw_id = payload.get("nodeToolCallId").and_then(Value::as_str).filter(|id| !id.trim().is_empty()).ok_or("nested reader has no local tool identity")?;
+        let parent = database.get_runtime_tool_call(run_id, parent_id)?.ok_or("nested reader parent is missing")?;
+        let expected_id = format!("graph-read:{}", hex::encode(Sha256::digest(serde_json::to_vec(&[parent_id, node_id, raw_id]).map_err(|e| e.to_string())?)));
+        if payload.get("observationScope").and_then(Value::as_str) != Some("nested")
+            || binding.execution_profile_id != "graph_readonly_preview"
+            || parent.tool_name != "graph_readonly_run" || parent.execution_location != "runtime" || parent.status != "running"
+            || !parent.input.get("nodes").and_then(Value::as_array).is_some_and(|nodes| nodes.iter().any(|node| node.get("id").and_then(Value::as_str) == Some(node_id)))
+            || payload.get("toolCallId").and_then(Value::as_str) != Some(expected_id.as_str()) {
+            return Err("nested reader does not belong to the running frozen graph node".into());
+        }
     }
     Ok(binding)
 }
@@ -7496,11 +7513,7 @@ fn execute_host_tool_request(
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
     if envelope.r#type == "tool.readonly_execute" {
-        let binding = require_rust_reader_binding(database, envelope)?;
-        let call = create_fresh_host_tool_call(database, run_id, tool_call_id, tool, &input, "running", false)?;
-        if let HostToolCallExecution::Replay(response) = call { return Ok(response); }
-        let outcome = crate::resource_gateway::execute(&binding, tool, &input, &cancellation);
-        return finalize_host_tool_execution(database, run_id, tool_call_id, tool, &input, Vec::new(), outcome);
+        return execute_rust_reader_request(database, envelope, &cancellation);
     }
     if let Some(response) =
         inspect_existing_host_tool_call(database, run_id, tool_call_id, tool, &input)?
@@ -7610,6 +7623,41 @@ fn execute_host_tool_request(
         outcome,
     )
 }
+
+/// Shared production executor seam. Admission is checked again here, before
+/// creating a durable tool row or opening any resource; tests exercise this
+/// same path over a real Pi JSONL process without needing a Tauri window.
+fn execute_rust_reader_request(
+    database: &Database,
+    envelope: &RuntimeEnvelope,
+    cancellation: &crate::kernel::CancellationToken,
+) -> Result<Value, String> {
+    cancellation.check()?;
+    let binding = require_rust_reader_binding(database, envelope)?;
+    let payload = envelope.payload.as_ref().ok_or("reader payload is missing")?;
+    let tool_call_id = payload.get("toolCallId").and_then(Value::as_str).ok_or("reader tool identity is missing")?;
+    let tool = payload.get("tool").and_then(Value::as_str).ok_or("reader tool is missing")?;
+    let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    let record_input = payload.get("originalInput").cloned().unwrap_or_else(|| input.clone());
+    let call = create_fresh_host_tool_call(database, &binding.run_id, tool_call_id, tool, &record_input, "running", false)?;
+    if let HostToolCallExecution::Replay(response) = call { return Ok(response); }
+    let outcome = (|| {
+        if payload.get("originalInput").is_some() {
+            let mut original = record_input.clone();
+            let object = original.as_object_mut().ok_or("reader original input is not an object")?;
+            if tool != "read" && object.get("path").and_then(Value::as_str).unwrap_or_default().trim().is_empty() {
+                object.insert("path".into(), json!("."));
+            }
+            let approved = crate::tool_guard::approve_read_only_tool(tool, &original, binding.permission.project_root.as_deref())?;
+            if approved.input != input { return Err("reader prepared input differs from the frozen source arguments".into()); }
+        }
+        crate::resource_gateway::execute(&binding, tool, &input, cancellation)
+    })();
+    finalize_host_tool_execution(database, &binding.run_id, tool_call_id, tool, &record_input, Vec::new(), outcome)
+}
+
+#[cfg(test)]
+mod resource_gateway_tests;
 
 fn execute_capability_tool_request(
     app: &AppHandle,

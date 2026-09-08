@@ -20,12 +20,13 @@ export function createReadOnlyTools(requestPreflight, { limits, executeHost } = 
     if (route === 'rust') {
       if (typeof executeHost !== 'function' || !approved.permissionSnapshotId) throw new Error('Frozen Rust reader route is unavailable.')
       const response = await executeHost('tool.readonly_execute', {
-        toolCallId, tool, input: approved.input, permissionSnapshotId: approved.permissionSnapshotId,
+        toolCallId, tool, input: approved.input, originalInput: params ?? {}, permissionSnapshotId: approved.permissionSnapshotId,
       }, signal)
-      if (!response?.payload || response.payload.isError || response.type === 'tool.execute_failed') {
+      if (response?.type !== 'tool.execute_completed' || response.payload?.isError
+          || !Array.isArray(response.payload?.result?.content)) {
         throw new Error(response?.payload?.error || 'Rust resource gateway rejected the operation.')
       }
-      return response.payload
+      return response.payload.result
     }
     if (route !== 'runtime') throw new Error(`Unknown frozen read-only execution route: ${route}`)
     return executeReadOnlyTool(tool, approved.input, { signal, limits })

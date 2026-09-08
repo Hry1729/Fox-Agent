@@ -452,6 +452,7 @@ async function executePrompt(request) {
       modelRuntime,
       modelProfile,
       preflight,
+      executeHost: hostRequest,
       context: planningContext,
     }),
     ...createHostTools(hostRequest),

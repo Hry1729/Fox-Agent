@@ -1,4 +1,5 @@
 import { Type } from 'typebox'
+import { createHash } from 'node:crypto'
 import {
   DefaultResourceLoader,
   SessionManager,
@@ -305,6 +306,25 @@ export async function runReadonlyGraph({ nodes, graphPolicy, signal, runNode }) 
   }
 }
 
+export function createGraphNodeReadTools({ nodeId, parentToolCallId, preflight, executeHost }) {
+  let toolCalls = 0
+  const scopedId = toolCallId => `graph-read:${createHash('sha256').update(JSON.stringify([parentToolCallId, nodeId, toolCallId])).digest('hex')}`
+  const metadata = { observationScope: 'nested', parentToolCallId, graphNodeId: nodeId }
+  const boundedPreflight = (toolCallId, tool, input, signal) => {
+    toolCalls += 1
+    if (toolCalls > MAX_NODE_TOOL_CALLS) {
+      return Promise.resolve({ decision: 'block', message: `Graph node tool limit ${MAX_NODE_TOOL_CALLS} reached.` })
+    }
+    return preflight(scopedId(toolCallId), tool, input, signal, { ...metadata, nodeToolCallId: toolCallId })
+  }
+  return createReadOnlyTools(boundedPreflight, {
+    limits: GRAPH_READ_LIMITS,
+    executeHost: typeof executeHost === 'function' ? (type, payload, signal) => executeHost(type, {
+      ...payload, ...metadata, nodeToolCallId: payload.toolCallId, toolCallId: scopedId(payload.toolCallId),
+    }, signal) : undefined,
+  })
+}
+
 async function runReadonlyNodeAgent({
   node,
   dependencyResults,
@@ -314,21 +334,11 @@ async function runReadonlyNodeAgent({
   modelRuntime,
   modelProfile,
   preflight,
+  executeHost,
   context,
   parentToolCallId,
 }) {
-  let toolCalls = 0
-  const boundedPreflight = (toolCallId, tool, input, toolSignal) => {
-    toolCalls += 1
-    if (toolCalls > MAX_NODE_TOOL_CALLS) {
-      return Promise.resolve({ decision: 'block', message: `Graph node tool limit ${MAX_NODE_TOOL_CALLS} reached.` })
-    }
-    return preflight(toolCallId, tool, input, toolSignal, {
-      observationScope: 'nested',
-      parentToolCallId,
-    })
-  }
-  const tools = adaptFoxToolsToPi(createReadOnlyTools(boundedPreflight, { limits: GRAPH_READ_LIMITS }))
+  const tools = adaptFoxToolsToPi(createGraphNodeReadTools({ nodeId: node.id, parentToolCallId, preflight, executeHost }))
   const settingsManager = SettingsManager.inMemory({
     compaction: { enabled: true, reserveTokens: 2_048, keepRecentTokens: 4_096 },
     retry: {
@@ -412,6 +422,7 @@ export function createGraphReadonlyTools({
   modelRuntime,
   modelProfile,
   preflight,
+  executeHost,
   context,
   runNode,
 }) {
@@ -436,6 +447,7 @@ export function createGraphReadonlyTools({
           modelRuntime,
           modelProfile,
           preflight,
+          executeHost,
           context,
           parentToolCallId: toolCallId,
         })),
