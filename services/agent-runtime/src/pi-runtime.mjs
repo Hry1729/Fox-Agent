@@ -10,6 +10,7 @@ import {
   registerFauxProvider,
 } from './pi-adapter.mjs'
 import { createEnvelope, PROTOCOL_NAME, PROTOCOL_VERSION, validateEnvelope } from './protocol.mjs'
+import { validatePromptControl } from './control-binding.mjs'
 import { createPiEventMapper, sanitizeAssistantHistory } from './pi-event-mapper.mjs'
 import { createReadOnlyTools } from './read-only-tools.mjs'
 import { createGraphReadonlyTools } from './graph-readonly-tools.mjs'
@@ -791,11 +792,17 @@ async function handleRequest(request) {
         respond(request, 'session_created', { runtimeSessionId: request.runtimeSessionId })
         break
       }
-      case 'prompt':
+      case 'prompt': {
         if (!modelService) throw new Error('Runtime has not been initialized.')
+        const frozenProject = validatePromptControl(request, executionProfile.id)
+        const session = currentSession(request)
+        if (session.conversationId !== request.conversationId) throw new Error('Runtime session belongs to another conversation')
+        if (activeRuns.has(request.runId)) throw new Error('Run is already active')
+        if (frozenProject) request.payload.projectContext = frozenProject
         respond(request, 'request_succeeded')
         void executePrompt(request)
         break
+      }
       case 'cancel': {
         const run = activeRuns.get(request.runId)
         if (run) {

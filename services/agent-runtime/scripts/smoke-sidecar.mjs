@@ -1,4 +1,6 @@
 import { access, mkdtemp, rm } from 'node:fs/promises'
+import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -76,12 +78,27 @@ try {
   await waitFor((message) => message.requestId === createSession.id && message.type === 'session_created')
 
   const runId = 'sidecar-smoke-run'
+  const permission = { mode: 'ask', projectRoot: null, grants: [] }
+  const controlBinding = {
+    schemaVersion: 1, runId, conversationId, engineId: 'pi', executionProfileId: 'legacy',
+    authority: 'legacy', readOnlyExecutor: 'runtime', permission,
+    permissionSnapshotId: `sha256:${createHash('sha256').update(JSON.stringify(permission)).digest('hex')}`,
+    budgets: { modelRequestMs: 120_000, toolExecutionMs: 600_000, runExecutionMs: 1_800_000, approvalWaitMs: 300_000 },
+  }
+  const rejected = send('prompt', {
+    conversationId, runtimeSessionId, runId,
+    payload: { text: 'Must not execute with a different engine.', controlBinding: { ...controlBinding, engineId: 'codex' } },
+  })
+  const rejection = await waitFor(message => message.requestId === rejected.id)
+  assert.equal(rejection.type, 'request_failed')
+  assert.equal(messages.some(message => message.runId === runId && message.type === 'runtime_event'), false)
   send('prompt', {
     conversationId,
     runtimeSessionId,
     runId,
     payload: {
       text: 'Verify the compiled Fox Runtime.',
+      controlBinding,
       messages: [{ role: 'user', content: 'Verify the compiled Fox Runtime.' }],
     },
   })

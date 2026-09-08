@@ -1836,8 +1836,10 @@ impl RuntimeHost {
             }
         };
         if control_binding.authority != fox_engine_protocol::ExecutionAuthority::Legacy
+            || control_binding.engine_id != "pi"
+            || control_binding.conversation_id != started.run.conversation_id
             || control_binding.execution_profile_id != execution_profile.id() {
-            return Err("Legacy startup cannot replace the frozen Run authority/profile".into());
+            return Err("Legacy startup cannot replace the frozen Run engine/authority/profile/conversation".into());
         }
         let project_context = json!({
             "projectRoot": control_binding.permission.project_root,
