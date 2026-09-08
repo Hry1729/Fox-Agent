@@ -57,6 +57,7 @@ test('creates immutable typed fragments with stable schema and content hashes', 
   assert.match(typedContextSchemaHash(), /^[a-f0-9]{64}$/)
   assert.ok(supportedTypedContextKinds().includes('user_message'))
   assert.ok(supportedTypedContextKinds().includes('untrusted_evidence'))
+  assert.ok(supportedTypedContextKinds().includes('skills'))
 })
 
 test('renders the legacy Fox XML shape without allowing raw-string bypasses', () => {

@@ -160,6 +160,7 @@ test('pauses a tool until the host returns a preflight decision', async (context
 
   const preflight = await runtime.waitFor((message) => message.kind === 'request' && message.type === 'tool.preflight')
   assert.equal(preflight.payload.tool, 'read')
+  assert.equal(preflight.payload.toolCallId, 'fake-tool-probe')
   runtime.respond(preflight, 'tool.preflight_allowed', {
     decision: 'allow',
     tool: 'read',

@@ -50,17 +50,17 @@ export const ConversationAutoScroll = ({
     let firstFrame = 0;
     let secondFrame = 0;
     const timers: number[] = [];
-    const ensureVisible = () => {
-      void scrollToBottom({ animation: "instant", ignoreEscapes: true });
+    const ensureVisible = (preserveScrollPosition = false) => {
+      void scrollToBottom({ animation: "instant", preserveScrollPosition });
     };
 
     ensureVisible();
     firstFrame = window.requestAnimationFrame(() => {
-      ensureVisible();
-      secondFrame = window.requestAnimationFrame(ensureVisible);
+      ensureVisible(true);
+      secondFrame = window.requestAnimationFrame(() => ensureVisible(true));
     });
-    timers.push(window.setTimeout(ensureVisible, 80));
-    timers.push(window.setTimeout(ensureVisible, 220));
+    timers.push(window.setTimeout(() => ensureVisible(true), 80));
+    timers.push(window.setTimeout(() => ensureVisible(true), 220));
 
     return () => {
       window.cancelAnimationFrame(firstFrame);
@@ -70,6 +70,11 @@ export const ConversationAutoScroll = ({
   }, [scrollKey, scrollToBottom]);
 
   return null;
+};
+
+export const ConversationViewportState = () => {
+  const { isAtBottom } = useStickToBottomContext();
+  return <span data-conversation-at-bottom={isAtBottom ? "true" : "false"} hidden />;
 };
 
 export type ConversationEmptyStateProps = ComponentProps<"div"> & {

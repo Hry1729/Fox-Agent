@@ -3,6 +3,7 @@ export const FOX_TOOL_DEFINITION_VERSION = 1
 const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/
 const EXECUTION_MODES = new Set(['runtime', 'host'])
 const TOOL_EXECUTION_MODES = new Set(['sequential', 'parallel'])
+const MAX_MODEL_VISIBLE_RESULT_CHARS = 120_000
 const PI_COMPATIBLE_OPTIONAL_FIELDS = [
   'promptSnippet',
   'promptGuidelines',
@@ -78,6 +79,72 @@ function ensureUniqueNames(tools) {
   }
 }
 
+function isPiContentBlock(block) {
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return false
+  if (block.type === 'text') return typeof block.text === 'string'
+  if (block.type === 'image') return typeof block.data === 'string'
+  return false
+}
+
+function isPiToolResult(result) {
+  return Boolean(
+    result
+    && typeof result === 'object'
+    && !Array.isArray(result)
+    && Array.isArray(result.content)
+    && result.content.every(isPiContentBlock),
+  )
+}
+
+function stringifyToolResult(result) {
+  if (typeof result === 'string') return result
+  if (result === undefined) return 'Tool completed successfully without a return value.'
+
+  const seen = new WeakSet()
+  try {
+    const serialized = JSON.stringify(result, (_key, value) => {
+      if (typeof value === 'bigint') return value.toString()
+      if (value && typeof value === 'object') {
+        if (seen.has(value)) return '[Circular]'
+        seen.add(value)
+      }
+      return value
+    })
+    return serialized ?? String(result)
+  } catch (error) {
+    return `[Tool result could not be serialized: ${error instanceof Error ? error.message : String(error)}]`
+  }
+}
+
+function jsonSafeToolDetails(result, serialized) {
+  if (result === undefined) return { kind: 'undefined' }
+  if (typeof result === 'string') return result
+  try {
+    return JSON.parse(serialized)
+  } catch {
+    return String(result)
+  }
+}
+
+function normalizeFoxToolResultForPi(result) {
+  if (isPiToolResult(result)) {
+    return result.details === undefined ? { ...result, details: {} } : result
+  }
+
+  const serialized = stringifyToolResult(result)
+  const outputTruncated = serialized.length > MAX_MODEL_VISIBLE_RESULT_CHARS
+  const text = outputTruncated
+    ? `${serialized.slice(0, MAX_MODEL_VISIBLE_RESULT_CHARS)}\n[Tool result truncated]`
+    : serialized
+  return {
+    content: [{ type: 'text', text }],
+    details: {
+      ...(outputTruncated ? {} : { structuredResult: jsonSafeToolDetails(result, serialized) }),
+      outputTruncated,
+    },
+  }
+}
+
 export function defineFoxTool(definition, metadata) {
   validateToolShape(definition)
   const optionalFields = Object.fromEntries(
@@ -120,7 +187,7 @@ export function adaptFoxToolToPi(tool) {
     label: tool.label,
     description: tool.description,
     parameters: tool.parameters,
-    execute: tool.execute,
+    execute: async (...args) => normalizeFoxToolResultForPi(await tool.execute(...args)),
     ...optionalFields,
   }
 }

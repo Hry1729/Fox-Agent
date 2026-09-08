@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, ChevronRight, Copy, Download, FileText, FolderOpen, Link2, ListTree, LoaderCircle, LogIn, Maximize2, MessageSquare, Minus, MonitorUp, MoreHorizontal, Network, Plus, RotateCcw, Search, Server, Sparkles, X } from 'lucide-react'
-import { toast } from 'sonner'
+import { notify as toast } from '@/features/notifications'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
@@ -105,20 +105,10 @@ export function KnowledgeDetailPage({ sidebarCollapsed, onSidebar, navigate, onA
     if (!selectedDocument) return
     const result = await resource.downloadDocument(selectedDocument.id, selectedDocument.name)
     if (result) toast.success(`已下载 ${result.filename}`, {
-      className: 'fox-download-complete-toast',
       description: result.path,
-      action: result.canOpenDirectly ? {
-        label: '打开文件',
-        onClick: () => void openDownloadedFile(result.path, false),
-      } : {
-        label: '打开所在文件夹',
-        onClick: () => void openDownloadedFile(result.path, true),
-      },
-      cancel: result.canOpenDirectly ? {
-        label: '打开所在文件夹',
-        onClick: () => void openDownloadedFile(result.path, true),
-      } : undefined,
-      duration: 12_000,
+      sourceType: 'knowledge_download',
+      sourceId: selectedDocument.id,
+      localFile: { path: result.path, canOpenDirectly: result.canOpenDirectly },
     })
   }
   const openDownloadedFile = async (path: string, reveal: boolean) => {
@@ -142,7 +132,6 @@ export function KnowledgeDetailPage({ sidebarCollapsed, onSidebar, navigate, onA
         maxBytes: MAX_LOCAL_OPEN_BYTES,
       })
       await desktopClient.openKnowledgePreviewCache(source.cacheKey)
-      toast.success(`已使用本机应用打开 ${selectedDocument.name}`)
     } catch (cause) {
       toast.error('无法使用本机应用打开文件', {
         description: cause instanceof Error ? cause.message : String(cause),
@@ -156,7 +145,6 @@ export function KnowledgeDetailPage({ sidebarCollapsed, onSidebar, navigate, onA
     if (!selectedDocument) return
     setPreviewRevision((value) => value + 1)
     void resource.openDocument(selectedDocument.id)
-    toast.success('正在重新加载预览', { description: selectedDocument.name })
   }
   const copySelectedDocumentInfo = async () => {
     if (!selectedDocument) return

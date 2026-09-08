@@ -1,5 +1,6 @@
 use crate::model_service::{
-    api_key_configured, clear_api_key, get_api_key, normalize_model_base_url, set_api_key,
+    api_key_configured, clear_api_key, get_api_key, normalize_model_base_url, normalize_model_id,
+    set_api_key,
 };
 use crate::yuxi::{
     access_token_configured, clear_access_token, get_access_token, normalize_base_url,
@@ -39,10 +40,11 @@ use crate::{
         SaveModelServiceRequest, SaveUserProfileRequest, SaveYuxiServiceRequest,
         SetGoalRunningRequest, SetGoalRunningResult, SetMemoryEnabledRequest,
         SetSkillEnabledRequest, SkillRecord, StartRunRequest, StartRunResult,
-        TestModelServiceRequest, TestYuxiServiceRequest, UpdateConversationPinnedRequest,
-        UpdateLifecycleHookEnabledRequest, UpdateMcpServerEnabledRequest, UpdateMemoryRequest,
-        UpdateProjectPermissionRequest, UsageStatistics, UserProfileRecord, YuxiAgentRecord,
-        YuxiConnectionTest, YuxiLoginRequest, YuxiModelRecord, YuxiServiceRecord, YuxiUserRecord,
+        TestModelServiceRequest, TestYuxiServiceRequest, UpdateConversationPermissionRequest,
+        UpdateConversationPinnedRequest, UpdateLifecycleHookEnabledRequest,
+        UpdateMcpServerEnabledRequest, UpdateMemoryRequest, UpdateProjectPermissionRequest,
+        UsageStatistics, UserProfileRecord, YuxiAgentRecord, YuxiConnectionTest, YuxiLoginRequest,
+        YuxiModelRecord, YuxiServiceRecord, YuxiUserRecord,
     },
     runtime_host::{RuntimeDiagnostics, RuntimeStatus},
     work_mode_gate::{self, ResolveWorkModeConfirmationRequest, WorkModeDecision},
@@ -1388,6 +1390,21 @@ pub fn project_permission_update(
         Ok(Some(project)) => ApiResponse::success(project),
         Ok(None) => ApiResponse::failure("project.not_found", "未找到项目", false),
         Err(error) => ApiResponse::failure("project.invalid_permission_mode", error, false),
+    }
+}
+
+#[tauri::command]
+pub fn conversation_permission_update(
+    state: State<'_, AppState>,
+    request: UpdateConversationPermissionRequest,
+) -> ApiResponse<ConversationSummary> {
+    match state
+        .database
+        .update_conversation_permission_mode(&request.conversation_id, &request.permission_mode)
+    {
+        Ok(Some(conversation)) => ApiResponse::success(conversation),
+        Ok(None) => ApiResponse::failure("conversation.not_found", "未找到对话", false),
+        Err(error) => ApiResponse::failure("conversation.invalid_permission_mode", error, false),
     }
 }
 
@@ -4874,7 +4891,7 @@ pub fn model_provider_save(
     let provider_id = request.id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let mut models = Vec::new();
     for (index, model) in request.models.into_iter().enumerate() {
-        let model_id = model.model_id.trim();
+        let model_id = normalize_model_id(&base_url, &model.model_id);
         if model_id.is_empty()
             || !(1_024..=4_000_000).contains(&model.context_window)
             || !(256..=262_144).contains(&model.max_output_tokens)
@@ -4887,9 +4904,9 @@ pub fn model_provider_save(
         }
         models.push(ProviderModelRecord {
             id: model.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
-            model_id: model_id.to_owned(),
+            model_id: model_id.clone(),
             display_name: if model.display_name.trim().is_empty() {
-                model_id.to_owned()
+                model_id.clone()
             } else {
                 model.display_name.trim().to_owned()
             },
@@ -5012,8 +5029,8 @@ pub fn model_service_save(
     request: SaveModelServiceRequest,
 ) -> ApiResponse<ModelServiceRecord> {
     let name = request.name.trim();
-    let model_id = request.model_id.trim();
-    if name.is_empty() || model_id.is_empty() {
+    let raw_model_id = request.model_id.trim();
+    if name.is_empty() || raw_model_id.is_empty() {
         return ApiResponse::failure("model.invalid_config", "服务名称和模型 ID 不能为空", false);
     }
     if !matches!(
@@ -5035,6 +5052,7 @@ pub fn model_service_save(
         Ok(url) => url,
         Err(error) => return ApiResponse::failure("model.invalid_url", error, false),
     };
+    let model_id = normalize_model_id(&base_url, raw_model_id);
     if let Err(error) = state.runtime_host.reload_configuration() {
         return ApiResponse::failure("model.runtime_busy", error, true);
     }
@@ -5055,7 +5073,7 @@ pub fn model_service_save(
     let record = ModelServiceRecord {
         name: name.to_owned(),
         base_url,
-        model_id: model_id.to_owned(),
+        model_id,
         api_type: request.api_type,
         context_window: request.context_window,
         max_output_tokens: request.max_output_tokens,

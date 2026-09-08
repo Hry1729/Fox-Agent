@@ -364,6 +364,7 @@ pub struct ConversationSummary {
     pub title: String,
     pub project_id: Option<String>,
     pub project_root: Option<String>,
+    pub permission_mode: String,
     pub status: String,
     pub pinned: bool,
     pub archived: bool,
@@ -1944,6 +1945,13 @@ pub struct GoalIdRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateProjectPermissionRequest {
     pub project_id: String,
+    pub permission_mode: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateConversationPermissionRequest {
+    pub conversation_id: String,
     pub permission_mode: String,
 }
 

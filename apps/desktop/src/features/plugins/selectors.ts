@@ -26,9 +26,9 @@ export function countInstalledPlugins(cards: PluginCardView[]): number {
 }
 
 export function pluginKindLabel(kind: PluginKind): string {
-  if (kind === 'mcp') return 'MCP 服务'
-  if (kind === 'skill') return 'Skills'
-  return '工具'
+  if (kind === 'mcp') return '连接器'
+  if (kind === 'skill') return '技能'
+  return '内置工具'
 }
 
 export function pluginOriginLabel(origin: PluginCardView['origin']): string {

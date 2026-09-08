@@ -750,7 +750,7 @@ fn compiled_manifest(package: &ValidatedPackage) -> Value {
         .filter(|reference| reference.source == "local")
         .map(|reference| reference.id.clone())
         .collect::<Vec<_>>();
-    json!({
+    let mut manifest = json!({
         "version": package.package.version,
         "manifestSchemaVersion": package.package.schema_version,
         "packageId": package.package.id,
@@ -766,7 +766,25 @@ fn compiled_manifest(package: &ValidatedPackage) -> Value {
         },
         "workflow": package.package.workflow,
         "team": package.package.team,
-    })
+    });
+    // Optional, hash-covered Fox binding metadata. It cannot grant resources:
+    // knowledge is still intersected with the conversation and tools with Host.
+    if let Some(file) = package.package.files.get("./fox/bindings.json") {
+        if let Ok(bindings) = serde_json::from_str::<Value>(&file.content) {
+            if bindings["inheritConversationKnowledge"] == true {
+                if let Some(object) = manifest.as_object_mut() {
+                    object.remove("knowledge");
+                    object.remove("knowledgeReferences");
+                }
+            }
+            if let Some(tools) = bindings["officeTools"].as_array() {
+                manifest["officeTools"] = json!(tools.iter().filter_map(Value::as_str)
+                    .filter(|name| crate::office::tool_definitions().iter().any(|tool| tool["name"] == *name))
+                    .collect::<Vec<_>>());
+            }
+        }
+    }
+    manifest
 }
 
 fn install_request(
@@ -801,6 +819,11 @@ fn install_request(
         enabled_skills: package.package.resources.skills.clone(),
         expected_current_hash,
     }
+}
+
+pub(crate) fn bundled_install_request(raw: Value) -> Result<InstallExpertPackageVersionRequest, String> {
+    let package = parse_package(raw).map_err(|error| format!("Invalid bundled expert: {error:?}"))?;
+    Ok(install_request(&package, None))
 }
 
 #[tauri::command]

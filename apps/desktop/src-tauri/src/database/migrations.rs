@@ -5682,6 +5682,431 @@ ADD COLUMN sound_id TEXT NOT NULL DEFAULT 'soft'
     CHECK(sound_id IN ('soft', 'chime', 'pop', 'signal'));
 "#;
 
+// Some databases recorded v36 before the Graph cascade-delete sentinel was added
+// to that migration. Later Graph triggers still reference the sentinel, so deleting
+// any Goal fails with "no such table: main.work_graph_cascade_delete_scopes".
+// Repair the missing object under a new version and reinstall the four scope
+// triggers so both Goal and Conversation cascades remain atomic.
+const MIGRATION_42: &str = r#"
+CREATE TABLE IF NOT EXISTS work_graph_cascade_delete_scopes (
+    goal_id TEXT PRIMARY KEY CHECK(length(trim(goal_id)) BETWEEN 1 AND 200),
+    conversation_id TEXT NOT NULL CHECK(length(trim(conversation_id)) BETWEEN 1 AND 200),
+    opened_at INTEGER NOT NULL CHECK(opened_at >= 0)
+);
+
+DROP TRIGGER IF EXISTS goals_open_work_graph_cascade_delete_scope;
+CREATE TRIGGER goals_open_work_graph_cascade_delete_scope
+BEFORE DELETE ON goals
+FOR EACH ROW
+WHEN EXISTS (SELECT 1 FROM work_graph_specs WHERE goal_id = OLD.id)
+BEGIN
+    INSERT OR IGNORE INTO work_graph_cascade_delete_scopes(
+        goal_id, conversation_id, opened_at
+    )
+    VALUES (OLD.id, OLD.conversation_id, CAST(strftime('%s', 'now') AS INTEGER) * 1000);
+END;
+
+DROP TRIGGER IF EXISTS goals_close_work_graph_cascade_delete_scope;
+CREATE TRIGGER goals_close_work_graph_cascade_delete_scope
+AFTER DELETE ON goals
+FOR EACH ROW
+BEGIN
+    DELETE FROM work_graph_cascade_delete_scopes WHERE goal_id = OLD.id;
+END;
+
+DROP TRIGGER IF EXISTS conversations_open_work_graph_cascade_delete_scopes;
+CREATE TRIGGER conversations_open_work_graph_cascade_delete_scopes
+BEFORE DELETE ON conversations
+FOR EACH ROW
+BEGIN
+    INSERT OR IGNORE INTO work_graph_cascade_delete_scopes(
+        goal_id, conversation_id, opened_at
+    )
+    SELECT
+        spec.goal_id,
+        OLD.id,
+        CAST(strftime('%s', 'now') AS INTEGER) * 1000
+    FROM work_graph_specs AS spec
+    JOIN goals AS goal ON goal.id = spec.goal_id
+    WHERE goal.conversation_id = OLD.id;
+END;
+
+DROP TRIGGER IF EXISTS conversations_close_work_graph_cascade_delete_scopes;
+CREATE TRIGGER conversations_close_work_graph_cascade_delete_scopes
+AFTER DELETE ON conversations
+FOR EACH ROW
+BEGIN
+    DELETE FROM work_graph_cascade_delete_scopes WHERE conversation_id = OLD.id;
+END;
+"#;
+
+// Conversation-level grants used to be keyed only by tool name. That allowed an
+// approval for one target to authorize a different command, file, URL, or MCP
+// operation. Rebuild the table with an explicit operation scope and intentionally
+// discard legacy broad grants: they cannot be narrowed safely after the fact.
+const MIGRATION_43: &str = r#"
+DROP TABLE IF EXISTS conversation_tool_permissions_v43;
+CREATE TABLE conversation_tool_permissions_v43 (
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    tool_name TEXT NOT NULL,
+    scope_key TEXT NOT NULL CHECK(length(trim(scope_key)) BETWEEN 1 AND 512),
+    granted_at INTEGER NOT NULL,
+    PRIMARY KEY(conversation_id, tool_name, scope_key)
+);
+DROP TABLE conversation_tool_permissions;
+ALTER TABLE conversation_tool_permissions_v43 RENAME TO conversation_tool_permissions;
+CREATE INDEX idx_conversation_tool_permissions_granted
+    ON conversation_tool_permissions(conversation_id, granted_at DESC);
+"#;
+
+// Clearing a derived notification used to delete its row. The next notification
+// sync then recreated the same historical run/approval/job as a brand-new unread
+// item. Keep a dismissal tombstone on the row so unchanged source state remains
+// hidden, while a later lifecycle transition can deliberately reopen it.
+const MIGRATION_44: &str = r#"
+ALTER TABLE app_notifications ADD COLUMN dismissed_at INTEGER;
+CREATE INDEX idx_app_notifications_visible_updated
+    ON app_notifications(dismissed_at, read_at, updated_at DESC, id);
+"#;
+
+// Project permissions used to live only on projects. Persist the selected
+// interaction/execution mode on every conversation as well, so projectless
+// chats do not silently fall back to read-only after the first message or an
+// application restart. A linked project's permission remains authoritative.
+const MIGRATION_45: &str = r#"
+ALTER TABLE conversations
+ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'ask'
+    CHECK(permission_mode IN ('read_only', 'ask', 'allow'));
+UPDATE conversations
+SET permission_mode = COALESCE(
+    (SELECT permission_mode FROM projects WHERE projects.id = conversations.project_id),
+    permission_mode
+);
+"#;
+
+// SenseNova product pages use a human-friendly display name, while the
+// OpenAI-compatible API requires a lowercase, hyphenated model ID. Repair
+// configurations that accidentally stored the display name as the ID.
+const MIGRATION_46: &str = r#"
+UPDATE model_service
+SET model_id = 'sensenova-6.8-flash-lite',
+    last_status = 'unknown',
+    last_latency_ms = NULL,
+    last_checked_at = NULL
+WHERE lower(base_url) LIKE '%://token.sensenova.cn/%'
+  AND lower(trim(model_id)) = 'sensenova 6.8 flash lite';
+
+UPDATE provider_models
+SET model_id = 'sensenova-6.8-flash-lite'
+WHERE lower(trim(model_id)) = 'sensenova 6.8 flash lite'
+  AND provider_id IN (
+      SELECT id FROM model_providers
+      WHERE lower(base_url) LIKE '%://token.sensenova.cn/%'
+  );
+
+UPDATE model_providers
+SET last_status = 'unknown',
+    last_latency_ms = NULL,
+    last_checked_at = NULL
+WHERE lower(base_url) LIKE '%://token.sensenova.cn/%';
+"#;
+
+// Earlier UI actions persisted confirmations even when their result was
+// already visible (opening a file, changing a selector, or restoring the
+// default assistant). Remove those legacy rows once and keep the notification
+// center focused on actionable or background work.
+const MIGRATION_47: &str = r#"
+DELETE FROM app_notifications
+WHERE (
+    source_type = 'ui'
+    AND (
+        body IN (
+            '已切换助手，发送消息后创建对话',
+            '已打开相关执行记录',
+            '已打开项目文件夹',
+            '已使用系统默认方式打开',
+            '已在文件夹中定位'
+        )
+        OR body LIKE '已使用 % 打开'
+        OR body LIKE '执行方式已切换为%'
+        OR body LIKE '已选择：%'
+        OR title = '正在重新加载预览'
+    )
+)
+OR (
+    source_type = 'knowledge_document'
+    AND body = '已在系统默认应用中打开原文件。'
+);
+"#;
+
+/// Kernel schema (v48): durable facts for the Fox Agent Kernel. These tables are
+/// purely additive — legacy runs do not reference them and rolling back to the
+/// pre-migration application + database backup restores prior behaviour without
+/// data loss (forward-only migration, see 迁移备份与恢复).
+const MIGRATION_48: &str = r#"
+CREATE TABLE IF NOT EXISTS kernel_runs (
+    run_id TEXT PRIMARY KEY,
+    engine_id TEXT NOT NULL,
+    kernel_mode TEXT NOT NULL CHECK(kernel_mode IN ('legacy','shadow','authoritative')),
+    capability_manifest_version INTEGER NOT NULL,
+    permission_snapshot_id TEXT NOT NULL,
+    execution_profile_id TEXT NOT NULL,
+    prompt_config_hash TEXT NOT NULL,
+    frozen_config_json TEXT NOT NULL,
+    state TEXT NOT NULL,
+    last_event_seq INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    terminal_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS kernel_tool_batches (
+    batch_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    ordered_tool_call_ids_json TEXT NOT NULL,
+    barrier_emitted INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kernel_tool_batches_run
+    ON kernel_tool_batches(run_id);
+
+CREATE TABLE IF NOT EXISTS kernel_tool_calls (
+    run_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    source_order INTEGER NOT NULL,
+    canonical_input_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN (
+        'pending','waiting_approval','running','completed','failed','cancelled'
+    )),
+    result_json TEXT,
+    created_at INTEGER NOT NULL,
+    settled_at INTEGER,
+    PRIMARY KEY(run_id, tool_call_id)
+);
+CREATE INDEX IF NOT EXISTS idx_kernel_tool_calls_batch
+    ON kernel_tool_calls(run_id, batch_id);
+CREATE INDEX IF NOT EXISTS idx_kernel_tool_calls_state
+    ON kernel_tool_calls(run_id, state);
+
+CREATE TABLE IF NOT EXISTS kernel_approvals (
+    run_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN (
+        'pending','allow_once','allow_conversation','denied','cancelled','expired'
+    )),
+    created_at INTEGER NOT NULL,
+    decided_at INTEGER,
+    PRIMARY KEY(run_id, tool_call_id)
+);
+CREATE INDEX IF NOT EXISTS idx_kernel_approvals_pending
+    ON kernel_approvals(run_id, state);
+
+-- Append-only kernel event stream; idempotent on (run_id, seq).
+CREATE TABLE IF NOT EXISTS kernel_events (
+    run_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_kernel_events_run
+    ON kernel_events(run_id, seq);
+"#;
+
+/// Kernel schema (v49): durable Effect/Dispatch Outbox and full RunController
+/// rehydration columns.
+///
+/// Identity ruling (enforced here and in the repository, matching v48):
+/// * `batch_id` is GLOBALLY unique (kernel_tool_batches PRIMARY KEY batch_id);
+///   a batch carries its owning `run_id`, and reusing a batch id in another run
+///   is rejected.
+/// * a tool call is unique within a run: kernel_tool_calls PRIMARY KEY
+///   `(run_id, tool_call_id)`.
+/// * an outbox effect is keyed `(run_id, effect_key)` with a run-scoped unique
+///   `idempotency_key`.
+///
+/// The outbox holds external actions (tool dispatch, approval prompt, engine
+/// cancel) that are committed in the SAME transaction as the Kernel decision
+/// facts, and only executed after commit. Each row has a stable idempotency key
+/// so a crash after commit never produces a second logical side effect.
+///
+/// Forward-only and additive. `apply_migration` records v49 atomically, so the
+/// migration runner is repeat-safe; the raw ALTER script itself is not rerun.
+/// Rollback is the pre-migration backup plus the previous application build.
+const MIGRATION_49: &str = r#"
+-- Rehydration columns on kernel_runs (all additive / nullable or defaulted).
+ALTER TABLE kernel_runs ADD COLUMN turn_id TEXT;
+ALTER TABLE kernel_runs ADD COLUMN running_elapsed_ms INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kernel_runs ADD COLUMN running_since_wall_ms INTEGER;
+ALTER TABLE kernel_runs ADD COLUMN approval_deadline_wall_ms INTEGER;
+ALTER TABLE kernel_runs ADD COLUMN capability_manifest_hash TEXT;
+ALTER TABLE kernel_runs ADD COLUMN terminal_written INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE kernel_runs ADD COLUMN retry_state_json TEXT;
+ALTER TABLE kernel_runs ADD COLUMN compaction_state_json TEXT;
+
+-- Link a dispatched tool call to its stable external idempotency key.
+ALTER TABLE kernel_tool_calls ADD COLUMN dispatch_idempotency_key TEXT;
+
+-- kernel_tool_batches keeps the v48 GLOBAL batch_id PRIMARY KEY; no rebuild.
+
+-- Durable external-effect outbox.
+CREATE TABLE IF NOT EXISTS kernel_effect_outbox (
+    run_id TEXT NOT NULL,
+    effect_key TEXT NOT NULL,
+    effect_type TEXT NOT NULL CHECK(effect_type IN (
+        'dispatch_tool','request_approval','cancel_engine_turn','cancel_tool_call','publish_snapshot'
+    )),
+    idempotency_key TEXT NOT NULL,
+    tool_call_id TEXT,
+    batch_id TEXT,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','leased','completed','failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    lease_owner TEXT,
+    leased_at INTEGER,
+    completed_at INTEGER,
+    last_error TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (run_id, effect_key)
+);
+CREATE INDEX IF NOT EXISTS idx_kernel_outbox_status
+    ON kernel_effect_outbox(run_id, status);
+CREATE INDEX IF NOT EXISTS idx_kernel_outbox_due
+    ON kernel_effect_outbox(status, created_at);
+-- An external idempotency key maps to at most one logical effect within a run.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kernel_outbox_idem
+    ON kernel_effect_outbox(run_id, idempotency_key);
+"#;
+
+/// Kernel schema (v50): make the all-settled batch delivery itself durable.
+///
+/// SQLite cannot extend an existing CHECK constraint in place, so this is a
+/// forward-only table rebuild that preserves every v49 outbox row and adds the
+/// `deliver_tool_batch` effect kind. The schema migration runner makes the step
+/// repeat-safe by recording v50 in `schema_migrations` in the same transaction.
+const MIGRATION_50: &str = r#"
+ALTER TABLE kernel_effect_outbox RENAME TO kernel_effect_outbox_v49;
+
+CREATE TABLE kernel_effect_outbox (
+    run_id TEXT NOT NULL,
+    effect_key TEXT NOT NULL,
+    effect_type TEXT NOT NULL CHECK(effect_type IN (
+        'dispatch_tool','request_approval','cancel_engine_turn','cancel_tool_call',
+        'deliver_tool_batch','publish_snapshot'
+    )),
+    idempotency_key TEXT NOT NULL,
+    tool_call_id TEXT,
+    batch_id TEXT,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','leased','completed','failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    lease_owner TEXT,
+    leased_at INTEGER,
+    completed_at INTEGER,
+    last_error TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (run_id, effect_key)
+);
+
+INSERT INTO kernel_effect_outbox (
+    run_id, effect_key, effect_type, idempotency_key, tool_call_id, batch_id,
+    payload_json, status, attempts, lease_owner, leased_at, completed_at,
+    last_error, created_at, updated_at
+)
+SELECT
+    run_id, effect_key, effect_type, idempotency_key, tool_call_id, batch_id,
+    payload_json, status, attempts, lease_owner, leased_at, completed_at,
+    last_error, created_at, updated_at
+FROM kernel_effect_outbox_v49;
+
+DROP TABLE kernel_effect_outbox_v49;
+
+CREATE INDEX idx_kernel_outbox_status
+    ON kernel_effect_outbox(run_id, status);
+CREATE INDEX idx_kernel_outbox_due
+    ON kernel_effect_outbox(status, created_at);
+CREATE UNIQUE INDEX idx_kernel_outbox_idem
+    ON kernel_effect_outbox(run_id, idempotency_key);
+"#;
+
+/// Kernel schema (v51): production Shadow observation/diff persistence.
+///
+/// Shadow runs are physically isolated from the executable outbox: a shadow
+/// decision is NEVER written to `kernel_effect_outbox`, so no startup/lease
+/// scan (which only reads `kernel_effect_outbox`) can ever execute a shadow
+/// side effect. Shadow runs and their comparison records live in dedicated,
+/// append-only observation tables with no leased/pending executability.
+///
+/// Forward-only, additive and repeatable; rollback is the pre-migration backup
+/// plus the previous build (see 迁移备份与恢复).
+const MIGRATION_51: &str = r#"
+-- One shadow context per legacy (kernel mode = 'shadow') run. Holds the frozen
+-- identity and the legacy run it observes. No execution columns exist here.
+CREATE TABLE IF NOT EXISTS kernel_shadow_runs (
+    shadow_run_id TEXT PRIMARY KEY,
+    legacy_run_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    turn_id TEXT,
+    engine_id TEXT NOT NULL,
+    kernel_mode TEXT NOT NULL CHECK(kernel_mode IN ('shadow')),
+    capability_manifest_version INTEGER NOT NULL,
+    capability_manifest_hash TEXT NOT NULL,
+    permission_snapshot_id TEXT NOT NULL,
+    execution_profile_id TEXT NOT NULL,
+    prompt_config_hash TEXT NOT NULL,
+    frozen_config_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(legacy_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_kernel_shadow_runs_legacy
+    ON kernel_shadow_runs(legacy_run_id);
+
+-- Append-only comparison records. Each row is one legacy-vs-kernel decision
+-- diff at an event cursor; 'match' rows record agreement. Nothing here is
+-- leaseable or executable — there is no status/outbox column by design.
+CREATE TABLE IF NOT EXISTS kernel_shadow_diffs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shadow_run_id TEXT NOT NULL,
+    legacy_run_id TEXT NOT NULL,
+    turn_id TEXT,
+    event_cursor INTEGER NOT NULL,
+    event_type TEXT,
+    category TEXT NOT NULL CHECK(category IN (
+        'match',
+        'state_mismatch',
+        'approval_mismatch',
+        'tool_param_or_order_mismatch',
+        'terminal_mismatch',
+        'timeout_retry_mismatch',
+        'not_comparable',
+        'shadow_error'
+    )),
+    legacy_disposition_json TEXT NOT NULL,
+    kernel_disposition_json TEXT NOT NULL,
+    detail_json TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY(shadow_run_id) REFERENCES kernel_shadow_runs(shadow_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_kernel_shadow_diffs_run_cursor
+    ON kernel_shadow_diffs(shadow_run_id, event_cursor);
+CREATE INDEX IF NOT EXISTS idx_kernel_shadow_diffs_category
+    ON kernel_shadow_diffs(category);
+"#;
+
+/// Kernel schema (v52): persist the model-request wall anchor so an in-flight
+/// model request keeps its timeout window across restarts (a crash must not
+/// grant a fresh window). This is a NEW migration (not appended to released
+/// v51) so databases that already ran v51 without this column pick it up.
+const MIGRATION_52: &str = r#"
+ALTER TABLE kernel_runs ADD COLUMN model_request_since_wall_ms INTEGER;
+"#;
+
 const AGENT_EXPERT_SCHEMA_VERSION: i64 = 20;
 const EXPERT_PACKAGE_SNAPSHOT_SCHEMA_VERSION: i64 = 21;
 const EXPERT_PACKAGE_SNAPSHOT_SCHEMA: &str = r#"
@@ -5834,6 +6259,18 @@ END;
 "#;
 
 const CONVERSATION_TOOL_PERMISSION_SCHEMA_VERSION: i64 = 23;
+const MIGRATION_54: &str = r#"
+CREATE TABLE run_control_bindings (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    authority TEXT NOT NULL CHECK(authority IN ('legacy','authoritative')),
+    engine_id TEXT NOT NULL CHECK(engine_id IN ('pi','codex','deepseek_harness')),
+    binding_json TEXT NOT NULL CHECK(json_valid(binding_json)),
+    binding_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_run_control_conversation ON run_control_bindings(conversation_id, created_at);
+"#;
 const _: () = assert!(DATABASE_SCHEMA_VERSION >= CONVERSATION_TOOL_PERMISSION_SCHEMA_VERSION);
 const CONVERSATION_TOOL_PERMISSION_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS conversation_tool_permissions (
@@ -5897,6 +6334,31 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     apply_graph_review_acceptance_migration(&transaction, now)?;
     apply_migration(&transaction, 40, MIGRATION_40, now)?;
     apply_migration(&transaction, 41, MIGRATION_41, now)?;
+    apply_migration(&transaction, 42, MIGRATION_42, now)?;
+    apply_migration(&transaction, 43, MIGRATION_43, now)?;
+    apply_migration(&transaction, 44, MIGRATION_44, now)?;
+    apply_migration(&transaction, 45, MIGRATION_45, now)?;
+    apply_migration(&transaction, 46, MIGRATION_46, now)?;
+    apply_migration(&transaction, 47, MIGRATION_47, now)?;
+    apply_migration(&transaction, 48, MIGRATION_48, now)?;
+    apply_migration(&transaction, 49, MIGRATION_49, now)?;
+    apply_migration(&transaction, 50, MIGRATION_50, now)?;
+    apply_migration(&transaction, 51, MIGRATION_51, now)?;
+    apply_migration(&transaction, 52, MIGRATION_52, now)?;
+    apply_migration(
+        &transaction,
+        53,
+        r#"
+        CREATE TABLE kernel_shadow_checkpoints (
+            shadow_run_id TEXT PRIMARY KEY REFERENCES kernel_shadow_runs(shadow_run_id) ON DELETE CASCADE,
+            state TEXT NOT NULL CHECK(state IN ('active', 'failed', 'closed')),
+            checkpoint_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+    "#,
+        now,
+    )?;
+    apply_migration(&transaction, 54, MIGRATION_54, now)?;
     transaction.commit()
 }
 
@@ -10782,6 +11244,224 @@ mod tests {
     }
 
     #[test]
+    fn cascade_delete_scope_repair_restores_goal_deletion_for_drifted_v36_databases() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run(&mut connection, 1).expect("apply current schema");
+
+        connection
+            .execute("DELETE FROM schema_migrations WHERE version = 42", [])
+            .expect("simulate database from before the repair migration");
+        connection
+            .execute("DROP TABLE work_graph_cascade_delete_scopes", [])
+            .expect("simulate the missing late-v36 sentinel table");
+        connection
+            .execute_batch(
+                "INSERT INTO agents(
+                    id, name, description, runtime_type, system_prompt, default_model,
+                    created_at, updated_at
+                 ) VALUES ('repair-agent', 'Repair Agent', '', 'pi', '', 'model', 1, 1);
+                 INSERT INTO conversations(
+                    id, agent_id, title, status, created_at, updated_at, lineage_root_id
+                 ) VALUES (
+                    'repair-conversation', 'repair-agent', 'Repair', 'active', 1, 1,
+                    'repair-conversation'
+                 );
+                 INSERT INTO goals(
+                    id, conversation_id, title, objective, status, created_by, created_at, updated_at
+                 ) VALUES (
+                    'repair-goal', 'repair-conversation', 'Repair', 'Delete safely', 'blocked',
+                    'user', '1', '1'
+                 );",
+            )
+            .expect("seed drifted database");
+
+        assert!(connection
+            .execute("DELETE FROM goals WHERE id = 'repair-goal'", [])
+            .is_err());
+
+        run(&mut connection, 2).expect("apply cascade-delete scope repair");
+        run(&mut connection, 3).expect("repeat cascade-delete scope repair");
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table' AND name = 'work_graph_cascade_delete_scopes'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version = 42",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .execute("DELETE FROM goals WHERE id = 'repair-goal'", [])
+                .expect("delete Goal after repairing the sentinel"),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM work_graph_cascade_delete_scopes",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn sensenova_model_id_migration_repairs_display_names_idempotently() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run(&mut connection, 1).expect("apply current schema");
+        connection
+            .execute(
+                "INSERT INTO model_service(
+                     singleton_id, name, base_url, model_id, api_type, context_window,
+                     max_output_tokens, enabled, last_status, last_latency_ms,
+                     last_checked_at, created_at, updated_at, supports_image_input
+                 ) VALUES (
+                     1, 'SenseNova', 'https://token.sensenova.cn/v1',
+                     'SenseNova 6.8 Flash Lite', 'openai-completions', 262144,
+                     65536, 1, 'connected', 12, 1, 1, 1, 1
+                 )",
+                [],
+            )
+            .expect("seed legacy primary model");
+        connection
+            .execute(
+                "INSERT INTO model_providers(
+                     id, name, base_url, api_type, enabled, is_default, last_status,
+                     last_latency_ms, last_checked_at, created_at, updated_at
+                 ) VALUES (
+                     'sensenova-test', 'SenseNova', 'https://token.sensenova.cn/v1',
+                     'openai-completions', 1, 1, 'connected', 12, 1, 1, 1
+                 )",
+                [],
+            )
+            .expect("seed SenseNova provider");
+        connection
+            .execute(
+                "INSERT INTO provider_models(
+                     id, provider_id, model_id, display_name, context_window,
+                     max_output_tokens, supports_image_input, is_default, created_at, updated_at
+                 ) VALUES (
+                     'sensenova-test-model', 'sensenova-test',
+                     'SenseNova 6.8 Flash Lite', 'SenseNova 6.8 Flash Lite',
+                     262144, 65536, 1, 1, 1, 1
+                 )",
+                [],
+            )
+            .expect("seed SenseNova model");
+
+        connection
+            .execute_batch(MIGRATION_46)
+            .expect("repair model IDs");
+        connection
+            .execute_batch(MIGRATION_46)
+            .expect("repeat model ID repair");
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT model_id, last_status, last_latency_ms, last_checked_at
+                     FROM model_service WHERE singleton_id = 1",
+                    [],
+                    |row| Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    )),
+                )
+                .unwrap(),
+            (
+                "sensenova-6.8-flash-lite".to_owned(),
+                "unknown".to_owned(),
+                None,
+                None,
+            )
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT model_id FROM provider_models WHERE id = 'sensenova-test-model'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "sensenova-6.8-flash-lite"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT last_status FROM model_providers WHERE id = 'sensenova-test'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn obsolete_foreground_notifications_are_removed_without_touching_background_work() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run(&mut connection, 1).expect("apply current schema");
+        connection
+            .execute_batch(
+                "INSERT INTO app_notifications(
+                    id, merge_key, kind, severity, title, body, source_type, source_id,
+                    status, action_json, created_at, updated_at
+                 ) VALUES
+                    ('switch', 'ui:switch', 'completed', 'normal', '操作完成',
+                     '已切换助手，发送消息后创建对话', 'ui', 'switch', 'completed', '{}', 1, 1),
+                    ('open', 'ui:open', 'completed', 'normal', '操作完成',
+                     '已打开项目文件夹', 'ui', 'open', 'completed', '{}', 1, 1),
+                    ('preview', 'ui:preview', 'completed', 'normal', '正在重新加载预览',
+                     'report.pdf', 'ui', 'preview', 'completed', '{}', 1, 1),
+                    ('background', 'run:background', 'failed', 'high', '后台任务失败',
+                     '需要检查', 'run', 'background', 'failed', '{}', 1, 1);",
+            )
+            .expect("seed notification policy examples");
+
+        connection
+            .execute_batch(MIGRATION_47)
+            .expect("remove obsolete notifications");
+        connection
+            .execute_batch(MIGRATION_47)
+            .expect("repeat obsolete notification cleanup");
+
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM app_notifications", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT id FROM app_notifications", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap(),
+            "background"
+        );
+    }
+
+    #[test]
     fn app_capability_migration_is_idempotent_and_enforces_defaults() {
         let mut connection = Connection::open_in_memory().expect("open database");
         run(&mut connection, 1).expect("apply current schema");
@@ -10821,6 +11501,22 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(project_columns.contains(&"archived_at".to_owned()));
+        let notification_columns = connection
+            .prepare("PRAGMA table_info(app_notifications)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(notification_columns.contains(&"dismissed_at".to_owned()));
+        let conversation_columns = connection
+            .prepare("PRAGMA table_info(conversations)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(conversation_columns.contains(&"permission_mode".to_owned()));
         assert_eq!(
             connection
                 .query_row(
@@ -10848,5 +11544,335 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    #[test]
+    fn v53_checkpoint_upgrade_preserves_existing_shadow_identity() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        run(&mut connection, 1).unwrap();
+        connection.execute_batch(
+            "INSERT INTO kernel_shadow_runs(
+                shadow_run_id, legacy_run_id, conversation_id, turn_id, engine_id, kernel_mode,
+                capability_manifest_version, capability_manifest_hash, permission_snapshot_id,
+                execution_profile_id, prompt_config_hash, frozen_config_json, created_at)
+             VALUES ('old-shadow','old-run','old-conversation','old-turn','pi','shadow',2,'manifest','permission','legacy','prompt','{}',1);
+             DROP TABLE kernel_shadow_checkpoints;
+             DROP TABLE run_control_bindings;
+             DELETE FROM schema_migrations WHERE version>=53;"
+        ).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            52
+        );
+        run(&mut connection, 2).unwrap();
+        run(&mut connection, 3).unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM kernel_shadow_runs WHERE shadow_run_id='old-shadow'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM kernel_shadow_checkpoints",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            crate::database::DATABASE_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn scoped_permission_migration_discards_legacy_broad_grants() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run(&mut connection, 1).expect("create current schema");
+        connection
+            .execute_batch(
+                "INSERT INTO agents(
+                    id, name, description, runtime_type, system_prompt, default_model,
+                    created_at, updated_at
+                 ) VALUES ('scope-agent', 'Scope Agent', '', 'pi', '', 'model', 1, 1);
+                 INSERT INTO conversations(
+                    id, agent_id, title, status, created_at, updated_at
+                 ) VALUES ('scope-conversation', 'scope-agent', 'Scope', 'active', 1, 1);
+                 DROP INDEX IF EXISTS idx_conversation_tool_permissions_granted;
+                 DROP TABLE conversation_tool_permissions;
+                 CREATE TABLE conversation_tool_permissions (
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                    tool_name TEXT NOT NULL,
+                    granted_at INTEGER NOT NULL,
+                    PRIMARY KEY(conversation_id, tool_name)
+                 );
+                 INSERT INTO conversation_tool_permissions(conversation_id, tool_name, granted_at)
+                 VALUES ('scope-conversation', 'run_command', 1);
+                 DELETE FROM schema_migrations WHERE version = 43;",
+            )
+            .expect("simulate version 42 broad permission table");
+
+        run(&mut connection, 2).expect("upgrade permission table");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM conversation_tool_permissions",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+            "an old tool-wide grant cannot be narrowed safely and must be discarded"
+        );
+        let columns = connection
+            .prepare("PRAGMA table_info(conversation_tool_permissions)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.contains(&"scope_key".to_owned()));
+        connection
+            .execute(
+                "INSERT INTO conversation_tool_permissions(
+                    conversation_id, tool_name, scope_key, granted_at
+                 ) VALUES ('scope-conversation', 'write_file', 'file:a', 2),
+                          ('scope-conversation', 'write_file', 'file:b', 2)",
+                [],
+            )
+            .expect("different exact scopes may coexist");
+    }
+
+    #[test]
+    fn kernel_v50_preserves_v49_outbox_rows_and_allows_batch_delivery() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+        connection.execute_batch(MIGRATION_48).unwrap();
+        connection.execute_batch(MIGRATION_49).unwrap();
+        connection
+            .execute(
+                "INSERT INTO kernel_effect_outbox (
+                    run_id, effect_key, effect_type, idempotency_key, tool_call_id,
+                    batch_id, payload_json, status, attempts, lease_owner, leased_at,
+                    completed_at, last_error, created_at, updated_at
+                 ) VALUES (
+                    'run-v49','dispatch:call-1','dispatch_tool','tool-dispatch:call-1',
+                    'call-1','batch-1','{}','pending',0,NULL,NULL,NULL,NULL,1,1
+                 )",
+                [],
+            )
+            .unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        apply_migration(&transaction, 50, MIGRATION_50, 2).unwrap();
+        transaction.commit().unwrap();
+
+        let preserved: (String, String) = connection
+            .query_row(
+                "SELECT effect_type, status FROM kernel_effect_outbox
+                  WHERE run_id='run-v49' AND effect_key='dispatch:call-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved, ("dispatch_tool".into(), "pending".into()));
+        connection
+            .execute(
+                "INSERT INTO kernel_effect_outbox (
+                    run_id, effect_key, effect_type, idempotency_key, tool_call_id,
+                    batch_id, payload_json, status, attempts, lease_owner, leased_at,
+                    completed_at, last_error, created_at, updated_at
+                 ) VALUES (
+                    'run-v49','deliver-batch:batch-1','deliver_tool_batch',
+                    'tool-batch-delivery:batch-1',NULL,'batch-1',
+                    '{\"orderedToolCallIds\":[\"call-1\"]}','pending',0,
+                    NULL,NULL,NULL,NULL,2,2
+                 )",
+                [],
+            )
+            .expect("v50 accepts durable batch delivery");
+        assert!(connection
+            .execute(
+                "INSERT INTO kernel_effect_outbox (
+                    run_id, effect_key, effect_type, idempotency_key, payload_json,
+                    status, created_at, updated_at
+                 ) VALUES ('run-v49','bad','unknown','bad','{}','pending',2,2)",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn migration_51_adds_shadow_tables_and_is_repeatable() {
+        // Build an OLD v51 database: migrations through v51, WITHOUT the v52
+        // model-anchor column. run() applies everything, then we simulate an
+        // already-released v51 by dropping the v52 column and its migration row.
+        let mut connection = Connection::open_in_memory().unwrap();
+        run(&mut connection, 1).unwrap();
+        connection
+            .execute_batch("ALTER TABLE kernel_runs DROP COLUMN model_request_since_wall_ms;")
+            .unwrap();
+        connection
+            .execute("DELETE FROM schema_migrations WHERE version = 52", [])
+            .unwrap();
+        // The old v51 database has NO model-anchor column.
+        let has_column: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('kernel_runs')
+                  WHERE name='model_request_since_wall_ms'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 0, "old v51 must lack the v52 column");
+
+        // v51 shadow tables exist and are physically separate from the outbox.
+        connection
+            .execute(
+                "INSERT INTO kernel_shadow_runs
+                    (shadow_run_id, legacy_run_id, conversation_id, turn_id, engine_id,
+                     kernel_mode, capability_manifest_version, capability_manifest_hash,
+                     permission_snapshot_id, execution_profile_id, prompt_config_hash,
+                     frozen_config_json, created_at)
+                 VALUES ('shadow-1','legacy-1','conv-1','turn-1','pi','shadow',2,
+                         'manifest-hash','perm','legacy','prompt','{}',1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO kernel_shadow_diffs
+                    (shadow_run_id, legacy_run_id, turn_id, event_cursor, event_type,
+                     category, legacy_disposition_json, kernel_disposition_json,
+                     detail_json, schema_version, created_at)
+                 VALUES ('shadow-1','legacy-1','turn-1',1,'run_start','not_comparable',
+                         '{}','{}','{}',2,1)",
+                [],
+            )
+            .unwrap();
+
+        // Idempotent: re-applying v51 does not error or duplicate (repeatable).
+        let transaction = connection.transaction().unwrap();
+        apply_migration(&transaction, 51, MIGRATION_51, 3).unwrap();
+        transaction.commit().unwrap();
+
+        // Existing shadow data survives the repeat migration.
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM kernel_shadow_diffs WHERE shadow_run_id='shadow-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Now upgrade the OLD v51 database to v52: the model-anchor column
+        // appears and data is preserved.
+        let transaction = connection.transaction().unwrap();
+        apply_migration(&transaction, 52, MIGRATION_52, 4).unwrap();
+        transaction.commit().unwrap();
+        let has_column: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('kernel_runs')
+                  WHERE name='model_request_since_wall_ms'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_column, 1, "v52 upgrade adds the model-anchor column");
+        let shadow_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM kernel_shadow_diffs WHERE shadow_run_id='shadow-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(shadow_count, 1, "v52 preserves shadow data");
+        // Re-applying v52 is a no-op (repeatable).
+        let transaction = connection.transaction().unwrap();
+        apply_migration(&transaction, 52, MIGRATION_52, 5).unwrap();
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn migration_51_shadow_tables_persist_alongside_v49_v50_data() {
+        // Upgrade path: v49/50 outbox rows remain, v51 adds shadow isolation.
+        let mut connection = Connection::open_in_memory().unwrap();
+        run(&mut connection, 1).unwrap();
+        connection
+            .execute(
+                "INSERT INTO kernel_effect_outbox (
+                    run_id, effect_key, effect_type, idempotency_key, payload_json,
+                    status, created_at, updated_at
+                 ) VALUES ('legacy-run','dispatch:c','dispatch_tool','tool-dispatch:c',
+                           '{}','pending',1,1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO kernel_shadow_runs
+                    (shadow_run_id, legacy_run_id, conversation_id, turn_id, engine_id,
+                     kernel_mode, capability_manifest_version, capability_manifest_hash,
+                     permission_snapshot_id, execution_profile_id, prompt_config_hash,
+                     frozen_config_json, created_at)
+                 VALUES ('shadow-legacy-run','legacy-run','conv','turn','pi','shadow',2,
+                         'm','p','legacy','pr','{}',1)",
+                [],
+            )
+            .unwrap();
+        // Physical isolation: the executable outbox contains only the legacy
+        // run row; shadow decisions live in kernel_shadow_* and are never in
+        // the outbox (so a lease scan over the outbox can never pick them up).
+        let outbox_pending: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM kernel_effect_outbox WHERE status='pending'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(outbox_pending, 1);
+        // No outbox row is keyed to the shadow run id.
+        let outbox_for_shadow: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id='shadow-legacy-run'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(outbox_for_shadow, 0);
+        // The shadow observation row is present in its own table.
+        let shadow_rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM kernel_shadow_runs WHERE shadow_run_id='shadow-legacy-run'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(shadow_rows, 1);
     }
 }

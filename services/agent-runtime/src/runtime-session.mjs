@@ -49,15 +49,26 @@ export function normalizeHistory(messages) {
 // OpenAI Responses rejecting an Anthropic/tool metadata field). Keep the
 // durable transcript expressive, but send only the canonical Pi block shape.
 export function sanitizeProviderHistory(messages) {
-  return normalizeHistory(messages).map((message) => {
+  const sanitized = normalizeHistory(messages).map((message) => {
     if (message.role === 'toolResult') {
       return {
         role: 'toolResult',
         toolCallId: message.toolCallId,
         toolName: message.toolName,
         content: Array.isArray(message.content)
-          ? message.content.filter((item) => item?.type === 'text' && typeof item.text === 'string')
-              .map((item) => ({ type: 'text', text: item.text }))
+          ? message.content.flatMap((item) => {
+              if (item?.type === 'text' && typeof item.text === 'string') {
+                return [{ type: 'text', text: item.text }]
+              }
+              if (item?.type === 'image' && typeof item.data === 'string') {
+                return [{
+                  type: 'image',
+                  data: item.data,
+                  ...(typeof item.mimeType === 'string' ? { mimeType: item.mimeType } : {}),
+                }]
+              }
+              return []
+            })
           : String(message.content ?? ''),
         // Tool details are Fox/provider diagnostics, not model conversation
         // input. Replaying them can leak fields such as `namespace` into an
@@ -91,10 +102,13 @@ export function sanitizeProviderHistory(messages) {
                 : {}),
             }]
           }
-          if (block.type === 'toolCall' && typeof block.name === 'string') {
+          if (block.type === 'toolCall'
+            && typeof block.id === 'string'
+            && block.id
+            && typeof block.name === 'string') {
             return [{
               type: 'toolCall',
-              ...(typeof block.id === 'string' ? { id: block.id } : {}),
+              id: block.id,
               name: block.name,
               arguments: block.arguments ?? block.input ?? {},
             }]
@@ -111,6 +125,57 @@ export function sanitizeProviderHistory(messages) {
       : []
     return { role: message.role, content, timestamp: message.timestamp }
   })
+  return repairToolHistory(sanitized)
+}
+
+export function repairToolHistory(messages) {
+  const repaired = []
+  const pending = new Map()
+
+  const closePending = () => {
+    for (const [toolCallId, pendingCall] of pending) {
+      repaired.push({
+        role: 'toolResult',
+        toolCallId,
+        toolName: pendingCall.toolName,
+        content: [{
+          type: 'text',
+          text: '[Fox recovery] The previous tool call ended without a durable result. Treat it as failed and do not assume the operation succeeded.',
+        }],
+        details: {},
+        isError: true,
+        timestamp: pendingCall.timestamp,
+      })
+    }
+    pending.clear()
+  }
+
+  for (const message of normalizeHistory(messages)) {
+    if (message.role === 'toolResult') {
+      const toolCallId = typeof message.toolCallId === 'string' ? message.toolCallId : ''
+      const pendingCall = pending.get(toolCallId)
+      // Orphan and duplicate results are invalid provider history. The durable
+      // session remains intact; only the replay projection drops them.
+      if (!toolCallId || !pendingCall) continue
+      repaired.push({ ...message, toolName: pendingCall.toolName })
+      pending.delete(toolCallId)
+      continue
+    }
+
+    if (pending.size > 0) closePending()
+    repaired.push(message)
+    if (message.role !== 'assistant' || !Array.isArray(message.content)) continue
+    for (const block of message.content) {
+      if (block?.type === 'toolCall' && typeof block.id === 'string' && block.id) {
+        pending.set(block.id, {
+          toolName: typeof block.name === 'string' ? block.name : 'unknown_tool',
+          timestamp: message.timestamp,
+        })
+      }
+    }
+  }
+  if (pending.size > 0) closePending()
+  return repaired
 }
 
 function textProjection(messages) {
@@ -122,6 +187,7 @@ function textProjection(messages) {
       .filter((item) => item?.type === 'text')
       .map((item) => item.text)
       .join('')
+    if (!content && message.role === 'assistant') return []
     return [{ role: message.role, content }]
   })
 }

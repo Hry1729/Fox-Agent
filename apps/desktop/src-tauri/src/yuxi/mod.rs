@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use url::Url;
 use uuid::Uuid;
 
+mod knowledge_search;
+
 const CREDENTIAL_SERVICE: &str = "com.fox.agent.yuxi";
 
 #[derive(Clone)]
@@ -549,11 +551,8 @@ impl YuxiClient {
         kb_id: &str,
         query: &str,
     ) -> Result<Value, String> {
-        let _ = (base_url, token, kb_id, query);
-        Err(
-            "当前普通用户 API 暂未提供独立知识库检索；请选择智能体后在对话中绑定知识库提问"
-                .to_owned(),
-        )
+        self.query_knowledge_with_limits(base_url, token, kb_id, query, None, None)
+            .await
     }
 
     pub async fn graph_subgraph(

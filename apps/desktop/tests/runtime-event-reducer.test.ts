@@ -383,6 +383,28 @@ describe('runtime event display queue', () => {
     expect(takeRuntimeEventFrame(queue).map((item) => item.seq)).toEqual([3])
   })
 
+  test('orders sequence numbers only inside each conversation and run stream', () => {
+    const background = (seq: number, type: RuntimeEventNotification['event']['type']): RuntimeEventNotification => ({
+      ...notification(seq, { type }),
+      conversationId: 'conversation-2',
+      runId: 'run-2',
+    })
+    const queue = [
+      notification(2, { type: 'message.started' }),
+      background(1, 'run.started'),
+      notification(1, { type: 'run.started' }),
+      background(2, 'message.started'),
+    ]
+
+    const frame = takeRuntimeEventFrame(queue, 10)
+    expect(frame.map((item) => `${item.runId}:${item.seq}`)).toEqual([
+      'run-1:1',
+      'run-2:1',
+      'run-1:2',
+      'run-2:2',
+    ])
+  })
+
   test('coalesces and drains a large ordered delta burst without delaying completion', () => {
     const queue = [
       notification(1, { type: 'run.started' }),

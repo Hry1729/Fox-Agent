@@ -297,6 +297,8 @@ export interface EmbeddingModelTestResult {
   dimension: number
   elapsedMs: number
   message: string
+  errorCode: string | null
+  errorDetails: string | null
 }
 
 export interface VectorBackendHealth {
@@ -351,6 +353,7 @@ export interface LocalKnowledgeGateway {
   pickFileSourceFolder(): Promise<string | null>
   addFileSource(path: string): Promise<LocalKnowledgeFileSource>
   rescanFileSource(id: string): Promise<LocalKnowledgeFileSource>
+  updateFileSource(id: string, displayName: string): Promise<LocalKnowledgeFileSource>
   removeFileSource(id: string): Promise<boolean>
   listLocalFiles(options?: { sourceId?: string; query?: string; category?: LocalFileCategory; limit?: number; offset?: number }): Promise<LocalKnowledgeCatalogFile[]>
   readLocalFileRange(id: string, start: number, end: number): Promise<unknown>

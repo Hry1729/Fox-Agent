@@ -265,17 +265,28 @@ impl Database {
             connection.execute(
                 "INSERT INTO app_notifications(
                     id, merge_key, kind, severity, title, body, source_type, source_id,
-                    workspace_view, entity_id, progress, status, action_json, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+                    workspace_view, entity_id, progress, status, action_json, created_at, updated_at,
+                    read_at
+                 ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14,
+                    CASE WHEN ?7 = 'approval' AND ?3 = 'completed' THEN ?14 ELSE NULL END
+                 )
                  ON CONFLICT(merge_key) DO UPDATE SET
                     kind = excluded.kind, severity = excluded.severity, title = excluded.title,
                     body = excluded.body, workspace_view = excluded.workspace_view,
                     entity_id = excluded.entity_id, progress = excluded.progress,
                     status = excluded.status, action_json = excluded.action_json,
                     read_at = CASE
+                        WHEN excluded.source_type = 'approval' AND excluded.kind = 'completed'
+                            THEN excluded.updated_at
                         WHEN app_notifications.status <> excluded.status
                           OR app_notifications.kind <> excluded.kind THEN NULL
                         ELSE app_notifications.read_at
+                    END,
+                    dismissed_at = CASE
+                        WHEN app_notifications.status <> excluded.status
+                          OR app_notifications.kind <> excluded.kind THEN NULL
+                        ELSE app_notifications.dismissed_at
                     END,
                     updated_at = excluded.updated_at
                  WHERE app_notifications.kind IS NOT excluded.kind
@@ -319,7 +330,7 @@ impl Database {
                         workspace_view, entity_id, progress, status, action_json, read_at,
                         created_at, updated_at
                  FROM app_notifications
-                 WHERE (?1 = 0 OR read_at IS NULL)
+                 WHERE dismissed_at IS NULL AND (?1 = 0 OR read_at IS NULL)
                  ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
                           updated_at DESC LIMIT ?2",
             )?;
@@ -362,7 +373,8 @@ impl Database {
     pub fn mark_all_app_notifications_read(&self) -> Result<usize, String> {
         self.with_connection(|connection| {
             Ok(connection.execute(
-                "UPDATE app_notifications SET read_at = ?1 WHERE read_at IS NULL",
+                "UPDATE app_notifications SET read_at = ?1
+                 WHERE dismissed_at IS NULL AND read_at IS NULL",
                 [now_ms()],
             )?)
         })
@@ -371,8 +383,9 @@ impl Database {
     pub fn clear_read_app_notifications(&self) -> Result<usize, String> {
         self.with_connection(|connection| {
             Ok(connection.execute(
-                "DELETE FROM app_notifications WHERE read_at IS NOT NULL",
-                [],
+                "UPDATE app_notifications SET dismissed_at = ?1
+                 WHERE dismissed_at IS NULL AND read_at IS NOT NULL",
+                [now_ms()],
             )?)
         })
     }
@@ -862,6 +875,26 @@ mod tests {
             .unwrap()
             .is_empty());
 
+        assert_eq!(database.clear_read_app_notifications().unwrap(), 1);
+        assert!(database
+            .list_app_notifications(false, 20)
+            .unwrap()
+            .is_empty());
+        database
+            .upsert_app_notification(input("completed", "completed", Some(100)))
+            .expect("repeat dismissed completion notification");
+        assert!(database
+            .list_app_notifications(false, 20)
+            .unwrap()
+            .is_empty());
+
+        database
+            .upsert_app_notification(input("progress", "running", Some(10)))
+            .expect("reopen notification after lifecycle transition");
+        let reopened = database.list_app_notifications(true, 20).unwrap();
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened[0].status, "running");
+
         let saved = database
             .save_notification_preferences(&NotificationPreferencesRecord {
                 system_popup: true,
@@ -876,6 +909,62 @@ mod tests {
         assert_eq!(saved.sound_id, "chime");
         assert!(!saved.badge && !saved.quiet_progress);
         assert_eq!(database.notification_preferences().unwrap().badge, false);
+
+        drop(database);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn resolved_approval_notifications_are_read_instead_of_reopened() {
+        let (database, path) = test_database();
+        let approval = |merge_key: &str, kind: &str, status: &str| AppNotificationUpsert {
+            merge_key: merge_key.to_owned(),
+            kind: kind.to_owned(),
+            severity: if kind == "approval" { "high" } else { "normal" }.to_owned(),
+            title: if kind == "approval" {
+                "操作等待审批"
+            } else {
+                "审批已处理"
+            }
+            .to_owned(),
+            body: "测试对话 · 写入文件".to_owned(),
+            source_type: "approval".to_owned(),
+            source_id: merge_key.to_owned(),
+            workspace_view: Some("chat".to_owned()),
+            entity_id: Some("conversation-one".to_owned()),
+            progress: None,
+            status: status.to_owned(),
+            action: json!({"open": "conversation"}),
+        };
+
+        database
+            .upsert_app_notification(approval("approval:one", "approval", "pending"))
+            .expect("insert pending approval");
+        let pending = database.list_app_notifications(true, 20).unwrap();
+        assert_eq!(pending.len(), 1);
+        database
+            .set_app_notification_read(&pending[0].id, true)
+            .expect("mark visible approval read");
+
+        database
+            .upsert_app_notification(approval("approval:one", "completed", "approved"))
+            .expect("resolve approval");
+        assert!(database
+            .list_app_notifications(true, 20)
+            .unwrap()
+            .is_empty());
+        let resolved = database.list_app_notifications(false, 20).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].status, "approved");
+        assert!(resolved[0].read_at.is_some());
+
+        database
+            .upsert_app_notification(approval("approval:two", "completed", "denied"))
+            .expect("insert already resolved approval");
+        assert!(database
+            .list_app_notifications(true, 20)
+            .unwrap()
+            .is_empty());
 
         drop(database);
         let _ = fs::remove_file(path);

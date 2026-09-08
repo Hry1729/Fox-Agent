@@ -53,9 +53,9 @@ export function ExpertBindingChip({ expert, readOnly, toolAvailability, onView, 
 function capabilitySummary(expert?: AgentRecord) {
   if (!expert) return []
   return [
-    expert.resources.skills.length ? `${expert.resources.skills.length} Skills` : '',
+    expert.resources.skills.length ? `${expert.resources.skills.length} 技能` : '',
     expert.resources.knowledges.length ? `${expert.resources.knowledges.length} 知识` : '',
-    expert.resources.mcps.length ? `${expert.resources.mcps.length} MCP` : '',
+    expert.resources.mcps.length ? `${expert.resources.mcps.length} 连接器` : '',
     expert.resources.tools.length ? `${expert.resources.tools.length} 工具` : '',
   ].filter(Boolean).slice(0, 3)
 }

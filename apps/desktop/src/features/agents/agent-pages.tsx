@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Brain, CalendarDays, CheckCircle2, Clock3, Code2, Database, Download, FileUp, Folder, Globe2, History, Images, Info, LoaderCircle, MessageSquareText, Plus, Puzzle, RotateCcw, Search, Settings2, Sparkles, Wrench } from 'lucide-react'
-import { toast } from 'sonner'
+import { notify as toast } from '@/features/notifications'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -419,8 +419,8 @@ const foxRuntimeTools = [
   { id: 'search_knowledge', name: 'search_knowledge', description: '检索已绑定知识库并返回来源', kind: 'Knowledge' },
   { id: 'read_knowledge_document', name: 'read_knowledge_document', description: '读取知识库中已解析的文档', kind: 'Knowledge' },
   { id: 'query_knowledge_graph', name: 'query_knowledge_graph', description: '查询知识图谱中的有限子图', kind: 'Knowledge' },
-  { id: 'list_mcp_tools', name: 'list_mcp_tools', description: '读取当前已启用 MCP 服务提供的工具清单', kind: 'MCP' },
-  { id: 'call_mcp_tool', name: 'call_mcp_tool', description: '通过 Fox 权限审批调用指定的 MCP 工具', kind: 'MCP' },
+  { id: 'list_mcp_tools', name: 'list_mcp_tools', description: '读取当前已启用 连接器提供的工具清单', kind: 'MCP' },
+  { id: 'call_mcp_tool', name: 'call_mcp_tool', description: '通过 Fox 权限审批调用指定的 连接器工具', kind: 'MCP' },
   { id: 'work_snapshot_get', name: 'work_snapshot_get', description: '读取当前目标、任务、证据和 A1 验收状态', kind: 'Work' },
   { id: 'goal_propose', name: 'goal_propose', description: '向 Host 提议一个可跟踪目标', kind: 'Work' },
   { id: 'goal_complete', name: 'goal_complete', description: '兼容 A0 的目标完成请求', kind: 'Work' },
@@ -461,8 +461,8 @@ const toolDescriptions: Record<string, string> = {
   code_check: '运行代码质量检查',
   format_code: '检查或应用代码格式',
   tabular_data: '预览、筛选和聚合表格数据',
-  list_mcp_tools: '列出 MCP 服务提供的工具',
-  call_mcp_tool: '调用 MCP 服务中的工具',
+  list_mcp_tools: '列出 连接器提供的工具',
+  call_mcp_tool: '调用 连接器中的工具',
 }
 
 function AgentCapabilitiesCard({ agent, navigate, section = 'all' }: { agent: AgentCardData; navigate: NavigateWorkspace; section?: 'all' | 'skills' | 'tools' }) {
@@ -557,10 +557,10 @@ function AgentCapabilitiesCard({ agent, navigate, section = 'all' }: { agent: Ag
   return (
     <>
       <Card className="fox-agent-capabilities-card">
-        <h2>{section === 'skills' ? 'Skills' : section === 'tools' ? '工具' : '能力与工具'}</h2>
+        <h2>{section === 'skills' ? '技能' : section === 'tools' ? '工具' : '能力与工具'}</h2>
         {section !== 'tools' && <section>
           <header><h3>能力（{skills.length}）</h3><Button variant="outline" size="sm" onClick={() => manageResources('skills')}><Settings2 />管理</Button></header>
-          <div className="fox-agent-capability-grid">{skills.length ? skills.map((skill) => <div key={skill.id}><span><Puzzle /></span><p><b>{skill.name || skill.id}</b><small>{skill.description || `Skill · ${skill.id}`}</small></p><Badge variant="outline">Skill</Badge></div>) : <p className="fox-agent-capability-empty">此专家暂未配置 Skills。</p>}</div>
+          <div className="fox-agent-capability-grid">{skills.length ? skills.map((skill) => <div key={skill.id}><span><Puzzle /></span><p><b>{skill.name || skill.id}</b><small>{skill.description || `技能 · ${skill.id}`}</small></p><Badge variant="outline">技能</Badge></div>) : <p className="fox-agent-capability-empty">此专家暂未配置 技能。</p>}</div>
         </section>}
         {section !== 'skills' && <section>
           <header><h3>工具（{tools.length}）</h3><Button variant="outline" size="sm" onClick={() => manageResources('tools')}><Settings2 />管理</Button></header>
@@ -568,18 +568,18 @@ function AgentCapabilitiesCard({ agent, navigate, section = 'all' }: { agent: Ag
             const toolName = tool.id || tool.name
             const description = tool.description || toolDescriptions[toolName] || `调用 ${toolName} 工具`
             return <div key={`${tool.kind}:${toolName}`}><span>{tool.kind === 'CLI' ? <Code2 /> : tool.kind === 'MCP' ? <Globe2 /> : /file|read|write|edit/i.test(toolName) ? <Wrench /> : <Search />}</span><p><b><code>{toolName}</code></b><small>{description}</small></p><Badge variant="outline">{tool.kind}</Badge></div>
-          }) : <p className="fox-agent-capability-empty">当前 Runtime 尚未返回 Tool、CLI 或 MCP 工具。</p>}</div>
+          }) : <p className="fox-agent-capability-empty">当前 Runtime 尚未返回 Tool、CLI 或 连接器工具。</p>}</div>
         </section>}
       </Card>
       <Dialog open={managerOpen} onOpenChange={setManagerOpen}>
         <DialogContent className="fox-agent-resource-dialog">
           <DialogHeader>
-            <div className="fox-agent-resource-dialog-title"><div><DialogTitle>管理能力与工具</DialogTitle><DialogDescription>{editableLocal ? '预置资源默认开启且不可修改，用户添加的资源可以自由启用或停用。' : agent.packageSource === 'imported' ? '已安装能力包的资源声明不可直接修改；可复制为本地专家后编辑。' : '该专家的能力与工具由其来源统一管理。'}</DialogDescription></div>{editableLocal && <Button variant="outline" size="sm" onClick={() => { setManagerOpen(false); navigate(managerTab === 'skills' ? 'skills' : 'mcp') }}><Plus />{managerTab === 'skills' ? '添加 Skill' : '添加工具'}</Button>}</div>
+            <div className="fox-agent-resource-dialog-title"><div><DialogTitle>管理能力与工具</DialogTitle><DialogDescription>{editableLocal ? '预置资源默认开启且不可修改，用户添加的资源可以自由启用或停用。' : agent.packageSource === 'imported' ? '已安装能力包的资源声明不可直接修改；可复制为本地专家后编辑。' : '该专家的能力与工具由其来源统一管理。'}</DialogDescription></div>{editableLocal && <Button variant="outline" size="sm" onClick={() => { setManagerOpen(false); navigate(managerTab === 'skills' ? 'skills' : 'mcp') }}><Plus />{managerTab === 'skills' ? '添加 技能' : '添加工具'}</Button>}</div>
           </DialogHeader>
           <Tabs value={managerTab} onValueChange={(value) => setManagerTab(value as 'skills' | 'tools')}>
             <TabsList><TabsTrigger value="skills">能力（{localAgent ? defaultSkills.length + draftSkills.size : skills.length}）</TabsTrigger><TabsTrigger value="tools">工具（{localAgent ? foxRuntimeTools.length + draftMcps.size : tools.length}）</TabsTrigger></TabsList>
             <TabsContent value="skills" className="fox-agent-resource-list">
-              {localAgent ? <>{defaultSkills.map((skill) => <div key={`default:${skill.id}`}><span><Puzzle /></span><p><b>{skill.name || skill.id}<em>预置</em></b><small>{skill.description || `Skill · ${skill.id}`}</small></p><Switch checked disabled aria-label={`${skill.name} 默认开启`} /></div>)}{userSkills.map((skill) => <div key={skill.id}><span><Puzzle /></span><p><b>{skill.name}<em>用户添加</em></b><small>{skill.description || skill.id}</small></p><Switch checked={draftSkills.has(skill.id)} disabled={!editableLocal || !skill.valid || saving} onCheckedChange={(checked) => toggleDraft('skills', skill.id, checked)} /></div>)}{!defaultSkills.length && !userSkills.length && <p className="fox-agent-resource-empty">还没有可用的 Skill。</p>}</> : skills.length ? skills.map((skill) => <div key={skill.id}><span><Puzzle /></span><p><b>{skill.name}<em>预置</em></b><small>{skill.description}</small></p><Switch checked disabled aria-label={`${skill.name} 默认开启`} /></div>) : <p className="fox-agent-resource-empty">该专家没有公开的能力信息。</p>}
+              {localAgent ? <>{defaultSkills.map((skill) => <div key={`default:${skill.id}`}><span><Puzzle /></span><p><b>{skill.name || skill.id}<em>预置</em></b><small>{skill.description || `技能 · ${skill.id}`}</small></p><Switch checked disabled aria-label={`${skill.name} 默认开启`} /></div>)}{userSkills.map((skill) => <div key={skill.id}><span><Puzzle /></span><p><b>{skill.name}<em>用户添加</em></b><small>{skill.description || skill.id}</small></p><Switch checked={draftSkills.has(skill.id)} disabled={!editableLocal || !skill.valid || saving} onCheckedChange={(checked) => toggleDraft('skills', skill.id, checked)} /></div>)}{!defaultSkills.length && !userSkills.length && <p className="fox-agent-resource-empty">还没有可用的 技能。</p>}</> : skills.length ? skills.map((skill) => <div key={skill.id}><span><Puzzle /></span><p><b>{skill.name}<em>预置</em></b><small>{skill.description}</small></p><Switch checked disabled aria-label={`${skill.name} 默认开启`} /></div>) : <p className="fox-agent-resource-empty">该专家没有公开的能力信息。</p>}
             </TabsContent>
             <TabsContent value="tools" className="fox-agent-resource-list">
               {localAgent ? <>{foxRuntimeTools.map((tool) => <div key={tool.id}><span>{tool.kind === 'CLI' ? <Code2 /> : <Wrench />}</span><p><b><code>{tool.id}</code><em>{agent.isBuiltin ? '预置' : '能力包'}</em></b><small>{tool.description}</small></p><Switch checked={draftTools.has(tool.id)} disabled={!editableLocal || saving} aria-label={`${tool.id} 工具权限`} onCheckedChange={(checked) => toggleDraft('tools', tool.id, checked)} /></div>)}{mcpResource.items.map((server) => <div key={server.id}><span><Globe2 /></span><p><b>{server.name}<em>用户添加</em></b><small>MCP · {server.command}</small></p><Switch checked={draftMcps.has(server.id)} disabled={!editableLocal || saving} onCheckedChange={(checked) => toggleDraft('mcp', server.id, checked)} /></div>)}</> : tools.length ? tools.map((tool) => <div key={`${tool.kind}:${tool.id}`}><span><Wrench /></span><p><b><code>{tool.id}</code><em>预置</em></b><small>{tool.description}</small></p><Switch checked disabled aria-label={`${tool.id} 默认开启`} /></div>) : <p className="fox-agent-resource-empty">该专家没有公开的工具信息。</p>}
@@ -848,7 +848,7 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
   const skillChoices: ExpertResourceChoice[] = skillResource.items.map((item) => ({
     id: item.id,
     name: item.name || item.id,
-    description: item.validationError || item.description || `Skill · ${item.id}`,
+    description: item.validationError || item.description || `技能 · ${item.id}`,
     badge: item.valid ? `v${item.version}` : '不可用',
     icon: <Puzzle />,
     disabled: !item.valid,
@@ -885,7 +885,7 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
         </div>
         {resource.error && <p className="fox-page-error">{resource.error}</p>}
         {(resource.syncing || resource.syncError) && <div className={`fox-agent-sync-notice ${resource.syncError ? 'is-offline' : ''}`} title={resource.syncError ?? undefined}>{resource.syncing ? <LoaderCircle className="animate-spin" /> : <Info />}<span>{resource.syncing ? '正在后台同步知识库专家，本地专家可正常使用。' : '知识库服务暂不可用或未登录，已显示缓存专家。'}</span></div>}
-        {resource.loading && cards.length === 0 ? <p className="fox-page-empty">正在加载专家...</p> : filteredCards.length ? <div className="fox-entity-grid fox-shadcn-entity-grid">{filteredCards.map((agent) => <AgentCard key={agent.id} agent={agent} onUse={() => navigate('chat', agent.id)} onManage={agent.runtimeType === 'pi' ? () => openManage(agent) : undefined} />)}</div> : <p className="fox-page-empty">没有符合当前筛选条件的专家。</p>}
+        {resource.loading && cards.length === 0 ? <p className="fox-page-empty fox-agent-list-empty">正在加载专家...</p> : filteredCards.length ? <div className="fox-entity-grid fox-shadcn-entity-grid">{filteredCards.map((agent) => <AgentCard key={agent.id} agent={agent} onUse={() => navigate('chat', agent.id)} onManage={agent.runtimeType === 'pi' ? () => openManage(agent) : undefined} />)}</div> : <p className="fox-page-empty fox-agent-list-empty">没有符合当前筛选条件的专家。</p>}
       </section>
       <DigitalColleagueManager open={digitalColleaguesOpen} onOpenChange={setDigitalColleaguesOpen} experts={resource.agents} />
       <Dialog open={editorOpen} onOpenChange={setEditorOpen}>
@@ -910,8 +910,8 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
             </TabsContent>
             <TabsContent value="resources" className="fox-agent-editor-resources">
               <section><header><span><Database />知识库</span><b>{selectedResources('knowledge').size} 已选择</b></header><ExpertResourceList items={knowledgeChoices} selected={selectedResources('knowledge')} disabled={readOnly} emptyText={knowledgeResource.loading ? '正在读取知识库…' : knowledgeResource.error || '没有可选择的知识库'} onToggle={(id, checked) => toggleResource('knowledge', id, checked)} /></section>
-              <section><header><span><Puzzle />Skills</span><b>{selectedResources('skills').size} 已选择</b></header><ExpertResourceList items={skillChoices} selected={selectedResources('skills')} disabled={readOnly} emptyText={skillResource.loading ? '正在扫描 Skills…' : skillResource.error || '没有可选择的 Skill'} onToggle={(id, checked) => toggleResource('skills', id, checked)} /></section>
-              <section><header><span><Globe2 />MCP 服务</span><b>{selectedResources('mcpServers').size} 已选择</b></header><ExpertResourceList items={mcpChoices} selected={selectedResources('mcpServers')} disabled={readOnly} emptyText={mcpResource.loading ? '正在读取 MCP 服务…' : mcpResource.error || '没有可选择的 MCP 服务'} onToggle={(id, checked) => toggleResource('mcpServers', id, checked)} /></section>
+              <section><header><span><Puzzle />技能</span><b>{selectedResources('skills').size} 已选择</b></header><ExpertResourceList items={skillChoices} selected={selectedResources('skills')} disabled={readOnly} emptyText={skillResource.loading ? '正在扫描 技能…' : skillResource.error || '没有可选择的 技能'} onToggle={(id, checked) => toggleResource('skills', id, checked)} /></section>
+              <section><header><span><Globe2 />连接器</span><b>{selectedResources('mcpServers').size} 已选择</b></header><ExpertResourceList items={mcpChoices} selected={selectedResources('mcpServers')} disabled={readOnly} emptyText={mcpResource.loading ? '正在读取 连接器…' : mcpResource.error || '没有可选择的 连接器'} onToggle={(id, checked) => toggleResource('mcpServers', id, checked)} /></section>
               <section><header><span><Wrench />工具权限</span><b>{selectedResources('allowedTools').size} 已选择</b></header><ExpertResourceList items={toolChoices} selected={selectedResources('allowedTools')} disabled={readOnly} emptyText="当前没有可选择的 Runtime 工具" onToggle={(id, checked) => toggleResource('allowedTools', id, checked)} /></section>
             </TabsContent>
             {editingAgent?.packageSource === 'imported' && <TabsContent value="versions" className="fox-agent-editor-resources">
@@ -947,7 +947,7 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
             <label><span>项目权限请求</span><strong>{packagePreview.requestedProjectPermission}</strong><small>最终权限仍由 Host 和用户在运行时决定。</small></label>
             {(packagePreview.missingResources.agents.length + packagePreview.missingResources.skills.length + packagePreview.missingResources.tools.length + packagePreview.missingResources.mcpServers.length + packagePreview.missingResources.knowledgeReferences.length) > 0 && <div className="fox-page-error">缺少资源：{[
               ...packagePreview.missingResources.agents.map((id) => `Agent ${id}`),
-              ...packagePreview.missingResources.skills.map((id) => `Skill ${id}`),
+              ...packagePreview.missingResources.skills.map((id) => `技能 ${id}`),
               ...packagePreview.missingResources.tools.map((id) => `Tool ${id}`),
               ...packagePreview.missingResources.mcpServers.map((id) => `MCP ${id}`),
               ...packagePreview.missingResources.knowledgeReferences.map((item) => `Knowledge ${item.id}`),
@@ -964,7 +964,7 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
 export function AgentDetailPage({ sidebarCollapsed, onSidebar, navigate, agentId, section = 'home' }: { sidebarCollapsed: boolean; onSidebar: () => void; navigate: NavigateWorkspace; agentId?: string | null; section?: string }) {
   const resource = useAgents()
   const agent = asCard(resource.agents.find((item) => item.id === agentId) ?? resource.agents[0] ?? fallbackAgent)
-  const sectionTitle = section === 'conversations' ? '对话任务' : section === 'memory' ? '记忆' : section === 'skills' ? 'Skills' : section === 'tools' ? '工具' : '首页'
+  const sectionTitle = section === 'conversations' ? '对话任务' : section === 'memory' ? '记忆' : section === 'skills' ? '技能' : section === 'tools' ? '工具' : '首页'
   return (
     <WorkspacePage className="fox-agent-detail-page" title={agent.name} subtitle={`专家详情 · ${sectionTitle}`} sidebarCollapsed={sidebarCollapsed} onSidebar={onSidebar} onBack={() => navigate('agents')} actions={<Button className="fox-agent-use-button" size="sm" disabled={!agent.available} onClick={() => navigate('chat', agent.id)}><Sparkles size={14} />召唤专家</Button>}>
       <div className="fox-detail-layout fox-agent-detail-layout">
@@ -972,8 +972,8 @@ export function AgentDetailPage({ sidebarCollapsed, onSidebar, navigate, agentId
           {section === 'home' && <><section className="fox-agent-hero"><span><img src={agent.image} alt="" /></span><div><div><h1>{agent.name}</h1>{agent.isDefault && <Badge variant="secondary"><i />默认专家</Badge>}</div><p>{agent.description}</p><small>{agent.runtimeType === 'pi' ? 'Fox 原生专家可在知识库服务离线时继续对话、读取和处理已授权项目。' : '系统提示词与管理配置保留在知识库服务，Fox 仅展示普通用户可见和可配置的字段。'}</small></div></section><AgentWorkRecord agentId={agent.id} /><AgentCapabilitiesCard agent={agent} navigate={navigate} /></>}
           {section === 'conversations' && <AgentSectionLayout title="对话任务" description="查看该专家执行过的对话任务、完成状态和关联项目。"><AgentWorkRecord agentId={agent.id} conversationsOnly /></AgentSectionLayout>}
           {section === 'memory' && <AgentSectionLayout title="记忆" description="查看、确认、编辑、启停、处理冲突和删除 Fox Host 管理的长期记忆。"><AgentMemoryManager agent={agent} /></AgentSectionLayout>}
-          {section === 'skills' && <AgentSectionLayout title="Skills" description="查看和管理为该专家启用的预置能力与用户扩展。"><AgentCapabilitiesCard agent={agent} navigate={navigate} section="skills" /></AgentSectionLayout>}
-          {section === 'tools' && <AgentSectionLayout title="工具" description="查看该专家可以使用的 Runtime、CLI 与 MCP 工具。"><AgentCapabilitiesCard agent={agent} navigate={navigate} section="tools" /></AgentSectionLayout>}
+          {section === 'skills' && <AgentSectionLayout title="技能" description="查看和管理为该专家启用的预置能力与用户扩展。"><AgentCapabilitiesCard agent={agent} navigate={navigate} section="skills" /></AgentSectionLayout>}
+          {section === 'tools' && <AgentSectionLayout title="工具" description="查看该专家可以使用的 Runtime、CLI 与 连接器工具。"><AgentCapabilitiesCard agent={agent} navigate={navigate} section="tools" /></AgentSectionLayout>}
         </main>
       </div>
     </WorkspacePage>

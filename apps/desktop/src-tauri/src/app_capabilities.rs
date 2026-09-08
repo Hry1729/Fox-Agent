@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::path::Path;
 use tauri::State;
+use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +26,22 @@ pub struct NotificationListRequest {
 pub struct NotificationReadRequest {
     pub id: String,
     pub read: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppNotificationPublishRequest {
+    pub kind: String,
+    pub severity: String,
+    pub title: String,
+    pub body: String,
+    pub merge_key: Option<String>,
+    pub source_type: Option<String>,
+    pub source_id: Option<String>,
+    pub workspace_view: Option<String>,
+    pub entity_id: Option<String>,
+    pub status: Option<String>,
+    pub action: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +92,22 @@ fn failure<T: serde::Serialize>(
     retryable: bool,
 ) -> ApiResponse<T> {
     ApiResponse::failure(code, error.to_string(), retryable)
+}
+
+fn validate_notification_value(
+    field: &str,
+    value: &str,
+    max_chars: usize,
+    required: bool,
+) -> Result<String, String> {
+    let value = value.trim();
+    if required && value.is_empty() {
+        return Err(format!("{field} 不能为空"));
+    }
+    if value.chars().count() > max_chars {
+        return Err(format!("{field} 不能超过 {max_chars} 个字符"));
+    }
+    Ok(value.to_owned())
 }
 
 fn sync_local_knowledge_notifications(state: &AppState) -> Result<(), String> {
@@ -164,6 +197,122 @@ pub fn app_notification_read(
     {
         Ok(value) => ApiResponse::success(value),
         Err(error) => failure("notifications.update_failed", error, true),
+    }
+}
+
+#[tauri::command]
+pub fn app_notification_publish(
+    state: State<'_, AppState>,
+    request: AppNotificationPublishRequest,
+) -> ApiResponse<bool> {
+    if !matches!(
+        request.kind.as_str(),
+        "approval" | "question" | "progress" | "completed" | "failed"
+    ) {
+        return failure(
+            "notifications.kind_invalid",
+            "通知类型必须是 approval、question、progress、completed 或 failed",
+            false,
+        );
+    }
+    if !matches!(request.severity.as_str(), "quiet" | "normal" | "high") {
+        return failure(
+            "notifications.severity_invalid",
+            "通知级别必须是 quiet、normal 或 high",
+            false,
+        );
+    }
+    let title = match validate_notification_value("通知标题", &request.title, 160, true) {
+        Ok(value) => value,
+        Err(error) => return failure("notifications.title_invalid", error, false),
+    };
+    let body = match validate_notification_value("通知内容", &request.body, 16_000, true) {
+        Ok(value) => value,
+        Err(error) => return failure("notifications.body_invalid", error, false),
+    };
+    let notification_id = Uuid::new_v4().to_string();
+    let source_type = request
+        .source_type
+        .as_deref()
+        .map(|value| validate_notification_value("通知来源", value, 80, false))
+        .transpose();
+    let source_type = match source_type {
+        Ok(Some(value)) if !value.is_empty() => value,
+        Ok(_) => "ui".to_owned(),
+        Err(error) => return failure("notifications.source_invalid", error, false),
+    };
+    let source_id = request
+        .source_id
+        .as_deref()
+        .map(|value| validate_notification_value("来源 ID", value, 256, false))
+        .transpose();
+    let source_id = match source_id {
+        Ok(Some(value)) if !value.is_empty() => value,
+        Ok(_) => notification_id.clone(),
+        Err(error) => return failure("notifications.source_invalid", error, false),
+    };
+    let merge_key = request
+        .merge_key
+        .as_deref()
+        .map(|value| validate_notification_value("合并键", value, 256, false))
+        .transpose();
+    let merge_key = match merge_key {
+        Ok(Some(value)) if !value.is_empty() => value,
+        Ok(_) => format!("ui:{source_type}:{notification_id}"),
+        Err(error) => return failure("notifications.merge_key_invalid", error, false),
+    };
+    let workspace_view = match request.workspace_view.as_deref() {
+        Some(value) => match validate_notification_value("页面标识", value, 80, false) {
+            Ok(value) if !value.is_empty() => Some(value),
+            Ok(_) => None,
+            Err(error) => return failure("notifications.route_invalid", error, false),
+        },
+        None => None,
+    };
+    let entity_id = match request.entity_id.as_deref() {
+        Some(value) => match validate_notification_value("页面对象 ID", value, 256, false) {
+            Ok(value) if !value.is_empty() => Some(value),
+            Ok(_) => None,
+            Err(error) => return failure("notifications.route_invalid", error, false),
+        },
+        None => None,
+    };
+    let status = match request.status.as_deref() {
+        Some(value) => match validate_notification_value("通知状态", value, 80, false) {
+            Ok(value) if !value.is_empty() => value,
+            Ok(_) => request.kind.clone(),
+            Err(error) => return failure("notifications.status_invalid", error, false),
+        },
+        None => request.kind.clone(),
+    };
+    let action = request
+        .action
+        .unwrap_or_else(|| json!({"open": "workspace"}));
+    if action.to_string().chars().count() > 4_096 {
+        return failure(
+            "notifications.action_invalid",
+            "通知操作数据不能超过 4096 个字符",
+            false,
+        );
+    }
+    match state
+        .database
+        .upsert_app_notification(AppNotificationUpsert {
+            merge_key,
+            kind: request.kind,
+            severity: request.severity,
+            title,
+            body,
+            source_type,
+            source_id,
+            workspace_view,
+            entity_id,
+            progress: None,
+            status,
+            action,
+        }) {
+        Ok(()) => ApiResponse::success(true),
+        Err(error) => failure("notifications.publish_failed", error, true),
     }
 }
 

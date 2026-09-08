@@ -9399,7 +9399,7 @@ mod tests {
     }
 
     #[test]
-    fn repair_override_rechecks_managed_budget_after_approval_without_partial_work_writes() {
+    fn repair_override_rechecks_managed_duration_after_approval_without_partial_work_writes() {
         let (database, path) = test_database();
         let fixture = repair_override_fixture(&database, "durable_v2", true);
         let (input, tool, approval) = approved_repair_override(
@@ -9427,6 +9427,13 @@ mod tests {
                         fixture.conversation_id,
                         created_at,
                     ],
+                )?;
+                // Child token/tool counters are observational for ordinary Child
+                // Runs; the Host-enforced duration deadline remains an admission
+                // boundary and must be rechecked after human approval.
+                connection.execute(
+                    "UPDATE runs SET started_at = ?2 WHERE id = ?1",
+                    params![fixture.run_id, created_at.saturating_sub(30_001)],
                 )?;
                 Ok(())
             })

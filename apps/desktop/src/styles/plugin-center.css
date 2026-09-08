@@ -29,7 +29,7 @@
 }
 
 .fox-plugin-kind-tabs {
-  height: var(--fox-action-height) !important;
+  height: 36px !important;
   gap: 2px !important;
   padding: 3px !important;
   border-radius: var(--fox-radius-control) !important;
@@ -354,6 +354,7 @@
   border: 0;
   background: transparent;
   box-shadow: none;
+  font-size: var(--fox-type-control) !important;
 }
 
 .fox-plugin-search input:focus-visible {
@@ -788,15 +789,22 @@
 
 .fox-library-card .fox-plugin-card-heading,
 .fox-library-card .fox-plugin-installed-card-header {
-  min-height: 88px;
+  height: var(--fox-library-card-header-height);
+  min-height: var(--fox-library-card-header-height);
+  flex: 0 0 var(--fox-library-card-header-height);
   grid-template-columns: 40px minmax(0, 1fr) !important;
   align-items: center;
-  gap: var(--fox-space-m) !important;
-  padding: var(--fox-space-m) var(--fox-space-l) var(--fox-space-s) !important;
+  column-gap: var(--fox-space-m) !important;
+  row-gap: 0 !important;
+  padding: var(--fox-library-card-edge-space) !important;
 }
 
 .fox-library-card.fox-plugin-card:has(.fox-plugin-card-state) .fox-plugin-card-heading {
-  padding-right: 90px !important;
+  padding-right: var(--fox-space-l) !important;
+}
+
+.fox-library-card.fox-plugin-card:has(.fox-plugin-card-state) .fox-plugin-card-title > strong {
+  padding-right: 80px;
 }
 
 .fox-library-card .fox-plugin-icon,
@@ -808,16 +816,20 @@
 
 .fox-library-card .fox-plugin-card-title,
 .fox-library-card .fox-plugin-installed-card-copy {
+  height: 40px;
   min-width: 0;
-  display: grid;
-  grid-template-rows: auto auto;
-  gap: var(--fox-space-s);
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0;
 }
 
 .fox-library-card .fox-plugin-card-title strong,
 .fox-library-card .fox-plugin-installed-card-title strong {
-  font-size: var(--fox-type-card-title);
-  line-height: 22px;
+  font-size: var(--fox-type-ui) !important;
+  font-weight: var(--fox-weight-semibold);
+  line-height: 20px;
 }
 
 .fox-library-card .fox-plugin-card-title small,
@@ -851,11 +863,14 @@
 }
 
 .fox-library-card .fox-plugin-card-content {
-  min-height: 0;
-  flex: 1 1 auto;
+  height: var(--fox-library-card-content-height);
+  min-height: var(--fox-library-card-content-height);
+  flex: 0 0 var(--fox-library-card-content-height);
+  flex-direction: column;
+  align-items: stretch;
   justify-content: flex-start;
-  gap: 0;
-  padding: var(--fox-space-xs) var(--fox-space-l) var(--fox-space-m) !important;
+  gap: var(--fox-space-m);
+  padding: 0 var(--fox-library-card-edge-space) var(--fox-library-card-edge-space) !important;
 }
 
 .fox-library-card .fox-plugin-card-content > .fox-agent-description {

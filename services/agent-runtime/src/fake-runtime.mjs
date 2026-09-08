@@ -84,6 +84,7 @@ async function streamPrompt(request) {
   })
   emitRuntimeEvent(request, seq++, 'run.request_snapshot', {
     schemaVersion: 1,
+    stablePromptHash: 'fake-runtime-prompt-v1',
     executionProfile: activeExecutionProfileSnapshot,
     continuationDecisionContract: continuationDecisionContract(activeExecutionProfile),
     toolNames: executionProfileCatalogTools(RUNTIME_TOOL_CATALOG, activeExecutionProfile).map(({ name }) => name),
@@ -96,7 +97,10 @@ async function streamPrompt(request) {
       tool: request.payload.toolProbe.tool,
       input: request.payload.toolProbe.input,
     })
-    const preflight = await requestHost(request, 'tool.preflight', request.payload.toolProbe)
+    const preflight = await requestHost(request, 'tool.preflight', {
+      ...request.payload.toolProbe,
+      toolCallId: 'fake-tool-probe',
+    })
     emitRuntimeEvent(request, seq++, 'tool.completed', {
       toolCallId: 'fake-tool-probe',
       tool: request.payload.toolProbe.tool,

@@ -216,7 +216,7 @@ const jobSeed: KnowledgeJob[] = [
     knowledgeBaseId: 'local-research-notes',
     type: 'index',
     status: 'running',
-    stage: 'chunking',
+    stage: 'vector_upsert',
     progress: 68,
     lastSequence: 4,
     outcome: null,
@@ -421,6 +421,16 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
       const source = fileSources.get(id)
       if (!source) throw new Error(`本地文件来源不存在：${id}`)
       const next = { ...source, lastScannedAt: now(), updatedAt: now() }
+      fileSources.set(id, next)
+      return copy(next)
+    },
+
+    async updateFileSource(id, displayName) {
+      const source = fileSources.get(id)
+      const normalizedName = displayName.trim()
+      if (!source) throw new Error(`本地文件来源不存在：${id}`)
+      if (!normalizedName) throw new Error('请输入文件夹显示名称。')
+      const next = { ...source, displayName: normalizedName, updatedAt: now() }
       fileSources.set(id, next)
       return copy(next)
     },
@@ -737,16 +747,22 @@ export function createMockLocalKnowledgeGateway(): LocalKnowledgeGateway {
     async listEmbeddingModels() {
       return [{
         id: 'bge-small-zh-v1.5', name: 'BGE Small 中文 v1.5', version: '75c43b0',
-        languages: ['中文'], dimension: 512, license: 'MIT', sourceUrl: 'https://huggingface.co/BAAI/bge-small-zh-v1.5',
+        languages: ['中文'], dimension: 512, license: 'MIT', sourceUrl: 'https://huggingface.co/Xenova/bge-small-zh-v1.5',
         status: 'not_installed', integrityStatus: 'pending', isDefault: false, recommended: true,
         sizeBytes: 24_452_059, installedAt: null, packagePath: null, loadReady: false,
+        lastErrorCode: null, lastErrorMessage: null, files: [], download: null,
+      }, {
+        id: 'multilingual-e5-small', name: 'Multilingual E5 Small', version: '761b726',
+        languages: ['中文', '英文'], dimension: 384, license: 'MIT', sourceUrl: 'https://huggingface.co/Xenova/multilingual-e5-small',
+        status: 'not_installed', integrityStatus: 'pending', isDefault: false, recommended: true,
+        sizeBytes: 135_137_323, installedAt: null, packagePath: null, loadReady: false,
         lastErrorCode: null, lastErrorMessage: null, files: [], download: null,
       }]
     },
     async startEmbeddingModelInstall() { return { operationId: `mock-model-${Date.now()}`, acceptedAt: now() } },
     async cancelEmbeddingModelDownload() { return true },
     async retryEmbeddingModelDownload() { return { operationId: `mock-model-${Date.now()}`, acceptedAt: now() } },
-    async testEmbeddingModel() { return { integrityVerified: true, loadReady: true, dimension: 512, elapsedMs: 42, message: '测试通过' } },
+    async testEmbeddingModel(modelId) { return { integrityVerified: true, loadReady: true, dimension: modelId === 'multilingual-e5-small' ? 384 : 512, elapsedMs: 42, message: '隔离测试通过', errorCode: null, errorDetails: null } },
     async setDefaultEmbeddingModel() { return true },
     async deleteEmbeddingModel() { return true },
     async importEmbeddingModelPackage() { throw new Error('浏览器预览不支持导入本地模型包。') },

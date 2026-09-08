@@ -91,25 +91,9 @@ async function createBundlerWorkspace() {
   ]) {
     await materializeDependency(dependency)
   }
-  await copyFile(resolve(root, 'src/pi-runtime.mjs'), resolve(workspace, 'pi-runtime.mjs'))
-  for (const file of [
-    'expert-package.mjs',
-    'fox-planning-extension.mjs',
-    'host-tools.mjs',
-    'model-profile.mjs',
-    'offline-evaluator.mjs',
-    'pi-adapter.mjs',
-    'pi-event-mapper.mjs',
-    'planner-runtime.mjs',
-    'prompt-composer.mjs',
-    'protocol.mjs',
-    'read-only-tool-executors.mjs',
-    'read-only-tools.mjs',
-    'runtime-contract.mjs',
-    'runtime-instructions.mjs',
-    'runtime-session.mjs',
-    'tool-adapter.mjs',
-  ]) {
+  // Stage all local modules so new transitive imports remain available to Bun.
+  for (const file of await readdir(resolve(root, 'src'))) {
+    if (!file.endsWith('.mjs')) continue
     await copyFile(resolve(root, 'src', file), resolve(workspace, file))
   }
   return workspace

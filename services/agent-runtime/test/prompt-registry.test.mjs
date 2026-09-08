@@ -122,7 +122,7 @@ test('allows registry_v1 only through an exact hashed development support matrix
   )
   const version = promptVersionSnapshot('registry_v1')
   const matrix = developmentPromptSupportMatrix()
-  assert.equal(matrix.hash, '65c3e97d4cca918161d5bc29415f19ed26c7561cbee684d98094ee5880766322')
+  assert.equal(matrix.hash, '5147240611626cbe7bf62977815323856c163139b2e56df39889e8af4438f9fb')
   assert.deepEqual(validatePromptSupportMatrix(matrix), matrix)
   assert.equal(resolvePromptPolicy({
     profileId: 'prompt_registry_preview',
@@ -173,10 +173,10 @@ test('allows registry_v1 only through an exact hashed development support matrix
   }), /support matrix profiles must use a plain object prototype/)
 })
 
-test('keeps stable_v1 Runtime prefix bytes and hash unchanged', () => {
+test('pins stable_v1 Runtime prefix bytes and the knowledge-routing instruction hash', () => {
   const composed = composeRuntimePrompt({ turn: { date: '2026-08-27T00:00:00.000Z' } })
   assert.equal(composed.prompt.slice(0, composed.diagnostics.stableChars), FOX_RUNTIME_INSTRUCTIONS)
-  assert.equal(composed.stablePromptHash, '7a5e2f9fed5a6eca')
+  assert.equal(composed.stablePromptHash, '2c3c342551372d31')
 })
 
 test('separates stable-prefix and dynamic-tail cache identities', () => {

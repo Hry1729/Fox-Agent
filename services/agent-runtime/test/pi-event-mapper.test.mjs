@@ -515,6 +515,20 @@ test('maps a host cancellation to one terminal event even if cleanup also fails'
   assert.equal(events.filter((event) => event.type === 'run.failed').length, 0)
 })
 
+test('preserves structured runtime failure codes', () => {
+  const events = []
+  const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))
+  const error = new Error('tool budget exhausted')
+  error.code = 'runtime.tool_call_budget_exceeded'
+  mapper.fail(error)
+
+  assert.deepEqual(events.filter((event) => event.type === 'run.failed'), [{
+    type: 'run.failed',
+    code: 'runtime.tool_call_budget_exceeded',
+    message: 'tool budget exhausted',
+  }])
+})
+
 test('maps context compaction without creating assistant text', () => {
   const events = []
   const mapper = createPiEventMapper((type, payload = {}) => events.push({ type, ...payload }))

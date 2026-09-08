@@ -200,6 +200,7 @@ struct ZvecGeneration {
     collection: Option<Arc<Collection>>,
     dimension: Option<usize>,
     record_ids: BTreeSet<String>,
+    expected_count: Option<usize>,
     status: GenerationStatus,
 }
 
@@ -258,6 +259,99 @@ impl ZvecVectorStore {
             .join(storage_component(knowledge_base_id))
             .join(storage_component(generation_id))
     }
+
+    pub fn recreate_generation(
+        &self,
+        knowledge_base_id: &str,
+        generation_id: &str,
+    ) -> Result<(), VectorIndexError> {
+        validate_storage_identifier(knowledge_base_id, "knowledge_base_id")?;
+        validate_storage_identifier(generation_id, "generation_id")?;
+        let path = self.generation_path(knowledge_base_id, generation_id);
+        let previous = self.lock_generations()?.remove(generation_id);
+        drop(previous);
+        if path.exists() {
+            std::fs::remove_dir_all(&path).map_err(|error| {
+                VectorIndexError::operation_failed(format!(
+                    "reset zvec generation '{}': {error}",
+                    path.display()
+                ))
+            })?;
+        }
+        self.lock_generations()?.insert(
+            generation_id.to_owned(),
+            ZvecGeneration {
+                knowledge_base_id: knowledge_base_id.to_owned(),
+                path,
+                collection: None,
+                dimension: None,
+                record_ids: BTreeSet::new(),
+                expected_count: None,
+                status: GenerationStatus::Building,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn open_generation(
+        &self,
+        knowledge_base_id: &str,
+        generation_id: &str,
+        dimension: usize,
+        expected_count: usize,
+    ) -> Result<Check, VectorIndexError> {
+        validate_storage_identifier(knowledge_base_id, "knowledge_base_id")?;
+        validate_storage_identifier(generation_id, "generation_id")?;
+        if dimension == 0 {
+            return Err(VectorIndexError::invalid_request(
+                "generation dimension must be greater than zero",
+            ));
+        }
+        let path = self.generation_path(knowledge_base_id, generation_id);
+        if !path.is_dir() {
+            return Err(VectorIndexError::generation_not_found(generation_id));
+        }
+        let path_text = path.to_str().ok_or_else(|| {
+            VectorIndexError::invalid_request("zvec generation path is not valid UTF-8")
+        })?;
+        let collection = Arc::new(Collection::open(path_text, None).map_err(|error| {
+            VectorIndexError::operation_failed(format!(
+                "open zvec generation '{}': {error}",
+                path.display()
+            ))
+        })?);
+        let stats = collection.stats().map_err(|error| {
+            VectorIndexError::operation_failed(format!("read zvec generation stats: {error}"))
+        })?;
+        let vector_count = usize::try_from(stats.doc_count).map_err(|_| {
+            VectorIndexError::integrity_failed("zvec document count exceeds platform limits")
+        })?;
+        if vector_count != expected_count {
+            return Err(VectorIndexError::integrity_failed(format!(
+                "zvec document count mismatch: expected {expected_count}, got {vector_count}"
+            )));
+        }
+        self.lock_generations()?.insert(
+            generation_id.to_owned(),
+            ZvecGeneration {
+                knowledge_base_id: knowledge_base_id.to_owned(),
+                path,
+                collection: Some(collection),
+                dimension: Some(dimension),
+                record_ids: BTreeSet::new(),
+                expected_count: Some(expected_count),
+                status: GenerationStatus::Verified,
+            },
+        );
+        Ok(Check {
+            generation_id: generation_id.to_owned(),
+            knowledge_base_id: knowledge_base_id.to_owned(),
+            vector_count,
+            dimension: Some(dimension),
+            flushed: true,
+            verified: true,
+        })
+    }
 }
 
 #[cfg(feature = "zvec")]
@@ -282,6 +376,7 @@ impl VectorStore for ZvecVectorStore {
                 collection: None,
                 dimension: None,
                 record_ids: BTreeSet::new(),
+                expected_count: None,
                 status: GenerationStatus::Building,
             },
         );
@@ -470,10 +565,13 @@ impl VectorStore for ZvecVectorStore {
         } else {
             0
         };
-        if vector_count != generation.record_ids.len() {
+        let expected_count = generation
+            .expected_count
+            .unwrap_or(generation.record_ids.len());
+        if vector_count != expected_count {
             return Err(VectorIndexError::integrity_failed(format!(
                 "zvec document count mismatch: expected {}, got {vector_count}",
-                generation.record_ids.len()
+                expected_count
             )));
         }
         generation.status = GenerationStatus::Verified;
@@ -1157,6 +1255,23 @@ mod tests {
         assert_eq!(check.vector_count, 2);
         assert_eq!(check.dimension, Some(4));
         drop(store);
+
+        let reopened = ZvecVectorStore::new(&root).unwrap();
+        let reopened_check = reopened
+            .open_generation("kb-smoke", "generation-smoke", 4, 2)
+            .unwrap();
+        assert_eq!(reopened_check.vector_count, 2);
+        let reopened_hits = reopened
+            .search(
+                "generation-smoke",
+                SearchRequest::new(vec![1.0, 0.0, 0.0, 0.0], 2),
+            )
+            .unwrap();
+        assert_eq!(
+            reopened_hits.first().map(|hit| hit.id.as_str()),
+            Some("chunk-a")
+        );
+        drop(reopened);
         let _ = std::fs::remove_dir_all(root);
     }
 }

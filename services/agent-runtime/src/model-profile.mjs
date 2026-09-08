@@ -167,7 +167,15 @@ export function resolveModelProfile(config = {}) {
       maxOutputTokens: boundedNumber(overrides.plannerMaxOutputTokens, 2_048, 512, 8_192),
     },
     runtime: {
-      maxRetries: boundedNumber(overrides.maxRetries, 2, 0, 5),
+      // Turn-level retry: re-running a whole agent turn after a terminal turn
+      // failure. Owned independently from the provider HTTP retry below so that a
+      // rate-limited request is never retried by both layers (double cost / 429
+      // amplification). The Fox Kernel is the authority for turn-retry policy; the
+      // sidecar defaults it off and only enables it when the Host configures it.
+      maxRetries: boundedNumber(overrides.maxRetries, 0, 0, 5),
+      // Provider HTTP retry: bounded retries of a single request for transient
+      // transport/5xx/429 failures, honouring the server's Retry-After header.
+      providerMaxRetries: boundedNumber(overrides.providerMaxRetries, 2, 0, 5),
       providerMaxRetryDelayMs: boundedNumber(overrides.providerMaxRetryDelayMs, 8_000, 500, 60_000),
       reserveTokens: Math.min(16_384, Math.max(2_048, Math.floor(contextWindow * 0.12))),
       keepRecentTokens: Math.min(24_000, Math.max(4_096, Math.floor(contextWindow * 0.18))),

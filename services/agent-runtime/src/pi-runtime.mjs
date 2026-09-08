@@ -26,7 +26,7 @@ import {
 } from './runtime-instructions.mjs'
 import { stablePromptHash } from './prompt-composer.mjs'
 import { plannerHandoff, runPlanner, shouldUsePlanner } from './planner-runtime.mjs'
-import { diagnoseToolsForAgentContext } from './expert-package.mjs'
+import { diagnoseToolsForAgentContext, selectToolsForProjectContext } from './expert-package.mjs'
 import { adaptFoxToolsToPi } from './tool-adapter.mjs'
 import { runOfflineEvals } from './offline-evaluator.mjs'
 import {
@@ -52,6 +52,13 @@ import {
 const sessions = new Map()
 const activeRuns = new Map()
 const pendingHostRequests = new Map()
+const RUNTIME_HTTP_IDLE_TIMEOUT_MS = 90_000
+const HOST_REQUEST_TIMEOUT_MS = 6 * 60_000
+const HARD_RUN_BUDGET = Object.freeze({
+  maxDurationMs: 30 * 60_000,
+  maxIdenticalToolCalls: 4,
+  maxWebSearchCalls: 6,
+})
 let modelService = null
 let fauxProvider = null
 let executionProfile = resolveExecutionProfile('legacy')
@@ -100,25 +107,59 @@ function requestHost(request, type, payload, signal) {
     runId: request.runId,
     payload,
   })
-  write(message)
+  if (signal?.aborted) {
+    const error = new Error('Host request was cancelled before dispatch.')
+    error.code = 'runtime.host_request_cancelled'
+    return Promise.reject(error)
+  }
   return new Promise((resolve, reject) => {
-    const abort = () => {
+    let settled = false
+    const cleanup = () => {
+      clearTimeout(timeout)
+      signal?.removeEventListener('abort', abort)
       pendingHostRequests.delete(message.id)
-      reject(new Error('Host request was cancelled.'))
     }
+    const settle = (handler, value) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      handler(value)
+    }
+    const abort = () => {
+      const error = new Error('Host request was cancelled.')
+      error.code = 'runtime.host_request_cancelled'
+      settle(reject, error)
+    }
+    const timeout = setTimeout(() => {
+      const error = new Error(`Host request ${type} timed out after ${HOST_REQUEST_TIMEOUT_MS}ms.`)
+      error.code = 'runtime.host_request_timeout'
+      settle(reject, error)
+    }, HOST_REQUEST_TIMEOUT_MS)
     signal?.addEventListener('abort', abort, { once: true })
     pendingHostRequests.set(message.id, {
-      resolve: (value) => { signal?.removeEventListener('abort', abort); resolve(value) },
-      reject,
+      runId: request.runId,
+      resolve: (value) => settle(resolve, value),
+      reject: (error) => settle(reject, error),
     })
+    // Close the narrow race between the pre-dispatch check and listener setup.
+    if (signal?.aborted) {
+      abort()
+      return
+    }
+    write(message)
   })
 }
 
-function cancelPendingHostRequests() {
-  for (const pending of pendingHostRequests.values()) {
-    pending.reject(new Error('Host request was cancelled.'))
+// Reject only the Host requests that belong to a single run. Cancellation must
+// never tear down in-flight requests owned by other concurrent runs (for example
+// the A5 child-runtime pool), so this is run-scoped rather than a global clear.
+function cancelPendingHostRequests(runId) {
+  for (const [id, pending] of pendingHostRequests.entries()) {
+    if (runId === undefined || pending.runId === runId) {
+      pendingHostRequests.delete(id)
+      pending.reject(new Error('Host request was cancelled.'))
+    }
   }
-  pendingHostRequests.clear()
 }
 
 function createModel(config, profile) {
@@ -170,6 +211,117 @@ function promptBudgetForRun(payload, modelProfile) {
   }
 }
 
+function positiveBudgetValue(value, fallback, hardMaximum) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.min(Math.floor(parsed), hardMaximum)
+    : fallback
+}
+
+function runBudgetForRequest(payload) {
+  const configured = payload?.runBudget && typeof payload.runBudget === 'object'
+    ? payload.runBudget
+    : {}
+  return {
+    maxDurationMs: positiveBudgetValue(
+      configured.maxDurationMs,
+      HARD_RUN_BUDGET.maxDurationMs,
+      HARD_RUN_BUDGET.maxDurationMs,
+    ),
+    maxTotalTokens: positiveBudgetValue(
+      configured.maxTotalTokens,
+      null,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    maxToolCalls: positiveBudgetValue(
+      configured.maxToolCalls,
+      null,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    maxIdenticalToolCalls: positiveBudgetValue(
+      configured.maxIdenticalToolCalls,
+      HARD_RUN_BUDGET.maxIdenticalToolCalls,
+      HARD_RUN_BUDGET.maxIdenticalToolCalls,
+    ),
+  }
+}
+
+function boundedRetryInt(value, fallback, min, max) {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed >= min && parsed <= max ? parsed : fallback
+}
+
+// Provider HTTP retry and whole-turn retry are separate policies. The sidecar
+// defaults turn retry OFF (it is owned by the Fox Kernel/Host) so a rate-limited
+// request is never retried by both Pi's provider layer and an outer turn retry,
+// which would double cost and amplify 429s. The Host may supply an explicit,
+// bounded retry policy per run; the model profile only supplies provider bounds.
+function retryPolicyForRun(payload, modelProfile) {
+  const host = payload?.retryPolicy && typeof payload.retryPolicy === 'object' ? payload.retryPolicy : {}
+  const profileRuntime = modelProfile.runtime
+  const providerMaxRetries = boundedRetryInt(
+    host.providerMaxRetries,
+    profileRuntime.providerMaxRetries,
+    0,
+    5,
+  )
+  const providerMaxRetryDelayMs = positiveBudgetValue(
+    host.providerMaxRetryDelayMs,
+    profileRuntime.providerMaxRetryDelayMs,
+    60_000,
+  )
+  const turnMaxRetries = boundedRetryInt(
+    host.turnMaxRetries,
+    host.turnEnabled === true ? 1 : 0,
+    0,
+    5,
+  )
+  return {
+    providerMaxRetries,
+    providerMaxRetryDelayMs,
+    turnEnabled: turnMaxRetries > 0,
+    turnMaxRetries,
+    turnBaseDelayMs: positiveBudgetValue(host.turnBaseDelayMs, 750, 30_000),
+  }
+}
+
+function budgetedTools(tools, budget, failRun) {
+  let totalCalls = 0
+  let webSearchCalls = 0
+  const identicalCalls = new Map()
+  return tools.map((tool) => ({
+    ...tool,
+    execute: async (toolCallId, input, signal, ...rest) => {
+      totalCalls += 1
+      if (budget.maxToolCalls !== null && totalCalls > budget.maxToolCalls) {
+        throw failRun(
+          'runtime.tool_call_budget_exceeded',
+          `Run exceeded its ${budget.maxToolCalls} tool-call budget.`,
+        )
+      }
+      if (tool.name === 'web_search') {
+        webSearchCalls += 1
+        if (webSearchCalls > HARD_RUN_BUDGET.maxWebSearchCalls) {
+          throw failRun(
+            'runtime.web_search_budget_exceeded',
+            `Run exceeded the hard limit of ${HARD_RUN_BUDGET.maxWebSearchCalls} web searches. Use the evidence already collected instead of retrying equivalent queries.`,
+          )
+        }
+      }
+      const fingerprint = `${tool.name}\0${JSON.stringify(input ?? {})}`
+      const repeated = (identicalCalls.get(fingerprint) ?? 0) + 1
+      identicalCalls.set(fingerprint, repeated)
+      if (repeated > budget.maxIdenticalToolCalls) {
+        throw failRun(
+          'runtime.repeated_tool_call',
+          `Tool ${tool.name} repeated the same input more than ${budget.maxIdenticalToolCalls} times.`,
+        )
+      }
+      return tool.execute(toolCallId, input, signal, ...rest)
+    },
+  }))
+}
+
 async function executePrompt(request) {
   const activeExecutionProfile = executionProfile
   const activeExecutionProfileSnapshot = executionProfileSnapshot(activeExecutionProfile)
@@ -185,9 +337,31 @@ async function executePrompt(request) {
     || isApprovalDemoFollowup(currentText, previousUserText)
   const bufferedAssistantEvents = []
   let toolExecutionCount = 0
+  const runBudget = runBudgetForRequest(request.payload)
+  const runAbort = new AbortController()
   const runControl = {
     cancelled: false,
     agent: null,
+    budgetError: null,
+    abort: runAbort,
+    mapper: null,
+  }
+  // Abort a Host request when either the run is cancelled or Pi's per-tool signal
+  // fires. AbortSignal.any is available on the supported Node runtime.
+  const runScopedSignal = (toolSignal) => {
+    const signals = [runAbort.signal]
+    if (toolSignal) signals.push(toolSignal)
+    return signals.length === 1 ? signals[0] : AbortSignal.any(signals)
+  }
+  let mapper = null
+  const failRun = (code, message) => {
+    if (runControl.budgetError) return runControl.budgetError
+    const error = new Error(message)
+    error.code = code
+    runControl.budgetError = error
+    mapper?.fail(error)
+    runControl.agent?.abort()
+    return error
   }
   const emit = (type, payload = {}) => {
     if (runControl.cancelled
@@ -197,6 +371,14 @@ async function executePrompt(request) {
       && type !== 'run.interrupted'
       && type !== 'run.failed') return
     if (type === 'tool.started') toolExecutionCount += 1
+    if (type === 'usage.updated' && runBudget.maxTotalTokens !== null && Number(payload.totalTokens) > runBudget.maxTotalTokens) {
+      runtimeEvent(request, seq, type, payload)
+      failRun(
+        'runtime.token_budget_exceeded',
+        `Run exceeded its ${runBudget.maxTotalTokens} total-token budget.`,
+      )
+      return
+    }
     if (approvalDemo && (type === 'message.delta' || type === 'message.completed')) {
       bufferedAssistantEvents.push({ type, payload })
       return
@@ -204,22 +386,39 @@ async function executePrompt(request) {
     runtimeEvent(request, seq, type, payload)
   }
   emit('run.started', { model: modelService.modelId, executionProfileId: activeExecutionProfile.id })
-  const mapper = createPiEventMapper(emit, { deferCompletion: true })
+  const toolPreparers = new Map()
+  mapper = createPiEventMapper(emit, { deferCompletion: true,
+    prepareToolInput: (name, input) => toolPreparers.get(name)?.(input) ?? input,
+  })
+  runControl.mapper = mapper
   let agent = null
   let terminalSeen = false
   let checkpoint = Promise.resolve()
+  let checkpointError = null
   let stopListening = () => {}
+  const budgetTimer = setTimeout(() => {
+    failRun(
+      'runtime.duration_budget_exceeded',
+      `Run exceeded its ${runBudget.maxDurationMs}ms duration budget.`,
+    )
+  }, runBudget.maxDurationMs)
   activeRuns.set(request.runId, runControl)
   try {
-  const preflight = async (tool, input, signal) => {
-    const response = await requestHost(request, 'tool.preflight', { tool, input }, signal)
+  const preflight = async (toolCallId, tool, input, signal, metadata = {}) => {
+    const response = await requestHost(request, 'tool.preflight', {
+      ...metadata,
+      toolCallId,
+      tool,
+      input,
+    }, runScopedSignal(signal))
     return response.payload ?? { decision: 'block', message: 'Fox returned no preflight decision.' }
   }
-  const hostRequest = (type, payload, signal) => requestHost(request, type, payload, signal)
+  const hostRequest = (type, payload, signal) => requestHost(request, type, payload, runScopedSignal(signal))
   const pendingUser = fallbackMessages.at(-1)
   if (pendingUser?.role === 'user' && pendingUser.content === request.payload?.text) fallbackMessages.pop()
   const transcript = sanitizeAssistantHistory(sanitizeProviderHistory(transcriptFromSession(session, fallbackMessages)))
   const modelProfile = resolveModelProfile(modelService)
+  const retryPolicy = retryPolicyForRun(request.payload, modelProfile)
   const model = createModel(modelService, modelProfile)
   const modelRuntime = await createFoxModelRuntime({
     model,
@@ -232,8 +431,10 @@ async function executePrompt(request) {
     workSnapshot: request.payload?.workSnapshot,
     memoryContext: request.payload?.memoryContext,
     assistantPackage: request.payload?.assistantPackage,
+    skillPrompt: request.payload?.skillPrompt,
     expertBinding: request.payload?.expertBinding,
     expertPackage: request.payload?.expertPackage,
+    runContext: request.payload?.runContext,
     conversationId: request.conversationId,
     runtimeSessionId: request.runtimeSessionId,
     model: modelService.modelId,
@@ -242,7 +443,7 @@ async function executePrompt(request) {
   }
   const cwd = String(planningContext.projectRoot || process.cwd())
   const catalogTools = [
-    ...createReadOnlyTools(preflight),
+    ...createReadOnlyTools(preflight, { executeHost: hostRequest }),
     ...createGraphReadonlyTools({
       profile: activeExecutionProfile,
       cwd,
@@ -272,12 +473,19 @@ async function executePrompt(request) {
     [...toolDiagnostics.tools, ...continuationTools],
     activeExecutionProfile,
   )
-  const effectiveToolNames = profileToolSelection.tools.map(({ name }) => name)
+  const projectToolSelection = selectToolsForProjectContext(
+    profileToolSelection.tools, request.payload?.projectContext,
+  )
+  const effectiveToolNames = projectToolSelection.tools.map(({ name }) => name)
   const excludedTools = [
     ...toolDiagnostics.excludedTools.filter(({ name }) => name !== CONTINUATION_PROPOSAL_TOOL_NAME),
     ...profileToolSelection.excludedTools,
+    ...projectToolSelection.excludedTools,
   ]
-  const tools = adaptFoxToolsToPi(profileToolSelection.tools)
+  const tools = budgetedTools(adaptFoxToolsToPi(projectToolSelection.tools), runBudget, failRun)
+  for (const tool of tools) {
+    if (tool.prepareArguments) toolPreparers.set(tool.name, tool.prepareArguments)
+  }
   const requestSnapshot = {
     schemaVersion: 1,
     model: modelService.modelId,
@@ -299,12 +507,15 @@ async function executePrompt(request) {
     assistantPackage: request.payload?.assistantPackage ?? null,
     expertBinding: request.payload?.expertBinding ?? null,
     expertPackage: request.payload?.expertPackage ?? null,
+    runContext: request.payload?.runContext ?? null,
     memoryRecallStatus: request.payload?.memoryContext?.status ?? 'empty',
     memoryRecallCount: Array.isArray(request.payload?.memoryContext?.items)
       ? request.payload.memoryContext.items.length
       : 0,
     executionProfile: activeExecutionProfileSnapshot,
     continuationDecisionContract: activeContinuationContract,
+    runBudget,
+    retryPolicy: retryPolicyForRun(request.payload, modelProfile),
   }
   const workToolNames = new Set(RUNTIME_TOOL_CATALOG
     .filter((tool) => tool.category === 'work')
@@ -383,18 +594,21 @@ async function executePrompt(request) {
   emit('run.request_snapshot', requestSnapshot)
   emit('run.phase', { phase: 'preparing' })
   const settingsManager = SettingsManager.inMemory({
+    httpIdleTimeoutMs: RUNTIME_HTTP_IDLE_TIMEOUT_MS,
     compaction: {
       enabled: true,
       reserveTokens: modelProfile.runtime.reserveTokens,
       keepRecentTokens: modelProfile.runtime.keepRecentTokens,
     },
     retry: {
-      enabled: true,
-      maxRetries: modelProfile.runtime.maxRetries,
-      baseDelayMs: 750,
+      // Turn retry is owned by the Fox Kernel/Host; the sidecar only performs it
+      // when explicitly configured. Provider HTTP retry is independent and bounded.
+      enabled: retryPolicy.turnEnabled,
+      maxRetries: retryPolicy.turnMaxRetries,
+      baseDelayMs: retryPolicy.turnBaseDelayMs,
       provider: {
-        maxRetries: modelProfile.runtime.maxRetries,
-        maxRetryDelayMs: modelProfile.runtime.providerMaxRetryDelayMs,
+        maxRetries: retryPolicy.providerMaxRetries,
+        maxRetryDelayMs: retryPolicy.providerMaxRetryDelayMs,
       },
     },
     images: { blockImages: !modelProfile.supportsImageInput },
@@ -431,9 +645,36 @@ async function executePrompt(request) {
     checkpoint = checkpoint.then(async () => {
       session.messages = normalizeHistory(sanitizeAssistantHistory(agent.state.messages))
       if (session.sessionPath) await saveSessionState(session.sessionPath, session)
-    }).catch(() => undefined)
+    }).catch((error) => {
+      const wrapped = new Error(`Failed to save the runtime checkpoint: ${error instanceof Error ? error.message : String(error)}`)
+      wrapped.code = 'runtime.checkpoint_failed'
+      checkpointError = wrapped
+    })
   }
+  let shadowTurn = 0
   stopListening = agent.subscribe((event) => {
+    if (event?.type === 'turn_start') {
+      shadowTurn += 1
+      emit('run.phase', { phase: 'model_streaming', shadowModelRequest: 'begin' })
+    }
+    if (event?.type === 'message_start' && event.message?.role === 'assistant') {
+      emit('run.phase', { phase: 'model_streaming', shadowModelRequest: 'settle' })
+    }
+    if (event?.type === 'message_end' && event.message?.role === 'assistant') {
+      const calls = event.message.content?.filter((part) => part.type === 'toolCall') ?? []
+      if (calls.length > 0) {
+        const batchId = `pi-batch-${request.runId}-${shadowTurn}`
+        emit('run.phase', {
+          phase: 'tool_execution',
+          shadowToolBatch: {
+            batchId,
+            calls: calls.map((call, sourceOrder) => ({
+              toolCallId: call.id, tool: call.name, input: call.arguments, sourceOrder,
+            })),
+          },
+        })
+      }
+    }
     if (event?.type === 'agent_end' && !event.willRetry) terminalSeen = true
     mapper.handle(event)
     if (event?.type === 'tool_execution_end' || event?.type === 'message_end' || event?.type === 'agent_end') {
@@ -446,10 +687,12 @@ async function executePrompt(request) {
     }
     emit('run.phase', { phase: 'model_streaming', attempt: 1 })
     await agent.prompt(request.payload?.text ?? '', { images, expandPromptTemplates: false })
+    if (runControl.budgetError) throw runControl.budgetError
     // `message_end` / `agent_end` may already have queued a checkpoint.  Wait for
     // that writer before replacing the same session file with the final snapshot;
     // concurrent renames are not reliably replace-safe on Windows.
     await checkpoint
+    if (checkpointError) throw checkpointError
     session.messages = normalizeHistory(sanitizeAssistantHistory(agent.state.messages))
     if (session.sessionPath) await saveSessionState(session.sessionPath, session)
     if (approvalDemo && toolExecutionCount === 0) {
@@ -471,6 +714,7 @@ async function executePrompt(request) {
     if (runControl.cancelled) mapper.cancel()
     else mapper.fail(error)
   } finally {
+    clearTimeout(budgetTimer)
     if (!terminalSeen) mapper.fail(new Error('Pi Runtime ended without a terminal agent event.'))
     await checkpoint
     stopListening()
@@ -554,14 +798,25 @@ async function handleRequest(request) {
         break
       case 'cancel': {
         const run = activeRuns.get(request.runId)
-        if (run) run.cancelled = true
-        run?.agent?.abort()
-        cancelPendingHostRequests()
+        if (run) {
+          run.cancelled = true
+          // Declare the cancelled terminal immediately so an abort-induced
+          // provider 'error' event can never be projected as run.failed.
+          run.mapper?.cancel()
+          run.abort?.abort()
+          run.agent?.abort()
+          cancelPendingHostRequests(request.runId)
+        }
         respond(request, 'request_succeeded', { cancelling: Boolean(run) })
         break
       }
       case 'shutdown':
-        for (const run of activeRuns.values()) run.agent.abort()
+        for (const run of activeRuns.values()) {
+          run.cancelled = true
+          run.mapper?.cancel()
+          run.abort?.abort()
+          run.agent?.abort()
+        }
         cancelPendingHostRequests()
         respond(request, 'request_succeeded')
         setTimeout(() => process.exit(0), 10)

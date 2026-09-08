@@ -6,7 +6,7 @@ import { mermaid } from "@streamdown/mermaid";
 import { memo, useState, type ComponentProps } from "react";
 import { Streamdown, type CustomRendererProps, type LinkSafetyModalProps } from "streamdown";
 import { ExternalLink } from "lucide-react";
-import { toast } from "sonner";
+import { notify as toast } from "@/features/notifications";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";

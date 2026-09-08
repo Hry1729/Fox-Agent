@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
+import { dirname } from 'node:path'
 import { createEnvelope, PROTOCOL_NAME, PROTOCOL_VERSION } from '../src/protocol.mjs'
 import { validateCapabilityManifest } from '../src/runtime-contract.mjs'
 
@@ -213,7 +214,7 @@ export async function runToolApprovalContract({
     conversationId,
     runtimeSessionId,
     runId,
-    payload: { text: 'read the approved file', messages: [{ role: 'user', content: 'read the approved file' }] },
+    payload: { projectContext: { projectRoot: dirname(expectedPath) }, text: 'read the approved file', messages: [{ role: 'user', content: 'read the approved file' }] },
   })
   const preflight = await runtime.waitFor((message) => message.kind === 'request' && message.type === 'tool.preflight' && message.runId === runId)
   assert.equal(preflight.payload.tool, 'read')
@@ -226,6 +227,7 @@ export async function runToolApprovalContract({
   const events = runtime.messages.filter((message) => message.runId === runId && message.type === 'runtime_event')
   const toolCompleted = events.find(({ payload }) => payload.type === 'tool.completed')
   assert.equal(toolCompleted.payload.tool, 'read')
+  assert.equal(preflight.payload.toolCallId, toolCompleted.payload.toolCallId)
   assert.equal(toolCompleted.payload.isError, false)
   assertSingleTerminal(events, 'run.completed')
 }

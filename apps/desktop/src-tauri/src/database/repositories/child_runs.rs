@@ -36,8 +36,31 @@ impl Database {
                 "SELECT id, name, description, category, agent_kind
                  FROM agents
                  WHERE runtime_type = 'pi'
-                   AND (agent_kind = 'assistant' OR agent_kind = 'expert' OR agent_kind = 'worker')
+                   AND (agent_kind = 'assistant' OR agent_kind = 'worker')
                  ORDER BY CASE id WHEN 'fox-general' THEN 0 ELSE 1 END, name, id",
+            )?;
+            let records = statement
+                .query_map([], |row| {
+                    Ok(ChildAgentSummary {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        description: row.get(2)?,
+                        category: row.get(3)?,
+                        agent_kind: row.get(4)?,
+                    })
+                })?
+                .collect();
+            records
+        })
+    }
+
+    pub fn list_consultable_experts(&self) -> Result<Vec<ChildAgentSummary>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, name, description, category, agent_kind
+                 FROM agents
+                 WHERE runtime_type = 'pi' AND agent_kind = 'expert'
+                 ORDER BY name, id",
             )?;
             let records = statement
                 .query_map([], |row| {
@@ -86,6 +109,7 @@ pub(super) fn create_child_run_in_transaction(
         parent_conversation_id,
         project_root,
         project_id,
+        permission_mode,
         lineage_root_id,
         model,
         root_run_id,
@@ -98,11 +122,13 @@ pub(super) fn create_child_run_in_transaction(
         String,
         String,
         String,
+        String,
         i64,
         String,
     ) = transaction.query_row(
-        "SELECT c.id, c.project_root, c.project_id, COALESCE(c.lineage_root_id, c.id),
-                        r.model, COALESCE(r.root_run_id, r.id), r.depth, r.status
+        "SELECT c.id, c.project_root, c.project_id, c.permission_mode,
+                        COALESCE(c.lineage_root_id, c.id), r.model,
+                        COALESCE(r.root_run_id, r.id), r.depth, r.status
                  FROM runs r JOIN conversations c ON c.id = r.conversation_id
                  WHERE r.id = ?1",
         [input.parent_run_id],
@@ -116,6 +142,7 @@ pub(super) fn create_child_run_in_transaction(
                 row.get(5)?,
                 row.get(6)?,
                 row.get(7)?,
+                row.get(8)?,
             ))
         },
     )?;
@@ -198,15 +225,17 @@ pub(super) fn create_child_run_in_transaction(
     let runtime_text = child_runtime_text(input.objective, input.context);
     transaction.execute(
         "INSERT INTO conversations(
-                    id, agent_id, title, project_root, project_id, status, created_at, updated_at,
+                    id, agent_id, title, project_root, project_id, permission_mode,
+                    status, created_at, updated_at,
                     last_message_at, parent_conversation_id, lineage_root_id, conversation_kind
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6, ?6, ?7, ?8, 'child')",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?7, ?7, ?8, ?9, 'child')",
         params![
             child_conversation_id,
             input.worker_agent_id,
             title,
             project_root,
             project_id,
+            permission_mode,
             now,
             parent_conversation_id,
             lineage_root_id,
@@ -876,6 +905,37 @@ mod tests {
     }
 
     #[test]
+    fn child_agent_catalog_always_exposes_the_seeded_general_agent() {
+        let (database, path, _) = test_database();
+        let agents = database.list_child_agents().expect("list child agents");
+        assert!(agents.iter().any(|agent| agent.id == "fox-general"));
+        assert!(agents
+            .iter()
+            .all(|agent| { matches!(agent.agent_kind.as_str(), "assistant" | "worker") }));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn expert_consultation_catalog_is_separate_from_child_templates() {
+        let (database, path, _) = test_database();
+        let child_agents = database.list_child_agents().expect("list child agents");
+        let experts = database
+            .list_consultable_experts()
+            .expect("list consultable experts");
+
+        assert!(!experts.is_empty());
+        assert!(experts.iter().all(|agent| agent.agent_kind == "expert"));
+        assert!(experts
+            .iter()
+            .all(|expert| { child_agents.iter().all(|agent| agent.id != expert.id) }));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn child_run_is_isolated_idempotent_and_linked_to_parent_trace() {
         let (database, path, parent) = test_database();
         database
@@ -1034,26 +1094,26 @@ mod tests {
     }
 
     #[test]
-    fn cumulative_usage_enforces_total_and_output_child_budgets_at_the_same_boundary() {
+    fn cumulative_usage_is_observed_without_terminating_ordinary_child_runs() {
         let (database, path, parent) = test_database();
-        let (_, total_child, _) = create_child(&database, &parent.run.id, "delegate-total-budget");
+        let (_, child, _) = create_child(&database, &parent.run.id, "delegate-observed-usage");
         database
             .with_connection(|connection| {
                 connection.execute(
                     "UPDATE child_run_delegations
-                     SET max_total_tokens = 256, max_output_tokens = 1_000
+                     SET max_total_tokens = 256, max_output_tokens = 64
                      WHERE child_run_id = ?1",
-                    [&total_child.child_run_id],
+                    [&child.child_run_id],
                 )?;
                 Ok(())
             })
             .unwrap();
         database
-            .apply_runtime_event(&total_child.child_run_id, 1, &json!({"type":"run.started"}))
+            .apply_runtime_event(&child.child_run_id, 1, &json!({"type":"run.started"}))
             .unwrap();
         database
             .apply_runtime_event(
-                &total_child.child_run_id,
+                &child.child_run_id,
                 2,
                 &json!({
                     "type":"usage.updated","inputTokens":64,"outputTokens":64,
@@ -1061,12 +1121,9 @@ mod tests {
                 }),
             )
             .unwrap();
-        assert!(!database
-            .child_budget_exceeded(&total_child.child_run_id)
-            .unwrap());
         assert!(database
             .apply_runtime_event(
-                &total_child.child_run_id,
+                &child.child_run_id,
                 3,
                 &json!({
                     "type":"usage.updated","inputTokens":63,"outputTokens":64,
@@ -1074,17 +1131,14 @@ mod tests {
                 }),
             )
             .is_err());
-        let after_rejected = database
-            .child_run(&total_child.child_run_id)
-            .unwrap()
-            .unwrap();
+        let after_rejected = database.child_run(&child.child_run_id).unwrap().unwrap();
         assert_eq!(
             (after_rejected.total_tokens, after_rejected.output_tokens),
             (128, 64)
         );
         database
             .apply_runtime_event(
-                &total_child.child_run_id,
+                &child.child_run_id,
                 4,
                 &json!({
                     "type":"usage.updated","inputTokens":128,"outputTokens":128,
@@ -1092,133 +1146,10 @@ mod tests {
                 }),
             )
             .unwrap();
-        assert!(database
-            .child_budget_exceeded(&total_child.child_run_id)
-            .unwrap());
-        assert!(database
-            .enforce_child_tool_budget(&total_child.child_run_id)
-            .unwrap_err()
-            .contains("token_budget_exceeded"));
-        let completion_error = database
-            .apply_runtime_event(
-                &total_child.child_run_id,
-                5,
-                &json!({"type":"run.completed"}),
-            )
-            .expect_err("completion cannot race past the total-token budget");
-        assert!(completion_error.contains("[child_run.budget_exceeded]"));
-        let total_before_failure = database
-            .child_run(&total_child.child_run_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(total_before_failure.status, "running");
+        assert!(database.child_budget_exceeded(&child.child_run_id).unwrap());
         database
-            .mark_run_failed(
-                &total_child.child_run_id,
-                "child_run.budget_exceeded",
-                &completion_error,
-            )
-            .unwrap();
-
-        let (_, output_child, _) =
-            create_child(&database, &parent.run.id, "delegate-output-budget");
-        database
-            .with_connection(|connection| {
-                connection.execute(
-                    "UPDATE child_run_delegations
-                     SET max_total_tokens = 1_000, max_output_tokens = 64
-                     WHERE child_run_id = ?1",
-                    [&output_child.child_run_id],
-                )?;
-                Ok(())
-            })
-            .unwrap();
-        database
-            .apply_runtime_event(
-                &output_child.child_run_id,
-                1,
-                &json!({"type":"run.started"}),
-            )
-            .unwrap();
-        database
-            .apply_runtime_event(
-                &output_child.child_run_id,
-                2,
-                &json!({
-                    "type":"usage.updated","inputTokens":16,"outputTokens":32,
-                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":48
-                }),
-            )
-            .unwrap();
-        assert!(!database
-            .child_budget_exceeded(&output_child.child_run_id)
-            .unwrap());
-        database
-            .apply_runtime_event(
-                &output_child.child_run_id,
-                3,
-                &json!({
-                    "type":"usage.updated","inputTokens":32,"outputTokens":64,
-                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":96
-                }),
-            )
-            .unwrap();
-        assert!(database
-            .child_budget_exceeded(&output_child.child_run_id)
-            .unwrap());
-        assert!(database
-            .enforce_child_tool_budget(&output_child.child_run_id)
-            .unwrap_err()
-            .contains("output_budget_exceeded"));
-        let completion_error = database
-            .apply_runtime_event(
-                &output_child.child_run_id,
-                4,
-                &json!({"type":"run.completed"}),
-            )
-            .expect_err("completion cannot race past the output-token budget");
-        assert!(completion_error.contains("[child_run.budget_exceeded]"));
-        database
-            .mark_run_failed(
-                &output_child.child_run_id,
-                "child_run.budget_exceeded",
-                &completion_error,
-            )
-            .unwrap();
-
-        let (_, below_child, _) = create_child(&database, &parent.run.id, "delegate-below-budget");
-        database
-            .with_connection(|connection| {
-                connection.execute(
-                    "UPDATE child_run_delegations
-                     SET max_total_tokens = 256, max_output_tokens = 64,
-                         max_duration_ms = 60_000
-                     WHERE child_run_id = ?1",
-                    [&below_child.child_run_id],
-                )?;
-                Ok(())
-            })
-            .unwrap();
-        database
-            .apply_runtime_event(&below_child.child_run_id, 1, &json!({"type":"run.started"}))
-            .unwrap();
-        database
-            .apply_runtime_event(
-                &below_child.child_run_id,
-                2,
-                &json!({
-                    "type":"usage.updated","inputTokens":192,"outputTokens":63,
-                    "cacheReadTokens":0,"cacheWriteTokens":0,"totalTokens":255
-                }),
-            )
-            .unwrap();
-        database
-            .apply_runtime_event(
-                &below_child.child_run_id,
-                3,
-                &json!({"type":"run.completed"}),
-            )
-            .expect("one token below both frozen boundaries may complete");
+            .apply_runtime_event(&child.child_run_id, 5, &json!({"type":"run.completed"}))
+            .expect("ordinary Child completion is not gated by cumulative usage");
 
         let (_, duration_child, _) =
             create_child(&database, &parent.run.id, "delegate-duration-budget");
@@ -1282,7 +1213,7 @@ mod tests {
     }
 
     #[test]
-    fn child_run_enforces_root_concurrency_and_tool_budget() {
+    fn child_run_enforces_root_concurrency_without_cumulative_tool_limits() {
         let (database, path, parent) = test_database();
         let mut first_child_id = String::new();
         for index in 0..MAX_ACTIVE_CHILDREN_PER_ROOT {
@@ -1341,10 +1272,9 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        assert!(database.enforce_child_tool_budget(&first_child_id).is_ok());
         database
             .apply_runtime_event(&first_child_id, 1, &json!({ "type": "run.started" }))
-            .expect("start child Run before consuming its tool budget");
+            .expect("start child Run before recording tools");
         database
             .create_host_tool_call(
                 &first_child_id,
@@ -1355,21 +1285,16 @@ mod tests {
                 false,
             )
             .unwrap();
-        assert!(
-            database.enforce_child_tool_budget(&first_child_id).is_ok(),
-            "the already-reserved boundary ToolCall remains executable"
-        );
-        let error = database
+        database
             .create_host_tool_call(
                 &first_child_id,
                 "child-tool-2",
                 "memory_search",
-                &json!({ "query": "must not acquire a second slot" }),
+                &json!({ "query": "ordinary Child keeps working" }),
                 "running",
                 false,
             )
-            .expect_err("the next fresh ToolCall must be rejected atomically");
-        assert!(error.contains("child_run.tool_budget_exceeded"));
+            .expect("ordinary Child tool counts are observational");
         let count: i64 = database
             .with_connection(|connection| {
                 connection.query_row(
@@ -1379,14 +1304,14 @@ mod tests {
                 )
             })
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
 
         drop(database);
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn child_managed_tool_slots_are_atomic_and_completion_allows_the_exact_boundary() {
+    fn child_managed_tool_acquisition_is_atomic_without_a_cumulative_count_cap() {
         use crate::database::HostToolCallDisposition;
         use std::sync::{Arc, Barrier};
 
@@ -1435,16 +1360,7 @@ mod tests {
                 .iter()
                 .filter(|outcome| { matches!(outcome, Ok(HostToolCallDisposition::Created)) })
                 .count(),
-            1
-        );
-        assert_eq!(
-            outcomes
-                .iter()
-                .filter(|outcome| outcome
-                    .as_ref()
-                    .is_err_and(|error| { error.contains("child_run.tool_budget_exceeded") }))
-                .count(),
-            1
+            2
         );
         let count: i64 = database
             .with_connection(|connection| {
@@ -1455,60 +1371,46 @@ mod tests {
                 )
             })
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, 2);
         database
             .apply_runtime_event(&child.child_run_id, 2, &json!({"type":"run.completed"}))
-            .expect("count == maxToolCalls is a valid completed boundary");
+            .expect("ordinary Child completion is not gated by tool-call count");
 
         drop(database);
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn child_tool_acquisition_rechecks_all_budgets_and_delayed_promotion() {
+    fn child_tool_acquisition_rechecks_duration_but_not_cumulative_usage() {
         let (database, path, parent) = test_database();
         let (_, child, _) = create_child(&database, &parent.run.id, "budget-child");
         database
             .apply_runtime_event(&child.child_run_id, 1, &json!({"type":"run.started"}))
             .unwrap();
 
-        for (field, call_id) in [
-            ("total_tokens = max_total_tokens", "blocked-total"),
-            ("output_tokens = max_output_tokens", "blocked-output"),
-        ] {
-            database
-                .with_connection(|connection| {
-                    connection.execute(
-                        &format!(
-                            "UPDATE child_run_delegations SET {field} WHERE child_run_id = ?1"
-                        ),
-                        [&child.child_run_id],
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
-            let error = database
-                .create_host_tool_call_once(
-                    &child.child_run_id,
-                    call_id,
-                    "memory_search",
-                    &json!({"query":call_id}),
-                    "running",
-                    false,
-                )
-                .expect_err("a reached cumulative budget cannot acquire a fresh tool slot");
-            assert!(error.contains("child_run.budget_exceeded"));
-            database
-                .with_connection(|connection| {
-                    connection.execute(
-                        "UPDATE child_run_delegations
-                         SET total_tokens = 0, output_tokens = 0 WHERE child_run_id = ?1",
-                        [&child.child_run_id],
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
-        }
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE child_run_delegations
+                     SET total_tokens = max_total_tokens,
+                         output_tokens = max_output_tokens
+                     WHERE child_run_id = ?1",
+                    [&child.child_run_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        database
+            .create_host_tool_call_once(
+                &child.child_run_id,
+                "observed-usage",
+                "memory_search",
+                &json!({"query":"still allowed"}),
+                "running",
+                false,
+            )
+            .expect("ordinary Child cumulative usage does not block fresh tools");
+
         database
             .with_connection(|connection| {
                 connection.execute(
@@ -1547,15 +1449,30 @@ mod tests {
                 &child.child_run_id,
                 2,
                 &json!({
-                    "type":"tool.started", "toolCallId":"reserved-before-limit",
+                    "type":"tool.started", "toolCallId":"runtime-promotion",
                     "tool":"memory_search", "input":{"query":"reserved"}
                 }),
             )
-            .expect("the Runtime projection reserves its slot while budgets are below limits");
+            .expect("Runtime tool projection remains available");
+        let (_, disposition) = database
+            .create_host_tool_call_once(
+                &child.child_run_id,
+                "runtime-promotion",
+                "memory_search",
+                &json!({"query":"reserved"}),
+                "running",
+                false,
+            )
+            .expect("promotion is not blocked by cumulative usage");
+        assert_eq!(
+            disposition,
+            crate::database::HostToolCallDisposition::PromotedRuntime
+        );
+
         let pending = database
             .create_host_tool_call(
                 &child.child_run_id,
-                "approved-before-limit",
+                "approved-after-usage",
                 "write",
                 &json!({"path":"bounded.md"}),
                 "pending",
@@ -1573,55 +1490,20 @@ mod tests {
             .resolve_approval(&approval.id, crate::database::ApprovalDecision::AllowOnce)
             .unwrap()
             .expect("approve once");
-        database
-            .with_connection(|connection| {
-                connection.execute(
-                    "UPDATE child_run_delegations SET total_tokens = max_total_tokens
-                     WHERE child_run_id = ?1",
-                    [&child.child_run_id],
-                )?;
-                Ok(())
-            })
-            .unwrap();
         assert!(database
-            .create_host_tool_call_once(
-                &child.child_run_id,
-                "reserved-before-limit",
-                "memory_search",
-                &json!({"query":"reserved"}),
-                "running",
-                false,
-            )
-            .expect_err("promotion must recheck non-tool budgets")
-            .contains("child_run.budget_exceeded"));
-        let claim_error = database
-            .claim_approved_tool_call(&child.child_run_id, "approved-before-limit")
-            .expect_err("approval claim must recheck the managed budget");
-        assert!(claim_error.contains("child_run.budget_exceeded"));
-        assert!(!database
-            .claim_approved_tool_call(&child.child_run_id, "approved-before-limit")
-            .unwrap());
-        let state: (String, i64, String, String, bool) = database
+            .claim_approved_tool_call(&child.child_run_id, "approved-after-usage")
+            .expect("approved tool claim is not blocked by cumulative usage"));
+        let state: (String, String, bool) = database
             .with_connection(|connection| {
                 Ok((
                     connection.query_row(
                         "SELECT execution_location FROM tool_calls
-                         WHERE run_id = ?1 AND runtime_tool_call_id = 'reserved-before-limit'",
-                        [&child.child_run_id],
-                        |row| row.get(0),
-                    )?,
-                    connection.query_row(
-                        "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1",
+                         WHERE run_id = ?1 AND runtime_tool_call_id = 'runtime-promotion'",
                         [&child.child_run_id],
                         |row| row.get(0),
                     )?,
                     connection.query_row(
                         "SELECT status FROM tool_calls WHERE id = ?1",
-                        [&pending.id],
-                        |row| row.get(0),
-                    )?,
-                    connection.query_row(
-                        "SELECT error_message FROM tool_calls WHERE id = ?1",
                         [&pending.id],
                         |row| row.get(0),
                     )?,
@@ -1633,36 +1515,16 @@ mod tests {
                 ))
             })
             .unwrap();
-        assert_eq!(state.0, "runtime");
-        assert_eq!(state.1, 2);
-        assert_eq!(state.2, "failed");
-        assert_eq!(state.3, claim_error);
-        assert!(state.4);
-        let (replayed, disposition) = database
-            .create_host_tool_call_once(
-                &child.child_run_id,
-                "approved-before-limit",
-                "write",
-                &json!({"path":"bounded.md"}),
-                "pending",
-                true,
-            )
-            .unwrap();
-        assert_eq!(
-            disposition,
-            crate::database::HostToolCallDisposition::ReplayTerminal
-        );
-        assert_eq!(
-            replayed.error_message.as_deref(),
-            Some(claim_error.as_str())
-        );
+        assert_eq!(state.0, "host");
+        assert_eq!(state.1, "running");
+        assert!(state.2);
 
         drop(database);
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
-    fn child_zero_tool_budget_allows_text_only_completion_and_rejects_legacy_excess() {
+    fn child_tool_count_snapshots_do_not_block_ordinary_runtime_or_legacy_completion() {
         let (database, path, parent) = test_database();
         let (_, text_only, _) = create_child(&database, &parent.run.id, "text-only-child");
         database
@@ -1678,20 +1540,19 @@ mod tests {
         database
             .apply_runtime_event(&text_only.child_run_id, 1, &json!({"type":"run.started"}))
             .unwrap();
-        assert!(database
+        database
             .apply_runtime_event(
                 &text_only.child_run_id,
                 2,
                 &json!({
-                    "type":"tool.started", "toolCallId":"forbidden",
-                    "tool":"memory_search", "input":{"query":"no slot"}
+                    "type":"tool.started", "toolCallId":"observed",
+                    "tool":"memory_search", "input":{"query":"no cumulative cap"}
                 }),
             )
-            .unwrap_err()
-            .contains("child_run.tool_budget_exceeded"));
+            .expect("ordinary Child can use tools even when a legacy count snapshot is zero");
         database
-            .apply_runtime_event(&text_only.child_run_id, 2, &json!({"type":"run.completed"}))
-            .expect("maxToolCalls=0 still permits a pure-text completion");
+            .apply_runtime_event(&text_only.child_run_id, 3, &json!({"type":"run.completed"}))
+            .expect("legacy maxToolCalls does not gate ordinary Child completion");
 
         let (_, legacy, _) = create_child(&database, &parent.run.id, "legacy-overflow-child");
         database
@@ -1728,10 +1589,9 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        assert!(database
+        database
             .apply_runtime_event(&legacy.child_run_id, 2, &json!({"type":"run.completed"}))
-            .unwrap_err()
-            .contains("child_run.tool_budget_exceeded"));
+            .expect("legacy excess tool counts remain observable but do not block completion");
 
         drop(database);
         let _ = std::fs::remove_file(path);

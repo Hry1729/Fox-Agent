@@ -25,11 +25,14 @@ use uuid::Uuid;
 
 mod a1_workflow;
 mod app_management;
+mod bundled_capabilities;
 mod child_runs;
 mod digital_colleagues;
 mod expert_teams;
 mod expert_workflows;
 mod graph_lead;
+mod kernel;
+mod run_control;
 mod memory;
 mod observability;
 mod work_events;
@@ -125,6 +128,8 @@ impl Database {
             connection: Arc::new(Mutex::new(connection)),
         };
         database.seed_builtin_agents()?;
+        database.seed_bundled_experts()?;
+        database.seed_expert_avatars()?;
         Ok(database)
     }
 
@@ -705,12 +710,26 @@ impl Database {
         operation(&mut connection).map_err(|error| error.to_string())
     }
 
+    /// Test-only: execute raw SQL (e.g. install a reject-trigger to simulate
+    /// durable write failure). Not used by production code.
+    #[cfg(test)]
+    pub(crate) fn execute_raw_sql(&self, sql: &str) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection.execute_batch(sql)?;
+            Ok(())
+        })
+    }
+
     fn seed_builtin_agents(&self) -> Result<(), String> {
         let now = now_ms();
         self.with_connection(|connection| {
             for (index, (id, name, description, system_prompt)) in
                 BUILTIN_AGENTS.iter().enumerate()
             {
+                // These stable identities are now supplied by the versioned library.
+                if matches!(*id, "fox-frontend" | "fox-reviewer" | "fox-architect") {
+                    continue;
+                }
                 let created_at = now + index as i64;
                 connection.execute(
                     "INSERT OR IGNORE INTO agents(
@@ -965,14 +984,24 @@ impl Database {
                     [&id],
                     |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
                 )?;
-                if builtin != 0 || package_source != "local" { return Err(rusqlite::Error::InvalidQuery); }
+                let (agent_kind, invocation_mode, visibility) = if id == DEFAULT_AGENT_ID {
+                    if builtin == 0 || package_source != "builtin" {
+                        return Err(rusqlite::Error::InvalidQuery);
+                    }
+                    ("assistant", "primary", "chat_selector")
+                } else {
+                    if builtin != 0 || package_source != "local" {
+                        return Err(rusqlite::Error::InvalidQuery);
+                    }
+                    ("expert", "inline", "expert_center")
+                };
                 transaction.execute(
                     "UPDATE agents SET name = ?2, description = ?3, icon = ?4, category = ?5,
                          system_prompt = ?6, default_model = ?7, opening_suggestions_json = ?8,
                          package_version = '1.0.0', package_manifest_json = ?9, updated_at = ?10,
-                         agent_kind = 'expert', invocation_mode = 'inline', visibility = 'expert_center'
+                         agent_kind = ?11, invocation_mode = ?12, visibility = ?13
                      WHERE id = ?1",
-                    params![id, name, request.description.trim(), request.icon.as_deref().filter(|value| !value.trim().is_empty()), request.category.trim(), prompt, request.default_model.trim(), serde_json::to_string(&suggestions).unwrap_or_else(|_| "[]".to_owned()), manifest.to_string(), now],
+                    params![id, name, request.description.trim(), request.icon.as_deref().filter(|value| !value.trim().is_empty()), request.category.trim(), prompt, request.default_model.trim(), serde_json::to_string(&suggestions).unwrap_or_else(|_| "[]".to_owned()), manifest.to_string(), now, agent_kind, invocation_mode, visibility],
                 )?;
             } else {
                 transaction.execute(
@@ -1350,7 +1379,8 @@ impl Database {
                         c.pinned, c.archived, c.archived_at, c.trashed_at,
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
-                        c.created_at, c.updated_at, c.last_message_at
+                        c.created_at, c.updated_at, c.last_message_at,
+                        COALESCE(p.permission_mode, c.permission_mode, 'ask')
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
@@ -1370,7 +1400,8 @@ impl Database {
                         c.pinned, c.archived, c.archived_at, c.trashed_at,
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
-                        c.created_at, c.updated_at, c.last_message_at
+                        c.created_at, c.updated_at, c.last_message_at,
+                        COALESCE(p.permission_mode, c.permission_mode, 'ask')
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
@@ -1390,7 +1421,8 @@ impl Database {
                         c.pinned, c.archived, c.archived_at, c.trashed_at,
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
-                        c.created_at, c.updated_at, c.last_message_at
+                        c.created_at, c.updated_at, c.last_message_at,
+                        COALESCE(p.permission_mode, c.permission_mode, 'ask')
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
@@ -1629,7 +1661,8 @@ impl Database {
                         c.pinned, c.archived, c.archived_at, c.trashed_at,
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
-                        c.created_at, c.updated_at, c.last_message_at
+                        c.created_at, c.updated_at, c.last_message_at,
+                        COALESCE(p.permission_mode, c.permission_mode, 'ask')
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
@@ -1750,7 +1783,11 @@ impl Database {
             let transaction = connection.transaction()?;
             transaction.execute(
                 "UPDATE conversations
-                 SET project_root = COALESCE(
+                 SET permission_mode = COALESCE(
+                         (SELECT permission_mode FROM projects WHERE id = ?1),
+                         permission_mode
+                     ),
+                     project_root = COALESCE(
                          project_root,
                          (SELECT root_path FROM projects WHERE id = ?1)
                      ),
@@ -1954,10 +1991,18 @@ impl Database {
 
             connection.execute(
                 "INSERT INTO conversations(
-                    id, agent_id, title, project_id, project_root, status,
+                    id, agent_id, title, project_id, project_root, permission_mode, status,
                     lineage_root_id, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?1, ?6, ?6)",
-                params![id, agent_id, title, project_id, project_root, now],
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?1, ?7, ?7)",
+                params![
+                    id,
+                    agent_id,
+                    title,
+                    project_id,
+                    project_root,
+                    permission_mode,
+                    now
+                ],
             )?;
             query_conversation(connection, &id)
         })
@@ -2513,7 +2558,7 @@ impl Database {
             let source = transaction
                 .query_row(
                     "SELECT c.agent_id, c.title, c.project_id, c.project_root,
-                            COALESCE(c.lineage_root_id, c.id)
+                            COALESCE(c.lineage_root_id, c.id), c.permission_mode
                      FROM conversations c
                      WHERE c.id = ?1 AND c.trashed_at IS NULL",
                     [source_id],
@@ -2524,11 +2569,19 @@ impl Database {
                             row.get::<_, Option<String>>(2)?,
                             row.get::<_, Option<String>>(3)?,
                             row.get::<_, String>(4)?,
+                            row.get::<_, String>(5)?,
                         ))
                     },
                 )
                 .optional()?;
-            let Some((agent_id, source_title, project_id, project_root, lineage_root_id)) = source
+            let Some((
+                agent_id,
+                source_title,
+                project_id,
+                project_root,
+                lineage_root_id,
+                permission_mode,
+            )) = source
             else {
                 return Ok(None);
             };
@@ -2567,11 +2620,12 @@ impl Database {
             )?;
             transaction.execute(
                 "INSERT INTO conversations(
-                    id, agent_id, title, project_id, project_root, status, pinned, archived,
+                    id, agent_id, title, project_id, project_root, permission_mode,
+                    status, pinned, archived,
                     parent_conversation_id, forked_from_message_id, lineage_root_id,
                     created_at, updated_at, last_message_at
                  ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5, 'active', 0, 0, ?6, ?7, ?8, ?9, ?9, ?10
+                    ?1, ?2, ?3, ?4, ?5, ?6, 'active', 0, 0, ?7, ?8, ?9, ?10, ?10, ?11
                  )",
                 params![
                     fork_id,
@@ -2579,6 +2633,7 @@ impl Database {
                     fork_title,
                     project_id,
                     project_root,
+                    permission_mode,
                     source_id,
                     message_id,
                     lineage_root_id,
@@ -3238,6 +3293,9 @@ impl Database {
         endpoint_url: Option<&str>,
         definition: Option<&str>,
     ) -> Result<super::McpServerRecord, String> {
+        if id == crate::office::SERVER_ID {
+            return Err("Office 文档由 Fox 管理，请使用启用/停用操作。".to_owned());
+        }
         let now = now_ms();
         let args_json = serde_json::to_string(args).map_err(|error| error.to_string())?;
         self.with_connection(|connection| {
@@ -3454,6 +3512,9 @@ impl Database {
     }
 
     pub fn delete_mcp_server(&self, id: &str) -> Result<bool, String> {
+        if id == crate::office::SERVER_ID {
+            return Err("Office 文档为随 Fox 安装的连接器，可以停用。".to_owned());
+        }
         self.with_connection(|connection| {
             Ok(connection.execute("DELETE FROM mcp_servers WHERE id = ?1", [id])? > 0)
         })
@@ -3467,7 +3528,7 @@ impl Database {
             connection
                 .query_row(
                     "SELECT COALESCE(p.root_path, c.project_root),
-                            COALESCE(p.permission_mode, 'read_only')
+                            COALESCE(p.permission_mode, c.permission_mode, 'ask')
                      FROM conversations c
                      LEFT JOIN projects p ON p.id = c.project_id
                      WHERE c.id = ?1
@@ -3476,6 +3537,42 @@ impl Database {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
+        })
+    }
+
+    pub fn conversation_permission_mode(&self, id: &str) -> Result<String, String> {
+        self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT COALESCE(p.permission_mode, c.permission_mode, 'ask')
+                 FROM conversations c
+                 LEFT JOIN projects p ON p.id = c.project_id
+                 WHERE c.id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+        })
+    }
+
+    pub fn update_conversation_permission_mode(
+        &self,
+        id: &str,
+        permission_mode: &str,
+    ) -> Result<Option<ConversationSummary>, String> {
+        if !matches!(permission_mode, "read_only" | "ask" | "allow") {
+            return Err("invalid conversation permission mode".to_owned());
+        }
+        let now = now_ms();
+        self.with_connection(|connection| {
+            let updated = connection.execute(
+                "UPDATE conversations
+                 SET permission_mode = ?2, updated_at = ?3
+                 WHERE id = ?1 AND project_id IS NULL",
+                params![id, permission_mode, now],
+            )?;
+            if updated == 0 {
+                return query_conversation(connection, id).optional();
+            }
+            query_conversation(connection, id).optional()
         })
     }
 
@@ -3497,6 +3594,34 @@ impl Database {
                 [run_id],
                 |row| row.get(0),
             )
+        })
+    }
+
+    pub(crate) fn get_runtime_tool_call(
+        &self,
+        run_id: &str,
+        runtime_tool_call_id: &str,
+    ) -> Result<Option<super::ToolCallRecord>, String> {
+        self.with_connection(|connection| {
+            Ok(query_tool_call(connection, run_id, runtime_tool_call_id).optional()?)
+        })
+    }
+
+    pub(crate) fn list_runtime_tool_calls_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<super::ToolCallRecord>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
+                        status, result_json, error_message, execution_location, requires_approval,
+                        started_at, completed_at, updated_at, trace_id, span_id
+                 FROM tool_calls WHERE run_id = ?1 ORDER BY started_at ASC, rowid ASC",
+            )?;
+            let records = statement
+                .query_map([run_id], map_tool_call)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(records)
         })
     }
 
@@ -3875,11 +4000,37 @@ impl Database {
     ) -> Result<Option<super::ApprovalRecord>, String> {
         let existing =
             self.with_connection(|connection| query_approval(connection, approval_id))?;
+        if existing.status != "pending" {
+            return Ok(None);
+        }
         if existing.category == TASK_REPAIR_OVERRIDE_APPROVAL_CATEGORY
             && decision == super::ApprovalDecision::AllowConversation
         {
             return Err(
                 "task repair budget override approvals only accept allow_once or deny".to_owned(),
+            );
+        }
+        let permission_scope = existing
+            .request
+            .get("permissionScope")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let allows_conversation = existing
+            .request
+            .get("availableDecisions")
+            .and_then(Value::as_array)
+            .is_none_or(|items| {
+                items
+                    .iter()
+                    .any(|item| item.as_str() == Some("allow_conversation"))
+            });
+        if decision == super::ApprovalDecision::AllowConversation
+            && (permission_scope.is_none() || !allows_conversation)
+        {
+            return Err(
+                "this approval is intentionally one-shot and cannot grant conversation access"
+                    .to_owned(),
             );
         }
         let now = now_ms();
@@ -3915,11 +4066,19 @@ impl Database {
             }
             let approval = query_approval(&transaction, approval_id)?;
             if decision == super::ApprovalDecision::AllowConversation {
+                let scope_key = permission_scope.expect("validated conversation permission scope");
                 transaction.execute(
-                    "INSERT INTO conversation_tool_permissions(conversation_id, tool_name, granted_at)
-                     VALUES (?1, ?2, ?3)
-                     ON CONFLICT(conversation_id, tool_name) DO UPDATE SET granted_at = excluded.granted_at",
-                    params![&approval.conversation_id, &approval.tool_name, now],
+                    "INSERT INTO conversation_tool_permissions(
+                         conversation_id, tool_name, scope_key, granted_at
+                     ) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(conversation_id, tool_name, scope_key)
+                     DO UPDATE SET granted_at = excluded.granted_at",
+                    params![
+                        &approval.conversation_id,
+                        &approval.tool_name,
+                        scope_key,
+                        now
+                    ],
                 )?;
             }
             transaction.commit()?;
@@ -4010,14 +4169,18 @@ impl Database {
         &self,
         conversation_id: &str,
         tool_name: &str,
+        scope_key: &str,
     ) -> Result<bool, String> {
+        if scope_key.trim().is_empty() {
+            return Ok(false);
+        }
         self.with_connection(|connection| {
             connection.query_row(
                 "SELECT EXISTS(
                     SELECT 1 FROM conversation_tool_permissions
-                    WHERE conversation_id = ?1 AND tool_name = ?2
+                    WHERE conversation_id = ?1 AND tool_name = ?2 AND scope_key = ?3
                  )",
-                params![conversation_id, tool_name],
+                params![conversation_id, tool_name, scope_key],
                 |row| row.get(0),
             )
         })
@@ -6082,6 +6245,7 @@ fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationSum
         created_at: row.get(14)?,
         updated_at: row.get(15)?,
         last_message_at: row.get(16)?,
+        permission_mode: row.get(17)?,
     })
 }
 
@@ -6333,7 +6497,8 @@ fn query_conversation(connection: &Connection, id: &str) -> rusqlite::Result<Con
                 c.pinned, c.archived, c.archived_at, c.trashed_at,
                 c.parent_conversation_id, c.forked_from_message_id,
                 COALESCE(c.lineage_root_id, c.id),
-                c.created_at, c.updated_at, c.last_message_at
+                c.created_at, c.updated_at, c.last_message_at,
+                COALESCE(p.permission_mode, c.permission_mode, 'ask')
          FROM conversations c
          JOIN agents a ON a.id = c.agent_id
          LEFT JOIN projects p ON p.id = c.project_id
@@ -7277,56 +7442,18 @@ fn validate_managed_tool_acquisition(
             "Managed ToolCall acquisition requires running Run '{run_id}', found '{run_status}'"
         )));
     }
-    let child_budget = transaction
+    let child_duration = transaction
         .query_row(
-            "SELECT r.started_at, d.max_duration_ms, d.max_total_tokens,
-                    d.max_output_tokens, d.max_tool_calls, d.total_tokens, d.output_tokens,
-                    (SELECT COUNT(*) FROM tool_calls t WHERE t.run_id = d.child_run_id)
+            "SELECT r.started_at, d.max_duration_ms
              FROM child_run_delegations d
              JOIN runs r ON r.id = d.child_run_id
              WHERE d.child_run_id = ?1",
             [run_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<i64>>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, i64>(7)?,
-                ))
-            },
+            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
         )
         .optional()?;
-    if let Some((
-        started_at,
-        max_duration,
-        max_total,
-        max_output,
-        max_tools,
-        total,
-        output,
-        used_tools,
-    )) = child_budget
-    {
+    if let Some((started_at, max_duration)) = child_duration {
         enforce_completion_deadline(run_id, "child_run", started_at, max_duration, now)?;
-        if total >= max_total {
-            return Err(projection_violation(format!(
-                "[child_run.budget_exceeded] Child Run '{run_id}' reached its frozen total-token budget ({total}/{max_total})"
-            )));
-        }
-        if output >= max_output {
-            return Err(projection_violation(format!(
-                "[child_run.budget_exceeded] Child Run '{run_id}' reached its frozen output-token budget ({output}/{max_output})"
-            )));
-        }
-        if max_tools < 0 || (fresh_slot && used_tools >= max_tools) || used_tools > max_tools {
-            return Err(projection_violation(format!(
-                "[child_run.tool_budget_exceeded] Child Run '{run_id}' used {used_tools} of {max_tools} frozen tool slots"
-            )));
-        }
         return Ok(());
     }
 
@@ -7435,56 +7562,18 @@ fn enforce_managed_run_completion_budget(
     run_id: &str,
     now: i64,
 ) -> rusqlite::Result<()> {
-    let child_budget = transaction
+    let child_duration = transaction
         .query_row(
-            "SELECT r.started_at, d.max_duration_ms, d.max_total_tokens,
-                    d.max_output_tokens, d.max_tool_calls, d.total_tokens, d.output_tokens,
-                    (SELECT COUNT(*) FROM tool_calls t WHERE t.run_id = d.child_run_id)
+            "SELECT r.started_at, d.max_duration_ms
              FROM child_run_delegations d
              JOIN runs r ON r.id = d.child_run_id
              WHERE d.child_run_id = ?1",
             [run_id],
-            |row| {
-                Ok((
-                    row.get::<_, Option<i64>>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, i64>(7)?,
-                ))
-            },
+            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
         )
         .optional()?;
-    if let Some((
-        started_at,
-        max_duration,
-        max_total,
-        max_output,
-        max_tools,
-        total,
-        output,
-        used_tools,
-    )) = child_budget
-    {
+    if let Some((started_at, max_duration)) = child_duration {
         enforce_completion_deadline(run_id, "child_run", started_at, max_duration, now)?;
-        if total >= max_total {
-            return Err(projection_violation(format!(
-                "[child_run.budget_exceeded] Child Run '{run_id}' reached its frozen total-token budget ({total}/{max_total})"
-            )));
-        }
-        if output >= max_output {
-            return Err(projection_violation(format!(
-                "[child_run.budget_exceeded] Child Run '{run_id}' reached its frozen output-token budget ({output}/{max_output})"
-            )));
-        }
-        if max_tools < 0 || used_tools > max_tools {
-            return Err(projection_violation(format!(
-                "[child_run.tool_budget_exceeded] Child Run '{run_id}' exceeded its frozen tool-call budget ({used_tools}/{max_tools})"
-            )));
-        }
         return Ok(());
     }
 
@@ -8127,7 +8216,7 @@ mod tests {
                 .iter()
                 .filter(|agent| agent.id.starts_with("fox-"))
                 .count(),
-            BUILTIN_AGENTS.len(),
+            BUILTIN_AGENTS.len() + 17, // 20 adapted experts reuse 3 existing IDs.
         );
         drop(reopened);
         let _ = std::fs::remove_file(path);
@@ -8189,6 +8278,52 @@ mod tests {
         assert!(database.delete_agent(&created.id).expect("delete original"));
         assert!(database.delete_agent(&copied.id).expect("delete copy"));
         drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn updates_default_assistant_without_reclassifying_it() {
+        let (database, path) = test_database();
+        let assistant = database
+            .get_agent(DEFAULT_AGENT_ID)
+            .expect("load default assistant")
+            .expect("default assistant exists");
+        let updated = database
+            .save_agent(&SaveAgentRequest {
+                id: Some(DEFAULT_AGENT_ID.to_owned()),
+                name: "我的 Fox 助手".to_owned(),
+                description: "自定义通用助手".to_owned(),
+                icon: assistant.icon.clone(),
+                category: assistant.category.clone(),
+                system_prompt: "Answer carefully and concisely.".to_owned(),
+                default_model: assistant.default_model.clone(),
+                opening_suggestions: vec!["帮我整理今天的工作".to_owned()],
+                package_manifest: assistant.package_manifest.clone(),
+            })
+            .expect("update default assistant");
+
+        assert_eq!(updated.name, "我的 Fox 助手");
+        assert_eq!(updated.description, "自定义通用助手");
+        assert_eq!(updated.system_prompt, "Answer carefully and concisely.");
+        assert_eq!(updated.opening_suggestions, vec!["帮我整理今天的工作"]);
+        assert!(updated.is_builtin);
+        assert_eq!(updated.agent_kind, "assistant");
+        assert_eq!(updated.invocation_mode, "primary");
+        assert_eq!(updated.visibility, "chat_selector");
+
+        drop(database);
+        let reopened = Database::open(path.clone()).expect("reopen assistant database");
+        let restored = reopened
+            .get_agent(DEFAULT_AGENT_ID)
+            .expect("reload default assistant")
+            .expect("restored default assistant exists");
+        assert_eq!(restored.name, "我的 Fox 助手");
+        assert_eq!(restored.system_prompt, "Answer carefully and concisely.");
+        assert_eq!(restored.agent_kind, "assistant");
+        assert_eq!(restored.invocation_mode, "primary");
+        assert_eq!(restored.visibility, "chat_selector");
+
+        drop(reopened);
         let _ = std::fs::remove_file(path);
     }
 
@@ -8846,8 +8981,9 @@ mod tests {
         database
             .with_connection(|connection| {
                 connection.execute(
-                    "INSERT INTO conversation_tool_permissions(conversation_id, tool_name, granted_at)
-                     VALUES (?1, 'write_file', ?2)",
+                    "INSERT INTO conversation_tool_permissions(
+                         conversation_id, tool_name, scope_key, granted_at
+                     ) VALUES (?1, 'write_file', 'test-scope', ?2)",
                     params![&source.id, now_ms()],
                 )?;
                 Ok(())
@@ -8906,10 +9042,10 @@ mod tests {
         assert!(fork_detail.approvals.is_empty());
         assert!(fork_detail.last_run.is_none());
         assert!(database
-            .conversation_tool_permission_granted(&source.id, "write_file")
+            .conversation_tool_permission_granted(&source.id, "write_file", "test-scope")
             .expect("source permission"));
         assert!(!database
-            .conversation_tool_permission_granted(&fork.id, "write_file")
+            .conversation_tool_permission_granted(&fork.id, "write_file", "test-scope")
             .expect("fork permission"));
         assert_eq!(
             database
@@ -10138,7 +10274,7 @@ mod tests {
             .expect("resolved approval");
         assert_eq!(resolved.status, "approved");
         assert!(!database
-            .conversation_tool_permission_granted(&conversation.id, "write_file")
+            .conversation_tool_permission_granted(&conversation.id, "write_file", "test-scope")
             .expect("check one-time approval"));
         assert!(database
             .claim_approved_tool_call(&started.run.id, "write-1")
@@ -10162,7 +10298,11 @@ mod tests {
             .create_approval(
                 &conversation_tool.id,
                 "创建 another.md",
-                &json!({"target":"another.md"}),
+                &json!({
+                    "target":"another.md",
+                    "permissionScope": "test-scope",
+                    "availableDecisions": ["allow_once", "allow_conversation", "deny"]
+                }),
             )
             .expect("create conversation approval");
         database
@@ -10176,8 +10316,46 @@ mod tests {
             .claim_approved_tool_call(&started.run.id, "write-2")
             .expect("claim approved conversation tool"));
         assert!(database
-            .conversation_tool_permission_granted(&conversation.id, "write_file")
+            .conversation_tool_permission_granted(&conversation.id, "write_file", "test-scope")
             .expect("check conversation approval"));
+        assert!(!database
+            .conversation_tool_permission_granted(&conversation.id, "write_file", "different-scope")
+            .expect("conversation grant must be isolated to its exact operation scope"));
+
+        let one_shot_tool = database
+            .create_host_tool_call(
+                &started.run.id,
+                "write-3",
+                "write_file",
+                &json!({"path":"forced-hook.md"}),
+                "pending",
+                true,
+            )
+            .expect("create one-shot-only tool");
+        let one_shot_approval = database
+            .create_approval(
+                &one_shot_tool.id,
+                "forced policy approval",
+                &json!({
+                    "target":"forced-hook.md",
+                    "availableDecisions": ["allow_once", "deny"]
+                }),
+            )
+            .expect("create one-shot-only approval");
+        assert!(database
+            .resolve_approval(
+                &one_shot_approval.id,
+                crate::database::ApprovalDecision::AllowConversation,
+            )
+            .expect_err("one-shot policy approval must reject conversation grants")
+            .contains("intentionally one-shot"));
+        database
+            .resolve_approval(
+                &one_shot_approval.id,
+                crate::database::ApprovalDecision::Deny,
+            )
+            .expect("deny one-shot-only approval")
+            .expect("one-shot-only approval remains pending after rejected decision");
 
         database
             .complete_host_tool_call(
@@ -11501,7 +11679,11 @@ mod tests {
         assert_eq!(tool_status, "pending");
         assert!(claimed_at.is_none());
         assert!(!database
-            .conversation_tool_permission_granted(&conversation.id, "task_repair_escalate_start",)
+            .conversation_tool_permission_granted(
+                &conversation.id,
+                "task_repair_escalate_start",
+                "test-scope",
+            )
             .expect("override approval must never persist a grant"));
 
         drop(database);
@@ -11552,7 +11734,7 @@ mod tests {
             .claim_approved_tool_call(&crashed.run.id, "crash-write")
             .expect("reject crashed tool claim"));
         assert!(!database
-            .conversation_tool_permission_granted(&conversation.id, "write_file")
+            .conversation_tool_permission_granted(&conversation.id, "write_file", "test-scope")
             .expect("crash must not grant conversation permission"));
 
         let cancelled = database
@@ -11695,7 +11877,7 @@ mod tests {
             .expect("reject late restart approval")
             .is_none());
         assert!(!database
-            .conversation_tool_permission_granted(&conversation.id, "write_file")
+            .conversation_tool_permission_granted(&conversation.id, "write_file", "test-scope")
             .expect("terminal approvals never grant permission"));
 
         drop(database);
@@ -12022,6 +12204,7 @@ mod tests {
             root.to_str()
         );
         assert!(conversation.project_id.is_some());
+        assert_eq!(conversation.permission_mode, "ask");
         let project_id = conversation.project_id.as_deref().unwrap();
         let projects = database.list_projects().expect("list projects");
         assert_eq!(projects.len(), 1);
@@ -12032,12 +12215,20 @@ mod tests {
             .expect("update permission")
             .expect("project exists");
         assert_eq!(updated.permission_mode, "allow");
+        assert_eq!(
+            database
+                .load_conversation(&conversation.id)
+                .expect("reload project conversation")
+                .conversation
+                .permission_mode,
+            "allow"
+        );
         assert!(database
             .update_project_permission_mode(project_id, "unrestricted")
             .is_err());
 
         let no_project = database
-            .create_conversation(DEFAULT_AGENT_ID, None, None, None)
+            .create_conversation(DEFAULT_AGENT_ID, None, None, Some("allow"))
             .expect("create plain conversation");
         assert_eq!(
             database
@@ -12045,6 +12236,21 @@ mod tests {
                 .expect("load empty project root"),
             None
         );
+        assert_eq!(no_project.permission_mode, "allow");
+        assert_eq!(
+            database
+                .conversation_permission_mode(&no_project.id)
+                .expect("load projectless permission"),
+            "allow"
+        );
+        let updated = database
+            .update_conversation_permission_mode(&no_project.id, "ask")
+            .expect("update projectless permission")
+            .expect("plain conversation exists");
+        assert_eq!(updated.permission_mode, "ask");
+        assert!(database
+            .update_conversation_permission_mode(&no_project.id, "unrestricted")
+            .is_err());
 
         drop(database);
         let _ = std::fs::remove_file(path);

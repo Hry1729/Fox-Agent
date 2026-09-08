@@ -9,6 +9,7 @@ const CONTEXT_MARKER_START = /<(?=\s*(?:\\*\/\s*)?fox_context_block\b)/giu
 
 const KIND_CONTRACTS = Object.freeze({
   assistant_persona: Object.freeze({ authority: 'runtime', trust: 'runtime_verified' }),
+  skills: Object.freeze({ authority: 'runtime', trust: 'runtime_verified' }),
   runtime: Object.freeze({ authority: 'runtime', trust: 'runtime_verified' }),
   expert_package: Object.freeze({ authority: 'runtime', trust: 'runtime_verified' }),
   expert_binding: Object.freeze({ authority: 'runtime', trust: 'runtime_verified' }),

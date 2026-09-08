@@ -111,7 +111,7 @@ describe('expert binding timeline UI', () => {
     const availability = latestExpertToolAvailability([], expert())
 
     expect(availability.source).toBe('declaration')
-    expect(availability.label).toBe('声明能力：3 个工具 · 1 个 Skills · 1 个 MCP')
+    expect(availability.label).toBe('声明能力：3 个工具 · 1 个技能 · 1 个连接器')
     expect(availability.availableCount).toBeNull()
   })
 

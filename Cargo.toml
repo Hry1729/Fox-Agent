@@ -1,0 +1,4 @@
+[workspace]
+resolver = "2"
+members = ["apps/desktop/src-tauri", "crates/fox-agent-kernel", "crates/fox-engine-protocol"]
+default-members = ["crates/fox-agent-kernel", "crates/fox-engine-protocol"]

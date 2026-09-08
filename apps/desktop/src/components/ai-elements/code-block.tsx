@@ -38,10 +38,6 @@ import type {
   ThemedToken,
 } from "shiki/types";
 
-// Shiki core, regex engine and themes are all loaded lazily on the first code
-// block render, so the highlighter never enters the cold-start entry. A raw
-// plaintext render is shown meanwhile (see createRawTokens).
-
 // Shiki uses bitflags for font styles: 1=italic, 2=bold, 4=underline
 // oxlint-disable-next-line eslint(no-bitwise)
 const isItalic = (fontStyle: number | undefined) => fontStyle && fontStyle & 1;

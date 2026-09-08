@@ -1,4 +1,5 @@
 import type { AppNotificationRecord, NotificationPreferencesRecord } from '@/features/conversations/model/types'
+import { desktopClient, desktopRuntimeAvailable } from '@/features/conversations/api/desktop-client'
 
 export type NotificationSoundId = 'soft' | 'chime' | 'pop' | 'signal'
 
@@ -12,11 +13,155 @@ export const NOTIFICATION_SOUND_OPTIONS: Array<{ id: NotificationSoundId; label:
 export const DEFAULT_NOTIFICATION_SOUND: NotificationSoundId = 'soft'
 export const FOX_IN_APP_NOTIFICATION_EVENT = 'fox:in-app-notification'
 export const FOX_NOTIFICATION_PREFERENCES_CHANGED_EVENT = 'fox:notification-preferences-changed'
+export const FOX_NOTIFICATIONS_CHANGED_EVENT = 'fox:notifications-changed'
+
+const NOTIFICATION_REFRESH_RUNTIME_EVENTS = new Set([
+  'run.started',
+  'run.completed',
+  'run.cancelled',
+  'run.failed',
+  'run.interrupted',
+])
 
 export interface InAppNotificationEventDetail {
   notification: Pick<AppNotificationRecord, 'id' | 'kind' | 'title' | 'body'>
   soundId?: NotificationSoundId
   forceSound?: boolean
+}
+
+export interface AppNotificationOptions {
+  description?: unknown
+  mergeKey?: string
+  sourceType?: string
+  sourceId?: string
+  workspaceView?: string
+  entityId?: string
+  status?: string
+  localFile?: { path: string; canOpenDirectly: boolean }
+}
+
+export interface NotificationVisibilityContext {
+  appVisible: boolean
+  appFocused: boolean
+  activeView: string
+  activeEntityId?: string | null
+  activeConversationId?: string | null
+}
+
+/**
+ * Returns true only when the notification's result is already visible in the
+ * foreground workspace. Generic notifications deliberately stay alerting: if
+ * they do not point at a page, their notification card is the only feedback.
+ */
+export function notificationIsVisibleInContext(
+  item: Pick<AppNotificationRecord, 'workspaceView' | 'entityId'>,
+  context: NotificationVisibilityContext,
+): boolean {
+  if (!context.appVisible || !context.appFocused || !item.workspaceView) return false
+  if (item.workspaceView === 'chat') {
+    return context.activeView === 'chat'
+      && Boolean(context.activeConversationId)
+      && item.entityId === context.activeConversationId
+  }
+  return item.workspaceView === context.activeView
+    && (item.entityId == null || item.entityId === context.activeEntityId)
+}
+
+function notificationText(value: unknown, fallback: string): string {
+  const text = value instanceof Error ? value.message : typeof value === 'string' ? value : value == null ? '' : String(value)
+  const normalized = text.trim() || fallback
+  return normalized.length > 15_900 ? `${normalized.slice(0, 15_900)}\n\n[通知内容过长，已截断]` : normalized
+}
+
+export async function publishAppNotification(
+  kind: AppNotificationRecord['kind'],
+  message: unknown,
+  options: AppNotificationOptions = {},
+): Promise<void> {
+  const severity: AppNotificationRecord['severity'] = kind === 'failed' || kind === 'approval' ? 'high' : 'normal'
+  const rawMessage = notificationText(message, kind === 'failed' ? '操作失败' : '操作已完成')
+  const description = options.description == null ? '' : notificationText(options.description, '')
+  const title = description
+    ? rawMessage
+    : kind === 'failed'
+      ? '操作失败'
+      : kind === 'question'
+        ? '需要处理'
+        : kind === 'progress'
+          ? '正在处理'
+          : '操作完成'
+  const body = description || rawMessage
+
+  if (!desktopRuntimeAvailable) {
+    const detail: InAppNotificationEventDetail = {
+      notification: { id: `browser-notification-${Date.now()}`, kind, title, body },
+    }
+    window.dispatchEvent(new CustomEvent<InAppNotificationEventDetail>(FOX_IN_APP_NOTIFICATION_EVENT, { detail }))
+    return
+  }
+
+  try {
+    await desktopClient.publishAppNotification({
+      kind,
+      severity,
+      title,
+      body,
+      mergeKey: options.mergeKey,
+      sourceType: options.sourceType ?? 'ui',
+      sourceId: options.sourceId,
+      workspaceView: options.workspaceView,
+      entityId: options.entityId,
+      status: options.status,
+      action: options.localFile ? {
+        type: 'downloaded_file',
+        path: options.localFile.path,
+        canOpenDirectly: options.localFile.canOpenDirectly,
+      } : undefined,
+    })
+    window.dispatchEvent(new Event(FOX_NOTIFICATIONS_CHANGED_EVENT))
+  } catch (cause) {
+    const detail: InAppNotificationEventDetail = {
+      notification: {
+        id: `notification-persist-failed-${Date.now()}`,
+        kind: 'failed',
+        title: '通知中心写入失败',
+        body: notificationText(cause, body),
+      },
+    }
+    window.dispatchEvent(new CustomEvent<InAppNotificationEventDetail>(FOX_IN_APP_NOTIFICATION_EVENT, { detail }))
+  }
+}
+
+type NotifyFunction = ((message: unknown, options?: AppNotificationOptions) => string) & {
+  success: (message: unknown, options?: AppNotificationOptions) => string
+  error: (message: unknown, options?: AppNotificationOptions) => string
+  info: (message: unknown, options?: AppNotificationOptions) => string
+  warning: (message: unknown, options?: AppNotificationOptions) => string
+}
+
+function enqueueNotification(
+  kind: AppNotificationRecord['kind'],
+  message: unknown,
+  options?: AppNotificationOptions,
+): string {
+  const id = `fox-notification-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  void publishAppNotification(kind, message, {
+    ...options,
+    sourceId: options?.sourceId ?? id,
+  })
+  return id
+}
+
+export const notify = ((message: unknown, options?: AppNotificationOptions) =>
+  enqueueNotification('completed', message, options)) as NotifyFunction
+
+notify.success = (message, options) => enqueueNotification('completed', message, options)
+notify.error = (message, options) => enqueueNotification('failed', message, options)
+notify.info = (message, options) => enqueueNotification('completed', message, options)
+notify.warning = (message, options) => enqueueNotification('question', message, options)
+
+export function runtimeEventRefreshesNotifications(eventType: unknown): boolean {
+  return typeof eventType === 'string' && NOTIFICATION_REFRESH_RUNTIME_EVENTS.has(eventType)
 }
 
 export function normalizeNotificationSoundId(value?: string | null): NotificationSoundId {

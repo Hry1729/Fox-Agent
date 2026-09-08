@@ -315,14 +315,18 @@ async function runReadonlyNodeAgent({
   modelProfile,
   preflight,
   context,
+  parentToolCallId,
 }) {
   let toolCalls = 0
-  const boundedPreflight = (tool, input, toolSignal) => {
+  const boundedPreflight = (toolCallId, tool, input, toolSignal) => {
     toolCalls += 1
     if (toolCalls > MAX_NODE_TOOL_CALLS) {
       return Promise.resolve({ decision: 'block', message: `Graph node tool limit ${MAX_NODE_TOOL_CALLS} reached.` })
     }
-    return preflight(tool, input, toolSignal)
+    return preflight(toolCallId, tool, input, toolSignal, {
+      observationScope: 'nested',
+      parentToolCallId,
+    })
   }
   const tools = adaptFoxToolsToPi(createReadOnlyTools(boundedPreflight, { limits: GRAPH_READ_LIMITS }))
   const settingsManager = SettingsManager.inMemory({
@@ -416,7 +420,7 @@ export function createGraphReadonlyTools({
     label: 'Run read-only research graph',
     description: 'Run 1-3 bounded read-only research agents as a depth-1 DAG. Independent nodes run concurrently; dependent nodes receive only accepted bounded reports. No node can write, execute commands, use the network, mutate Fox state, or delegate.',
     parameters: GRAPH_INPUT_SCHEMA,
-    execute: async (_toolCallId, params, signal) => {
+    execute: async (toolCallId, params, signal) => {
       if (profile?.id !== GRAPH_PROFILE_ID) {
         fail('graph_readonly.profile_required', `${GRAPH_READONLY_TOOL_NAME} requires ${GRAPH_PROFILE_ID}.`)
       }
@@ -433,6 +437,7 @@ export function createGraphReadonlyTools({
           modelProfile,
           preflight,
           context,
+          parentToolCallId: toolCallId,
         })),
       })
       if (result.status === 'cancelled') {

@@ -9,7 +9,7 @@ edition = "2021"
 [features]
 default = ["local-embedding", "zvec"]
 zvec = ["dep:zvec-rust"]
-local-embedding = ["dep:ort"]
+local-embedding = ["dep:ort", "dep:tokenizers"]
 
 [[bin]]
 name = "local-embedding-smoke"
@@ -25,6 +25,8 @@ tauri-build = { version = "2", features = [] }
 serde_json = "1"
 
 [dependencies]
+fox-engine-protocol = { path = "../../../crates/fox-engine-protocol" }
+fox-agent-kernel = { path = "../../../crates/fox-agent-kernel" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 keyring = { version = "3", features = ["windows-native"] }
 base64 = "0.22"
@@ -47,7 +49,11 @@ toml = "0.8.2"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 zvec-rust = { version = "0.6.0", optional = true }
-ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray", "load-dynamic"], optional = true }
+ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray", "download-binaries"], optional = true }
+tokenizers = { version = "0.21.1", default-features = false, features = ["fancy-regex"], optional = true }
+
+[dev-dependencies]
+fox-agent-kernel = { path = "../../../crates/fox-agent-kernel", features = ["test-support"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

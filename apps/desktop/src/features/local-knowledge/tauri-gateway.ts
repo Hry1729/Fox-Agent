@@ -62,6 +62,7 @@ export type LocalKnowledgeDesktopClient = Pick<
   | 'pickLocalKnowledgeSourceFolder'
   | 'addLocalKnowledgeFileSource'
   | 'rescanLocalKnowledgeFileSource'
+  | 'updateLocalKnowledgeFileSource'
   | 'removeLocalKnowledgeFileSource'
   | 'listLocalKnowledgeLocalFiles'
   | 'readLocalKnowledgeLocalFileRange'
@@ -493,6 +494,11 @@ export function createTauriLocalKnowledgeGateway(client: LocalKnowledgeDesktopCl
     },
     async rescanFileSource(id) {
       return mapLocalKnowledgeFileSource(await client.rescanLocalKnowledgeFileSource(id))
+    },
+    async updateFileSource(id, displayName) {
+      const normalizedName = displayName.trim()
+      if (!normalizedName) unavailable('local_knowledge.source_name_required', '请输入文件夹显示名称。')
+      return mapLocalKnowledgeFileSource(await client.updateLocalKnowledgeFileSource(id, normalizedName))
     },
     async removeFileSource(id) {
       return client.removeLocalKnowledgeFileSource(id)

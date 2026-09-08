@@ -17,7 +17,8 @@ use crate::{
     },
 };
 use rusqlite::{
-    params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension, Row,
+    params, params_from_iter, types::Value as SqlValue, Connection, OpenFlags, OptionalExtension,
+    Row,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -33,7 +34,7 @@ use std::{
 use tauri::State;
 use uuid::Uuid;
 
-const KNOWLEDGE_SCHEMA_VERSION: i64 = 3;
+const KNOWLEDGE_SCHEMA_VERSION: i64 = 4;
 pub(crate) const DEFAULT_CHUNK_SIZE: i64 = 512;
 pub(crate) const DEFAULT_CHUNK_OVERLAP: i64 = 50;
 const MAX_LOCAL_FILE_CATALOG_ITEMS: usize = 100_000;
@@ -396,6 +397,13 @@ pub struct LocalKnowledgeFileSourceIdRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LocalKnowledgeFileSourceUpdateRequest {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalKnowledgeCatalogFilesRequest {
     pub source_id: Option<String>,
     pub query: Option<String>,
@@ -502,7 +510,41 @@ pub struct LocalKnowledgeStorageStatus {
 
 impl LocalKnowledgeStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, LocalKnowledgeError> {
+        Self::open_internal(root.as_ref(), None)
+    }
+
+    pub fn open_with_zvec_resource_dir(
+        root: impl AsRef<Path>,
+        resource_dir: impl AsRef<Path>,
+    ) -> Result<Self, LocalKnowledgeError> {
+        Self::open_internal(root.as_ref(), Some(resource_dir.as_ref()))
+    }
+
+    pub(crate) fn open_retrieval_worker(
+        root: impl AsRef<Path>,
+        zvec_resource_dir: Option<&Path>,
+    ) -> Result<Self, LocalKnowledgeError> {
         let root = root.as_ref().to_path_buf();
+        let database_path = root.join("knowledge.db");
+        let connection = Connection::open_with_flags(
+            &database_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+        )?;
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+            root: Arc::new(root),
+            zvec_resource_dir: Arc::new(zvec_resource_dir.map(Path::to_path_buf)),
+            database_path: Arc::new(database_path),
+            storage_migration_active: Arc::new(Mutex::new(None)),
+            pending_root_path: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    fn open_internal(
+        root: &Path,
+        zvec_resource_dir: Option<&Path>,
+    ) -> Result<Self, LocalKnowledgeError> {
+        let root = root.to_path_buf();
         std::fs::create_dir_all(&root)?;
         for directory in ["models", "indexes", "knowledge-bases", "staging"] {
             std::fs::create_dir_all(root.join(directory))?;
@@ -515,7 +557,7 @@ impl LocalKnowledgeStore {
         let store = Self {
             connection: Arc::new(Mutex::new(connection)),
             root: Arc::new(root),
-            zvec_resource_dir: Arc::new(None),
+            zvec_resource_dir: Arc::new(zvec_resource_dir.map(Path::to_path_buf)),
             database_path: Arc::new(database_path),
             storage_migration_active: Arc::new(Mutex::new(None)),
             pending_root_path: Arc::new(Mutex::new(None)),
@@ -1194,37 +1236,70 @@ impl LocalKnowledgeStore {
         let active_generation_matches_configuration = match (
             base.active_index_generation.as_deref(),
             base.configured_embedding_model_id.as_deref(),
+            embedding_model.as_ref(),
         ) {
-            (Some(generation_id), Some(model_id)) => connection.query_row(
+            (Some(generation_id), Some(model_id), Some(model)) => connection.query_row(
                 "SELECT EXISTS(
                         SELECT 1 FROM local_kb_index_generations
                         WHERE id = ?1 AND knowledge_base_id = ?2 AND status = 'active'
+                          AND vector_store_kind = 'zvec-hnsw-cosine-v1'
                           AND embedding_model_id = ?3 AND chunk_config_hash = ?4
+                          AND embedding_model_version = ?5
                      )",
                 params![
                     generation_id,
                     &base.id,
                     model_id,
-                    format!("chars-{}-overlap-{}", base.chunk_size, base.chunk_overlap)
+                    format!("chars-{}-overlap-{}", base.chunk_size, base.chunk_overlap),
+                    &model.version
                 ],
                 |row| row.get::<_, bool>(0),
             )?,
             _ => false,
         };
 
-        let vector_count = match base.active_index_generation.as_deref() {
-            Some(generation_id) => Some(connection.query_row(
-                "SELECT COUNT(*) FROM local_kb_vectors WHERE generation_id = ?1",
-                [generation_id],
-                |row| row.get::<_, i64>(0),
-            )?),
+        let vector_generation = match base.active_index_generation.as_deref() {
+            Some(generation_id) => connection
+                .query_row(
+                    "SELECT dimension, chunk_count FROM local_kb_index_generations
+                 WHERE id = ?1 AND knowledge_base_id = ?2 AND status = 'active'
+                   AND vector_store_kind = 'zvec-hnsw-cosine-v1'",
+                    params![generation_id, &base.id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .optional()?,
             None => None,
         };
+        #[cfg(feature = "zvec")]
+        let zvec_generation_error =
+            match (base.active_index_generation.as_deref(), vector_generation) {
+                (Some(generation_id), Some((dimension, count))) if dimension > 0 && count >= 0 => {
+                    self.validate_zvec_generation_readable(
+                        &base.id,
+                        generation_id,
+                        dimension as usize,
+                        count as usize,
+                    )
+                    .err()
+                    .map(|error| error.to_string())
+                }
+                _ => None,
+            };
+        #[cfg(not(feature = "zvec"))]
+        let zvec_generation_error = vector_generation
+            .is_some()
+            .then(|| "当前桌面构建未启用 Zvec".to_owned());
+        let zvec_generation_readable =
+            vector_generation.is_some() && zvec_generation_error.is_none();
+        let vector_count = vector_generation
+            .filter(|_| zvec_generation_readable)
+            .map(|(_, count)| count);
         base.text_index_ready = base.document_count > 0
             && ready_document_count == base.document_count
             && chunk_count > 0;
         base.vector_index_ready = embedding_model.is_some()
             && active_generation_matches_configuration
+            && zvec_generation_readable
             && vector_count.is_some_and(|count| count > 0 && count == chunk_count);
         base.search_mode =
             if configured_search_mode == "vector" || configured_search_mode == "hybrid" {
@@ -1247,8 +1322,12 @@ impl LocalKnowledgeStore {
                 "未配置向量模型".to_owned()
             } else if base.embedding_model.is_none() {
                 "向量模型未安装或未通过完整性校验".to_owned()
+            } else if base.active_index_generation.is_some() && vector_generation.is_none() {
+                "当前索引不是可用的 Zvec 索引，请重新构建".to_owned()
+            } else if let Some(error) = zvec_generation_error {
+                format!("Zvec 索引不可用：{error}")
             } else {
-                "向量索引尚未完成读写校验".to_owned()
+                "Zvec 向量索引尚未完成读写校验".to_owned()
             })
         };
         Ok(())
@@ -1371,6 +1450,33 @@ impl LocalKnowledgeStore {
             .connection()?
             .execute("DELETE FROM local_file_sources WHERE id = ?1", [source_id])?
             > 0)
+    }
+
+    pub fn update_file_source(
+        &self,
+        request: LocalKnowledgeFileSourceUpdateRequest,
+    ) -> Result<LocalKnowledgeFileSource, LocalKnowledgeError> {
+        let source_id = request.id.trim();
+        let display_name = request.display_name.trim();
+        if source_id.is_empty() || display_name.is_empty() {
+            return Err(LocalKnowledgeError::invalid(
+                "file source id and display name are required",
+            ));
+        }
+        if display_name.chars().count() > 80 {
+            return Err(LocalKnowledgeError::invalid(
+                "file source display name is too long",
+            ));
+        }
+        let updated_at = crate::database::now_ms();
+        let changed = self.connection()?.execute(
+            "UPDATE local_file_sources SET display_name = ?1, updated_at = ?2 WHERE id = ?3",
+            params![display_name, updated_at, source_id],
+        )?;
+        if changed == 0 {
+            return Err(LocalKnowledgeError::not_found("local file source"));
+        }
+        self.get_file_source(source_id)
     }
 
     pub fn list_catalog_files(
@@ -1964,6 +2070,11 @@ impl LocalKnowledgeStore {
             .root
             .join("staging")
             .join(format!("deleted-{id}-{}", Uuid::new_v4()));
+        let source_index_directory = self.root.join("indexes").join(id);
+        let staged_index_directory = self
+            .root
+            .join("staging")
+            .join(format!("deleted-index-{id}-{}", Uuid::new_v4()));
         let connection = self.connection()?;
         let exists = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM local_knowledge_bases WHERE id = ?1)",
@@ -1997,6 +2108,34 @@ impl LocalKnowledgeStore {
         } else {
             false
         };
+        let index_moved = if source_index_directory.exists() {
+            let metadata = match std::fs::symlink_metadata(&source_index_directory) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    if moved {
+                        let _ = std::fs::rename(&staged_directory, &source_directory);
+                    }
+                    return Err(LocalKnowledgeError::from(error));
+                }
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                if moved {
+                    let _ = std::fs::rename(&staged_directory, &source_directory);
+                }
+                return Err(LocalKnowledgeError::invalid(
+                    "knowledge base Zvec index directory is invalid",
+                ));
+            }
+            if let Err(error) = std::fs::rename(&source_index_directory, &staged_index_directory) {
+                if moved {
+                    let _ = std::fs::rename(&staged_directory, &source_directory);
+                }
+                return Err(LocalKnowledgeError::from(error));
+            }
+            true
+        } else {
+            false
+        };
 
         let deleted = connection.execute("DELETE FROM local_knowledge_bases WHERE id = ?1", [id]);
         match deleted {
@@ -2005,6 +2144,9 @@ impl LocalKnowledgeStore {
                 if moved {
                     let _ = std::fs::remove_dir_all(staged_directory);
                 }
+                if index_moved {
+                    let _ = std::fs::remove_dir_all(staged_index_directory);
+                }
                 Ok(true)
             }
             Ok(_) => {
@@ -2012,12 +2154,18 @@ impl LocalKnowledgeStore {
                 if moved {
                     let _ = std::fs::rename(staged_directory, source_directory);
                 }
+                if index_moved {
+                    let _ = std::fs::rename(staged_index_directory, source_index_directory);
+                }
                 Err(LocalKnowledgeError::not_found("knowledge base"))
             }
             Err(error) => {
                 drop(connection);
                 if moved {
                     let _ = std::fs::rename(staged_directory, source_directory);
+                }
+                if index_moved {
+                    let _ = std::fs::rename(staged_index_directory, source_index_directory);
                 }
                 Err(LocalKnowledgeError::from(error))
             }
@@ -2845,6 +2993,7 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalKnowledgeError>
             vector_store_kind TEXT NOT NULL,
             vector_store_version TEXT,
             embedding_model_id TEXT NOT NULL,
+            embedding_model_version TEXT,
             dimension INTEGER NOT NULL CHECK(dimension > 0),
             chunk_config_hash TEXT NOT NULL,
             parser_version TEXT NOT NULL,
@@ -3002,6 +3151,12 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalKnowledgeError>
         "search_mode",
         "ALTER TABLE local_knowledge_bases ADD COLUMN search_mode TEXT NOT NULL DEFAULT 'keyword'",
     )?;
+    ensure_schema_column(
+        connection,
+        "local_kb_index_generations",
+        "embedding_model_version",
+        "ALTER TABLE local_kb_index_generations ADD COLUMN embedding_model_version TEXT",
+    )?;
     for (column, statement) in [
         ("name", "ALTER TABLE local_embedding_models ADD COLUMN name TEXT"),
         ("languages_json", "ALTER TABLE local_embedding_models ADD COLUMN languages_json TEXT NOT NULL DEFAULT '[]'"),
@@ -3013,6 +3168,11 @@ fn initialize_schema(connection: &Connection) -> Result<(), LocalKnowledgeError>
     ] {
         ensure_schema_column(connection, "local_embedding_models", column, statement)?;
     }
+    connection.execute(
+        "UPDATE local_embedding_models SET is_default = 0
+         WHERE model_id = 'all-MiniLM-L6-v2' AND is_default = 1",
+        [],
+    )?;
     connection.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_local_embedding_one_default
          ON local_embedding_models(is_default) WHERE is_default = 1",
@@ -3595,6 +3755,14 @@ pub async fn local_knowledge_file_source_rescan(
 }
 
 #[tauri::command]
+pub fn local_knowledge_file_source_update(
+    state: State<'_, AppState>,
+    request: LocalKnowledgeFileSourceUpdateRequest,
+) -> ApiResponse<LocalKnowledgeFileSource> {
+    local_response(state.local_knowledge.update_file_source(request))
+}
+
+#[tauri::command]
 pub fn local_knowledge_file_source_remove(
     state: State<'_, AppState>,
     request: LocalKnowledgeFileSourceIdRequest,
@@ -3852,10 +4020,14 @@ mod tests {
             .join("documents");
         std::fs::create_dir_all(&base_directory).unwrap();
         std::fs::write(base_directory.join("sample.txt"), b"sample").unwrap();
+        let index_directory = root.join("indexes").join(&updated.id).join("generation-1");
+        std::fs::create_dir_all(&index_directory).unwrap();
+        std::fs::write(index_directory.join("index.bin"), b"zvec").unwrap();
 
         assert!(store.delete_base(&updated.id).unwrap());
         assert!(store.list_bases().unwrap().is_empty());
         assert!(!root.join("knowledge-bases").join(&updated.id).exists());
+        assert!(!root.join("indexes").join(&updated.id).exists());
         drop(store);
         let _ = std::fs::remove_dir_all(root);
     }

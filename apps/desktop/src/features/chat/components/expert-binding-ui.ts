@@ -130,9 +130,9 @@ export function declaredExpertToolAvailability(expert: AgentRecord): ExpertToolA
     : expert.resources.tools.map((tool) => tool.id || tool.name).filter(Boolean)
   const summaries = [
     declaredTools.length ? `${declaredTools.length} 个工具` : '',
-    expert.resources.skills.length ? `${expert.resources.skills.length} 个 Skills` : '',
+    expert.resources.skills.length ? `${expert.resources.skills.length} 个技能` : '',
     expert.resources.knowledges.length ? `${expert.resources.knowledges.length} 个知识资源` : '',
-    expert.resources.mcps.length ? `${expert.resources.mcps.length} 个 MCP` : '',
+    expert.resources.mcps.length ? `${expert.resources.mcps.length} 个连接器` : '',
   ].filter(Boolean)
   return {
     source: 'declaration',

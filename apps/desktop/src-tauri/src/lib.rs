@@ -7,6 +7,7 @@ mod digital_colleagues;
 mod expert_packages;
 mod expert_teams;
 mod expert_workflows;
+mod kernel;
 mod lifecycle_hooks;
 #[cfg(feature = "local-embedding")]
 mod local_embedding;
@@ -18,8 +19,10 @@ mod local_knowledge_vector;
 mod maintenance;
 mod mcp;
 mod mcp_openapi;
+mod office;
 mod model_service;
 mod runtime_host;
+mod resource_gateway;
 mod skills;
 mod tool_guard;
 mod tool_host;
@@ -35,6 +38,87 @@ use model_service::ModelServiceClient;
 use runtime_host::RuntimeHost;
 use tauri::Manager;
 use yuxi::YuxiClient;
+
+#[cfg(feature = "local-embedding")]
+pub fn local_embedding_smoke_package_exit_code(package_path: &std::ffi::OsStr) -> i32 {
+    match local_embedding::smoke_test_package(std::path::Path::new(&package_path)) {
+        Ok(_) => 0,
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
+    }
+}
+
+#[cfg(not(feature = "local-embedding"))]
+pub fn local_embedding_smoke_package_exit_code(_package_path: &std::ffi::OsStr) -> i32 {
+    eprintln!("local embedding is not enabled in this desktop build");
+    2
+}
+
+pub fn local_knowledge_retrieval_worker_exit_code(
+    root: &std::ffi::OsStr,
+    request_json: &std::ffi::OsStr,
+    zvec_resource_dir: Option<&std::ffi::OsStr>,
+) -> i32 {
+    let root = std::path::PathBuf::from(root);
+    let request_json = request_json.to_string_lossy().into_owned();
+    let zvec_resource_dir = zvec_resource_dir.map(std::path::PathBuf::from);
+    let result = match std::thread::Builder::new()
+        .name("fox-retrieval-native".to_owned())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let request =
+                serde_json::from_str::<local_knowledge_vector::KnowledgeRetrievalRequest>(
+                    &request_json,
+                )
+                .map_err(|error| {
+                    local_knowledge::LocalKnowledgeError::invalid(format!(
+                        "无法解析检索隔离请求：{error}"
+                    ))
+                })?;
+            let store = local_knowledge::LocalKnowledgeStore::open_retrieval_worker(
+                root,
+                zvec_resource_dir.as_deref(),
+            )?;
+            store.search_retrieval_in_process(request)
+        }) {
+        Ok(worker) => worker.join().unwrap_or_else(|_| {
+            Err(local_knowledge::LocalKnowledgeError::storage(
+                "向量检索原生工作线程异常终止",
+            ))
+        }),
+        Err(error) => Err(local_knowledge::LocalKnowledgeError::storage(format!(
+            "无法启动向量检索原生工作线程：{error}"
+        ))),
+    };
+    match result {
+        Ok(data) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": true,
+                    "data": data,
+                    "errorCode": null,
+                    "errorMessage": null,
+                })
+            );
+            0
+        }
+        Err(error) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": false,
+                    "data": null,
+                    "errorCode": error.code(),
+                    "errorMessage": error.to_string(),
+                })
+            );
+            2
+        }
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -55,6 +139,8 @@ pub fn run() {
             std::fs::create_dir_all(&attachments_dir)?;
             let skills_dir = app_data_dir.join("skills");
             std::fs::create_dir_all(&skills_dir)?;
+            office::setup(&database, &app.path().resource_dir()?)?;
+            skills::install_bundled_office_skills(&skills_dir)?;
             let yuxi_client = YuxiClient::new()?;
             let runtime_host = RuntimeHost::new(
                 app.handle().clone(),
@@ -64,6 +150,7 @@ pub fn run() {
                 skills_dir.clone(),
                 yuxi_client.clone(),
             );
+            runtime_host.recover_shadow_observations();
             runtime_host.recover_active_graph_node_reviews()?;
             runtime_host.recover_active_graph_node_cancellations()?;
             runtime_host.recover_pending_graph_acceptances()?;
@@ -81,8 +168,14 @@ pub fn run() {
                 &app_data_dir,
                 configured_local_knowledge_root.as_deref(),
             );
-            let local_knowledge = LocalKnowledgeStore::open(local_knowledge_root)?
-                .with_zvec_resource_dir(app.path().resource_dir()?.join("vector"));
+            // zvec-rust links to zvec_c_api.dll at process load time on Windows, so the
+            // bundled DLL must live in the resource root beside the executable. Keeping
+            // this path identical to the bundle destination also makes the later health
+            // probe report the same library that Windows loaded during startup.
+            let local_knowledge = LocalKnowledgeStore::open_with_zvec_resource_dir(
+                local_knowledge_root,
+                app.path().resource_dir()?,
+            )?;
             local_knowledge.ensure_default_fox_guide()?;
             app.manage(AppState::new(
                 database,
@@ -179,6 +272,7 @@ pub fn run() {
             app_capabilities::digital_colleague_run_detail,
             app_capabilities::app_notifications_list,
             app_capabilities::app_notification_read,
+            app_capabilities::app_notification_publish,
             app_capabilities::app_notifications_mark_all_read,
             app_capabilities::app_notifications_clear_read,
             app_capabilities::notification_preferences_get,
@@ -195,6 +289,7 @@ pub fn run() {
             commands::artifact_inspect,
             commands::artifact_action,
             commands::project_permission_update,
+            commands::conversation_permission_update,
             commands::conversation_create,
             commands::conversation_expert_bind,
             commands::conversation_expert_remove,
@@ -263,6 +358,7 @@ pub fn run() {
             local_knowledge::local_knowledge_file_sources_list,
             local_knowledge::local_knowledge_file_source_add,
             local_knowledge::local_knowledge_file_source_rescan,
+            local_knowledge::local_knowledge_file_source_update,
             local_knowledge::local_knowledge_file_source_remove,
             local_knowledge::local_knowledge_local_files_list,
             local_knowledge::local_knowledge_local_file_read,

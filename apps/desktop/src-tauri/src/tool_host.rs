@@ -77,6 +77,14 @@ pub fn prepare(
 }
 
 pub fn execute(action: PreparedToolAction) -> Result<Value, String> {
+    execute_with_cancellation(action, None)
+}
+
+pub fn execute_with_cancellation(
+    action: PreparedToolAction,
+    cancellation: Option<&crate::kernel::CancellationToken>,
+) -> Result<Value, String> {
+    check_cancellation(cancellation)?;
     match action {
         PreparedToolAction::WriteFile {
             root,
@@ -89,10 +97,12 @@ pub fn execute(action: PreparedToolAction) -> Result<Value, String> {
             let operation = if path.exists() { "modified" } else { "created" };
             if create_directories {
                 if let Some(parent) = path.parent() {
+                    check_cancellation(cancellation)?;
                     fs::create_dir_all(parent)
                         .map_err(|error| format!("failed to create parent directory: {error}"))?;
                 }
             }
+            check_cancellation(cancellation)?;
             fs::write(&path, content.as_bytes())
                 .map_err(|error| format!("failed to write file: {error}"))?;
             Ok(text_result(
@@ -107,6 +117,7 @@ pub fn execute(action: PreparedToolAction) -> Result<Value, String> {
             ..
         } => {
             revalidate_target(&root, &path, Some(false))?;
+            check_cancellation(cancellation)?;
             fs::write(&path, content.as_bytes())
                 .map_err(|error| format!("failed to edit file: {error}"))?;
             Ok(text_result(
@@ -122,7 +133,7 @@ pub fn execute(action: PreparedToolAction) -> Result<Value, String> {
             ..
         } => {
             revalidate_target(&root, &cwd, Some(true))?;
-            execute_command(&command, &cwd, timeout)
+            execute_command(&command, &cwd, timeout, cancellation)
         }
     }
 }
@@ -249,7 +260,12 @@ fn prepare_command(input: &Value, root: &Path) -> Result<PreparedToolAction, Str
     })
 }
 
-fn execute_command(command: &str, cwd: &Path, timeout: Duration) -> Result<Value, String> {
+fn check_cancellation(cancellation: Option<&crate::kernel::CancellationToken>) -> Result<(), String> {
+    cancellation.map_or(Ok(()), |token| token.check())
+}
+
+fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: Option<&crate::kernel::CancellationToken>) -> Result<Value, String> {
+    check_cancellation(cancellation)?;
     #[cfg(windows)]
     let mut process = {
         let mut process = Command::new("cmd.exe");
@@ -276,6 +292,10 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration) -> Result<Value
     let stderr_reader = thread::spawn(move || read_limited(stderr, MAX_COMMAND_OUTPUT_BYTES));
     let started = Instant::now();
     let status = loop {
+        if let Err(error) = check_cancellation(cancellation) {
+            terminate_process_tree(&mut child);
+            return Err(error);
+        }
         if let Some(status) = child
             .try_wait()
             .map_err(|error| format!("failed to wait for command: {error}"))?
@@ -320,6 +340,7 @@ fn terminate_process_tree(child: &mut std::process::Child) {
     let pid = child.id().to_string();
     let _ = Command::new("taskkill")
         .args(["/PID", &pid, "/T", "/F"])
+        .creation_flags(0x0800_0000)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -575,6 +596,45 @@ mod tests {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src").join("note.txt"), "hello\nworld\n").unwrap();
         root
+    }
+
+    #[test]
+    fn cancelled_tool_does_not_write_or_create_parent_directories() {
+        use crate::kernel::CancellationPort;
+        let root = project();
+        let registry = crate::kernel::CancellationRegistry::default();
+        registry.register_run("r").unwrap();
+        let token = registry.tool_token("r", "write").unwrap();
+        let action = prepare("write_file", &json!({"path":"cancelled/note.txt","content":"must not be written"}), root.to_str().unwrap()).unwrap();
+        registry.request_tool_cancel("r", "write");
+        assert!(execute_with_cancellation(action, Some(&token)).unwrap_err().contains("tool.cancelled"));
+        assert!(!root.join("cancelled").exists());
+    }
+
+    #[test]
+    fn cancellation_stops_an_in_flight_command() {
+        use crate::kernel::CancellationPort;
+        let root = project();
+        let registry = crate::kernel::CancellationRegistry::default();
+        registry.register_run("r").unwrap();
+        let token = registry.tool_token("r", "command").unwrap();
+        let command_root = root.clone();
+        #[cfg(windows)]
+        let command = "echo ready>started.txt & ping -n 30 127.0.0.1 > NUL";
+        #[cfg(not(windows))]
+        let command = "printf ready > started.txt; exec sleep 30";
+        let worker = thread::spawn(move || execute_command(command, &command_root, Duration::from_secs(60), Some(&token)));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !root.join("started.txt").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let started = root.join("started.txt").exists();
+        let cancelled_at = Instant::now();
+        registry.request_tool_cancel("r", "command");
+        let result = worker.join().unwrap();
+        assert!(started, "test command must actually start before cancellation");
+        assert!(result.unwrap_err().contains("tool.cancelled"));
+        assert!(cancelled_at.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

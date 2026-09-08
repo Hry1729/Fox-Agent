@@ -1,0 +1,12 @@
+{
+  "version": "1.0.147",
+  "repository": "https://github.com/iOfficeAI/OfficeCLI",
+  "assets": {
+    "win-x64": { "name": "officecli-win-x64.exe", "sha256": "724056e5ff079c3585df79c8afc386f08ef7d5f956cf4e2723534e129aab6e80" },
+    "win-arm64": { "name": "officecli-win-arm64.exe", "sha256": "7ff0195c32405bac9cf6a32589d984fa7a863adfabbc6e42dfef47a7839264cf" },
+    "mac-x64": { "name": "officecli-mac-x64", "sha256": "9f957b9439b922916360189bedfb780defc471b95ab8670f2a5a9630e7c9c253" },
+    "mac-arm64": { "name": "officecli-mac-arm64", "sha256": "55569d8a7430c1d8d7872c1661ff8cfea2eeef03ffc4fa8dbee437a4c91ee1ed" },
+    "linux-x64": { "name": "officecli-linux-x64", "sha256": "e8bfe04f670139f526fe4e81f11acc1bc8629e421a20c5ba7a6e25f7a54a31f7" },
+    "linux-arm64": { "name": "officecli-linux-arm64", "sha256": "f90c734722fd2f41ae76e72878329f033ed36c132aa741ec44dc3827066c55b9" }
+  }
+}

@@ -118,20 +118,23 @@ fn aggregate_plugin_cards(
             .unwrap_or(canonical_id);
         let origin = source
             .map(|value| value.origin.clone())
-            .unwrap_or(PluginOrigin::Local);
+            .unwrap_or(if server.id == crate::office::SERVER_ID { PluginOrigin::Builtin } else { PluginOrigin::Local });
         let install_status = installation_for(&installations, &aliases)
             .map(|value| value.install_status.clone())
             .unwrap_or(PluginInstallStatus::Installed);
-        let version =
-            installation_for(&installations, &aliases).map(|value| value.installed_version.clone());
+        let version = if server.id == crate::office::SERVER_ID { Some(crate::office::VERSION.to_owned()) } else {
+            installation_for(&installations, &aliases).map(|value| value.installed_version.clone())
+        };
         let runtime_status = Some(mcp_runtime_status(&server.status));
         let live = PluginCardView {
             id: card_id,
             kind: PluginKind::Mcp,
             origin,
-            category: "MCP 服务".to_owned(),
+            category: if server.id == crate::office::SERVER_ID { "文件与办公" } else { "连接器" }.to_owned(),
             name: server.name.clone(),
-            description: format!("连接 {} 提供的外部工具和能力。", server.name),
+            description: if server.id == crate::office::SERVER_ID {
+                "创建、读取和编辑 Word、Excel、PowerPoint 文件。由 OfficeCLI 提供。".to_owned()
+            } else { format!("连接 {} 提供的外部工具和能力。", server.name) },
             icon: Some("cable".to_owned()),
             version,
             install_status,
@@ -177,8 +180,8 @@ fn aggregate_plugin_cards(
             kind: PluginKind::Skill,
             origin: index
                 .and_then(|index| cards.get(index).map(|card| card.origin.clone()))
-                .unwrap_or(PluginOrigin::Local),
-            category: "Skills".to_owned(),
+                .unwrap_or(if matches!(record.id.as_str(), "fox-office-word" | "fox-office-excel" | "fox-office-ppt") { PluginOrigin::Builtin } else { PluginOrigin::Local }),
+            category: "技能".to_owned(),
             name: record.name,
             description: record.description,
             icon: Some("sparkles".to_owned()),
@@ -641,8 +644,8 @@ fn builtin_tool_description(tool: &str) -> &'static str {
         }
         "format_code" => "使用项目已有格式化器检查或应用代码格式，不会自动下载工具。",
         "tabular_data" => "预览、筛选和聚合 CSV、TSV 或 JSON 表格数据。",
-        "child_agent_list" => "列出 Host 允许承担隔离 Child Run 的本地 Agent。",
-        "child_run_start" => "按显式目标、上下文和预算异步启动一个隔离 Child Run。",
+        "child_agent_list" => "分别列出可承担普通 Child Run 的助手/Worker 模板与可咨询专家。",
+        "child_run_start" => "按普通 Worker 或一次性专家咨询模式启动隔离 Child Run。",
         "child_run_collect" => "收集直属 Child Run 的状态、有限结果、用量与错误。",
         "child_run_cancel" => "取消当前父 Run 拥有的一个活动 Child Run。",
         "memory_search" => "按当前 Agent 与项目作用域检索已确认且启用的受治理记忆。",

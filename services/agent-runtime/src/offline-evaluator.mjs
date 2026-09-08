@@ -160,8 +160,10 @@ function evaluateRecoveryScenario(scenario) {
     ])
     return restored.length === 2
       && restored[0].content?.[0]?.id === 'call-1'
-      && restored[1].content?.length === 1
+      && restored[1].content?.length === 2
       && restored[1].content[0].text === 'exit=0'
+      && restored[1].content[1].type === 'image'
+      && restored[1].content[1].data === 'ignored'
       && Object.keys(restored[1].details ?? {}).length === 0
   }
   if (scenario === 'validation-state-after-interruption') {

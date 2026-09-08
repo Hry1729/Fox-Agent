@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Bot, ChevronRight, CircleStop, Clock3, Copy, FileText, KeyRound, LoaderCircle, Pause, Play, Plus, RefreshCw, RotateCcw, Send, ShieldCheck, Webhook } from 'lucide-react'
-import { toast } from 'sonner'
+import { notify as toast } from '@/features/notifications'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'

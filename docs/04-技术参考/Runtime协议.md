@@ -170,13 +170,13 @@ Run 分派和终态还会触发 `before_run/after_run` 审计，但不会新增 
 | 工具 | 核心输入 | Host 结果 |
 |---|---|---|
 | `child_agent_list` | 空对象 | `agents[]` |
-| `child_run_start` | `objective`、`context?`、`agentId?`、`budget?` | `childRun`、`created` |
+| `child_run_start` | `objective`、`context?`、`agentId?`、`budget?`（当前仅支持 `maxDurationMs`） | `childRun`、`created` |
 | `child_run_collect` | `childRunIds`（1–8）、`waitMs?`（0–60000） | `childRuns`、`allTerminal` |
 | `child_run_cancel` | `childRunId` | `cancelled`、`childRun` |
 
 Graph-bound Child 不能使用通用 `child_run_cancel`；必须走 `graph_readonly_node_cancel`，否则 Host 会在任何取消副作用前返回 `graph.readonly_dedicated_cancel_required`。
 
-`budget` 可声明 `maxDurationMs`、`maxTotalTokens`、`maxOutputTokens` 和 `maxToolCalls`，Host 会在模型上限与固定安全范围内规范化。`maxTotalTokens` 与 `maxOutputTokens` 都按累计 `used >= max` 视为预算耗尽：轮询会取消 Child，下一次 Child Tool preflight 也会拒绝，不能把输出上限只当模型提示。fresh Runtime/Host ToolCall 必须在同一个 SQLite `IMMEDIATE` 事务内确认 Run 仍 running、duration/total/output 未达边界且当前 `COUNT(tool_calls) < maxToolCalls` 后才插入；`maxToolCalls=0` 因此只允许纯文本 Run。Runtime→Host promotion、等待审批后的 claim 与人工 Repair override 真正执行前不重复占槽，但会按 `count <= max` 再验全部非工具预算；超限会把已批准 ToolCall 终结为 failed、消费本次 Approval 且不进入 handler。最终 `run.completed` 还会在 Repository 同一事务内、写终态事实前重验冻结 duration/total/output，并要求 tool count 不大于上限；达到 token/time 边界或旧库 tool count 超限时拒绝 completed，映射稳定 `child_run.budget_exceeded` / `child_run.tool_budget_exceeded`。`child_run_start` 以 `(parent_run_id, toolCallId)` 幂等；collect/cancel 只接受当前 parent 的直属 Child。父子共用 Trace ID但使用不同 root span。Child 的工具和 MCP scope 是父 Assistant、父 Expert 与 Child Agent 声明的交集，Runtime 侧过滤后 Host 仍会再次拒绝越权请求。
+普通 `child_run_start` 只允许声明 `maxDurationMs`，Host 在固定安全范围内规范化并继续硬性执行运行时长、深度、并发、权限交集和重复同参工具循环保护。累计 Token、输出 Token 和工具调用次数保留为观测指标，不再作为普通 Child 的终止门，避免长审查或多轮检索在正常工作中被固定计数截断。Graph implementation/Reviewer 属于 Host 内部专用执行 Profile，仍可使用其固定、不可由模型改写的确定性计数预算。`objective/context` 应优先传项目相对路径、符号名和行范围；仅对未保存内容、很短的必要摘录或 Child 无法访问的数据内联全文。`child_run_start` 以 `(parent_run_id, toolCallId)` 幂等；collect/cancel 只接受当前 parent 的直属 Child。父子共用 Trace ID但使用不同 root span。Child 的工具和 MCP scope 是父 Assistant、父 Expert 与 Child Agent 声明的交集，Runtime 侧过滤后 Host 仍会再次拒绝越权请求。
 
 ## Runtime 事件
 
@@ -185,7 +185,7 @@ Graph-bound Child 不能使用通用 `child_run_cancel`；必须走 `graph_reado
 | 事件 | 关键字段 |
 |---|---|
 | `run.started` | model |
-| `run.request_snapshot` | model, provider, assistantPackage, expertBinding, expertPackage；`stablePromptHash/contextHash`；Prompt definition/version/content Hash、Typed Context Schema Hash、stable/dynamic cache identity 与 read/write diagnostics；Assistant/Expert 声明工具、有效工具、排除原因、token limits |
+| `run.request_snapshot` | model, provider, assistantPackage, expertBinding, expertPackage；`stablePromptHash/contextHash`；Prompt definition/version/content Hash、Typed Context Schema Hash、stable/dynamic cache identity 与 read/write diagnostics；Assistant/Expert 声明工具、有效工具、排除原因、token limits；`retryPolicy`（Provider HTTP 重试与 Turn 重试的独立上限/退避） |
 | `run.continuation_proposed` | proposal-only `ContinuationDecision v1`；不是终态或 Host 事实 |
 | `run.phase` | phase, attempt?, outcome? |
 | `run.retrying` | attempt, maxAttempts, delayMs, message |
@@ -295,7 +295,7 @@ V2 的所有字段来自一次 SQLite read transaction，不允许先读 Ledger�
 
 `task_repair_escalate_start` 的其余 Schema 精确为必填 `taskId/attemptId`（1–200）、`expectedVersion>=1`、`rootCause`（1–4000）和 `escalationReason`（1–2000），并关闭额外属性；模型不能提交 `runId/conversationId/approval/policy/grant/count`。Runtime 原样转发这些声明字段，不生成审批决定。Host 必须把审批绑定到当前 ToolCall/Run，只在本次 pending approval 被允许后执行，不能把 AllowConversation 或历史 grant 当作该高风险 Repair 的授权。
 
-Host 实现把 `approval=always` 当作自身强制规则，不依赖 Runtime Catalog 是否诚实：请求先按上面的精确 Schema 校验，再以 Host Envelope 的 Run/Conversation 创建 pending ToolCall 和 category=`task_repair_budget_override` 的 Approval；可选决定只有 `allow_once/deny`。`AllowConversation`、普通工具 claim、已 claim/历史 Approval、跨 ToolCall/Run/Task/会话和非 canonical `durable_v2` 均 fail-closed。批准后由单个 SQLite `IMMEDIATE` 事务重新核验 Task CAS、冻结 Policy、普通 Repair 预算耗尽、running Attempt、Finding/root cause、Approval claim，以及 managed Child/Digital 的 reserved-slot duration/total/output/daily/tool count。成功时原子追加一次 override event、一个 Repair Attempt、Task `in_progress` 及 Approval/ToolCall claim；若等待真人期间预算耗尽，则 Event/Attempt/Task 零写，ToolCall 原子 failed 且本次 Approval 被 claim 后不可复用。每个 Task 全生命周期最多一次，重启或新 Run 不重置。
+Host 实现把 `approval=always` 当作自身强制规则，不依赖 Runtime Catalog 是否诚实：请求先按上面的精确 Schema 校验，再以 Host Envelope 的 Run/Conversation 创建 pending ToolCall 和 category=`task_repair_budget_override` 的 Approval；可选决定只有 `allow_once/deny`。`AllowConversation`、普通工具 claim、已 claim/历史 Approval、跨 ToolCall/Run/Task/会话和非 canonical `durable_v2` 均 fail-closed。批准后由单个 SQLite `IMMEDIATE` 事务重新核验 Task CAS、冻结 Policy、普通 Repair 预算耗尽、running Attempt、Finding/root cause、Approval claim，以及普通 Child 的 reserved-slot duration 与 Digital Colleague 的 duration/total/output/daily/tool count。成功时原子追加一次 override event、一个 Repair Attempt、Task `in_progress` 及 Approval/ToolCall claim；若等待真人期间预算耗尽，则 Event/Attempt/Task 零写，ToolCall 原子 failed 且本次 Approval 被 claim 后不可复用。每个 Task 全生命周期最多一次，重启或新 Run 不重置。
 
 前端把 Approval `request.category`、`request.availableDecisions` 和工具专用 `request.arguments` 视为不可信协议输入。审批按钮只显示 Host 明确声明、Fox 当前支持且符合 category 上限的决定，点击发送前还会重新执行同一校验；`task_repair_budget_override` 只显示“拒绝/只允许这一次”，绝不显示会话级长期授权，并展示 `rootCause/findingIds` 供真人判断。普通工具的历史 Approval 在缺少 `availableDecisions` 时兼容原三选项；一旦字段显式存在但为空、重复、含未知值，或 category/额外返工上下文未知、畸形，UI 只保留安全的“拒绝”，也不会替 Host 补出未声明的 `allow_once`。这层裁剪用于减少误操作，Host 的 CAS、claim 和 category 校验仍是最终权限事实。
 
@@ -414,6 +414,16 @@ Fox 只在确有差异时做模型家族分支：MiniMax、DeepSeek、Claude、O
 ## 错误
 
 协议错误：`protocol.invalid_message`、`protocol.unknown_request`；Runtime 请求错误：`runtime.request_failed`；Pi 执行错误：`runtime.pi_failed`；Provider 错误：`provider.request_failed`。
+
+取消分类：用户或 Host 取消（包括工具等待 Host 预检期间）终止为 `run.cancelled`。取消会 abort 在途 Provider 请求，Pi 可能据此产生 `stopReason=error/aborted`，但该 abort 诱发的 provider 错误**不得**投影为 `run.failed/provider.request_failed`；取消是权威终态，优先级高于迟到失败。取消按 `runId` 隔离，只中止该 Run 的在途 Host 请求，不做影响其它 Run 的全局清理；终态只写一次，取消后的迟到成功结果只进审计。
+
+重试分类：Provider HTTP 重试（单次请求的传输/5xx/429 有界重试，遵循服务端 `Retry-After`）与整轮 Turn 重试是两套独立策略，分别配置、分别观测，禁止两层对同一失败重复重试。Sidecar 默认 Turn 重试关闭（由 Fox Kernel/Host 决定），Provider 重试使用模型画像的有界上限；`run.request_snapshot.retryPolicy` 回传本轮冻结的两层上限。Kernel 侧 `run.retrying`（整轮重试调度）、`run.provider_retry`（Provider 重试观测）与 `context.compaction.started/completed`（上下文压缩）是相互独立的状态/事件，重试调度进入 `retry_scheduled` 并持久化 wall-clock scheduled/due time，压缩进入 `compacting`，二者不共用状态。
+
+时间与超时：四类预算分别建模。模型请求超时由显式生命周期信号驱动：turn 派发时 `begin_model_request`、模型首个输出/工具批次/终态时 `settle_model_request`（不是从“无工具在途”推断，避免工具结算后误触发）；在途请求超过 `model_request_timeout_ms` 产出唯一失败终态 `model.request_timeout`，retry resume / compaction 结束后由下一次派发重新 arm，`waiting_approval` 期间不 arm。模型请求墙钟锚点持久化（v51 `model_request_since_wall_ms`），rehydrate 后按崩溃前已流逝时间计时，连续崩溃不重置超时窗口；工具执行超时为 `tool.execution_timeout`；Run 执行预算耗尽为 `runtime.duration_budget_exceeded`；审批等待超时为 `approval.wait_timeout`。审批等待用持久化墙钟截止，不被模型请求超时或普通 Host 请求超时提前终止；取消与超时竞态由终态守卫保证单一权威终态（进入 `cancelling` 后迟到超时只进审计）。模型请求超时在 Kernel 决策核执行并由测试覆盖（含 settle 后不触发、rehydrate 不重置窗口、取消压过超时），Host/Pi 侧请求生命周期的物理 abort 仍属后续接线。
+
+Kernel 持久编排（当前未接生产权威，仅关闭路径与测试使用）：v49 outbox 加 v50 `deliver_tool_batch` 覆盖工具派发、审批请求、引擎/工具取消以及 all-settled 批次向下一模型回合交付；状态为 `pending/leased/completed/failed`，每行带稳定幂等键。严格连续事件、Run/Batch/Tool（含 canonical input）状态、审批 CAS 与待执行 outbox 在同一 SQLite 事务提交；审批结论、最终 Tool 状态与 dispatch 意图必须一致，`wall_now >= deadline` 时普通批准/拒绝均视为迟到，提前写 `expired` 也会拒绝；工具结果与对应 leased dispatch 完成也同事务。exact replay 逐字段比对冲突并 fail-closed，complete/fail 要求 lease owner。恢复只执行安全 pending 动作；终态只排空取消，不复活 dispatch/审批/批次交付；leased 崩溃遗留必须按幂等键对账或标记 `requires_reconcile`。rehydrate 在单一读事务中核对全部冻结身份列、事件 cursor、终态、批次成员、审批、dispatch/barrier 一致性；新进程首个 tick 重新锚定 Run/Tool 单调超时。单事务 Snapshot 另复核冻结身份与事件 cursor；缺失或损坏不回退默认值。上述测试合同不等于真实线上 Run 恢复；生产 Host 尚未扫描、派发或消费这些 Kernel facts。
+
+Kernel Shadow（v51，生产 Legacy 仍为权威）：每次 Legacy Run 启动在 Host 用 `ShadowContext::start` 创建并运行一个真实的 shadow RunController（`kernel_shadow_runs`，`shadow-{legacyRunId}`），并写入首条 `not_comparable` 观察记录。Shadow 跑纯决策核但不派发工具、不发网络、不弹第二次审批、不取消真实 Run、不交付第二份批次、不改写 Legacy 终态；可执行 Effect 在 ShadowContext 内分类后丢弃。比较结果写入独立 `kernel_shadow_diffs`（类别 `match / state_mismatch / approval_mismatch / tool_param_or_order_mismatch / terminal_mismatch / timeout_retry_mismatch / not_comparable / shadow_error`；disposition 携带工具名/canonical input/source order/batch 顺序与 retry/timeout 事实，不按 ID 排序抹序；含 cursor、冻结身份、schemaVersion）。Shadow 副作用**三层物理隔离**：(1) `kernel_create_run` 写入边界拒绝 `kernel_mode='shadow'`（shadow 只能进 `kernel_shadow_runs`）；(2) 单 Run 与全局租约扫描 SQL 带 `kernel_mode <> 'shadow'`；(3) shadow 代码路径无执行器句柄且 `kernel_executable_outbox_count=0`。diff cursor 严格单调，身份/配置冲突 fail-closed（不用 INSERT OR IGNORE）。Shadow 引导失败只进诊断，不影响 Legacy。逐事件在线 diff（`on_tool_batch`/`on_terminal`）尚未接入 Host 事件循环，启动点之后的生产比对待后续阶段。
 
 ## 契约测试
 

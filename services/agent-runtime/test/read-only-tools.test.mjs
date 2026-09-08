@@ -24,8 +24,8 @@ test('executes Fox read, ls, find and grep implementations', async (context) => 
 
 test('defaults omitted project-search paths to the authorized project root', async () => {
   const preflightCalls = []
-  const tools = createReadOnlyTools(async (tool, input) => {
-    preflightCalls.push({ tool, input })
+  const tools = createReadOnlyTools(async (toolCallId, tool, input) => {
+    preflightCalls.push({ toolCallId, tool, input })
     return { decision: 'block', message: 'preflight sentinel' }
   })
   const cases = [
@@ -44,8 +44,26 @@ test('defaults omitted project-search paths to the authorized project root', asy
   }
 
   assert.deepEqual(preflightCalls, [
-    { tool: 'ls', input: { path: '.' } },
-    { tool: 'find', input: { pattern: 'README', path: '.' } },
-    { tool: 'grep', input: { pattern: 'Fox', path: '.' } },
+    { toolCallId: 'call-ls', tool: 'ls', input: { path: '.' } },
+    { toolCallId: 'call-find', tool: 'find', input: { pattern: 'README', path: '.' } },
+    { toolCallId: 'call-grep', tool: 'grep', input: { pattern: 'Fox', path: '.' } },
   ])
+})
+test('Rust reader routing keeps the frozen identity and never falls back on failure', async () => {
+  const calls = []
+  const preflight = async (_id, _tool, input) => ({ decision: 'allow', input, executionRoute: 'rust', permissionSnapshotId: 'sha256:frozen' })
+  const tools = createReadOnlyTools(preflight, { executeHost: async (...args) => {
+    calls.push(args)
+    return { type: 'tool.execute_completed', payload: { content: [{ type: 'text', text: 'host result' }], details: {} } }
+  } })
+  const read = tools.find(tool => tool.name === 'read')
+  const result = await read.execute('reader-1', { path: 'does-not-exist.txt' })
+  assert.equal(result.content[0].text, 'host result')
+  assert.equal(calls[0][0], 'tool.readonly_execute')
+  assert.equal(calls[0][1].permissionSnapshotId, 'sha256:frozen')
+  assert.equal(calls[0][1].toolCallId, 'reader-1')
+  const failed = createReadOnlyTools(preflight, { executeHost: async () => ({type:'tool.execute_failed',payload:{isError:true,error:'gateway rejected'}}) })
+  await assert.rejects(failed.find(tool => tool.name === 'read').execute('reader-2', {path:'does-not-exist.txt'}), /gateway rejected/)
+  const unknown = createReadOnlyTools(async () => ({decision:'allow',input:{path:'.'},executionRoute:'unknown'}))
+  await assert.rejects(unknown.find(tool => tool.name === 'ls').execute('reader-3', {}), /Unknown frozen/)
 })

@@ -1,5 +1,7 @@
 # Fox Agent 核心能力优化方案
 
+> Fox 对话、工具、权限、审批、重试、取消与多引擎接入的统一控制改造，见 [Fox Agent Kernel 统一控制架构改造方案](./Fox%20Agent%20Kernel统一控制架构改造方案.md)。该文档同时记录 Pi 公开扩展通道的七项契约实验和实施门槛。
+
 > 状态：实施中<br>
 > 适用版本：Fox `0.1.x` 及后续版本<br>
 > 维护范围：吸收 Maka、Kun、DeepSeek-Reasonix 与 OpenAI Codex 优点时的架构原则、实施顺序和验收门槛<br>

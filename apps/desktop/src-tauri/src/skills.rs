@@ -4,31 +4,24 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const MAX_SKILL_BYTES: u64 = 128 * 1024;
-const SUPPORTED_TOOLS: &[&str] = &[
-    "read",
-    "ls",
-    "find",
-    "grep",
-    "read_attachment",
-    "write_file",
-    "edit_file",
-    "run_command",
-    "web_search",
-    "web_read",
-    "http_request",
-    "system_info",
-    "sqlite_read",
-    "structured_data",
-    "git_read",
-    "test_run",
-    "code_check",
-    "format_code",
-    "tabular_data",
-    "list_knowledge_bases",
-    "search_knowledge",
-    "read_knowledge_document",
-    "query_knowledge_graph",
-];
+const DEFAULT_SKILL_PROMPT_CHARS: usize = 8_000;
+
+pub(crate) fn install_bundled_office_skills(root: &Path) -> Result<(), String> {
+    for (id, instructions) in [
+        ("fox-office-word", include_str!("../resources/office-skills/word/SKILL.md")),
+        ("fox-office-excel", include_str!("../resources/office-skills/excel/SKILL.md")),
+        ("fox-office-ppt", include_str!("../resources/office-skills/ppt/SKILL.md")),
+    ] {
+        let directory = root.join(id);
+        let path = directory.join("SKILL.md");
+        // Preserve local edits. Future updates must compare a version/hash first.
+        if !path.exists() {
+            std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+            std::fs::write(path, instructions).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Default, Deserialize)]
 struct SkillMetadata {
@@ -53,46 +46,143 @@ pub fn scan_skills(root: &Path, enabled: &[String]) -> Result<Vec<LoadedSkill>, 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.to_string()),
     };
+    let mut directories = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    directories.sort();
     let mut skills = Vec::new();
-    let mut seen = HashMap::<String, PathBuf>::new();
-    for entry in entries.flatten() {
-        let directory = entry.path();
-        if !directory.is_dir() {
-            continue;
-        }
+    for directory in directories {
         let path = directory.join("SKILL.md");
         if !path.is_file() {
             continue;
         }
-        let mut skill = load_skill(
+        let skill = load_skill(
             &path,
             directory.file_name().and_then(|value| value.to_str()),
         )?;
-        if let Some(previous) = seen.insert(skill.record.id.clone(), path.clone()) {
+        skills.push(skill);
+    }
+    let mut paths_by_id = HashMap::<String, Vec<PathBuf>>::new();
+    for skill in &skills {
+        paths_by_id
+            .entry(skill.record.id.clone())
+            .or_default()
+            .push(PathBuf::from(&skill.record.source_path));
+    }
+    for skill in &mut skills {
+        if let Some(paths) = paths_by_id
+            .get(&skill.record.id)
+            .filter(|paths| paths.len() > 1)
+        {
             skill.record.valid = false;
-            skill.record.validation_error =
-                Some(format!("Skill ID 与 {} 重复", previous.to_string_lossy()));
+            skill.record.validation_error = Some(format!(
+                "Skill ID 重复：{}",
+                paths
+                    .iter()
+                    .map(|path| path.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ));
         }
         skill.record.enabled = enabled.contains(&skill.record.id) && skill.record.valid;
-        skills.push(skill);
     }
     skills.sort_by(|left, right| left.record.name.cmp(&right.record.name));
     Ok(skills)
 }
 
 pub fn enabled_skill_prompt(root: &Path, enabled: &[String]) -> Result<String, String> {
-    let skills = scan_skills(root, enabled)?;
-    let blocks = skills
+    enabled_skill_prompt_for_context(root, enabled, None, "", DEFAULT_SKILL_PROMPT_CHARS)
+}
+
+pub fn enabled_skill_prompt_for_context(
+    root: &Path,
+    enabled: &[String],
+    available_tools: Option<&HashSet<String>>,
+    task: &str,
+    max_chars: usize,
+) -> Result<String, String> {
+    let mut skills = scan_skills(root, enabled)?
         .into_iter()
         .filter(|skill| skill.record.enabled && skill.record.valid)
-        .map(|skill| {
-            format!(
-                "## Skill: {} ({})\n{}",
-                skill.record.name, skill.record.id, skill.instructions
-            )
-        })
         .collect::<Vec<_>>();
+    let task = task.to_lowercase();
+    skills.sort_by(|left, right| {
+        skill_relevance(right, &task)
+            .cmp(&skill_relevance(left, &task))
+            .then_with(|| left.record.name.cmp(&right.record.name))
+            .then_with(|| left.record.id.cmp(&right.record.id))
+    });
+
+    let mut blocks = Vec::new();
+    let mut omitted = Vec::new();
+    let limit = max_chars.max(256);
+    for skill in skills {
+        let unavailable = available_tools
+            .map(|tools| {
+                skill
+                    .record
+                    .required_tools
+                    .iter()
+                    .filter(|tool| !tools.contains(*tool))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !unavailable.is_empty() {
+            omitted.push(format!(
+                "{}（缺少工具：{}）",
+                skill.record.id,
+                unavailable.join("、")
+            ));
+            continue;
+        }
+        let block = format!(
+            "## Skill: {} ({})\n{}",
+            skill.record.name, skill.record.id, skill.instructions
+        );
+        let candidate_chars = blocks.iter().map(String::len).sum::<usize>()
+            + block.len()
+            + blocks.len().saturating_mul(2);
+        if candidate_chars > limit.saturating_sub(256) {
+            omitted.push(format!("{}（超出本轮 Skill 预算）", skill.record.id));
+            continue;
+        }
+        blocks.push(block);
+    }
+    if !omitted.is_empty() {
+        blocks.push(format!(
+            "## Skill selection diagnostics\n本轮未注入：{}。未注入的 Skill 不得作为已生效指令。",
+            omitted.join("；")
+        ));
+    }
+    while blocks.join("\n\n").len() > limit && blocks.len() > 1 {
+        blocks.remove(blocks.len() - 2);
+    }
     Ok(blocks.join("\n\n"))
+}
+
+fn skill_relevance(skill: &LoadedSkill, task: &str) -> usize {
+    if task.is_empty() {
+        return 0;
+    }
+    let mut score = 0;
+    for candidate in [
+        skill.record.id.as_str(),
+        skill.record.name.as_str(),
+        skill.record.description.as_str(),
+    ] {
+        let candidate = candidate.trim().to_lowercase();
+        if !candidate.is_empty() && task.contains(&candidate) {
+            score += 10 + candidate.len().min(40);
+        }
+        score += candidate
+            .split(|character: char| !character.is_alphanumeric())
+            .filter(|token| token.chars().count() >= 3 && task.contains(token))
+            .count();
+    }
+    score
 }
 
 fn load_skill(path: &Path, directory_id: Option<&str>) -> Result<LoadedSkill, String> {
@@ -137,7 +227,7 @@ fn load_skill(path: &Path, directory_id: Option<&str>) -> Result<LoadedSkill, St
         validation_errors.push("Skill 指令正文不能为空".to_owned());
     }
     for tool in &metadata.required_tools {
-        if !SUPPORTED_TOOLS.contains(&tool.as_str()) {
+        if !crate::runtime_host::runtime_tool_is_supported(tool) {
             validation_errors.push(format!("未知工具: {tool}"));
         }
     }
@@ -239,6 +329,66 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("未知工具"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn marks_every_duplicate_id_invalid_and_orders_scans_deterministically() {
+        let root = std::env::temp_dir().join(format!("fox-skill-test-{}", uuid::Uuid::new_v4()));
+        for directory in ["z-last", "a-first"] {
+            let path = root.join(directory);
+            std::fs::create_dir_all(&path).expect("create duplicate skill directory");
+            std::fs::write(
+                path.join("SKILL.md"),
+                "---\nid: duplicate\nname: Duplicate\n---\nDo work.",
+            )
+            .expect("write duplicate skill");
+        }
+        let skills = scan_skills(&root, &["duplicate".to_owned()]).expect("scan skills");
+        assert_eq!(skills.len(), 2);
+        assert!(skills
+            .iter()
+            .all(|skill| !skill.record.valid && !skill.record.enabled));
+        assert!(skills.iter().all(|skill| skill
+            .record
+            .validation_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("重复")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn filters_enabled_skills_by_effective_tools_without_cutting_blocks() {
+        let root = std::env::temp_dir().join(format!("fox-skill-test-{}", uuid::Uuid::new_v4()));
+        for (directory, tool, body) in [
+            (
+                "delegate",
+                "child_agent_list",
+                "Delegate only when it helps.",
+            ),
+            ("writer", "write_file", "Write the requested artifact."),
+        ] {
+            let path = root.join(directory);
+            std::fs::create_dir_all(&path).expect("create skill directory");
+            std::fs::write(
+                path.join("SKILL.md"),
+                format!("---\nid: {directory}\nname: {directory}\nrequired_tools: [{tool}]\n---\n{body}"),
+            )
+            .expect("write skill");
+        }
+        let available = HashSet::from(["child_agent_list".to_owned()]);
+        let prompt = enabled_skill_prompt_for_context(
+            &root,
+            &["delegate".to_owned(), "writer".to_owned()],
+            Some(&available),
+            "delegate this task",
+            1_000,
+        )
+        .expect("compose skill prompt");
+        assert!(prompt.contains("Delegate only when it helps."));
+        assert!(!prompt.contains("Write the requested artifact."));
+        assert!(prompt.contains("缺少工具：write_file"));
         let _ = std::fs::remove_dir_all(root);
     }
 }

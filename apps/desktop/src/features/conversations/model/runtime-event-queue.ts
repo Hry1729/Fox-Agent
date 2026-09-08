@@ -22,11 +22,26 @@ export function enqueueRuntimeEvent(queue: RuntimeEventNotification[], notificat
   queue.push(notification)
 }
 
-function queueIsOrdered(queue: RuntimeEventNotification[]) {
-  for (let index = 1; index < queue.length; index += 1) {
-    if (queue[index - 1].seq > queue[index].seq) return false
-  }
-  return true
+function streamKey(notification: RuntimeEventNotification) {
+  return `${notification.conversationId}\0${notification.runId}`
+}
+
+function orderQueueWithinStreams(queue: RuntimeEventNotification[]) {
+  const streams = new Map<string, RuntimeEventNotification[]>()
+  const keys = queue.map((notification) => {
+    const key = streamKey(notification)
+    const events = streams.get(key) ?? []
+    events.push(notification)
+    streams.set(key, events)
+    return key
+  })
+  for (const events of streams.values()) events.sort((left, right) => left.seq - right.seq)
+  const indexes = new Map<string, number>()
+  queue.splice(0, queue.length, ...keys.map((key) => {
+    const index = indexes.get(key) ?? 0
+    indexes.set(key, index + 1)
+    return streams.get(key)![index]
+  }))
 }
 
 function coalesceQueuedDeltas(queue: RuntimeEventNotification[]) {
@@ -70,7 +85,7 @@ function adaptivePacedLimit(queueLength: number, requestedLimit?: number) {
 export function takeRuntimeEventFrame(queue: RuntimeEventNotification[], pacedLimit?: number) {
   if (queue.length === 0) return []
   const limit = adaptivePacedLimit(queue.length, pacedLimit)
-  if (!queueIsOrdered(queue)) queue.sort((left, right) => left.seq - right.seq)
+  orderQueueWithinStreams(queue)
   coalesceQueuedDeltas(queue)
 
   let paced = 0

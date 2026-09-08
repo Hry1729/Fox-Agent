@@ -3,6 +3,7 @@ import {
   chatSelectableAgents,
   expertCatalogAgents,
   normalizeAgentClassification,
+  resolveActiveChatAgent,
 } from '../src/features/agents/agent-classification'
 import type { AgentRecord } from '../src/features/conversations/model/types'
 
@@ -30,6 +31,13 @@ function agent(id: string, overrides: Partial<AgentRecord> = {}): AgentRecord {
 }
 
 describe('agent classification', () => {
+  test('preserves a selected offline remote agent instead of presenting the local default', () => {
+    const local = agent('fox-general', { isDefault: true })
+    const remote = agent('yuxi:default-chatbot', { runtimeType: 'yuxi', available: false })
+    expect(resolveActiveChatAgent([local, remote], remote.id)).toBe(remote)
+    expect(resolveActiveChatAgent([local], remote.id)).toBeNull()
+    expect(resolveActiveChatAgent([local, remote], null)?.id).toBe(local.id)
+  })
   test('normalizes missing legacy fields without overwriting explicit classification', () => {
     expect(normalizeAgentClassification(agent('fox-debugger'))).toMatchObject({
       agentKind: 'expert',

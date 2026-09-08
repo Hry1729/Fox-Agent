@@ -9,7 +9,7 @@ use std::{
     fmt::{Display, Formatter},
     fs::{self, File},
     io::{self, Read},
-    path::{Path, PathBuf},
+    path::Path,
     sync::OnceLock,
 };
 
@@ -23,7 +23,6 @@ pub enum EmbeddingError {
     InvalidManifest(String),
     InvalidInput(String),
     ModelHashMismatch { expected: String, actual: String },
-    RuntimeNotFound(PathBuf),
     Runtime(String),
     Inference(String),
     DimensionMismatch { expected: usize, actual: usize },
@@ -44,11 +43,6 @@ impl Display for EmbeddingError {
                     "model hash mismatch: expected {expected}, got {actual}"
                 )
             }
-            Self::RuntimeNotFound(path) => write!(
-                formatter,
-                "ONNX Runtime library not found: {}",
-                path.display()
-            ),
             Self::Runtime(message) => {
                 write!(formatter, "ONNX Runtime initialization failed: {message}")
             }
@@ -163,12 +157,45 @@ pub struct TokenizedInput {
 }
 
 impl TokenizedInput {
-    pub fn smoke() -> Self {
+    fn from_tokenizer(package_dir: &Path, tokenizer_file: &str) -> Result<Self, EmbeddingError> {
+        let tokenizer_path = package_dir.join(tokenizer_file);
+        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|error| {
+            EmbeddingError::InvalidInput(format!(
+                "failed to load tokenizer '{}': {error}",
+                tokenizer_path.display()
+            ))
+        })?;
+        let encoding = tokenizer
+            .encode("Fox 本地向量模型隔离推理测试", true)
+            .map_err(|error| {
+                EmbeddingError::InvalidInput(format!("tokenizer smoke encoding failed: {error}"))
+            })?;
+        let input_ids = encoding
+            .get_ids()
+            .iter()
+            .map(|value| i64::from(*value))
+            .collect::<Vec<_>>();
+        let attention_mask = encoding
+            .get_attention_mask()
+            .iter()
+            .map(|value| i64::from(*value))
+            .collect::<Vec<_>>();
+        let token_type_ids = encoding
+            .get_type_ids()
+            .iter()
+            .map(|value| i64::from(*value))
+            .collect::<Vec<_>>();
         Self {
-            input_ids: vec![101, 102],
-            attention_mask: vec![1, 1],
-            token_type_ids: None,
+            input_ids,
+            attention_mask,
+            token_type_ids: Some(token_type_ids),
         }
+        .validated()
+    }
+
+    fn validated(self) -> Result<Self, EmbeddingError> {
+        self.validate()?;
+        Ok(self)
     }
 
     fn validate(&self) -> Result<(), EmbeddingError> {
@@ -229,8 +256,7 @@ impl OnnxEmbeddingProvider {
             )));
         }
         verify_model_hash(&manifest, &model_path)?;
-        let runtime_path = resolve_runtime_path(&package_dir)?;
-        initialize_runtime(&runtime_path)?;
+        initialize_runtime()?;
         let session = Session::builder()
             .map_err(|error| EmbeddingError::Inference(error.to_string()))?
             .commit_from_file(&model_path)
@@ -400,7 +426,9 @@ fn verify_model_hash(
     let expected = manifest.normalized_hash()?;
     let mut file = File::open(model_path)?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    // Keep this buffer on the heap. A 1 MiB stack allocation overflows the
+    // default Windows main-thread stack before ONNX inference even starts.
+    let mut buffer = vec![0u8; 1024 * 1024];
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {
@@ -415,58 +443,10 @@ fn verify_model_hash(
     Ok(())
 }
 
-fn resolve_runtime_path(package_dir: &Path) -> Result<PathBuf, EmbeddingError> {
-    if let Some(value) = env::var_os("ORT_DYLIB_PATH") {
-        let path = PathBuf::from(value);
-        let path = if path.is_absolute() {
-            path
-        } else {
-            env::current_exe()?
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default()
-                .join(path)
-        };
-        if path.is_file() {
-            return Ok(path);
-        }
-        return Err(EmbeddingError::RuntimeNotFound(path));
-    }
-
-    let packaged_path = package_dir.join(runtime_library_name());
-    if packaged_path.is_file() {
-        return Ok(packaged_path);
-    }
-    if let Some(executable_dir) = env::current_exe()?.parent() {
-        let bundled_path = executable_dir.join(runtime_library_name());
-        if bundled_path.is_file() {
-            return Ok(bundled_path);
-        }
-        let resource_path = executable_dir
-            .join("resources")
-            .join("models")
-            .join(runtime_library_name());
-        if resource_path.is_file() {
-            return Ok(resource_path);
-        }
-    }
-    Err(EmbeddingError::RuntimeNotFound(packaged_path))
-}
-
-fn runtime_library_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "onnxruntime.dll"
-    } else if cfg!(target_os = "macos") {
-        "libonnxruntime.dylib"
-    } else {
-        "libonnxruntime.so"
-    }
-}
-
-fn initialize_runtime(runtime_path: &Path) -> Result<(), EmbeddingError> {
+fn initialize_runtime() -> Result<(), EmbeddingError> {
     static INITIALIZATION: OnceLock<Result<(), String>> = OnceLock::new();
     match INITIALIZATION.get_or_init(|| {
-        ort::init_from(runtime_path.to_string_lossy())
+        ort::init()
             .commit()
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -487,27 +467,27 @@ fn find_input_name(input_names: &[String], preferred_names: &[&str]) -> Option<S
         .cloned()
 }
 
-fn main() -> Result<(), EmbeddingError> {
-    let package_dir = env::args().nth(1).ok_or_else(|| {
-        EmbeddingError::InvalidInput(
-            "usage: local-embedding-smoke <model-package-directory>".to_owned(),
-        )
-    })?;
-    let mut provider = OnnxEmbeddingProvider::from_package_dir(Path::new(&package_dir))?;
-    let embedding = provider.embed(&TokenizedInput::smoke())?;
+pub(crate) fn smoke_test_package(package_dir: &Path) -> Result<usize, EmbeddingError> {
+    let mut provider = OnnxEmbeddingProvider::from_package_dir(package_dir)?;
+    let input = TokenizedInput::from_tokenizer(package_dir, &provider.manifest().tokenizer)?;
+    let embedding = provider.embed(&input)?;
     if embedding.len() != provider.dimension() {
         return Err(EmbeddingError::DimensionMismatch {
             expected: provider.dimension(),
             actual: embedding.len(),
         });
     }
-    println!(
-        "ONNX offline smoke passed: version={}, dimension={}, tokenizer={}, license={}",
-        provider.manifest().version,
-        embedding.len(),
-        provider.manifest().tokenizer,
-        provider.manifest().license
-    );
+    Ok(embedding.len())
+}
+
+fn main() -> Result<(), EmbeddingError> {
+    let package_dir = env::args().nth(1).ok_or_else(|| {
+        EmbeddingError::InvalidInput(
+            "usage: local-embedding-smoke <model-package-directory>".to_owned(),
+        )
+    })?;
+    let dimension = smoke_test_package(Path::new(&package_dir))?;
+    println!("ONNX offline smoke passed: dimension={dimension}");
     Ok(())
 }
 

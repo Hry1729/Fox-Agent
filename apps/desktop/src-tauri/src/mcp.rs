@@ -78,10 +78,18 @@ pub fn shutdown_connections() {
 }
 
 pub fn list_tools(server: &McpServerRecord) -> Result<Vec<Value>, String> {
+    if server.id == crate::office::SERVER_ID {
+        if !server.enabled { return Err("Office 连接器已停用".to_owned()); }
+        crate::office::verify_binary(std::path::Path::new(&server.command))?;
+        return Ok(crate::office::tool_definitions());
+    }
     with_client(server, |client| client.list_tools()).and_then(normalize_tools)
 }
 
 pub fn call_tool(server: &McpServerRecord, tool: &str, arguments: &Value) -> Result<Value, String> {
+    if server.id == crate::office::SERVER_ID {
+        return Err("Office 连接器必须经过项目权限适配器调用".to_owned());
+    }
     let tools = list_tools(server)?;
     if !tools
         .iter()

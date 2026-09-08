@@ -12,13 +12,13 @@ import {
   HardDrive,
   LoaderCircle,
   NotebookPen,
+  PackagePlus,
   Plus,
-  Puzzle,
   RefreshCw,
   Search,
   Settings2,
-  Sparkles,
   Terminal,
+  WandSparkles,
   Wrench,
   X,
   type LucideIcon,
@@ -50,15 +50,17 @@ const iconMap: Record<string, LucideIcon> = {
   globe: Globe2,
   'hard-drive': HardDrive,
   notebook: NotebookPen,
-  puzzle: Puzzle,
-  sparkles: Sparkles,
+  package: PackagePlus,
+  'package-plus': PackagePlus,
+  puzzle: PackagePlus,
+  sparkles: WandSparkles,
   terminal: Terminal,
   wrench: Wrench,
 }
 
 const kindIcons: Record<PluginKind, LucideIcon> = {
   tool: Wrench,
-  skill: Sparkles,
+  skill: WandSparkles,
   mcp: Cable,
 }
 
@@ -66,13 +68,14 @@ const kindOrder: PluginKind[] = ['tool', 'skill', 'mcp']
 
 export interface PluginCenterPageProps {
   gateway?: PluginGateway
+  initialKind?: PluginKind
   onAddPlugin?: () => void
   onConfigureAgent?: (plugin: PluginCardView) => void
   className?: string
 }
 
 function PluginIcon({ name }: { name?: string }) {
-  const Icon = iconMap[name ?? 'puzzle'] ?? Puzzle
+  const Icon = iconMap[name ?? 'package-plus'] ?? PackagePlus
   return <Icon aria-hidden="true" />
 }
 
@@ -109,16 +112,17 @@ function CatalogPluginCard({
   const action = pluginInstallAction(card)
   const canInstall = action.action === 'install' || action.action === 'update'
   return (
-    <Card className="fox-library-card fox-shadcn-kb-card fox-shadcn-agent-card fox-plugin-card" data-plugin-id={card.id} data-install-status={card.installStatus}>
+    <Card className="fox-library-card fox-library-card--stacked-meta fox-shadcn-kb-card fox-shadcn-agent-card fox-plugin-card" data-plugin-id={card.id} data-install-status={card.installStatus}>
       <CardHeader className="fox-shadcn-kb-head fox-plugin-card-heading">
         <span className="fox-shadcn-kb-icon fox-shadcn-agent-icon fox-plugin-icon"><PluginIcon name={card.icon} /></span>
-        <span className="fox-shadcn-kb-heading fox-plugin-card-title"><strong>{card.name}</strong><span className="fox-library-card-tags"><small>{pluginOriginLabel(card.origin)}</small><small>{pluginKindLabel(card.kind)}</small></span></span>
+        <span className="fox-shadcn-kb-heading fox-plugin-card-title"><strong>{card.name}</strong></span>
       </CardHeader>
       <span className="fox-plugin-card-state">{canInstall
         ? <Button className="fox-plugin-card-install" type="button" variant="outline" size="sm" disabled={action.disabled} title={card.incompatibilityReason} onClick={() => onInstallAction(card)}><Download />{action.label}</Button>
         : <StatusBadge card={card} />}</span>
       <CardContent className="fox-shadcn-kb-content fox-plugin-card-content">
         <p className={`fox-agent-description ${card.incompatibilityReason ? 'fox-plugin-card-error' : ''}`} title={card.incompatibilityReason ?? card.description}>{card.incompatibilityReason ?? card.description}</p>
+        <span className="fox-library-card-tags"><small>{pluginOriginLabel(card.origin)}</small><small>{pluginKindLabel(card.kind)}</small></span>
       </CardContent>
     </Card>
   )
@@ -142,16 +146,16 @@ function InstalledPluginCard({
     ?? card.lastError
     ?? (card.runtimeStatus === 'error' ? '运行时报告异常，请检查 Host 日志。' : undefined)
   return (
-    <Card className="fox-library-card fox-shadcn-kb-card fox-shadcn-agent-card fox-plugin-installed-card" data-plugin-id={card.id} data-install-status={card.installStatus}>
+    <Card className="fox-library-card fox-library-card--stacked-meta fox-shadcn-kb-card fox-shadcn-agent-card fox-plugin-installed-card" data-plugin-id={card.id} data-install-status={card.installStatus}>
       <CardHeader className="fox-shadcn-kb-head fox-plugin-installed-card-header">
         <span className="fox-shadcn-kb-icon fox-shadcn-agent-icon fox-plugin-installed-card-icon"><PluginIcon name={card.icon} /></span>
         <span className="fox-shadcn-kb-heading fox-plugin-installed-card-copy">
           <span className="fox-plugin-installed-card-title"><strong>{card.name}</strong></span>
-          <span className="fox-library-card-tags"><small>{pluginOriginLabel(card.origin)}</small><small>{pluginKindLabel(card.kind)}</small></span>
         </span>
       </CardHeader>
       <CardContent className="fox-shadcn-kb-content fox-plugin-card-content">
         <p className={`fox-agent-description ${issue ? 'fox-plugin-installed-card-error' : ''}`} role={issue ? 'alert' : undefined} title={issue ?? card.description}>{issue && <CircleAlert />}{issue ?? card.description}</p>
+        <span className="fox-library-card-tags"><small>{pluginOriginLabel(card.origin)}</small><small>{pluginKindLabel(card.kind)}</small></span>
       </CardContent>
     </Card>
   )
@@ -186,12 +190,12 @@ function ScopeDialog({
 }
 
 function EmptyState({ children }: { children: ReactNode }) {
-  return <div className="fox-plugin-empty"><Puzzle /><span>{children}</span></div>
+  return <div className="fox-plugin-empty"><PackagePlus /><span>{children}</span></div>
 }
 
-export function PluginCenterPage({ gateway: providedGateway, onAddPlugin, onConfigureAgent, className }: PluginCenterPageProps) {
+export function PluginCenterPage({ gateway: providedGateway, initialKind, onAddPlugin, onConfigureAgent, className }: PluginCenterPageProps) {
   const gateway = providedGateway ?? defaultPluginGateway
-  const [kind, setKind] = useState<PluginKind>('tool')
+  const [kind, setKind] = useState<PluginKind>(initialKind && kindOrder.includes(initialKind) ? initialKind : 'tool')
   const [search, setSearch] = useState('')
   const [category, setCategory] = useState<string | undefined>()
   const [catalog, setCatalog] = useState<PluginCardView[]>([])
@@ -206,6 +210,13 @@ export function PluginCenterPage({ gateway: providedGateway, onAddPlugin, onConf
   const [scopePlugin, setScopePlugin] = useState<PluginCardView | null>(null)
   const [scope, setScope] = useState<PluginAgentScopeDTO[]>([])
   const [scopeLoading, setScopeLoading] = useState(false)
+
+  useEffect(() => {
+    if (initialKind && kindOrder.includes(initialKind)) {
+      setKind(initialKind)
+      setCategory(undefined)
+    }
+  }, [initialKind])
 
   const reload = useCallback(async () => {
     setLoading(true)

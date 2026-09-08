@@ -24,6 +24,22 @@ function objectProperties(schema) {
   return schema.properties
 }
 
+test('knowledge tools normalize serialized references before strict schema validation', () => {
+  const reference = { source: 'remote', connectionId: 'yuxi-primary', id: 'kb-crane' }
+  const search = toolByName(createKnowledgeTools(() => {}), KNOWLEDGE_TOOL_NAMES.search)
+  const input = { query: '起升 赋值', target: JSON.stringify(reference) }
+  const prepared = search.prepareArguments(input)
+  assert.deepEqual(prepared, { query: '起升 赋值', target: reference })
+  assert.equal(Check(search.parameters, prepared), true)
+  assert.equal(typeof input.target, 'string')
+  assert.equal(Check(search.parameters, search.prepareArguments({ query: '起升', targets: JSON.stringify([reference]) })), true)
+  for (const target of ['{bad json}', '[]', 'null', '{"source":"remote","id":"kb-crane"}']) {
+    assert.equal(Check(search.parameters, search.prepareArguments({ query: '起升', target })), false)
+  }
+  const read = toolByName(createKnowledgeTools(() => {}), KNOWLEDGE_TOOL_NAMES.read)
+  assert.equal(Check(read.parameters, read.prepareArguments({ target: JSON.stringify(reference), documentId: 'file-1' })), true)
+})
+
 const CAPABILITY_TOOL_NAMES = [
   'web_search',
   'web_read',
@@ -130,9 +146,11 @@ test('forwards expanded Host capability calls without transforming inputs', asyn
 })
 
 test('publishes backward-compatible serial and strict bounded Graph PlanRevision schemas', () => {
-  const schema = toolByName(createHostTools(() => {}), 'plan_revision_create').parameters
+  const tool = toolByName(createHostTools(() => {}), 'plan_revision_create')
+  const schema = tool.parameters
   assert.equal(schema.additionalProperties, false)
   assert.equal(schema.properties.tasks.anyOf.length, 2)
+  assert.equal(typeof tool.prepareArguments, 'function')
 
   const serial = {
     goalId: 'goal-1',
@@ -152,6 +170,12 @@ test('publishes backward-compatible serial and strict bounded Graph PlanRevision
   }
   assert.equal(Check(schema, serial), true)
   assert.equal(Check(schema, graph), true)
+  const stringifiedTasks = tool.prepareArguments({ ...serial, tasks: JSON.stringify(serial.tasks) })
+  assert.deepEqual(stringifiedTasks.tasks, serial.tasks)
+  assert.equal(Check(schema, stringifiedTasks), true)
+  const malformedTasks = tool.prepareArguments({ ...serial, tasks: '[{' })
+  assert.equal(typeof malformedTasks.tasks, 'string')
+  assert.equal(Check(schema, malformedTasks), false)
   assert.equal(Check(schema, { ...serial, tasks: [{ title: 'x'.repeat(500), ordinal: 0 }] }), true)
   assert.equal(Check(schema, { ...serial, tasks: [{ title: 'x'.repeat(501), ordinal: 0 }] }), false)
   assert.equal(Check(schema, { ...graph, tasks: [{ ...graph.tasks[0], title: 'x'.repeat(300) }] }), true)
@@ -655,12 +679,13 @@ test('publishes bounded Child Run schemas in delegation catalog order', () => {
   )
 
   const start = objectProperties(toolByName(tools, 'child_run_start').parameters)
+  assert.deepEqual(start.mode.anyOf.map(({ const: value }) => value), ['worker', 'expert_consultation'])
   assert.equal(start.objective.maxLength, 8000)
   assert.equal(start.context.maxLength, 12000)
+  assert.equal(start.agentId.maxLength, 160)
+  assert.equal(start.expertId.maxLength, 160)
   assert.equal(start.budget.properties.maxDurationMs.maximum, 900000)
-  assert.equal(start.budget.properties.maxTotalTokens.maximum, 200000)
-  assert.equal(start.budget.properties.maxOutputTokens.maximum, 32768)
-  assert.equal(start.budget.properties.maxToolCalls.maximum, 100)
+  assert.deepEqual(Object.keys(start.budget.properties), ['maxDurationMs'])
 
   const collect = objectProperties(toolByName(tools, 'child_run_collect').parameters)
   assert.equal(collect.childRunIds.minItems, 1)
@@ -678,10 +703,18 @@ test('forwards Child Run orchestration inputs without changing authority fields'
   const cases = [
     ['child_agent_list', {}],
     ['child_run_start', {
+      mode: 'worker',
       objective: 'Review the cancellation path',
       context: 'Inspect only the supplied run IDs.',
       agentId: 'fox-general',
-      budget: { maxDurationMs: 30000, maxTotalTokens: 4000, maxOutputTokens: 1000, maxToolCalls: 4 },
+      budget: { maxDurationMs: 30000 },
+    }],
+    ['child_run_start', {
+      mode: 'expert_consultation',
+      expertId: 'fox-reviewer',
+      objective: 'Review the proposed boundary',
+      context: 'Return advice to the lead without changing the attached expert.',
+      budget: { maxDurationMs: 30000 },
     }],
     ['child_run_collect', { childRunIds: ['child-1', 'child-2'], waitMs: 1000 }],
     ['child_run_cancel', { childRunId: 'child-2' }],

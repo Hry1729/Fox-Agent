@@ -61,6 +61,7 @@ impl ModelServiceClient {
         model_id: &str,
     ) -> Result<ModelConnectionTest, String> {
         let normalized = normalize_model_base_url(base_url)?;
+        let requested_model_id = normalize_model_id(&normalized, model_id);
         let started = Instant::now();
         let response = match api_type {
             "openai-completions" => {
@@ -72,7 +73,7 @@ impl ModelServiceClient {
                 request.send().await
             }
             "anthropic-messages" => {
-                let model_id = model_id.trim();
+                let model_id = requested_model_id.as_str();
                 if model_id.is_empty() {
                     return Err("Anthropic Messages 连接测试需要填写模型 ID".to_owned());
                 }
@@ -110,19 +111,38 @@ impl ModelServiceClient {
                 .map_err(|_| "响应不是有效的 Anthropic Messages 响应".to_owned())?
                 .model;
             vec![if returned_model.is_empty() {
-                model_id.to_owned()
+                requested_model_id.clone()
             } else {
                 returned_model
             }]
         } else {
-            response
+            let models = response
                 .json::<ModelsResponse>()
                 .await
                 .map_err(|_| "响应不是有效的 OpenAI-compatible 模型列表".to_owned())?
                 .data
                 .into_iter()
                 .map(|model| model.id)
-                .collect()
+                .collect::<Vec<_>>();
+            if !requested_model_id.is_empty()
+                && !models.iter().any(|model| model == &requested_model_id)
+            {
+                let available = models
+                    .iter()
+                    .take(8)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("、");
+                let suffix = if available.is_empty() {
+                    "服务没有返回可用模型".to_owned()
+                } else {
+                    format!("当前可用模型：{available}")
+                };
+                return Err(format!(
+                    "模型 ID“{requested_model_id}”不在服务返回的模型列表中；{suffix}"
+                ));
+            }
+            models
         };
         Ok(ModelConnectionTest {
             ok: true,
@@ -159,6 +179,40 @@ pub fn normalize_model_base_url(value: &str) -> Result<String, String> {
     let path = url.path().trim_end_matches('/').to_owned();
     url.set_path(if path.is_empty() { "/" } else { &path });
     Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
+/// Preserve provider-defined model IDs, while correcting known cases where a
+/// human-facing SenseNova display name was pasted into the machine ID field.
+pub fn normalize_model_id(base_url: &str, value: &str) -> String {
+    let trimmed = value.trim();
+    let is_sensenova_token_api = Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| host.eq_ignore_ascii_case("token.sensenova.cn"));
+    if !is_sensenova_token_api {
+        return trimmed.to_owned();
+    }
+
+    let mut alias = String::with_capacity(trimmed.len());
+    let mut previous_separator = false;
+    for character in trimmed.chars() {
+        if character.is_ascii_alphanumeric() || character == '.' {
+            alias.push(character.to_ascii_lowercase());
+            previous_separator = false;
+        } else if !previous_separator && !alias.is_empty() {
+            alias.push('-');
+            previous_separator = true;
+        }
+    }
+    let alias = alias.trim_end_matches('-');
+    if matches!(
+        alias,
+        "sensenova-6.7-flash-lite" | "sensenova-6.8-flash-lite"
+    ) {
+        alias.to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 pub fn set_api_key(base_url: &str, api_key: &str) -> Result<(), String> {
@@ -281,6 +335,22 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_sensenova_display_names_to_api_model_ids() {
+        assert_eq!(
+            normalize_model_id("https://token.sensenova.cn/v1", "SenseNova 6.8 Flash Lite"),
+            "sensenova-6.8-flash-lite"
+        );
+        assert_eq!(
+            normalize_model_id("https://token.sensenova.cn/v1", "SenseNova-6.7-Flash-Lite"),
+            "sensenova-6.7-flash-lite"
+        );
+        assert_eq!(
+            normalize_model_id("https://api.example.com/v1", "My Model"),
+            "My Model"
+        );
+    }
+
+    #[test]
     fn tests_openai_compatible_models_endpoint() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let address = listener.local_addr().expect("read address");
@@ -301,10 +371,39 @@ mod tests {
             &format!("http://{address}/v1"),
             None,
             "openai-completions",
-            "",
+            "test-model",
         ))
         .expect("test connection");
         assert_eq!(result.models, vec!["test-model"]);
+        server.join().expect("join server");
+    }
+
+    #[test]
+    fn rejects_an_openai_model_id_missing_from_the_provider_catalog() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("read address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut request = [0_u8; 2048];
+            let length = stream.read(&mut request).expect("read request");
+            let request = String::from_utf8_lossy(&request[..length]);
+            assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+            let body = r#"{"data":[{"id":"sensenova-6.8-flash-lite"}]}"#;
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+        let client = ModelServiceClient::new().expect("create client");
+        let error = tauri::async_runtime::block_on(client.test(
+            &format!("http://{address}/v1"),
+            None,
+            "openai-completions",
+            "wrong-model",
+        ))
+        .expect_err("missing model ID must fail the connection test");
+        assert!(error.contains("wrong-model"));
+        assert!(error.contains("sensenova-6.8-flash-lite"));
         server.join().expect("join server");
     }
 

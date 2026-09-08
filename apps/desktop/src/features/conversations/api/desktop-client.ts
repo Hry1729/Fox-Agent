@@ -333,6 +333,8 @@ export interface LocalEmbeddingModelTestDto {
   dimension: number
   elapsedMs: number
   message: string
+  errorCode: string | null
+  errorDetails: string | null
 }
 
 export interface LocalVectorBackendHealthDto {
@@ -536,6 +538,19 @@ export const desktopClient = {
   openProjectRoot: (projectId: string) => command<boolean>('project_root_open', { projectId }),
   listAppNotifications: (unreadOnly = false, limit = 100) =>
     command<AppNotificationRecord[]>('app_notifications_list', { unreadOnly, limit }),
+  publishAppNotification: (request: {
+    kind: AppNotificationRecord['kind']
+    severity: AppNotificationRecord['severity']
+    title: string
+    body: string
+    mergeKey?: string
+    sourceType?: string
+    sourceId?: string
+    workspaceView?: string
+    entityId?: string
+    status?: string
+    action?: Record<string, unknown>
+  }) => command<boolean>('app_notification_publish', request),
   setAppNotificationRead: (id: string, read: boolean) =>
     command<boolean>('app_notification_read', { id, read }),
   markAllAppNotificationsRead: () => command<number>('app_notifications_mark_all_read'),
@@ -562,6 +577,8 @@ export const desktopClient = {
   openExternalUrl: (url: string) => command<boolean>('external_url_open', { url }),
   updateProjectPermission: (projectId: string, permissionMode: ProjectRecord['permissionMode']) =>
     command<ProjectRecord>('project_permission_update', { projectId, permissionMode }),
+  updateConversationPermission: (conversationId: string, permissionMode: ProjectRecord['permissionMode']) =>
+    command<ConversationSummary>('conversation_permission_update', { conversationId, permissionMode }),
   deleteProject: (projectId: string) => command<boolean>('project_delete', { projectId }),
   createConversation: (request: { agentId: string; expertId?: string; title?: string; projectRoot?: string; permissionMode?: ProjectRecord['permissionMode'] }) =>
     command<ConversationSummary>('conversation_create', request),
@@ -660,6 +677,8 @@ export const desktopClient = {
     command<LocalKnowledgeFileSourceDto>('local_knowledge_file_source_add', { path }),
   rescanLocalKnowledgeFileSource: (id: string) =>
     command<LocalKnowledgeFileSourceDto>('local_knowledge_file_source_rescan', { id }),
+  updateLocalKnowledgeFileSource: (id: string, displayName: string) =>
+    command<LocalKnowledgeFileSourceDto>('local_knowledge_file_source_update', { id, displayName }),
   removeLocalKnowledgeFileSource: (id: string) =>
     command<boolean>('local_knowledge_file_source_remove', { id }),
   listLocalKnowledgeLocalFiles: (options: { sourceId?: string; query?: string; category?: string; limit?: number; offset?: number } = {}) =>

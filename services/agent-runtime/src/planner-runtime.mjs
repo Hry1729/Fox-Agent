@@ -5,11 +5,13 @@ import {
   createFoxAgentSession,
 } from './pi-adapter.mjs'
 import { createReadOnlyTools } from './read-only-tools.mjs'
+import { selectToolsForProjectContext } from './expert-package.mjs'
 import { composeFoxPrompt, stablePromptHash } from './prompt-composer.mjs'
 import { adaptFoxToolsToPi } from './tool-adapter.mjs'
 
 const MAX_PLAN_STEPS = 8
 const MAX_PLAN_CHARS = 8_000
+const MAX_PLANNER_DURATION_MS = 90_000
 
 export const FOX_PLANNER_INSTRUCTIONS = `
 You are Fox Planner, an internal planning stage for a desktop coding agent.
@@ -106,7 +108,7 @@ export async function runPlanner({
   onAgent,
 } = {}) {
   const startedAt = Date.now()
-  const tools = adaptFoxToolsToPi(createReadOnlyTools(preflight))
+  const tools = adaptFoxToolsToPi(selectToolsForProjectContext(createReadOnlyTools(preflight), context).tools)
   const settingsManager = SettingsManager.inMemory({
     compaction: { enabled: true, reserveTokens: 4_096, keepRecentTokens: 8_192 },
     retry: {
@@ -150,8 +152,17 @@ export async function runPlanner({
   })
   onAgent?.(session)
   session.state.messages = Array.isArray(history) ? history.slice(-12) : []
+  let timeout = null
   try {
-    await session.prompt(text, { expandPromptTemplates: false })
+    await Promise.race([
+      session.prompt(text, { expandPromptTemplates: false }),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          session.abort()
+          reject(new Error(`Planner exceeded its ${MAX_PLANNER_DURATION_MS}ms duration budget.`))
+        }, MAX_PLANNER_DURATION_MS)
+      }),
+    ])
     const output = assistantText(session.state.messages)
     if (!output) throw new Error('Planner returned no final plan.')
     const plan = parsePlannerOutput(output)
@@ -161,6 +172,7 @@ export async function runPlanner({
       planHash: stablePromptHash(plannerHandoff(plan)),
     }
   } finally {
+    if (timeout !== null) clearTimeout(timeout)
     onAgent?.(null)
     session.dispose()
   }

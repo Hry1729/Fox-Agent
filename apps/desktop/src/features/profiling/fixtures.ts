@@ -37,6 +37,7 @@ function baseDetail(messages: ConversationMessage[], runtimeEvents: RunEventReco
     projectId: null,
     projectRoot: null,
     status: 'active',
+    permissionMode: 'read_only',
     createdAt: 0,
     updatedAt: 0,
     lastMessageAt: 0,

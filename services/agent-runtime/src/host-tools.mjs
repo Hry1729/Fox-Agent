@@ -57,6 +57,20 @@ const PLAN_TASKS_SCHEMA = Type.Union([
   Type.Array(GRAPH_PLAN_TASK_SCHEMA, { minItems: 1, maxItems: 3 }),
 ])
 
+function preparePlanRevisionArguments(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args) || typeof args.tasks !== 'string') {
+    return args
+  }
+  const serializedTasks = args.tasks.trim()
+  if (!serializedTasks.startsWith('[') || serializedTasks.length > 400_000) return args
+  try {
+    const tasks = JSON.parse(serializedTasks)
+    return Array.isArray(tasks) ? { ...args, tasks } : args
+  } catch {
+    return args
+  }
+}
+
 async function executeHostTool(toolCallId, tool, input, requestHost, signal) {
   const response = await requestHost('tool.execute', { toolCallId, tool, input }, signal)
   const payload = response?.payload ?? {}
@@ -561,7 +575,7 @@ export function createHostTools(requestHost) {
     {
       name: 'child_agent_list',
       label: 'List child agents',
-      description: 'List the Host-approved local agents that can execute an isolated Child Run. Call this before selecting a specialist unless the general agent is sufficient.',
+      description: 'List two separate Host-approved catalogs: reusable assistant/worker templates for ordinary Child Runs, and expert packages for one-off isolated consultations. Catalog entries are templates, not persistent child instances.',
       parameters: Type.Object({}),
       execute: (toolCallId, params, signal) =>
         executeHostTool(toolCallId, 'child_agent_list', params, requestHost, signal),
@@ -569,16 +583,18 @@ export function createHostTools(requestHost) {
     {
       name: 'child_run_start',
       label: 'Start child run',
-      description: 'Start one isolated, asynchronous Child Run for a concrete independent investigation, implementation, or review task. Fox enforces depth, concurrency, duration, token, output, and tool-call limits. Start multiple independent children before collecting them to obtain real parallelism.',
+      description: 'Start one isolated asynchronous Child Run. Use mode=worker with an optional agentId from child_agent_list.agents for ordinary delegated work. Use mode=expert_consultation with an exact expertId from child_agent_list.experts for a one-off specialist report; this never attaches, replaces, or removes the conversation expert. Prefer project-relative paths and bounded context. Fox enforces depth, concurrency, duration, and permission limits.',
       parameters: Type.Object({
+        mode: Type.Optional(Type.Union([
+          Type.Literal('worker'),
+          Type.Literal('expert_consultation'),
+        ])),
         objective: Type.String({ minLength: 1, maxLength: 8000 }),
         context: Type.Optional(Type.String({ maxLength: 12000 })),
         agentId: Type.Optional(Type.String({ minLength: 1, maxLength: 160 })),
+        expertId: Type.Optional(Type.String({ minLength: 1, maxLength: 160 })),
         budget: Type.Optional(Type.Object({
           maxDurationMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 900000 })),
-          maxTotalTokens: Type.Optional(Type.Integer({ minimum: 256, maximum: 200000 })),
-          maxOutputTokens: Type.Optional(Type.Integer({ minimum: 64, maximum: 32768 })),
-          maxToolCalls: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
         })),
       }),
       execute: (toolCallId, params, signal) =>
@@ -781,6 +797,7 @@ export function createHostTools(requestHost) {
         summary: Type.String(),
         tasks: PLAN_TASKS_SCHEMA,
       }, { additionalProperties: false }),
+      prepareArguments: preparePlanRevisionArguments,
       execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'plan_revision_create', params, requestHost, signal),
     },
     {
@@ -872,10 +889,27 @@ export const KNOWLEDGE_REFERENCE_SCHEMA = Type.Union([
 
 const KNOWLEDGE_REFERENCES_SCHEMA = Type.Array(KNOWLEDGE_REFERENCE_SCHEMA, { minItems: 1 })
 
+function prepareKnowledgeArguments(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args
+  const prepared = { ...args }
+  for (const [key, array] of [['target', false], ['targets', true]]) {
+    const value = prepared[key]
+    if (typeof value !== 'string' || value.length > 64_000) continue
+    const serialized = value.trim()
+    if (!serialized.startsWith(array ? '[' : '{')) continue
+    try {
+      const parsed = JSON.parse(serialized)
+      if (parsed && typeof parsed === 'object' && Array.isArray(parsed) === array) prepared[key] = parsed
+    } catch { /* Keep malformed arguments for ordinary schema validation. */ }
+  }
+  return prepared
+}
+
 export function createKnowledgeTools(requestHost) {
   return defineFoxTools([
     {
       name: KNOWLEDGE_TOOL_NAMES.list,
+      prepareArguments: prepareKnowledgeArguments,
       label: 'List knowledge bases',
       description: 'List knowledge bases explicitly enabled for the current Fox conversation, including their local or remote source. Optionally narrow the result with source-aware targets.',
       parameters: Type.Object({
@@ -886,8 +920,9 @@ export function createKnowledgeTools(requestHost) {
     },
     {
       name: KNOWLEDGE_TOOL_NAMES.search,
+      prepareArguments: prepareKnowledgeArguments,
       label: 'Search knowledge',
-      description: 'Search enabled local or remote knowledge bases. Use targets for source-aware references; knowledgeBaseId remains compatible with legacy remote calls.',
+      description: 'Search the conversation knowledge bases independently of any project folder. First call list_knowledge_bases, then pass its reference objects in targets (including source: local for local bases). query should contain concise domain keywords. knowledgeBaseId alone is only for legacy remote calls.',
       parameters: Type.Object({
         knowledgeBaseId: Type.Optional(Type.String()),
         target: Type.Optional(KNOWLEDGE_REFERENCE_SCHEMA),
@@ -900,8 +935,9 @@ export function createKnowledgeTools(requestHost) {
     },
     {
       name: KNOWLEDGE_TOOL_NAMES.read,
+      prepareArguments: prepareKnowledgeArguments,
       label: 'Read knowledge document',
-      description: 'Read an enabled local or remote knowledge document. Use target for a source-aware reference; knowledgeBaseId remains compatible with legacy remote calls.',
+      description: 'Read parsed text of an enabled knowledge document. documentId must be a real file_id or documentId returned by search_knowledge, never the knowledge-base ID. Use target for the same source-aware knowledge reference as the search. A backend/API failure does not mean the conversation binding is missing.',
       parameters: Type.Object({
         knowledgeBaseId: Type.Optional(Type.String()),
         target: Type.Optional(KNOWLEDGE_REFERENCE_SCHEMA),
@@ -911,6 +947,7 @@ export function createKnowledgeTools(requestHost) {
     },
     {
       name: KNOWLEDGE_TOOL_NAMES.graph,
+      prepareArguments: prepareKnowledgeArguments,
       label: 'Query knowledge graph',
       description: 'Query a bounded knowledge graph subgraph. Local targets explicitly return local_knowledge.graph_unavailable until local graph support is available.',
       parameters: Type.Object({

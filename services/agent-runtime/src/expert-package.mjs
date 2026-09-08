@@ -1,3 +1,20 @@
+import { RUNTIME_TOOL_CATALOG } from './runtime-contract.mjs'
+
+const PROJECT_TOOL_NAMES = new Set(RUNTIME_TOOL_CATALOG
+  .filter(({ category }) => ['project-read', 'project-write', 'process'].includes(category))
+  .map(({ name }) => name))
+
+export function selectToolsForProjectContext(tools, projectContext) {
+  const hasProject = typeof projectContext?.projectRoot === 'string'
+    && projectContext.projectRoot.trim().length > 0
+  return {
+    tools: tools.filter(({ name }) => hasProject || !PROJECT_TOOL_NAMES.has(name)),
+    excludedTools: hasProject ? [] : tools
+      .filter(({ name }) => PROJECT_TOOL_NAMES.has(name))
+      .map(({ name }) => ({ name, reason: 'project_unavailable' })),
+  }
+}
+
 function normalizeDeclaredToolNames(agentPackage) {
   const configured = agentPackage?.packageManifest?.allowedTools
   if (!Array.isArray(configured)) return null

@@ -13,5 +13,120 @@
     "id": "fox-thinking",
     "name": "思考专家",
     "src": "/expert-icons/fox_thinking.png"
+  },
+  {
+    "id": "fox-report-writer",
+    "name": "汇报材料专家",
+    "src": "/avatars/experts/Fox_ResearchWriter.png"
+  },
+  {
+    "id": "fox-meeting-notes",
+    "name": "会议纪要专家",
+    "src": "/avatars/experts/Fox_MeetingNotes.png"
+  },
+  {
+    "id": "fox-policy-writer",
+    "name": "制度与流程撰写专家",
+    "src": "/avatars/experts/Fox_PolicyAdvisor.png"
+  },
+  {
+    "id": "fox-technical-writer",
+    "name": "技术文档专家",
+    "src": "/avatars/experts/Fox_TechnicalWriter.png"
+  },
+  {
+    "id": "fox-data-analyst",
+    "name": "数据分析专家",
+    "src": "/avatars/experts/Fox_DataAnalyst.png"
+  },
+  {
+    "id": "fox-frontend",
+    "name": "前端开发专家",
+    "src": "/avatars/experts/Fox_FrontendDeveloper.png"
+  },
+  {
+    "id": "fox-backend-developer",
+    "name": "后端开发专家",
+    "src": "/avatars/experts/Fox_BackendDeveloper.png"
+  },
+  {
+    "id": "fox-architect",
+    "name": "软件架构专家",
+    "src": "/avatars/experts/Fox_SystemsEngineer.png"
+  },
+  {
+    "id": "fox-reviewer",
+    "name": "代码审查专家",
+    "src": "/avatars/experts/Fox_CodeReviewer.png"
+  },
+  {
+    "id": "fox-iot-architect",
+    "name": "工业物联网方案专家",
+    "src": "/avatars/experts/Fox_IoTEngineer.png"
+  },
+  {
+    "id": "fox-ui-designer",
+    "name": "UI 设计专家",
+    "src": "/avatars/experts/Fox_UIDesigner.png"
+  },
+  {
+    "id": "fox-ux-researcher",
+    "name": "用户体验专家",
+    "src": "/avatars/experts/Fox_UXResearcher.png"
+  },
+  {
+    "id": "fox-presentation-designer",
+    "name": "演示与信息图专家",
+    "src": "/avatars/experts/Fox_VisualStoryteller.png"
+  },
+  {
+    "id": "fox-brand-guardian",
+    "name": "品牌与视觉规范专家",
+    "src": "/avatars/experts/Fox_BrandGuardian.png"
+  },
+  {
+    "id": "fox-researcher",
+    "name": "调研与资料核验专家",
+    "src": "/avatars/experts/Fox_Researcher.png"
+  },
+  {
+    "id": "fox-product-manager",
+    "name": "产品需求专家",
+    "src": "/avatars/experts/Fox_ProductManager.png"
+  },
+  {
+    "id": "fox-project-manager",
+    "name": "项目计划与推进专家",
+    "src": "/avatars/experts/Fox_ProjectManager.png"
+  },
+  {
+    "id": "fox-prompt-engineer",
+    "name": "提示词优化专家",
+    "src": "/avatars/experts/Fox_PromptEngineer.png"
+  },
+  {
+    "id": "fox-study-planner",
+    "name": "学习规划专家",
+    "src": "/avatars/experts/Fox_StudyPlanner.png"
+  },
+  {
+    "id": "fox-translator",
+    "name": "翻译与术语专家",
+    "src": "/avatars/experts/Fox_CommunicationsManager.png"
+  },
+  {
+    "id": "fox-debugger",
+    "name": "调试专家",
+    "src": "/avatars/experts/Fox_QualityInspector.png"
+  },
+  {
+    "id": "fox-security",
+    "name": "安全审计专家",
+    "src": "/avatars/experts/Fox_SecurityReviewer.png"
+  },
+  {
+    "id": "yuxi:deep-research",
+    "name": "深度研究",
+    "src": "/avatars/experts/Fox_ResearchAnalyst.png"
   }
 ]

@@ -1,12 +1,16 @@
 mod capability_tools;
 mod continuation;
 mod protocol;
+pub(crate) mod shadow_reconcile;
+#[cfg(test)]
+mod shadow_reconcile_tests;
 mod work_tools;
 
 #[cfg(test)]
 pub(crate) use work_tools::WORK_TOOLS;
 
 use crate::yuxi::{get_access_token, YuxiClient};
+use crate::kernel::CancellationPort;
 use crate::{
     app_state::AppState,
     database::{
@@ -30,7 +34,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc, Arc, Mutex,
     },
     thread,
@@ -38,6 +42,10 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
+
+pub(crate) fn runtime_tool_is_supported(tool: &str) -> bool {
+    protocol::canonical_runtime_tool_contract(tool).is_some()
+}
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -60,6 +68,17 @@ const GRAPH_REVIEWER_MAX_TOOL_CALLS: i64 = 6;
 const MAX_CONTINUATION_RECONCILIATION_ITEMS: usize = 256;
 const MAX_CONTINUATION_RECONCILIATION_ITEMS_PER_PASS: usize = 1_024;
 const MAX_CONTINUATION_RECONCILIATION_PASS_DURATION: Duration = Duration::from_secs(2);
+const MAX_CONCURRENT_TOOL_HANDLERS: usize = 32;
+
+struct ToolHandlerPermit {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for ToolHandlerPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeToolIngress {
@@ -76,8 +95,7 @@ fn validate_runtime_tool_authority(
     tool: &str,
     ingress: RuntimeToolIngress,
 ) -> Result<(), (&'static str, String)> {
-    manifest
-        .validate()
+    protocol::validate_host_manifest(manifest)
         .map_err(|error| ("runtime.capability.invalid", error))?;
     // A missing snapshot is only retained for Runs created before schema v34.
     // Any non-Legacy active Runtime will therefore fail the identity comparison.
@@ -347,6 +365,12 @@ fn package_string_scope(manifest: &Value, field: &str) -> Option<HashSet<String>
     })
 }
 
+fn runtime_package_tool_scope(package: &Value) -> Option<HashSet<String>> {
+    package
+        .get("packageManifest")
+        .and_then(|manifest| package_string_scope(manifest, "allowedTools"))
+}
+
 fn intersect_optional_scopes(
     left: Option<HashSet<String>>,
     right: Option<HashSet<String>>,
@@ -594,6 +618,7 @@ pub struct RuntimeDiagnostics {
     pub session_file_count: usize,
     pub recovery_attempts: u8,
     pub last_recovery_at: Option<i64>,
+    pub kernel_shadow_gate: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -661,6 +686,7 @@ fn node_dependency_is_available(script: &Path, package: &str) -> bool {
 }
 
 struct RuntimeHostState {
+    cancellation: crate::kernel::CancellationRegistry,
     state: String,
     worker: Option<WorkerHandle>,
     stderr: VecDeque<String>,
@@ -676,6 +702,95 @@ struct RuntimeHostState {
     cancelled_dispatches: HashSet<String>,
     recovery_attempts: u8,
     last_recovery_at: Option<i64>,
+    /// Per-legacy-run shadow contexts. These run the observation-only kernel
+    /// decision core and are fed legacy events; they never execute side
+    /// effects. Keyed by legacy run id.
+    shadow: Arc<shadow_reconcile::ShadowReconciler>,
+}
+
+/// Content-addressed shadow identity hash over the normalised CONTENT of a
+/// frozen contract input. Hashing normalised JSON (not an identity tag) means
+/// changing the capability set, permission scope or prompt/profile content
+/// changes the hash.
+fn runtime_shadow_hash(seed: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(seed.as_bytes())))
+}
+
+fn shadow_prompt_config_hash(snapshot: &Value) -> Result<String, String> {
+    let stable_prompt_hash = snapshot
+        .get("stablePromptHash")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "run.request_snapshot omitted the non-empty stablePromptHash required by Kernel Shadow"
+                .to_owned()
+        })?;
+    let mut identity = serde_json::Map::new();
+    for key in [
+        "contextHash",
+        "contextSchemaHash",
+        "executionProfile",
+        "promptCacheIdentity",
+        "promptContentHash",
+        "promptDefinitionId",
+        "promptVersion",
+        "toolCatalogHash",
+    ] {
+        identity.insert(
+            key.to_owned(),
+            snapshot.get(key).cloned().unwrap_or(Value::Null),
+        );
+    }
+    identity.insert(
+        "stablePromptHash".to_owned(),
+        Value::String(stable_prompt_hash.to_owned()),
+    );
+    Ok(runtime_shadow_hash(&Value::Object(identity).to_string()))
+}
+
+fn shadow_permission_snapshot_id(permission_mode: &str, project_access: &str) -> String {
+    runtime_shadow_hash(&format!("permission|{permission_mode}|{project_access}"))
+}
+
+fn shadow_preflight_tool_call_id(envelope: &RuntimeEnvelope) -> Result<&str, &'static str> {
+    envelope
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.get("toolCallId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("tool.preflight omitted a non-empty payload.toolCallId")
+}
+
+fn shadow_preflight_input(envelope: &RuntimeEnvelope, allowed: bool, payload: &Value) -> Value {
+    if allowed {
+        if let Some(input) = payload.get("input") {
+            return input.clone();
+        }
+    }
+    envelope
+        .payload
+        .as_ref()
+        .and_then(|request| request.get("input"))
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+}
+
+fn runtime_tool_event_succeeded(payload: &Value) -> bool {
+    payload.get("type").and_then(Value::as_str) == Some("tool.completed")
+        && payload.get("isError").and_then(Value::as_bool) != Some(true)
+}
+
+fn shadow_legacy_tool_decision(
+    tool: &str,
+    execution_location: &str,
+    requires_approval: bool,
+) -> Result<&'static str, String> {
+    // Single source of truth: shared with the ShadowReconciler so the Host
+    // and the integration tests never maintain two classification lists.
+    shadow_reconcile::legacy_tool_decision(tool, execution_location, requires_approval)
 }
 
 #[derive(Clone)]
@@ -690,14 +805,27 @@ pub struct RuntimeHost {
     yuxi_client: YuxiClient,
     child_hosts: Arc<Mutex<HashMap<String, RuntimeHost>>>,
     run_budget_override: Option<ChildRunBudget>,
+    enforce_count_budget_override: bool,
     execution_profile_override: Option<&'static str>,
     tool_allowlist_override: Option<HashSet<String>>,
     mcp_server_scope_override: Option<HashSet<String>>,
     digital_scheduler_started: Arc<AtomicBool>,
     digital_scheduler_stop: Arc<AtomicBool>,
+    active_tool_handlers: Arc<AtomicUsize>,
 }
 
 impl RuntimeHost {
+    fn try_acquire_tool_handler(&self) -> Option<ToolHandlerPermit> {
+        let active = self.active_tool_handlers.fetch_add(1, Ordering::SeqCst);
+        if active >= MAX_CONCURRENT_TOOL_HANDLERS {
+            self.active_tool_handlers.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(ToolHandlerPermit {
+            active: self.active_tool_handlers.clone(),
+        })
+    }
+
     pub fn run_offline_evaluations(&self) -> Result<EvaluationRunSummary, String> {
         let runtime = self.runtime_command()?;
         let mut command = Command::new(&runtime.program);
@@ -784,8 +912,9 @@ impl RuntimeHost {
     ) -> Self {
         let host = Self {
             app,
-            database,
+            database: database.clone(),
             state: Arc::new(Mutex::new(RuntimeHostState {
+                cancellation: crate::kernel::CancellationRegistry::default(),
                 state: "stopped".to_owned(),
                 worker: None,
                 stderr: VecDeque::new(),
@@ -801,6 +930,7 @@ impl RuntimeHost {
                 cancelled_dispatches: HashSet::new(),
                 recovery_attempts: 0,
                 last_recovery_at: None,
+                shadow: Arc::new(shadow_reconcile::ShadowReconciler::new(database.clone())),
             })),
             run_transition: Arc::new(Mutex::new(())),
             sessions_dir,
@@ -809,11 +939,13 @@ impl RuntimeHost {
             yuxi_client,
             child_hosts: Arc::new(Mutex::new(HashMap::new())),
             run_budget_override: None,
+            enforce_count_budget_override: true,
             execution_profile_override: None,
             tool_allowlist_override: None,
             mcp_server_scope_override: None,
             digital_scheduler_started: Arc::new(AtomicBool::new(false)),
             digital_scheduler_stop: Arc::new(AtomicBool::new(false)),
+            active_tool_handlers: Arc::new(AtomicUsize::new(0)),
         };
         host.reconcile_continuation_proposals();
         host
@@ -900,6 +1032,10 @@ impl RuntimeHost {
 
     pub fn diagnostics(&self) -> RuntimeDiagnostics {
         let available = self.runtime_available();
+        let kernel_shadow_gate = self.database.kernel_shadow_recent_exit_gate().unwrap_or_else(|error| json!({
+            "passed": false, "authoritativeEnabled": false, "productionRolloutApproved": false,
+            "blockingReasons": [redact_diagnostic_line(&error)],
+        }));
         let session_file_count = std::fs::read_dir(&self.sessions_dir)
             .ok()
             .into_iter()
@@ -939,6 +1075,7 @@ impl RuntimeHost {
                 session_file_count,
                 recovery_attempts: state.recovery_attempts,
                 last_recovery_at: state.last_recovery_at,
+                kernel_shadow_gate: kernel_shadow_gate.clone(),
             },
             Err(_) => RuntimeDiagnostics {
                 protocol: protocol::PROTOCOL_NAME.to_owned(),
@@ -956,6 +1093,7 @@ impl RuntimeHost {
                 session_file_count,
                 recovery_attempts: 0,
                 last_recovery_at: None,
+                kernel_shadow_gate,
             },
         }
     }
@@ -1034,6 +1172,7 @@ impl RuntimeHost {
                 return result;
             }
             if let Ok(mut state) = self.state.lock() {
+                state.cancellation.retire_run(&started.run.id);
                 if let Some(worker) = state.worker.as_mut() {
                     if worker.active_run_id.as_deref() == Some(&started.run.id) {
                         worker.active_run_id = None;
@@ -1046,6 +1185,290 @@ impl RuntimeHost {
             }
         }
         result
+    }
+
+    /// Freeze an observation-only Kernel shadow context for a legacy run.
+    ///
+    /// This is the production Shadow entry point: it only records a frozen
+    /// `kernel_shadow_runs` row (kernel mode `shadow`). It does NOT run tools,
+    /// raise approvals, dispatch to the executable outbox, or touch the legacy
+    /// run. Any error is swallowed (logged into diagnostics) so Shadow can
+    /// never break the authoritative legacy path. Authoritative Kernel
+    /// execution remains disabled; there is no production caller that leases
+    /// `kernel_effect_outbox`.
+    fn bootstrap_shadow_context(
+        &self,
+        legacy_run_id: &str,
+        conversation_id: &str,
+        execution_profile_id: &str,
+        prompt_config_hash: &str,
+    ) {
+        if let Err(error) = self.try_bootstrap_shadow_context(
+            legacy_run_id,
+            conversation_id,
+            execution_profile_id,
+            prompt_config_hash,
+        ) {
+            // Shadow must never fail the legacy run; surface it in diagnostics only.
+            if let Ok(mut state) = self.state.lock() {
+                state.last_error = Some(format!("kernel shadow bootstrap skipped: {error}"));
+            }
+        }
+    }
+
+    fn bootstrap_shadow_context_from_request_snapshot(
+        &self,
+        legacy_run_id: &str,
+        conversation_id: &str,
+        snapshot: &Value,
+    ) {
+        let result = (|| -> Result<(String, String), String> {
+            let execution_profile_id = self
+                .database
+                .frozen_run_execution_profile_id(legacy_run_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| {
+                    format!(
+                        "Run '{legacy_run_id}' has no frozen execution profile for Kernel Shadow"
+                    )
+                })?;
+            let prompt_config_hash = shadow_prompt_config_hash(snapshot)?;
+            Ok((execution_profile_id, prompt_config_hash))
+        })();
+        match result {
+            Ok((execution_profile_id, prompt_config_hash)) => self.bootstrap_shadow_context(
+                legacy_run_id,
+                conversation_id,
+                &execution_profile_id,
+                &prompt_config_hash,
+            ),
+            Err(error) => {
+                if let Ok(mut state) = self.state.lock() {
+                    state.last_error = Some(format!("kernel shadow bootstrap skipped: {error}"));
+                }
+            }
+        }
+    }
+
+    fn try_bootstrap_shadow_context(
+        &self,
+        legacy_run_id: &str,
+        conversation_id: &str,
+        execution_profile_id: &str,
+        prompt_config_hash: &str,
+    ) -> Result<(), String> {
+        let engine = "pi";
+        // Content-addressed identities: hash the actual frozen contract inputs
+        // (engine + manifest version; conversation/permission; profile/prompt)
+        // rather than emitting synthetic prefixes. These are observation
+        // hashes over stable contract identity, not user content or secrets.
+        let manifest_version = protocol::CAPABILITY_MANIFEST_VERSION as u32;
+        // Content-addressed hashes over the actual frozen contract CONTENT, not
+        // just identity tags, so changing permission scope, the capability set,
+        // or the prompt/profile changes the hash.
+        let capabilities_json = self
+            .shadow_capabilities_json()
+            .unwrap_or_else(|| format!("manifest-v{manifest_version}"));
+        let permission_snapshot = self
+            .database
+            .kernel_shadow_permission_snapshot(conversation_id)?;
+        let manifest_hash = runtime_shadow_hash(&format!(
+            "manifest|{engine}|v{manifest_version}|{capabilities_json}"
+        ));
+        let permission_snapshot_id = runtime_shadow_hash(&permission_snapshot.to_string());
+        let frozen = crate::kernel::RunFrozenConfig {
+            engine_id: engine.to_owned(),
+            kernel_mode: crate::kernel::KernelMode::Shadow.as_str().to_owned(),
+            capability_manifest_version: manifest_version,
+            capability_manifest_hash: manifest_hash.clone(),
+            permission_snapshot_id,
+            execution_profile_id: execution_profile_id.to_owned(),
+            prompt_config_hash: prompt_config_hash.to_owned(),
+            model_request_timeout_ms: 120_000,
+            tool_execution_timeout_ms: 600_000,
+            run_execution_budget_ms: 1_800_000,
+            approval_wait_timeout_ms: 3_600_000,
+            provider_max_retries: 2,
+            turn_max_retries: 0,
+        };
+        self.shadow_reconciler()?.bootstrap_with_policy(
+            legacy_run_id,
+            conversation_id,
+            execution_profile_id,
+            frozen,
+            Some(permission_snapshot),
+        )
+    }
+
+    fn shadow_reconciler(&self) -> Result<Arc<shadow_reconcile::ShadowReconciler>, String> {
+        self.state
+            .lock()
+            .map(|state| state.shadow.clone())
+            .map_err(|_| "shadow host state lock poisoned".to_string())
+    }
+
+    fn report_shadow_result(&self, result: Result<(), String>) {
+        if let Err(error) = result {
+            if let Ok(mut state) = self.state.lock() {
+                state.last_error = Some(format!("kernel shadow observation failed: {error}"));
+            }
+        }
+    }
+
+    pub(crate) fn recover_shadow_observations(&self) {
+        self.report_shadow_result((|| self.shadow_reconciler()?.recover_all().map(|_| ()))());
+    }
+
+    /// Feed a legacy tool-batch decision into the run's shadow context, run the
+    /// shadow decision core over the same batch, and persist the comparison
+    /// record. Independent legacy tool facts (`legacy_tools`) are supplied by
+    /// the caller from what legacy actually decided. Never executes tools and
+    /// never affects the legacy run; failures are diagnostic-only.
+    /// Feed a single legacy tool.preflight decision into the shadow context.
+    /// The preflight is treated as a one-tool observation; legacy decision and
+    /// identity come from the real preflight (`allowed` + payload), kernel
+    /// decision from the shadow policy. Observation-only.
+    fn shadow_feed_preflight(
+        &self,
+        legacy_run_id: &str,
+        tool: &str,
+        envelope: &RuntimeEnvelope,
+        allowed: bool,
+        payload: &Value,
+    ) {
+        let nested_parent = envelope
+            .payload
+            .as_ref()
+            .filter(|request| {
+                request.get("observationScope").and_then(Value::as_str) == Some("nested")
+            })
+            .and_then(|request| request.get("parentToolCallId"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(parent_tool_call_id) = nested_parent {
+            let valid_graph_parent = self
+                .database
+                .get_runtime_tool_call(legacy_run_id, parent_tool_call_id)
+                .ok()
+                .flatten()
+                .is_some_and(|record| {
+                    record.tool_name == "graph_readonly_run"
+                        && record.execution_location == "runtime"
+                });
+            if valid_graph_parent {
+                // Graph preview node reads are internal to graph_readonly_run
+                // and have no top-level Runtime tool event to settle. The outer
+                // graph ToolCall is registered from its real projection.
+                return;
+            }
+        }
+        let tool_call_id = match shadow_preflight_tool_call_id(envelope) {
+            Ok(tool_call_id) => tool_call_id.to_owned(),
+            Err(error) => {
+                if let Ok(mut state) = self.state.lock() {
+                    state.last_error = Some(format!(
+                        "kernel shadow preflight observation skipped: {error}"
+                    ));
+                }
+                return;
+            }
+        };
+        // An allowed Host preflight may canonicalise or default arguments. Feed
+        // the approved payload.input as the actual legacy/kernel observation;
+        // blocked or malformed responses fall back to the requested input.
+        let input = shadow_preflight_input(envelope, allowed, payload);
+        // Legacy decision from the real preflight outcome.
+        let legacy_decision = if allowed {
+            "allow"
+        } else if payload
+            .get("decision")
+            .and_then(Value::as_str)
+            .is_some_and(|d| d.contains("approv") || d.contains("ask"))
+        {
+            "approval"
+        } else {
+            "deny"
+        };
+        self.report_shadow_result((|| {
+            let reconciler = self.shadow_reconciler()?;
+            if reconciler.context_state(legacy_run_id) == "absent" {
+                return Ok(());
+            }
+            let outcome = reconciler.feed_preflight(
+                legacy_run_id,
+                tool,
+                &tool_call_id,
+                input,
+                legacy_decision,
+            )?;
+            outcome.persist_error.map_or(Ok(()), Err)
+        })());
+    }
+
+    /// Normalised capability manifest content for the shadow identity hash.
+    /// Reads the live (effective) capability set so changing the manifest
+    /// changes the frozen manifest hash.
+    fn shadow_capabilities_json(&self) -> Option<String> {
+        let state = self.state.lock().ok()?;
+        let caps = self.effective_capabilities(&state.capabilities);
+        // Canonicalise (sort keys) via serde_json for a stable hash input.
+        let mut value = caps.clone();
+        if let Some(obj) = value.as_object_mut() {
+            for (_k, v) in obj.iter_mut() {
+                if v.is_array() {
+                    if let Some(arr) = v.as_array() {
+                        let mut sorted = arr.clone();
+                        sorted.sort_by(|a, b| {
+                            a.to_string()
+                                .partial_cmp(&b.to_string())
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        *v = serde_json::Value::Array(sorted);
+                    }
+                }
+            }
+        }
+        Some(value.to_string())
+    }
+
+    /// Feed a legacy terminal event into the run's shadow context and persist
+    /// the comparison; then drop the shadow context. `legacy_state` is the
+    /// legacy run STATE name (`completed` / `failed` / `cancelled`). The kernel
+    /// side is driven through the matching state machine transitions: a cancel
+    /// requires a prior `request_cancel`, and completed requires settled tools
+    /// (fed earlier via `shadow_feed_tool_settled`).
+    pub fn shadow_feed_terminal(
+        &self,
+        legacy_run_id: &str,
+        legacy_state: &str,
+        kernel_outcome: crate::kernel::RunOutcome,
+        _retry_timeout: crate::kernel::RetryTimeoutFacts,
+    ) {
+        self.report_shadow_result((|| {
+            let reconciler = self.shadow_reconciler()?;
+            if reconciler.context_state(legacy_run_id) == "absent" {
+                return Ok(());
+            }
+            let outcome = reconciler.terminal(legacy_run_id, legacy_state, kernel_outcome, true)?;
+            outcome.persist_error.map_or(Ok(()), Err)
+        })());
+    }
+
+    pub fn shadow_feed_tool_settled(
+        &self,
+        legacy_run_id: &str,
+        tool_call_id: &str,
+        ok: bool,
+        _result_json: &str,
+    ) {
+        self.report_shadow_result((|| {
+            let reconciler = self.shadow_reconciler()?;
+            if reconciler.context_state(legacy_run_id) == "absent" {
+                return Ok(());
+            }
+            reconciler.settle_applied_tool(legacy_run_id, tool_call_id, ok)
+        })());
     }
 
     pub fn start_run_detached(
@@ -1216,6 +1639,15 @@ impl RuntimeHost {
                 );
             }
         }
+        self.shadow_feed_terminal(
+            &started.run.id,
+            "failed",
+            crate::kernel::RunOutcome::Failed {
+                code: code.to_owned(),
+                message: detail.to_owned(),
+            },
+            Default::default(),
+        );
     }
 
     fn start_run_inner(
@@ -1261,9 +1693,11 @@ impl RuntimeHost {
             .database
             .get_model_service()?
             .ok_or_else(|| "model service is not configured".to_owned())?;
-        let effective_max_output_tokens = self
+        let count_budget_override = self
             .run_budget_override
             .as_ref()
+            .filter(|_| self.enforce_count_budget_override);
+        let effective_max_output_tokens = count_budget_override
             .map(|budget| budget.max_output_tokens)
             .unwrap_or(model_service.max_output_tokens)
             .min(model_service.max_output_tokens);
@@ -1271,9 +1705,7 @@ impl RuntimeHost {
             .context_window
             .saturating_sub(effective_max_output_tokens)
             .max(4096);
-        let input_tokens = self
-            .run_budget_override
-            .as_ref()
+        let input_tokens = count_budget_override
             .map(|budget| {
                 input_tokens.min(
                     budget
@@ -1301,6 +1733,17 @@ impl RuntimeHost {
             .database
             .get_agent(&agent_id)?
             .ok_or_else(|| "conversation assistant was not found".to_owned())?;
+        let run_role = match (run_kind, assistant.agent_kind.as_str()) {
+            ("child", "expert") => "expert_consultation",
+            ("child", _) => "child_worker",
+            ("digital_colleague", _) => "digital_colleague",
+            _ => "user_facing_lead",
+        };
+        let run_context = json!({
+            "runKind": run_kind,
+            "runRole": run_role,
+            "isUserFacingLead": run_role == "user_facing_lead",
+        });
         let expert_binding = self
             .database
             .current_conversation_expert_binding(&started.run.conversation_id)?;
@@ -1359,14 +1802,17 @@ impl RuntimeHost {
             .filter(|skill| seen_skills.insert((*skill).clone()))
             .cloned()
             .collect::<Vec<_>>();
-        let skill_prompt = crate::skills::enabled_skill_prompt(&self.skills_dir, &enabled_skills)?;
-        let system_prompt = if skill_prompt.is_empty() {
-            system_prompt
-        } else {
-            format!(
-                "{system_prompt}\n\n# Enabled Assistant and Expert Skills\nThe following instruction-only Skills are enabled for the current assistant and expert. Follow them when relevant; they do not grant additional tool permissions.\n\n{skill_prompt}"
-            )
-        };
+        let available_skill_tools = intersect_optional_scopes(
+            runtime_package_tool_scope(&assistant_package),
+            expert_package.as_ref().and_then(runtime_package_tool_scope),
+        );
+        let skill_prompt = crate::skills::enabled_skill_prompt_for_context(
+            &self.skills_dir,
+            &enabled_skills,
+            available_skill_tools.as_ref(),
+            text,
+            8_000,
+        )?;
         let expert_binding_payload = expert_binding.as_ref().map(|binding| {
             json!({
                 "bindingId": binding.id,
@@ -1377,19 +1823,26 @@ impl RuntimeHost {
                 "activatedAt": binding.activated_at,
             })
         });
-        let project_access = self
-            .database
-            .conversation_project_access(&started.run.conversation_id)?;
-        let project_context = match project_access {
-            Some((project_root, permission_mode)) => json!({
-                "projectRoot": project_root,
-                "permissionMode": permission_mode,
-            }),
-            None => json!({
-                "projectRoot": null,
-                "permissionMode": "read_only",
-            }),
+        let control_binding = match self.database.run_control_binding(&started.run.id)? {
+            Some(binding) => binding,
+            None => {
+                let executor = match std::env::var("FOX_RESOURCE_GATEWAY_READS") {
+                    Err(std::env::VarError::NotPresent) => fox_engine_protocol::ResourceExecutor::Runtime,
+                    Ok(value) if value == "runtime" => fox_engine_protocol::ResourceExecutor::Runtime,
+                    Ok(value) if value == "rust" => fox_engine_protocol::ResourceExecutor::Rust,
+                    _ => return Err("FOX_RESOURCE_GATEWAY_READS must be runtime or rust".into()),
+                };
+                self.database.freeze_legacy_run_control_with_executor(&started.run.id, execution_profile.id(), executor)?
+            }
         };
+        if control_binding.authority != fox_engine_protocol::ExecutionAuthority::Legacy
+            || control_binding.execution_profile_id != execution_profile.id() {
+            return Err("Legacy startup cannot replace the frozen Run authority/profile".into());
+        }
+        let project_context = json!({
+            "projectRoot": control_binding.permission.project_root,
+            "permissionMode": control_binding.permission.mode.as_str(),
+        });
         let work_snapshot = work_tools::snapshot(&self.database, &started.run.conversation_id)?;
         let memory_context = self.database.recall_memories(
             &started.run.conversation_id,
@@ -1411,6 +1864,7 @@ impl RuntimeHost {
             if state.cancelled_dispatches.remove(&started.run.id) {
                 return Err(CANCELLED_BEFORE_SUBMISSION.to_owned());
             }
+            state.cancellation.register_run(&started.run.id)?;
             if let Some(worker) = state.worker.as_mut() {
                 worker.active_run_id = Some(started.run.id.clone());
                 worker.current_runtime_session_id = Some(runtime_session_id.clone());
@@ -1427,14 +1881,25 @@ impl RuntimeHost {
                 "model": started.run.model,
                 "messages": messages,
                 "systemPrompt": system_prompt,
+                "skillPrompt": skill_prompt,
                 "images": images,
                 "assistantPackage": assistant_package,
                 "expertBinding": expert_binding_payload,
                 "expertPackage": expert_package,
+                "runContext": run_context,
                 "projectContext": project_context,
+                "controlBinding": control_binding,
                 "workSnapshot": work_snapshot,
                 "memoryContext": memory_context,
                 "promptBudget": { "maxPromptTokens": input_tokens },
+                "runBudget": self.run_budget_override.as_ref().map(|budget| {
+                    let mut payload = json!({ "maxDurationMs": budget.max_duration_ms });
+                    if self.enforce_count_budget_override {
+                        payload["maxTotalTokens"] = json!(budget.max_total_tokens);
+                        payload["maxToolCalls"] = json!(budget.max_tool_calls);
+                    }
+                    payload
+                }),
             }));
         let prompt_response = self.send_request(prompt_request, RESPONSE_TIMEOUT)?;
         if prompt_response.r#type != "request_succeeded" {
@@ -1611,6 +2076,11 @@ impl RuntimeHost {
         graph_review_request_id: Option<String>,
     ) -> Result<(), String> {
         let child_run_id = child_run.child_run_id.clone();
+        let enforce_count_budget_override = graph_review_request_id.is_some()
+            || self
+                .database
+                .graph_attempt_id_for_child_run(&child_run_id)?
+                .is_some();
         let mut child_host = RuntimeHost::new(
             self.app.clone(),
             self.database.clone(),
@@ -1620,6 +2090,12 @@ impl RuntimeHost {
             self.yuxi_client.clone(),
         );
         child_host.run_budget_override = Some(child_run.budget.clone());
+        child_host
+            .state
+            .lock()
+            .map_err(|_| "child host state lock poisoned")?
+            .shadow = self.shadow_reconciler()?;
+        child_host.enforce_count_budget_override = enforce_count_budget_override;
         if graph_review_request_id.is_some() {
             child_host.execution_profile_override = Some(GRAPH_REVIEWER_EXECUTION_PROFILE);
         }
@@ -1691,28 +2167,15 @@ impl RuntimeHost {
                 let deadline =
                     Instant::now() + Duration::from_millis(child_run.budget.max_duration_ms as u64);
                 loop {
-                    let token_budget_exceeded = coordinator
-                        .database
-                        .child_budget_exceeded(&child_run_id)
-                        .unwrap_or(false);
                     let duration_exceeded = Instant::now() >= deadline;
-                    if token_budget_exceeded || duration_exceeded {
+                    if duration_exceeded {
                         let _ = child_host.cancel_run(&child_run_id);
                         let _ = child_host.stop_worker();
-                        let (code, message) = if token_budget_exceeded {
-                            (
-                                "child_run.token_budget_exceeded",
-                                "Child Run exceeded its Host-enforced total-token budget.",
-                            )
-                        } else {
-                            (
-                                "child_run.duration_budget_exceeded",
-                                "Child Run exceeded its Host-enforced duration budget.",
-                            )
-                        };
-                        let _ = coordinator
-                            .database
-                            .mark_run_failed(&child_run_id, code, message);
+                        let _ = coordinator.database.mark_run_failed(
+                            &child_run_id,
+                            "child_run.duration_budget_exceeded",
+                            "Child Run exceeded its Host-enforced duration budget.",
+                        );
                         break;
                     }
                     let status = coordinator
@@ -1784,6 +2247,11 @@ impl RuntimeHost {
             self.skills_dir.clone(),
             self.yuxi_client.clone(),
         );
+        managed_host
+            .state
+            .lock()
+            .map_err(|_| "managed host state lock poisoned")?
+            .shadow = self.shadow_reconciler()?;
         managed_host.run_budget_override = Some(ChildRunBudget {
             max_duration_ms: prepared.colleague.max_duration_ms,
             max_total_tokens: prepared.remaining_tokens.min(200_000),
@@ -2335,6 +2803,8 @@ impl RuntimeHost {
             )
         };
 
+        self.state.lock().map_err(|_| "runtime state lock is poisoned")?
+            .cancellation.request_run_cancel(run_id);
         let mut request = RuntimeRequest::new("cancel").with_run(run_id);
         if let Some(conversation_id) = conversation_id.as_deref() {
             request = request.with_conversation(conversation_id);
@@ -2367,31 +2837,7 @@ impl RuntimeHost {
         if let Some(pending) = sender {
             let _ = pending.sender.send(decision.approved());
         }
-        let conversation_id = approval.conversation_id.clone();
-        let tool_name = approval.tool_name.clone();
         let _ = self.app.emit("fox://approval-resolved", approval);
-        if decision == ApprovalDecision::AllowConversation {
-            if let Ok(queued) = self
-                .database
-                .pending_approvals_for_conversation_tool(&conversation_id, &tool_name)
-            {
-                for queued_approval in queued {
-                    let Ok(Some(resolved)) = self
-                        .database
-                        .resolve_approval(&queued_approval.id, ApprovalDecision::AllowConversation)
-                    else {
-                        continue;
-                    };
-                    let sender = self.state.lock().ok().and_then(|state| {
-                        state.pending_approvals.lock().ok()?.remove(&resolved.id)
-                    });
-                    if let Some(pending) = sender {
-                        let _ = pending.sender.send(true);
-                    }
-                    let _ = self.app.emit("fox://approval-resolved", resolved);
-                }
-            }
-        }
         Ok(true)
     }
 
@@ -2537,6 +2983,7 @@ impl RuntimeHost {
 
     fn mark_run_ready(&self, run_id: &str) {
         let should_dispatch = if let Ok(mut state) = self.state.lock() {
+            state.cancellation.retire_run(run_id);
             if let Some(worker) = state.worker.as_mut() {
                 if worker.active_run_id.as_deref() == Some(run_id) {
                     worker.active_run_id = None;
@@ -2669,6 +3116,7 @@ impl RuntimeHost {
                     "maxOutputTokens": self
                         .run_budget_override
                         .as_ref()
+                        .filter(|_| self.enforce_count_budget_override)
                         .map(|budget| budget.max_output_tokens)
                         .unwrap_or(model_service.max_output_tokens)
                         .min(model_service.max_output_tokens),
@@ -2874,6 +3322,15 @@ impl RuntimeHost {
                             runtime_host.handle_runtime_crash(write_error);
                             return;
                         }
+                        // Legacy denied the preflight. Feed the shadow so the
+                        // kernel-side decision is compared against a real deny.
+                        runtime_host.shadow_feed_preflight(
+                            run_id,
+                            tool,
+                            &envelope,
+                            false,
+                            &json!({ "decision": "deny", "code": code }),
+                        );
                         continue;
                     }
                     let input = envelope
@@ -2892,10 +3349,14 @@ impl RuntimeHost {
                                     .ok()
                                     .flatten()
                             });
-                    let (project_root, permission_mode) = project_access
-                        .as_ref()
-                        .map(|(root, mode)| (Some(root.as_str()), mode.as_str()))
-                        .unwrap_or((None, "read_only"));
+                    let persisted_permission_mode = envelope
+                        .conversation_id
+                        .as_deref()
+                        .and_then(|conversation_id| {
+                            database.conversation_permission_mode(conversation_id).ok()
+                        })
+                        .unwrap_or_else(|| "ask".to_owned());
+                    let project_root = project_access.as_ref().map(|(root, _)| root.as_str());
                     let expert_guard = envelope
                         .conversation_id
                         .as_deref()
@@ -2905,12 +3366,18 @@ impl RuntimeHost {
                         .transpose();
                     let delegated_guard = runtime_host.ensure_delegated_tool_allowed(tool);
                     let (allowed, payload) = match delegated_guard.and(expert_guard.map(|_| ())) {
-                        Ok(_) => crate::tool_guard::preflight_payload(
-                            tool,
-                            &input,
-                            project_root,
-                            permission_mode,
-                        ),
+                        Ok(_) => match database.run_control_binding(run_id) {
+                            Ok(Some(binding)) => {
+                                let (allowed, mut payload) = crate::tool_guard::preflight_payload(
+                                    tool, &input, binding.permission.project_root.as_deref(), binding.permission.mode.as_str(),
+                                );
+                                payload["executionRoute"] = json!(binding.read_only_executor);
+                                payload["permissionSnapshotId"] = json!(binding.permission_snapshot_id);
+                                (allowed, payload)
+                            }
+                            Ok(None) => crate::tool_guard::preflight_payload(tool, &input, project_root, &persisted_permission_mode),
+                            Err(error) => (false, json!({"decision":"block","message":error})),
+                        },
                         Err(error) => (
                             false,
                             json!({
@@ -2924,15 +3391,22 @@ impl RuntimeHost {
                     } else {
                         "tool.preflight_blocked"
                     };
-                    let response = HostResponse::for_request(&envelope, response_type, payload);
+                    let response =
+                        HostResponse::for_request(&envelope, response_type, payload.clone());
                     if let Err(error) = write_protocol_message(&stdin, &response) {
                         runtime_host.handle_runtime_crash(error);
                         return;
                     }
+                    // Online Shadow feed: run the same preflight through the
+                    // observation-only kernel and persist a comparison record.
+                    // Independent legacy facts come from THIS real decision; the
+                    // kernel side is the shadow controller's own decision. No
+                    // side effects; failures never affect the legacy response.
+                    runtime_host.shadow_feed_preflight(run_id, tool, &envelope, allowed, &payload);
                     continue;
                 }
 
-                if envelope.kind == "request" && envelope.r#type == "tool.execute" {
+                if envelope.kind == "request" && matches!(envelope.r#type.as_str(), "tool.execute" | "tool.readonly_execute") {
                     if let Err((code, error)) =
                         runtime_host.ensure_active_envelope_identity(&envelope)
                     {
@@ -2961,11 +3435,18 @@ impl RuntimeHost {
                         .and_then(Value::as_str)
                         .unwrap_or_default();
                     let run_id = envelope.run_id.as_deref().unwrap_or_default();
-                    if let Err((code, error)) = runtime_host.ensure_runtime_tool_allowed(
+                    let readonly_execution = envelope.r#type == "tool.readonly_execute";
+                    let ingress = if readonly_execution { RuntimeToolIngress::Preflight } else { RuntimeToolIngress::Execute };
+                    let admission = runtime_host.ensure_runtime_tool_allowed(
                         run_id,
                         tool,
-                        RuntimeToolIngress::Execute,
-                    ) {
+                        ingress,
+                    ).and_then(|_| {
+                        if readonly_execution {
+                            require_rust_reader_binding(&database, &envelope).map(|_| ()).map_err(|error| ("resource_gateway.binding_rejected", error))
+                        } else { Ok(()) }
+                    });
+                    if let Err((code, error)) = admission {
                         let response = HostResponse::for_request(
                             &envelope,
                             "tool.execute_failed",
@@ -3067,24 +3548,27 @@ impl RuntimeHost {
                         Ok(None) => {}
                     }
                     if let Some(run_id) = envelope.run_id.as_deref() {
-                        if let Err(error) = database.enforce_child_tool_budget(run_id) {
-                            let response = HostResponse::for_request(
-                                &envelope,
-                                "tool.execute_failed",
-                                json!({
-                                    "isError": true,
-                                    "error": error,
-                                    "errorDetails": {
-                                        "code": "child_run.budget_exceeded",
-                                        "retryable": false,
-                                    }
-                                }),
-                            );
-                            if let Err(write_error) = write_protocol_message(&stdin, &response) {
-                                runtime_host.handle_runtime_crash(write_error);
-                                return;
+                        if runtime_host.enforce_count_budget_override {
+                            if let Err(error) = database.enforce_child_tool_budget(run_id) {
+                                let response = HostResponse::for_request(
+                                    &envelope,
+                                    "tool.execute_failed",
+                                    json!({
+                                        "isError": true,
+                                        "error": error,
+                                        "errorDetails": {
+                                            "code": "child_run.budget_exceeded",
+                                            "retryable": false,
+                                        }
+                                    }),
+                                );
+                                if let Err(write_error) = write_protocol_message(&stdin, &response)
+                                {
+                                    runtime_host.handle_runtime_crash(write_error);
+                                    return;
+                                }
+                                continue;
                             }
-                            continue;
                         }
                         if let Err(error) = database.enforce_digital_colleague_tool_budget(run_id) {
                             let response = HostResponse::for_request(
@@ -3113,7 +3597,27 @@ impl RuntimeHost {
                     let yuxi_client = yuxi_client.clone();
                     let attachments_dir = attachments_dir.clone();
                     let child_runtime_host = runtime_host.clone();
+                    let Some(tool_handler_permit) = runtime_host.try_acquire_tool_handler() else {
+                        let response = HostResponse::for_request(
+                            &envelope,
+                            "tool.execute_failed",
+                            json!({
+                                "isError": true,
+                                "error": "Fox Host is handling too many tool requests; retry after another request finishes.",
+                                "errorDetails": {
+                                    "code": "runtime.tool_handler_capacity_exceeded",
+                                    "retryable": true,
+                                }
+                            }),
+                        );
+                        if let Err(write_error) = write_protocol_message(&stdin, &response) {
+                            runtime_host.handle_runtime_crash(write_error);
+                            return;
+                        }
+                        continue;
+                    };
                     thread::spawn(move || {
+                        let _tool_handler_permit = tool_handler_permit;
                         let tool = envelope
                             .payload
                             .as_ref()
@@ -3279,6 +3783,18 @@ impl RuntimeHost {
                             if !applied {
                                 continue;
                             }
+                            if payload.get("type").and_then(Value::as_str)
+                                == Some("run.request_snapshot")
+                            {
+                                // Freeze Shadow only after the Runtime has
+                                // emitted the actual composed prompt identity.
+                                // This event precedes every Pi tool event.
+                                runtime_host.bootstrap_shadow_context_from_request_snapshot(
+                                    &run_id,
+                                    &conversation_id,
+                                    &payload,
+                                );
+                            }
                             if payload.get("type").and_then(Value::as_str).is_some_and(
                                 |event_type| {
                                     crate::database::WORK_EVENT_TYPES.contains(&event_type)
@@ -3291,6 +3807,11 @@ impl RuntimeHost {
                                     let _ = database.apply_work_event(&event);
                                 }
                             }
+                            runtime_host.report_shadow_result((|| {
+                                runtime_host
+                                    .shadow_reconciler()?
+                                    .observe_applied_event(&run_id, &payload)
+                            })());
                             let notification = RuntimeEventNotification {
                                 conversation_id,
                                 runtime_session_id: envelope.runtime_session_id.clone(),
@@ -3439,6 +3960,17 @@ impl RuntimeHost {
                     );
                 }
             }
+            // Always close/remove the live shadow context, including duplicate
+            // or failed crash-event persistence paths.
+            self.shadow_feed_terminal(
+                &run_id,
+                "failed",
+                crate::kernel::RunOutcome::Failed {
+                    code: "runtime.process_crashed".into(),
+                    message: message.clone(),
+                },
+                Default::default(),
+            );
             self.cancel_pending_approvals_for_run(&run_id);
         }
         if !should_recover {
@@ -3744,7 +4276,7 @@ fn parse_runtime_ready_payload(payload: &Value) -> Result<(String, Option<String
         .ok_or_else(|| "runtime handshake omitted the capability manifest".to_owned())?;
     let manifest = serde_json::from_value::<RuntimeCapabilityManifest>(capabilities.clone())
         .map_err(|error| format!("runtime capability manifest is invalid: {error}"))?;
-    manifest.validate()?;
+    protocol::validate_host_manifest(&manifest)?;
     Ok((runtime, runtime_version, capabilities))
 }
 
@@ -4210,46 +4742,99 @@ fn execute_child_run_tool_request(
                 )?;
                 Ok(json!({ "team": team }))
             }
-            "child_agent_list" => Ok(json!({ "agents": database.list_child_agents()? })),
+            "child_agent_list" => Ok(json!({
+                "agents": database.list_child_agents()?,
+                "experts": database.list_consultable_experts()?,
+            })),
             "child_run_start" => {
                 let objective = required_bounded_text(&input, "objective", 8_000)?;
                 let context = optional_bounded_text(&input, "context", 12_000)?;
-                let agent_id = input
-                    .get("agentId")
+                let mode = input
+                    .get("mode")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                    .unwrap_or("fox-general");
-                let model_max_output = database
-                    .get_model_service()?
-                    .ok_or_else(|| "model service is not configured".to_owned())?
-                    .max_output_tokens;
-                let budget = normalized_child_budget(input.get("budget"), model_max_output)?;
-                let (started, child_run, created) = database
-                .create_child_run(crate::database::CreateChildRunInput {
-                    parent_run_id: run_id,
-                    tool_call_id,
-                    worker_agent_id: agent_id,
-                    objective,
-                    context,
-                    budget: &budget,
-                    team_run_id: None,
-                    team_member_id: None,
-                    allowed_tools: None,
-                })
-                .map_err(|error| {
-                    format!(
-                        "child_run.start_rejected: the agent, depth, concurrency, or per-parent limit rejected this Child Run ({error})"
-                    )
-                })?;
-                if created || child_run.status == "queued" {
-                    runtime_host.start_child_runtime(
-                        started,
-                        child_run.clone(),
-                        conversation_id.to_owned(),
-                    )?;
+                    .unwrap_or("worker");
+                match mode {
+                    "worker" => {
+                        if input.get("expertId").is_some() {
+                            return Err(
+                                "child_run.invalid_identity: mode=worker does not accept expertId"
+                                    .to_owned(),
+                            );
+                        }
+                        let agent_id = input
+                            .get("agentId")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or("fox-general");
+                        let available_agents = database.list_child_agents()?;
+                        if !available_agents.iter().any(|agent| agent.id == agent_id) {
+                            let available = available_agents
+                                .iter()
+                                .map(|agent| format!("{} ({})", agent.id, agent.name))
+                                .collect::<Vec<_>>()
+                                .join("、");
+                            return Err(format!(
+                                "child_run.agent_not_found: 子 Agent 模板 '{agent_id}' 不存在。可用模板：{}。请先调用 child_agent_list，并使用 agents 中返回的精确 agentId。",
+                                if available.is_empty() { "无" } else { &available }
+                            ));
+                        }
+                        start_isolated_child_run(
+                            runtime_host,
+                            database,
+                            run_id,
+                            conversation_id,
+                            tool_call_id,
+                            agent_id,
+                            objective,
+                            context,
+                            input.get("budget"),
+                            "child_run.start_rejected",
+                        )
+                    }
+                    "expert_consultation" => {
+                        if input.get("agentId").is_some() {
+                            return Err(
+                                "child_run.invalid_identity: mode=expert_consultation does not accept agentId"
+                                    .to_owned(),
+                            );
+                        }
+                        let expert_id = required_bounded_text(&input, "expertId", 160)?;
+                        let available_experts = database.list_consultable_experts()?;
+                        if !available_experts
+                            .iter()
+                            .any(|expert| expert.id == expert_id)
+                        {
+                            let available = available_experts
+                                .iter()
+                                .map(|expert| format!("{} ({})", expert.id, expert.name))
+                                .collect::<Vec<_>>()
+                                .join("、");
+                            return Err(format!(
+                                "child_run.expert_not_found: 专家 '{expert_id}' 不存在或不可咨询。可用专家：{}。请先调用 child_agent_list，并使用 experts 中返回的精确 expertId。",
+                                if available.is_empty() { "无" } else { &available }
+                            ));
+                        }
+                        start_isolated_child_run(
+                            runtime_host,
+                            database,
+                            run_id,
+                            conversation_id,
+                            tool_call_id,
+                            expert_id,
+                            objective,
+                            context,
+                            input.get("budget"),
+                            "child_run.expert_consultation_rejected",
+                        )
+                    }
+                    _ => Err(
+                        "child_run.invalid_mode: mode must be worker or expert_consultation"
+                            .to_owned(),
+                    ),
                 }
-                Ok(json!({ "childRun": child_run, "created": created }))
             }
             "child_run_collect" => {
                 let requested = input
@@ -4406,6 +4991,51 @@ fn normalized_child_budget(
         max_output_tokens: max_output_tokens.min(max_total_tokens),
         max_tool_calls,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_isolated_child_run(
+    runtime_host: &RuntimeHost,
+    database: &Database,
+    parent_run_id: &str,
+    parent_conversation_id: &str,
+    tool_call_id: &str,
+    worker_agent_id: &str,
+    objective: &str,
+    context: &str,
+    budget_input: Option<&Value>,
+    rejection_code: &str,
+) -> Result<Value, String> {
+    let model_max_output = database
+        .get_model_service()?
+        .ok_or_else(|| "model service is not configured".to_owned())?
+        .max_output_tokens;
+    let budget = normalized_child_budget(budget_input, model_max_output)?;
+    let (started, child_run, created) = database
+        .create_child_run(crate::database::CreateChildRunInput {
+            parent_run_id,
+            tool_call_id,
+            worker_agent_id,
+            objective,
+            context,
+            budget: &budget,
+            team_run_id: None,
+            team_member_id: None,
+            allowed_tools: None,
+        })
+        .map_err(|error| {
+            format!(
+                "{rejection_code}: the agent, depth, concurrency, or per-parent limit rejected this isolated Child Run ({error})"
+            )
+        })?;
+    if created || child_run.status == "queued" {
+        runtime_host.start_child_runtime(
+            started,
+            child_run.clone(),
+            parent_conversation_id.to_owned(),
+        )?;
+    }
+    Ok(json!({ "childRun": child_run, "created": created }))
 }
 
 fn run_status_is_terminal(status: &str) -> bool {
@@ -5000,6 +5630,71 @@ fn ensure_expert_tool_allowed(
     Ok(())
 }
 
+fn permission_scope_hash(kind: &str, value: &[u8]) -> String {
+    format!("{kind}:sha256:{}", hex::encode(Sha256::digest(value)))
+}
+
+fn mcp_permission_scope(tool: &str, input: &Value) -> Option<String> {
+    if tool != "call_mcp_tool" {
+        return None;
+    }
+    let server_id = input.get("serverId")?.as_str()?.trim();
+    let remote_tool = input.get("tool")?.as_str()?.trim();
+    if server_id == crate::office::SERVER_ID {
+        // Office grants are bound to the exact request (files and operations),
+        // never to the entire connector's read/write command surface.
+        return Some(permission_scope_hash("office-request", input.to_string().as_bytes()));
+    }
+    if server_id.is_empty() || remote_tool.is_empty() {
+        return None;
+    }
+    Some(permission_scope_hash(
+        "mcp-tool",
+        format!("{server_id}\0{remote_tool}").as_bytes(),
+    ))
+}
+
+fn host_permission_scope(tool: &str, preview: &crate::tool_host::ToolPreview) -> Option<String> {
+    // Shell commands are deliberately one-shot. A command string is not a stable
+    // capability boundary and must never become a conversation-wide grant.
+    if tool == "run_command" {
+        return None;
+    }
+    Some(permission_scope_hash(
+        "host-target",
+        format!("{tool}\0{}", preview.target).as_bytes(),
+    ))
+}
+
+fn capability_permission_scope(tool: &str, input: &Value) -> Option<String> {
+    let encoded = serde_json::to_vec(input).ok()?;
+    Some(permission_scope_hash(
+        &format!("capability-{tool}"),
+        &encoded,
+    ))
+}
+
+fn attach_permission_scope(request: &mut Value, scope: Option<&str>) {
+    let Some(object) = request.as_object_mut() else {
+        return;
+    };
+    if let Some(scope) = scope {
+        object.insert(
+            "permissionScope".to_owned(),
+            Value::String(scope.to_owned()),
+        );
+        object.insert(
+            "availableDecisions".to_owned(),
+            json!(["allow_once", "allow_conversation", "deny"]),
+        );
+    } else {
+        object.insert(
+            "availableDecisions".to_owned(),
+            json!(["allow_once", "deny"]),
+        );
+    }
+}
+
 fn request_declarative_hook_approval(
     app: &AppHandle,
     database: &Database,
@@ -5023,6 +5718,7 @@ fn request_declarative_hook_approval(
             "summary": summary,
             "arguments": input,
             "policyReason": summary,
+            "availableDecisions": ["allow_once", "deny"],
         }),
     )?;
     if approval.status != "pending" {
@@ -5354,9 +6050,39 @@ fn execute_mcp_tool_request(
     if let Some(reason) = &hook_decision.blocked {
         return Err(format!("[hook.blocked] {reason}"));
     }
-    let requires_approval = hook_decision.requires_approval
-        || (tool == "call_mcp_tool"
-            && !database.conversation_tool_permission_granted(conversation_id, tool)?);
+    let managed_office = tool == "call_mcp_tool" && input["serverId"] == crate::office::SERVER_ID;
+    let office_access = if managed_office { database.conversation_project_access(conversation_id)? } else { None };
+    let permission_scope = if managed_office {
+        Some(permission_scope_hash("office-project-request", json!({"access":office_access,"input":input}).to_string().as_bytes()))
+    } else { mcp_permission_scope(tool, &input) };
+    let has_conversation_permission = match permission_scope.as_deref() {
+        Some(scope) => {
+            database.conversation_tool_permission_granted(conversation_id, tool, scope)?
+        }
+        None => false,
+    };
+    let office_needs_approval = if managed_office {
+        ensure_plan_approved_before_mutation(database, conversation_id, tool, &input)?;
+        let access = database.conversation_project_access(conversation_id)?;
+        let permission = database.conversation_permission_mode(conversation_id)?;
+        let remote_tool = input["tool"].as_str().ok_or("Office 工具名缺失")?;
+        if let Some(binding) = database.current_conversation_expert_binding(conversation_id)? {
+            let manifest = expert_package_manifest(&binding.package_snapshot)?;
+            if let Some(allowed) = manifest.get("officeTools").and_then(Value::as_array) {
+                if !allowed.iter().any(|value| value == remote_tool) {
+                    return Err("该专家未绑定此 Office 操作".to_owned());
+                }
+            }
+        }
+        let prepared = crate::office::prepare(remote_tool, &input["arguments"], access.as_ref().map(|(root,_)| root.as_str()), &permission)?;
+        prepared.mutates && permission != "allow" && !has_conversation_permission
+    } else { tool == "call_mcp_tool" && !has_conversation_permission };
+    let requires_approval = hook_decision.requires_approval || office_needs_approval;
+    let approval_permission_scope = if hook_decision.requires_approval {
+        None
+    } else {
+        permission_scope.as_deref()
+    };
     let tool_call = match create_fresh_host_tool_call(
         database,
         run_id,
@@ -5374,6 +6100,18 @@ fn execute_mcp_tool_request(
         HostToolCallExecution::Replay(response) => return Ok(response),
     };
     let outcome: Result<Value, String> = (|| {
+        if hook_decision.requires_approval && tool != "call_mcp_tool" {
+            request_declarative_hook_approval(
+                app,
+                database,
+                state,
+                run_id,
+                &tool_call,
+                tool,
+                &input,
+                hook_decision.approval_reason.as_deref(),
+            )?;
+        }
         let result = if tool == "list_mcp_tools" {
             let query = input
                 .get("query")
@@ -5445,10 +6183,7 @@ fn execute_mcp_tool_request(
                 .filter(|server| server.enabled)
                 .ok_or_else(|| "MCP Server 不存在或已停用".to_owned())?;
             if requires_approval {
-                let approval = database.create_approval(
-                &tool_call.id,
-                &format!("调用 MCP 工具 {} / {}", server.name, remote_tool),
-                &json!({
+                let mut request = json!({
                     "tool": "call_mcp_tool",
                     "title": "调用 MCP 工具",
                     "target": format!("{} / {}", server.name, remote_tool),
@@ -5457,8 +6192,13 @@ fn execute_mcp_tool_request(
                     "serverName": server.name,
                     "mcpTool": remote_tool,
                     "arguments": arguments,
-                }),
-            )?;
+                });
+                attach_permission_scope(&mut request, approval_permission_scope);
+                let approval = database.create_approval(
+                    &tool_call.id,
+                    &format!("调用 MCP 工具 {} / {}", server.name, remote_tool),
+                    &request,
+                )?;
                 let (sender, receiver) = mpsc::channel();
                 state
                     .lock()
@@ -5505,7 +6245,17 @@ fn execute_mcp_tool_request(
                 claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
             }
             let health_started = Instant::now();
-            match crate::mcp::call_tool(&server, remote_tool, &arguments) {
+            let call_result = if managed_office {
+                let access = database.conversation_project_access(conversation_id)?;
+                if access != office_access { return Err("Office 项目或权限在等待期间发生变化，请重新发起操作".into()); }
+                ensure_expert_tool_allowed(database, conversation_id, tool)?;
+                let server = database.get_mcp_server(crate::office::SERVER_ID)?.ok_or("Office 连接器不存在")?;
+                let permission = database.conversation_permission_mode(conversation_id)?;
+                crate::office::execute(&server, remote_tool, &arguments, access.as_ref().map(|(root,_)| root.as_str()), &permission)
+            } else {
+                crate::mcp::call_tool(&server, remote_tool, &arguments)
+            };
+            match call_result {
                 Ok(result) => {
                     let _ = database.record_mcp_health(
                         &server.id,
@@ -5531,7 +6281,8 @@ fn execute_mcp_tool_request(
             return Err(format!("unsupported MCP proxy tool: {tool}"));
         };
         Ok(json!({
-            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()) }],
+            "content": if managed_office { result.get("content").cloned().unwrap_or_else(|| json!([])) }
+                else { json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()) }]) },
             "details": result,
             "untrusted": true,
             "sourceType": "knowledge",
@@ -6235,7 +6986,7 @@ async fn execute_knowledge_tool_request(
                     let token = get_access_token(&service.base_url)
                         .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
                     yuxi_client
-                        .query_knowledge(&service.base_url, &token, &target.id, query)
+                        .query_knowledge_with_limits(&service.base_url, &token, &target.id, query, requested_limit, requested_max_chars)
                         .await?
                 };
                 results.push(json!({ "reference": target.as_json(), "result": value }));
@@ -6282,7 +7033,7 @@ async fn execute_knowledge_tool_request(
                 let token = get_access_token(&service.base_url)
                     .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
                 yuxi_client
-                    .knowledge_document_content(&service.base_url, &token, &target.id, document_id)
+                    .knowledge_document_text(&service.base_url, &token, &target.id, document_id)
                     .await?
             }
         }
@@ -6515,14 +7266,15 @@ fn knowledge_tool_target(value: &Value) -> Result<KnowledgeToolTarget, String> {
 
 fn structured_knowledge_error(message: &str) -> (&str, &str, bool) {
     let Some(rest) = message.strip_prefix('[') else {
-        return ("knowledge.tool_failed", message, true);
+        return ("knowledge.tool_failed", message, false);
     };
     let Some((code, detail)) = rest.split_once(']') else {
-        return ("knowledge.tool_failed", message, true);
+        return ("knowledge.tool_failed", message, false);
     };
     let retryable = matches!(
         code,
         "local_knowledge.retrieval_unavailable"
+            | "remote_knowledge.retrieval_unavailable"
             | "vector_index.unavailable"
             | "vector_index.operation_failed"
             | "vector_index.integrity_failed"
@@ -6608,6 +7360,15 @@ mod knowledge_tool_contract_tests {
         assert_eq!(code, "local_knowledge.retrieval_unavailable");
         assert!(retryable);
     }
+
+    #[test]
+    fn remote_knowledge_errors_retry_only_transient_failures() {
+        for code in ["authentication_required", "access_denied", "document_unavailable", "protocol_invalid"] {
+            assert!(!structured_knowledge_error(&format!("[remote_knowledge.{code}] failed")).2);
+        }
+        assert!(structured_knowledge_error("[remote_knowledge.retrieval_unavailable] transient").2);
+        assert!(!structured_knowledge_error("unsupported API").2);
+    }
 }
 
 fn bounded_knowledge_tool_result(result: Value) -> Value {
@@ -6648,6 +7409,19 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
     &value[..end]
 }
 
+fn require_rust_reader_binding(database: &Database, envelope: &RuntimeEnvelope) -> Result<fox_engine_protocol::RunControlBinding, String> {
+    let run_id = envelope.run_id.as_deref().ok_or("reader request has no runId")?;
+    let payload = envelope.payload.as_ref().ok_or("reader request has no payload")?;
+    let binding = database.run_control_binding(run_id)?.ok_or("reader request has no frozen control binding")?;
+    if envelope.conversation_id.as_deref() != Some(binding.conversation_id.as_str())
+        || binding.read_only_executor != fox_engine_protocol::ResourceExecutor::Rust
+        || !payload.get("tool").and_then(Value::as_str).is_some_and(crate::resource_gateway::is_reader)
+        || payload.get("permissionSnapshotId").and_then(Value::as_str) != Some(binding.permission_snapshot_id.as_str()) {
+        return Err("reader identity, executor or permission snapshot does not match the frozen Run".into());
+    }
+    Ok(binding)
+}
+
 fn execute_host_tool_request(
     app: &AppHandle,
     database: &Database,
@@ -6674,8 +7448,18 @@ fn execute_host_tool_request(
         .get("tool")
         .and_then(Value::as_str)
         .ok_or_else(|| "host tool request is missing tool".to_owned())?;
+    let cancellation = state.lock().map_err(|_| "runtime state lock is poisoned")?
+        .cancellation.tool_token(run_id, tool_call_id)?;
+    cancellation.check()?;
     ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    if envelope.r#type == "tool.readonly_execute" {
+        let binding = require_rust_reader_binding(database, envelope)?;
+        let call = create_fresh_host_tool_call(database, run_id, tool_call_id, tool, &input, "running", false)?;
+        if let HostToolCallExecution::Replay(response) = call { return Ok(response); }
+        let outcome = crate::resource_gateway::execute(&binding, tool, &input, &cancellation);
+        return finalize_host_tool_execution(database, run_id, tool_call_id, tool, &input, Vec::new(), outcome);
+    }
     if let Some(response) =
         inspect_existing_host_tool_call(database, run_id, tool_call_id, tool, &input)?
     {
@@ -6695,9 +7479,20 @@ fn execute_host_tool_request(
     }
 
     let prepared = crate::tool_host::prepare(tool, &input, &project_root)?;
+    let permission_scope = host_permission_scope(tool, prepared.preview());
+    let has_conversation_permission = match permission_scope.as_deref() {
+        Some(scope) => {
+            database.conversation_tool_permission_granted(conversation_id, tool, scope)?
+        }
+        None => false,
+    };
     let requires_approval = hook_decision.requires_approval
-        || ((permission_mode == "ask" || tool == "run_command")
-            && !database.conversation_tool_permission_granted(conversation_id, tool)?);
+        || ((permission_mode == "ask" || tool == "run_command") && !has_conversation_permission);
+    let approval_permission_scope = if hook_decision.requires_approval {
+        None
+    } else {
+        permission_scope.as_deref()
+    };
     let tool_call = match create_fresh_host_tool_call(
         database,
         run_id,
@@ -6717,8 +7512,9 @@ fn execute_host_tool_request(
 
     let outcome = (|| -> Result<Value, String> {
         if requires_approval {
-            let request =
+            let mut request =
                 serde_json::to_value(prepared.preview()).map_err(|error| error.to_string())?;
+            attach_permission_scope(&mut request, approval_permission_scope);
             let approval =
                 database.create_approval(&tool_call.id, &prepared.preview().summary, &request)?;
             let (sender, receiver) = mpsc::channel();
@@ -6767,7 +7563,7 @@ fn execute_host_tool_request(
             claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
         }
 
-        crate::tool_host::execute(prepared)
+        crate::tool_host::execute_with_cancellation(prepared, Some(&cancellation))
     })();
     finalize_host_tool_execution(
         database,
@@ -6822,18 +7618,27 @@ fn execute_capability_tool_request(
     ensure_plan_approved_before_mutation(database, conversation_id, tool, &input)?;
     let project_access = database.conversation_project_access(conversation_id)?;
     let project_root = project_access.as_ref().map(|(root, _)| root.as_str());
-    let permission_mode = project_access
-        .as_ref()
-        .map(|(_, mode)| mode.as_str())
-        .unwrap_or("read_only");
+    let persisted_permission_mode = database.conversation_permission_mode(conversation_id)?;
+    let permission_mode = persisted_permission_mode.as_str();
     let prepared = capability_tools::prepare(tool, &input, project_root)?;
     if permission_mode == "read_only" && prepared.blocked_in_read_only() {
         return Err(format!("tool {tool} is blocked in read-only mode"));
     }
 
+    let permission_scope = capability_permission_scope(tool, &input);
+    let has_conversation_permission = match permission_scope.as_deref() {
+        Some(scope) => {
+            database.conversation_tool_permission_granted(conversation_id, tool, scope)?
+        }
+        None => false,
+    };
     let requires_approval = hook_decision.requires_approval
-        || (prepared.requires_approval()
-            && !database.conversation_tool_permission_granted(conversation_id, tool)?);
+        || (prepared.requires_approval() && !has_conversation_permission);
+    let approval_permission_scope = if hook_decision.requires_approval {
+        None
+    } else {
+        permission_scope.as_deref()
+    };
     let tool_call = match create_fresh_host_tool_call(
         database,
         run_id,
@@ -6853,8 +7658,9 @@ fn execute_capability_tool_request(
 
     let outcome = (|| -> Result<Value, String> {
         if requires_approval {
-            let request =
+            let mut request =
                 serde_json::to_value(prepared.preview()).map_err(|error| error.to_string())?;
+            attach_permission_scope(&mut request, approval_permission_scope);
             let approval =
                 database.create_approval(&tool_call.id, &prepared.preview().summary, &request)?;
             let (sender, receiver) = mpsc::channel();
@@ -6923,7 +7729,9 @@ fn ensure_plan_approved_before_mutation(
     input: &Value,
 ) -> Result<(), String> {
     let mutates_project = matches!(tool, "write_file" | "edit_file" | "run_command")
-        || (tool == "format_code" && input.get("mode").and_then(Value::as_str) == Some("write"));
+        || (tool == "format_code" && input.get("mode").and_then(Value::as_str) == Some("write"))
+        || (tool == "call_mcp_tool" && input["serverId"] == crate::office::SERVER_ID
+            && matches!(input["tool"].as_str(), Some("office_create" | "office_edit" | "office_merge" | "office_render")));
     if !mutates_project {
         return Ok(());
     }
@@ -7019,6 +7827,8 @@ mod attachment_tests {
         inspect_existing_host_tool_call, intersect_mcp_server_scopes, intersect_optional_scopes,
         node_dependency_is_available, normalized_child_budget, parse_runtime_ready_payload,
         pending_approval_ids_for_run, redact_diagnostic_line, runtime_expert_package,
+        runtime_tool_event_succeeded, shadow_legacy_tool_decision, shadow_permission_snapshot_id,
+        shadow_preflight_input, shadow_preflight_tool_call_id, shadow_prompt_config_hash,
         should_attempt_recovery, structured_runtime_error, validate_envelope_identity_scope,
         validate_runtime_tool_authority, HostToolCallExecution, PendingApproval,
         RuntimeToolIngress,
@@ -7029,7 +7839,8 @@ mod attachment_tests {
         KnowledgeReference,
     };
     use crate::runtime_host::protocol::{
-        RuntimeCapabilityManifest, RuntimeToolCapability, CAPABILITY_MANIFEST_VERSION,
+        RuntimeCapabilityManifest, RuntimeEnvelope, RuntimeToolCapability,
+        CAPABILITY_MANIFEST_VERSION,
     };
     use flate2::{write::DeflateEncoder, Compression};
     use serde_json::json;
@@ -7041,6 +7852,117 @@ mod attachment_tests {
         sync::mpsc,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn shadow_preflight_uses_payload_tool_call_identity_and_approved_input() {
+        let envelope: RuntimeEnvelope = serde_json::from_value(json!({
+            "protocol": "fox-agent-runtime",
+            "version": 1,
+            "kind": "request",
+            "id": "transport-request-id",
+            "type": "tool.preflight",
+            "requestId": "different-response-correlation-id",
+            "conversationId": "conversation-1",
+            "runtimeSessionId": "session-1",
+            "runId": "run-1",
+            "timestamp": "2026-09-07T00:00:00Z",
+            "payload": {
+                "toolCallId": "pi-tool-call-id",
+                "tool": "ls",
+                "input": {}
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            shadow_preflight_tool_call_id(&envelope).unwrap(),
+            "pi-tool-call-id"
+        );
+        let mut missing_payload_id = envelope.clone();
+        missing_payload_id
+            .payload
+            .as_mut()
+            .and_then(|payload| payload.as_object_mut())
+            .unwrap()
+            .remove("toolCallId");
+        assert!(shadow_preflight_tool_call_id(&missing_payload_id).is_err());
+        assert_eq!(
+            shadow_preflight_input(
+                &envelope,
+                true,
+                &json!({"decision":"allow","input":{"path":"."}}),
+            ),
+            json!({"path":"."})
+        );
+        assert_eq!(
+            shadow_preflight_input(
+                &envelope,
+                false,
+                &json!({"decision":"block","input":{"path":"ignored"}}),
+            ),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn shadow_prompt_hash_tracks_runtime_prompt_identity_only() {
+        let snapshot = json!({
+            "type": "run.request_snapshot",
+            "stablePromptHash": "stable-a",
+            "contextHash": "context-a",
+            "promptDefinitionId": "fox-runtime",
+            "promptVersion": 7,
+            "promptContentHash": "content-a",
+            "contextSchemaHash": "schema-a",
+            "promptCacheIdentity": "cache-a",
+            "executionProfile": {"id":"durable_v2"},
+            "toolCatalogHash": "tools-a",
+            "promptDiagnostics": {"tokens": 123}
+        });
+        let base = shadow_prompt_config_hash(&snapshot).unwrap();
+        let mut diagnostics_only = snapshot.clone();
+        diagnostics_only["promptDiagnostics"] = json!({"tokens": 999});
+        assert_eq!(base, shadow_prompt_config_hash(&diagnostics_only).unwrap());
+        let mut prompt_changed = snapshot.clone();
+        prompt_changed["promptContentHash"] = json!("content-b");
+        assert_ne!(base, shadow_prompt_config_hash(&prompt_changed).unwrap());
+        let mut stable_changed = snapshot;
+        stable_changed["stablePromptHash"] = json!("stable-b");
+        assert_ne!(base, shadow_prompt_config_hash(&stable_changed).unwrap());
+        assert!(shadow_prompt_config_hash(&json!({"type":"run.request_snapshot"})).is_err());
+    }
+
+    #[test]
+    fn shadow_permission_hash_is_content_addressed_and_event_errors_fail() {
+        assert_eq!(
+            shadow_permission_snapshot_id("ask", "D:/project|ReadWrite"),
+            shadow_permission_snapshot_id("ask", "D:/project|ReadWrite")
+        );
+        assert_ne!(
+            shadow_permission_snapshot_id("ask", "D:/project|ReadWrite"),
+            shadow_permission_snapshot_id("read-only", "D:/project|ReadWrite")
+        );
+        assert!(runtime_tool_event_succeeded(
+            &json!({"type":"tool.completed","isError":false})
+        ));
+        assert!(!runtime_tool_event_succeeded(
+            &json!({"type":"tool.completed","isError":true})
+        ));
+        assert!(!runtime_tool_event_succeeded(
+            &json!({"type":"tool.failed"})
+        ));
+        assert_eq!(
+            shadow_legacy_tool_decision("write_file", "host", true).unwrap(),
+            "approval"
+        );
+        assert_eq!(
+            shadow_legacy_tool_decision("write_file", "runtime", false).unwrap(),
+            "deny"
+        );
+        assert_eq!(
+            shadow_legacy_tool_decision("graph_readonly_run", "runtime", false).unwrap(),
+            "allow"
+        );
+    }
 
     fn authority_manifest(tool_names: &[&str]) -> RuntimeCapabilityManifest {
         RuntimeCapabilityManifest {
@@ -8636,6 +9558,14 @@ mod attachment_tests {
         )
         .unwrap_err()
         .contains("plan.approval_required"));
+        assert!(ensure_plan_approved_before_mutation(
+            &database, &conversation.id, "call_mcp_tool",
+            &json!({"serverId":"fox-office","tool":"office_create","arguments":{"output":"report.docx"}}),
+        ).is_err());
+        assert!(ensure_plan_approved_before_mutation(
+            &database, &conversation.id, "call_mcp_tool",
+            &json!({"serverId":"fox-office","tool":"office_read","arguments":{"file":"report.docx"}}),
+        ).is_ok());
         assert!(ensure_plan_approved_before_mutation(
             &database,
             &conversation.id,

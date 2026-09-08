@@ -1,25 +1,4 @@
-import { filterKnowledgePickerItems, knowledgePickerStatus } from './knowledge-picker-state'
-import { lazy, Suspense, Profiler, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactNode } from 'react'
-
-// Profile-build only: forward React Profiler commits to the telemetry collector.
-// The dynamic import sits behind a compile-time constant that is literal-false in
-// normal releases, so Rollup DCEs it and no profiling code ships to production.
-let profilingOnRender:
-  | ((id: string, phase: 'mount' | 'update' | 'nested-update', actualDuration: number, baseDuration: number, startTime: number, commitTime: number) => void)
-  | null = null
-if (typeof __FOX_PROFILING__ !== 'undefined' && __FOX_PROFILING__) {
-  void import('@/features/profiling/telemetry').then((module) => {
-    profilingOnRender = module.profilingCollector.onRender
-  })
-}
-
-function recordRegionRender(id: string, phase: 'mount' | 'update' | 'nested-update', actualDuration: number, baseDuration: number, startTime: number, commitTime: number) {
-  if (typeof performance === 'undefined') return
-  if (import.meta.env.DEV) {
-    performance.mark(`fox.${id}.${phase}`, { detail: { actualDuration, baseDuration } })
-  }
-  profilingOnRender?.(id, phase, actualDuration, baseDuration, startTime, commitTime)
-}
+import { lazy, memo, Profiler, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactNode } from 'react'
 import {
   Activity,
   Archive,
@@ -28,6 +7,7 @@ import {
   ArrowUp,
   Bell,
   BookOpen,
+  BookCopy,
   Bot,
   Brain,
   Check,
@@ -37,6 +17,7 @@ import {
   CircleStop,
   ClipboardList,
   Copy,
+  Eraser,
   ExternalLink,
   File,
   FileEdit,
@@ -60,6 +41,7 @@ import {
   Minus,
   Minimize2,
   MoreHorizontal,
+  PackagePlus,
   PanelLeft,
   PanelRight,
   Pause,
@@ -68,7 +50,6 @@ import {
   PinOff,
   Play,
   Plus,
-  Puzzle,
   RotateCcw,
   Search,
   Server,
@@ -83,16 +64,18 @@ import {
   ThumbsDown,
   ThumbsUp,
   UserRound,
+  UserRoundCheck,
+  WandSparkles,
   Wrench,
   X
 } from 'lucide-react'
 import { createContext, useContext } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { flushSync } from 'react-dom'
-import { toast } from 'sonner'
 import { BorderBeam } from 'border-beam'
 import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable, knowledgeReferenceFromLegacyBinding, knowledgeReferenceKey } from '@/features/conversations/api/desktop-client'
 import { normalizeProjectPermission, selectProjectRoot, validPickedProjectFolder } from './project-access-dialog-state'
+import { filterKnowledgePickerItems, knowledgePickerStatus } from './knowledge-picker-state'
 import { Button } from '@/components/ui/button'
 import { ShinyText } from '@/components/effects/shiny-text'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -135,7 +118,8 @@ import {
   ConversationAutoScroll,
   ConversationContent,
   ConversationEmptyState,
-  ConversationScrollButton
+  ConversationScrollButton,
+  ConversationViewportState
 } from '@/components/ai-elements/conversation'
 import {
   Message,
@@ -209,7 +193,7 @@ import {
   WebPreviewNavigation,
   WebPreviewNavigationButton
 } from '@/components/ai-elements/web-preview'
-import { Agent as AIAgent, AgentContent as AIAgentContent, AgentHeader as AIAgentHeader } from '@/components/ai-elements/agent'
+import { Agent as AIAgent, AgentContent as AIAgentContent } from '@/components/ai-elements/agent'
 import {
   PromptInput,
   PromptInputActionAddAttachments,
@@ -235,7 +219,8 @@ import { useYuxiUser } from '@/features/settings/use-yuxi-user'
 import { useModelService } from '@/features/settings/use-model-service'
 import { useYuxiModels } from '@/features/settings/use-yuxi-models'
 import { useAgents } from '@/features/agents/use-agents'
-import { chatSelectableAgents, normalizeAgentClassification } from '@/features/agents/agent-classification'
+import { chatSelectableAgents, normalizeAgentClassification, resolveActiveChatAgent } from '@/features/agents/agent-classification'
+import { conversationModelOverride, yuxiModelOverrideAllowed } from './model-selection'
 import { resolveExpertKnowledgeDeclaration } from '@/features/agents/expert-knowledge'
 import { useKnowledgeBases } from '@/features/knowledge/use-knowledge'
 import { latestMessage, runIsActive, useDesktopConversation } from '@/features/conversations/hooks/use-desktop-conversation'
@@ -245,19 +230,19 @@ import type { RuntimeQuestion, RuntimeQuestionRequest } from '@/features/convers
 import type { AgentRecord, AppNotificationRecord, ApprovalDecision, ApprovalRecord, ArtifactActionResponse, ArtifactApplication, ArtifactRecord, ArtifactInspectResponse, AttachmentRecord, ChildRunRecord, ConversationDetail, ConversationMessage, ConversationSummary, DesktopErrorDetails, GlobalSearchRecord, KnowledgeBaseRecord, KnowledgeBindingRecord, KnowledgeReference, ModelServiceRecord, NotificationPreferencesRecord, ProjectFileActionResponse, ProjectFileEntry, ProjectFilePreview, ProjectRecord, RunEventRecord, TaskEvidenceRecord, ToolCallRecord, YuxiModelRecord, YuxiUserRecord } from '@/features/conversations/model/types'
 import {
   FOX_IN_APP_NOTIFICATION_EVENT,
+  FOX_NOTIFICATIONS_CHANGED_EVENT,
   FOX_NOTIFICATION_PREFERENCES_CHANGED_EVENT,
+  notify as toast,
   normalizeNotificationSoundId,
+  notificationIsVisibleInContext,
   playNotificationSound,
+  runtimeEventRefreshesNotifications,
   type InAppNotificationEventDetail,
 } from '@/features/notifications'
 import type { LocalKnowledgeBaseDto } from '@/features/conversations/api/desktop-client'
 import type { KnowledgeSourceLocator, NavigateWorkspace, WorkspaceView } from '@/features/workspace/types'
 import { captureManagementReturnRoutes, managementExitRoute, SETTINGS_WORKSPACE_VIEWS, type ManagementReturnRoutes } from '@/features/workspace/management-navigation'
 import { WorkspaceShell } from '@/features/workspace/workspace-shell'
-// Import from the lightweight sidebar module directly, NOT the barrel: the
-// local-knowledge barrel re-exports local-knowledge-pages (which statically
-// imports message-response/streamdown), and a value import here would pull the
-// heavy markdown renderer into the cold-start entry. Type-only imports are safe.
 import { LocalKnowledgeSidebarNavigation } from '@/features/local-knowledge/local-knowledge-sidebar'
 import { idleMascots, mascotAt, mascotLibrary, workingMascots } from './mascot-library'
 import { GoalProgress } from './components/GoalProgress'
@@ -267,7 +252,8 @@ import { useGoalProgress, type GoalProgressData } from './hooks/use-goal-progres
 import type { MessageResponseProps } from '@/components/ai-elements/message-response'
 import { normalizeAssistantMarkdown } from '@/features/conversations/model/assistant-presentation'
 import { UserProfileDialog, useUserProfile } from '@/features/profile/user-profile'
-import { childRunCounts, childRunDuration, childRunIsActive, childRunStatusLabel, isWebToolCall, normalizeBrowserUrl, webActivitySummary } from './sidebar-model'
+import { childRunIsActive, childRunStatusLabel, formatDurationMs, isWebToolCall, latestConversationContextUsage, normalizeBrowserUrl, webActivitySummary, type ConversationUsage } from './sidebar-model'
+import { EMPTY_RUNTIME_ARTIFACTS, EMPTY_RUNTIME_EVENTS, groupRuntimeRecords } from './runtime-timeline-performance'
 
 const OnboardingPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.OnboardingPage })))
 const MessageResponse = lazy(() => import('@/components/ai-elements/message-response').then((module) => ({ default: module.MessageResponse })))
@@ -322,6 +308,52 @@ const layoutStorage = {
   seenChanges: 'fox.layout.seenChanges'
 } as const
 
+// In the profile build, lazily load the telemetry collector and forward React
+// Profiler commits to it. The dynamic import sits behind a literal-false flag in
+// normal releases, so Rollup DCEs the whole branch and no telemetry chunk or
+// runtime cost ships to production.
+type RegionRenderHandler = (
+  id: string,
+  phase: 'mount' | 'update' | 'nested-update',
+  actualDuration: number,
+  baseDuration: number,
+  startTime: number,
+  commitTime: number,
+) => void
+let profilingOnRender: RegionRenderHandler | null = null
+if (typeof __FOX_PROFILING__ !== 'undefined' && __FOX_PROFILING__) {
+  void import('@/features/profiling/telemetry').then((module) => {
+    profilingOnRender = module.profilingCollector.onRender
+  })
+}
+
+function recordRegionRender(
+  id: string,
+  phase: 'mount' | 'update' | 'nested-update',
+  actualDuration: number,
+  baseDuration: number,
+  startTime: number,
+  commitTime: number,
+) {
+  if (typeof performance === 'undefined') return
+  if (import.meta.env.DEV) {
+    performance.mark(`fox.${id}.${phase}`, { detail: { actualDuration, baseDuration } })
+  }
+  profilingOnRender?.(id, phase, actualDuration, baseDuration, startTime, commitTime)
+}
+
+function useStableCallback<TArgs extends unknown[], TResult>(callback: (...args: TArgs) => TResult) {
+  const callbackRef = useRef(callback)
+  useLayoutEffect(() => {
+    callbackRef.current = callback
+  }, [callback])
+  return useCallback((...args: TArgs) => callbackRef.current(...args), [])
+}
+
+const EMPTY_CONVERSATION_MESSAGES: ConversationMessage[] = []
+const EMPTY_CONVERSATION_ATTACHMENTS: AttachmentRecord[] = []
+const EMPTY_RUNTIME_APPROVALS: ApprovalRecord[] = []
+
 const citationUrls = [
   'https://github.com/xingyuv/kun/blob/develop/LICENSE',
   'https://github.com/xingyuv/kun/blob/develop/CLA.md'
@@ -345,6 +377,10 @@ interface OpenFileTab {
   name: string
   artifactId: string | null
 }
+interface ChildAgentSelection {
+  run: ChildRunRecord
+  avatarIndex: number
+}
 type ChatState = 'complete' | 'running' | 'question' | 'approval' | 'error' | 'denied'
 type AssistantMode = 'assistant' | 'knowledge'
 const CONVERSATION_FORK_EVENT = 'fox:conversation-fork'
@@ -353,40 +389,9 @@ function requestConversationFork(messageId: string) {
   window.dispatchEvent(new CustomEvent(CONVERSATION_FORK_EVENT, { detail: { messageId } }))
 }
 
-interface ConversationUsage {
-  inputTokens: number
-  outputTokens: number
-  cacheReadTokens: number
-  cacheWriteTokens: number
-  totalTokens: number
-}
-
 function isConfirmationQuestion(question: RuntimeQuestion) {
   if (question.options.length !== 2 || question.multiSelect) return false
   return question.options.every((option) => /确认|取消|同意|拒绝|继续|停止|是|否|yes|no/i.test(option.label))
-}
-
-function yuxiModelOverrideAllowed(agent?: AgentRecord | null) {
-  if (!agent || agent.runtimeType !== 'yuxi') return false
-  const items = agent.configurableItems
-  if (!items || typeof items !== 'object' || Array.isArray(items)) return false
-  const model = (items as Record<string, unknown>).model
-  return Boolean(model && typeof model === 'object' && (model as Record<string, unknown>).kind === 'llm')
-}
-function latestConversationUsage(events: RunEventRecord[]): ConversationUsage {
-  const usage = [...events].reverse().find((item) => item.eventType === 'usage.updated')?.event
-  const inputTokens = typeof usage?.inputTokens === 'number' ? usage.inputTokens : 0
-  const outputTokens = typeof usage?.outputTokens === 'number' ? usage.outputTokens : 0
-  const cacheReadTokens = typeof usage?.cacheReadTokens === 'number' ? usage.cacheReadTokens : 0
-  const cacheWriteTokens = typeof usage?.cacheWriteTokens === 'number' ? usage.cacheWriteTokens : 0
-  const reportedTotal = typeof usage?.totalTokens === 'number' ? usage.totalTokens : 0
-  return {
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheWriteTokens,
-    totalTokens: Math.max(reportedTotal, inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens),
-  }
 }
 
 function compactTokenCount(value: number) {
@@ -507,6 +512,7 @@ function globalSearchKindLabel(kind: GlobalSearchRecord['kind']): string {
 
 const NOTIFICATION_TOAST_VISIBLE_MS = 5000
 const NOTIFICATION_TOAST_EXIT_MS = 280
+const NOTIFICATION_PIN_STORAGE_KEY = 'fox.notification.manually-pinned-ids'
 
 interface NotificationToastEntry {
   instanceId: string
@@ -518,14 +524,59 @@ function notificationFingerprint(item: AppNotificationRecord): string {
   return JSON.stringify([item.kind, item.severity, item.title, item.body, item.progress, item.status])
 }
 
-function NotificationCenter({ onNavigate }: { onNavigate: NavigateWorkspace }) {
-  const [open, setOpen] = useState(false)
+function notificationDay(item: AppNotificationRecord): { key: string; label: string } {
+  const date = new Date(item.updatedAt)
+  const today = new Date()
+  const yesterday = new Date(today)
+  yesterday.setDate(today.getDate() - 1)
+  const key = `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
+  const isSameDay = (value: Date) => date.getFullYear() === value.getFullYear()
+    && date.getMonth() === value.getMonth()
+    && date.getDate() === value.getDate()
+  if (isSameDay(today)) return { key, label: '今天' }
+  if (isSameDay(yesterday)) return { key, label: '昨天' }
+  return { key, label: date.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'short' }) }
+}
+
+function loadManuallyPinnedNotificationIds(): Set<string> {
+  if (typeof window === 'undefined') return new Set()
+  try {
+    const value = JSON.parse(window.localStorage.getItem(NOTIFICATION_PIN_STORAGE_KEY) ?? '[]')
+    return new Set(Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function isAutomaticPriorityNotification(item: AppNotificationRecord): boolean {
+  return item.severity === 'high' || item.kind === 'approval' || item.kind === 'question' || item.kind === 'progress'
+}
+
+function NotificationCenter({
+  onNavigate,
+  open,
+  onOpenChange,
+  showTrigger,
+  activeView,
+  activeEntityId,
+  activeConversationId,
+}: {
+  onNavigate: NavigateWorkspace
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  showTrigger: boolean
+  activeView: WorkspaceView
+  activeEntityId?: string | null
+  activeConversationId?: string | null
+}) {
   const [unreadOnly, setUnreadOnly] = useState(false)
   const [items, setItems] = useState<AppNotificationRecord[]>([])
   const [preferences, setPreferences] = useState<NotificationPreferencesRecord | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [toastItems, setToastItems] = useState<NotificationToastEntry[]>([])
+  const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [manuallyPinnedIds, setManuallyPinnedIds] = useState<Set<string>>(loadManuallyPinnedNotificationIds)
   const observedNotifications = useRef<Map<string, string> | null>(null)
   const toastTimers = useRef(new Map<string, { leave: number; remove: number }>())
 
@@ -559,6 +610,15 @@ function NotificationCenter({ onNavigate }: { onNavigate: NavigateWorkspace }) {
     const remove = window.setTimeout(() => removeToast(instanceId), NOTIFICATION_TOAST_VISIBLE_MS + NOTIFICATION_TOAST_EXIT_MS)
     toastTimers.current.set(instanceId, { leave, remove })
   }, [removeToast])
+
+  const clearToastQueue = useCallback(() => {
+    for (const timers of toastTimers.current.values()) {
+      window.clearTimeout(timers.leave)
+      window.clearTimeout(timers.remove)
+    }
+    toastTimers.current.clear()
+    setToastItems([])
+  }, [])
 
   useEffect(() => {
     const handlePreview = (event: Event) => {
@@ -595,9 +655,23 @@ function NotificationCenter({ onNavigate }: { onNavigate: NavigateWorkspace }) {
         desktopClient.listAppNotifications(unreadOnly, 100),
         desktopClient.getNotificationPreferences(),
       ])
-      const nextObserved = new Map(nextItems.map((item) => [item.id, notificationFingerprint(item)]))
+      const visibleUnreadIds = new Set(nextItems
+        .filter((item) => item.readAt == null && notificationIsVisibleInContext(item, {
+          appVisible: document.visibilityState === 'visible',
+          appFocused: document.hasFocus(),
+          activeView,
+          activeEntityId,
+          activeConversationId,
+        }))
+        .map((item) => item.id))
+      if (visibleUnreadIds.size) {
+        await Promise.allSettled([...visibleUnreadIds].map((id) => desktopClient.setAppNotificationRead(id, true)))
+      }
+      const seenAt = Date.now()
+      const presentedItems = nextItems.map((item) => visibleUnreadIds.has(item.id) ? { ...item, readAt: seenAt } : item)
+      const nextObserved = new Map(presentedItems.map((item) => [item.id, notificationFingerprint(item)]))
       if (observedNotifications.current) {
-        const changed = nextItems.filter((item) => item.readAt == null && observedNotifications.current?.get(item.id) !== notificationFingerprint(item))
+        const changed = presentedItems.filter((item) => item.readAt == null && observedNotifications.current?.get(item.id) !== notificationFingerprint(item))
         const shouldAlert = changed.filter((item) => !(nextPreferences.quietProgress && item.kind === 'progress'))
         shouldAlert.slice(0, 3).forEach((item) => enqueueToast(item))
         if (shouldAlert.length && nextPreferences.sound) playNotificationSound(normalizeNotificationSoundId(nextPreferences.soundId))
@@ -614,7 +688,7 @@ function NotificationCenter({ onNavigate }: { onNavigate: NavigateWorkspace }) {
       } else {
         observedNotifications.current = nextObserved
       }
-      setItems(nextItems)
+      setItems(presentedItems)
       setPreferences(nextPreferences)
       setError(null)
     } catch (cause) {
@@ -622,7 +696,13 @@ function NotificationCenter({ onNavigate }: { onNavigate: NavigateWorkspace }) {
     } finally {
       if (!quiet) setLoading(false)
     }
-  }, [enqueueToast, unreadOnly])
+  }, [activeConversationId, activeEntityId, activeView, enqueueToast, unreadOnly])
+
+  useEffect(() => {
+    const refresh = () => void load(true)
+    window.addEventListener(FOX_NOTIFICATIONS_CHANGED_EVENT, refresh)
+    return () => window.removeEventListener(FOX_NOTIFICATIONS_CHANGED_EVENT, refresh)
+  }, [load])
 
   useEffect(() => {
     if (!desktopRuntimeAvailable) return
@@ -631,40 +711,163 @@ function NotificationCenter({ onNavigate }: { onNavigate: NavigateWorkspace }) {
     return () => window.clearInterval(timer)
   }, [load, open])
 
+  useEffect(() => {
+    if (!desktopRuntimeAvailable) return
+    let disposed = false
+    let refreshTimer: number | null = null
+    const unlisten: Array<() => void> = []
+    const scheduleRefresh = () => {
+      if (disposed) return
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer)
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null
+        void load(true)
+      }, 80)
+    }
+    const visibilityRefresh = () => {
+      if (document.visibilityState === 'visible') scheduleRefresh()
+    }
+    window.addEventListener('focus', scheduleRefresh)
+    document.addEventListener('visibilitychange', visibilityRefresh)
+    void Promise.all([
+      desktopClient.listenRuntimeEvents((notification) => {
+        if (runtimeEventRefreshesNotifications(notification.event.type)) scheduleRefresh()
+      }),
+      desktopClient.listenWorkEvents(scheduleRefresh),
+      desktopClient.listenApprovalRequests(scheduleRefresh),
+      desktopClient.listenApprovalResolved(scheduleRefresh),
+    ]).then((subscriptions) => {
+      if (disposed) subscriptions.forEach((unsubscribe) => unsubscribe())
+      else unlisten.push(...subscriptions)
+    }).catch(() => undefined)
+    return () => {
+      disposed = true
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer)
+      window.removeEventListener('focus', scheduleRefresh)
+      document.removeEventListener('visibilitychange', visibilityRefresh)
+      unlisten.forEach((unsubscribe) => unsubscribe())
+    }
+  }, [load])
+
   const unreadCount = items.filter((item) => item.readAt == null).length
+  const hasReadNotifications = items.some((item) => item.readAt != null)
+  const priorityItems = useMemo(() => items.filter((item) => manuallyPinnedIds.has(item.id) || isAutomaticPriorityNotification(item)), [items, manuallyPinnedIds])
+  const datedItems = useMemo(() => items.filter((item) => !manuallyPinnedIds.has(item.id) && !isAutomaticPriorityNotification(item)), [items, manuallyPinnedIds])
+  const notificationGroups = useMemo(() => datedItems.reduce<Array<{ key: string; label: string; items: AppNotificationRecord[] }>>((groups, item) => {
+    const day = notificationDay(item)
+    const current = groups.at(-1)
+    if (current?.key === day.key) current.items.push(item)
+    else groups.push({ ...day, items: [item] })
+    return groups
+  }, []), [datedItems])
+  const toggleManualPin = useCallback((id: string) => {
+    setManuallyPinnedIds((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      window.localStorage.setItem(NOTIFICATION_PIN_STORAGE_KEY, JSON.stringify([...next]))
+      return next
+    })
+  }, [])
+  const inspectItem = async (item: AppNotificationRecord) => {
+    if (item.readAt == null) await desktopClient.setAppNotificationRead(item.id, true)
+    setExpandedId((current) => current === item.id ? null : item.id)
+    await load(true)
+  }
   const openItem = async (item: AppNotificationRecord) => {
     if (item.readAt == null) await desktopClient.setAppNotificationRead(item.id, true)
     if (item.workspaceView) {
       onNavigate(item.workspaceView as WorkspaceView, item.entityId ?? undefined)
-      setOpen(false)
+      onOpenChange(false)
     }
     await load(true)
   }
-  const markAllRead = async () => { await desktopClient.markAllAppNotificationsRead(); await load(true) }
-  const clearRead = async () => { await desktopClient.clearReadAppNotifications(); await load(true) }
+  const openNotificationFile = async (item: AppNotificationRecord, reveal: boolean) => {
+    const path = typeof item.action.path === 'string' ? item.action.path : null
+    if (!path) return
+    try {
+      await desktopClient.openDownloadedFile(path, reveal)
+    } catch (cause) {
+      toast.error(reveal ? '无法打开所在文件夹' : '无法打开文件', { description: desktopErrorDetails(cause).message })
+    }
+  }
+  const markAllRead = async () => {
+    try {
+      await desktopClient.markAllAppNotificationsRead()
+      clearToastQueue()
+      await load(true)
+    } catch (cause) {
+      toast.error('全部标记已读失败', { description: desktopErrorDetails(cause).message })
+    }
+  }
+  const clearRead = async () => {
+    try {
+      await desktopClient.clearReadAppNotifications()
+      clearToastQueue()
+      setExpandedId(null)
+      await load(true)
+    } catch (cause) {
+      toast.error('清除已读通知失败', { description: desktopErrorDetails(cause).message })
+    }
+  }
+  const renderNotificationItem = (item: AppNotificationRecord) => {
+    const expanded = expandedId === item.id
+    const manuallyPinned = manuallyPinnedIds.has(item.id)
+    const automaticPriority = isAutomaticPriorityNotification(item)
+    const downloadedFile = item.action.type === 'downloaded_file' && typeof item.action.path === 'string'
+    const canOpenDirectly = downloadedFile && item.action.canOpenDirectly === true
+    return <article key={item.id} className={`fox-notification-entry ${expanded ? 'is-expanded' : ''}`}>
+      <div className={`fox-notification-item fox-sidebar-tree-row is-${item.kind} ${item.readAt == null ? 'is-unread' : ''} ${expanded ? 'is-active' : ''} ${manuallyPinned ? 'is-manually-pinned' : ''}`}>
+        <button type="button" className="fox-notification-item-main" onClick={() => void inspectItem(item)} aria-expanded={expanded}>
+          <span className="fox-notification-dot" />
+          <span className="fox-notification-copy"><span className="fox-notification-line"><strong>{item.title}</strong><time>{new Date(item.updatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time></span><small>{item.body}</small>{item.progress != null && item.kind === 'progress' && <i><b style={{ width: `${item.progress}%` }} /></i>}</span>
+        </button>
+        {!automaticPriority && <button type="button" className="fox-notification-pin" aria-label={manuallyPinned ? `取消置顶 ${item.title}` : `置顶 ${item.title}`} aria-pressed={manuallyPinned} title={manuallyPinned ? '取消置顶' : '置顶'} onClick={() => toggleManualPin(item.id)}>{manuallyPinned ? <PinOff /> : <Pin />}</button>}
+      </div>
+      {expanded && <div className="fox-notification-details">
+        <pre>{item.body}</pre>
+        <footer><span>{item.sourceType} · {item.status}</span><div>{canOpenDirectly && <Button variant="outline" size="sm" onClick={() => void openNotificationFile(item, false)}><ExternalLink />打开文件</Button>}{downloadedFile && <Button variant="outline" size="sm" onClick={() => void openNotificationFile(item, true)}><FolderOpen />打开所在文件夹</Button>}{item.workspaceView && <Button variant="outline" size="sm" onClick={() => void openItem(item)}><ExternalLink />打开相关页面</Button>}</div></footer>
+      </div>}
+    </article>
+  }
   return <>
-    <Popover open={open} onOpenChange={setOpen}>
-    <PopoverTrigger asChild>
-      <button type="button" className="fox-notification-trigger" aria-label={unreadCount ? `${unreadCount} 条未读通知` : '通知中心'} title="通知中心">
+    {showTrigger && <button type="button" className={`fox-notification-trigger ${open ? 'is-active' : ''}`} aria-label={unreadCount ? `${unreadCount} 条未读通知` : '通知中心'} aria-pressed={open} title="通知中心" onClick={() => onOpenChange(!open)}>
         <Bell />{preferences?.badge !== false && unreadCount > 0 && <span aria-hidden="true" />}
-      </button>
-    </PopoverTrigger>
-    <PopoverContent align="end" sideOffset={6} className="fox-notification-popover">
-      <header>
-        <div className="fox-notification-heading"><h2>通知中心</h2><p>{unreadCount ? `${unreadCount} 条未读` : '全部已读'}</p></div>
-        <div className="fox-notification-toolbar"><button type="button" className={!unreadOnly ? 'is-active' : ''} onClick={() => setUnreadOnly(false)}>全部</button><button type="button" className={unreadOnly ? 'is-active' : ''} onClick={() => setUnreadOnly(true)}>未读</button><Button variant="ghost" size="sm" onClick={() => void markAllRead()} disabled={!unreadCount}>全部已读</Button><Button variant="ghost" size="sm" onClick={() => void clearRead()}>清理已读</Button><Button className="fox-notification-refresh" variant="ghost" size="icon-sm" onClick={() => void load()} disabled={loading} aria-label="刷新通知" title="刷新通知"><RotateCcw className={loading ? 'animate-spin' : undefined} /></Button></div>
+      </button>}
+    {open && <section className="fox-notification-sidebar fox-sidebar-section" aria-label="通知中心">
+      <header className="fox-section-head">
+        <span>通知中心</span>
+        <span>
+          <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="fox-notification-clear-read" aria-label="清除已读通知" disabled={!hasReadNotifications} onClick={() => void clearRead()}><Eraser /></Button></TooltipTrigger><TooltipContent side="right"><p>清除已读</p></TooltipContent></Tooltip>
+          <DropdownMenu>
+          <DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-notification-more" aria-label="管理通知"><MoreHorizontal /></Button></DropdownMenuTrigger>
+          <DropdownMenuContent align="end" side="right" sideOffset={6} className="fox-notification-menu">
+            <DropdownMenuItem onSelect={() => setUnreadOnly((value) => !value)}>{unreadOnly ? <Bell /> : <CircleDot />}{unreadOnly ? '显示全部通知' : '仅显示未读'}</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void load()}><RotateCcw />刷新通知</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem disabled={!unreadCount} onSelect={() => void markAllRead()}><Check />全部已读</DropdownMenuItem>
+          </DropdownMenuContent>
+          </DropdownMenu>
+        </span>
       </header>
       <div className="fox-notification-list" aria-live="polite">
         {error && <div className="fox-notification-error" role="alert"><AlertTriangle />{error}</div>}
         {loading && !items.length && <div className="fox-notification-state"><LoaderCircle className="animate-spin" />正在同步任务状态</div>}
         {!loading && !items.length && <div className="fox-notification-state"><Bell />没有通知</div>}
-        {items.map((item) => <button type="button" key={item.id} className={`fox-notification-item is-${item.kind} ${item.readAt == null ? 'is-unread' : ''}`} onClick={() => void openItem(item)}>
-          <span className="fox-notification-dot" />
-          <span className="fox-notification-copy"><span className="fox-notification-line"><time>{new Date(item.updatedAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time><strong>{item.title}</strong></span><small>{item.body}</small>{item.progress != null && item.kind === 'progress' && <i><b style={{ width: `${item.progress}%` }} /></i>}</span>
-        </button>)}
+        {items.length > 0 && <section className="fox-notification-day is-priority" aria-labelledby="notification-priority-title">
+          <div className="fox-notification-day-title" id="notification-priority-title">置顶</div>
+          <div className="fox-notification-day-items">
+            {priorityItems.length ? priorityItems.map(renderNotificationItem) : <p className="fox-notification-priority-empty">暂无置顶通知</p>}
+          </div>
+        </section>}
+        {notificationGroups.map((group) => <section className="fox-notification-day" key={group.key} aria-labelledby={`notification-day-${group.key}`}>
+          <div className="fox-notification-day-title" id={`notification-day-${group.key}`}>{group.label}</div>
+          <div className="fox-notification-day-items">
+            {group.items.map(renderNotificationItem)}
+          </div>
+        </section>)}
       </div>
-    </PopoverContent>
-    </Popover>
+    </section>}
     <div className="fox-notification-toast-host" aria-live="polite" aria-atomic="false">
       {toastItems.map((item) => <article key={item.instanceId} className={`fox-notification-toast is-${item.notification.kind} ${item.leaving ? 'is-leaving' : ''}`} role="status">
         <span className="fox-notification-toast-icon"><Bell /></span>
@@ -676,7 +879,7 @@ function NotificationCenter({ onNavigate }: { onNavigate: NavigateWorkspace }) {
   </>
 }
 
-function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSettings, onAbout, onToggleSidebar, onZoom, onNavigate }: {
+function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSettings, onAbout, onToggleSidebar, onZoom }: {
   leftSidebarCollapsed: boolean
   onNewChat: () => void
   onOpenProject: () => void
@@ -684,7 +887,6 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
   onAbout: () => void
   onToggleSidebar: () => void
   onZoom: (delta: number) => void
-  onNavigate: NavigateWorkspace
 }) {
   const [maximized, setMaximized] = useState(false)
 
@@ -761,7 +963,6 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
           </WindowMenu>
         </nav>
       </div>
-      <div className="fox-window-actions"><NotificationCenter onNavigate={onNavigate} /></div>
       <div className="fox-window-controls">
         <button type="button" aria-label="最小化" onClick={() => void windowAction('minimize')}><Minus /></button>
         <button type="button" aria-label={maximized ? '还原窗口' : '最大化'} title={maximized ? '还原窗口' : '最大化'} onClick={() => void windowAction('maximize')}>{maximized ? <Copy /> : <Square />}</button>
@@ -770,6 +971,8 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
     </header>
   )
 }
+
+const MemoizedWindowTitlebar = memo(WindowTitlebar)
 
 function WindowMenu({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -799,6 +1002,7 @@ function Sidebar({
   onDeleteProject,
   onNavigate,
   onExitManagement,
+  onExpand,
   onTheme,
   onSettings,
   runtimeConversations,
@@ -831,6 +1035,7 @@ function Sidebar({
   onDeleteProject: (project: { name: string; root: string; items: Array<{ id: string; title: string }> }) => void
   onNavigate: NavigateWorkspace
   onExitManagement: () => void
+  onExpand: () => void
   onTheme: () => void
   onSettings: () => void
   runtimeConversations?: ConversationSummary[]
@@ -849,41 +1054,63 @@ function Sidebar({
   const [searchOpen, setSearchOpen] = useState(false)
   const [search, setSearch] = useState('')
   const [searchResults, setSearchResults] = useState<GlobalSearchRecord[] | null>(null)
+  const [searchError, setSearchError] = useState<string | null>(null)
   const [lifecycleView, setLifecycleView] = useState<'active' | 'archived' | 'trash'>('active')
+  const [pendingSidebarSection, setPendingSidebarSection] = useState<'projects' | 'conversations' | null>(null)
+  const [collapsedSection, setCollapsedSection] = useState<'projects' | 'conversations' | null>(null)
+  const [collapsedProjectKey, setCollapsedProjectKey] = useState<string | null>(null)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const [profileDialogOpen, setProfileDialogOpen] = useState(false)
-  const searchButtonRef = useRef<HTMLButtonElement | null>(null)
-  const searchPanelRef = useRef<HTMLLabelElement | null>(null)
-  const searchResultsRef = useRef<HTMLDivElement | null>(null)
+  const [notificationsOpen, setNotificationsOpen] = useState(false)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
+  const projectSectionRef = useRef<HTMLElement | null>(null)
+  const conversationSectionRef = useRef<HTMLElement | null>(null)
   const normalizedSearch = search.trim().toLocaleLowerCase()
-  useEffect(() => {
-    if (!searchOpen) return
-    const closeSearchOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target as Node | null
-      if (!target || searchButtonRef.current?.contains(target) || searchPanelRef.current?.contains(target) || searchResultsRef.current?.contains(target)) return
-      setSearchOpen(false)
+  const changeSearchOpen = useCallback((open: boolean) => {
+    setSearchOpen(open)
+    if (open) {
+      window.requestAnimationFrame(() => searchInputRef.current?.focus())
+      return
     }
-    document.addEventListener('pointerdown', closeSearchOnOutsidePointer)
-    return () => document.removeEventListener('pointerdown', closeSearchOnOutsidePointer)
-  }, [searchOpen])
+    setSearch('')
+    setSearchResults(null)
+    setSearchError(null)
+  }, [])
   useEffect(() => {
-    if (!normalizedSearch || !onGlobalSearch || lifecycleView !== 'active') {
+    const openSearchFromShortcut = (event: globalThis.KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLocaleLowerCase() !== 'k') return
+      event.preventDefault()
+      changeSearchOpen(true)
+    }
+    window.addEventListener('keydown', openSearchFromShortcut)
+    return () => window.removeEventListener('keydown', openSearchFromShortcut)
+  }, [changeSearchOpen])
+  useEffect(() => {
+    if (!normalizedSearch) {
       setSearchResults(null)
+      setSearchError(null)
+      return
+    }
+    if (!onGlobalSearch) {
+      setSearchResults([])
+      setSearchError('当前环境暂不支持全局搜索')
       return
     }
     setSearchResults(null)
+    setSearchError(null)
     let cancelled = false
     const timer = window.setTimeout(() => {
       void onGlobalSearch(search.trim()).then((records) => {
         if (!cancelled) setSearchResults(records)
+      }).catch((cause) => {
+        if (!cancelled) setSearchError(cause instanceof Error ? cause.message : '全局搜索失败，请稍后重试')
       })
     }, 180)
     return () => {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [lifecycleView, normalizedSearch, onGlobalSearch, search])
+  }, [normalizedSearch, onGlobalSearch, search])
   const lifecycleConversations = lifecycleView === 'archived'
     ? archivedConversations
     : lifecycleView === 'trash'
@@ -900,9 +1127,7 @@ function Sidebar({
   const regularConversationItems = lifecycleView === 'active'
     ? conversationItems.filter((item) => !item.projectRoot)
     : conversationItems
-  const visibleProjectConversations = projectConversationItems.filter((item) =>
-    !normalizedSearch || item.title.toLocaleLowerCase().includes(normalizedSearch) || item.projectRoot?.toLocaleLowerCase().includes(normalizedSearch)
-  )
+  const visibleProjectConversations = projectConversationItems
   const projectGroups = Array.from(visibleProjectConversations.reduce((groups, item) => {
     const projectRoot = item.projectRoot?.trim()
     if (!projectRoot) return groups
@@ -917,15 +1142,11 @@ function Sidebar({
     })
     return groups
   }, new Map<string, { key: string; root: string; name: string; items: typeof visibleProjectConversations }>()).values())
-  const visibleConversations = regularConversationItems.filter((item) =>
-    !normalizedSearch || item.title.toLocaleLowerCase().includes(normalizedSearch)
-  )
-  const toggleSearch = () => {
-    setSearchOpen((open) => {
-      const next = !open
-      if (next) window.requestAnimationFrame(() => searchInputRef.current?.focus())
-      return next
-    })
+  const visibleConversations = regularConversationItems
+  const toggleSearch = () => changeSearchOpen(!searchOpen)
+  const changeNotificationsOpen = (open: boolean) => {
+    setNotificationsOpen(open)
+    if (open) changeSearchOpen(false)
   }
   const groupedSearchResults = Array.from((searchResults ?? []).reduce((groups, item) => {
     const group = groups.get(item.kind) ?? []
@@ -934,8 +1155,7 @@ function Sidebar({
     return groups
   }, new Map<GlobalSearchRecord['kind'], GlobalSearchRecord[]>()).entries())
   const openGlobalSearchResult = (item: GlobalSearchRecord) => {
-    setSearchOpen(false)
-    setSearch('')
+    changeSearchOpen(false)
     if (['conversation', 'artifact', 'task'].includes(item.kind) && item.entityId) {
       onOpenConversation(item.entityId)
       return
@@ -945,6 +1165,20 @@ function Sidebar({
   const setAllProjectsOpen = (open: boolean) => {
     setProjectOpen(Object.fromEntries(projectGroups.map((project) => [project.key, open])))
   }
+  const revealSidebarSection = (section: 'projects' | 'conversations') => {
+    setLifecycleView('active')
+    setPendingSidebarSection(section)
+    onExpand()
+  }
+  useEffect(() => {
+    if (collapsed || !pendingSidebarSection) return
+    const frame = window.requestAnimationFrame(() => {
+      const target = pendingSidebarSection === 'projects' ? projectSectionRef.current : conversationSectionRef.current
+      target?.scrollIntoView({ block: 'start' })
+      setPendingSidebarSection(null)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [collapsed, pendingSidebarSection])
   const { profile, save: saveProfile } = useUserProfile({ name: yuxiUser?.username ?? 'Hury', avatar: yuxiUser?.avatar })
   const profileName = profile.name
   const profileInitial = profile.initial
@@ -963,12 +1197,16 @@ function Sidebar({
     : knowledgeDetailViews.includes(activeView)
       ? 'knowledge'
       : 'chat'
+  const showSidebarUtilities = sidebarMode === 'chat' || sidebarMode === 'local-knowledge'
+  useEffect(() => {
+    if (!showSidebarUtilities) setNotificationsOpen(false)
+  }, [showSidebarUtilities])
   const agentSection = activeDocumentId ?? 'home'
   const agentContextItems = [
     { section: 'home', label: '首页', icon: House },
     { section: 'conversations', label: '对话任务', icon: ClipboardList },
     { section: 'memory', label: '记忆', icon: Brain },
-    { section: 'skills', label: 'Skills', icon: Puzzle },
+    { section: 'skills', label: '技能', icon: WandSparkles },
     { section: 'tools', label: '工具', icon: Wrench },
   ]
   const activeSettingsView: WorkspaceView = activeView === 'onboarding'
@@ -980,60 +1218,74 @@ function Sidebar({
       : activeView === 'skills' || activeView === 'mcp'
         ? 'settings-extensions'
         : activeView
-  const contextItems = sidebarMode === 'settings'
-    ? [
+  const settingsContextGroups = [
+    {
+      label: '通用',
+      items: [
         { view: 'settings' as const, label: '应用', icon: Settings },
-        { view: 'settings-models' as const, label: '模型供应商', icon: Server },
-        { view: 'settings-ai' as const, label: '模型偏好', icon: Bot },
-        { view: 'settings-yuxi' as const, label: '知识库服务', icon: Globe2 },
-        { view: 'settings-projects' as const, label: '项目与权限', icon: ShieldCheck },
         { view: 'settings-conversation' as const, label: '输入与对话', icon: MessageCircleMore },
-        { view: 'settings-usage' as const, label: '使用统计', icon: Activity },
+      ],
+    },
+    {
+      label: '模型与知识',
+      items: [
+        { view: 'settings-models' as const, label: '模型供应商', icon: Server },
+        { view: 'settings-ai' as const, label: '助手设置', icon: Bot },
+        { view: 'settings-yuxi' as const, label: '知识库服务', icon: Globe2 },
+      ],
+    },
+    {
+      label: '权限与数据',
+      items: [
+        { view: 'settings-projects' as const, label: '项目与权限', icon: ShieldCheck },
         { view: 'settings-extensions' as const, label: '扩展', icon: Wrench },
+        { view: 'settings-usage' as const, label: '使用统计', icon: Activity },
         { view: 'maintenance' as const, label: '数据与诊断', icon: ShieldCheck },
-        { view: 'settings-about' as const, label: '关于', icon: CircleHelp },
-      ]
-    : [
-        { view: 'knowledge-detail' as const, label: '文件与详情', icon: BookOpen },
-        { view: 'knowledge-graph' as const, label: '知识图谱', icon: Globe2 },
-      ]
+      ],
+    },
+    {
+      label: '关于',
+      items: [
+        { view: 'settings-about' as const, label: '关于 Fox', icon: CircleHelp },
+      ],
+    },
+  ]
+  const contextItems = [
+    { view: 'knowledge-detail' as const, label: '文件与详情', icon: BookOpen },
+    { view: 'knowledge-graph' as const, label: '知识图谱', icon: Globe2 },
+  ]
 
   return (
-    <aside className={`fox-sidebar ${collapsed ? 'is-collapsed' : ''} ${!['chat', 'local-knowledge'].includes(sidebarMode) ? 'is-management' : ''}`}>
+    <aside className={`fox-sidebar ${collapsed ? 'is-collapsed' : ''} ${!['chat', 'local-knowledge'].includes(sidebarMode) ? 'is-management' : ''} ${notificationsOpen ? 'is-notifications' : ''}`}>
       <div className="fox-sidebar-title-safe">
-        {!collapsed && !['chat', 'local-knowledge'].includes(sidebarMode) ? <button type="button" className="fox-management-back" onClick={sidebarMode === 'agent' ? () => onNavigate('agents') : onExitManagement}><ArrowLeft size={16} /><span>返回</span></button> : <span className="fox-window-safe" />}
+        {collapsed && (sidebarMode === 'chat' || sidebarMode === 'local-knowledge') ? <Tooltip>
+          <TooltipTrigger asChild><button type="button" className="fox-sidebar-mode-switch" aria-label={assistantMode === 'assistant' ? '切换到知识' : '切换到助手'} onClick={() => onModeChange(assistantMode === 'assistant' ? 'knowledge' : 'assistant')}>{assistantMode === 'assistant' ? <BookCopy /> : <Sparkles />}</button></TooltipTrigger>
+          <TooltipContent side="right"><p>{assistantMode === 'assistant' ? '切换到知识' : '切换到助手'}</p></TooltipContent>
+        </Tooltip> : !collapsed && !['chat', 'local-knowledge'].includes(sidebarMode) ? <button type="button" className="fox-management-back" onClick={sidebarMode === 'agent' ? () => onNavigate('agents') : onExitManagement}><ArrowLeft size={16} /><span>返回</span></button> : <span className="fox-window-safe" />}
       </div>
 
-      {(sidebarMode === 'chat' || sidebarMode === 'local-knowledge') && !collapsed && (
-        <Tabs value={assistantMode} onValueChange={(value) => onModeChange(value as AssistantMode)} className="fox-mode-tabs">
-          <TabsList>
-            <TabsTrigger value="assistant"><Sparkles />助手</TabsTrigger>
-            <TabsTrigger value="knowledge"><Library />知识</TabsTrigger>
-          </TabsList>
-        </Tabs>
+      {showSidebarUtilities && !collapsed && (
+        <div className="fox-sidebar-mode-row">
+          <Tabs value={assistantMode} onValueChange={(value) => onModeChange(value as AssistantMode)} className="fox-mode-tabs">
+            <TabsList>
+              <TabsTrigger value="assistant"><Sparkles />助手</TabsTrigger>
+              <TabsTrigger value="knowledge"><BookCopy />知识</TabsTrigger>
+            </TabsList>
+          </Tabs>
+          <div className="fox-sidebar-mode-actions"><button type="button" className={`fox-sidebar-search-trigger ${searchOpen ? 'is-active' : ''}`} onClick={toggleSearch} aria-label="全局搜索" title="搜索（Ctrl K）"><Search /></button></div>
+        </div>
       )}
 
       {sidebarMode === 'chat' ? <><div className="fox-sidebar-primary">
-        <button className={`fox-sidebar-command is-emphasis ${newChatActive ? 'is-active' : ''}`} onClick={onNewChat}><MessageSquarePlus size={16} /><span>新建对话</span><kbd>Ctrl N</kbd></button>
-        <button ref={searchButtonRef} className={`fox-sidebar-command ${searchOpen ? 'is-active' : ''}`} onClick={toggleSearch}><Search size={16} /><span>搜索</span><kbd>Ctrl K</kbd></button>
-        {!collapsed && searchOpen && <label ref={searchPanelRef} className="fox-sidebar-search fox-sidebar-global-search">
-          <Search size={14} />
-          <input ref={searchInputRef} value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索对话、项目、知识库和任务" />
-          {search && <button type="button" onClick={() => setSearch('')} aria-label="清除"><X size={13} /></button>}
-        </label>}
-        {!collapsed && searchOpen && normalizedSearch && <div ref={searchResultsRef} className="fox-sidebar-global-results" role="region" aria-label="全局搜索结果">
-          {searchResults === null && <div className="fox-sidebar-global-state"><LoaderCircle className="animate-spin" />正在搜索</div>}
-          {searchResults?.length === 0 && <div className="fox-sidebar-global-state"><Search />没有匹配结果</div>}
-          {groupedSearchResults.map(([resultKind, records]) => <section key={resultKind}><header>{globalSearchKindLabel(resultKind)}<span>{records.length}</span></header>{records.map((item) => <button type="button" key={`${item.kind}:${item.id}`} onClick={() => openGlobalSearchResult(item)}><strong>{item.title}</strong><small>{item.subtitle}</small><time>{new Date(item.updatedAt).toLocaleDateString('zh-CN')}</time></button>)}</section>)}
-        </div>}
-        <button className={`fox-sidebar-command ${agentViews.includes(activeView) ? 'is-active' : ''}`} onClick={() => onNavigate('agents')}><Bot size={16} /><span>专家</span></button>
-        <button className={`fox-sidebar-command ${knowledgeViews.includes(activeView) ? 'is-active' : ''}`} onClick={() => onNavigate('knowledge')}><Library size={16} /><span>远程知识库</span></button>
-        <button className={`fox-sidebar-command ${activeView === 'plugins' ? 'is-active' : ''}`} onClick={() => onNavigate('plugins')}><Puzzle size={16} /><span>插件</span></button>
+        <button className={`fox-sidebar-command is-emphasis ${newChatActive ? 'is-active' : ''}`} onClick={onNewChat}><MessageSquarePlus size={18} /><span>新建对话</span><kbd>Ctrl N</kbd></button>
+        <button className={`fox-sidebar-command starts-destination-group ${agentViews.includes(activeView) ? 'is-active' : ''}`} onClick={() => onNavigate('agents')}><UserRoundCheck size={18} /><span>专家</span></button>
+        <button className={`fox-sidebar-command ${knowledgeViews.includes(activeView) ? 'is-active' : ''}`} onClick={() => onNavigate('knowledge')}><Library size={18} /><span>远程知识库</span></button>
+        <button className={`fox-sidebar-command ${activeView === 'plugins' ? 'is-active' : ''}`} onClick={() => onNavigate('plugins')}><PackagePlus size={18} /><span>插件</span></button>
       </div>
 
-      {!collapsed && (
+      {!notificationsOpen && !collapsed && (
         <ScrollArea className="fox-sidebar-scroll">
-          {lifecycleView === 'active' && <section className="fox-sidebar-section">
+          {lifecycleView === 'active' && <section ref={projectSectionRef} className="fox-sidebar-section">
             <div className="fox-section-head"><span>项目</span><span><IconButton label="添加项目" onClick={onAddProject}><Plus size={14} /></IconButton><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="更多项目操作"><MoreHorizontal size={14} /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" side="right" sideOffset={5} className="fox-project-menu"><DropdownMenuItem onSelect={onAddProject}><Plus />添加项目</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem disabled={!projectGroups.length} onSelect={() => setAllProjectsOpen(true)}><ChevronDown />全部展开</DropdownMenuItem><DropdownMenuItem disabled={!projectGroups.length} onSelect={() => setAllProjectsOpen(false)}><ChevronRight />全部收起</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => onNavigate('settings-projects')}><ShieldCheck />项目与权限</DropdownMenuItem></DropdownMenuContent></DropdownMenu></span></div>
             {projectGroups.length ? projectGroups.map((project) => {
               const open = projectOpen[project.key] ?? true
@@ -1099,7 +1351,7 @@ function Sidebar({
             }) : <p className="fox-project-empty">暂无项目对话</p>}
           </section>}
 
-          <section className="fox-sidebar-section fox-conversation-section">
+          <section ref={conversationSectionRef} className="fox-sidebar-section fox-conversation-section">
             <div className="fox-section-head">
               <span>{lifecycleView === 'archived' ? '已归档' : lifecycleView === 'trash' ? '回收站' : '对话'}</span>
               <span>
@@ -1166,11 +1418,13 @@ function Sidebar({
             </div>
           </section>
         </ScrollArea>
-      )}</> : sidebarMode === 'local-knowledge' ? <LocalKnowledgeSidebarNavigation collapsed={collapsed} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} navigate={onNavigate} onCreate={() => { if (onCreateLocalKnowledge) onCreateLocalKnowledge(); else onNavigate('local-knowledge') }} /> : <>
+      )}</> : sidebarMode === 'local-knowledge' ? <LocalKnowledgeSidebarNavigation collapsed={collapsed} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} navigate={onNavigate} hideLibrary={notificationsOpen} onCreate={() => { if (onCreateLocalKnowledge) onCreateLocalKnowledge(); else onNavigate('local-knowledge') }} /> : !notificationsOpen ? <>
         <div className={`fox-sidebar-primary fox-context-sidebar-nav ${sidebarMode === 'settings' ? 'is-settings' : ''}`}>
           {sidebarMode === 'agent'
             ? agentContextItems.map(({ section, label, icon: Icon }) => <button key={section} className={`fox-sidebar-command ${agentSection === section ? 'is-active' : ''}`} onClick={() => onNavigate('agent-detail', activeEntityId ?? undefined, { documentId: section })}><Icon size={16} /><span>{label}</span></button>)
-            : contextItems.map(({ view, label, icon: Icon }) => <button key={view} className={`fox-sidebar-command ${(sidebarMode === 'settings' ? activeSettingsView : activeView) === view ? 'is-active' : ''}`} onClick={() => onNavigate(view, view === 'knowledge-detail' || view === 'knowledge-graph' ? activeEntityId ?? undefined : undefined)}><Icon size={16} /><span>{label}</span></button>)}
+            : sidebarMode === 'settings'
+              ? settingsContextGroups.map((group) => <section className="fox-context-sidebar-group" key={group.label}>{!collapsed && <span className="fox-context-sidebar-group-label">{group.label}</span>}{group.items.map(({ view, label, icon: Icon }) => <button key={view} className={`fox-sidebar-command ${activeSettingsView === view ? 'is-active' : ''}`} onClick={() => onNavigate(view)}><Icon size={18} /><span>{label}</span></button>)}</section>)
+              : contextItems.map(({ view, label, icon: Icon }) => <button key={view} className={`fox-sidebar-command ${activeView === view ? 'is-active' : ''}`} onClick={() => onNavigate(view, activeEntityId ?? undefined)}><Icon size={18} /><span>{label}</span></button>)}
         </div>
         {!collapsed && sidebarMode === 'knowledge' && (
           <KnowledgeResourceExplorer
@@ -1179,9 +1433,92 @@ function Sidebar({
             navigate={onNavigate}
           />
         )}
-      </>}
+      </> : null}
+
+      <NotificationCenter
+        onNavigate={onNavigate}
+        open={notificationsOpen}
+        onOpenChange={changeNotificationsOpen}
+        showTrigger={showSidebarUtilities && !collapsed}
+        activeView={activeView}
+        activeEntityId={activeEntityId}
+        activeConversationId={activeConversationId}
+      />
 
       <div className="fox-sidebar-spacer" />
+      {!notificationsOpen && collapsed && sidebarMode === 'chat' && <div className="fox-sidebar-collapsed-sections" aria-label="项目与对话">
+        <div
+          className="fox-sidebar-collapsed-entry"
+          onMouseEnter={() => setCollapsedSection('projects')}
+          onMouseLeave={() => { setCollapsedSection(null); setCollapsedProjectKey(null) }}
+        >
+          <button
+            type="button"
+            className={collapsedSection === 'projects' ? 'is-active' : undefined}
+            aria-label={`展开项目列表，共 ${projectGroups.length} 个项目`}
+            title={`项目 · ${projectGroups.length}`}
+            onFocus={() => setCollapsedSection('projects')}
+            onClick={() => revealSidebarSection('projects')}
+          >
+            <Folders />
+            <span className="fox-sidebar-collapsed-count">{projectGroups.length}</span>
+          </button>
+          {collapsedSection === 'projects' && <div className="fox-sidebar-collapsed-popover fox-sidebar-project-popover" role="menu" aria-label="项目列表">
+            <header>项目</header>
+            {projectGroups.length ? projectGroups.map((project) => <div
+              className="fox-sidebar-hover-project"
+              key={project.key}
+              onMouseEnter={() => setCollapsedProjectKey(project.key)}
+              onFocus={() => setCollapsedProjectKey(project.key)}
+            >
+              <button
+                type="button"
+                role="menuitem"
+                title={project.root}
+                onClick={() => { const firstConversation = project.items[0]; if (firstConversation) onOpenConversation(firstConversation.id) }}
+              >
+                <FolderOpen />
+                <span>{project.name}</span>
+                <small>{project.items.length}</small>
+                <ChevronRight className="fox-sidebar-hover-project-chevron" />
+              </button>
+              {collapsedProjectKey === project.key && <div className="fox-sidebar-collapsed-popover fox-sidebar-conversations-popover" role="menu" aria-label={`${project.name} 对话`}>
+                <header>{project.name}</header>
+                {project.items.map((item) => <button type="button" role="menuitem" key={item.id} className={item.active ? 'is-active' : undefined} onClick={() => onOpenConversation(item.id)} title={item.title}>
+                  <MessageCircleMore />
+                  <span>{item.title}</span>
+                  {item.time && <time>{item.time}</time>}
+                </button>)}
+              </div>}
+            </div>) : <p className="fox-sidebar-collapsed-empty">暂无项目</p>}
+          </div>}
+        </div>
+        <div
+          className="fox-sidebar-collapsed-entry"
+          onMouseEnter={() => setCollapsedSection('conversations')}
+          onMouseLeave={() => setCollapsedSection(null)}
+        >
+          <button
+            type="button"
+            className={collapsedSection === 'conversations' ? 'is-active' : undefined}
+            aria-label={`展开对话列表，共 ${visibleConversations.length} 个对话`}
+            title={`对话 · ${visibleConversations.length}`}
+            onFocus={() => setCollapsedSection('conversations')}
+            onClick={() => revealSidebarSection('conversations')}
+          >
+            <MessageCircleMore />
+            <span className="fox-sidebar-collapsed-count">{visibleConversations.length}</span>
+          </button>
+          {collapsedSection === 'conversations' && <div className="fox-sidebar-collapsed-popover fox-sidebar-conversations-list-popover" role="menu" aria-label="对话列表">
+            <header>对话</header>
+            {visibleConversations.length ? visibleConversations.map((item) => <button type="button" role="menuitem" key={item.id} className={item.active ? 'is-active' : undefined} onClick={() => onOpenConversation(item.id)} title={item.title}>
+              <MessageCircleMore />
+              <span>{item.title}</span>
+              {item.time && <time>{item.time}</time>}
+            </button>) : <p className="fox-sidebar-collapsed-empty">暂无对话</p>}
+          </div>}
+        </div>
+      </div>}
       <div className="fox-sidebar-footer">
         <DropdownMenu open={profileMenuOpen} onOpenChange={setProfileMenuOpen}>
           <Tooltip>
@@ -1216,10 +1553,28 @@ function Sidebar({
         <IconButton label="切换主题" onClick={onTheme}><SunMoon size={16} /></IconButton>
         <IconButton label="设置" onClick={onSettings}><Settings size={16} /></IconButton>
       </div>
+      <Dialog open={searchOpen} onOpenChange={changeSearchOpen}>
+        <DialogContent className="fox-global-search-dialog" showCloseButton={false}>
+          <DialogHeader className="sr-only"><DialogTitle>全局搜索</DialogTitle><DialogDescription>搜索对话、项目、知识库、文件和任务。</DialogDescription></DialogHeader>
+          <label className="fox-global-search-input-shell">
+            <Search aria-hidden="true" />
+            <input ref={searchInputRef} autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索对话、项目、知识库、文件和任务" />
+            {search && <button type="button" onClick={() => setSearch('')} aria-label="清除搜索"><X /></button>}
+          </label>
+          {normalizedSearch && <div className="fox-global-search-results" role="region" aria-label="全局搜索结果" aria-live="polite">
+            {!searchError && searchResults === null && <div className="fox-global-search-state"><LoaderCircle className="animate-spin" />正在搜索</div>}
+            {searchError && <div className="fox-global-search-state is-error"><AlertTriangle />{searchError}</div>}
+            {!searchError && searchResults?.length === 0 && <div className="fox-global-search-state"><Search />没有匹配结果</div>}
+            {!searchError && groupedSearchResults.map(([resultKind, records]) => <section key={resultKind}><header>{globalSearchKindLabel(resultKind)}<span>{records.length}</span></header>{records.map((item) => <button type="button" key={`${item.kind}:${item.id}`} onClick={() => openGlobalSearchResult(item)}><strong>{item.title}</strong><small>{item.subtitle}</small><time>{new Date(item.updatedAt).toLocaleDateString('zh-CN')}</time></button>)}</section>)}
+          </div>}
+        </DialogContent>
+      </Dialog>
       <UserProfileDialog open={profileDialogOpen} onOpenChange={setProfileDialogOpen} profile={profile} detail={profileDetail} onSave={async (next) => { await saveProfile(next); toast.success('个人资料已更新') }} />
     </aside>
   )
 }
+
+const MemoizedSidebar = memo(Sidebar)
 
 function AssistantProcess({ running = false }: { running?: boolean }) {
   const [open, setOpen] = useState(false)
@@ -1623,7 +1978,8 @@ function RuntimeArtifacts({ artifacts, onOpenArtifact }: { artifacts: ArtifactRe
 }
 
 function RuntimeAssistantMessage({ message, processEvents, running, artifacts, assistantName, modelName, knowledgeBindings, onOpenSource, onOpenArtifact, onFork }: { message: ConversationMessage; processEvents: RunEventRecord[]; running: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onFork?: (messageId: string) => void }) {
-  const parsed = splitAssistantContent(message.content ?? '')
+  const parsed = useMemo(() => splitAssistantContent(message.content ?? ''), [message.content])
+  const process = useMemo(() => runtimeProcess(processEvents), [processEvents])
   const completed = message.status === 'completed' && !running
   const replyTime = new Date(message.updatedAt || message.createdAt).toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
   const [feedback, setFeedback] = useState<'positive' | 'negative' | null>(null)
@@ -1661,10 +2017,10 @@ function RuntimeAssistantMessage({ message, processEvents, running, artifacts, a
     <div className="fox-turn-anchor">
       <Message from="assistant" className="fox-message fox-assistant-message">
         <MessageContent className="fox-assistant-content">
-          <RuntimeProcess events={processEvents} running={running} answerStarted={Boolean(parsed.answer)} />
+          <RuntimeProcess events={processEvents} process={process} running={running} answerStarted={Boolean(parsed.answer)} />
           {parsed.answer && <div className="fox-answer-body"><MarkdownResponse className="fox-answer-response">{parsed.answer}</MarkdownResponse></div>}
           {!running && <RuntimeArtifacts artifacts={artifacts} onOpenArtifact={onOpenArtifact} />}
-          <RuntimeSources sources={runtimeProcess(processEvents).sources} knowledgeBindings={knowledgeBindings} onOpenSource={onOpenSource} />
+          <RuntimeSources sources={process.sources} knowledgeBindings={knowledgeBindings} onOpenSource={onOpenSource} />
         </MessageContent>
         <div className="fox-message-footer">
           <MessageActions className="fox-message-actions">
@@ -1694,6 +2050,24 @@ function RuntimeAssistantMessage({ message, processEvents, running, artifacts, a
     </div>
   )
 }
+
+const MemoizedRuntimeAssistantMessage = memo(RuntimeAssistantMessage, (previous, next) => (
+  previous.message.id === next.message.id
+  && previous.message.content === next.message.content
+  && previous.message.status === next.message.status
+  && previous.message.runId === next.message.runId
+  && previous.message.createdAt === next.message.createdAt
+  && previous.message.updatedAt === next.message.updatedAt
+  && previous.processEvents === next.processEvents
+  && previous.running === next.running
+  && previous.artifacts === next.artifacts
+  && previous.assistantName === next.assistantName
+  && previous.modelName === next.modelName
+  && previous.knowledgeBindings === next.knowledgeBindings
+  && previous.onOpenSource === next.onOpenSource
+  && previous.onOpenArtifact === next.onOpenArtifact
+  && previous.onFork === next.onFork
+))
 
 function RuntimeReasoningItem({ detail, running = false }: { detail: string; running?: boolean }) {
   return (
@@ -1748,9 +2122,9 @@ function RuntimeStepDetail({ label, active = false, children }: { label: string;
   )
 }
 
-function RuntimeProcess({ events, running, answerStarted = false }: { events: RunEventRecord[]; running: boolean; answerStarted?: boolean }) {
+function RuntimeProcess({ events, process: preparedProcess, running, answerStarted = false }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; running: boolean; answerStarted?: boolean }) {
   const [open, setOpen] = useState(false)
-  const process = runtimeProcess(events)
+  const process = useMemo(() => preparedProcess ?? runtimeProcess(events), [events, preparedProcess])
   const terminalEvent = [...events].reverse().find((item) => [
     'run.completed', 'run.cancelled', 'run.failed', 'run.interrupted',
   ].includes(item.eventType))
@@ -1841,42 +2215,95 @@ function SentMessageAttachments({ attachments }: { attachments: AttachmentRecord
   </Attachments>
 }
 
+function ConversationBottomDock({ plan }: { plan?: GoalProgressData['planRevisions'][number] }) {
+  const planStatus = plan?.status === 'proposed'
+    ? '待批准'
+    : plan?.status === 'approved'
+      ? '已批准'
+      : plan?.status === 'rejected'
+        ? '已退回'
+        : '已更新'
+  return (
+    <div className={`fox-conversation-bottom-dock ${plan ? 'has-plan' : ''}`}>
+      <ConversationScrollButton className="fox-scroll-button" aria-label="定位到最新消息" />
+      {plan && <div className={`fox-plan-floater is-${plan.status}`} role="status" title={[plan.title, plan.summary].filter(Boolean).join('\n')}>
+        <ListTodo size={12} />
+        <strong>{plan.title || `计划 v${plan.revision}`}</strong>
+        <span>v{plan.revision} · {planStatus}</span>
+      </div>}
+    </div>
+  )
+}
+
 // Exported for the profile-build performance harness (synthetic long-conversation
-// fixture). Renders the real streaming message path with no Tauri dependency.
-export function RuntimeTimeline({ messages, attachments, artifacts, expertBindings = [], agents = [], pendingMessage, events, activeRunId, activeRunModel, runtimeRunning, state, streamingText, runtimeError, runtimeErrorDetails, assistantName = 'Fox 默认助手', hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onRetry, onRerun, onFork, onOpenSource, onOpenArtifact, onViewExpert }: { messages: ConversationMessage[]; attachments: AttachmentRecord[]; artifacts: ArtifactRecord[]; expertBindings?: ExpertBindingView[]; agents?: AgentRecord[]; pendingMessage?: ConversationMessage | null; events: RunEventRecord[]; activeRunId?: string; activeRunModel?: string; runtimeRunning: boolean; state: ChatState; streamingText: string; runtimeError?: string | null; runtimeErrorDetails?: DesktopErrorDetails | null; assistantName?: string; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onRetry: () => void; onRerun: (messageId: string, prompt: string) => Promise<boolean>; onFork?: (messageId: string) => void; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onViewExpert?: (expertId: string) => void }) {
-  const runtimeContext = useContext(ComposerRuntimeContext)
+// fixture). Renders the real streaming message path without any Tauri dependency.
+export function RuntimeTimeline({ messages, attachments, artifacts, expertBindings = [], agents = [], pendingMessage, events, activeRunId, activeRunModel, runtimeRunning, state, streamingText, runtimeError, runtimeErrorDetails, assistantName = 'Fox 默认助手', planRevision, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onRetry, onRerun, onFork, onOpenSource, onOpenArtifact, onViewExpert }: { messages: ConversationMessage[]; attachments: AttachmentRecord[]; artifacts: ArtifactRecord[]; expertBindings?: ExpertBindingView[]; agents?: AgentRecord[]; pendingMessage?: ConversationMessage | null; events: RunEventRecord[]; activeRunId?: string; activeRunModel?: string; runtimeRunning: boolean; state: ChatState; streamingText: string; runtimeError?: string | null; runtimeErrorDetails?: DesktopErrorDetails | null; assistantName?: string; planRevision?: GoalProgressData['planRevisions'][number]; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onRetry: () => void; onRerun: (messageId: string, prompt: string) => Promise<boolean>; onFork?: (messageId: string) => void; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onViewExpert?: (expertId: string) => void }) {
+  const runtimeContext = useContext(TimelineRuntimeContext)
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [editingText, setEditingText] = useState('')
   const [rerunning, setRerunning] = useState(false)
+  const eventGroupsRef = useRef(new Map<string, RunEventRecord[]>)
+  const artifactGroupsRef = useRef(new Map<string, ArtifactRecord[]>)
+  const syntheticReasoningRef = useRef(new Map<string, RunEventRecord[]>)
+  const parsedContentCacheRef = useRef(new Map<string, ReturnType<typeof splitAssistantContent>>())
+  const eventsByRunId = useMemo(() => {
+    const next = groupRuntimeRecords(events, eventGroupsRef.current)
+    eventGroupsRef.current = next
+    return next
+  }, [events])
+  const artifactsByRunId = useMemo(() => {
+    const next = groupRuntimeRecords(artifacts, artifactGroupsRef.current)
+    artifactGroupsRef.current = next
+    return next
+  }, [artifacts])
   const resolvedAssistantName = runtimeContext.assistantName ?? assistantName
   const resolvedRunModel = runtimeContext.runModel ?? activeRunModel
-  const storedMessages = messages.filter((message) => message.role === 'user' || message.role === 'assistant')
-  const pendingAlreadyStored = Boolean(pendingMessage && storedMessages.some((message) =>
-    message.role === 'user' && message.content === pendingMessage.content && message.createdAt >= pendingMessage.createdAt - 3000
-  ))
-  const visibleMessages = pendingMessage && !pendingAlreadyStored ? [...storedMessages, pendingMessage] : [...storedMessages]
-  const currentRunAssistant = activeRunId
-    ? visibleMessages.find((message) => message.role === 'assistant' && message.runId === activeRunId)
-    : undefined
-  const currentRunHasProcess = Boolean(activeRunId && events.some((item) => item.runId === activeRunId))
-  if (activeRunId && !currentRunAssistant && (runtimeRunning || Boolean(streamingText) || currentRunHasProcess)) {
-    const latestOrdinal = visibleMessages.reduce((highest, message) => Math.max(highest, message.ordinal), 0)
-    const now = Date.now()
-    visibleMessages.push({
-      id: `assistant-${activeRunId}`,
-      conversationId: visibleMessages.at(-1)?.conversationId ?? 'pending',
-      runId: activeRunId,
-      role: 'assistant',
-      kind: 'text',
-      content: streamingText,
-      status: runtimeRunning ? 'streaming' : 'completed',
-      ordinal: latestOrdinal + 1,
-      createdAt: now,
-      updatedAt: now,
-    })
-  }
-  const timelineEntries = mergeExpertBindingsIntoTimeline(visibleMessages, expertBindings)
-  const latestUserMessageId = [...visibleMessages].reverse().find((message) => message.role === 'user')?.id
+  const storedMessages = useMemo(() => messages.filter((message) => message.role === 'user' || message.role === 'assistant'), [messages])
+  const attachmentsByMessageId = useMemo(() => {
+    const grouped = new Map<string, AttachmentRecord[]>()
+    for (const attachment of attachments) {
+      if (!attachment.messageId) continue
+      const bucket = grouped.get(attachment.messageId)
+      if (bucket) bucket.push(attachment)
+      else grouped.set(attachment.messageId, [attachment])
+    }
+    return grouped
+  }, [attachments])
+  const agentsById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents])
+  const visibleMessages = useMemo(() => {
+    const pendingAlreadyStored = Boolean(pendingMessage && storedMessages.some((message) =>
+      message.role === 'user' && message.content === pendingMessage.content && message.createdAt >= pendingMessage.createdAt - 3000
+    ))
+    const visible = pendingMessage && !pendingAlreadyStored ? [...storedMessages, pendingMessage] : [...storedMessages]
+    const currentRunAssistant = activeRunId
+      ? visible.find((message) => message.role === 'assistant' && message.runId === activeRunId)
+      : undefined
+    const currentRunHasProcess = Boolean(activeRunId && eventsByRunId.has(activeRunId))
+    if (activeRunId && !currentRunAssistant && (runtimeRunning || Boolean(streamingText) || currentRunHasProcess)) {
+      const latestOrdinal = visible.reduce((highest, message) => Math.max(highest, message.ordinal), 0)
+      const now = Date.now()
+      visible.push({
+        id: `assistant-${activeRunId}`,
+        conversationId: visible.at(-1)?.conversationId ?? 'pending',
+        runId: activeRunId,
+        role: 'assistant',
+        kind: 'text',
+        content: streamingText,
+        status: runtimeRunning ? 'streaming' : 'completed',
+        ordinal: latestOrdinal + 1,
+        createdAt: now,
+        updatedAt: now,
+      })
+    }
+    return visible
+  }, [activeRunId, eventsByRunId, pendingMessage, runtimeRunning, storedMessages, streamingText])
+  const timelineEntries = useMemo(() => mergeExpertBindingsIntoTimeline(visibleMessages, expertBindings), [expertBindings, visibleMessages])
+  const latestUserMessageId = useMemo(() => {
+    for (let index = visibleMessages.length - 1; index >= 0; index -= 1) {
+      if (visibleMessages[index].role === 'user') return visibleMessages[index].id
+    }
+    return undefined
+  }, [visibleMessages])
   useEffect(() => {
     if (editingMessageId && editingMessageId !== latestUserMessageId) {
       setEditingMessageId(null)
@@ -1911,30 +2338,31 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
       setRerunning(false)
     }
   }
-  const currentAssistantActivity = activeRunId
+  const currentAssistantActivity = useMemo(() => activeRunId
     ? visibleMessages.find((message) => message.role === 'assistant' && message.runId === activeRunId)
-    : undefined
-  const currentRunLastSeq = activeRunId
-    ? events.reduce((highest, item) => item.runId === activeRunId ? Math.max(highest, item.seq) : highest, 0)
-    : 0
+    : undefined, [activeRunId, visibleMessages])
+  const currentRunLastSeq = useMemo(() => activeRunId
+    ? (eventsByRunId.get(activeRunId) ?? EMPTY_RUNTIME_EVENTS).reduce((highest, item) => Math.max(highest, item.seq), 0)
+    : 0, [activeRunId, eventsByRunId])
   const autoScrollKey = runtimeRunning
     ? [latestUserMessageId, activeRunId, currentRunLastSeq > 0 || currentAssistantActivity ? 'active' : 'waiting'].join(':')
     : latestUserMessageId
   return (
     <Conversation className="fox-conversation">
       <ConversationAutoScroll scrollKey={autoScrollKey} />
+      <ConversationViewportState />
       <ConversationTurnRail messages={visibleMessages} artifacts={artifacts} />
       <ConversationContent className="fox-conversation-content" scrollClassName="fox-conversation-scroll">
         {hasEarlierMessages && <div className="fox-history-loader"><Button variant="ghost" size="sm" disabled={loadingEarlierMessages} onClick={onLoadEarlierMessages}>{loadingEarlierMessages && <LoaderCircle className="animate-spin" />}加载更早消息</Button></div>}
         <div className="fox-thread-date"><span>今天</span></div>
         {timelineEntries.map((entry) => {
           if (entry.kind === 'expert') {
-            const expert = agents.find((item) => item.id === entry.binding.expertId)
+            const expert = agentsById.get(entry.binding.expertId)
             return <ExpertActivationCard key={`expert-binding-${entry.binding.id}`} binding={entry.binding} expert={expert} onView={(expertId) => onViewExpert?.(expertId)} />
           }
           const message = entry.message
           if (message.role === 'user') {
-            const messageAttachments = attachments.filter((attachment) => attachment.messageId === message.id)
+            const messageAttachments = attachmentsByMessageId.get(message.id) ?? EMPTY_CONVERSATION_ATTACHMENTS
             const latest = message.id === latestUserMessageId
             const editing = latest && editingMessageId === message.id
             return <div id={`fox-turn-${message.id}`} key={message.id} className="fox-turn-anchor" data-turn-message-id={message.id}>
@@ -1975,32 +2403,51 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
           }
           const isCurrentRun = Boolean(activeRunId && message.runId === activeRunId)
           const rawContent = isCurrentRun ? streamingText || message.content : message.content
-          const parsed = splitAssistantContent(rawContent)
-          const storedProcessEvents = message.runId ? events.filter((item) => item.runId === message.runId) : []
+          const parsedCacheKey = `${message.id}:${rawContent}`
+          let parsed = parsedContentCacheRef.current.get(parsedCacheKey)
+          if (!parsed) {
+            parsed = splitAssistantContent(rawContent)
+            if (parsedContentCacheRef.current.size >= 256) {
+              const oldestKey = parsedContentCacheRef.current.keys().next().value
+              if (typeof oldestKey === 'string') parsedContentCacheRef.current.delete(oldestKey)
+            }
+            parsedContentCacheRef.current.set(parsedCacheKey, parsed)
+          }
+          const storedProcessEvents = message.runId ? eventsByRunId.get(message.runId) ?? EMPTY_RUNTIME_EVENTS : EMPTY_RUNTIME_EVENTS
           const hasStoredReasoning = storedProcessEvents.some((item) => item.eventType === 'reasoning.delta')
-          const processEvents = parsed.reasoning && !hasStoredReasoning
-            ? [...storedProcessEvents, {
+          let processEvents = storedProcessEvents
+          if (parsed.reasoning && !hasStoredReasoning) {
+            const cacheKey = `${message.id}:${parsed.reasoning}`
+            const cached = syntheticReasoningRef.current.get(cacheKey)
+            if (cached) {
+              processEvents = cached
+            } else {
+              processEvents = [...storedProcessEvents, {
                 runId: message.runId ?? `history-${message.id}`,
                 seq: storedProcessEvents.reduce((highest, item) => Math.max(highest, item.seq), 0) + 1,
                 eventType: 'reasoning.delta',
                 event: { type: 'reasoning.delta', delta: parsed.reasoning, source: 'yuxi-history' },
                 createdAt: message.updatedAt,
               }]
-            : storedProcessEvents
+              syntheticReasoningRef.current.set(cacheKey, processEvents)
+            }
+          }
           const running = isCurrentRun && runtimeRunning
-          const messageArtifacts = artifacts.filter((artifact) => Boolean(message.runId) && artifact.runId === message.runId)
+          const messageArtifacts = message.runId ? artifactsByRunId.get(message.runId) ?? EMPTY_RUNTIME_ARTIFACTS : EMPTY_RUNTIME_ARTIFACTS
           const eventModel = processEvents.find((item) => item.eventType === 'run.started' && typeof item.event.model === 'string')?.event.model as string | undefined
-          return <div id={`fox-turn-${message.id}`} key={`assistant-turn-${message.runId ?? message.id}`} className="fox-turn-anchor" data-turn-message-id={message.id}><RuntimeAssistantMessage message={{ ...message, content: rawContent }} processEvents={processEvents} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onFork={onFork} /></div>
+          const displayMessage = rawContent === message.content ? message : { ...message, content: rawContent }
+          return <div id={`fox-turn-${message.id}`} key={`assistant-turn-${message.runId ?? message.id}`} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onFork={onFork} /></div>
         })}
         {state === 'error' && <div className="fox-turn-anchor"><Message from="assistant" className="fox-message fox-assistant-message"><MessageContent className="fox-assistant-content"><ErrorPrompt onRetry={onRetry} error={runtimeError} errorDetails={runtimeErrorDetails} /></MessageContent></Message></div>}
       </ConversationContent>
-      <ConversationScrollButton className="fox-scroll-button" />
+      <ConversationBottomDock plan={planRevision} />
     </Conversation>
   )
 }
 
-function Timeline({ empty, state, prompt, mascotSrc, mascotActive = false, openingSuggestions, runtimeMessages, runtimeAttachments, runtimeArtifacts, expertBindings, agents, pendingMessage, runtimeEvents, runtimeRunId, runtimeRunModel, runtimeRunning = false, runtimeReply, runtimeError, runtimeErrorDetails, assistantName, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onApprove, onDeny, onRetry, onRerun, onFork, onAnswer, onStart, onOpenSource, onOpenArtifact, onViewExpert }: { empty: boolean; state: ChatState; prompt: string; mascotSrc?: string; mascotActive?: boolean; openingSuggestions?: string[]; runtimeMessages?: ConversationMessage[]; runtimeAttachments?: AttachmentRecord[]; runtimeArtifacts?: ArtifactRecord[]; expertBindings?: ExpertBindingView[]; agents?: AgentRecord[]; pendingMessage?: ConversationMessage | null; runtimeEvents?: RunEventRecord[]; runtimeRunId?: string; runtimeRunModel?: string; runtimeRunning?: boolean; runtimeReply?: string; runtimeError?: string | null; runtimeErrorDetails?: DesktopErrorDetails | null; assistantName?: string; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onApprove: () => void; onDeny: () => void; onRetry: () => void; onRerun: (messageId: string, prompt: string) => Promise<boolean>; onFork?: (messageId: string) => void; onAnswer: (answer: string) => void; onStart: (suggestion: string) => void; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onViewExpert?: (expertId: string) => void }) {
+function Timeline({ empty, state, prompt, mascotSrc, mascotActive = false, openingSuggestions, runtimeMessages, runtimeAttachments, runtimeArtifacts, expertBindings, agents, pendingMessage, runtimeEvents, runtimeRunId, runtimeRunModel, runtimeRunning = false, runtimeReply, runtimeError, runtimeErrorDetails, assistantName, planRevisions, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onApprove, onDeny, onRetry, onRerun, onFork, onAnswer, onStart, onOpenSource, onOpenArtifact, onViewExpert }: { empty: boolean; state: ChatState; prompt: string; mascotSrc?: string; mascotActive?: boolean; openingSuggestions?: string[]; runtimeMessages?: ConversationMessage[]; runtimeAttachments?: AttachmentRecord[]; runtimeArtifacts?: ArtifactRecord[]; expertBindings?: ExpertBindingView[]; agents?: AgentRecord[]; pendingMessage?: ConversationMessage | null; runtimeEvents?: RunEventRecord[]; runtimeRunId?: string; runtimeRunModel?: string; runtimeRunning?: boolean; runtimeReply?: string; runtimeError?: string | null; runtimeErrorDetails?: DesktopErrorDetails | null; assistantName?: string; planRevisions?: GoalProgressData['planRevisions']; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onApprove: () => void; onDeny: () => void; onRetry: () => void; onRerun: (messageId: string, prompt: string) => Promise<boolean>; onFork?: (messageId: string) => void; onAnswer: (answer: string) => void; onStart: (suggestion: string) => void; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onViewExpert?: (expertId: string) => void }) {
   const running = state === 'running'
+  const latestPlanRevision = planRevisions?.reduce((latest, plan) => !latest || plan.revision > latest.revision ? plan : latest, undefined as GoalProgressData['planRevisions'][number] | undefined)
   const starterSuggestions = openingSuggestions?.map((item) => item.trim()).filter(Boolean).slice(0, 6)
   const visibleSuggestions = starterSuggestions?.length ? starterSuggestions : [
     '整理这个项目中的文档',
@@ -2012,6 +2459,7 @@ function Timeline({ empty, state, prompt, mascotSrc, mascotActive = false, openi
   if (empty) {
     return (
         <Conversation className="fox-conversation">
+        <ConversationViewportState />
         <ConversationEmptyState className="fox-empty-conversation">
           <div className="fox-empty-heading">
             {mascotSrc && <div className={`fox-empty-mascot ${mascotActive ? 'is-active' : ''}`} aria-hidden="true"><img key={mascotSrc} src={mascotSrc} alt="" /></div>}
@@ -2025,10 +2473,11 @@ function Timeline({ empty, state, prompt, mascotSrc, mascotActive = false, openi
     )
   }
   if (runtimeMessages) {
-    return <RuntimeTimeline messages={runtimeMessages} attachments={runtimeAttachments ?? []} artifacts={runtimeArtifacts ?? []} expertBindings={expertBindings} agents={agents} pendingMessage={pendingMessage} events={runtimeEvents ?? []} activeRunId={runtimeRunId} activeRunModel={runtimeRunModel} runtimeRunning={runtimeRunning} state={state} streamingText={runtimeReply ?? ''} runtimeError={runtimeError} runtimeErrorDetails={runtimeErrorDetails} assistantName={assistantName} hasEarlierMessages={hasEarlierMessages} loadingEarlierMessages={loadingEarlierMessages} onLoadEarlierMessages={onLoadEarlierMessages} onRetry={onRetry} onRerun={onRerun} onFork={onFork} onOpenSource={onOpenSource} onOpenArtifact={onOpenArtifact} onViewExpert={onViewExpert} />
+    return <RuntimeTimeline messages={runtimeMessages} attachments={runtimeAttachments ?? []} artifacts={runtimeArtifacts ?? []} expertBindings={expertBindings} agents={agents} pendingMessage={pendingMessage} events={runtimeEvents ?? []} activeRunId={runtimeRunId} activeRunModel={runtimeRunModel} runtimeRunning={runtimeRunning} state={state} streamingText={runtimeReply ?? ''} runtimeError={runtimeError} runtimeErrorDetails={runtimeErrorDetails} assistantName={assistantName} planRevision={latestPlanRevision} hasEarlierMessages={hasEarlierMessages} loadingEarlierMessages={loadingEarlierMessages} onLoadEarlierMessages={onLoadEarlierMessages} onRetry={onRetry} onRerun={onRerun} onFork={onFork} onOpenSource={onOpenSource} onOpenArtifact={onOpenArtifact} onViewExpert={onViewExpert} />
   }
   return (
     <Conversation className="fox-conversation">
+      <ConversationViewportState />
       <ConversationContent className="fox-conversation-content" scrollClassName="fox-conversation-scroll">
         <div className="fox-thread-date"><span>今天</span></div>
         <div className="fox-turn-anchor">
@@ -2069,10 +2518,12 @@ function Timeline({ empty, state, prompt, mascotSrc, mascotActive = false, openi
         </Message>
         </div>
       </ConversationContent>
-      <ConversationScrollButton className="fox-scroll-button" />
+      <ConversationBottomDock plan={latestPlanRevision} />
     </Conversation>
   )
 }
+
+const MemoizedTimeline = memo(Timeline)
 
 function ConversationTurnRail({ messages, artifacts }: { messages: ConversationMessage[]; artifacts: ArtifactRecord[] }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null)
@@ -2193,7 +2644,7 @@ function slashCommandRuntimeText(command: SlashCommand, prompt: string) {
   }
 }
 
-const ComposerRuntimeContext = createContext<{
+type ComposerRuntimeContextValue = {
   knowledgeBindings: KnowledgeBindingRecord[]
   onKnowledge?: () => void
   onOpenSource?: (source: RuntimeSource) => void
@@ -2208,7 +2659,14 @@ const ComposerRuntimeContext = createContext<{
   knowledgeError?: string | null
   onKnowledgeMenuOpen?: () => void
   onKnowledgeToggle?: (reference: KnowledgeReference, name: string) => Promise<boolean>
-}>({ knowledgeBindings: [] })
+}
+
+type TimelineRuntimeContextValue = Pick<ComposerRuntimeContextValue,
+  'knowledgeBindings' | 'onOpenSource' | 'assistantName' | 'runModel'
+>
+
+const ComposerRuntimeContext = createContext<ComposerRuntimeContextValue>({ knowledgeBindings: [] })
+const TimelineRuntimeContext = createContext<TimelineRuntimeContextValue>({ knowledgeBindings: [] })
 
 const goalStateCopy: Record<ChatState, { label: string; detail: string; time: string }> = {
   complete: { label: '已完成', detail: '确认 Kun 授权范围与 Fox 开发边界', time: '刚刚' },
@@ -2305,7 +2763,7 @@ function GoalFloater({ chatState, data, onDelete, onRunningChange, onEvidenceCli
         <div className={`fox-goal-floater is-${visualState}`}>
           <PopoverTrigger asChild>
             <button type="button" className="fox-goal-trigger" aria-label={open ? '收起当前目标详情' : '打开当前目标详情'}>
-              <span className="fox-goal-icon"><Target size={14} /></span>
+              <span className="fox-goal-icon"><Target size={12} /></span>
               <strong>{data?.goal.title || goalStateCopy[chatState].label}</strong>
               {data && <span className="fox-goal-time">{formatGoalElapsed(data.goal.createdAt, ['completed', 'cancelled'].includes(data.goal.status) ? data.goal.completedAt ?? data.goal.updatedAt : null)}</span>}
             </button>
@@ -2315,8 +2773,9 @@ function GoalFloater({ chatState, data, onDelete, onRunningChange, onEvidenceCli
             const changed = await onRunningChange(data.goal.id, data.goal.version, data.goal.status !== 'active')
             setChangingRunning(false)
             if (!changed) toast.error('目标状态更新失败')
-          }}>{changingRunning ? <LoaderCircle className="animate-spin" size={13} /> : data.goal.status === 'active' ? <Pause size={13} /> : <Play size={13} />}</button>}
-          <button type="button" className="fox-goal-expand" aria-label={open ? '收起当前目标详情' : '打开当前目标详情'} title={open ? '收起' : '展开'} onClick={() => setOpen((value) => !value)}>{open ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button>
+            else toast.success(data.goal.status === 'active' ? '目标已暂停，正在停止当前运行' : '目标已继续运行')
+          }}>{changingRunning ? <LoaderCircle className="animate-spin" size={11} /> : data.goal.status === 'active' ? <Pause size={11} /> : <Play size={11} />}</button>}
+          <button type="button" className="fox-goal-expand" aria-label={open ? '收起当前目标详情' : '打开当前目标详情'} title={open ? '收起' : '展开'} onClick={() => setOpen((value) => !value)}>{open ? <ChevronUp size={12} /> : <ChevronDown size={12} />}</button>
           {data && onDelete && <button type="button" className="fox-goal-delete" disabled={deleting} aria-label="删除目标" title="删除目标" onClick={async () => {
             setDeleting(true)
             const deleted = await onDelete(data.goal.id)
@@ -2327,7 +2786,7 @@ function GoalFloater({ chatState, data, onDelete, onRunningChange, onEvidenceCli
             } else {
               toast.error('目标删除失败，请先停止当前生成后重试')
             }
-          }}><Trash2 size={13} /></button>}
+          }}><Trash2 size={11} /></button>}
         </div>
       </PopoverAnchor>
       {data && <PopoverContent align="start" side="top" sideOffset={8} className="fox-goal-popover">
@@ -2360,8 +2819,8 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
   const supportsDynamicModelSwitch = isYuxiAgent
     ? allowYuxiModelOverride
     : runtimeCapabilities?.dynamicModelSwitch === true
-  const modelOptions = activeAgent?.runtimeType === 'yuxi' && allowYuxiModelOverride
-    ? yuxiModels
+  const modelOptions = activeAgent?.runtimeType === 'yuxi'
+    ? allowYuxiModelOverride ? yuxiModels : []
     : modelService?.modelId
       ? [{ spec: modelService.modelId, modelId: modelService.modelId, displayName: modelService.modelId, providerId: 'fox', providerDisplayName: modelService.name }]
       : []
@@ -2404,7 +2863,7 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
 
   useEffect(() => {
     setModel(defaultModel)
-  }, [defaultModel])
+  }, [defaultModel, activeAgent?.id])
 
   useEffect(() => {
     setQuestionSelections({})
@@ -2430,8 +2889,8 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
       window.cancelAnimationFrame(animationFrame)
       animationFrame = window.requestAnimationFrame(() => {
         const stageBottom = stage.getBoundingClientRect().bottom
-        const promptTop = prompt.getBoundingClientRect().top
-        onHeightChange(Math.ceil(Math.max(0, stageBottom - promptTop + 6)))
+        const composerTop = composer.getBoundingClientRect().top
+        onHeightChange(Math.ceil(Math.max(0, stageBottom - composerTop + 6)))
       })
     }
 
@@ -2580,11 +3039,12 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
     onResolvePlanRevision && goalProgressData?.planRevisions.some((plan) => plan.status === 'proposed'),
   )
   const decisionPending = demoApprovalPending || demoQuestionPending || pendingApprovals.length > 0 || Boolean(activeQuestionRequest) || goalConfirmationPending || planRevisionPending
+  const approvalDecisionPending = demoApprovalPending || pendingApprovals.length > 0
 
   return (
     <div ref={composerRef} className={`fox-composer-wrap ${centered ? 'is-empty' : ''}`}>
       {(showGoal || goalProgressData) && <GoalFloater chatState={chatState} data={goalProgressData} onDelete={onDeleteGoal} onRunningChange={onGoalRunningChange} onEvidenceClick={onEvidenceClick} onResolveConfirmation={onResolveWorkModeConfirmation} onResolvePlanRevision={onResolvePlanRevision} onResolveWorkflowGate={onResolveWorkflowGate} />}
-      <div ref={promptRef} className={`fox-prompt-shell ${decisionPending ? 'is-decision' : ''}`} onFocusCapture={() => setFocused(true)} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false) }}>
+      <div ref={promptRef} className={`fox-prompt-shell ${decisionPending ? 'is-decision' : ''} ${approvalDecisionPending ? 'is-approval' : ''}`} onFocusCapture={() => setFocused(true)} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false) }}>
         {mascotSrc && !decisionPending && !commandOpen && !mentionOpen && <div className={`fox-composer-mascot ${mascotActive ? 'is-active' : ''}`} aria-hidden="true"><img key={mascotSrc} src={mascotSrc} alt="" /></div>}
         {decisionPending ? <div className="fox-decision-card">
           {demoApprovalPending && onApprove && onDeny && <ApprovalPrompt onApprove={onApprove} onDeny={onDeny} />}
@@ -2710,11 +3170,7 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
           setDraft('')
           setCommandOpen(false)
           setMentionOpen(false)
-          const selectedModel = activeAgent?.runtimeType === 'yuxi' && !allowYuxiModelOverride
-            ? undefined
-            : model === '未配置模型'
-              ? undefined
-              : model
+          const selectedModel = conversationModelOverride(activeAgent, model, yuxiModels)
           const prompt = text.trim() || '请分析这些附件'
           const runtimeText = selectedSlashCommand ? slashCommandRuntimeText(selectedSlashCommand, prompt) : undefined
           const outcome = await onSubmitPrompt?.(prompt, selectedModel, submittedFiles, runtimeText)
@@ -2793,6 +3249,7 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
             <PromptInputSelect value={activeAgent?.id ?? ''} onValueChange={(value) => value !== activeAgent?.id && onAgentChange?.(value)} disabled={!activeAgent}>
               <PromptInputSelectTrigger className="fox-agent-control"><Sparkles size={14} /><PromptInputSelectValue /></PromptInputSelectTrigger>
               <PromptInputSelectContent position="popper" side="top" align="end" sideOffset={6}>
+                {activeAgent && !selectableAgents.some((item) => item.id === activeAgent.id) && <PromptInputSelectItem value={activeAgent.id} disabled>{activeAgent.name}</PromptInputSelectItem>}
                 {selectableAgents.map((item) => <PromptInputSelectItem key={item.id} value={item.id} disabled={!item.available}>{item.name}</PromptInputSelectItem>)}
               </PromptInputSelectContent>
             </PromptInputSelect>
@@ -2827,6 +3284,8 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
     </div>
   )
 }
+
+const MemoizedComposer = memo(Composer)
 
 type KnowledgePickerItem = {
   reference: KnowledgeReference
@@ -3110,16 +3569,7 @@ function ProjectFilePreviewPane({ conversationId, path, displayPath }: { convers
     try {
       const response = await desktopClient.projectFileAction(conversationId, path, action, applicationId)
       setApplications(response.applications)
-      const application = response.applications.find((item) => item.id === applicationId)
-      toast.success(
-        action === 'open'
-          ? '已使用系统默认方式打开'
-          : action === 'open_with'
-            ? `已使用 ${application?.label ?? '编程软件'} 打开`
-            : action === 'reveal'
-              ? '已在文件夹中定位'
-              : '已复制受控路径'
-      )
+      if (action === 'copy_path') toast.success('已复制受控路径')
     } catch (cause) {
       toast.error(desktopErrorDetails(cause).message)
     } finally {
@@ -3132,7 +3582,6 @@ function ProjectFilePreviewPane({ conversationId, path, displayPath }: { convers
     setBusyAction('project_folder')
     try {
       await desktopClient.openProjectFolder(conversationId)
-      toast.success('已打开项目文件夹')
     } catch (cause) {
       toast.error(desktopErrorDetails(cause).message)
     } finally {
@@ -3376,107 +3825,252 @@ function ChildRunStatusIcon({ run }: { run: ChildRunRecord }) {
   return <AlertTriangle size={13} />
 }
 
-function publicChildEvent(event: RunEventRecord) {
-  const labels: Record<string, string> = {
-    'run.started': '开始运行', 'run.completed': '运行完成', 'run.failed': '运行失败', 'run.cancelled': '运行已取消', 'run.interrupted': '运行中断',
-    'tool.started': '调用工具', 'tool.completed': '工具完成', 'tool.failed': '工具失败', 'source.added': '新增引用', 'usage.updated': '更新用量',
-  }
-  const label = labels[event.eventType] ?? event.eventType.replaceAll('.', ' · ')
-  const tool = typeof event.event.tool === 'string' ? event.event.tool : typeof event.event.toolName === 'string' ? event.event.toolName : ''
-  const detail = tool || (typeof event.event.title === 'string' ? event.event.title : '')
-  return { label, detail }
+type ChildTranscriptItem =
+  | { kind: 'message'; id: string; createdAt: number; role: 'user' | 'assistant'; content: string }
+  | { kind: 'tool'; id: string; createdAt: number; toolName: string; status: string }
+
+function childTranscriptItems(detail: ConversationDetail | null): ChildTranscriptItem[] {
+  if (!detail) return []
+  const messages: ChildTranscriptItem[] = detail.messages
+    .filter((message): message is ConversationMessage & { role: 'user' | 'assistant' } => (
+      (message.role === 'user' || message.role === 'assistant') && Boolean(message.content.trim())
+    ))
+    .map((message) => ({
+      kind: 'message',
+      id: message.id,
+      createdAt: message.createdAt,
+      role: message.role,
+      content: message.content.trim(),
+    }))
+  const tools: ChildTranscriptItem[] = detail.toolCalls.map((tool) => ({
+    kind: 'tool',
+    id: tool.id,
+    createdAt: tool.startedAt,
+    toolName: tool.toolName,
+    status: tool.status,
+  }))
+  return [...messages, ...tools].sort((left, right) => left.createdAt - right.createdAt)
 }
 
-function ChildAgentPanel({ detail, onRequestChildTask, onOpenArtifact }: { detail: ConversationDetail | null; onRequestChildTask: (prompt?: string) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void }) {
-  const runs = useMemo(
-    () => [...(detail?.childRuns ?? [])].sort((left, right) => right.createdAt - left.createdAt),
-    [detail?.childRuns],
-  )
-  const [selectedChildId, setSelectedChildId] = useState<string | null>(null)
-  const [cancelBusyId, setCancelBusyId] = useState<string | null>(null)
-  const [childDetail, setChildDetail] = useState<ConversationDetail | null>(null)
-  const [childDetailLoading, setChildDetailLoading] = useState(false)
-  const [childDetailError, setChildDetailError] = useState<string | null>(null)
-  const selected = runs.find((run) => run.childRunId === selectedChildId) ?? runs[0] ?? null
-  const counts = childRunCounts(runs)
+function childToolStatusLabel(status: string) {
+  if (status === 'completed') return '已完成'
+  if (status === 'failed') return '失败'
+  return '执行中'
+}
 
-  useEffect(() => {
-    if (!runs.length) {
-      setSelectedChildId(null)
-      return
-    }
-    if (!runs.some((run) => run.childRunId === selectedChildId)) setSelectedChildId(runs[0].childRunId)
-  }, [runs, selectedChildId])
-  useEffect(() => {
-    if (!selected) {
-      setChildDetail(null)
-      setChildDetailError(null)
-      return
-    }
-    let cancelled = false
-    setChildDetailLoading(true)
-    setChildDetailError(null)
-    void desktopClient.loadConversation(selected.childConversationId).then((value) => {
-      if (!cancelled) setChildDetail(value)
-    }).catch((cause) => {
-      if (!cancelled) setChildDetailError(desktopErrorDetails(cause).message)
-    }).finally(() => { if (!cancelled) setChildDetailLoading(false) })
-    return () => { cancelled = true }
-  }, [selected?.childConversationId])
+function childRunFailureTitle(run: ChildRunRecord) {
+  if (/duration|timeout/i.test(run.errorCode ?? '') || /超时|time limit|timed out/i.test(run.errorMessage ?? '')) return '运行超时'
+  if (run.status === 'interrupted') return '运行中断'
+  return '运行失败'
+}
 
-  const cancelChild = async (run: ChildRunRecord) => {
-    const conversationId = detail?.conversation.id
-    if (!conversationId || !childRunIsActive(run) || cancelBusyId) return
-    setCancelBusyId(run.childRunId)
-    try {
-      const cancelled = await desktopClient.cancelChildRun(conversationId, run.childRunId)
-      if (cancelled) toast.success('已向子 Agent 发送取消信号')
-      else toast.info('这个子任务已经结束')
-    } catch (cause) {
-      toast.error(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setCancelBusyId(null)
-    }
+function childRunFailureMessage(run: ChildRunRecord) {
+  if (childRunFailureTitle(run) === '运行超时') {
+    return run.budget.maxDurationMs
+      ? `超过 ${formatDurationMs(run.budget.maxDurationMs)}执行上限，结果未采用`
+      : '运行超过执行上限，结果未采用'
   }
+  return run.errorMessage ?? (run.status === 'interrupted' ? '运行意外中断，本次结果未采用' : '子 Agent 未返回可采用结果')
+}
+
+function childAgentVisualQaEnabled() {
+  return import.meta.env.DEV && new URLSearchParams(window.location.search).get('preview') === 'child-agent'
+}
+
+function childAgentVisualQaPanelWidth() {
+  if (!childAgentVisualQaEnabled()) return null
+  const requested = Number(new URLSearchParams(window.location.search).get('panelWidth'))
+  return Number.isFinite(requested) && requested > 0 ? Math.min(760, Math.max(280, requested)) : 540
+}
+
+function childAgentVisualQaRuns(): ChildRunRecord[] {
+  if (!childAgentVisualQaEnabled()) return []
+  const now = Date.now()
+  const base: ChildRunRecord = {
+    id: 'preview-delegation-1',
+    parentRunId: 'preview-parent-run',
+    childRunId: 'preview-child-run-1',
+    childConversationId: 'preview-conversation-1',
+    workerAgentId: 'fox-debugger',
+    workerAgentName: 'Fox 调试专家',
+    objective: '审查 quicksort.py，找出所有 Bug，简洁输出，每个 Bug 一行标题 + 一行修复建议。',
+    context: '请按 critical / high / medium / low 分级，并给出能够直接执行的修改建议。',
+    teamRunId: null,
+    teamMemberId: null,
+    allowedTools: ['read_file', 'search_code', 'run_tests'],
+    status: 'failed',
+    depth: 1,
+    budget: { maxDurationMs: 600_000, maxTotalTokens: 80_000, maxOutputTokens: 6_000, maxToolCalls: 12 },
+    resultText: '已读取并审查代码，以下是按严重级别排列的 Bug 清单（节选）：\n\n• Critical：quicksort_inplace 递归深度无界，可能导致递归深度异常。\n• High：_sort 区间判断存在潜在偏差，缺少对 equal 分区的递归处理。\n• Medium：_inplace 缺少对空数组和单元素的提前返回保护。\n• Low：命名、注释和类型注解可以进一步统一。',
+    inputTokens: 52_410,
+    outputTokens: 12_570,
+    totalTokens: 64_980,
+    toolCallCount: 3,
+    errorCode: 'runtime.duration_budget_exceeded',
+    errorMessage: '超过 10 分钟执行上限，结果未采用',
+    createdAt: now - 610_000,
+    startedAt: now - 608_000,
+    finishedAt: now - 8_000,
+  }
+  return [
+    base,
+    { ...base, id: 'preview-delegation-2', childRunId: 'preview-child-run-2', childConversationId: 'preview-conversation-2', objective: '审查 quicksort.py 代码，验证修复后的边界条件。', workerAgentName: 'Fox 代码审查专家', status: 'completed', resultText: '边界条件验证通过。', totalTokens: 18_420, toolCallCount: 5, errorCode: null, errorMessage: null, finishedAt: now - 180_000 },
+    { ...base, id: 'preview-delegation-3', childRunId: 'preview-child-run-3', childConversationId: 'preview-conversation-3', objective: '对 quicksort.py 进行全面测试并记录失败用例。', workerAgentName: 'Fox 测试专家', status: 'completed', resultText: '已完成测试并返回用例摘要。', totalTokens: 21_760, toolCallCount: 7, errorCode: null, errorMessage: null, finishedAt: now - 420_000 },
+    { ...base, id: 'preview-delegation-4', childRunId: 'preview-child-run-4', childConversationId: 'preview-conversation-4', objective: '检查排序实现的性能退化风险。', workerAgentName: 'Fox 性能专家', status: 'running', resultText: null, totalTokens: 8_320, toolCallCount: 2, errorCode: null, errorMessage: null, finishedAt: null },
+  ]
+}
+
+const childAgentAvatars = [mascotAssets.search, mascotAssets.laptop, mascotAssets.checklist, mascotAssets.wrench]
+const collapsedChildAgentLimit = 10
+
+function ChildAgentPanel({ detail, onOpenChildAgent }: { detail: ConversationDetail | null; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void }) {
+  const previewRuns = useMemo(childAgentVisualQaRuns, [])
+  const runs = useMemo(
+    () => [...(detail?.childRuns?.length ? detail.childRuns : previewRuns)].sort((left, right) => right.createdAt - left.createdAt),
+    [detail?.childRuns, previewRuns],
+  )
+  const [showAllAgents, setShowAllAgents] = useState(false)
+  const visibleRuns = showAllAgents ? runs : runs.slice(0, collapsedChildAgentLimit)
 
   return (
     <AIAgent className="fox-agent-panel">
-      <div className="fox-agent-summary">
-        <div className="fox-agent-avatars"><span><img src={mascotAssets.laptop} alt="" /></span><span><img src={mascotAssets.search} alt="" /></span><span>{counts.active > 0 ? <LoaderCircle className="animate-spin" size={11} /> : <Check size={11} />}</span></div>
-        <div className="fox-agent-heading"><AIAgentHeader name="子 Agent" model={`${runs.length} 个任务`} /><small>{counts.active} 个运行中 · {counts.completed} 个已完成{counts.failed > 0 ? ` · ${counts.failed} 个异常结束` : ''}</small></div>
-      </div>
       <AIAgentContent className="fox-agent-content">
-        <button type="button" className="fox-agent-create" onClick={() => onRequestChildTask()}><Plus size={15} />委派新任务</button>
         {runs.length === 0
-          ? <div className="fox-agent-empty"><Bot size={27} /><strong>当前会话还没有子 Agent</strong><span>点击“委派新任务”，主 Agent 会选择合适的专家、限定工具和预算，并负责收集结果。</span></div>
-          : <>
-              <div className="fox-agent-section-label"><span>任务记录</span><small>{runs.length}</small></div>
-              <ScrollArea className="fox-agent-run-scroll"><div className="fox-agent-run-list">{runs.map((run) => <button type="button" key={run.childRunId} className={`fox-agent-history ${selected?.childRunId === run.childRunId ? 'is-active' : ''}`} onClick={() => setSelectedChildId(run.childRunId)}><span className={`fox-agent-state is-${run.status}`}><ChildRunStatusIcon run={run} /></span><p><strong>{run.objective}</strong><small>{run.workerAgentName} · {childRunStatusLabel(run.status)}</small></p><span className="fox-agent-metrics"><strong>{childRunDuration(run)}</strong><small>{run.toolCallCount} 次工具</small></span><ChevronRight size={14} /></button>)}</div></ScrollArea>
-              {selected && <div className="fox-agent-detail">
-                <div className="fox-agent-detail-head"><div><Bot size={15} /><span><strong>{selected.workerAgentName}</strong><small>{selected.teamRunId ? '专家团队成员' : '独立子 Agent'} · 深度 {selected.depth}</small></span></div><Badge variant={selected.status === 'failed' ? 'destructive' : selected.status === 'completed' ? 'secondary' : 'outline'}>{childRunStatusLabel(selected.status)}</Badge></div>
-                <section><label>任务目标</label><p>{selected.objective}</p></section>
-                <section><label>任务关系</label><p>父运行 {selected.parentRunId.slice(0, 12)}… · {runs.filter((item) => item.parentRunId === selected.parentRunId && item.childRunId !== selected.childRunId).length} 个兄弟任务{selected.teamRunId ? ` · 团队 ${selected.teamRunId.slice(0, 12)}…` : ''}</p></section>
-                {selected.context.trim() && <section><label>父任务提供的上下文</label><p>{selected.context}</p></section>}
-                <div className="fox-agent-detail-metrics"><span><small>耗时</small><strong>{childRunDuration(selected)}</strong></span><span><small>Token</small><strong>{selected.totalTokens.toLocaleString()} / {selected.budget.maxTotalTokens.toLocaleString()}</strong></span><span><small>工具调用</small><strong>{selected.toolCallCount} / {selected.budget.maxToolCalls}</strong></span></div>
-                {selected.allowedTools && <section><label>允许使用的工具</label><div className="fox-agent-tools">{selected.allowedTools.length ? selected.allowedTools.map((tool) => <code key={tool}>{tool}</code>) : <span>不允许调用工具</span>}</div></section>}
-                {selected.resultText && <section className="fox-agent-result"><label>返回给父 Agent 的结果</label><pre>{selected.resultText}</pre></section>}
-                {(selected.errorMessage || selected.errorCode) && <section className="fox-agent-error"><label>{selected.errorCode ?? '执行失败'}</label><p>{selected.errorMessage ?? '没有记录错误详情'}</p></section>}
-                <section className="fox-agent-adoption"><label>结果采用状态</label>{(() => { const evidence = detail?.evidence.filter((item) => item.sourceRunId === selected.childRunId && item.validityStatus === 'valid') ?? []; return <p>{evidence.length ? `已被主任务采用 · ${evidence.length} 条有效证据` : selected.status === 'completed' ? '已返回主 Agent，尚无采用证据' : selected.status === 'failed' ? `未采用 · ${selected.errorMessage || '子任务执行失败'}` : '等待子任务返回'}</p> })()}</section>
-                <section><label>公开事件流</label>{childDetailLoading ? <div className="fox-agent-inline-state"><LoaderCircle className="animate-spin" />正在读取子任务事件</div> : childDetailError ? <div className="fox-agent-inline-state is-error"><AlertTriangle />{childDetailError}</div> : <div className="fox-agent-event-list">{(childDetail?.runtimeEvents ?? []).filter((event) => !event.eventType.startsWith('reasoning.')).slice(-24).map((event) => { const item = publicChildEvent(event); return <div key={`${event.runId}:${event.seq}`}><span>{event.seq}</span><p><b>{item.label}</b>{item.detail && <small>{item.detail}</small>}</p></div> })}{childDetail && childDetail.runtimeEvents.length === 0 && <p>暂无公开事件。</p>}</div>}</section>
-                {(childDetail?.artifacts.length ?? 0) > 0 && <section><label>本轮产物</label><div className="fox-agent-artifact-list">{childDetail!.artifacts.map((artifact) => <button type="button" key={artifact.id} onClick={() => onOpenArtifact?.(artifact)} disabled={!onOpenArtifact}><FileText /><span><b>{artifact.displayName}</b><small>{artifact.storagePath}</small></span><ChevronRight /></button>)}</div></section>}
-                <div className="fox-agent-detail-actions">
-                  {childRunIsActive(selected) && <Button size="sm" variant="outline" disabled={selected.status === 'cancelling' || cancelBusyId === selected.childRunId} onClick={() => void cancelChild(selected)}>{cancelBusyId === selected.childRunId ? <LoaderCircle className="animate-spin" /> : <CircleStop />} {selected.status === 'cancelling' ? '正在取消' : '取消子任务'}</Button>}
-                  {!childRunIsActive(selected) && <Button size="sm" variant="outline" onClick={() => onRequestChildTask(`请重试这个子任务，复用原目标和必要上下文，并先解释上一次结果中的问题：\n\n目标：${selected.objective}\n\n上下文：${selected.context}`)}><RotateCcw />重试</Button>}
-                  {!childRunIsActive(selected) && <Button size="sm" variant="outline" onClick={() => onRequestChildTask(`请把这个任务重新委派给另一位更合适的子 Agent，并对比上一次结果：\n\n目标：${selected.objective}\n\n上次状态：${childRunStatusLabel(selected.status)}`)}><Bot />重新委派</Button>}
-                </div>
-              </div>}
-            </>}
+          ? <div className="fox-agent-empty"><Bot size={27} /><strong>当前会话还没有子 Agent</strong><span>子 Agent 开始运行后，会显示在这个列表中。</span></div>
+          : <nav className="fox-agent-list" aria-label="子 Agent 列表">
+              {visibleRuns.map((run, index) => (
+                <button type="button" key={run.childRunId} className="fox-agent-list-item" aria-label={`打开 ${run.workerAgentName} 消息`} onClick={() => onOpenChildAgent(run, index)}>
+                  <img className="fox-agent-list-avatar" src={childAgentAvatars[index % childAgentAvatars.length]} alt="" />
+                  <span className="fox-agent-list-copy"><strong>{run.workerAgentName}</strong><small title={run.objective}>{run.objective}</small></span>
+                  <em className={`is-${run.status}`}>{childRunStatusLabel(run.status)}</em>
+                  <ChevronRight className="fox-agent-list-open" aria-hidden="true" />
+                </button>
+              ))}
+              {runs.length > collapsedChildAgentLimit && <button type="button" className="fox-agent-list-more" aria-expanded={showAllAgents} onClick={() => setShowAllAgents((value) => !value)}>
+                <span>{showAllAgents ? '收起' : `显示更多（${runs.length - collapsedChildAgentLimit}）`}</span>
+                {showAllAgents ? <ChevronUp /> : <ChevronDown />}
+              </button>}
+            </nav>}
       </AIAgentContent>
     </AIAgent>
   )
 }
 
-function ContextContent({ mode, detail, fileTabs, activeFileTabId, onOpenFile, onOpenEvidence, onOpenArtifact, onRequestChildTask }: { mode: RightMode; detail: ConversationDetail | null; fileTabs: OpenFileTab[]; activeFileTabId: string | null; onOpenFile: (path: string, artifactId: string | null) => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onRequestChildTask: (prompt?: string) => void }) {
+function childUserMessageNeedsCollapse(content: string) {
+  return content.length > 84 || content.split(/\r?\n/).length > 3
+}
+
+function ChildAgentConversationPanel({ run, avatarIndex, onBack }: { run: ChildRunRecord; avatarIndex: number; onBack: () => void }) {
+  const [childDetail, setChildDetail] = useState<ConversationDetail | null>(null)
+  const [childDetailLoading, setChildDetailLoading] = useState(false)
+  const [childDetailError, setChildDetailError] = useState<string | null>(null)
+  const [expandedUserMessages, setExpandedUserMessages] = useState<Set<string>>(() => new Set())
+  const transcript = useMemo(() => {
+    const storedItems = childTranscriptItems(childDetail)
+    if (storedItems.length || !run.childConversationId.startsWith('preview-conversation-')) return storedItems
+    const startedAt = run.startedAt ?? run.createdAt
+    const previewItems: ChildTranscriptItem[] = [{
+      kind: 'message',
+      id: `${run.childRunId}:objective`,
+      createdAt: run.createdAt,
+      role: 'user',
+      content: run.objective,
+    }]
+    const tools = (run.allowedTools ?? []).slice(0, Math.max(1, Math.min(run.toolCallCount, 3)))
+    tools.forEach((toolName, index) => previewItems.push({
+      kind: 'tool',
+      id: `${run.childRunId}:tool:${index}`,
+      createdAt: startedAt + ((index + 1) * 30_000),
+      toolName,
+      status: childRunIsActive(run) && index === tools.length - 1 ? 'running' : 'completed',
+    }))
+    if (run.resultText) previewItems.push({
+      kind: 'message',
+      id: `${run.childRunId}:result`,
+      createdAt: run.finishedAt ?? Date.now(),
+      role: 'assistant',
+      content: run.resultText,
+    })
+    return previewItems
+  }, [childDetail, run])
+
+  useEffect(() => {
+    if (run.childConversationId.startsWith('preview-conversation-')) {
+      setChildDetail(null)
+      setChildDetailLoading(false)
+      setChildDetailError(null)
+      return
+    }
+    let cancelled = false
+    let refreshTimer: number | undefined
+    setChildDetail(null)
+    setChildDetailLoading(true)
+    setChildDetailError(null)
+    const load = async (showLoading: boolean) => {
+      if (showLoading) setChildDetailLoading(true)
+      try {
+        const value = await desktopClient.loadConversation(run.childConversationId)
+        if (!cancelled) {
+          setChildDetail(value)
+          setChildDetailError(null)
+        }
+      } catch (cause) {
+        if (!cancelled) setChildDetailError(desktopErrorDetails(cause).message)
+      } finally {
+        if (!cancelled && showLoading) setChildDetailLoading(false)
+      }
+    }
+    void load(true)
+    if (childRunIsActive(run)) refreshTimer = window.setInterval(() => { void load(false) }, 1_500)
+    return () => {
+      cancelled = true
+      if (refreshTimer !== undefined) window.clearInterval(refreshTimer)
+    }
+  }, [run.childConversationId, run.status])
+
+  return (
+    <section className="fox-agent-conversation is-tab" aria-label={`${run.workerAgentName}只读消息记录`}>
+      <header className="fox-agent-conversation-head">
+        <button type="button" className="fox-agent-conversation-back" aria-label="返回子 Agent 列表" onClick={onBack}><ArrowLeft /></button>
+        <div><strong title={run.objective}>{run.workerAgentName}</strong></div>
+        <span className={`is-${run.status}`}><ChildRunStatusIcon run={run} />{childRunStatusLabel(run.status)}</span>
+      </header>
+      <div className="fox-agent-conversation-scroll">
+        {childDetailLoading && !childDetail
+          ? <div className="fox-agent-inline-state"><LoaderCircle className="animate-spin" />正在读取子 Agent 消息</div>
+          : childDetailError && !childDetail
+            ? <div className="fox-agent-inline-state is-error"><AlertTriangle />{childDetailError}</div>
+            : transcript.map((item) => item.kind === 'tool'
+              ? <div className={`fox-agent-tool-event is-${item.status}`} key={`tool:${item.id}`}>
+                  {item.status === 'completed' ? <Check /> : item.status === 'failed' ? <AlertTriangle /> : <LoaderCircle className="animate-spin" />}
+                  <span>{childToolStatusLabel(item.status)} · <code>{item.toolName}</code></span>
+                </div>
+              : item.role === 'user'
+                ? <article className="fox-agent-message is-user" key={`message:${item.id}`}>
+                    <div className="fox-agent-user-message">
+                      <div className={`fox-agent-user-bubble ${childUserMessageNeedsCollapse(item.content) ? 'is-collapsible' : ''} ${expandedUserMessages.has(item.id) ? 'is-expanded' : ''}`}>
+                        <p>{item.content}</p>
+                        {childUserMessageNeedsCollapse(item.content) && <button type="button" className="fox-agent-message-toggle" aria-label={expandedUserMessages.has(item.id) ? '收起用户消息' : '展开用户消息'} aria-expanded={expandedUserMessages.has(item.id)} onClick={() => setExpandedUserMessages((current) => { const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next })}>{expandedUserMessages.has(item.id) ? <ChevronUp /> : <ChevronDown />}</button>}
+                      </div>
+                      <time>{new Date(item.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>
+                    </div>
+                  </article>
+                : <article className="fox-agent-message is-assistant" key={`message:${item.id}`}>
+                    <img src={childAgentAvatars[avatarIndex % childAgentAvatars.length]} alt="" />
+                    <div><small>{run.workerAgentName} · {new Date(item.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</small><MarkdownResponse>{item.content}</MarkdownResponse></div>
+                  </article>)}
+        {!childDetailLoading && !childDetailError && transcript.length === 0 && <p className="fox-agent-transcript-empty">这个子 Agent 还没有可见消息。</p>}
+        {childRunIsActive(run) && <div className="fox-agent-live-line"><LoaderCircle className="animate-spin" />子 Agent 正在运行，消息会自动更新</div>}
+        {(run.status === 'failed' || run.status === 'interrupted') && <div className="fox-agent-run-error" role="alert">
+          <AlertTriangle />
+          <div><strong>{childRunFailureTitle(run)}</strong>{run.errorCode && <code>{run.errorCode}</code>}<p>{childRunFailureMessage(run)}</p></div>
+        </div>}
+      </div>
+    </section>
+  )
+}
+
+function ContextContent({ mode, detail, fileTabs, activeFileTabId, onOpenFile, onOpenEvidence, onOpenChildAgent }: { mode: RightMode; detail: ConversationDetail | null; fileTabs: OpenFileTab[]; activeFileTabId: string | null; onOpenFile: (path: string, artifactId: string | null) => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void }) {
   const conversationId = detail?.conversation.id ?? null
   const [selectedChange, setSelectedChange] = useState('')
   const [fileSearch, setFileSearch] = useState('')
@@ -3586,7 +4180,7 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, onOpenFile, o
     return <BrowserPanel detail={detail} />
   }
   if (mode === 'agents') {
-    return <ChildAgentPanel detail={detail} onRequestChildTask={onRequestChildTask} onOpenArtifact={onOpenArtifact} />
+    return <ChildAgentPanel detail={detail} onOpenChildAgent={onOpenChildAgent} />
   }
   return null
 }
@@ -3600,7 +4194,18 @@ const rightItems: Array<[RightMode, string, ReactNode]> = [
   ['agents', '子 Agent', <Bot size={16} />]
 ]
 
-function RightPanel({ mode, tabs, detail, width, compact = false, maximized = false, fileTabs, activeFileTabId, onMode, onCloseMode, onOpenFile, onActivateFile, onCloseFile, onOpenEvidence, onOpenArtifact, onRequestChildTask, onToggleMaximized, onCollapse }: { mode: RightMode | null; tabs: RightMode[]; detail: ConversationDetail | null; width: number; compact?: boolean; maximized?: boolean; fileTabs: OpenFileTab[]; activeFileTabId: string | null; onMode: (mode: RightMode) => void; onCloseMode: (mode: RightMode) => void; onOpenFile: (path: string, artifactId: string | null) => void; onActivateFile: (tabId: string) => void; onCloseFile: (tabId: string) => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onRequestChildTask: (prompt?: string) => void; onToggleMaximized: () => void; onCollapse: () => void }) {
+function RightPanel({ mode, tabs, detail, width, compact = false, maximized = false, fileTabs, activeFileTabId, activeChildAgent, onMode, onCloseMode, onOpenFile, onActivateFile, onCloseFile, onOpenChildAgent, onBackChildAgent, onOpenEvidence, onToggleMaximized, onCollapse }: { mode: RightMode | null; tabs: RightMode[]; detail: ConversationDetail | null; width: number; compact?: boolean; maximized?: boolean; fileTabs: OpenFileTab[]; activeFileTabId: string | null; activeChildAgent: ChildAgentSelection | null; onMode: (mode: RightMode) => void; onCloseMode: (mode: RightMode) => void; onOpenFile: (path: string, artifactId: string | null) => void; onActivateFile: (tabId: string) => void; onCloseFile: (tabId: string) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void; onBackChildAgent: () => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onToggleMaximized: () => void; onCollapse: () => void }) {
+  const activeChildAgentRun = activeChildAgent
+    ? detail?.childRuns.find((run) => run.childRunId === activeChildAgent.run.childRunId) ?? activeChildAgent.run
+    : null
+  const homeItemCounts: Record<RightMode, number> = {
+    knowledge: detail?.knowledgeBindings.filter((binding) => binding.enabled !== false).length ?? 0,
+    files: detail?.artifacts.length ?? 0,
+    changes: detail?.toolCalls.filter((item) => isChangeOrCommandTool(item.toolName)).length ?? 0,
+    todo: detail?.tasks.length ?? 0,
+    browser: detail?.toolCalls.filter(isWebToolCall).length ?? 0,
+    agents: detail?.childRuns.length ?? 0,
+  }
   return (
     <aside className={`fox-context-panel ${mode === 'files' ? 'is-files' : ''} ${compact ? 'is-compact' : ''} ${maximized ? 'is-maximized' : ''}`} style={compact || maximized ? undefined : { width }}>
       <div className="fox-context-tabbar">
@@ -3624,18 +4229,23 @@ function RightPanel({ mode, tabs, detail, width, compact = false, maximized = fa
         </div>
         <div className="fox-context-tab-actions">
           <DropdownMenu>
-            <DropdownMenuTrigger asChild><button type="button" aria-label="打开侧边栏页面" title="打开侧边栏页面"><Plus size={16} /></button></DropdownMenuTrigger>
+            <DropdownMenuTrigger asChild><button type="button" aria-label="打开侧边栏页面" title="打开侧边栏页面"><Plus size={14} /></button></DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="fox-context-add-menu">
               {rightItems.map(([id, label, icon]) => <DropdownMenuItem key={id} onSelect={() => onMode(id)}>{icon}<span>{label}</span></DropdownMenuItem>)}
             </DropdownMenuContent>
           </DropdownMenu>
-          <button type="button" aria-label={maximized ? '还原右侧边栏' : '全屏显示右侧边栏'} title={maximized ? '还原' : '全屏'} onClick={onToggleMaximized}>{maximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>
-          <button type="button" className="is-sidebar-open" aria-label="关闭右侧边栏" title="关闭右侧边栏" onClick={onCollapse}><PanelRight size={16} /></button>
+          <button type="button" aria-label={maximized ? '还原右侧边栏' : '全屏显示右侧边栏'} title={maximized ? '还原' : '全屏'} onClick={onToggleMaximized}>{maximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
+          <button type="button" className="is-sidebar-open" aria-label="关闭右侧边栏" title="关闭右侧边栏" onClick={onCollapse}><PanelRight size={14} /></button>
         </div>
       </div>
-      {mode
-        ? <ContextContent mode={mode} detail={detail} fileTabs={fileTabs} activeFileTabId={activeFileTabId} onOpenFile={onOpenFile} onOpenEvidence={onOpenEvidence} onOpenArtifact={onOpenArtifact} onRequestChildTask={onRequestChildTask} />
-        : <div className="fox-context-home"><div>{rightItems.map(([id, label, icon]) => <button type="button" key={id} onClick={() => onMode(id)}>{icon}<span>{label}</span></button>)}</div></div>}
+      {mode === 'agents' && activeChildAgent && activeChildAgentRun
+        ? <ChildAgentConversationPanel key={activeChildAgentRun.childRunId} run={activeChildAgentRun} avatarIndex={activeChildAgent.avatarIndex} onBack={onBackChildAgent} />
+        : mode
+        ? <ContextContent mode={mode} detail={detail} fileTabs={fileTabs} activeFileTabId={activeFileTabId} onOpenFile={onOpenFile} onOpenEvidence={onOpenEvidence} onOpenChildAgent={onOpenChildAgent} />
+        : <div className="fox-context-home"><nav aria-label="侧边栏功能">{rightItems.map(([id, label, icon]) => {
+            const count = homeItemCounts[id]
+            return <button type="button" key={id} onClick={() => onMode(id)}>{icon}<span>{label}</span>{count > 0 && <small>{count}</small>}</button>
+          })}</nav></div>}
     </aside>
   )
 }
@@ -3660,8 +4270,10 @@ function SidebarResizeDivider({ onResize }: { onResize: (delta: number) => void 
   return <div className="fox-sidebar-resize-divider" role="separator" aria-label="调整侧边栏宽度" aria-orientation="vertical" onPointerDown={(event) => { start.current = { x: event.clientX }; event.currentTarget.setPointerCapture(event.pointerId) }} onPointerMove={(event) => { if (!start.current) return; const delta = event.clientX - start.current.x; start.current = { x: event.clientX }; onResize(delta) }} onPointerUp={() => { start.current = null }}><span /></div>
 }
 
-function ConversationSummaryPopover({ detail, modelName, usage, contextWindow }: { detail: ConversationDetail | null; modelName: string; usage: ConversationUsage; contextWindow: number }) {
-  const contextPercent = Math.min(100, Math.round((usage.totalTokens / Math.max(1, contextWindow)) * 100))
+function ConversationSummaryPopover({ detail, modelName, usage, contextWindow, onOpenRightMode }: { detail: ConversationDetail | null; modelName: string; usage: ConversationUsage; contextWindow: number; onOpenRightMode: (mode: RightMode) => void }) {
+  const [open, setOpen] = useState(false)
+  const hasContextWindow = contextWindow > 0
+  const contextPercent = hasContextWindow ? Math.min(100, Math.round((usage.totalTokens / contextWindow) * 100)) : 0
   const cacheEligibleTokens = usage.inputTokens + usage.cacheReadTokens
   const cacheHitRate = cacheEligibleTokens ? Math.round(usage.cacheReadTokens / cacheEligibleTokens * 100) : 0
   const artifacts = detail?.artifacts ?? []
@@ -3677,16 +4289,16 @@ function ConversationSummaryPopover({ detail, modelName, usage, contextWindow }:
     diagnostics.compactions ? `压缩 ${diagnostics.compactions}` : '',
     diagnostics.plannerStatus,
   ].filter(Boolean).join(' · ')
-  const summaryItems = [
-    { icon: <FileText size={15} />, label: '文件输出', count: artifacts.length, detail: artifacts.slice(0, 2).map((item) => item.displayName).join('、') },
-    { icon: <ListTodo size={15} />, label: '任务计划', count: tasks.length, detail: tasks.slice(0, 2).map((item) => item.title).join('、') },
-    { icon: <Terminal size={15} />, label: '后台进程', count: activeProcesses.length, detail: activeProcesses.slice(0, 2).map((item) => item.toolName).join('、') },
-    { icon: <Bot size={15} />, label: '子专家', count: subAgents.length, detail: subAgents.slice(-2).map((item) => `${item.workerAgentName} · ${item.status}`).join('、') },
-    { icon: <BookOpen size={15} />, label: '来源', count: sources.length, detail: sources.slice(0, 2).map((item) => item.title).join('、') },
-    { icon: <Wrench size={15} />, label: '运行诊断', count: diagnostics.toolCount, detail: diagnosticDetail },
+  const summaryItems: Array<{ icon: ReactNode; label: string; count: number; detail: string; mode: RightMode }> = [
+    { icon: <FileText size={15} />, label: '文件输出', count: artifacts.length, detail: artifacts.slice(0, 2).map((item) => item.displayName).join('、'), mode: 'files' },
+    { icon: <ListTodo size={15} />, label: '任务计划', count: tasks.length, detail: tasks.slice(0, 2).map((item) => item.title).join('、'), mode: 'todo' },
+    { icon: <Terminal size={15} />, label: '后台进程', count: activeProcesses.length, detail: activeProcesses.slice(0, 2).map((item) => item.toolName).join('、'), mode: 'todo' },
+    { icon: <Bot size={15} />, label: '子专家', count: subAgents.length, detail: subAgents.slice(-2).map((item) => `${item.workerAgentName} · ${item.status}`).join('、'), mode: 'agents' },
+    { icon: <BookOpen size={15} />, label: '来源', count: sources.length, detail: sources.slice(0, 2).map((item) => item.title).join('、'), mode: 'knowledge' },
+    { icon: <Wrench size={15} />, label: '运行诊断', count: diagnostics.toolCount, detail: diagnosticDetail, mode: 'todo' },
   ]
   return (
-    <Popover>
+    <Popover open={open} onOpenChange={setOpen}>
       <Tooltip>
         <TooltipTrigger asChild><PopoverTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="对话摘要"><Activity size={16} /></Button></PopoverTrigger></TooltipTrigger>
         <TooltipContent side="bottom"><p>对话摘要</p></TooltipContent>
@@ -3694,25 +4306,25 @@ function ConversationSummaryPopover({ detail, modelName, usage, contextWindow }:
       <PopoverContent align="end" sideOffset={8} className="fox-conversation-summary">
         <div className="fox-summary-model">
           <div><span>模型</span><strong title={modelName}>{modelName}</strong></div>
-          <div className="fox-summary-context-copy"><span>上下文</span><strong>{compactTokenCount(usage.totalTokens)} / {compactTokenCount(contextWindow)}</strong></div>
+          <div className="fox-summary-context-copy"><span>上下文</span><strong>{compactTokenCount(usage.totalTokens)} / {hasContextWindow ? compactTokenCount(contextWindow) : '未知'}</strong></div>
           <div className="fox-summary-context-track"><span style={{ width: `${contextPercent}%` }} /></div>
-          <small>{contextPercent}% 已使用 · 输入 {compactTokenCount(usage.inputTokens)} · 输出 {compactTokenCount(usage.outputTokens)}</small>
+          <small>{hasContextWindow ? `${contextPercent}% 已使用` : '未配置上下文上限'} · 本次输入 {compactTokenCount(usage.inputTokens)} · 输出 {compactTokenCount(usage.outputTokens)}</small>
           <small>缓存读取 {compactTokenCount(usage.cacheReadTokens)} · 写入 {compactTokenCount(usage.cacheWriteTokens)} · 命中率 {cacheHitRate}%</small>
           {(diagnostics.provider || diagnostics.apiType) && <small title={diagnostics.baseUrl || undefined}>{[diagnostics.provider, diagnostics.apiType].filter(Boolean).join(' · ')}</small>}
         </div>
         <div className="fox-summary-list">
-          {summaryItems.map((item) => <div key={item.label} className="fox-summary-item">
+          {summaryItems.map((item) => <button type="button" key={item.label} className="fox-summary-item" aria-label={`打开${item.label}侧边栏`} onClick={() => { setOpen(false); onOpenRightMode(item.mode) }}>
             <span className="fox-summary-icon">{item.icon}</span>
             <span><strong>{item.label}</strong><small>{item.detail || '暂无'}</small></span>
-            <b>{item.count}</b>
-          </div>)}
+            <span className="fox-summary-item-tail"><b>{item.count}</b><ChevronRight /></span>
+          </button>)}
         </div>
       </PopoverContent>
     </Popover>
   )
 }
 
-function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, conversation, detail, modelName, usage, contextWindow, state, onPinConversation, onRenameConversation, onArchiveConversation }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; usage: ConversationUsage; contextWindow: number; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void }) {
+function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, onOpenRightMode, conversation, detail, modelName, usage, contextWindow, state, onPinConversation, onRenameConversation, onArchiveConversation }: { rightSidebarCollapsed: boolean; onRightSidebarExpand: () => void; onOpenRightMode: (mode: RightMode) => void; conversation?: ConversationSummary | null; detail: ConversationDetail | null; modelName: string; usage: ConversationUsage; contextWindow: number; state: ChatState; onPinConversation: (conversation: ConversationSummary) => void; onRenameConversation: (conversation: ConversationSummary) => void; onArchiveConversation: (conversation: ConversationSummary) => void }) {
   const [projectPopoverOpen, setProjectPopoverOpen] = useState(false)
   const projectRoot = conversation?.projectRoot?.trim() ?? ''
   const normalizedProjectRoot = projectRoot.replace(/[\\/]+$/, '')
@@ -3739,29 +4351,29 @@ function ChatTopbar({ rightSidebarCollapsed, onRightSidebarExpand, conversation,
             </PopoverContent>
           </Popover>
           <span className="fox-chat-title">{conversation?.title || '新对话'}</span>
+          <DropdownMenu>
+            <Tooltip>
+              <TooltipTrigger asChild><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button fox-chat-title-more" aria-label="更多"><MoreHorizontal size={16} /></Button></DropdownMenuTrigger></TooltipTrigger>
+              <TooltipContent side="bottom"><p>更多</p></TooltipContent>
+            </Tooltip>
+            <DropdownMenuContent align="start" className="fox-top-menu">
+              <DropdownMenuLabel>当前对话</DropdownMenuLabel>
+              <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onPinConversation(conversation)}>{conversation?.pinned ? <PinOff /> : <Pin />}{conversation?.pinned ? '取消置顶' : '置顶对话'}</DropdownMenuItem>
+              <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onRenameConversation(conversation)}><FileEdit />重命名对话</DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onArchiveConversation(conversation)}><Archive />归档对话</DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
       <div className="fox-chat-top-actions">
-        {rightSidebarCollapsed && <IconButton label="展开右侧边栏" tooltipSide="bottom" onClick={onRightSidebarExpand}><PanelRight size={16} /></IconButton>}
-        <ConversationSummaryPopover detail={detail} modelName={modelName} usage={usage} contextWindow={contextWindow} />
+        <ConversationSummaryPopover detail={detail} modelName={modelName} usage={usage} contextWindow={contextWindow} onOpenRightMode={onOpenRightMode} />
         {state === 'running' && <Badge className="fox-running-badge"><span />运行中</Badge>}
         {state === 'question' && <Badge className="fox-question-badge"><CircleHelp size={12} />等待回答</Badge>}
         {state === 'approval' && <Badge className="fox-approval-badge"><ShieldCheck size={12} />等待批准</Badge>}
         {state === 'error' && <Badge className="fox-error-badge"><AlertTriangle size={12} />运行错误</Badge>}
         {state === 'denied' && <Badge className="fox-denied-badge"><CircleStop size={12} />已取消</Badge>}
-        <DropdownMenu>
-          <Tooltip>
-            <TooltipTrigger asChild><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-icon-button" aria-label="更多"><MoreHorizontal size={16} /></Button></DropdownMenuTrigger></TooltipTrigger>
-            <TooltipContent side="bottom"><p>更多</p></TooltipContent>
-          </Tooltip>
-          <DropdownMenuContent align="end" className="fox-top-menu">
-            <DropdownMenuLabel>当前对话</DropdownMenuLabel>
-            <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onPinConversation(conversation)}>{conversation?.pinned ? <PinOff /> : <Pin />}{conversation?.pinned ? '取消置顶' : '置顶对话'}</DropdownMenuItem>
-            <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onRenameConversation(conversation)}><FileEdit />重命名对话</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem disabled={!conversation} onSelect={() => conversation && onArchiveConversation(conversation)}><Archive />归档对话</DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {rightSidebarCollapsed && <IconButton label="展开右侧边栏" className="fox-right-sidebar-expand" tooltipSide="bottom" onClick={onRightSidebarExpand}><PanelRight size={14} /></IconButton>}
       </div>
     </header>
   )
@@ -3798,9 +4410,10 @@ export function Workbench() {
   const [openRightTabs, setOpenRightTabs] = useState<RightMode[]>(readStoredRightTabs)
   const [openFileTabs, setOpenFileTabs] = useState<OpenFileTab[]>([])
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null)
+  const [activeChildAgent, setActiveChildAgent] = useState<ChildAgentSelection | null>(null)
   const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(true)
   const [rightPanelMaximized, setRightPanelMaximized] = useState(false)
-  const [rightWidth, setRightWidth] = useState(() => readStoredNumber(layoutStorage.rightWidth, 360, 280, 760))
+  const [rightWidth, setRightWidth] = useState(() => childAgentVisualQaPanelWidth() ?? readStoredNumber(layoutStorage.rightWidth, 360, 280, 760))
   const [seenChangeCounts, setSeenChangeCounts] = useState<Record<string, number>>(readStoredSeenChanges)
   const [dark, setDark] = useState(() => typeof window !== 'undefined' && window.localStorage.getItem(layoutStorage.theme) === 'dark')
   const [mascotIndex, setMascotIndex] = useState(0)
@@ -3856,10 +4469,7 @@ export function Workbench() {
   const desktopRunning = desktopConversation.enabled && runIsActive(desktopConversation.detail)
   const desktopRunStatus = desktopConversation.detail?.lastRun?.status
   const selectableAgents = chatSelectableAgents(agentResource.agents)
-  const activeAgent = selectableAgents.find((item) => item.id === desktopConversation.selectedAgentId)
-    ?? selectableAgents.find((item) => item.isDefault)
-    ?? selectableAgents[0]
-    ?? null
+  const activeAgent = resolveActiveChatAgent(agentResource.agents, desktopConversation.selectedAgentId)
   const activeExpert = agentResource.agents.find((item) => item.id === desktopConversation.selectedExpertId) ?? null
   const expertToolAvailability = useMemo(() => activeExpert
     ? latestExpertToolAvailability(desktopConversation.detail?.runtimeEvents ?? [], activeExpert)
@@ -3867,7 +4477,7 @@ export function Workbench() {
   const activeProject = projects.find((item) => item.id === desktopConversation.detail?.conversation.projectId)
     ?? projects.find((item) => item.rootPath === desktopConversation.draftProjectRoot)
     ?? null
-  const conversationUsage = useMemo(() => latestConversationUsage(desktopConversation.detail?.runtimeEvents ?? []), [desktopConversation.detail?.runtimeEvents])
+  const conversationUsage = useMemo(() => latestConversationContextUsage(desktopConversation.detail?.runtimeEvents ?? []), [desktopConversation.detail?.runtimeEvents])
   const runtimeQuestion = useMemo(() => pendingRuntimeQuestion(desktopConversation.detail), [desktopConversation.detail])
   const goalProgressData = useGoalProgress(desktopConversation.detail)
   const conversationAgentId = desktopConversation.detail?.conversation.agentId
@@ -3900,6 +4510,7 @@ export function Workbench() {
   useEffect(() => {
     setOpenFileTabs([])
     setActiveFileTabId(null)
+    setActiveChildAgent(null)
     if (rightMode === 'files' && !openRightTabs.includes('files')) {
       setRightMode(openRightTabs.at(-1) ?? null)
     }
@@ -4013,7 +4624,14 @@ export function Workbench() {
     setPendingUserMessage(null)
   }, [desktopUserMessage, pendingUserMessage])
 
-  const shellStyle = useMemo(() => ({ '--fox-sidebar-width': `${sidebarCollapsed ? 64 : sidebarWidth}px`, '--fox-composer-occlusion': `${composerHeight}px` } as React.CSSProperties), [composerHeight, sidebarCollapsed, sidebarWidth])
+  const shellStyle = useMemo(() => {
+    const currentSidebarWidth = sidebarCollapsed || compactLayout ? 64 : sidebarWidth
+    return {
+      '--fox-sidebar-width': `${currentSidebarWidth}px`,
+      '--fox-sidebar-center-offset': `${currentSidebarWidth / 2}px`,
+      '--fox-composer-occlusion': `${composerHeight}px`,
+    } as React.CSSProperties
+  }, [compactLayout, composerHeight, sidebarCollapsed, sidebarWidth])
 
   const openRightSidebarHome = () => {
     setRightSidebarCollapsed(false)
@@ -4030,6 +4648,7 @@ export function Workbench() {
     setRightSidebarCollapsed(false)
     setOpenRightTabs((current) => current.includes(mode) ? current : [...current, mode])
     if (mode === 'files') setActiveFileTabId(null)
+    if (mode === 'agents') setActiveChildAgent(null)
     if (mode === 'changes' && activeConversationId) {
       setSeenChangeCounts((current) => current[activeConversationId] === totalChangeCount ? current : { ...current, [activeConversationId]: totalChangeCount })
     }
@@ -4046,6 +4665,7 @@ export function Workbench() {
       setActiveFileTabId(openFileTabs[0].id)
       return
     }
+    if (mode === 'agents') setActiveChildAgent(null)
     if (closingActivePage) {
       setRightMode(nextTabs[Math.min(closingIndex, nextTabs.length - 1)] ?? null)
     }
@@ -4083,16 +4703,15 @@ export function Workbench() {
       setRightMode(openRightTabs.at(-1) ?? null)
     }
   }
+  const openChildAgent = (run: ChildRunRecord, avatarIndex: number) => {
+    setActiveChildAgent({ run, avatarIndex })
+    setRightSidebarCollapsed(false)
+    setRightMode('agents')
+    if (compactLayout) setCompactRightOpen(true)
+  }
   const openArtifact = (artifact: ArtifactRecord) => {
     const projectRoot = desktopConversation.detail?.conversation.projectRoot
     openFile(projectRoot ? artifactProjectPath(artifact, projectRoot, []) : artifact.storagePath, artifact.id)
-  }
-  const requestChildTask = (prompt?: string) => {
-    setSuggestedPrompt(prompt ?? '请把下面这个独立子任务委派给合适的子 Agent，并在完成后汇总、验证它的结果：\n\n')
-    setComposerResetKey((value) => value + 1)
-    setRightPanelMaximized(false)
-    if (compactLayout) setCompactRightOpen(false)
-    window.setTimeout(() => document.querySelector<HTMLTextAreaElement>('.fox-prompt-textarea')?.focus(), 0)
   }
   const openEvidence = (evidence: TaskEvidenceRecord) => {
     const scrollToMessage = (messageId: string) => {
@@ -4123,7 +4742,6 @@ export function Workbench() {
     }
     if (evidence.refKind === 'tool_call' || evidence.refKind === 'run_event') {
       selectRightMode(evidence.evidenceType === 'file_diff' ? 'changes' : 'todo')
-      toast.info('已打开相关执行记录')
       return
     }
     toast.info('该证据的原始对象已不可用')
@@ -4156,7 +4774,7 @@ export function Workbench() {
     setPendingUserMessage(null)
     setChatState('running')
     void desktopConversation
-      .rerunFromMessage(latestUser.id, latestUser.content, desktopConversation.detail?.lastRun?.model)
+      .rerunFromMessage(latestUser.id, latestUser.content, conversationModelOverride(activeAgent, desktopConversation.detail?.lastRun?.model, yuxiModels.models))
       .then((started) => {
         if (!started) setChatState('error')
       })
@@ -4208,14 +4826,14 @@ export function Workbench() {
     }
     prepareDraft(knowledgeAgent.id, 'knowledge', undefined, undefined, [knowledgeBase])
   }
-  const switchAssistantMode = (mode: AssistantMode) => {
+  const switchAssistantMode = (mode: AssistantMode, newConversation = false) => {
     setAssistantMode(mode)
     if (mode === 'knowledge') {
       navigate('local-knowledge-home')
       return
     }
     if (mode === 'assistant') {
-      if (LOCAL_KNOWLEDGE_WORKSPACE_VIEWS.includes(activeView)) {
+      if (!newConversation) {
         navigate('chat')
         return
       }
@@ -4248,7 +4866,8 @@ export function Workbench() {
       toast.error('请先选择一个专家')
       return
     }
-    prepareDraft(agentId, assistantMode, projectRoot, permissionMode)
+    desktopConversation.selectProject(projectRoot, permissionMode)
+    setActiveView('chat')
   }
   const pickProjectFolder = async () => {
     try {
@@ -4263,14 +4882,7 @@ export function Workbench() {
     const selected = await pickProjectFolder()
     if (!selected) return
     const projectSelection = selectProjectRoot(selected, projects, readDefaultProjectPermission())
-    const projectAgentId = desktopConversation.defaultAgentId
-      ?? agentResource.agents.find((agent) => agent.runtimeType !== 'yuxi' && agent.isDefault)?.id
-      ?? 'fox-general'
-    const created = await desktopConversation.createConversationForAgent(projectAgentId, projectSelection.path, projectSelection.permissionMode)
-    if (!created) {
-      toast.error(desktopConversation.error ?? '无法创建项目会话，请检查文件夹路径')
-      return
-    }
+    desktopConversation.selectProject(projectSelection.path, projectSelection.permissionMode)
     setActiveView('chat')
     toast.success(`项目“${selected.split(/[\\/]/).filter(Boolean).at(-1) ?? selected}”已加入当前对话`)
   }
@@ -4289,49 +4901,25 @@ export function Workbench() {
         toast.error(cause instanceof Error ? cause.message : String(cause))
         return
       }
+    } else if (desktopConversation.detail?.conversation.id) {
+      try {
+        await desktopClient.updateConversationPermission(
+          desktopConversation.detail.conversation.id,
+          permissionMode,
+        )
+        await desktopConversation.openConversation(desktopConversation.detail.conversation.id)
+      } catch (cause) {
+        toast.error(cause instanceof Error ? cause.message : String(cause))
+        return
+      }
     }
-    toast.success(`执行方式已切换为${{ ask: '“执行前询问”', allow: '“自动执行”', read_only: '“只读模式”' }[permissionMode]}`)
   }
   const saveKnowledgeBindings = async (references: KnowledgeReference[], names: Record<string, string>, closeDialog = true) => {
     setKnowledgeDialogBusy(true)
     setKnowledgeDialogError(null)
     try {
-      const requiresPersistedConversation = references.some((reference) => reference.source === 'local')
-      let conversationId = desktopConversation.detail?.conversation.id ?? null
-      if (requiresPersistedConversation && !conversationId) {
-        const created = await desktopClient.createConversation({
-          agentId: desktopConversation.selectedAgentId ?? activeAgent?.id ?? 'fox-general',
-          expertId: activeExpert?.id ?? undefined,
-          projectRoot: desktopConversation.draftProjectRoot ?? undefined,
-          permissionMode: desktopConversation.draftPermissionMode ?? undefined,
-        })
-        await desktopConversation.openConversation(created.id)
-        conversationId = created.id
-      }
-
-      if (conversationId) {
-        await desktopClient.setKnowledgeReferences(conversationId, references, names)
-        await desktopConversation.openConversation(conversationId)
-      } else {
-        const remoteItems = references.map((reference) => {
-          const item = knowledge.items.find((candidate) => candidate.id === reference.id)
-          if (item) return item
-          return {
-            id: reference.id,
-            name: names[knowledgeReferenceKey(reference)] ?? reference.id,
-            description: '',
-            kbType: null,
-            status: null,
-            fileCount: 0,
-            processedCount: 0,
-            rowCount: 0,
-            createdAt: null,
-            updatedAt: null,
-          } satisfies KnowledgeBaseRecord
-        })
-        const saved = await desktopConversation.setKnowledgeBindings(remoteItems)
-        if (!saved) throw new Error(desktopConversation.error ?? '无法保存知识库选择')
-      }
+      const saved = await desktopConversation.setKnowledgeReferences(references, names)
+      if (!saved) throw new Error(desktopConversation.error ?? '无法保存知识库选择')
     } catch (cause) {
       setKnowledgeDialogBusy(false)
       setKnowledgeDialogError(cause instanceof Error ? cause.message : String(cause))
@@ -4343,8 +4931,8 @@ export function Workbench() {
     return true
   }
   const toggleKnowledgeBinding = async (reference: KnowledgeReference, name: string) => {
-    const currentReferences = Array.isArray(desktopConversation.detail?.knowledgeReferences)
-      ? desktopConversation.detail.knowledgeReferences
+    const currentReferences = Array.isArray(desktopConversation.knowledgeReferences)
+      ? desktopConversation.knowledgeReferences
       : desktopConversation.knowledgeBindings.filter((binding) => binding.enabled !== false).map(knowledgeReferenceFromLegacyBinding)
     const targetKey = knowledgeReferenceKey(reference)
     const nextReferences = currentReferences.some((item) => knowledgeReferenceKey(item) === targetKey)
@@ -4484,21 +5072,16 @@ export function Workbench() {
             return
           }
           if (configuredKnowledgeReferences.length) {
-            try {
-              const conversation = await desktopClient.createConversation({
-                agentId: desktopConversation.defaultAgentId ?? activeAgent?.id ?? 'fox-general',
-                expertId: entityId,
-                projectRoot: desktopConversation.draftProjectRoot ?? undefined,
-                permissionMode: desktopConversation.draftPermissionMode ?? undefined,
-              })
-              const names = Object.fromEntries(configuredKnowledgeReferences.map((reference) => [
-                knowledgeReferenceKey(reference),
-                knowledge.items.find((item) => item.id === reference.id)?.name ?? reference.id,
-              ]))
-              await desktopClient.setKnowledgeReferences(conversation.id, configuredKnowledgeReferences, names)
-              await desktopConversation.openConversation(conversation.id)
-            } catch (cause) {
-              toast.error('专家已启用，但知识库绑定失败', { description: cause instanceof Error ? cause.message : String(cause) })
+            const references = [...(desktopConversation.knowledgeReferences ?? desktopConversation.knowledgeBindings.map(knowledgeReferenceFromLegacyBinding))]
+            for (const reference of configuredKnowledgeReferences) {
+              if (!references.some((item) => knowledgeReferenceKey(item) === knowledgeReferenceKey(reference))) references.push(reference)
+            }
+            const names = Object.fromEntries(references.map((reference) => [
+              knowledgeReferenceKey(reference),
+              knowledge.items.find((item) => item.id === reference.id)?.name ?? reference.id,
+            ]))
+            if (!await desktopConversation.setKnowledgeReferences(references, names)) {
+              toast.error('专家已启用，但知识库绑定失败')
             }
           }
         })()
@@ -4593,33 +5176,242 @@ export function Workbench() {
     setCompactRightOpen(false)
   }, [activeView, timelineEmpty])
   const showConversationRightSidebar = activeView === 'chat' && !timelineEmpty
+  const handleRuntimeOpenSource = useStableCallback((source: RuntimeSource) => {
+    navigate('knowledge-detail', source.knowledgeBaseId, { documentId: source.documentId, sourceLocator: source.locator })
+  })
+  const handleRuntimeSubmitQuestion = useStableCallback(async (text: string, answers: Record<string, string | string[]>) => {
+    if (!runtimeQuestion) return false
+    clearWorkflowTimer()
+    setActivePrompt(text)
+    setChatState('running')
+    const started = await desktopConversation.resumeQuestion(runtimeQuestion.runId, text, answers)
+    if (!started) {
+      setChatState('error')
+      return false
+    }
+    return true
+  })
+  const handleKnowledgeOpen = useStableCallback(() => {
+    setKnowledgeDialogOpen(true)
+    refreshKnowledgeChoices()
+  })
+  const handleKnowledgeToggle = useStableCallback((reference: KnowledgeReference, name: string) => toggleKnowledgeBinding(reference, name))
+  const timelineRuntimeContextValue = useMemo<TimelineRuntimeContextValue>(() => ({
+    knowledgeBindings: desktopConversation.knowledgeBindings,
+    assistantName: timelineAssistantName,
+    runModel: timelineRunModel,
+    onOpenSource: handleRuntimeOpenSource,
+  }), [desktopConversation.knowledgeBindings, handleRuntimeOpenSource, timelineAssistantName, timelineRunModel])
+  const composerRuntimeContextValue = useMemo<ComposerRuntimeContextValue>(() => ({
+    ...timelineRuntimeContextValue,
+    remoteKnowledgeBases: knowledge.items,
+    localKnowledgeBases,
+    knowledgeReferences: desktopConversation.knowledgeReferences,
+    knowledgeLoading: knowledge.loading || localKnowledgeLoading || knowledgeDialogBusy,
+    knowledgeError: knowledgeDialogError ?? knowledge.error,
+    onKnowledgeMenuOpen: refreshKnowledgeChoices,
+    onKnowledgeToggle: handleKnowledgeToggle,
+    questionRequest: runtimeQuestion,
+    onSubmitQuestion: handleRuntimeSubmitQuestion,
+    onKnowledge: handleKnowledgeOpen,
+  }), [desktopConversation.knowledgeReferences, handleKnowledgeOpen, handleKnowledgeToggle, handleRuntimeSubmitQuestion, knowledge.error, knowledge.items, knowledge.loading, knowledgeDialogBusy, knowledgeDialogError, localKnowledgeBases, localKnowledgeLoading, refreshKnowledgeChoices, runtimeQuestion, timelineRuntimeContextValue])
+  const handleTimelineLoadEarlierMessages = useStableCallback(() => {
+    void desktopConversation.loadEarlierMessages()
+  })
+  const handleTimelineApprove = useStableCallback(() => finishWorkflow())
+  const handleTimelineDeny = useStableCallback(() => {
+    clearWorkflowTimer()
+    setChatState('denied')
+  })
+  const handleTimelineRetry = useStableCallback(() => {
+    void retryLatestRun()
+  })
+  const handleTimelineRerun = useStableCallback(async (messageId: string, prompt: string) => {
+    clearWorkflowTimer()
+    setActivePrompt(prompt)
+    setSuggestedPrompt('')
+    setPendingUserMessage(null)
+    setEmptyConversation(false)
+    setChatState('running')
+    if (!desktopConversation.enabled) {
+      finishWorkflow()
+      return true
+    }
+    const started = await desktopConversation.rerunFromMessage(messageId, prompt, conversationModelOverride(activeAgent, desktopConversation.detail?.lastRun?.model, yuxiModels.models))
+    if (!started) setChatState('error')
+    return started
+  })
+  const handleTimelineAnswer = useStableCallback((_answer: string) => {
+    finishWorkflow(2600)
+  })
+  const handleTimelineStart = useStableCallback((suggestion: string) => resetConversation(suggestion))
+  const handleTimelineOpenArtifact = useStableCallback((artifact: ArtifactRecord) => {
+    void openArtifact(artifact)
+  })
+  const handleTimelineViewExpert = useStableCallback((expertId: string) => navigate('agent-detail', expertId))
+  const handleComposerProject = useStableCallback(() => {
+    void addProject()
+  })
+  const handleComposerPermissionModeChange = useStableCallback((permissionMode: ProjectRecord['permissionMode']) => changeProjectPermission(permissionMode))
+  const handleComposerAgentChange = useStableCallback((agentId: string) => {
+    void desktopConversation.createConversationForAgent(agentId).then((created) => {
+      if (!created) toast.error(desktopConversation.error ?? '无法切换这个助手')
+    })
+  })
+  const handleComposerViewExpert = useStableCallback(() => {
+    if (activeExpert) navigate('agent-detail', activeExpert.id)
+  })
+  const handleComposerChangeExpert = useStableCallback(() => navigate('agents'))
+  const handleComposerRemoveExpert = useStableCallback(async () => {
+    const result = await desktopConversation.removeExpert()
+    if (!result.success) {
+      toast.error(expertErrorMessage(result.error, '无法移除专家，请稍后重试'))
+      return
+    }
+    toast.success('已移除专家')
+  })
+  const handleComposerPromptCommit = useStableCallback((prompt: string) => {
+    const now = Date.now()
+    setActivePrompt(prompt)
+    setSuggestedPrompt('')
+    setEmptyConversation(false)
+    setChatState('running')
+    setPendingUserMessage({
+      id: `ui-pending-${now}`,
+      conversationId: desktopConversation.detail?.conversation.id ?? 'pending',
+      runId: null,
+      role: 'user',
+      kind: 'text',
+      content: prompt,
+      status: 'sending',
+      ordinal: (desktopConversation.detail?.messages.at(-1)?.ordinal ?? 0) + 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+  })
+  const handleComposerSubmitPrompt = useStableCallback(async (prompt: string, model?: string, submittedFiles?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => {
+    clearWorkflowTimer()
+    setActivePrompt(prompt)
+    setSuggestedPrompt('')
+    setEmptyConversation(false)
+    if (desktopConversation.enabled) {
+      setChatState('running')
+      const started = await desktopConversation.send(prompt, conversationModelOverride(activeAgent, model, yuxiModels.models), submittedFiles, runtimeText)
+      if (!started) {
+        setPendingUserMessage((message) => message ? { ...message, status: 'failed', updatedAt: Date.now() } : message)
+        setChatState('error')
+        return 'error' as const
+      }
+      return 'complete' as const
+    }
+    if (/询问我|让我选择|需要确认方案|怎么处理/.test(prompt)) {
+      setChatState('question')
+      return 'question' as const
+    }
+    if (/修改|写入|删除|重命名|创建文件/.test(prompt)) {
+      setChatState('approval')
+      return 'approval' as const
+    }
+    if (/失败|错误|连接测试|检查连接/.test(prompt)) {
+      setChatState('error')
+      return 'error' as const
+    }
+    setChatState('running')
+    return 'complete' as const
+  })
+  const handleComposerResolveApproval = useStableCallback((approvalId: string, decision: ApprovalDecision) => desktopConversation.resolveApproval(approvalId, decision))
+  const handleComposerResolveWorkModeConfirmation = useStableCallback((goalId: string, expectedVersion: number, approved: boolean) => desktopConversation.resolveWorkModeConfirmation(goalId, expectedVersion, approved))
+  const handleComposerResolvePlanRevision = useStableCallback((planRevisionId: string, decision: 'approved' | 'rejected') => desktopConversation.resolvePlanRevision(planRevisionId, decision))
+  const handleComposerDeleteGoal = useStableCallback((goalId: string) => desktopConversation.deleteGoal(goalId))
+  const handleComposerGoalRunningChange = useStableCallback((goalId: string, expectedVersion: number, running: boolean) => desktopConversation.setGoalRunning(goalId, expectedVersion, running))
+  const handleComposerEvidenceClick = useStableCallback((evidence: TaskEvidenceRecord) => openEvidence(evidence))
+  const handleComposerStatusChange = useStableCallback((status: 'ready' | 'streaming') => {
+    if (!desktopConversation.enabled && status === 'ready' && chatState === 'running') setChatState('complete')
+  })
+  const handleComposerCancel = useStableCallback(() => desktopConversation.cancel())
+  const handleWorkspaceNavigate = useStableCallback((...args: Parameters<NavigateWorkspace>) => navigate(...args))
+  const handleAssistantModeChange = useStableCallback((mode: AssistantMode) => switchAssistantMode(mode))
+  const handleNewChat = useStableCallback(() => switchAssistantMode('assistant', true))
+  const handleNewProjectChat = useStableCallback((projectRoot?: string) => createProjectDraft(projectRoot))
+  const handleCreateLocalKnowledge = useStableCallback(() => requestLocalKnowledgeCreate())
+  const handleOpenConversation = useStableCallback((conversationId?: string) => {
+    setPendingUserMessage(null)
+    if (desktopConversation.enabled && conversationId) void desktopConversation.openConversation(conversationId)
+    setEmptyConversation(false)
+    navigate('chat')
+  })
+  const handleRenameConversation = useStableCallback((conversation: ConversationSummary) => setConversationDialog({ conversation, mode: 'rename' }))
+  const handlePinConversation = useStableCallback((conversation: ConversationSummary) => {
+    void pinManagedConversation(conversation)
+  })
+  const handleArchiveConversation = useStableCallback((conversation: ConversationSummary) => {
+    void archiveManagedConversation(conversation)
+  })
+  const handleUnarchiveConversation = useStableCallback((conversation: ConversationSummary) => {
+    void unarchiveManagedConversation(conversation)
+  })
+  const handleTrashConversation = useStableCallback((conversation: ConversationSummary) => {
+    void trashManagedConversation(conversation)
+  })
+  const handleRestoreConversation = useStableCallback((conversation: ConversationSummary) => {
+    void restoreManagedConversation(conversation)
+  })
+  const handlePurgeConversation = useStableCallback((conversation: ConversationSummary) => setConversationDialog({ conversation, mode: 'purge' }))
+  const handleDeleteProject = useStableCallback((project: { name: string; root: string; items: Array<{ id: string; title: string }> }) => {
+    const normalizedRoot = project.root.replace(/[\\/]+$/, '').replace(/\//g, '\\').toLocaleLowerCase()
+    setProjectDeleteDialog({
+      ...project,
+      items: desktopConversation.conversations
+        .filter((conversation) => conversation.projectRoot?.replace(/[\\/]+$/, '').replace(/\//g, '\\').toLocaleLowerCase() === normalizedRoot)
+        .map((conversation) => ({ id: conversation.id, title: conversation.title })),
+    })
+  })
+  const handleExitManagement = useStableCallback(() => exitManagement())
+  const handleExpandSidebar = useStableCallback(() => setSidebarCollapsed(false))
+  const handleToggleTheme = useStableCallback(() => setDark(!dark))
+  const handleOpenSettings = useStableCallback(() => navigate('settings'))
+  const handleOpenAbout = useStableCallback(() => navigate('settings-about'))
+  const handleToggleSidebar = useStableCallback(() => setSidebarCollapsed((value) => !value))
+  const handleZoom = useStableCallback((delta: number) => {
+    const current = Number(document.documentElement.dataset.foxZoom ?? '1')
+    const next = Math.min(1.4, Math.max(.8, Math.round((current + delta) * 10) / 10))
+    document.documentElement.dataset.foxZoom = String(next)
+    document.documentElement.style.zoom = String(next)
+  })
+  const sidebarYuxiService = useMemo(() => yuxi.service ? {
+    name: yuxi.service.name,
+    status: yuxi.service.lastStatus,
+    connectionType: yuxi.service.connectionType,
+  } : null, [yuxi.service])
 
   if (activeView === 'onboarding') return <Suspense fallback={<div className="fox-app-loading"><img src={mascotAssets.brand} alt="" /><p>Fox 正在准备引导页</p></div>}><OnboardingPage navigate={navigate} onExit={finishOnboarding} /></Suspense>
 
   return (
     <main className="fox-shell" style={shellStyle}>
-      <WindowTitlebar leftSidebarCollapsed={sidebarCollapsed || compactLayout} onNewChat={() => switchAssistantMode(assistantMode)} onOpenProject={() => void addProject()} onSettings={() => navigate('settings')} onAbout={() => navigate('settings-about')} onToggleSidebar={() => setSidebarCollapsed((value) => !value)} onZoom={(delta) => { const current = Number(document.documentElement.dataset.foxZoom ?? '1'); const next = Math.min(1.4, Math.max(.8, Math.round((current + delta) * 10) / 10)); document.documentElement.dataset.foxZoom = String(next); document.documentElement.style.zoom = String(next) }} onNavigate={navigate} />
+      <MemoizedWindowTitlebar leftSidebarCollapsed={sidebarCollapsed || compactLayout} onNewChat={handleNewChat} onOpenProject={handleComposerProject} onSettings={handleOpenSettings} onAbout={handleOpenAbout} onToggleSidebar={handleToggleSidebar} onZoom={handleZoom} />
       <div className="fox-workbench">
-        <Sidebar collapsed={sidebarCollapsed || compactLayout} assistantMode={assistantMode} onModeChange={switchAssistantMode} onNewChat={() => switchAssistantMode(assistantMode)} onNewProjectChat={createProjectDraft} onAddProject={() => void addProject()} onCreateLocalKnowledge={requestLocalKnowledgeCreate} onOpenConversation={(conversationId) => { setPendingUserMessage(null); if (desktopConversation.enabled && conversationId) void desktopConversation.openConversation(conversationId); setEmptyConversation(false); navigate('chat') }} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} onUnarchiveConversation={(conversation) => void unarchiveManagedConversation(conversation)} onTrashConversation={(conversation) => void trashManagedConversation(conversation)} onRestoreConversation={(conversation) => void restoreManagedConversation(conversation)} onPurgeConversation={(conversation) => setConversationDialog({ conversation, mode: 'purge' })} onDeleteProject={(project) => { const normalizedRoot = project.root.replace(/[\\/]+$/, '').replace(/\//g, '\\').toLocaleLowerCase(); setProjectDeleteDialog({ ...project, items: desktopConversation.conversations.filter((conversation) => conversation.projectRoot?.replace(/[\\/]+$/, '').replace(/\//g, '\\').toLocaleLowerCase() === normalizedRoot).map((conversation) => ({ id: conversation.id, title: conversation.title })) }) }} onNavigate={navigate} onExitManagement={exitManagement} onTheme={() => setDark(!dark)} onSettings={() => navigate('settings')} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.detail?.conversation.id} newChatActive={activeView === 'chat' && timelineEmpty} yuxiService={yuxi.service ? { name: yuxi.service.name, status: yuxi.service.lastStatus, connectionType: yuxi.service.connectionType } : null} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
+        <MemoizedSidebar collapsed={sidebarCollapsed || compactLayout} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.detail?.conversation.id} newChatActive={activeView === 'chat' && timelineEmpty} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
         {!sidebarCollapsed && !compactLayout && <SidebarResizeDivider onResize={(delta) => setSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
         <div className="fox-content-card">
         <div className={`fox-content-surface ${rightPanelMaximized && showConversationRightSidebar && !rightSidebarCollapsed ? 'is-right-maximized' : ''}`}>
         <section className="fox-chat-pane">
-          <ComposerRuntimeContext.Provider value={{ knowledgeBindings: desktopConversation.knowledgeBindings, remoteKnowledgeBases: knowledge.items, localKnowledgeBases, knowledgeReferences: desktopConversation.detail?.knowledgeReferences, knowledgeLoading: knowledge.loading || localKnowledgeLoading || knowledgeDialogBusy, knowledgeError: knowledgeDialogError ?? knowledge.error, onKnowledgeMenuOpen: refreshKnowledgeChoices, onKnowledgeToggle: toggleKnowledgeBinding, assistantName: timelineAssistantName, runModel: timelineRunModel, onOpenSource: (source) => navigate('knowledge-detail', source.knowledgeBaseId, { documentId: source.documentId, sourceLocator: source.locator }), questionRequest: runtimeQuestion, onSubmitQuestion: async (text, answers) => { if (!runtimeQuestion) return false; clearWorkflowTimer(); setActivePrompt(text); setChatState('running'); const started = await desktopConversation.resumeQuestion(runtimeQuestion.runId, text, answers); if (!started) { setChatState('error'); return false } return true }, onKnowledge: () => { setKnowledgeDialogOpen(true); refreshKnowledgeChoices() } }}>
-          {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || activeAgent?.defaultModel || modelService.service?.modelId || '未配置模型'} usage={conversationUsage} contextWindow={modelService.service?.contextWindow ?? 0} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
-<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><Timeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={() => void desktopConversation.loadEarlierMessages()} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} mascotSrc={sidebarMascot} mascotActive={desktopRunning || mascotCelebrating} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? [] : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? [] : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? [] : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} onApprove={() => finishWorkflow()} onDeny={() => { clearWorkflowTimer(); setChatState('denied') }} onRetry={retryLatestRun} onRerun={async (messageId, prompt) => { clearWorkflowTimer(); setActivePrompt(prompt); setSuggestedPrompt(''); setPendingUserMessage(null); setEmptyConversation(false); setChatState('running'); if (!desktopConversation.enabled) { finishWorkflow(); return true } const started = await desktopConversation.rerunFromMessage(messageId, prompt, desktopConversation.detail?.lastRun?.model); if (!started) setChatState('error'); return started }} onAnswer={(answer) => { toast.success(`已选择：${answer}`); finishWorkflow(2600) }} onStart={(suggestion) => resetConversation(suggestion)} onOpenArtifact={openArtifact} onViewExpert={(expertId) => navigate('agent-detail', expertId)} /></Profiler><Profiler id="conversation-composer" onRender={recordRegionRender}><Composer resetKey={composerResetKey} suggestedPrompt={suggestedPrompt} chatState={chatState} centered={timelineEmpty} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? desktopConversation.detail?.approvals ?? [] : []} mascotSrc={timelineEmpty ? undefined : sidebarMascot} mascotActive={desktopRunning || mascotCelebrating} onProject={() => void addProject()} onPermissionModeChange={changeProjectPermission} onAgentChange={(agentId) => { void desktopConversation.createConversationForAgent(agentId).then((created) => { if (created) toast.success('已切换助手，发送消息后创建对话') }) }} onViewExpert={() => activeExpert && navigate('agent-detail', activeExpert.id)} onChangeExpert={() => navigate('agents')} onRemoveExpert={async () => { const result = await desktopConversation.removeExpert(); if (!result.success) { toast.error(expertErrorMessage(result.error, '无法移除专家，请稍后重试')); return } toast.success('已移除专家') }} onHeightChange={setComposerHeight} onPromptCommit={(prompt) => { const now = Date.now(); setActivePrompt(prompt); setSuggestedPrompt(''); setEmptyConversation(false); setChatState('running'); setPendingUserMessage({ id: `ui-pending-${now}`, conversationId: desktopConversation.detail?.conversation.id ?? 'pending', runId: null, role: 'user', kind: 'text', content: prompt, status: 'sending', ordinal: (desktopConversation.detail?.messages.at(-1)?.ordinal ?? 0) + 1, createdAt: now, updatedAt: now }) }} onSubmitPrompt={async (prompt, model, submittedFiles, runtimeText) => { clearWorkflowTimer(); setActivePrompt(prompt); setSuggestedPrompt(''); setEmptyConversation(false); if (desktopConversation.enabled) { setChatState('running'); const started = await desktopConversation.send(prompt, model, submittedFiles, runtimeText); if (!started) { setPendingUserMessage((message) => message ? { ...message, status: 'failed', updatedAt: Date.now() } : message); setChatState('error'); return 'error' } return 'complete' } if (/询问我|让我选择|需要确认方案|怎么处理/.test(prompt)) { setChatState('question'); return 'question' } if (/修改|写入|删除|重命名|创建文件/.test(prompt)) { setChatState('approval'); return 'approval' } if (/失败|错误|连接测试|检查连接/.test(prompt)) { setChatState('error'); return 'error' } setChatState('running'); return 'complete' }} onApprove={() => finishWorkflow()} onDeny={() => { clearWorkflowTimer(); setChatState('denied') }} onAnswer={(answer) => { toast.success(`已选择：${answer}`); finishWorkflow(2600) }} onResolveApproval={(approvalId, approved) => desktopConversation.resolveApproval(approvalId, approved)} onResolveWorkModeConfirmation={desktopConversation.resolveWorkModeConfirmation} onResolvePlanRevision={desktopConversation.resolvePlanRevision} onDeleteGoal={desktopConversation.deleteGoal} onGoalRunningChange={desktopConversation.setGoalRunning} onEvidenceClick={openEvidence} onStatusChange={(status) => { if (!desktopConversation.enabled && status === 'ready' && chatState === 'running') setChatState('complete') }} onCancel={desktopConversation.enabled ? desktopConversation.cancel : undefined} /></Profiler></div></>}
+          <TimelineRuntimeContext.Provider value={timelineRuntimeContextValue}>
+          <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
+          {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || activeAgent?.defaultModel || modelService.service?.modelId || '未配置模型'} usage={conversationUsage} contextWindow={modelService.service?.contextWindow ?? 0} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
+<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} mascotSrc={sidebarMascot} mascotActive={desktopRunning || mascotCelebrating} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} /></Profiler><Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} suggestedPrompt={suggestedPrompt} chatState={chatState} centered={timelineEmpty} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={activeProject?.permissionMode ?? desktopConversation.detail?.conversation.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? desktopConversation.detail?.approvals ?? EMPTY_RUNTIME_APPROVALS : EMPTY_RUNTIME_APPROVALS} mascotSrc={timelineEmpty ? undefined : sidebarMascot} mascotActive={desktopRunning || mascotCelebrating} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onDeleteGoal={handleComposerDeleteGoal} onGoalRunningChange={handleComposerGoalRunningChange} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
           </ComposerRuntimeContext.Provider>
+          </TimelineRuntimeContext.Provider>
         </section>
-        {showConversationRightSidebar && !rightSidebarCollapsed && !compactLayout && <>{!rightPanelMaximized && <ResizeDivider onResize={(delta) => setRightWidth((value) => Math.min(760, Math.max(280, value + delta)))} />}<RightPanel mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenEvidence={openEvidence} onOpenArtifact={openArtifact} onRequestChildTask={requestChildTask} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} /></>}
+        {showConversationRightSidebar && !rightSidebarCollapsed && !compactLayout && <>{!rightPanelMaximized && <ResizeDivider onResize={(delta) => setRightWidth((value) => Math.min(760, Math.max(280, value + delta)))} />}<RightPanel mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} activeChildAgent={activeChildAgent} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenChildAgent={openChildAgent} onBackChildAgent={() => setActiveChildAgent(null)} onOpenEvidence={openEvidence} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} /></>}
         </div>
         </div>
       </div>
       <Sheet open={showConversationRightSidebar && !rightSidebarCollapsed && compactLayout && compactRightOpen} onOpenChange={(open) => { if (open) setCompactRightOpen(true); else collapseRightSidebar() }}>
         <SheetContent side="right" showCloseButton={false} className={`fox-compact-context-sheet ${rightPanelMaximized ? 'is-maximized' : ''}`}>
-          <RightPanel compact mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenEvidence={openEvidence} onOpenArtifact={openArtifact} onRequestChildTask={requestChildTask} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} />
+          <RightPanel compact mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} activeChildAgent={activeChildAgent} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenChildAgent={openChildAgent} onBackChildAgent={() => setActiveChildAgent(null)} onOpenEvidence={openEvidence} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} />
         </SheetContent>
       </Sheet>
-      <KnowledgeBindingDialog open={knowledgeDialogOpen} remoteItems={knowledge.items} localItems={localKnowledgeBases} localLoading={localKnowledgeLoading} remoteLoading={knowledge.loading} remoteError={knowledge.error} onRetry={() => void knowledge.refresh()} references={desktopConversation.detail?.knowledgeReferences} bindings={desktopConversation.knowledgeBindings} busy={knowledgeDialogBusy} error={knowledgeDialogError} onOpenChange={setKnowledgeDialogOpen} onConfirm={(references, names) => void saveKnowledgeBindings(references, names)} />
+      <KnowledgeBindingDialog open={knowledgeDialogOpen} remoteItems={knowledge.items} localItems={localKnowledgeBases} localLoading={localKnowledgeLoading} remoteLoading={knowledge.loading} remoteError={knowledge.error} onRetry={() => void knowledge.refresh()} references={desktopConversation.knowledgeReferences} bindings={desktopConversation.knowledgeBindings} busy={knowledgeDialogBusy} error={knowledgeDialogError} onOpenChange={setKnowledgeDialogOpen} onConfirm={(references, names) => void saveKnowledgeBindings(references, names)} />
       <ConversationManagementDialogs conversation={conversationDialog?.conversation ?? null} mode={conversationDialog?.mode ?? null} busy={conversationDialogBusy} error={conversationDialogError} onClose={() => { setConversationDialog(null); setConversationDialogError(null) }} onRename={(title) => void renameManagedConversation(title)} onDelete={() => void purgeManagedConversation()} />
       <ProjectDeleteDialog project={projectDeleteDialog} busy={projectDeleteBusy} onClose={() => setProjectDeleteDialog(null)} onDelete={() => void deleteManagedProject()} />
     </main>

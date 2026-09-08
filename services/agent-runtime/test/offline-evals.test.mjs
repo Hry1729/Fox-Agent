@@ -131,7 +131,7 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   assert.equal(report.metadata.promptCacheIdentity.toolCatalogHash, report.metadata.toolCatalogHash)
   assert.equal(report.metadata.promptCacheDiagnostics.read.eligible, true)
   assert.equal(report.metadata.promptCacheDiagnostics.write.eligible, false)
-  assert.equal(report.resultHash, '39e1dcd149f391a58bff2ac9445c58ec72f094038830af4a182f1de8fa885b2d')
+  assert.equal(report.resultHash, '83db1bca2a4ee97854afb3f847e8fba9212ceb9f7b315d011bf9750f1172b773')
 })
 
 test('locks Graph review and final Acceptance schemas, profile boundary, and truthful completion Prompt', () => {

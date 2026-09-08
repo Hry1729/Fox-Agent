@@ -2,7 +2,7 @@ mod migrations;
 mod models;
 mod repositories;
 
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 41;
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 54;
 pub use models::*;
 #[allow(unused_imports)]
 pub use repositories::{

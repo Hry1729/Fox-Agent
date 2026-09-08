@@ -223,6 +223,7 @@ export function createPiEventMapper(emit, options = {}) {
   const deferCompletion = options.deferCompletion === true
   let messageStarted = false
   let finished = false
+  let cancelled = false
   let agentEnded = false
   let pendingTerminal = null
   let pendingText = ''
@@ -373,7 +374,8 @@ export function createPiEventMapper(emit, options = {}) {
           break
         }
         case 'tool_execution_start':
-          emit('tool.started', { toolCallId: event.toolCallId, tool: event.toolName, input: event.args })
+          emit('tool.started', { toolCallId: event.toolCallId, tool: event.toolName,
+            input: options.prepareToolInput?.(event.toolName, event.args) ?? event.args })
           break
         case 'tool_execution_update':
           emit('tool.updated', { toolCallId: event.toolCallId, tool: event.toolName, update: event.partialResult })
@@ -396,7 +398,12 @@ export function createPiEventMapper(emit, options = {}) {
               cumulativeUsage = nextUsage
               accountedUsageEvents.add(event)
             }
-            if (event.message.stopReason === 'error') {
+            if (cancelled) {
+              // A user/host cancellation aborts the in-flight provider request, which
+              // surfaces as stopReason 'error'/'aborted'. Cancellation is the authority:
+              // never record an abort-induced provider error as a failed run.
+              pendingTerminal = { type: 'run.cancelled' }
+            } else if (event.message.stopReason === 'error') {
               pendingTerminal = {
                 type: 'run.failed',
                 code: 'provider.request_failed',
@@ -468,17 +475,33 @@ export function createPiEventMapper(emit, options = {}) {
     },
     fail(error) {
       if (finished) return
+      if (cancelled) {
+        // Cancellation wins over any late failure (aborted provider stream, host
+        // request rejection, or Pi surfacing the abort as an error terminal).
+        finished = true
+        pendingTerminal = null
+        emit('run.cancelled')
+        return
+      }
       finished = true
       const pending = pendingTerminal
       pendingTerminal = null
       emit('run.failed', pending?.type === 'run.failed'
         ? { code: pending.code, message: pending.message }
-        : { code: 'runtime.pi_failed', message: error instanceof Error ? error.message : String(error) })
+        : {
+            code: typeof error?.code === 'string' && error.code.trim()
+              ? error.code
+              : 'runtime.pi_failed',
+            message: error instanceof Error ? error.message : String(error),
+          })
     },
     cancel() {
+      cancelled = true
       if (finished) return
+      // A cancellation arriving before the terminal agent event pre-declares the
+      // outcome; the abort-induced provider 'error' terminal must not override it.
+      pendingTerminal = { type: 'run.cancelled' }
       finished = true
-      pendingTerminal = null
       emit('run.cancelled')
     },
     finish() {

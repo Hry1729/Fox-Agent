@@ -41,9 +41,82 @@ test('converts Fox tools to the Pi custom tool contract without leaking adapter 
   assert.equal(adapted.executionMode, 'parallel')
   assert.equal(adapted.renderResult, undefined)
   assert.deepEqual(await adapted.execute('weather-call', { city: 'Hangzhou' }), {
-    city: 'Hangzhou',
-    temperature: 24,
+    content: [{ type: 'text', text: '{"city":"Hangzhou","temperature":24}' }],
+    details: {
+      structuredResult: { city: 'Hangzhou', temperature: 24 },
+      outputTruncated: false,
+    },
   })
+})
+
+test('preserves Pi-native results while making every concurrent structured result visible to the model', async () => {
+  const tools = defineFoxTools([
+    piTool({
+      name: 'child_agent_list',
+      execute: async () => ({ agents: [{ id: 'fox-general' }, { id: 'fox-reviewer' }] }),
+    }),
+    piTool({
+      name: 'read',
+      execute: async () => ({
+        content: [{ type: 'text', text: 'file contents' }],
+        details: { path: 'README.md' },
+      }),
+    }),
+  ], {
+    source: 'fox-test',
+    execution: 'runtime',
+    trusted: true,
+  })
+  const [childAgentList, read] = adaptFoxToolsToPi(tools)
+
+  const [childAgentResult, readResult] = await Promise.all([
+    childAgentList.execute('child-list-call', {}),
+    read.execute('read-call', {}),
+  ])
+
+  assert.deepEqual(JSON.parse(childAgentResult.content[0].text), {
+    agents: [{ id: 'fox-general' }, { id: 'fox-reviewer' }],
+  })
+  assert.deepEqual(childAgentResult.details, {
+    structuredResult: { agents: [{ id: 'fox-general' }, { id: 'fox-reviewer' }] },
+    outputTruncated: false,
+  })
+  assert.deepEqual(readResult, {
+    content: [{ type: 'text', text: 'file contents' }],
+    details: { path: 'README.md' },
+  })
+})
+
+test('normalizes primitive, missing, circular, and oversized Fox tool results', async () => {
+  const circular = { ok: true }
+  circular.self = circular
+  const cases = [
+    ['string_result', 'plain text', 'plain text'],
+    ['missing_result', undefined, 'Tool completed successfully without a return value.'],
+    ['circular_result', circular, '{"ok":true,"self":"[Circular]"}'],
+    ['oversized_result', { value: 'x'.repeat(120_100) }, null],
+  ]
+  const tools = adaptFoxToolsToPi(defineFoxTools(cases.map(([name, result]) => piTool({
+    name,
+    execute: async () => result,
+  })), {
+    source: 'fox-test',
+    execution: 'runtime',
+    trusted: true,
+  }))
+
+  for (let index = 0; index < tools.length; index += 1) {
+    const result = await tools[index].execute(`call-${index}`, {})
+    if (cases[index][2] !== null) assert.equal(result.content[0].text, cases[index][2])
+    assert.equal(result.content.length, 1)
+  }
+  assert.deepEqual((await tools[2].execute('circular-details-call', {})).details.structuredResult, {
+    ok: true,
+    self: '[Circular]',
+  })
+  const oversized = await tools[3].execute('oversized-call', {})
+  assert.equal(oversized.details.outputTruncated, true)
+  assert.match(oversized.content[0].text, /\[Tool result truncated\]$/)
 })
 
 test('routes imported Pi tools through the Fox Host executor by default', async () => {

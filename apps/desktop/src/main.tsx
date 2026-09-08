@@ -11,12 +11,14 @@ document.addEventListener('contextmenu', (event) => event.preventDefault())
 applyStoredTextScale()
 
 // Static compile-time constant (vite define). False in normal builds, so the
-// lazy() calls below are dead-code eliminated and no profiling chunk ships.
+// lazy() below is dead-code eliminated and no profiling chunk ships to release.
 const PROFILING = typeof __FOX_PROFILING__ !== 'undefined' && __FOX_PROFILING__ === true
 
 const ProfilingHarness = PROFILING
   ? lazy(() => import('./features/profiling/ProfilingHarness').then((module) => ({ default: module.ProfilingHarness })))
   : null
+// Real-App collection controller; loaded only in the profile build, only on the
+// real App page (not the synthetic harness). DCE'd from normal releases.
 const RealProfilingController = PROFILING
   ? lazy(() => import('./features/profiling/RealProfilingController').then((module) => ({ default: module.RealProfilingController })))
   : null
@@ -36,8 +38,9 @@ function openHarness() {
 }
 
 function Root() {
-  // Mutex: ?foxPerf mounts ONLY the synthetic harness (real App never renders).
-  // Otherwise the real App renders plus, in profile builds, the live controller.
+  // Mutex: ?foxPerf mounts ONLY the synthetic harness (real App/Workbench never
+  // renders, so its commits can't pollute samples). Otherwise the real App
+  // renders, plus — in profile builds — the lightweight collection controller.
   const [harnessMode] = useState<boolean>(() => PROFILING && profilingRequested())
 
   if (ProfilingHarness && harnessMode) {

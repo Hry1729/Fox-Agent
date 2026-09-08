@@ -81,7 +81,7 @@ Pi 是首个本地 Runtime Adapter，不是 Fox 对话架构本身。未来增�
 - Runtime stderr 尾部、最后错误和恢复次数；
 - Runtime 名称、版本和 Capability Manifest。
 
-Primary Run 继续使用单 Worker FIFO，保证普通会话的既有顺序语义。A5 在这一主队列之外增加 Host-owned Child Runtime 池：每个 Child Run 使用独立 RuntimeHost、Sidecar 和 Session，同一 root 最多并发 3 个、深度 1。它不是复用一个全局多 Agent 进程，也不会让普通会话绕过 FIFO。父子身份、预算、权限交集、审批、取消和结果聚合见[子 Agent 与 Child Run 架构](子Agent与ChildRun架构.md)。
+Primary Run 继续使用单 Worker FIFO，保证普通会话的既有顺序语义。A5 在这一主队列之外增加 Host-owned Child Runtime 池：每个 Child Run 使用独立 RuntimeHost、Sidecar 和 Session，同一 root 最多并发 3 个、深度 1。它不是复用一个全局多 Agent 进程，也不会让普通会话绕过 FIFO。父子身份、运行时长、权限交集、审批、取消和结果聚合见[子 Agent 与 Child Run 架构](子Agent与ChildRun架构.md)。
 
 ### Sidecar 启动
 
@@ -231,6 +231,8 @@ Fox 不直接使用 Pi 的裸默认提示词。`composeFoxPrompt` 将输入分�
 
 动态层
 ├─ assistant_persona：Host 选择的基础 Assistant 增强层
+├─ runtime/delegation_contract：可选 Child Worker/专家咨询固定角色边界
+├─ skills：Host 选择且与当前任务相关的指令型 Skills
 ├─ runtime：项目、权限、会话、模型
 ├─ expert_package：可选专家 Persona Overlay 与能力包
 ├─ expert_binding：可选绑定 ID、版本和 Hash
@@ -254,6 +256,8 @@ Prompt Experiment v1 只接受 `offline_replay`、`mock`、`read_only_shadow`。
 Execution Profile 采用同一边界：短且版本化的 Profile 行为契约进入动态 Model instructions；Profile 快照和 Continuation contract 进入动态 `runtime` context block。`durable_v2` 指令明确告知 Legacy Workflow mutation 在统一 Attempt/Acceptance API 接入前暂不可用、只保留 snapshot inspection；该动态说明不修改 `stable_v1` 定义或稳定前缀 Hash。`runId`、`eventCursor`、`decisionId` 等本轮值绝不进入稳定前缀，避免动态状态破坏 Prompt 前缀复用。
 
 Host 发送 `assistantPackage`、可选 `expertBinding` 与可选 `expertPackage`。专家包来自绑定时的冻结快照，Host 每次 Run 校验 Hash 后再叠加当前授权。助手和专家 Skills 合并去重后注入，但工具 Allowlist 与 MCP Server scope 均取交集；任一包显式空 Allowlist 都会关闭相应能力。交集诊断分别记录两侧声明、最终有效工具和排除原因；空交集仍允许纯文本回答。专家声明不能扩大 Host Capability、项目权限、知识绑定或审批范围。
+
+专家有两种明确调用语义。对话挂载专家属于 inline overlay：默认助手仍是 Lead，专家包只增强同一主运行。`child_run_start(mode=expert_consultation)` 属于 isolated consultation：Host 创建隐藏 Child Conversation，以所选 Expert 作为该 Child 的 Assistant Package，继承父模型与授权上限，并注入 `delegation_contract`，要求它只返回专业报告。咨询完成不会修改 `conversation_expert_bindings`，Lead 必须通过 `child_run_collect` 检查并综合结果。`child_agent_list` 在一个兼容协议中分别返回 `agents` 与 `experts`，普通模式只能使用 `agentId`，专家咨询只能使用 `expertId`，避免把“能力模板”和“运行实例”混为一谈。
 
 Prompt 预算来自当前 Model Profile。Host/Runtime 稳定契约具有最高保留级别，Assistant 与 Expert Persona 必须作为增强层；超预算时优先收缩低权限动态块和专家附加上下文。Work Snapshot 也计入总字符/片段预算、`contextHash` 和 fragment diagnostics；超预算时按结构裁剪集合和字符串，输出仍是合法 JSON，并以 `truncation.strategy=structured_budget_v1`、遗漏计数和字符上限明确说明裁剪。Task 选择前先从原始 `taskAttempts`、Ledger `activeTasks` 和 `executionCursor` 提取关键 Task，按“全部 running → cursor → active → 原数组补位”选择；全部原始 running Attempt 与对应 Task/Policy 不依赖普通可见 Task 上限，其他可见 Task 保留最新 terminal Attempt。fallback 至少保存当前/全部 running Attempt 与对应 Policy identity，若 durable/graph 预算连这些恢复事实都放不下则 fail-closed；旧 Attempt/Policy 的省略数写入 `truncation.omitted`。裁剪结果只是单一事实源的有界 Prompt 视图。模型兼容测试覆盖 Assistant/Expert 冲突、伪 marker、40/1000 条历史末尾 running、总预算与重启恢复。
 
@@ -362,7 +366,7 @@ Planner 只有在存在授权项目、用户请求具有行动意图且任务较
 
 验证闭环复用同一 Runtime Catalog 和 `tool.execute`：`task_attempt_start`、`task_repair_start`、`task_repair_escalate_start`、`task_attempt_finish` 只提交 Task/Attempt 乐观版本与模型声明的修复事实，`conversationId/runId/ValidationPolicy/approval/grant/count` 只能由 Host Envelope、冻结 Snapshot 和审批记录派生。人工升级输入额外包含 `escalationReason`，但不能选择批准方式或复用授权；Catalog 的 `approval=always` 与 Host 二次门禁共同保证本次 ToolCall 等待真人决定。`task_create_many.riskLevel` 只能提示风险提升，不能降低 Host Policy；Evidence 的 `validationCheckType` 复用冻结 ValidationPolicy 枚举。人工升级仅在 `durable_v2` 暴露，其余写动作和 Shadow/Graph Readonly 继续沿既有 Profile 规则裁剪。
 
-Host 对 `toolCallId + tool + canonical input` 的最早门禁是“已有事实只读分流”：terminal exact replay 直接返回首次持久化 result/error，failed ToolCall 使用稳定同形 `{isError:true,error}`，pending/running 则返回稳定 in-flight；它早于可变预算、override preflight、Lifecycle Hook 和 handler。对没有既有 ToolCall 的 fresh 请求，Host 可先做无副作用 eligibility/preflight；`before_tool` 评估与审计也发生在 acquire 前，但按同一 call ID insert-once，预算拒绝或并发 loser 最多留下审计事实，不会产生审批或外部副作用。只有随后在 `IMMEDIATE` 事务取得 `Created` 或 Runtime-running→Host `PromotedRuntime` 唯一执行权的赢家，才会进入审批等待和真实 handler。取得执行权后，Child、Memory、Work、MCP、Attachment、Knowledge、Project 与 Capability 八类 Host 入口都通过同一 finalizer 终结 ToolCall：普通 `Result` 失败（含参数、审批超时/拒绝、锁、服务查找和 handler 错误）必须持久化为 `failed`，成功必须先持久化为 `completed`；若 Repository 已因 managed budget/override 原子门终结该调用，finalizer 只返回既有权威结果，不能覆盖。`after_tool` 只由赢家在终结时 best-effort 执行，属于注解/审计，失败不能改变已经提交的 handler 结果。managed Child/Digital 的 fresh 获取同时要求 Run running、duration/total/output/daily 未耗尽和 `tool count < maxToolCalls`；promotion、Approval claim 与 Repair override 在真实执行前按 reserved `count <= max` 重验预算，超限将 ToolCall failed、消费当前 Approval 且 handler 零执行。`run.started` 只接受 `queued → running`；四种 Run 终态只能从非终态进入，终态之间不可互换，同终态重放还必须与首次完整 canonical payload 完全相等，并在任何 observability/projector 前短路，因此不会改写 root span 的结束时间或 UI 最后终态。managed Child/Digital 的首次 `run.completed` 在这个冻结终态分支之前，以同一事务重验 frozen duration/total/output/daily 与 `tool count <= maxToolCalls`；超限拒绝成功并由 Host 写稳定 budget failed。下一 ToolCall/monitor 只提前止损，不能替代 acquisition/claim/completion 原子门。Run 终态后除该精确重放外不接受任何 Runtime Event（包括 usage）；用户问题回复由 Host resume/new Run 路径承载。这个边界避免 Fox 内部重复写文件、创建 Child/Memory/Capability/MCP 请求；外部系统在“副作用已发生、Fox 结果尚未落库”的崩溃窗口仍需自己的幂等键。
+Host 对 `toolCallId + tool + canonical input` 的最早门禁是“已有事实只读分流”：terminal exact replay 直接返回首次持久化 result/error，failed ToolCall 使用稳定同形 `{isError:true,error}`，pending/running 则返回稳定 in-flight；它早于可变预算、override preflight、Lifecycle Hook 和 handler。对没有既有 ToolCall 的 fresh 请求，Host 可先做无副作用 eligibility/preflight；`before_tool` 评估与审计也发生在 acquire 前，但按同一 call ID insert-once，预算拒绝或并发 loser 最多留下审计事实，不会产生审批或外部副作用。只有随后在 `IMMEDIATE` 事务取得 `Created` 或 Runtime-running→Host `PromotedRuntime` 唯一执行权的赢家，才会进入审批等待和真实 handler。取得执行权后，Child、Memory、Work、MCP、Attachment、Knowledge、Project 与 Capability 八类 Host 入口都通过同一 finalizer 终结 ToolCall：普通 `Result` 失败（含参数、审批超时/拒绝、锁、服务查找和 handler 错误）必须持久化为 `failed`，成功必须先持久化为 `completed`；若 Repository 已因 managed budget/override 原子门终结该调用，finalizer 只返回既有权威结果，不能覆盖。`after_tool` 只由赢家在终结时 best-effort 执行，属于注解/审计，失败不能改变已经提交的 handler 结果。普通 Child 的 fresh 获取只硬性重验 Run running 与 duration；累计 Token、输出和工具调用次数仅用于观测。Digital Colleague 继续在 fresh 获取、promotion、Approval claim 与 completion 上按冻结 duration/total/output/daily/tool count 执行原子预算门；Graph implementation/Reviewer 继续使用 Host 固定的专用确定性计数预算。`run.started` 只接受 `queued → running`；四种 Run 终态只能从非终态进入，终态之间不可互换，同终态重放还必须与首次完整 canonical payload 完全相等，并在任何 observability/projector 前短路，因此不会改写 root span 的结束时间或 UI 最后终态。Run 终态后除该精确重放外不接受任何 Runtime Event（包括 usage）；用户问题回复由 Host resume/new Run 路径承载。这个边界避免 Fox 内部重复写文件、创建 Child/Memory/Capability/MCP 请求；外部系统在“副作用已发生、Fox 结果尚未落库”的崩溃窗口仍需自己的幂等键。
 
 Host-owned ToolCall 执行期间，Runtime 仍可能回传同一调用的 `tool.started/updated/completed` lifecycle echo。权限门会保留这些原始 RunEvent 供审计，但 projector 对匹配的 Host-owned ToolCall 明确 no-op：Runtime echo 不能改写 Host 已持久化的 status、result 或 error，也不能让迟到 `completed` 覆盖 Host 失败结果。
 
@@ -409,14 +413,44 @@ Provider 原生 reasoning 优先映射到 `reasoning.delta`。对把 `<think>` �
 
 模型配置重新加载时，Host 会停止旧 Worker；活动 Run 存在时拒绝热切换，避免一次运行中途改变模型契约。
 
+## Fox Agent Kernel（决策核心）
+
+> 状态：决策核心与持久化读模型已在现有 Tauri crate 内落地并通过纯 Rust 测试；线上 Run 仍由既有 Host/Pi 链路实际执行，Kernel 尚未成为权威决策源（未进入 `authoritative`）。本节描述当前真实边界，不把目标设计写成已完成事实。
+
+Kernel 是状态机、权限、审批、重试、预算、取消、恢复、终态与完成判断的**唯一决策源**目标形态；Runtime Host 只管理引擎进程、通信、事件转换与取消信号传递，Resource Gateway 执行资源操作并在落地前再做最终安全校验，Engine Adapter 适配 Pi/DeepSeek/Codex，React 只读 Run Snapshot。
+
+当前已就位的部分（`apps/desktop/src-tauri/src/kernel/`，仍属关闭的 Kernel 路径，不驱动生产 Run）：
+
+- 纯 Rust、同步、零 tauri/Pi/TS 依赖的决策核心 `RunController`：Run/ToolBatch/ToolCall 状态转换、策略决策、审批、批次 all-settled 屏障、取消与终态分类、`retry_scheduled` 与 `compacting` 独立状态流程（进入/调度/恢复）、Provider 与 Turn 两层重试的独立计数与上限。每次状态转换返回有序 `Effect`，由适配层持久化后再执行 IO。
+- 时间语义分两个时钟域（`kernel/ports.rs::Clock`）：进程内执行耗时使用单调时钟（不跨重启比较，累计执行耗时持久化后恢复，并在新进程首个 tick 为 Run 与在途 Tool 重新建立单调时钟锚点）；人工审批截止、整轮重试 due time 与**模型请求墙钟锚点**使用持久化墙钟，重启后仍有效，系统时间回拨会 fail-closed 而不是无限等待。工具执行超时在 `running` 以及同批次其它工具等待审批时都继续执行；审批等待只挂起 Run 执行预算。**模型请求超时**由显式生命周期信号驱动（`begin_model_request` / `settle_model_request`），不是从“无工具在途”推断：turn 派发时 arm、模型首个输出/工具批次/终态时 settle。在途模型请求自锚点超过 `model_request_timeout_ms` 产出唯一失败终态 `model.request_timeout`；模型响应（提出批次）、retry resume、compaction 结束后由下一次显式派发重新 arm；`waiting_approval` 期间不 arm（审批只受墙钟截止约束）。模型请求墙钟锚点持久化（v52 `kernel_runs.model_request_since_wall_ms`），rehydrate 后仍按崩溃前已流逝时间计时，连续崩溃**不会**获得新的完整超时窗口。**终态不变量**：`terminate` 与 `settle_cancellation` 在成功终态转换内清除模型请求锚点（`settle_model_request`），终态 Run 不持有 model-request anchor；rehydrate 终态 Run 也不恢复 `model_request_in_flight`。取消与超时竞态由终态守卫保证只有一个权威终态（取消后迟到超时只进审计）。模型 begin/settle 的 Kernel API 在决策核执行并由测试覆盖（settle 后不触发、rehydrate 不重置窗口、终态清锚点、取消压过超时）；Host/Pi 侧在真实模型派发/首包/批次点调用 begin/settle 的 Adapter 接线仍属后续。
+- 生产 Shadow（migration v51 建观察表、v52 加模型请求锚点列，`kernel/shadow.rs` + 仓库方法 + Host 注册表）：真实 Host 在每次 Run 启动点（`RuntimeHost::start_run_inner` 冻结 Execution Profile 后）调用 `bootstrap_shadow_context`，按 `shadow-{legacyRunId}` 用 `ShadowContext::start` 创建一个**真实的 shadow RunController**（纯决策核，生产墙钟），冻结身份落 `kernel_shadow_runs`；ShadowContext 存放在 Host 的 per-run `shadow_contexts` 注册表（不再创建后丢弃）。冻结身份用对真实合同输入（engine/manifest/permission/prompt）的内容哈希（`runtime_shadow_hash`）。Shadow 跑纯决策核但**永不动作**：不派发工具、不发网络、不弹第二次审批、不取消真实 Run、不交付第二份批次、不改写 Legacy 终态；可执行 Effect 在 ShadowContext 内分类后即丢弃。
+  - **在线逐事件喂入**：Host 事件循环在每个 `tool.preflight` 决策完成后调用 `shadow_feed_preflight`（把该次**真实 legacy 决策**——allow/approval/deny 与工具名/canonical input/顺序——与 shadow 用独立 `ShadowPolicyAdapter` 策略对同一批次得出的 kernel 决策比较），在 `run.completed/cancelled/failed` 终态事件处调用 `shadow_feed_terminal`（让 kernel controller **自行执行**对应终态转换后读取其终态，而非直接填 legacy 终态）并在终态后移除上下文。每次比较作为 `kernel_shadow_diffs` 持久化。legacy 与 kernel 的工具事实是**两套独立输入**（legacy 来自真实决策，kernel 来自 shadow controller 的 decision effects），顺序/参数分歧可观察。
+  - 比较记录绑定 legacy/kernel run id、turn、冻结身份、严格单调 event cursor、双方 disposition、mismatch 类别、schemaVersion、createdAt。disposition 携带工具名/canonical input/source order/batch 顺序（**不按 ID 排序抹序**）与 retry/timeout 事实；类别区分状态、审批、工具参数/顺序、终态、超时/重试差异与“不可比较项”，审批差异优先于常规重试计数噪声，超时差异只在终态码不一致时判定。
+  - **物理隔离是三层硬约束**：(1) `kernel_create_run` 写入边界拒绝 `kernel_mode='shadow'`；(2) 单 Run 与全局租约扫描 SQL 均带 `r.kernel_mode <> 'shadow'`；(3) shadow 代码路径无执行器句柄，且 `kernel_executable_outbox_count` 强制 shadow run 零 outbox 行。diff cursor 严格单调、**重启从持久化 `MAX(event_cursor)` 恢复**（`kernel_shadow_max_cursor` + `ShadowContext::start(start_cursor)`），重放 bootstrap 不再尝试写 cursor 1 被拒；身份/配置冲突 fail-closed（不用 `INSERT OR IGNORE`），exact replay 幂等。Shadow 任何失败只进诊断，绝不影响 Legacy Run。
+- 事务化 Durable Effect/Dispatch Outbox：migration v49 新增 `kernel_effect_outbox`，v50 前向重建 CHECK 并增加 `deliver_tool_batch`，把 all-settled 结果向下一模型回合的交付也做成 durable effect。事件严格连续、Batch/Tool（含 exact canonical input）状态、审批 CAS、dispatch intent 与 Run 聚合在**同一个 SQLite 事务**提交后才允许外部执行；审批结论、最终 Tool 状态与是否存在 dispatch 必须一致，过期边界与 tick 同为 `wall_now >= deadline`；工具结果与对应 leased dispatch 的完成也在同一事务结算。outbox exact replay 逐字段比对，effect key 或幂等键相同但 kind/owner/payload 不同会整事务 fail-closed；lease 返回真实 `leased` 状态，complete/fail 要求匹配 owner。
+- `RunController` rehydrate（`kernel_rehydrate`）：在单一读事务中重建 runId/turnId、冻结配置（含完整 Capability Manifest Hash）、RunState、事件序号、累计执行耗时、审批/重试墙钟、Tool Batch 与 source order/barrier、Tool Call 状态/结果。它会逐项交叉核对 Run 冗余身份列与冻结配置、事件 cursor、终态标记、Batch 成员、审批、running dispatch 和 barrier delivery；损坏或缺失事实 fail-closed，不编造默认 turn、retry 或 compaction 数据。pending outbox 由恢复读模型单独提供，不伪装成 Controller 内存状态。
+- 恢复编排器（`kernel/recovery.rs::plan_recovery`，纯函数，可供生产 Host 在启动时调用）：重发仍有效的待审批请求（不创建第二条审批记录），用同一幂等键恢复安全的 pending dispatch、batch delivery 和取消；终态禁止复活 dispatch/审批/批次交付，但允许排空已提交取消。崩溃遗留的 `leased` 动作一律归为不确定并要求按幂等键对账。
+- 富快照读模型（`kernel_build_full_snapshot`）：在**单个一致读事务**内构建，含 Run 状态与冻结身份、批次顺序、每个 Tool Call 的状态/结果/错误/审批状态、待执行/执行中的 outbox Effect、retry/compaction/预算信息；读取时重新校验完整冻结身份与事件 cursor，不混合两个提交点或把损坏身份呈现为权威状态。
+- 身份裁决（v49/v50 与 Repository 共同强制）：`batch_id` 全局唯一（`kernel_tool_batches` 主键，跨 Run 复用即拒绝）；tool call 按 `(run_id, tool_call_id)` 复合键并冻结 tool/input/source order；outbox 按 `(run_id, effect_key)` 主键并带 Run 内唯一 `idempotency_key`。
+- 合成决策语料（`kernel/corpus.rs`）以纯脚本（无真实用户数据/路径/密钥）覆盖自动执行与强制审批、批次乱序完成、取消竞态、重复与冲突事件、Provider/Turn 重试分离、审批时钟与执行预算分离、compaction 与 retry 状态区别。
+
+尚未完成、因此 Kernel **不能**宣告 authoritative（当前是否 authoritative：**否**）：
+
+- Shadow 已在生产 Run 启动点接线（per-run 注册表 `shadow_contexts`），Host 事件循环在**工具预检点、工具结果点、取消点、终态点、runtime crash 点**逐事件喂入：`shadow_feed_preflight`（含 Host deny 早期拒绝）、`shadow_feed_tool_settled`（消费 runtime `tool.completed/tool.failed` 的真实 toolCallId/结果，驱动 kernel `tool_settled`，使 run.completed 合法）、`shadow_feed_terminal`（取消前先 `on_cancel`→`request_cancel`+`settle_cancellation`）、crash 路径也喂 `failed` 终态并清 context。终态比较两侧统一用**状态名**（completed/failed/cancelled），kernel 侧由 controller 自行执行终态转换（已终态时回读当前状态，不伪造 Match）；legacy 与 kernel 的工具事实分别独立累计（`legacy_tools` / `kernel_tools`）。端到端测试覆盖正常序列（allow→settle→completed=Match）、取消序列（cancel→cancelled=Match）、未结算工具不得 completed 的反例。冻结身份哈希基于规范化合同**内容**（capability manifest JSON、permission mode/scope、profile/prompt），改权限/prompt/能力集会改变哈希。但这仍是只读**观察/比较闭环**：Kernel 决策不驱动真实 Run；`kernel_effect_outbox` 无生产执行器（仅测试 Harness、非默认）；Shadow 在线差异尚未设定/通过“零安全差异、状态与工具批次差异达门槛”的退出判据，也未聚合为阶段门信号。
+- Shadow 的 kernel 策略（`ShadowPolicyAdapter`）当前是独立默认策略（读工具允许、变更类工具要求审批），尚未从 Kernel 冻结权限快照完整推导；preflight 仍按逐工具单批次喂入（source_order 基于实际工具顺序的跨批次聚合待完善）；跨重启的 shadow controller 目前只恢复 cursor，工具语义历史的 rehydrate 待补齐。
+- 当前 crash/reopen 测试证明关闭路径与 shadow 物理隔离的 SQLite 事务、重启租约扫描和恢复计划；Pi→Node→JSONL→Rust→React 的真实进程崩溃、Effect 执行及 UI 续跑端到端验收仍属后续阶段。
+- 7A 决策权切换、7B Resource Gateway 迁移、React 改读统一 Snapshot、DeepSeek Harness/Codex 接入均未开始。
+- Pi 侧已先行修复两项 P0：Host 预检期取消现在终止为 `run.cancelled`（不再误记 `provider.request_failed`），且取消按 `runId` 隔离、不再全局清理其它 Run 的在途 Host 请求；Provider HTTP 重试与 Turn 重试已解耦为独立可配置策略。
+
 ## 取消、异常与恢复
 
 ### 用户取消
 
 1. Host 标记活动或排队 Run 的取消意图。
 2. 已提交 Sidecar 的 Run 收到 `cancel`；尚未提交的 Run 从队列中移除。
-3. Runtime 中止 Agent 和 Pending Host Tool Promise。
-4. Host 写入取消终态，前端丢弃此后属于旧 Run 的增量。
+3. Runtime 中止 Agent 与该 Run 的 Pending Host 请求；Host 请求按 `runId` 隔离中止，取消一个 Run 不会清理其它并发 Run（如 Child Runtime 池）的在途请求。
+4. 取消期间因模型流被 abort 而产生的 provider 错误不记为失败；Host 预检期取消的正确终态是 `run.cancelled`，终态只写一次，迟到成功结果只进审计。
+5. 前端丢弃此后属于旧 Run 的增量。
 
 ### Sidecar 异常
 

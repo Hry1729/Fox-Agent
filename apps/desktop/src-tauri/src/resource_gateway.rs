@@ -1,0 +1,250 @@
+//! Bounded Rust executors for the four canonical project readers. Every opened
+//! resource is checked against the frozen root; no runtime fallback is allowed.
+use crate::kernel::CancellationToken;
+use fox_engine_protocol::{ResourceExecutor, RunControlBinding};
+use serde_json::{json, Value};
+use std::{collections::VecDeque, fs::{self, File, OpenOptions}, io::Read, path::{Path, PathBuf}, time::{Duration, Instant}};
+
+const MAX_ENTRIES: usize = 4_000;
+const MAX_MATCHES: usize = 200;
+const MAX_CHARS: usize = 120_000;
+const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+
+pub fn is_reader(tool: &str) -> bool { matches!(tool, "read" | "ls" | "find" | "grep") }
+
+struct Gateway<'a> {
+    root: PathBuf,
+    cancellation: &'a CancellationToken,
+    deadline: Instant,
+    remaining_bytes: u64,
+}
+
+impl Gateway<'_> {
+    fn check(&self) -> Result<(), String> {
+        self.cancellation.check()?;
+        if Instant::now() >= self.deadline { return Err("resource gateway execution budget exceeded".into()); }
+        Ok(())
+    }
+    fn open(&self, path: &Path, directory: bool) -> Result<File, String> {
+        self.check()?;
+        let canonical = path.canonicalize().map_err(|error| format!("resource cannot be resolved: {error}"))?;
+        if !canonical.starts_with(&self.root) { return Err("resource is outside the frozen project root".into()); }
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Pin against replacement/rename while reading; allow other readers.
+            options.share_mode(1);
+            if directory { options.custom_flags(0x0200_0000); }
+        }
+        let file = options.open(&canonical).map_err(|error| format!("resource cannot be opened: {error}"))?;
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if directory != metadata.is_dir() || (!directory && !metadata.is_file()) {
+            return Err("resource type does not match the requested operation".into());
+        }
+        verify_opened_path(&file, &canonical, &self.root)?;
+        self.check()?;
+        Ok(file)
+    }
+    fn text(&mut self, path: &Path) -> Result<String, String> {
+        let mut file = self.open(path, false)?;
+        let mut contents = Vec::new();
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            self.check()?;
+            let count = file.read(&mut chunk).map_err(|error| error.to_string())?;
+            if count == 0 { break; }
+            if contents.len() as u64 + count as u64 > MAX_FILE_BYTES || count as u64 > self.remaining_bytes {
+                return Err("resource gateway text byte limit exceeded".into());
+            }
+            self.remaining_bytes -= count as u64;
+            contents.extend_from_slice(&chunk[..count]);
+        }
+        Ok(String::from_utf8_lossy(&contents).into_owned())
+    }
+    fn entries(&self, path: &Path, limit: usize) -> Result<(Vec<Entry>, bool), String> {
+        let _directory_guard = self.open(path, true)?;
+        let mut entries = Vec::new();
+        for item in fs::read_dir(path).map_err(|error| error.to_string())? {
+            self.check()?;
+            let item = item.map_err(|error| error.to_string())?;
+            if entries.len() == limit { return Ok((entries, true)); }
+            let target = item.path();
+            let canonical = target.canonicalize().map_err(|error| format!("nested resource cannot be resolved: {error}"))?;
+            if !canonical.starts_with(&self.root) { return Err("nested resource is outside the frozen project root".into()); }
+            let kind = item.file_type().map_err(|error| error.to_string())?;
+            // Never traverse links. File reads still validate the actual handle.
+            entries.push(Entry { path: target, name: item.file_name().to_string_lossy().into_owned(), directory: kind.is_dir() });
+        }
+        entries.sort_by(|a,b| a.name.cmp(&b.name));
+        Ok((entries, false))
+    }
+    fn walk(&self, path: &Path) -> Result<(Vec<Entry>, bool), String> {
+        let mut queue = VecDeque::from([path.to_path_buf()]);
+        let mut found = Vec::new();
+        while let Some(directory) = queue.pop_front() {
+            let (entries, truncated) = self.entries(&directory, MAX_ENTRIES - found.len())?;
+            for entry in entries {
+                if entry.directory { queue.push_back(entry.path.clone()); }
+                found.push(entry);
+            }
+            if truncated || found.len() == MAX_ENTRIES { return Ok((found, truncated || !queue.is_empty())); }
+        }
+        Ok((found, false))
+    }
+}
+
+struct Entry { path: PathBuf, name: String, directory: bool }
+
+#[cfg(windows)]
+fn verify_opened_path(file: &File, _requested: &Path, root: &Path) -> Result<(), String> {
+    use std::os::windows::{io::AsRawHandle, ffi::OsStringExt};
+    use windows::Win32::{Foundation::HANDLE, Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED}};
+    let mut buffer = vec![0u16; 32_768];
+    let count = unsafe { GetFinalPathNameByHandleW(HANDLE(file.as_raw_handle()), &mut buffer, FILE_NAME_NORMALIZED) } as usize;
+    if count == 0 || count >= buffer.len() { return Err("cannot validate opened resource handle".into()); }
+    let opened = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..count]));
+    if !opened.starts_with(root) { return Err("opened resource escaped the frozen project root".into()); }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn verify_opened_path(file: &File, requested: &Path, root: &Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let opened = file.metadata().map_err(|error| error.to_string())?;
+    let canonical = requested.canonicalize().map_err(|error| error.to_string())?;
+    let current = fs::metadata(&canonical).map_err(|error| error.to_string())?;
+    if !canonical.starts_with(root) || current.dev() != opened.dev() || current.ino() != opened.ino() {
+        return Err("opened resource identity changed".into());
+    }
+    Ok(())
+}
+
+fn slice_utf16(text: &str, offset: usize, limit: usize) -> String {
+    String::from_utf16_lossy(&text.encode_utf16().skip(offset).take(limit).collect::<Vec<_>>())
+}
+fn result(text: String, mut details: Value) -> Value {
+    let length = text.encode_utf16().count();
+    details["outputTruncated"] = json!(length > MAX_CHARS);
+    json!({ "content": [{"type":"text", "text": slice_utf16(&text, 0, MAX_CHARS)}], "details": details })
+}
+
+pub fn execute(binding: &RunControlBinding, tool: &str, input: &Value, cancellation: &CancellationToken) -> Result<Value, String> {
+    binding.validate()?;
+    if binding.read_only_executor != ResourceExecutor::Rust || !is_reader(tool) {
+        return Err("resource gateway is not the frozen executor for this tool".into());
+    }
+    let approved = crate::tool_guard::approve_read_only_tool(tool, input, binding.permission.project_root.as_deref())?;
+    let root = Path::new(binding.permission.project_root.as_deref().ok_or("missing frozen project root")?).canonicalize().map_err(|error| error.to_string())?;
+    let mut gateway = Gateway { root, cancellation, deadline: Instant::now() + Duration::from_millis(binding.budgets.tool_execution_ms as u64), remaining_bytes: MAX_SCAN_BYTES };
+    gateway.check()?;
+    let path = approved.resolved_path;
+    if tool == "read" {
+        let text = gateway.text(&path)?;
+        let offset = input.get("offset").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as usize;
+        let limit = input.get("limit").and_then(Value::as_f64).filter(|v| *v != 0.0).unwrap_or(MAX_CHARS as f64).clamp(1.0, MAX_CHARS as f64) as usize;
+        let truncated = offset.saturating_add(limit) < text.encode_utf16().count();
+        return Ok(result(slice_utf16(&text, offset, limit), json!({"path":path,"truncated":truncated})));
+    }
+    if tool == "ls" {
+        let (entries, truncated) = gateway.entries(&path, MAX_ENTRIES)?;
+        return Ok(result(entries.iter().map(|e| format!("{} {}", if e.directory {"[dir]"} else {"[file]"}, e.name)).collect::<Vec<_>>().join("\n"), json!({"path":path,"count":entries.len(),"truncated":truncated})));
+    }
+    let needle = input.get("pattern").and_then(Value::as_str).unwrap_or_default().to_lowercase();
+    let (entries, scan_truncated) = gateway.walk(&path)?;
+    let mut matches = Vec::new();
+    if tool == "find" {
+        for entry in entries {
+            gateway.check()?;
+            if entry.name.to_lowercase().contains(&needle) { matches.push(entry.path.to_string_lossy().into_owned()); }
+            if matches.len() == MAX_MATCHES { break; }
+        }
+    } else {
+        for entry in entries.into_iter().filter(|e| !e.directory) {
+            let text = gateway.text(&entry.path)?;
+            for (index, line) in text.split('\n').enumerate() {
+                gateway.check()?;
+                let line = line.strip_suffix('\r').unwrap_or(line);
+                if line.to_lowercase().contains(&needle) {
+                    matches.push(format!("{}:{}:{}",entry.path.display(),index+1,slice_utf16(line,0,8_000)));
+                }
+                if matches.len() == MAX_MATCHES { break; }
+            }
+            if matches.len() == MAX_MATCHES { break; }
+        }
+    }
+    Ok(result(matches.join("\n"), json!({"count":matches.len(),"scanTruncated":scan_truncated,"matchLimitReached":matches.len()==MAX_MATCHES})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::{CancellationRegistry, CancellationPort};
+    use fox_engine_protocol::{ExecutionAuthority, FrozenPermission, PermissionMode, TimeBudgets};
+
+    fn fixture() -> (RunControlBinding, CancellationRegistry, CancellationToken) {
+        let root = std::env::temp_dir().join(format!("fox-gateway-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/note.txt"), "A😀Fox\r\nsecond Fox line\n").unwrap();
+        let permission = FrozenPermission { mode: PermissionMode::ReadOnly, project_root: Some(root.to_string_lossy().into_owned()), grants: vec![] };
+        let binding = RunControlBinding {
+            schema_version: 1, run_id: "gateway-run".into(), conversation_id: "gateway-conversation".into(), engine_id: "pi".into(),
+            execution_profile_id: "test-profile".into(), authority: ExecutionAuthority::Legacy, read_only_executor: ResourceExecutor::Rust,
+            permission_snapshot_id: crate::database::Database::run_control_permission_hash(&permission).unwrap(), permission, budgets: TimeBudgets::default(),
+        };
+        let registry = CancellationRegistry::default();
+        registry.register_run(&binding.run_id).unwrap();
+        let token = registry.tool_token(&binding.run_id, "tool").unwrap();
+        (binding, registry, token)
+    }
+
+    #[test]
+    fn resource_gateway_executes_read_ls_find_grep_with_utf16_offsets() {
+        let (binding, _, token) = fixture();
+        let read = execute(&binding, "read", &json!({"path":"src/note.txt","offset":1,"limit":2}), &token).unwrap();
+        assert_eq!(read["content"][0]["text"], "😀");
+        assert_eq!(read["details"]["truncated"], true);
+        let list = execute(&binding, "ls", &json!({"path":"src"}), &token).unwrap();
+        assert_eq!(list["content"][0]["text"], "[file] note.txt");
+        let found = execute(&binding, "find", &json!({"path":".","pattern":"NOTE"}), &token).unwrap();
+        assert_eq!(found["details"]["count"], 1);
+        let searched = execute(&binding, "grep", &json!({"path":".","pattern":"fox"}), &token).unwrap();
+        assert_eq!(searched["details"]["count"], 2);
+        assert!(searched["content"][0]["text"].as_str().unwrap().contains(":2:second Fox line"));
+    }
+
+    #[test]
+    fn resource_gateway_rejects_wrong_executor_cancelled_calls_and_oversized_files() {
+        let (mut binding, registry, token) = fixture();
+        binding.read_only_executor = ResourceExecutor::Runtime;
+        assert!(execute(&binding,"read",&json!({"path":"src/note.txt"}),&token).is_err());
+        binding.read_only_executor = ResourceExecutor::Rust;
+        let huge = Path::new(binding.permission.project_root.as_ref().unwrap()).join("huge.txt");
+        File::create(&huge).unwrap().set_len(MAX_FILE_BYTES + 1).unwrap();
+        assert!(execute(&binding,"read",&json!({"path":huge}),&token).unwrap_err().contains("byte limit"));
+        registry.request_run_cancel(&binding.run_id);
+        assert!(execute(&binding,"ls",&json!({"path":"."}),&token).unwrap_err().contains("tool.cancelled"));
+    }
+
+    #[test]
+    fn resource_gateway_blocks_nested_links_outside_frozen_root() {
+        let (binding, _, token) = fixture();
+        let outside = std::env::temp_dir().join(format!("fox-gateway-outside-{}",uuid::Uuid::new_v4()));
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "must never be returned").unwrap();
+        let link = Path::new(binding.permission.project_root.as_ref().unwrap()).join("outside-link");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let status = std::process::Command::new("cmd.exe").args(["/D","/C","mklink","/J"])
+                .arg(&link).arg(&outside).creation_flags(0x0800_0000).stdout(std::process::Stdio::null()).status().unwrap();
+            assert!(status.success(), "junction fixture must be created");
+        }
+        #[cfg(not(windows))]
+        std::os::unix::fs::symlink(&outside,&link).unwrap();
+        assert!(execute(&binding,"grep",&json!({"path":".","pattern":"must"}),&token).unwrap_err().contains("outside"));
+        assert!(execute(&binding,"read",&json!({"path":outside.join("secret.txt")}),&token).is_err());
+    }
+}

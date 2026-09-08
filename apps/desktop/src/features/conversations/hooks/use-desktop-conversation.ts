@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
-import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable } from '../api/desktop-client'
-import { applyWorkEvent, mergeConversationDetail, reduceRuntimeNotifications, runRecordIsActive } from '../model/runtime-event-reducer'
-import { enqueueRuntimeEvent, takeRuntimeEventFrame } from '../model/runtime-event-queue'
+import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable, knowledgeReferenceKey, knowledgeReferenceFromLegacyBinding } from '../api/desktop-client'
+import { applyWorkEvent, mergeConversationDetail, runRecordIsActive } from '../model/runtime-event-reducer'
 import { pendingRuntimeQuestion } from '../model/pending-interactions'
 import { extractedAttachmentContext } from '../model/attachment-content'
 import { resolveConversationAgentId } from '../model/agent-initialization'
 import { withWorkspaceInitializationTimeout } from '../model/workspace-initialization'
+import { useRuntimeEventStream } from './use-runtime-event-stream'
 import type {
   ConversationDetail,
   ChildRunNotification,
@@ -21,6 +21,7 @@ import type {
   ApprovalDecision,
   KnowledgeBaseRecord,
   KnowledgeBindingRecord,
+  KnowledgeReference,
   WorkEventRecord,
   RuntimeInitialization,
   DesktopErrorDetails,
@@ -47,6 +48,9 @@ interface DesktopConversationState {
   expertBindings: ConversationExpertBinding[]
   draftProjectRoot: string | null
   draftPermissionMode: ProjectRecord['permissionMode'] | null
+  knowledgeReferences: KnowledgeReference[] | undefined
+  selectProject: (projectRoot: string, permissionMode: ProjectRecord['permissionMode']) => void
+  setKnowledgeReferences: (references: KnowledgeReference[], names: Record<string, string>) => Promise<boolean>
   knowledgeBindings: KnowledgeBindingRecord[]
   streamingText: string
   error: string | null
@@ -158,12 +162,16 @@ export function useDesktopConversation(): DesktopConversationState {
   const [draftProjectRoot, setDraftProjectRoot] = useState<string | null>(null)
   const [draftPermissionMode, setDraftPermissionMode] = useState<ProjectRecord['permissionMode'] | null>(null)
   const [draftKnowledgeBases, setDraftKnowledgeBases] = useState<KnowledgeBaseRecord[]>([])
+  const [draftKnowledgeReferences, setDraftKnowledgeReferences] = useState<KnowledgeReference[] | undefined>(undefined)
+  const [draftKnowledgeNames, setDraftKnowledgeNames] = useState<Record<string, string>>({})
   const draftRef = useRef<{
     agentId: string | null
     expertId: string | null
     projectRoot: string | null
     permissionMode: ProjectRecord['permissionMode'] | null
     knowledgeBases: KnowledgeBaseRecord[]
+    knowledgeReferences?: KnowledgeReference[]
+    knowledgeNames?: Record<string, string>
   }>({ agentId: null, expertId: null, projectRoot: null, permissionMode: null, knowledgeBases: [] })
   const [error, setError] = useState<string | null>(null)
   const [errorDetails, setErrorDetails] = useState<DesktopErrorDetails | null>(null)
@@ -188,7 +196,27 @@ export function useDesktopConversation(): DesktopConversationState {
     setDraftProjectRoot(nextDraft.projectRoot)
     setDraftPermissionMode(nextDraft.permissionMode)
     setDraftKnowledgeBases(nextDraft.knowledgeBases)
+    setDraftKnowledgeReferences(nextDraft.knowledgeReferences)
+    setDraftKnowledgeNames(nextDraft.knowledgeNames ?? {})
   }, [])
+
+  const currentDraft = useCallback((): typeof draftRef.current => detail ? {
+    agentId: detail.conversation.agentId,
+    expertId: activeConversationExpertBinding(detail)?.expertId ?? null,
+    projectRoot: detail.conversation.projectRoot ?? null,
+    permissionMode: detail.conversation.permissionMode,
+    knowledgeBases: [],
+    knowledgeReferences: detail.knowledgeReferences ?? detail.knowledgeBindings.map(knowledgeReferenceFromLegacyBinding),
+    knowledgeNames: Object.fromEntries(detail.knowledgeBindings.map((binding) => [knowledgeReferenceKey(knowledgeReferenceFromLegacyBinding(binding)), binding.knowledgeBaseName ?? binding.knowledgeBaseId])),
+  } : draftRef.current, [detail])
+
+  const selectProject = useCallback((projectRoot: string, permissionMode: ProjectRecord['permissionMode']) => {
+    const draft = currentDraft()
+    applyDraft({ ...draft, agentId: draft.agentId ?? defaultAgentId, projectRoot, permissionMode })
+    activeConversationIdRef.current = null
+    activeRunIdRef.current = null
+    setDetail(null)
+  }, [applyDraft, currentDraft, defaultAgentId])
 
   const initializeRuntime = useCallback(() => {
     if (runtimeInitializationRef.current) return runtimeInitializationRef.current
@@ -218,8 +246,10 @@ export function useDesktopConversation(): DesktopConversationState {
       projectRoot: draftProjectRoot,
       permissionMode: draftPermissionMode,
       knowledgeBases: draftKnowledgeBases,
+      knowledgeReferences: draftKnowledgeReferences,
+      knowledgeNames: draftKnowledgeNames,
     }
-  }, [draftAgentId, draftExpertId, draftKnowledgeBases, draftPermissionMode, draftProjectRoot])
+  }, [draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot])
 
   const refreshList = useCallback(async () => {
     const next = await desktopClient.listConversations()
@@ -262,7 +292,7 @@ export function useDesktopConversation(): DesktopConversationState {
       agentId: next.conversation.agentId,
       expertId: activeConversationExpertBinding(next)?.expertId ?? null,
       projectRoot: null,
-      permissionMode: null,
+      permissionMode: next.conversation.permissionMode,
       knowledgeBases: [],
     })
     setDetail(next)
@@ -355,12 +385,13 @@ export function useDesktopConversation(): DesktopConversationState {
       setErrorDetails(null)
       activeConversationIdRef.current = null
       activeRunIdRef.current = null
+      const draft = currentDraft()
       applyDraft({
+        ...draft,
         agentId: resolvedAgent.agentId,
         expertId: selectedExpertId,
-        projectRoot: projectRoot?.trim() || null,
-        permissionMode: permissionMode ?? null,
-        knowledgeBases: [],
+        projectRoot: projectRoot?.trim() || draft.projectRoot,
+        permissionMode: permissionMode ?? draft.permissionMode,
       })
       setDetail(null)
       return { success: true, error: null }
@@ -370,7 +401,7 @@ export function useDesktopConversation(): DesktopConversationState {
       setErrorDetails(details)
       return { success: false, error: details }
     }
-  }, [applyDraft, defaultAgentId, initializeRuntime])
+  }, [applyDraft, currentDraft, defaultAgentId, initializeRuntime])
 
   const setDraftPermission = useCallback((permissionMode: ProjectRecord['permissionMode']) => {
     draftRef.current = { ...draftRef.current, permissionMode }
@@ -517,6 +548,22 @@ export function useDesktopConversation(): DesktopConversationState {
     }
   }, [applyDraft, detail, openConversation])
 
+  const setKnowledgeReferences = useCallback(async (references: KnowledgeReference[], names: Record<string, string>) => {
+    const conversationId = activeConversationIdRef.current
+    if (!conversationId) {
+      applyDraft({ ...draftRef.current, knowledgeReferences: references, knowledgeNames: names, knowledgeBases: [] })
+      return true
+    }
+    try {
+      await desktopClient.setKnowledgeReferences(conversationId, references, names)
+      await openConversation(conversationId)
+      return true
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+      return false
+    }
+  }, [applyDraft, openConversation])
+
   const setKnowledgeBindings = useCallback(async (knowledgeBases: KnowledgeBaseRecord[]) => {
     const conversationId = activeConversationIdRef.current
     if (!conversationId) {
@@ -552,7 +599,6 @@ export function useDesktopConversation(): DesktopConversationState {
         applyDraft({
           ...draftRef.current,
           agentId: draftRef.current.agentId ?? agentId,
-          expertId: null,
         })
         await Promise.all([
           withWorkspaceInitializationTimeout(refreshRuntimeStatus(), '运行状态加载'),
@@ -569,7 +615,6 @@ export function useDesktopConversation(): DesktopConversationState {
           applyDraft({
             ...draftRef.current,
             agentId: draftRef.current.agentId ?? fallbackAgentId,
-            expertId: null,
           })
           setError(cause instanceof Error ? cause.message : String(cause))
         }
@@ -622,107 +667,19 @@ export function useDesktopConversation(): DesktopConversationState {
     }
   }, [])
 
-  useEffect(() => {
-    if (!desktopRuntimeAvailable) return
-    let disposed = false
-    let unlisten: (() => void) | undefined
-    const flushRuntimeEvents = () => {
-      runtimeEventFrameRef.current = null
-      if (disposed || runtimeEventQueueRef.current.length === 0) return
-      const notifications = takeRuntimeEventFrame(runtimeEventQueueRef.current)
-      flushSync(() => {
-        setDetail((current) => current ? reduceRuntimeNotifications(current, notifications) : current)
-      })
-      const terminal = [...notifications].reverse().find(({ event }) => (
-        event.type === 'run.completed'
-        || event.type === 'run.cancelled'
-        || event.type === 'run.failed'
-        || event.type === 'run.interrupted'
-      ))
-      if (runtimeEventQueueRef.current.length > 0) {
-        scheduleRuntimeFlush()
-      }
-      if (!terminal) return
-      const event = terminal.event
-      const terminalReceivedAt = runtimeEventReceivedAtRef.current.get(`${terminal.runId}:${terminal.seq}`)
-      runtimeEventReceivedAtRef.current.delete(`${terminal.runId}:${terminal.seq}`)
-      if (terminalReceivedAt !== undefined) {
-        void desktopClient.recordUiMetric(
-          terminal.runId,
-          'ui.terminal_render',
-          Math.max(0, Math.round(performance.now() - terminalReceivedAt)),
-        ).catch(() => undefined)
-      }
-      const isCurrentConversation = activeConversationIdRef.current === terminal.conversationId
-      if (isCurrentConversation && (event.type === 'run.failed' || event.type === 'run.interrupted') && typeof event.message === 'string') {
-        setError(event.message)
-        setErrorDetails({
-          code: typeof event.code === 'string' ? event.code : 'runtime.failed',
-          message: event.message,
-          retryable: event.type === 'run.interrupted',
-        })
-      }
-      if (!isCurrentConversation) {
-        void refreshList()
-        return
-      }
-      void desktopClient.loadConversation(terminal.conversationId).then((persisted) => {
-        if (disposed || activeConversationIdRef.current !== terminal.conversationId) return
-        flushSync(() => setDetail((current) => mergeConversationDetail(persisted, current)))
-      }).catch(() => undefined)
-      void refreshList()
-    }
-    const scheduleRuntimeFlush = () => {
-      if (runtimeEventFrameRef.current !== null) return
-      runtimeEventFrameRef.current = window.requestAnimationFrame(flushRuntimeEvents)
-    }
-    const subscription = desktopClient.listenRuntimeEvents((notification: RuntimeEventNotification) => {
-      const decision = disposed ? 'disposed' : 'accepted'
-      if (decision !== 'accepted') return
-      const event = notification.event
-      if (event.type === 'run.started') {
-        setError(null)
-        setErrorDetails(null)
-      }
-      lastRuntimeEventAtRef.current = Date.now()
-      if (['run.completed', 'run.cancelled', 'run.failed', 'run.interrupted'].includes(String(event.type))) {
-        runtimeEventReceivedAtRef.current.set(`${notification.runId}:${notification.seq}`, performance.now())
-      }
-      const dispatchedAt = uiDispatchStartedRef.current.get(notification.conversationId)
-      if (dispatchedAt !== undefined) {
-        uiDispatchStartedRef.current.delete(notification.conversationId)
-        void desktopClient.recordUiMetric(
-          notification.runId,
-          'ui.first_event',
-          Math.max(0, Math.round(performance.now() - dispatchedAt)),
-        ).catch(() => undefined)
-      }
-      enqueueRuntimeEvent(runtimeEventQueueRef.current, notification)
-      scheduleRuntimeFlush()
-    })
-    runtimeListenerReadyRef.current = subscription.then((stop) => {
-      if (disposed) stop()
-      else unlisten = stop
-    }).catch((cause) => {
-      if (!disposed) {
-        const message = cause instanceof Error ? cause.message : String(cause)
-        setError(message)
-      }
-    })
-    return () => {
-      disposed = true
-      runtimeEventQueueRef.current = []
-      runtimeEventReceivedAtRef.current.clear()
-      uiDispatchStartedRef.current.clear()
-      lastRuntimeEventAtRef.current = 0
-      if (runtimeEventFrameRef.current !== null) {
-        window.cancelAnimationFrame(runtimeEventFrameRef.current)
-        runtimeEventFrameRef.current = null
-      }
-      unlisten?.()
-      runtimeListenerReadyRef.current = null
-    }
-  }, [refreshList])
+  useRuntimeEventStream({
+    activeConversationIdRef,
+    runtimeListenerReadyRef,
+    runtimeEventQueueRef,
+    runtimeEventFrameRef,
+    lastRuntimeEventAtRef,
+    uiDispatchStartedRef,
+    runtimeEventReceivedAtRef,
+    setDetail,
+    setError,
+    setErrorDetails,
+    refreshList,
+  })
 
   useEffect(() => {
     if (!desktopRuntimeAvailable) return
@@ -841,7 +798,10 @@ export function useDesktopConversation(): DesktopConversationState {
         active = await desktopClient.loadConversation(conversation.id)
         activeConversationIdRef.current = conversation.id
         const knowledgeBases = draft.knowledgeBases.length ? draft.knowledgeBases : draftKnowledgeBases
-        if (knowledgeBases.length) {
+        if (draft.knowledgeReferences !== undefined) {
+          await desktopClient.setKnowledgeReferences(conversation.id, draft.knowledgeReferences, draft.knowledgeNames ?? {})
+          active = await desktopClient.loadConversation(conversation.id)
+        } else if (knowledgeBases.length) {
           const bindings = await desktopClient.setKnowledgeBindings(
             conversation.id,
             knowledgeBases.map((item) => ({ id: item.id, name: item.name })),
@@ -1284,6 +1244,9 @@ export function useDesktopConversation(): DesktopConversationState {
     expertBindings: detail?.expertBindings ?? [],
     draftProjectRoot,
     draftPermissionMode,
+    knowledgeReferences: detail?.knowledgeReferences ?? draftKnowledgeReferences,
+    selectProject,
+    setKnowledgeReferences,
     knowledgeBindings: detail?.knowledgeBindings ?? draftKnowledgeBases.map((item) => ({
       conversationId: 'draft',
       serviceConnectionId: 'yuxi',
@@ -1327,7 +1290,7 @@ export function useDesktopConversation(): DesktopConversationState {
     refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runtimeStatus, searchConversations, send, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
+  }), [archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runtimeStatus, searchConversations, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {

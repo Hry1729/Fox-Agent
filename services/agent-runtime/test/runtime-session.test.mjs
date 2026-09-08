@@ -58,6 +58,40 @@ test('uses Pi content blocks when replaying a legacy assistant string', () => {
   assert.deepEqual(messages[1].content, [{ type: 'text', text: '目标已提交，等待确认。' }])
 })
 
+test('preserves image blocks in tool results and repairs interrupted tool history', () => {
+  const messages = sanitizeProviderHistory([{
+    role: 'assistant',
+    content: [
+      { type: 'toolCall', id: 'image-call', name: 'capture', arguments: {} },
+      { type: 'toolCall', id: 'lost-call', name: 'read', arguments: { path: 'lost.txt' } },
+    ],
+    timestamp: 1,
+  }, {
+    role: 'toolResult',
+    toolCallId: 'image-call',
+    toolName: 'capture',
+    content: [{ type: 'image', data: 'YWJj', mimeType: 'image/png', providerOnly: true }],
+    timestamp: 2,
+  }, {
+    role: 'toolResult',
+    toolCallId: 'orphan-call',
+    toolName: 'read',
+    content: [{ type: 'text', text: 'must be dropped' }],
+    timestamp: 3,
+  }, {
+    role: 'assistant',
+    content: [{ type: 'text', text: 'continued' }],
+    timestamp: 4,
+  }])
+
+  assert.deepEqual(messages[1].content, [{ type: 'image', data: 'YWJj', mimeType: 'image/png' }])
+  assert.equal(messages.some((message) => message.toolCallId === 'orphan-call'), false)
+  const recovered = messages.find((message) => message.toolCallId === 'lost-call')
+  assert.equal(recovered.isError, true)
+  assert.match(recovered.content[0].text, /without a durable result/)
+  assert.equal(messages.indexOf(recovered) < messages.findIndex((message) => message.timestamp === 4), true)
+})
+
 test('falls back to SQLite history when a runtime transcript is empty', () => {
   const messages = transcriptFromSession({ messages: [] }, [{ role: 'assistant', content: 'restored reply' }])
   assert.equal(messages[0].content, 'restored reply')
@@ -73,11 +107,12 @@ test('prefers SQLite truth over a stale runtime transcript', () => {
 
 test('keeps Pi tool context when its text projection matches SQLite', () => {
   const toolResult = { role: 'toolResult', toolCallId: '1', toolName: 'read', content: [{ type: 'text', text: 'file body' }], details: {}, isError: false, timestamp: 1 }
+  const toolCall = { role: 'assistant', content: [{ type: 'toolCall', id: '1', name: 'read', arguments: {} }], timestamp: 0.5 }
   const assistant = { role: 'assistant', content: [{ type: 'text', text: 'final reply' }], api: 'faux', provider: 'faux', model: 'test', usage: {}, stopReason: 'stop', timestamp: 2 }
   const messages = transcriptFromSession(
-    { messages: [{ role: 'user', content: 'read it', timestamp: 0 }, toolResult, assistant] },
+    { messages: [{ role: 'user', content: 'read it', timestamp: 0 }, toolCall, toolResult, assistant] },
     [{ role: 'user', content: 'read it' }, { role: 'assistant', content: 'final reply' }],
   )
-  assert.equal(messages.length, 3)
-  assert.equal(messages[1].role, 'toolResult')
+  assert.equal(messages.length, 4)
+  assert.equal(messages[2].role, 'toolResult')
 })

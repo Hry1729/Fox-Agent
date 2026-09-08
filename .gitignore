@@ -4,6 +4,8 @@ dist/
 services/agent-runtime/dist/*
 !services/agent-runtime/dist/.gitkeep
 target/
+# Isolated default-feature verification output (may contain locked DLLs).
+/apps/desktop/src-tauri/target-default-check/
 .runtime-*/
 .agent_context/
 .claude/
@@ -30,3 +32,8 @@ package-lock.json
 *.log
 .DS_Store
 Thumbs.db
+
+# Pinned OfficeCLI is prepared and hash-verified before packaging.
+apps/desktop/src-tauri/resources/officecli/officecli
+apps/desktop/src-tauri/resources/officecli/officecli.exe
+apps/desktop/src-tauri/resources/officecli/*.download

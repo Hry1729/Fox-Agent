@@ -76,10 +76,13 @@ export function WorkspaceShell({
     navigate(target.view, target.entityId)
   }
   const pageProps = { sidebarCollapsed, onSidebar, navigate }
+  const initialPluginKind = activeEntityId === 'tool' || activeEntityId === 'skill' || activeEntityId === 'mcp'
+    ? activeEntityId
+    : undefined
 
   let rawWorkspacePage: ReactNode = null
   if (activeView === 'plugins') {
-    rawWorkspacePage = <PluginCenterPage gateway={pluginGateway} onConfigureAgent={onConfigurePluginAgent} />
+    rawWorkspacePage = <PluginCenterPage gateway={pluginGateway} initialKind={initialPluginKind} onConfigureAgent={onConfigurePluginAgent} />
   } else if (localKnowledgeView) {
     rawWorkspacePage = (
       <LocalKnowledgeWorkspace

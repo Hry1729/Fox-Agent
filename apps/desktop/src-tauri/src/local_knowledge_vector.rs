@@ -19,16 +19,33 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
-use tauri::State;
+use tauri::{Manager, State};
 use uuid::Uuid;
+
+#[cfg(feature = "zvec")]
+use crate::vector_store::{SearchRequest, VectorRecord, VectorStore, ZvecVectorStore};
 
 const RECOMMENDED_MODEL_ID: &str = "bge-small-zh-v1.5";
 const RECOMMENDED_MODEL_NAME: &str = "BGE Small 中文 v1.5";
 const RECOMMENDED_MODEL_VERSION: &str = "75c43b069aac4d136ba6bc1122f995fedcfd2781";
 const RECOMMENDED_MODEL_DIMENSION: i64 = 512;
+const MULTILINGUAL_E5_MODEL_ID: &str = "multilingual-e5-small";
+const MULTILINGUAL_E5_MODEL_NAME: &str = "Multilingual E5 Small";
+const MULTILINGUAL_E5_MODEL_VERSION: &str = "761b726dd34fb83930e26aab4e9ac3899aa1fa78";
+const MULTILINGUAL_E5_MODEL_DIMENSION: i64 = 384;
+const LEGACY_MINILM_MODEL_ID: &str = "all-MiniLM-L6-v2";
+const ZVEC_STORE_KIND: &str = "zvec-hnsw-cosine-v1";
+const ZVEC_STORE_VERSION: &str = "0.6.0";
+const DEFAULT_EMBEDDING_MAX_TOKENS: usize = 512;
+const EMBEDDING_MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(45);
+const RETRIEVAL_WORKER_TIMEOUT: Duration = Duration::from_secs(60);
+const RETRIEVAL_WORKER_ROOT_ENV: &str = "FOX_KNOWLEDGE_RETRIEVAL_ROOT";
+const RETRIEVAL_WORKER_REQUEST_ENV: &str = "FOX_KNOWLEDGE_RETRIEVAL_REQUEST";
+const RETRIEVAL_WORKER_ZVEC_RESOURCE_ENV: &str = "FOX_KNOWLEDGE_ZVEC_RESOURCE_DIR";
 const RRF_VERSION: &str = "rrf-v1-k60";
 const RRF_K: f64 = 60.0;
 
@@ -42,7 +59,7 @@ pub struct EmbeddingModelAsset {
     pub size_bytes: i64,
 }
 
-fn recommended_assets() -> Vec<EmbeddingModelAsset> {
+fn bge_recommended_assets() -> Vec<EmbeddingModelAsset> {
     let revision = RECOMMENDED_MODEL_VERSION;
     let root = format!("https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/{revision}");
     vec![
@@ -70,6 +87,27 @@ fn recommended_assets() -> Vec<EmbeddingModelAsset> {
     ]
 }
 
+fn multilingual_e5_recommended_assets() -> Vec<EmbeddingModelAsset> {
+    let revision = MULTILINGUAL_E5_MODEL_VERSION;
+    let root = format!("https://huggingface.co/Xenova/multilingual-e5-small/resolve/{revision}");
+    vec![
+        EmbeddingModelAsset {
+            name: "model.onnx".to_owned(),
+            download_name: "onnx/model_int8.onnx".to_owned(),
+            url: format!("{root}/onnx/model_int8.onnx?download=true"),
+            sha256: "4d24e2bc01a447951524466ef533e52944bf48509e6552810bcee1a2711cb02c".to_owned(),
+            size_bytes: 118_054_593,
+        },
+        EmbeddingModelAsset {
+            name: "tokenizer.json".to_owned(),
+            download_name: "tokenizer.json".to_owned(),
+            url: format!("{root}/tokenizer.json?download=true"),
+            sha256: "0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39".to_owned(),
+            size_bytes: 17_082_730,
+        },
+    ]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EmbeddingPackageManifest {
@@ -88,12 +126,22 @@ struct EmbeddingPackageManifest {
     pooling: String,
     #[serde(default)]
     normalize: bool,
+    #[serde(default = "default_embedding_max_tokens")]
+    max_tokens: usize,
+    #[serde(default)]
+    query_prefix: String,
+    #[serde(default)]
+    passage_prefix: String,
     #[serde(default)]
     files: Vec<EmbeddingModelAsset>,
 }
 
 fn default_pooling() -> String {
     "mean".to_owned()
+}
+
+fn default_embedding_max_tokens() -> usize {
+    DEFAULT_EMBEDDING_MAX_TOKENS
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -142,6 +190,8 @@ pub struct EmbeddingModelTestResult {
     pub dimension: i64,
     pub elapsed_ms: i64,
     pub message: String,
+    pub error_code: Option<String>,
+    pub error_details: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,13 +219,22 @@ pub struct KnowledgeIndexStartRequest {
     pub rebuild: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgeRetrievalRequest {
     pub knowledge_base_id: String,
     pub query: String,
     pub mode: Option<String>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RetrievalWorkerResponse {
+    ok: bool,
+    data: Option<Value>,
+    error_code: Option<String>,
+    error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -246,19 +305,389 @@ fn model_response<T: Serialize>(result: Result<T, LocalKnowledgeError>) -> ApiRe
     }
 }
 
-fn recommended_manifest() -> EmbeddingPackageManifest {
-    EmbeddingPackageManifest {
-        id: RECOMMENDED_MODEL_ID.to_owned(),
-        name: RECOMMENDED_MODEL_NAME.to_owned(),
-        version: RECOMMENDED_MODEL_VERSION.to_owned(),
-        dimension: RECOMMENDED_MODEL_DIMENSION as usize,
-        languages: vec!["中文".to_owned()],
-        tokenizer: "tokenizer.json".to_owned(),
-        hash: recommended_assets()[0].sha256.clone(),
-        license: "MIT".to_owned(),
-        pooling: "cls".to_owned(),
-        normalize: true,
-        files: recommended_assets(),
+fn recommended_manifest(model_id: &str) -> Option<EmbeddingPackageManifest> {
+    match model_id {
+        RECOMMENDED_MODEL_ID => {
+            let files = bge_recommended_assets();
+            Some(EmbeddingPackageManifest {
+                id: RECOMMENDED_MODEL_ID.to_owned(),
+                name: RECOMMENDED_MODEL_NAME.to_owned(),
+                version: RECOMMENDED_MODEL_VERSION.to_owned(),
+                dimension: RECOMMENDED_MODEL_DIMENSION as usize,
+                languages: vec!["中文".to_owned()],
+                tokenizer: "tokenizer.json".to_owned(),
+                hash: files[0].sha256.clone(),
+                license: "MIT".to_owned(),
+                pooling: "cls".to_owned(),
+                normalize: true,
+                max_tokens: DEFAULT_EMBEDDING_MAX_TOKENS,
+                query_prefix: String::new(),
+                passage_prefix: String::new(),
+                files,
+            })
+        }
+        MULTILINGUAL_E5_MODEL_ID => {
+            let files = multilingual_e5_recommended_assets();
+            Some(EmbeddingPackageManifest {
+                id: MULTILINGUAL_E5_MODEL_ID.to_owned(),
+                name: MULTILINGUAL_E5_MODEL_NAME.to_owned(),
+                version: MULTILINGUAL_E5_MODEL_VERSION.to_owned(),
+                dimension: MULTILINGUAL_E5_MODEL_DIMENSION as usize,
+                languages: vec!["中文".to_owned(), "英文".to_owned()],
+                tokenizer: "tokenizer.json".to_owned(),
+                hash: files[0].sha256.clone(),
+                license: "MIT".to_owned(),
+                pooling: "mean".to_owned(),
+                normalize: true,
+                max_tokens: DEFAULT_EMBEDDING_MAX_TOKENS,
+                query_prefix: "query: ".to_owned(),
+                passage_prefix: "passage: ".to_owned(),
+                files,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn recommended_manifests() -> Vec<EmbeddingPackageManifest> {
+    [RECOMMENDED_MODEL_ID, MULTILINGUAL_E5_MODEL_ID]
+        .into_iter()
+        .filter_map(recommended_manifest)
+        .collect()
+}
+
+fn recommended_source_url(model_id: &str) -> Option<&'static str> {
+    match model_id {
+        RECOMMENDED_MODEL_ID => Some("https://huggingface.co/Xenova/bge-small-zh-v1.5"),
+        MULTILINGUAL_E5_MODEL_ID => Some("https://huggingface.co/Xenova/multilingual-e5-small"),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "local-embedding")]
+#[derive(Debug)]
+struct EmbeddingSmokeFailure {
+    code: String,
+    message: String,
+    details: String,
+}
+
+#[cfg(feature = "local-embedding")]
+fn embedding_smoke_failure(
+    code: impl Into<String>,
+    message: impl Into<String>,
+    details: impl Into<String>,
+) -> EmbeddingSmokeFailure {
+    EmbeddingSmokeFailure {
+        code: code.into(),
+        message: message.into(),
+        details: details.into(),
+    }
+}
+
+#[cfg(feature = "local-embedding")]
+fn collect_embedding_smoke_stderr(mut stderr: impl Read) -> String {
+    const MAX_DIAGNOSTIC_BYTES: usize = 64_000;
+    const MAX_DIAGNOSTIC_CHARS: usize = 16_000;
+    let mut captured = Vec::with_capacity(MAX_DIAGNOSTIC_BYTES.min(8_192));
+    let mut buffer = [0_u8; 4_096];
+    let mut truncated = false;
+    loop {
+        let read = match stderr.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) => return format!("读取隔离进程诊断输出失败：{error}"),
+        };
+        let remaining = MAX_DIAGNOSTIC_BYTES.saturating_sub(captured.len());
+        if remaining > 0 {
+            captured.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+        truncated |= read > remaining;
+    }
+    let details = String::from_utf8_lossy(&captured);
+    let details = details.trim();
+    if details.is_empty() {
+        return "隔离进程没有返回额外诊断信息。".to_owned();
+    }
+    if !truncated && details.chars().count() <= MAX_DIAGNOSTIC_CHARS {
+        details.to_owned()
+    } else {
+        format!(
+            "{}\n\n[诊断信息超过 {} 字符，已截断]",
+            details
+                .chars()
+                .take(MAX_DIAGNOSTIC_CHARS)
+                .collect::<String>(),
+            MAX_DIAGNOSTIC_CHARS
+        )
+    }
+}
+
+#[cfg(feature = "local-embedding")]
+fn finish_embedding_smoke_stderr(reader: thread::JoinHandle<String>) -> String {
+    reader
+        .join()
+        .unwrap_or_else(|_| "隔离进程诊断读取线程异常终止。".to_owned())
+}
+
+#[cfg(feature = "local-embedding")]
+fn embedding_smoke_exit_status(status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) => {
+            #[cfg(windows)]
+            {
+                format!("{code} (0x{:08X})", code as u32)
+            }
+            #[cfg(not(windows))]
+            {
+                code.to_string()
+            }
+        }
+        None => "被系统终止".to_owned(),
+    }
+}
+
+#[cfg(feature = "local-embedding")]
+fn run_embedding_model_smoke_process(package_path: &Path) -> Result<(), EmbeddingSmokeFailure> {
+    let executable = std::env::current_exe().map_err(|error| {
+        embedding_smoke_failure(
+            "local_embedding.smoke_executable_missing",
+            "无法启动隔离推理测试",
+            format!("无法定位 Fox 当前可执行文件：{error}"),
+        )
+    })?;
+    let mut command = Command::new(executable);
+    command
+        .env("FOX_EMBEDDING_SMOKE_PACKAGE", package_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn().map_err(|error| {
+        embedding_smoke_failure(
+            "local_embedding.smoke_launch_failed",
+            "隔离推理进程启动失败",
+            format!("模型目录：{}\n启动错误：{error}", package_path.display()),
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        embedding_smoke_failure(
+            "local_embedding.smoke_diagnostics_unavailable",
+            "隔离推理进程启动后无法读取诊断信息",
+            format!("模型目录：{}", package_path.display()),
+        )
+    })?;
+    let stderr_reader = thread::Builder::new()
+        .name("fox-embedding-smoke-stderr".to_owned())
+        .spawn(move || collect_embedding_smoke_stderr(stderr))
+        .map_err(|error| {
+            let _ = child.kill();
+            let _ = child.wait();
+            embedding_smoke_failure(
+                "local_embedding.smoke_diagnostics_launch_failed",
+                "无法启动隔离推理诊断读取线程",
+                error.to_string(),
+            )
+        })?;
+    let deadline = Instant::now() + EMBEDDING_MODEL_TEST_TIMEOUT;
+    loop {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let diagnostics = finish_embedding_smoke_stderr(stderr_reader);
+                return Err(embedding_smoke_failure(
+                    "local_embedding.smoke_wait_failed",
+                    "无法读取隔离推理进程状态",
+                    format!("{error}\n\n{diagnostics}"),
+                ));
+            }
+        };
+        if let Some(status) = status {
+            let diagnostics = finish_embedding_smoke_stderr(stderr_reader);
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(embedding_smoke_failure(
+                    "local_embedding.smoke_inference_failed",
+                    "模型文件完整，但隔离加载或推理失败",
+                    format!(
+                        "退出状态：{}\n模型目录：{}\n\n{}",
+                        embedding_smoke_exit_status(status),
+                        package_path.display(),
+                        diagnostics
+                    ),
+                ))
+            };
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let diagnostics = finish_embedding_smoke_stderr(stderr_reader);
+            return Err(embedding_smoke_failure(
+                "local_embedding.smoke_timeout",
+                "隔离推理测试超时，已安全终止测试进程",
+                format!(
+                    "超时限制：{} 秒\n模型目录：{}\n\n{}",
+                    EMBEDDING_MODEL_TEST_TIMEOUT.as_secs(),
+                    package_path.display(),
+                    diagnostics
+                ),
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn collect_retrieval_worker_stream(mut stream: impl Read, max_bytes: usize) -> String {
+    let mut captured = Vec::with_capacity(max_bytes.min(16_384));
+    let mut buffer = [0_u8; 8_192];
+    let mut truncated = false;
+    loop {
+        let read = match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) => return format!("读取检索隔离进程输出失败：{error}"),
+        };
+        let remaining = max_bytes.saturating_sub(captured.len());
+        if remaining > 0 {
+            captured.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+        truncated |= read > remaining;
+    }
+    let mut output = String::from_utf8_lossy(&captured).trim().to_owned();
+    if truncated {
+        output.push_str("\n\n[隔离进程输出过长，已截断]");
+    }
+    output
+}
+
+fn finish_retrieval_worker_stream(reader: thread::JoinHandle<String>) -> String {
+    reader
+        .join()
+        .unwrap_or_else(|_| "检索隔离进程输出读取线程异常终止。".to_owned())
+}
+
+fn retrieval_worker_error(
+    response: RetrievalWorkerResponse,
+    diagnostics: &str,
+) -> LocalKnowledgeError {
+    let mut message = response
+        .error_message
+        .unwrap_or_else(|| "向量检索隔离进程没有返回错误详情".to_owned());
+    if !diagnostics.is_empty() {
+        message.push_str("\n\n诊断信息：\n");
+        message.push_str(diagnostics);
+    }
+    match response.error_code.as_deref() {
+        Some("local_knowledge.invalid_request") => LocalKnowledgeError::invalid(message),
+        Some("local_knowledge.job_conflict") => LocalKnowledgeError::conflict(message),
+        _ => LocalKnowledgeError::storage(message),
+    }
+}
+
+#[cfg(all(feature = "local-embedding", feature = "zvec"))]
+fn run_retrieval_worker_process(
+    store: &LocalKnowledgeStore,
+    request: &KnowledgeRetrievalRequest,
+) -> Result<Value, LocalKnowledgeError> {
+    let executable = std::env::current_exe().map_err(|error| {
+        LocalKnowledgeError::storage(format!("无法定位 Fox 当前可执行文件：{error}"))
+    })?;
+    let request_json = serde_json::to_string(request).map_err(LocalKnowledgeError::storage)?;
+    let mut command = Command::new(executable);
+    command
+        .env(RETRIEVAL_WORKER_ROOT_ENV, store.root.as_os_str())
+        .env(RETRIEVAL_WORKER_REQUEST_ENV, request_json)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(resource_dir) = store.zvec_resource_dir.as_ref().as_ref() {
+        command.env(RETRIEVAL_WORKER_ZVEC_RESOURCE_ENV, resource_dir);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn().map_err(|error| {
+        LocalKnowledgeError::storage(format!("无法启动向量检索隔离进程：{error}"))
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        LocalKnowledgeError::storage("无法读取向量检索隔离进程结果")
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        LocalKnowledgeError::storage("无法读取向量检索隔离进程诊断信息")
+    })?;
+    let stdout_reader = thread::Builder::new()
+        .name("fox-retrieval-worker-stdout".to_owned())
+        .spawn(move || collect_retrieval_worker_stream(stdout, 2 * 1024 * 1024))
+        .map_err(LocalKnowledgeError::storage)?;
+    let stderr_reader = thread::Builder::new()
+        .name("fox-retrieval-worker-stderr".to_owned())
+        .spawn(move || collect_retrieval_worker_stream(stderr, 64 * 1024))
+        .map_err(LocalKnowledgeError::storage)?;
+    let deadline = Instant::now() + RETRIEVAL_WORKER_TIMEOUT;
+    loop {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let stdout = finish_retrieval_worker_stream(stdout_reader);
+                let stderr = finish_retrieval_worker_stream(stderr_reader);
+                return Err(LocalKnowledgeError::storage(format!(
+                    "无法读取向量检索隔离进程状态：{error}\n\n输出：{stdout}\n\n诊断：{stderr}"
+                )));
+            }
+        };
+        if let Some(status) = status {
+            let stdout = finish_retrieval_worker_stream(stdout_reader);
+            let stderr = finish_retrieval_worker_stream(stderr_reader);
+            let response =
+                serde_json::from_str::<RetrievalWorkerResponse>(&stdout).map_err(|error| {
+                    LocalKnowledgeError::storage(format!(
+                        "向量检索隔离进程异常退出（状态 {}）：{error}\n\n诊断信息：{}",
+                        embedding_smoke_exit_status(status),
+                        if stderr.is_empty() { "无" } else { &stderr }
+                    ))
+                })?;
+            if !status.success() || !response.ok {
+                return Err(retrieval_worker_error(response, &stderr));
+            }
+            return response
+                .data
+                .ok_or_else(|| LocalKnowledgeError::storage("向量检索隔离进程没有返回结果"));
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = finish_retrieval_worker_stream(stdout_reader);
+            let diagnostics = finish_retrieval_worker_stream(stderr_reader);
+            return Err(LocalKnowledgeError::storage(format!(
+                "向量检索超过 {} 秒，已安全终止隔离进程。{}",
+                RETRIEVAL_WORKER_TIMEOUT.as_secs(),
+                if diagnostics.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n\n诊断信息：{diagnostics}")
+                }
+            )));
+        }
+        thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -300,86 +729,91 @@ impl LocalKnowledgeStore {
 
     pub fn list_embedding_models(&self) -> Result<Vec<EmbeddingModelView>, LocalKnowledgeError> {
         let connection = self.connection()?;
-        let download = connection
-            .query_row(
-                "SELECT id, status, progress, downloaded_bytes, total_bytes, current_file,
-                        error_code, error_message, updated_at
-                 FROM local_embedding_model_downloads
-                 WHERE model_id = ?1 ORDER BY updated_at DESC LIMIT 1",
-                [RECOMMENDED_MODEL_ID],
-                map_download,
-            )
-            .optional()?;
-        let installed = connection
-            .query_row(
-                "SELECT model_id, COALESCE(name, model_id), version, dimension,
-                        languages_json, COALESCE(license, ''), COALESCE(source_url, ''),
-                        status, integrity_status, is_default, COALESCE(size_bytes, 0),
-                        installed_at, package_path, last_error_code, last_error_message
-                 FROM local_embedding_models WHERE model_id = ?1
-                 ORDER BY updated_at DESC LIMIT 1",
-                [RECOMMENDED_MODEL_ID],
-                |row| {
-                    let languages: String = row.get(4)?;
-                    Ok(EmbeddingModelView {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        version: row.get(2)?,
-                        dimension: row.get(3)?,
-                        languages: serde_json::from_str(&languages).unwrap_or_default(),
-                        license: row.get(5)?,
-                        source_url: row.get(6)?,
-                        status: row.get(7)?,
-                        integrity_status: row.get(8)?,
-                        is_default: row.get(9)?,
-                        size_bytes: row.get(10)?,
-                        installed_at: row.get(11)?,
-                        package_path: row.get(12)?,
-                        last_error_code: row.get(13)?,
-                        last_error_message: row.get(14)?,
-                        load_ready: false,
-                        recommended: true,
-                        files: recommended_assets(),
-                        download: download.clone(),
-                    })
-                },
-            )
-            .optional()?;
         let mut items = Vec::new();
-        if let Some(mut model) = installed {
-            model.load_ready = model.status == "ready" && model.integrity_status == "verified";
-            items.push(model);
-        } else {
-            let manifest = recommended_manifest();
-            items.push(EmbeddingModelView {
-                id: manifest.id,
-                name: manifest.name,
-                version: manifest.version,
-                languages: manifest.languages,
-                dimension: manifest.dimension as i64,
-                license: manifest.license,
-                source_url: "https://huggingface.co/BAAI/bge-small-zh-v1.5".to_owned(),
-                status: if download.as_ref().is_some_and(|item| {
-                    matches!(item.status.as_str(), "queued" | "running" | "paused")
-                }) {
-                    "installing".to_owned()
-                } else {
-                    "not_installed".to_owned()
-                },
-                integrity_status: "pending".to_owned(),
-                is_default: false,
-                recommended: true,
-                size_bytes: manifest.files.iter().map(|file| file.size_bytes).sum(),
-                installed_at: None,
-                package_path: None,
-                load_ready: false,
-                last_error_code: download.as_ref().and_then(|item| item.error_code.clone()),
-                last_error_message: download
-                    .as_ref()
-                    .and_then(|item| item.error_message.clone()),
-                files: manifest.files,
-                download,
-            });
+        for manifest in recommended_manifests() {
+            let download = connection
+                .query_row(
+                    "SELECT id, status, progress, downloaded_bytes, total_bytes, current_file,
+                            error_code, error_message, updated_at
+                     FROM local_embedding_model_downloads
+                     WHERE model_id = ?1 ORDER BY updated_at DESC LIMIT 1",
+                    [&manifest.id],
+                    map_download,
+                )
+                .optional()?;
+            let installed = connection
+                .query_row(
+                    "SELECT model_id, COALESCE(name, model_id), version, dimension,
+                            languages_json, COALESCE(license, ''), COALESCE(source_url, ''),
+                            status, integrity_status, is_default, COALESCE(size_bytes, 0),
+                            installed_at, package_path, last_error_code, last_error_message
+                     FROM local_embedding_models WHERE model_id = ?1
+                     ORDER BY updated_at DESC LIMIT 1",
+                    [&manifest.id],
+                    |row| {
+                        let languages: String = row.get(4)?;
+                        Ok(EmbeddingModelView {
+                            id: row.get(0)?,
+                            name: row.get(1)?,
+                            version: row.get(2)?,
+                            dimension: row.get(3)?,
+                            languages: serde_json::from_str(&languages).unwrap_or_default(),
+                            license: row.get(5)?,
+                            source_url: row.get(6)?,
+                            status: row.get(7)?,
+                            integrity_status: row.get(8)?,
+                            is_default: row.get(9)?,
+                            size_bytes: row.get(10)?,
+                            installed_at: row.get(11)?,
+                            package_path: row.get(12)?,
+                            last_error_code: row.get(13)?,
+                            last_error_message: row.get(14)?,
+                            load_ready: false,
+                            recommended: true,
+                            files: manifest.files.clone(),
+                            download: download.clone(),
+                        })
+                    },
+                )
+                .optional()?;
+            if let Some(mut model) = installed {
+                model.load_ready = model.status == "ready"
+                    && model.integrity_status == "verified"
+                    && model.last_error_code.is_none();
+                items.push(model);
+            } else {
+                items.push(EmbeddingModelView {
+                    id: manifest.id.clone(),
+                    name: manifest.name,
+                    version: manifest.version,
+                    languages: manifest.languages,
+                    dimension: manifest.dimension as i64,
+                    license: manifest.license,
+                    source_url: recommended_source_url(&manifest.id)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    status: if download.as_ref().is_some_and(|item| {
+                        matches!(item.status.as_str(), "queued" | "running" | "paused")
+                    }) {
+                        "installing".to_owned()
+                    } else {
+                        "not_installed".to_owned()
+                    },
+                    integrity_status: "pending".to_owned(),
+                    is_default: false,
+                    recommended: true,
+                    size_bytes: manifest.files.iter().map(|file| file.size_bytes).sum(),
+                    installed_at: None,
+                    package_path: None,
+                    load_ready: false,
+                    last_error_code: download.as_ref().and_then(|item| item.error_code.clone()),
+                    last_error_message: download
+                        .as_ref()
+                        .and_then(|item| item.error_message.clone()),
+                    files: manifest.files,
+                    download,
+                });
+            }
         }
 
         let mut statement = connection.prepare(
@@ -387,34 +821,40 @@ impl LocalKnowledgeStore {
                     languages_json, COALESCE(license, ''), COALESCE(source_url, ''),
                     status, integrity_status, is_default, COALESCE(size_bytes, 0),
                     installed_at, package_path, last_error_code, last_error_message
-             FROM local_embedding_models WHERE model_id != ?1 ORDER BY name COLLATE NOCASE",
+             FROM local_embedding_models WHERE model_id NOT IN (?1, ?2)
+             ORDER BY name COLLATE NOCASE",
         )?;
-        let custom = statement.query_map([RECOMMENDED_MODEL_ID], |row| {
-            let languages: String = row.get(4)?;
-            let status: String = row.get(7)?;
-            let integrity_status: String = row.get(8)?;
-            Ok(EmbeddingModelView {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                version: row.get(2)?,
-                dimension: row.get(3)?,
-                languages: serde_json::from_str(&languages).unwrap_or_default(),
-                license: row.get(5)?,
-                source_url: row.get(6)?,
-                load_ready: status == "ready" && integrity_status == "verified",
-                status,
-                integrity_status,
-                is_default: row.get(9)?,
-                recommended: false,
-                size_bytes: row.get(10)?,
-                installed_at: row.get(11)?,
-                package_path: row.get(12)?,
-                last_error_code: row.get(13)?,
-                last_error_message: row.get(14)?,
-                files: Vec::new(),
-                download: None,
-            })
-        })?;
+        let custom = statement.query_map(
+            params![RECOMMENDED_MODEL_ID, MULTILINGUAL_E5_MODEL_ID],
+            |row| {
+                let languages: String = row.get(4)?;
+                let status: String = row.get(7)?;
+                let integrity_status: String = row.get(8)?;
+                Ok(EmbeddingModelView {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    version: row.get(2)?,
+                    dimension: row.get(3)?,
+                    languages: serde_json::from_str(&languages).unwrap_or_default(),
+                    license: row.get(5)?,
+                    source_url: row.get(6)?,
+                    load_ready: status == "ready"
+                        && integrity_status == "verified"
+                        && row.get::<_, Option<String>>(13)?.is_none(),
+                    status,
+                    integrity_status,
+                    is_default: row.get(9)?,
+                    recommended: false,
+                    size_bytes: row.get(10)?,
+                    installed_at: row.get(11)?,
+                    package_path: row.get(12)?,
+                    last_error_code: row.get(13)?,
+                    last_error_message: row.get(14)?,
+                    files: Vec::new(),
+                    download: None,
+                })
+            },
+        )?;
         items.extend(custom.collect::<Result<Vec<_>, _>>()?);
         Ok(items)
     }
@@ -423,15 +863,13 @@ impl LocalKnowledgeStore {
         &self,
         model_id: &str,
     ) -> Result<LocalKnowledgeOperationAccepted, LocalKnowledgeError> {
-        if model_id.trim() != RECOMMENDED_MODEL_ID {
-            return Err(LocalKnowledgeError::invalid(
-                "unknown recommended embedding model",
-            ));
-        }
+        let model_id = model_id.trim();
+        let manifest = recommended_manifest(model_id)
+            .ok_or_else(|| LocalKnowledgeError::invalid("unknown recommended embedding model"))?;
         let active = self.connection()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM local_embedding_model_downloads
              WHERE model_id = ?1 AND status IN ('queued', 'running', 'paused'))",
-            [RECOMMENDED_MODEL_ID],
+            [model_id],
             |row| row.get::<_, bool>(0),
         )?;
         if active {
@@ -441,9 +879,9 @@ impl LocalKnowledgeStore {
         }
         let download_id = Uuid::new_v4().to_string();
         let now = now_ms();
-        let manifest = recommended_manifest();
         let total_bytes: i64 = manifest.files.iter().map(|file| file.size_bytes).sum();
         let package_path = self.model_package_path(&manifest.id, &manifest.version)?;
+        let source_url = recommended_source_url(model_id).unwrap_or_default();
         let mut connection = self.connection()?;
         let transaction = connection.transaction()?;
         transaction.execute(
@@ -466,7 +904,7 @@ impl LocalKnowledgeStore {
                 manifest.dimension as i64,
                 serde_json::to_string(&manifest.languages).unwrap_or_else(|_| "[]".to_owned()),
                 manifest.license,
-                "https://huggingface.co/BAAI/bge-small-zh-v1.5",
+                source_url,
                 package_path.to_string_lossy(),
                 manifest.hash,
                 total_bytes,
@@ -480,8 +918,8 @@ impl LocalKnowledgeStore {
              ) VALUES (?1, ?2, ?3, 'queued', 0, 0, ?4, ?5, ?6, ?6)",
             params![
                 download_id,
-                RECOMMENDED_MODEL_ID,
-                RECOMMENDED_MODEL_VERSION,
+                manifest.id,
+                manifest.version,
                 total_bytes,
                 serde_json::to_string(&manifest).map_err(LocalKnowledgeError::storage)?,
                 now,
@@ -684,16 +1122,22 @@ impl LocalKnowledgeStore {
     }
 
     pub fn set_default_embedding_model(&self, model_id: &str) -> Result<bool, LocalKnowledgeError> {
+        if model_id == LEGACY_MINILM_MODEL_ID {
+            return Err(LocalKnowledgeError::conflict(
+                "all-MiniLM-L6-v2 已退出受控模型清单，不能设为默认；请使用 multilingual-e5-small",
+            ));
+        }
         let mut connection = self.connection()?;
         let ready = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM local_embedding_models
-             WHERE model_id = ?1 AND status = 'ready' AND integrity_status = 'verified')",
+             WHERE model_id = ?1 AND status = 'ready' AND integrity_status = 'verified'
+               AND last_error_code IS NULL)",
             [model_id],
             |row| row.get::<_, bool>(0),
         )?;
         if !ready {
             return Err(LocalKnowledgeError::conflict(
-                "embedding model is not ready",
+                "向量模型尚未就绪，或最近一次隔离推理测试未通过",
             ));
         }
         let transaction = connection.transaction()?;
@@ -702,7 +1146,13 @@ impl LocalKnowledgeStore {
             [],
         )?;
         transaction.execute(
-            "UPDATE local_embedding_models SET is_default = 1, updated_at = ?2 WHERE model_id = ?1",
+            "UPDATE local_embedding_models SET is_default = 1, updated_at = ?2
+             WHERE rowid = (
+                 SELECT rowid FROM local_embedding_models
+                 WHERE model_id = ?1 AND status = 'ready' AND integrity_status = 'verified'
+                   AND last_error_code IS NULL
+                 ORDER BY updated_at DESC LIMIT 1
+             )",
             params![model_id, now_ms()],
         )?;
         transaction.commit()?;
@@ -787,30 +1237,32 @@ impl LocalKnowledgeStore {
         validate_embedding_package(&package_path)?;
 
         #[cfg(feature = "local-embedding")]
-        let (load_ready, message) = {
-            use crate::local_embedding::{
-                EmbeddingProvider, OnnxEmbeddingProvider, TokenizedInput,
-            };
-            match OnnxEmbeddingProvider::from_package_dir(&package_path).and_then(|mut provider| {
-                provider
-                    .embed(&TokenizedInput::smoke())
-                    .map(|embedding| (provider.dimension(), embedding.len()))
-            }) {
-                Ok((expected, actual)) if expected == actual => {
-                    (true, "完整性、加载和推理测试均通过".to_owned())
-                }
-                Ok((expected, actual)) => (
-                    false,
-                    format!("推理维度不一致：期望 {expected}，实际 {actual}"),
+        let (load_ready, message, error_code, error_details) =
+            match run_embedding_model_smoke_process(&package_path) {
+                Ok(()) => (
+                    true,
+                    "完整性、隔离加载和推理测试均通过".to_owned(),
+                    None,
+                    None,
                 ),
-                Err(error) => (false, error.to_string()),
-            }
-        };
+                Err(error) => (false, error.message, Some(error.code), Some(error.details)),
+            };
         #[cfg(not(feature = "local-embedding"))]
-        let (load_ready, message) = (
+        let (load_ready, message, error_code, error_details) = (
             false,
             "当前构建未启用 local-embedding 运行时；文件完整性已通过".to_owned(),
+            Some("local_embedding.runtime_disabled".to_owned()),
+            Some("请使用包含 local-embedding 功能的 Fox Desktop 构建。".to_owned()),
         );
+
+        let stored_error_message = if load_ready {
+            None
+        } else {
+            Some(match error_details.as_deref() {
+                Some(details) if !details.is_empty() => format!("{message}\n\n{details}"),
+                _ => message.clone(),
+            })
+        };
 
         let now = now_ms();
         self.connection()?.execute(
@@ -823,11 +1275,7 @@ impl LocalKnowledgeStore {
                 } else {
                     Some("local_embedding.load_failed".to_owned())
                 },
-                if load_ready {
-                    None::<String>
-                } else {
-                    Some(message.clone())
-                },
+                stored_error_message,
                 now,
             ],
         )?;
@@ -837,6 +1285,8 @@ impl LocalKnowledgeStore {
             dimension,
             elapsed_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
             message,
+            error_code,
+            error_details,
         })
     }
 
@@ -855,6 +1305,11 @@ impl LocalKnowledgeStore {
         } else {
             manifest.id.clone()
         };
+        if model_id == LEGACY_MINILM_MODEL_ID {
+            return Err(LocalKnowledgeError::conflict(
+                "all-MiniLM-L6-v2 已退出受控模型清单；如需导入自定义模型，请使用不同的模型 ID",
+            ));
+        }
         validate_storage_component(&model_id)?;
         let destination = self.model_package_path(&model_id, &manifest.version)?;
         if destination.exists() {
@@ -1040,126 +1495,122 @@ fn directory_size(path: &Path) -> Result<i64, LocalKnowledgeError> {
 }
 
 #[cfg(feature = "local-embedding")]
-struct BertTokenizer {
-    vocabulary: HashMap<String, i64>,
-    cls_id: i64,
-    sep_id: i64,
-    unknown_id: i64,
+struct EmbeddingTokenizer {
+    inner: tokenizers::Tokenizer,
 }
 
 #[cfg(feature = "local-embedding")]
-impl BertTokenizer {
-    fn from_package(path: &Path, tokenizer_file: &str) -> Result<Self, LocalKnowledgeError> {
-        let value: Value = serde_json::from_slice(&fs::read(path.join(tokenizer_file))?)
-            .map_err(LocalKnowledgeError::storage)?;
-        let vocabulary = value
-            .pointer("/model/vocab")
-            .and_then(Value::as_object)
-            .ok_or_else(|| {
-                LocalKnowledgeError::invalid(
-                    "tokenizer.json does not contain a WordPiece vocabulary",
-                )
-            })?
-            .iter()
-            .filter_map(|(token, id)| id.as_i64().map(|id| (token.clone(), id)))
-            .collect::<HashMap<_, _>>();
-        let token_id = |token: &str| {
-            vocabulary.get(token).copied().ok_or_else(|| {
-                LocalKnowledgeError::invalid(format!("tokenizer is missing {token}"))
-            })
-        };
-        Ok(Self {
-            cls_id: token_id("[CLS]")?,
-            sep_id: token_id("[SEP]")?,
-            unknown_id: token_id("[UNK]")?,
-            vocabulary,
-        })
+impl EmbeddingTokenizer {
+    fn from_package(
+        path: &Path,
+        tokenizer_file: &str,
+        max_tokens: usize,
+    ) -> Result<Self, LocalKnowledgeError> {
+        if max_tokens == 0 {
+            return Err(LocalKnowledgeError::invalid(
+                "embedding tokenizer max_tokens must be greater than zero",
+            ));
+        }
+        let tokenizer_path = path.join(tokenizer_file);
+        let mut inner = tokenizers::Tokenizer::from_file(&tokenizer_path).map_err(|error| {
+            LocalKnowledgeError::invalid(format!(
+                "无法加载 tokenizer '{}': {error}",
+                tokenizer_path.display()
+            ))
+        })?;
+        inner
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: max_tokens,
+                ..Default::default()
+            }))
+            .map_err(|error| {
+                LocalKnowledgeError::invalid(format!("无法配置 tokenizer 截断规则: {error}"))
+            })?;
+        Ok(Self { inner })
     }
 
-    fn encode(&self, text: &str) -> crate::local_embedding::TokenizedInput {
-        let mut pieces = Vec::new();
-        let mut ascii_word = String::new();
-        let flush_word = |word: &mut String, output: &mut Vec<String>| {
-            if !word.is_empty() {
-                output.push(std::mem::take(word));
-            }
-        };
-        for character in text.chars() {
-            if character.is_whitespace() {
-                flush_word(&mut ascii_word, &mut pieces);
-            } else if character.is_ascii_alphanumeric() || character == '_' {
-                ascii_word.push(character.to_ascii_lowercase());
-            } else {
-                flush_word(&mut ascii_word, &mut pieces);
-                pieces.push(character.to_string());
-            }
+    fn encode(
+        &self,
+        text: &str,
+    ) -> Result<crate::local_embedding::TokenizedInput, LocalKnowledgeError> {
+        let encoding = self
+            .inner
+            .encode(text, true)
+            .map_err(|error| LocalKnowledgeError::invalid(format!("文本分词失败: {error}")))?;
+        let input_ids = encoding
+            .get_ids()
+            .iter()
+            .map(|value| i64::from(*value))
+            .collect::<Vec<_>>();
+        if input_ids.is_empty() {
+            return Err(LocalKnowledgeError::invalid(
+                "tokenizer produced an empty input",
+            ));
         }
-        flush_word(&mut ascii_word, &mut pieces);
-
-        let mut ids = Vec::with_capacity(pieces.len().saturating_add(2));
-        ids.push(self.cls_id);
-        for token in pieces {
-            if ids.len() >= 511 {
-                break;
-            }
-            if let Some(id) = self.vocabulary.get(&token) {
-                ids.push(*id);
-                continue;
-            }
-            let characters = token.chars().collect::<Vec<_>>();
-            let mut start = 0usize;
-            let mut wordpiece_ids = Vec::new();
-            while start < characters.len() {
-                let mut end = characters.len();
-                let mut found = None;
-                while end > start {
-                    let mut candidate = characters[start..end].iter().collect::<String>();
-                    if start > 0 {
-                        candidate.insert_str(0, "##");
-                    }
-                    if let Some(id) = self.vocabulary.get(&candidate) {
-                        found = Some((*id, end));
-                        break;
-                    }
-                    end -= 1;
-                }
-                match found {
-                    Some((id, next)) => {
-                        wordpiece_ids.push(id);
-                        start = next;
-                    }
-                    None => {
-                        wordpiece_ids.clear();
-                        wordpiece_ids.push(self.unknown_id);
-                        break;
-                    }
-                }
-            }
-            for id in wordpiece_ids {
-                if ids.len() >= 511 {
-                    break;
-                }
-                ids.push(id);
-            }
-        }
-        ids.push(self.sep_id);
-        crate::local_embedding::TokenizedInput {
-            attention_mask: vec![1; ids.len()],
-            token_type_ids: Some(vec![0; ids.len()]),
-            input_ids: ids,
-        }
+        Ok(crate::local_embedding::TokenizedInput {
+            attention_mask: encoding
+                .get_attention_mask()
+                .iter()
+                .map(|value| i64::from(*value))
+                .collect(),
+            token_type_ids: Some(
+                encoding
+                    .get_type_ids()
+                    .iter()
+                    .map(|value| i64::from(*value))
+                    .collect(),
+            ),
+            input_ids,
+        })
     }
 }
 
 #[cfg(feature = "local-embedding")]
 fn embedding_runtime(
     package_path: &Path,
-) -> Result<(crate::local_embedding::OnnxEmbeddingProvider, BertTokenizer), LocalKnowledgeError> {
+) -> Result<
+    (
+        crate::local_embedding::OnnxEmbeddingProvider,
+        EmbeddingTokenizer,
+        EmbeddingPackageManifest,
+    ),
+    LocalKnowledgeError,
+> {
     let manifest = validate_embedding_package(package_path)?;
-    let tokenizer = BertTokenizer::from_package(package_path, &manifest.tokenizer)?;
+    let tokenizer =
+        EmbeddingTokenizer::from_package(package_path, &manifest.tokenizer, manifest.max_tokens)?;
     let provider = crate::local_embedding::OnnxEmbeddingProvider::from_package_dir(package_path)
         .map_err(|error| LocalKnowledgeError::storage(error.to_string()))?;
-    Ok((provider, tokenizer))
+    Ok((provider, tokenizer, manifest))
+}
+
+#[cfg(feature = "zvec")]
+impl LocalKnowledgeStore {
+    pub(crate) fn zvec_vector_store(&self) -> Result<ZvecVectorStore, LocalKnowledgeError> {
+        let root = self.root.join("indexes");
+        let store = if let Some(resource_dir) = self.zvec_resource_dir.as_ref() {
+            ZvecVectorStore::from_resource_dir(&root, resource_dir)
+        } else {
+            ZvecVectorStore::new(&root)
+        };
+        store.map_err(|error| LocalKnowledgeError::storage(error.to_string()))
+    }
+
+    pub(crate) fn validate_zvec_generation_readable(
+        &self,
+        knowledge_base_id: &str,
+        generation_id: &str,
+        dimension: usize,
+        expected_count: usize,
+    ) -> Result<(), LocalKnowledgeError> {
+        self.zvec_vector_store()
+            .and_then(|store| {
+                store
+                    .open_generation(knowledge_base_id, generation_id, dimension, expected_count)
+                    .map_err(|error| LocalKnowledgeError::storage(error.to_string()))
+            })
+            .map(|_| ())
+    }
 }
 
 impl LocalKnowledgeStore {
@@ -1168,14 +1619,14 @@ impl LocalKnowledgeStore {
         knowledge_base_id: &str,
         job_type: &str,
     ) -> Result<LocalKnowledgeOperationAccepted, LocalKnowledgeError> {
-        #[cfg(not(feature = "local-embedding"))]
+        #[cfg(not(all(feature = "local-embedding", feature = "zvec")))]
         {
             let _ = (knowledge_base_id, job_type);
             return Err(LocalKnowledgeError::conflict(
-                "当前桌面构建未启用 local-embedding，无法创建向量索引",
+                "当前桌面构建未同时启用 local-embedding 和 Zvec，无法创建向量索引",
             ));
         }
-        #[cfg(feature = "local-embedding")]
+        #[cfg(all(feature = "local-embedding", feature = "zvec"))]
         {
             if !matches!(job_type, "index" | "rebuild") {
                 return Err(LocalKnowledgeError::invalid(
@@ -1183,14 +1634,40 @@ impl LocalKnowledgeStore {
                 ));
             }
             let base = self.get_base(knowledge_base_id)?;
-            let model_id = base.configured_embedding_model_id.ok_or_else(|| {
-                LocalKnowledgeError::conflict("knowledge base has no embedding model")
-            })?;
+            let (model_id, inherited_default) =
+                if let Some(model_id) = base.configured_embedding_model_id {
+                    (model_id, false)
+                } else {
+                    let default_model = self
+                        .connection()?
+                        .query_row(
+                            "SELECT model_id FROM local_embedding_models
+                             WHERE is_default = 1 AND status = 'ready'
+                               AND integrity_status = 'verified' AND last_error_code IS NULL
+                               AND model_id != ?1
+                             ORDER BY updated_at DESC LIMIT 1",
+                            [LEGACY_MINILM_MODEL_ID],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()?
+                        .ok_or_else(|| {
+                            LocalKnowledgeError::conflict(
+                                "知识库未配置向量模型，也没有可用的默认模型；请先安装并设为默认",
+                            )
+                        })?;
+                    (default_model, true)
+                };
+            if model_id == LEGACY_MINILM_MODEL_ID {
+                return Err(LocalKnowledgeError::conflict(
+                    "all-MiniLM-L6-v2 已从受控模型清单移除，请改用 multilingual-e5-small",
+                ));
+            }
             let (version, dimension, package_path) = self
                 .connection()?
                 .query_row(
                     "SELECT version, dimension, package_path FROM local_embedding_models
                  WHERE model_id = ?1 AND status = 'ready' AND integrity_status = 'verified'
+                   AND last_error_code IS NULL
                  ORDER BY is_default DESC, updated_at DESC LIMIT 1",
                     [&model_id],
                     |row| {
@@ -1220,6 +1697,13 @@ impl LocalKnowledgeStore {
                     "knowledge base has no parsed chunks",
                 ));
             }
+            if inherited_default {
+                self.connection()?.execute(
+                    "UPDATE local_knowledge_bases
+                     SET embedding_model_id = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![knowledge_base_id, model_id, now_ms()],
+                )?;
+            }
             let sequence = self.connection()?.query_row(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 FROM local_kb_index_generations WHERE knowledge_base_id = ?1",
                 [knowledge_base_id],
@@ -1242,11 +1726,21 @@ impl LocalKnowledgeStore {
             transaction.execute(
                 "INSERT INTO local_kb_index_generations(
                     id, knowledge_base_id, sequence, status, vector_store_kind,
-                    vector_store_version, embedding_model_id, dimension, chunk_config_hash,
-                    parser_version, chunk_count, created_at
-                 ) VALUES (?1, ?2, ?3, 'staging', 'sqlite-vector-v1', '1', ?4, ?5, ?6, 'fox-text-v1', 0, ?7)",
-                params![generation_id, knowledge_base_id, sequence, model_id, dimension,
-                    format!("chars-{}-overlap-{}", base.chunk_size, base.chunk_overlap), now],
+                    vector_store_version, embedding_model_id, embedding_model_version,
+                    dimension, chunk_config_hash, parser_version, chunk_count, created_at
+                 ) VALUES (?1, ?2, ?3, 'staging', ?4, ?5, ?6, ?7, ?8, ?9, 'fox-text-v1', 0, ?10)",
+                params![
+                    generation_id,
+                    knowledge_base_id,
+                    sequence,
+                    ZVEC_STORE_KIND,
+                    ZVEC_STORE_VERSION,
+                    model_id,
+                    version,
+                    dimension,
+                    format!("chars-{}-overlap-{}", base.chunk_size, base.chunk_overlap),
+                    now
+                ],
             )?;
             transaction.execute(
                 "INSERT INTO local_kb_jobs(
@@ -1278,7 +1772,7 @@ impl LocalKnowledgeStore {
         }
     }
 
-    #[cfg(feature = "local-embedding")]
+    #[cfg(all(feature = "local-embedding", feature = "zvec"))]
     fn run_index_generation(&self, job_id: &str) {
         if let Err(error) = self.perform_index_generation(job_id) {
             let _ = self.fail_job(job_id, &error);
@@ -1303,15 +1797,27 @@ impl LocalKnowledgeStore {
         &self,
         job: &LocalKnowledgeJob,
     ) -> Result<(), LocalKnowledgeError> {
-        #[cfg(not(feature = "local-embedding"))]
+        #[cfg(not(all(feature = "local-embedding", feature = "zvec")))]
         {
             let _ = job;
             return Err(LocalKnowledgeError::conflict(
-                "当前桌面构建未启用 local-embedding，无法恢复向量索引任务",
+                "当前桌面构建未同时启用 local-embedding 和 Zvec，无法恢复向量索引任务",
             ));
         }
-        #[cfg(feature = "local-embedding")]
+        #[cfg(all(feature = "local-embedding", feature = "zvec"))]
         {
+            let checkpoint: Value =
+                serde_json::from_str(job.checkpoint_json.as_deref().unwrap_or("{}"))
+                    .map_err(LocalKnowledgeError::storage)?;
+            if checkpoint.get("modelId").and_then(Value::as_str) == Some(LEGACY_MINILM_MODEL_ID) {
+                return Err(LocalKnowledgeError::conflict(
+                    "旧的 all-MiniLM-L6-v2 索引任务不能继续，请选择 multilingual-e5-small 后重建",
+                ));
+            }
+            let model_version = checkpoint
+                .get("modelVersion")
+                .and_then(Value::as_str)
+                .ok_or_else(|| LocalKnowledgeError::invalid("index model version is missing"))?;
             let generation_id = job
                 .generation_id
                 .as_deref()
@@ -1319,9 +1825,16 @@ impl LocalKnowledgeStore {
             self.connection()?.execute(
                 "UPDATE local_kb_index_generations
                  SET status = 'staging', last_error_code = NULL, last_error_message = NULL,
-                     activated_at = NULL
+                     activated_at = NULL, vector_store_kind = ?3, vector_store_version = ?4,
+                     embedding_model_version = ?5
                  WHERE id = ?1 AND knowledge_base_id = ?2",
-                params![generation_id, &job.knowledge_base_id],
+                params![
+                    generation_id,
+                    &job.knowledge_base_id,
+                    ZVEC_STORE_KIND,
+                    ZVEC_STORE_VERSION,
+                    model_version
+                ],
             )?;
             let store = self.clone();
             let job_id = job.id.clone();
@@ -1333,7 +1846,7 @@ impl LocalKnowledgeStore {
         }
     }
 
-    #[cfg(feature = "local-embedding")]
+    #[cfg(all(feature = "local-embedding", feature = "zvec"))]
     fn perform_index_generation(&self, job_id: &str) -> Result<(), LocalKnowledgeError> {
         use crate::local_embedding::EmbeddingProvider;
         let job = self.get_job(job_id)?;
@@ -1352,10 +1865,28 @@ impl LocalKnowledgeStore {
             .get("modelId")
             .and_then(Value::as_str)
             .ok_or_else(|| LocalKnowledgeError::invalid("index model id is missing"))?;
+        let model_version = checkpoint
+            .get("modelVersion")
+            .and_then(Value::as_str)
+            .ok_or_else(|| LocalKnowledgeError::invalid("index model version is missing"))?;
+        let expected_dimension = checkpoint
+            .get("dimension")
+            .and_then(Value::as_i64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| LocalKnowledgeError::invalid("index model dimension is invalid"))?;
         if !self.advance_job(job_id, "running", "embedding", 5)? {
             return Ok(());
         }
-        let (mut provider, tokenizer) = embedding_runtime(Path::new(package_path))?;
+        let (mut provider, tokenizer, manifest) = embedding_runtime(Path::new(package_path))?;
+        if (!manifest.id.is_empty() && manifest.id != model_id)
+            || manifest.version != model_version
+            || provider.dimension() != manifest.dimension
+            || manifest.dimension != expected_dimension
+        {
+            return Err(LocalKnowledgeError::invalid(
+                "embedding package identity, version, or dimension does not match the index job",
+            ));
+        }
         let chunks = {
             let connection = self.connection()?;
             let mut statement = connection.prepare(
@@ -1372,28 +1903,31 @@ impl LocalKnowledgeStore {
                 .collect::<Result<Vec<_>, _>>()?;
             items
         };
-        self.connection()?.execute(
-            "DELETE FROM local_kb_vectors WHERE generation_id = ?1",
-            [&generation_id],
-        )?;
+        let vector_store = self.zvec_vector_store()?;
+        vector_store
+            .recreate_generation(&job.knowledge_base_id, &generation_id)
+            .map_err(|error| LocalKnowledgeError::storage(error.to_string()))?;
         let total = chunks.len().max(1);
+        let mut batch = Vec::with_capacity(32);
         for (index, (chunk_id, text)) in chunks.iter().enumerate() {
             if self.job_is_cancelled(job_id) {
                 return Ok(());
             }
-            let tokenized = tokenizer.encode(text);
+            let embedding_text = format!("{}{}", manifest.passage_prefix, text);
+            let tokenized = tokenizer.encode(&embedding_text)?;
             let vector = provider
                 .embed(&tokenized)
                 .map_err(|error| LocalKnowledgeError::storage(error.to_string()))?;
             if vector.len() != provider.dimension() {
                 return Err(LocalKnowledgeError::invalid("embedding dimension mismatch"));
             }
-            self.connection()?.execute(
-                "INSERT INTO local_kb_vectors(generation_id, chunk_id, dimension, vector_json, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![generation_id, chunk_id, vector.len() as i64,
-                    serde_json::to_string(&vector).map_err(LocalKnowledgeError::storage)?, now_ms()],
-            )?;
+            batch.push(VectorRecord::new(chunk_id.clone(), vector));
+            if batch.len() == 32 || index + 1 == chunks.len() {
+                vector_store
+                    .upsert(&generation_id, &batch)
+                    .map_err(|error| LocalKnowledgeError::storage(error.to_string()))?;
+                batch.clear();
+            }
             if index % 8 == 0 || index + 1 == chunks.len() {
                 let progress = 5 + (((index + 1) * 75 / total) as i64);
                 if !self.advance_job(job_id, "running", "vector_upsert", progress.min(80))? {
@@ -1404,17 +1938,18 @@ impl LocalKnowledgeStore {
         if !self.advance_job(job_id, "running", "verifying", 90)? {
             return Ok(());
         }
-        let check = self.connection()?.query_row(
-            "SELECT COUNT(*), MIN(dimension), MAX(dimension) FROM local_kb_vectors WHERE generation_id = ?1",
-            [&generation_id],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, Option<i64>>(2)?)),
-        )?;
-        if check.0 != chunks.len() as i64
-            || check.1 != Some(provider.dimension() as i64)
-            || check.2 != check.1
+        vector_store
+            .flush(&generation_id)
+            .map_err(|error| LocalKnowledgeError::storage(error.to_string()))?;
+        let check = vector_store
+            .verify(&generation_id)
+            .map_err(|error| LocalKnowledgeError::storage(error.to_string()))?;
+        if !check.verified
+            || check.vector_count != chunks.len()
+            || check.dimension != Some(provider.dimension())
         {
             return Err(LocalKnowledgeError::invalid(
-                "vector generation read/write verification failed",
+                "Zvec generation read/write verification failed",
             ));
         }
         if !self.advance_job(job_id, "running", "committing", 96)? {
@@ -1460,6 +1995,19 @@ impl LocalKnowledgeStore {
         request: KnowledgeRetrievalRequest,
     ) -> Result<Value, LocalKnowledgeError> {
         let base = self.get_base(&request.knowledge_base_id)?;
+        let requested_mode = request.mode.as_deref().unwrap_or(&base.search_mode);
+        #[cfg(all(feature = "local-embedding", feature = "zvec"))]
+        if requested_mode != "keyword" && !cfg!(test) {
+            return run_retrieval_worker_process(self, &request);
+        }
+        self.search_retrieval_in_process(request)
+    }
+
+    pub(crate) fn search_retrieval_in_process(
+        &self,
+        request: KnowledgeRetrievalRequest,
+    ) -> Result<Value, LocalKnowledgeError> {
+        let base = self.get_base(&request.knowledge_base_id)?;
         let query = request.query.trim();
         if query.is_empty() || query.chars().count() > 512 {
             return Err(LocalKnowledgeError::invalid(
@@ -1474,7 +2022,10 @@ impl LocalKnowledgeStore {
         }
         if requested_mode != "keyword" && !base.vector_index_ready {
             return Err(LocalKnowledgeError::conflict(
-                "vector index is not ready for this knowledge base",
+                base.fallback_reason
+                    .as_deref()
+                    .map(|reason| format!("当前知识库的向量索引不可用：{reason}"))
+                    .unwrap_or_else(|| "当前知识库的向量索引尚未就绪，请先重新构建".to_owned()),
             ));
         }
         let limit = request.limit.unwrap_or(8).clamp(1, 20);
@@ -1503,7 +2054,7 @@ impl LocalKnowledgeStore {
         let vector = if requested_mode == "keyword" {
             Vec::new()
         } else {
-            self.vector_scores(&base, query)?
+            self.vector_scores(&base, query, limit.saturating_mul(8).clamp(20, 200))?
         };
         let vector_ms = elapsed_ms(vector_started);
         let lexical_rank = lexical
@@ -1601,15 +2152,16 @@ impl LocalKnowledgeStore {
         &self,
         base: &crate::local_knowledge::LocalKnowledgeBase,
         query: &str,
+        top_k: usize,
     ) -> Result<Vec<(String, f64)>, LocalKnowledgeError> {
-        #[cfg(not(feature = "local-embedding"))]
+        #[cfg(not(all(feature = "local-embedding", feature = "zvec")))]
         {
-            let _ = (base, query);
+            let _ = (base, query, top_k);
             Err(LocalKnowledgeError::conflict(
-                "local embedding runtime is unavailable",
+                "local embedding runtime or Zvec is unavailable",
             ))
         }
-        #[cfg(feature = "local-embedding")]
+        #[cfg(all(feature = "local-embedding", feature = "zvec"))]
         {
             use crate::local_embedding::EmbeddingProvider;
             let model_id = base
@@ -1619,45 +2171,74 @@ impl LocalKnowledgeStore {
                 .ok_or_else(|| {
                     LocalKnowledgeError::conflict("active generation has no embedding model")
                 })?;
-            let package_path = self.connection()?.query_row(
-                "SELECT package_path FROM local_embedding_models WHERE model_id = ?1 AND status = 'ready'
-                 ORDER BY updated_at DESC LIMIT 1",
-                [model_id],
-                |row| row.get::<_, Option<String>>(0),
-            )?.ok_or_else(|| LocalKnowledgeError::invalid("model package path is missing"))?;
-            let (mut provider, tokenizer) = embedding_runtime(Path::new(&package_path))?;
-            let query_vector = provider
-                .embed(&tokenizer.encode(query))
-                .map_err(|error| LocalKnowledgeError::storage(error.to_string()))?;
             let generation_id = base.active_index_generation.as_deref().ok_or_else(|| {
                 LocalKnowledgeError::conflict("active vector generation is missing")
             })?;
-            let connection = self.connection()?;
-            let mut statement = connection.prepare(
-                "SELECT chunk_id, vector_json FROM local_kb_vectors WHERE generation_id = ?1",
-            )?;
-            let vectors = statement
-                .query_map([generation_id], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            let mut scores = vectors
+            let (store_kind, model_version, dimension, chunk_count) =
+                self.connection()?.query_row(
+                    "SELECT vector_store_kind, embedding_model_version, dimension, chunk_count
+                 FROM local_kb_index_generations
+                 WHERE id = ?1 AND knowledge_base_id = ?2 AND status = 'active'",
+                    params![generation_id, base.id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )?;
+            if store_kind != ZVEC_STORE_KIND {
+                return Err(LocalKnowledgeError::conflict(
+                    "当前向量索引不是 Zvec 索引，请重建索引后再检索",
+                ));
+            }
+            let model_version = model_version
+                .ok_or_else(|| LocalKnowledgeError::conflict("当前索引缺少模型版本，请重新构建"))?;
+            let package_path = self
+                .connection()?
+                .query_row(
+                    "SELECT package_path FROM local_embedding_models
+                 WHERE model_id = ?1 AND version = ?2 AND status = 'ready'
+                   AND integrity_status = 'verified' AND last_error_code IS NULL
+                 ORDER BY updated_at DESC LIMIT 1",
+                    params![model_id, model_version],
+                    |row| row.get::<_, Option<String>>(0),
+                )?
+                .ok_or_else(|| {
+                    LocalKnowledgeError::conflict(
+                        "当前索引使用的模型版本已不可用，请重新安装该版本或重建索引",
+                    )
+                })?;
+            let (mut provider, tokenizer, manifest) = embedding_runtime(Path::new(&package_path))?;
+            let query_text = format!("{}{}", manifest.query_prefix, query);
+            let query_vector = provider
+                .embed(&tokenizer.encode(&query_text)?)
+                .map_err(|error| LocalKnowledgeError::storage(error.to_string()))?;
+            let dimension = usize::try_from(dimension)
+                .map_err(|_| LocalKnowledgeError::invalid("invalid vector dimension"))?;
+            let chunk_count = usize::try_from(chunk_count)
+                .map_err(|_| LocalKnowledgeError::invalid("invalid vector count"))?;
+            if query_vector.len() != dimension {
+                return Err(LocalKnowledgeError::conflict(
+                    "查询模型维度与当前 Zvec 索引不一致，请重建索引",
+                ));
+            }
+            let vector_store = self.zvec_vector_store()?;
+            vector_store
+                .open_generation(&base.id, generation_id, dimension, chunk_count)
+                .map_err(|error| LocalKnowledgeError::storage(error.to_string()))?;
+            let hits = vector_store
+                .search(
+                    generation_id,
+                    SearchRequest::new(query_vector, top_k.min(chunk_count.max(1))),
+                )
+                .map_err(|error| LocalKnowledgeError::storage(error.to_string()))?;
+            Ok(hits
                 .into_iter()
-                .filter_map(|(id, json)| {
-                    serde_json::from_str::<Vec<f32>>(&json)
-                        .ok()
-                        .and_then(|vector| {
-                            cosine_similarity(&query_vector, &vector).map(|score| (id, score))
-                        })
-                })
-                .collect::<Vec<_>>();
-            scores.sort_by(|left, right| {
-                right
-                    .1
-                    .total_cmp(&left.1)
-                    .then_with(|| left.0.cmp(&right.0))
-            });
-            Ok(scores)
+                .map(|hit| (hit.id, f64::from(hit.score)))
+                .collect())
         }
     }
 
@@ -1807,7 +2388,7 @@ impl LocalKnowledgeStore {
             "SELECT relative_path FROM local_kb_documents WHERE knowledge_base_id = ?1 AND id = ?2",
             params![request.knowledge_base_id, request.document_id], |row| row.get::<_, String>(0),
         ).optional()?.ok_or_else(|| LocalKnowledgeError::not_found("knowledge document"))?;
-        let source = path.join(relative_path);
+        let source = path.join(&relative_path);
         let staged = self
             .root
             .join("staging")
@@ -1826,8 +2407,33 @@ impl LocalKnowledgeStore {
         );
         match deleted {
             Ok(count) => {
+                let completed_at = now_ms();
                 transaction.execute("UPDATE local_kb_index_generations SET status = 'stale' WHERE knowledge_base_id = ?1 AND status = 'active'", [&request.knowledge_base_id])?;
-                transaction.execute("UPDATE local_knowledge_bases SET active_index_generation = NULL, updated_at = ?2 WHERE id = ?1", params![request.knowledge_base_id, now_ms()])?;
+                transaction.execute("UPDATE local_knowledge_bases SET active_index_generation = NULL, updated_at = ?2 WHERE id = ?1", params![request.knowledge_base_id, completed_at])?;
+                if count > 0 {
+                    let job_id = Uuid::new_v4().to_string();
+                    let operation_id = Uuid::new_v4().to_string();
+                    let data = json!({
+                        "documentId": request.document_id,
+                        "relativePath": relative_path,
+                    })
+                    .to_string();
+                    transaction.execute(
+                        "INSERT INTO local_kb_jobs(
+                            id, parent_operation_id, knowledge_base_id, job_type, status,
+                            stage, progress, last_sequence, outcome, data_json,
+                            heartbeat_at, created_at, started_at, updated_at, completed_at
+                         ) VALUES (?1, ?2, ?3, 'delete', 'completed', 'committing', 100, 2,
+                                   'success', ?4, ?5, ?5, ?5, ?5, ?5)",
+                        params![
+                            job_id,
+                            operation_id,
+                            request.knowledge_base_id,
+                            data,
+                            completed_at
+                        ],
+                    )?;
+                }
                 transaction.commit()?;
                 if moved {
                     let _ = fs::remove_file(staged);
@@ -2051,6 +2657,7 @@ fn retrieval_lexical_score(text: &str, terms: &[String]) -> f64 {
         .min(1.0)
 }
 
+#[cfg(test)]
 fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f64> {
     if left.len() != right.len() || left.is_empty() {
         return None;
@@ -2148,27 +2755,28 @@ impl LocalKnowledgeStore {
                 }),
                 Ok(false) => Ok(VectorBackendHealth {
                     backend: "zvec".to_owned(),
-                    available: true,
+                    available: false,
                     read_write_verified: false,
                     fallback_active: true,
-                    message: "Zvec 返回了不完整的健康检查结果，已使用 SQLite 向量兼容层".to_owned(),
+                    message: "Zvec 返回了不完整的健康检查结果；向量检索已停用，关键词检索仍可用"
+                        .to_owned(),
                 }),
                 Err(error) => Ok(VectorBackendHealth {
                     backend: "zvec".to_owned(),
                     available: false,
                     read_write_verified: false,
                     fallback_active: true,
-                    message: format!("Zvec 不可用：{}；已使用 SQLite 向量兼容层", error),
+                    message: format!("Zvec 不可用：{}；向量检索已停用，关键词检索仍可用", error),
                 }),
             };
         }
         #[cfg(not(feature = "zvec"))]
         Ok(VectorBackendHealth {
-            backend: "sqlite-vector-v1".to_owned(),
-            available: true,
-            read_write_verified: true,
+            backend: "zvec".to_owned(),
+            available: false,
+            read_write_verified: false,
             fallback_active: true,
-            message: "当前构建未启用 Zvec；SQLite 向量兼容层可持久化并完成余弦检索".to_owned(),
+            message: "当前构建未启用 Zvec；向量检索不可用，关键词检索仍可用".to_owned(),
         })
     }
 }
@@ -2209,15 +2817,18 @@ pub fn local_embedding_model_download_retry(
 }
 
 #[tauri::command]
-pub fn local_embedding_model_test(
-    state: State<'_, AppState>,
+pub async fn local_embedding_model_test(
+    app: tauri::AppHandle,
     request: EmbeddingModelIdRequest,
-) -> ApiResponse<EmbeddingModelTestResult> {
-    model_response(
-        state
-            .local_knowledge
-            .test_embedding_model(&request.model_id),
-    )
+) -> Result<ApiResponse<EmbeddingModelTestResult>, String> {
+    let store = app.state::<AppState>().local_knowledge.clone();
+    let model_id = request.model_id;
+    let result =
+        tauri::async_runtime::spawn_blocking(move || store.test_embedding_model(&model_id))
+            .await
+            .map_err(|error| LocalKnowledgeError::storage(format!("模型测试任务异常结束：{error}")))
+            .and_then(|result| result);
+    Ok(model_response(result))
 }
 
 #[tauri::command]
@@ -2352,26 +2963,270 @@ pub fn local_knowledge_document_reparse(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "local-embedding")]
     #[test]
-    fn controlled_manifest_has_pinned_integrity_metadata() {
-        let manifest = recommended_manifest();
-        assert_eq!(manifest.id, RECOMMENDED_MODEL_ID);
-        assert_eq!(manifest.dimension, 512);
-        assert_eq!(manifest.files.len(), 3);
-        assert!(manifest
-            .files
-            .iter()
-            .all(|file| normalize_sha256(&file.sha256).is_ok()));
-        assert!(manifest
-            .files
-            .iter()
-            .all(|file| file.url.contains(RECOMMENDED_MODEL_VERSION)));
+    fn embedding_smoke_diagnostics_are_read_and_bounded() {
+        let details = collect_embedding_smoke_stderr("runtime failure".as_bytes());
+        assert_eq!(details, "runtime failure");
+
+        let oversized = vec![b'x'; 80_000];
+        let details = collect_embedding_smoke_stderr(oversized.as_slice());
+        assert!(details.contains("诊断信息超过 16000 字符，已截断"));
+        assert!(details.chars().count() < 17_000);
+    }
+
+    #[test]
+    fn controlled_manifests_have_pinned_integrity_metadata() {
+        let manifests = recommended_manifests();
+        assert_eq!(manifests.len(), 2);
+        assert_eq!(manifests[0].id, RECOMMENDED_MODEL_ID);
+        assert_eq!(manifests[0].dimension, 512);
+        assert_eq!(manifests[1].id, MULTILINGUAL_E5_MODEL_ID);
+        assert_eq!(manifests[1].dimension, 384);
+        assert_eq!(manifests[1].languages, vec!["中文", "英文"]);
+        assert_eq!(manifests[1].query_prefix, "query: ");
+        assert_eq!(manifests[1].passage_prefix, "passage: ");
+        assert_eq!(
+            manifests[1]
+                .files
+                .iter()
+                .map(|file| file.size_bytes)
+                .sum::<i64>(),
+            135_137_323
+        );
+        for manifest in manifests {
+            assert!(matches!(manifest.files.len(), 2 | 3));
+            assert!(manifest
+                .files
+                .iter()
+                .all(|file| normalize_sha256(&file.sha256).is_ok()));
+            assert!(manifest
+                .files
+                .iter()
+                .all(|file| file.url.contains(&manifest.version)));
+        }
+    }
+
+    #[test]
+    fn model_catalog_exposes_both_controlled_recommendations() {
+        let root = std::env::temp_dir().join(format!(
+            "fox-local-knowledge-model-catalog-{}",
+            Uuid::new_v4().simple()
+        ));
+        let store = LocalKnowledgeStore::open(&root).unwrap();
+        let models = store.list_embedding_models().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, RECOMMENDED_MODEL_ID);
+        assert_eq!(models[1].id, MULTILINGUAL_E5_MODEL_ID);
+        assert!(models.iter().all(|model| model.recommended));
+        assert!(models.iter().all(|model| model.status == "not_installed"));
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_minilm_default_and_sqlite_vector_generation_are_not_reused() {
+        let root = std::env::temp_dir().join(format!(
+            "fox-local-knowledge-legacy-vector-{}",
+            Uuid::new_v4().simple()
+        ));
+        let store = LocalKnowledgeStore::open(&root).unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO local_embedding_models(
+                    model_id, name, version, dimension, status, languages_json, license,
+                    source_url, integrity_status, size_bytes, updated_at, is_default
+                 ) VALUES (?1, 'Legacy MiniLM', 'legacy', 384, 'ready', '[\"英文\"]',
+                           'Apache-2.0', '', 'verified', 1, ?2, 1)",
+                params![LEGACY_MINILM_MODEL_ID, now_ms()],
+            )
+            .unwrap();
+        drop(store);
+
+        let store = LocalKnowledgeStore::open(&root).unwrap();
+        let is_default = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT is_default FROM local_embedding_models WHERE model_id = ?1",
+                [LEGACY_MINILM_MODEL_ID],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap();
+        assert!(!is_default);
+
+        let base = store
+            .create_base(crate::local_knowledge::CreateLocalKnowledgeBaseRequest {
+                name: "旧向量代次".to_owned(),
+                description: None,
+                embedding_model_id: Some(LEGACY_MINILM_MODEL_ID.to_owned()),
+                chunk_size: None,
+                chunk_overlap: None,
+                search_mode: Some("hybrid".to_owned()),
+            })
+            .unwrap();
+        let generation_id = Uuid::new_v4().to_string();
+        let now = now_ms();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO local_kb_index_generations(
+                    id, knowledge_base_id, sequence, status, vector_store_kind,
+                    vector_store_version, embedding_model_id, dimension, chunk_config_hash,
+                    parser_version, chunk_count, created_at, activated_at
+                 ) VALUES (?1, ?2, 1, 'active', 'sqlite-vector-v1', '1', ?3, 384,
+                           'chars-512-overlap-50', 'fox-text-v1', 1, ?4, ?4)",
+                params![generation_id, base.id, LEGACY_MINILM_MODEL_ID, now],
+            )
+            .unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "UPDATE local_knowledge_bases SET active_index_generation = ?2 WHERE id = ?1",
+                params![base.id, generation_id],
+            )
+            .unwrap();
+        let migrated = store.get_base(&base.id).unwrap();
+        assert!(!migrated.vector_index_ready);
+        assert_eq!(migrated.vector_count, None);
+        assert!(migrated
+            .fallback_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Zvec")));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // This drives the embedding index-resolution path (`start_index_generation`),
+    // whose real implementation exists ONLY when both local-embedding and zvec
+    // are enabled (the cfg(all(...)) branch); production builds enable both.
+    // Under any other feature combination the method takes a different stub
+    // path, so the "no parsed chunks" assertion does not hold. Gate on BOTH
+    // features rather than ignoring the test or asserting an incompatible error.
+    #[cfg(all(feature = "local-embedding", feature = "zvec"))]
+    #[test]
+    fn unbound_knowledge_base_resolves_the_ready_default_model() {
+        let root = std::env::temp_dir().join(format!(
+            "fox-local-knowledge-default-model-{}",
+            Uuid::new_v4().simple()
+        ));
+        let store = LocalKnowledgeStore::open(&root).unwrap();
+        let knowledge_base = store
+            .create_base(crate::local_knowledge::CreateLocalKnowledgeBaseRequest {
+                name: "默认向量模型测试".to_owned(),
+                description: None,
+                embedding_model_id: None,
+                chunk_size: None,
+                chunk_overlap: None,
+                search_mode: None,
+            })
+            .unwrap();
+        let manifest = recommended_manifest(RECOMMENDED_MODEL_ID).unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO local_embedding_models(
+                    model_id, name, version, dimension, status, languages_json, license,
+                    source_url, package_path, integrity_status, package_hash, size_bytes,
+                    installed_at, updated_at, is_default
+                 ) VALUES (?1, ?2, ?3, ?4, 'ready', '[\"中文\"]', ?5, ?6, ?7,
+                           'verified', ?8, 1, ?9, ?9, 1)",
+                params![
+                    manifest.id,
+                    manifest.name,
+                    manifest.version,
+                    manifest.dimension as i64,
+                    manifest.license,
+                    recommended_source_url(RECOMMENDED_MODEL_ID),
+                    root.join("models").to_string_lossy(),
+                    manifest.hash,
+                    now_ms(),
+                ],
+            )
+            .unwrap();
+
+        let error = store
+            .start_index_generation(&knowledge_base.id, "index")
+            .unwrap_err();
+        assert!(error.to_string().contains("no parsed chunks"));
+        assert!(store
+            .get_base(&knowledge_base.id)
+            .unwrap()
+            .configured_embedding_model_id
+            .is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn cosine_similarity_rejects_invalid_dimensions() {
         assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0, 0.0]), Some(1.0));
         assert!(cosine_similarity(&[1.0], &[1.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn deleting_a_document_creates_a_completed_delete_job() {
+        let root = std::env::temp_dir().join(format!(
+            "fox-local-knowledge-delete-job-{}",
+            Uuid::new_v4().simple()
+        ));
+        let store = LocalKnowledgeStore::open(&root).unwrap();
+        let knowledge_base = store
+            .create_base(crate::local_knowledge::CreateLocalKnowledgeBaseRequest {
+                name: "删除任务测试".to_owned(),
+                description: None,
+                embedding_model_id: None,
+                chunk_size: None,
+                chunk_overlap: None,
+                search_mode: None,
+            })
+            .unwrap();
+        let document_id = Uuid::new_v4().to_string();
+        let relative_path = "sample.txt";
+        let documents = root
+            .join("knowledge-bases")
+            .join(&knowledge_base.id)
+            .join("documents");
+        std::fs::create_dir_all(&documents).unwrap();
+        std::fs::write(documents.join(relative_path), b"sample").unwrap();
+        let now = now_ms();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO local_kb_documents(
+                    id, knowledge_base_id, display_name, relative_path, source_path,
+                    current_revision, content_hash, file_size, mime_type, parse_status,
+                    index_status, parser_version, chunk_config_hash, created_at, updated_at
+                 ) VALUES (?1, ?2, 'sample.txt', ?3, ?3, 1, 'hash', 6, 'text/plain',
+                           'ready', 'pending', 'fox-text-v1', 'utf8-4096-v1', ?4, ?4)",
+                params![document_id, knowledge_base.id, relative_path, now],
+            )
+            .unwrap();
+
+        assert!(store
+            .delete_document(KnowledgeDocumentActionRequest {
+                knowledge_base_id: knowledge_base.id.clone(),
+                document_id,
+            })
+            .unwrap());
+        assert!(!documents.join(relative_path).exists());
+        let jobs = store.list_jobs(Some(&knowledge_base.id)).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_type, "delete");
+        assert_eq!(jobs[0].status, "completed");
+        assert_eq!(jobs[0].stage.as_deref(), Some("committing"));
+        assert_eq!(jobs[0].outcome.as_deref(), Some("success"));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(all(feature = "zvec", target_os = "windows"))]

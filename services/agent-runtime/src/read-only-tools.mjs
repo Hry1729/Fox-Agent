@@ -2,27 +2,42 @@ import { Type } from 'typebox'
 import { executeReadOnlyTool } from './read-only-tool-executors.mjs'
 import { defineFoxTools } from './tool-adapter.mjs'
 
-async function approvedArgs(tool, params, requestPreflight, signal) {
+async function approvedArgs(toolCallId, tool, params, requestPreflight, signal) {
   const input = tool !== 'read' && !String(params?.path || '').trim()
     ? { ...params, path: '.' }
     : params
-  const response = await requestPreflight(tool, input, signal)
+  const response = await requestPreflight(toolCallId, tool, input, signal)
   if (response.decision !== 'allow' || !response.input) {
     throw new Error(response.message || `Tool ${tool} was blocked by Fox.`)
   }
-  return response.input
+  return response
 }
 
-export function createReadOnlyTools(requestPreflight, { limits } = {}) {
+export function createReadOnlyTools(requestPreflight, { limits, executeHost } = {}) {
+  const execute = async (toolCallId, tool, params, signal) => {
+    const approved = await approvedArgs(toolCallId, tool, params, requestPreflight, signal)
+    const route = approved.executionRoute ?? 'runtime'
+    if (route === 'rust') {
+      if (typeof executeHost !== 'function' || !approved.permissionSnapshotId) throw new Error('Frozen Rust reader route is unavailable.')
+      const response = await executeHost('tool.readonly_execute', {
+        toolCallId, tool, input: approved.input, permissionSnapshotId: approved.permissionSnapshotId,
+      }, signal)
+      if (!response?.payload || response.payload.isError || response.type === 'tool.execute_failed') {
+        throw new Error(response?.payload?.error || 'Rust resource gateway rejected the operation.')
+      }
+      return response.payload
+    }
+    if (route !== 'runtime') throw new Error(`Unknown frozen read-only execution route: ${route}`)
+    return executeReadOnlyTool(tool, approved.input, { signal, limits })
+  }
   return defineFoxTools([
     {
       name: 'read',
       label: 'Read file',
       description: 'Read a UTF-8 text file inside the authorized project folder.',
       parameters: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }),
-      execute: async (_toolCallId, params, signal) => {
-        const input = await approvedArgs('read', params, requestPreflight, signal)
-        return executeReadOnlyTool('read', input, { signal, limits })
+      execute: async (toolCallId, params, signal) => {
+        return execute(toolCallId, 'read', params, signal)
       },
     },
     {
@@ -30,9 +45,8 @@ export function createReadOnlyTools(requestPreflight, { limits } = {}) {
       label: 'List directory',
       description: 'List direct children of a directory inside the authorized project folder. Omit path to list the project root.',
       parameters: Type.Object({ path: Type.Optional(Type.String()) }),
-      execute: async (_toolCallId, params, signal) => {
-        const input = await approvedArgs('ls', params, requestPreflight, signal)
-        return executeReadOnlyTool('ls', input, { signal, limits })
+      execute: async (toolCallId, params, signal) => {
+        return execute(toolCallId, 'ls', params, signal)
       },
     },
     {
@@ -40,9 +54,8 @@ export function createReadOnlyTools(requestPreflight, { limits } = {}) {
       label: 'Find files',
       description: 'Find file and directory names below a project path. Omit path to search from the project root.',
       parameters: Type.Object({ path: Type.Optional(Type.String()), pattern: Type.String() }),
-      execute: async (_toolCallId, params, signal) => {
-        const input = await approvedArgs('find', params, requestPreflight, signal)
-        return executeReadOnlyTool('find', input, { signal, limits })
+      execute: async (toolCallId, params, signal) => {
+        return execute(toolCallId, 'find', params, signal)
       },
     },
     {
@@ -50,9 +63,8 @@ export function createReadOnlyTools(requestPreflight, { limits } = {}) {
       label: 'Search files',
       description: 'Search text files below a project path for a literal string. Omit path to search from the project root.',
       parameters: Type.Object({ path: Type.Optional(Type.String()), pattern: Type.String() }),
-      execute: async (_toolCallId, params, signal) => {
-        const input = await approvedArgs('grep', params, requestPreflight, signal)
-        return executeReadOnlyTool('grep', input, { signal, limits })
+      execute: async (toolCallId, params, signal) => {
+        return execute(toolCallId, 'grep', params, signal)
       },
     },
   ], { source: 'fox-read-only', execution: 'runtime', trusted: true })

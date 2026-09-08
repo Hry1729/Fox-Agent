@@ -55,6 +55,14 @@ export function chatSelectableAgents(agents: AgentRecord[]): ClassifiedAgentReco
       && agent.visibility === 'chat_selector')
 }
 
+export function resolveActiveChatAgent(agents: AgentRecord[], selectedAgentId?: string | null): AgentRecord | null {
+  // An unavailable/temporarily missing selection must not be displayed as a
+  // different assistant while dispatch still targets the selected conversation.
+  if (selectedAgentId) return agents.find((agent) => agent.id === selectedAgentId) ?? null
+  const selectable = chatSelectableAgents(agents)
+  return selectable.find((agent) => agent.isDefault) ?? selectable[0] ?? null
+}
+
 export function expertCatalogAgents(agents: AgentRecord[]): ClassifiedAgentRecord[] {
   return agents
     .map(normalizeAgentClassification)

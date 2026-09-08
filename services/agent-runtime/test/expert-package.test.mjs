@@ -4,9 +4,27 @@ import {
   diagnoseToolsForAgentContext,
   filterToolsForAgentContext,
   filterToolsForExpert,
+  selectToolsForProjectContext,
 } from '../src/expert-package.mjs'
 
 const tools = [{ name: 'read' }, { name: 'write_file' }, { name: 'run_command' }]
+
+test('projectless conversations retain knowledge and attachment tools without exposing filesystem tools', () => {
+  const catalog = [...tools, ...['ls', 'grep', 'find', 'graph_readonly_run', 'git_read', 'sqlite_read',
+    'test_run', 'format_code', 'tabular_data', 'list_knowledge_bases', 'search_knowledge',
+    'read_knowledge_document', 'read_attachment', 'web_search', 'structured_data'].map(name => ({ name }))]
+  for (const context of [undefined, {}, { projectRoot: null }, { projectRoot: '  ' }]) {
+    const selected = selectToolsForProjectContext(catalog, context)
+    assert.deepEqual(selected.tools.map(tool => tool.name), [
+      'list_knowledge_bases', 'search_knowledge', 'read_knowledge_document',
+      'read_attachment', 'web_search', 'structured_data',
+    ])
+    assert.ok(selected.excludedTools.every(tool => tool.reason === 'project_unavailable'))
+  }
+  assert.deepEqual(selectToolsForProjectContext(catalog, { projectRoot: 'D:/project' }).tools, catalog)
+  const restricted = filterToolsForAgentContext(catalog, { packageManifest: { allowedTools: ['read'] } }, null)
+  assert.deepEqual(selectToolsForProjectContext(restricted, {}).tools, [])
+})
 
 test('expert package enforces an explicit runtime tool allowlist', () => {
   assert.deepEqual(filterToolsForExpert(tools, {

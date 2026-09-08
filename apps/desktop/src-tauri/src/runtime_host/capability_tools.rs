@@ -993,37 +993,84 @@ fn execute_web_search(
     include_domains: &[String],
     exclude_domains: &[String],
 ) -> Result<Value, String> {
+    let requested_provider = provider;
     let provider = resolve_search_provider(provider)?;
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(20))
         .redirect(Policy::limited(3))
-        .user_agent("Fox/0.1 web_search")
+        .user_agent(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/128.0 Safari/537.36 Fox/0.1",
+        )
         .build()
         .map_err(|error| format!("failed to create web search client: {error}"))?;
     let filtered_query = search_query_with_domains(query, include_domains, exclude_domains);
-    let raw = match provider {
-        SearchProvider::Brave => search_brave(&client, &filtered_query, max_results)?,
-        SearchProvider::Tavily => search_tavily(
-            &client,
-            query,
-            max_results,
-            include_domains,
-            exclude_domains,
-        )?,
-        SearchProvider::Exa => search_exa(
-            &client,
-            query,
-            max_results,
-            include_domains,
-            exclude_domains,
-        )?,
-        SearchProvider::Searxng => search_searxng(&client, &filtered_query, max_results)?,
-        SearchProvider::DuckDuckGo => search_duckduckgo(&client, &filtered_query, max_results)?,
+    let (raw, provider_name, fallback_from) = match provider {
+        SearchProvider::Brave => (
+            search_brave(&client, &filtered_query, max_results)?,
+            "brave",
+            None,
+        ),
+        SearchProvider::Tavily => (
+            search_tavily(
+                &client,
+                query,
+                max_results,
+                include_domains,
+                exclude_domains,
+            )?,
+            "tavily",
+            None,
+        ),
+        SearchProvider::Exa => (
+            search_exa(
+                &client,
+                query,
+                max_results,
+                include_domains,
+                exclude_domains,
+            )?,
+            "exa",
+            None,
+        ),
+        SearchProvider::Searxng => (
+            search_searxng(&client, &filtered_query, max_results)?,
+            "searxng",
+            None,
+        ),
+        SearchProvider::DuckDuckGo => {
+            match search_duckduckgo(&client, &filtered_query, max_results) {
+                Ok(raw)
+                    if !matches!(requested_provider, SearchProvider::Auto)
+                        || raw
+                            .get("results")
+                            .and_then(Value::as_array)
+                            .is_some_and(|results| !results.is_empty()) =>
+                {
+                    (raw, "duckduckgo", None)
+                }
+                Ok(_) => (
+                    search_yahoo(&client, &filtered_query, max_results)?,
+                    "yahoo",
+                    Some("duckduckgo_empty"),
+                ),
+                Err(duckduckgo_error) if matches!(requested_provider, SearchProvider::Auto) => {
+                    let yahoo = search_yahoo(&client, &filtered_query, max_results).map_err(
+                        |yahoo_error| {
+                            format!(
+                                "automatic web search providers failed: {duckduckgo_error}; {yahoo_error}"
+                            )
+                        },
+                    )?;
+                    (yahoo, "yahoo", Some("duckduckgo_blocked"))
+                }
+                Err(error) => return Err(error),
+            }
+        }
         SearchProvider::Auto => unreachable!(),
     };
     let results = normalize_search_results(provider, raw, max_results)?;
-    let provider_name = search_provider_name(provider);
     let text = if results.is_empty() {
         format!("No web results found for: {query}")
     } else {
@@ -1051,6 +1098,7 @@ fn execute_web_search(
         json!({
             "query": query,
             "provider": provider_name,
+            "fallbackFrom": fallback_from,
             "results": results,
         }),
     ))
@@ -1219,10 +1267,12 @@ fn search_duckduckgo(client: &Client, query: &str, max_results: usize) -> Result
             header::ACCEPT,
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         )
+        .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
         .query(&[("q", query)])
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|error| format!("DuckDuckGo search request failed: {error}"))?;
+    let status = response.status();
     let mut bytes = Vec::new();
     response
         .take((1024 * 1024 + 1) as u64)
@@ -1232,9 +1282,129 @@ fn search_duckduckgo(client: &Client, query: &str, max_results: usize) -> Result
         return Err("DuckDuckGo search response exceeded the 1 MiB limit".to_owned());
     }
     let source = String::from_utf8_lossy(&bytes);
+    if status == StatusCode::ACCEPTED || duckduckgo_challenge_page(&source) {
+        return Err(
+            "DuckDuckGo blocked the automated search request; choose another provider".to_owned(),
+        );
+    }
     Ok(json!({
         "results": parse_duckduckgo_results(&source, max_results),
     }))
+}
+
+fn duckduckgo_challenge_page(source: &str) -> bool {
+    let lowercase = source.to_ascii_lowercase();
+    [
+        "anomaly-modal",
+        "challenge-form",
+        "duckduckgo.com/anomaly.js",
+        "unfortunately, bots use duckduckgo too",
+    ]
+    .iter()
+    .any(|marker| lowercase.contains(marker))
+}
+
+fn search_yahoo(client: &Client, query: &str, max_results: usize) -> Result<Value, String> {
+    let response = client
+        .get("https://search.yahoo.com/search")
+        .header(
+            header::ACCEPT,
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
+        .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
+        .query(&[("p", query), ("ei", "UTF-8"), ("nojs", "1")])
+        .send()
+        .and_then(|response| response.error_for_status())
+        .map_err(|error| format!("Yahoo search request failed: {error}"))?;
+    let mut bytes = Vec::new();
+    response
+        .take((1024 * 1024 + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read Yahoo search response: {error}"))?;
+    if bytes.len() > 1024 * 1024 {
+        return Err("Yahoo search response exceeded the 1 MiB limit".to_owned());
+    }
+    let source = String::from_utf8_lossy(&bytes);
+    Ok(json!({
+        "results": parse_yahoo_results(&source, max_results),
+    }))
+}
+
+fn parse_yahoo_results(source: &str, max_results: usize) -> Vec<Value> {
+    let lowercase = source.to_ascii_lowercase();
+    let mut results = Vec::new();
+    let mut cursor = 0usize;
+    while results.len() < max_results {
+        let Some(h3_offset) = lowercase[cursor..].find("<h3") else {
+            break;
+        };
+        let h3_start = cursor + h3_offset;
+        let Some(h3_open_offset) = lowercase[h3_start..].find('>') else {
+            break;
+        };
+        let h3_open_end = h3_start + h3_open_offset;
+        let Some(h3_close_offset) = lowercase[h3_open_end + 1..].find("</h3>") else {
+            break;
+        };
+        let h3_close = h3_open_end + 1 + h3_close_offset;
+        let next_h3 = lowercase[h3_close + 5..]
+            .find("<h3")
+            .map(|offset| h3_close + 5 + offset)
+            .unwrap_or(source.len());
+        cursor = h3_close + 5;
+
+        let search_start = h3_start.saturating_sub(4_000);
+        let Some(anchor_start_offset) = lowercase[search_start..h3_start].rfind("<a") else {
+            continue;
+        };
+        let anchor_start = search_start + anchor_start_offset;
+        let Some(anchor_end_offset) = lowercase[anchor_start..h3_start].find('>') else {
+            continue;
+        };
+        let anchor_end = anchor_start + anchor_end_offset;
+        let Some(raw_url) = html_attribute(&source[anchor_start..=anchor_end], "href") else {
+            continue;
+        };
+        let Some(url) = unwrap_yahoo_url(&raw_url) else {
+            continue;
+        };
+        let title = html_to_text(&source[h3_open_end + 1..h3_close]);
+        if title.is_empty() {
+            continue;
+        }
+        let snippet = html_element_text_by_class(&source[h3_close + 5..next_h3], "compText")
+            .unwrap_or_default();
+        results.push(json!({
+            "title": title,
+            "url": url,
+            "content": snippet,
+        }));
+    }
+    results
+}
+
+fn unwrap_yahoo_url(raw_url: &str) -> Option<String> {
+    let base = Url::parse("https://search.yahoo.com/search").ok()?;
+    let parsed = Url::parse(raw_url).or_else(|_| base.join(raw_url)).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if host == "r.search.yahoo.com" || host.ends_with(".r.search.yahoo.com") {
+        let path = parsed.path();
+        let encoded_start = path.find("/RU=")? + 4;
+        let encoded_end = path[encoded_start..]
+            .find("/RK=")
+            .map(|offset| encoded_start + offset)
+            .unwrap_or(path.len());
+        let decoder = Url::parse(&format!(
+            "https://fox.invalid/?target={}",
+            &path[encoded_start..encoded_end]
+        ))
+        .ok()?;
+        let target = decoder
+            .query_pairs()
+            .find_map(|(key, value)| (key == "target").then(|| value.into_owned()))?;
+        return unwrap_duckduckgo_url(&target);
+    }
+    unwrap_duckduckgo_url(parsed.as_str())
 }
 
 fn parse_duckduckgo_results(source: &str, max_results: usize) -> Vec<Value> {
@@ -3540,6 +3710,38 @@ mod tests {
         assert_eq!(results[0]["title"], "Fox & Pi");
         assert_eq!(results[0]["url"], "https://example.com/fox");
         assert_eq!(results[0]["content"], "A useful search result.");
+    }
+
+    #[test]
+    fn detects_duckduckgo_challenge_pages_instead_of_reporting_no_results() {
+        assert!(duckduckgo_challenge_page(
+            r#"<form id="challenge-form"><div class="anomaly-modal">blocked</div></form>"#,
+        ));
+        assert!(!duckduckgo_challenge_page(
+            r#"<a class="result__a" href="https://example.com">Example</a>"#,
+        ));
+    }
+
+    #[test]
+    fn parses_yahoo_html_results_and_unwraps_redirects() {
+        let source = r#"
+            <div class="dd algo algo-sr">
+              <div class="compTitle">
+                <a href="https://r.search.yahoo.com/_ylt=x/RU=https%3A%2F%2Fexample.com%2Fnews%3Fa%3D1/RK=2/RS=x">
+                  <h3><span>上港集团：选举于福林为董事长</span></h3>
+                </a>
+              </div>
+              <div class="compText aAbs"><p>公司公告的相关摘要。</p></div>
+            </div>
+            <div class="dd algo algo-sr">
+              <a href="http://127.0.0.1/private"><h3>Private result</h3></a>
+            </div>
+        "#;
+        let results = parse_yahoo_results(source, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["title"], "上港集团：选举于福林为董事长");
+        assert_eq!(results[0]["url"], "https://example.com/news?a=1");
+        assert_eq!(results[0]["content"], "公司公告的相关摘要。");
     }
 
     #[test]

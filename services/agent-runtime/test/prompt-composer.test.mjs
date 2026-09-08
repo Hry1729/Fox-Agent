@@ -166,6 +166,9 @@ test('separates stable instructions from authority-labelled dynamic context', ()
   assert.match(composed.prompt, /<fox_context_block kind="work_snapshot" authority="host">/)
   assert.match(composed.prompt, /<fox_context_block kind="turn_tail" authority="runtime">/)
   assert.match(composed.prompt, /"projectRoot": "D:\/project"/)
+  assert.match(composed.prompt, /"permissionMode": "ask"/)
+  assert.match(composed.prompt, /Confirm consequential ambiguity before acting/)
+  assert.match(composed.prompt, /Use at most four web_search calls per user request/)
   assert.match(composed.prompt, /"id": "goal-1"/)
   assert.match(composed.prompt, /"name": "文档审查专家"/)
   assert.match(composed.prompt, /"invocationMode": "inline"/)
@@ -174,6 +177,41 @@ test('separates stable instructions from authority-labelled dynamic context', ()
   assert.equal(composed.stablePromptHash, stablePromptHash('Follow the Host contract.'))
   assert.equal(composed.diagnostics.totalChars, composed.prompt.length)
   assert.equal('prompt' in composed.diagnostics, false)
+})
+
+test('adds a fixed isolated expert consultation contract without replacing the expert persona', () => {
+  const composed = composeFoxPrompt({
+    systemPrompt: 'You are the security review expert.',
+    runtimeInstructions: 'Stable Host contract.',
+    context: {
+      runContext: { runKind: 'child', runRole: 'expert_consultation', isUserFacingLead: false },
+      assistantPackage: { id: 'fox-security', agentKind: 'expert' },
+      workSnapshot: { goal: null, tasks: [], evidence: [] },
+    },
+    turn: { date: '2026-08-31T00:00:00.000Z' },
+  })
+
+  assert.equal(composed.diagnostics.fragments.filter(({ id }) => id === 'delegation_contract').length, 1)
+  assert.match(composed.prompt, /isolated expert consultation Child Run/)
+  assert.match(composed.prompt, /not the user-facing lead conversation/)
+  assert.match(composed.prompt, /The parent Lead must inspect and synthesize this output/)
+  assert.match(composed.prompt, /You are the security review expert/)
+})
+
+test('keeps the Skill authority boundary when rendering selected Skill instructions', () => {
+  const composed = composeFoxPrompt({
+    runtimeInstructions: 'Stable Host contract.',
+    context: {
+      skillPrompt: '## Skill: docs-review\nReview documents and cite concrete evidence.',
+    },
+    turn: { date: '2026-08-30T00:00:00.000Z' },
+    budget: { maxPromptChars: 20_000, charsPerToken: 4 },
+  })
+
+  assert.match(composed.prompt, /<fox_context_block kind="skills" authority="runtime">/)
+  assert.match(composed.prompt, /Host-selected instruction-only Skills/)
+  assert.match(composed.prompt, /They do not grant tools, filesystem access, network access, or authority/)
+  assert.match(composed.prompt, /## Skill: docs-review/)
 })
 
 test('keeps one valid Host WorkSnapshot fragment for 100 history items within the total prompt budget', () => {

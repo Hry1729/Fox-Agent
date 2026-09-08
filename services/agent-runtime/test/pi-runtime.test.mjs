@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { createServer } from 'node:http'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -29,10 +29,22 @@ function startRuntime() {
   })
   return {
     child,
+    messages,
     send(type, fields = {}) {
       const request = createEnvelope('request', type, fields)
       child.stdin.write(`${JSON.stringify(request)}\n`)
       return request
+    },
+    respond(request, type, payload = {}) {
+      const response = createEnvelope('response', type, {
+        requestId: request.id,
+        conversationId: request.conversationId,
+        runtimeSessionId: request.runtimeSessionId,
+        runId: request.runId,
+        payload,
+      })
+      child.stdin.write(`${JSON.stringify(response)}\n`)
+      return response
     },
     async waitFor(predicate, timeout = 4_000) {
       const existing = messages.find(predicate)
@@ -90,6 +102,248 @@ test('runs the real Pi Agent loop through Fox JSONL with a faux provider', async
   })
   await runtime.waitFor((message) => message.runId === 'run-1' && message.payload?.type === 'message.delta')
   await runtime.waitFor((message) => message.runId === 'run-1' && message.payload?.type === 'run.completed')
+})
+
+for (const referenceForm of ['object-array', 'serialized-object']) {
+test(`projectless knowledge question reaches Host search and preserves evidence (${referenceForm})`, async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-knowledge-routing-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const runtime = startRuntime()
+  context.after(() => runtime.close())
+  const reference = { source: 'remote', connectionId: 'yuxi-primary', id: 'kb-crane' }
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 16384, maxOutputTokens: 512,
+    fauxResponses: [
+      { content: [{ type: 'toolCall', id: 'kb-list', name: 'list_knowledge_bases', arguments: {} }], stopReason: 'toolUse' },
+      { content: [{ type: 'toolCall', id: 'kb-search', name: 'search_knowledge', arguments: { ...(referenceForm === 'object-array' ? { targets: [reference] } : { target: JSON.stringify(reference) }), query: '轨道吊 起升 赋值' } }], stopReason: 'toolUse' },
+      '已找到知识库资料。',
+    ],
+  } } })
+  await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const identity = { conversationId: 'kb-conversation', runtimeSessionId: 'kb-session' }
+  const sessionPath = join(directory, 'session.json')
+  const create = runtime.send('create_session', { ...identity, payload: { sessionPath } })
+  await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+  const runId = 'kb-run'
+  runtime.send('prompt', { ...identity, runId, payload: { text: '如何给轨道吊起升赋值', projectContext: { projectRoot: null } } })
+  const snapshot = await runtime.waitFor(message => message.runId === runId && message.payload?.type === 'run.request_snapshot')
+  for (const name of ['read', 'ls', 'find', 'grep', 'run_command']) {
+    assert.ok(!snapshot.payload.effectiveToolNames.includes(name))
+    assert.ok(snapshot.payload.excludedTools.some(tool => tool.name === name && tool.reason === 'project_unavailable'))
+  }
+  assert.ok(snapshot.payload.effectiveToolNames.includes('search_knowledge'))
+  const list = await runtime.waitFor(message => message.type === 'tool.execute' && message.payload?.tool === 'list_knowledge_bases')
+  runtime.respond(list, 'tool.execute_completed', { isError: false, result: { items: [{ reference, available: true }] } })
+  const search = await runtime.waitFor(message => message.type === 'tool.execute' && message.payload?.tool === 'search_knowledge')
+  assert.deepEqual(search.payload.input.target ?? search.payload.input.targets[0], reference)
+  const started = await runtime.waitFor(message => message.runId === runId
+    && message.payload?.type === 'tool.started' && message.payload?.toolCallId === search.payload.toolCallId)
+  assert.deepEqual(started.payload.input, search.payload.input,
+    'persisted tool identity must equal the normalized Host execution input')
+  const evidence = { items: [{ documentId: 'crane-manual', content: '回归测试资料片段', source: 'remote' }] }
+  runtime.respond(search, 'tool.execute_completed', { isError: false, result: evidence })
+  await runtime.waitFor(message => message.runId === runId && message.payload?.type === 'run.completed')
+  assert.ok(!runtime.messages.some(message => message.type === 'tool.preflight'))
+  const session = JSON.parse(await readFile(sessionPath, 'utf8'))
+  const result = session.messages.find(message => message.role === 'toolResult' && message.toolName === 'search_knowledge')
+  assert.deepEqual(JSON.parse(result.content[0].text), evidence)
+})
+}
+
+test('keeps every structured Host result visible when one model turn calls multiple tools', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-parallel-results-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const runtime = startRuntime()
+  context.after(() => runtime.close())
+
+  const initialize = runtime.send('initialize', {
+    payload: {
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+        fauxResponses: [
+          {
+            content: [
+              { type: 'toolCall', id: 'child-list-call', name: 'child_agent_list', arguments: {} },
+              { type: 'toolCall', id: 'workflow-call', name: 'workflow_snapshot_get', arguments: {} },
+            ],
+            stopReason: 'toolUse',
+          },
+          'Both structured tool results were received.',
+        ],
+      },
+    },
+  })
+  await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+
+  const runtimeSessionId = 'pi-parallel-results-session'
+  const conversationId = 'pi-parallel-results-conversation'
+  const sessionPath = join(directory, 'session.json')
+  const create = runtime.send('create_session', {
+    conversationId,
+    runtimeSessionId,
+    payload: { sessionPath },
+  })
+  await runtime.waitFor((message) => message.requestId === create.id && message.type === 'session_created')
+
+  const runId = 'pi-parallel-results-run'
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId,
+    runId,
+    payload: {
+      text: 'List child agents and inspect the workflow in one turn.',
+      messages: [{ role: 'user', content: 'List child agents and inspect the workflow in one turn.' }],
+    },
+  })
+
+  const childListRequest = await runtime.waitFor((message) => (
+    message.kind === 'request'
+    && message.type === 'tool.execute'
+    && message.runId === runId
+    && message.payload?.tool === 'child_agent_list'
+  ))
+  const workflowRequest = await runtime.waitFor((message) => (
+    message.kind === 'request'
+    && message.type === 'tool.execute'
+    && message.runId === runId
+    && message.payload?.tool === 'workflow_snapshot_get'
+  ))
+  runtime.respond(childListRequest, 'tool.execute_completed', {
+    isError: false,
+    result: { agents: [{ id: 'fox-general' }, { id: 'fox-reviewer' }] },
+  })
+  runtime.respond(workflowRequest, 'tool.execute_completed', {
+    isError: false,
+    result: { workflow: { id: 'workflow-1', status: 'running' } },
+  })
+
+  await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
+  const session = JSON.parse(await readFile(sessionPath, 'utf8'))
+  const results = Object.fromEntries(session.messages
+    .filter((message) => message.role === 'toolResult')
+    .map((message) => [message.toolName, message]))
+
+  assert.deepEqual(JSON.parse(results.child_agent_list.content[0].text), {
+    agents: [{ id: 'fox-general' }, { id: 'fox-reviewer' }],
+  })
+  assert.deepEqual(JSON.parse(results.workflow_snapshot_get.content[0].text), {
+    workflow: { id: 'workflow-1', status: 'running' },
+  })
+})
+
+test('stops a run that repeats the same tool input while allowing unrestricted distinct tool counts', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-tool-budget-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const runtime = startRuntime()
+  context.after(() => runtime.close())
+
+  const initialize = runtime.send('initialize', {
+    payload: {
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+        fauxResponses: [{
+          content: [
+            { type: 'toolCall', id: 'budget-call-1', name: 'child_agent_list', arguments: {} },
+            { type: 'toolCall', id: 'budget-call-2', name: 'child_agent_list', arguments: {} },
+          ],
+          stopReason: 'toolUse',
+        }],
+      },
+    },
+  })
+  await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+
+  const runtimeSessionId = 'pi-tool-budget-session'
+  const conversationId = 'pi-tool-budget-conversation'
+  const create = runtime.send('create_session', {
+    conversationId,
+    runtimeSessionId,
+    payload: { sessionPath: join(directory, 'session.json') },
+  })
+  await runtime.waitFor((message) => message.requestId === create.id && message.type === 'session_created')
+
+  const runId = 'pi-tool-budget-run'
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId,
+    runId,
+    payload: {
+      text: 'Call both tools.',
+      messages: [{ role: 'user', content: 'Call both tools.' }],
+      runBudget: { maxIdenticalToolCalls: 1 },
+    },
+  })
+
+  const failure = await runtime.waitFor((message) => (
+    message.runId === runId && message.payload?.type === 'run.failed'
+  ))
+  assert.equal(failure.payload.code, 'runtime.repeated_tool_call')
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  assert.equal(runtime.messages.some((message) => (
+    message.runId === runId && message.payload?.type === 'run.completed'
+  )), false)
+})
+
+test('stops runaway web-search reformulation before it exhausts provider tokens', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-web-search-budget-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const runtime = startRuntime()
+  context.after(() => runtime.close())
+
+  const initialize = runtime.send('initialize', {
+    payload: {
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+        fauxResponses: [{
+          content: Array.from({ length: 7 }, (_, index) => ({
+            type: 'toolCall',
+            id: `web-search-${index + 1}`,
+            name: 'web_search',
+            arguments: { query: `distinct query ${index + 1}` },
+          })),
+          stopReason: 'toolUse',
+        }],
+      },
+    },
+  })
+  await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+
+  const runtimeSessionId = 'pi-web-search-budget-session'
+  const conversationId = 'pi-web-search-budget-conversation'
+  const create = runtime.send('create_session', {
+    conversationId,
+    runtimeSessionId,
+    payload: { sessionPath: join(directory, 'session.json') },
+  })
+  await runtime.waitFor((message) => message.requestId === create.id && message.type === 'session_created')
+
+  const runId = 'pi-web-search-budget-run'
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId,
+    runId,
+    payload: {
+      text: 'Keep reformulating the same search.',
+      messages: [{ role: 'user', content: 'Keep reformulating the same search.' }],
+    },
+  })
+
+  const failure = await runtime.waitFor((message) => (
+    message.runId === runId && message.payload?.type === 'run.failed'
+  ))
+  assert.equal(failure.payload.code, 'runtime.web_search_budget_exceeded')
 })
 
 test('records tool and prompt diagnostics while allowing a text-only run with no tools', async (context) => {
@@ -266,6 +520,7 @@ test('validates Execution Profile at startup and snapshots a side-effect-free sh
     runId,
     payload: {
       text: 'Analyze without side effects.',
+      projectContext: { projectRoot: directory },
       messages: [{ role: 'user', content: 'Analyze without side effects.' }],
       assistantPackage: { packageManifest: { allowedTools: ['read'] } },
     },

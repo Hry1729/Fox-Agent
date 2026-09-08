@@ -345,6 +345,7 @@ export interface ConversationSummary {
   title: string
   projectId: string | null
   projectRoot: string | null
+  permissionMode: ProjectRecord['permissionMode']
   status: string
   pinned?: boolean
   archived?: boolean
