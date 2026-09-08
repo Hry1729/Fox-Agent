@@ -180,6 +180,40 @@
       "title": "KernelEngineBatchCheckpoint",
       "type": "object"
     },
+    "KernelInitialModelInput": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Host-owned initial prompt snapshot, not a dispatch request or permission.\nA separate durable dispatch intent is required before invoking an engine.",
+      "properties": {
+        "messages": {
+          "items": true,
+          "type": "array"
+        },
+        "promptConfigHash": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "runId",
+        "turnId",
+        "promptConfigHash",
+        "messages"
+      ],
+      "title": "KernelInitialModelInput",
+      "type": "object"
+    },
     "KernelModelResponse": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,

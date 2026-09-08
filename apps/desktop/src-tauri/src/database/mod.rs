@@ -3,7 +3,7 @@ mod kernel_changes;
 mod models;
 mod repositories;
 
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 55;
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 56;
 pub use models::*;
 #[allow(unused_imports)]
 pub use repositories::{

@@ -443,6 +443,8 @@ Rust `KernelCoordinator::dispatch_stored_batch_with_worker` 是受控正式调�
 
 Host 校验响应的协议版本、类型、请求 ID、Run/Conversation/Session、批次及游标，拒绝超大帧、其他身份和非预期事件。模型响应仍经协调器同事务提交。配置内容已可持久恢复并用于受控批次派发；初始模型回合及默认桌面启动尚未接线，本入口不构成生产权威切换。
 
+共享 DTO `KernelInitialModelInput`（schemaVersion=1）定义 Host 拥有的初始上下文：`runId`、`turnId`、`promptConfigHash`、`messages`。v56 输入表在 Run 启动前冻结，读取时与模型配置在同一数据库事务校验；完整历史须以当前用户消息结束，不接受孤立工具结果、悬空工具调用或未知内容块，上限 1 MiB。此 DTO 不是新的 JSONL 请求，不授权模型派发；独立初始请求 Outbox、首响应协议与正式启动接线仍是下一阶段。
+
 ## 错误
 
 协议错误：`protocol.invalid_message`、`protocol.unknown_request`；Runtime 请求错误：`runtime.request_failed`；Pi 执行错误：`runtime.pi_failed`；Provider 错误：`provider.request_failed`。

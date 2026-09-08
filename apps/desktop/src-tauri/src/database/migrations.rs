@@ -6259,6 +6259,38 @@ END;
 "#;
 
 const CONVERSATION_TOOL_PERMISSION_SCHEMA_VERSION: i64 = 23;
+const MIGRATION_56: &str = r#"
+CREATE TABLE kernel_initial_inputs (
+    run_id TEXT PRIMARY KEY REFERENCES kernel_model_configs(run_id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+    turn_id TEXT NOT NULL,
+    input_json TEXT NOT NULL CHECK(json_valid(input_json)),
+    input_hash TEXT NOT NULL,
+    prompt_config_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TRIGGER kernel_initial_input_immutable BEFORE UPDATE ON kernel_initial_inputs
+BEGIN SELECT RAISE(ABORT, 'Kernel initial input is immutable'); END;
+CREATE TRIGGER kernel_initial_input_insert_guard BEFORE INSERT ON kernel_initial_inputs
+WHEN NOT EXISTS (
+    SELECT 1 FROM kernel_runs r JOIN kernel_model_configs c ON c.run_id=r.run_id
+    JOIN run_control_bindings b ON b.run_id=r.run_id
+    WHERE r.run_id=NEW.run_id AND r.state='created' AND r.last_event_seq=0
+      AND r.kernel_mode='authoritative' AND r.engine_id='pi'
+      AND b.authority='authoritative' AND b.engine_id='pi'
+      AND r.prompt_config_hash=NEW.prompt_config_hash AND c.config_hash=NEW.prompt_config_hash
+      AND json_extract(NEW.input_json,'$.runId')=NEW.run_id
+      AND json_extract(NEW.input_json,'$.turnId')=NEW.turn_id
+      AND json_extract(NEW.input_json,'$.promptConfigHash')=NEW.prompt_config_hash
+      AND json_extract(NEW.input_json,'$.schemaVersion')=NEW.schema_version
+      AND length(trim(NEW.turn_id))>0
+)
+BEGIN SELECT RAISE(ABORT, 'Kernel initial input must match frozen configuration before Run start'); END;
+CREATE TRIGGER kernel_initial_input_start_guard BEFORE UPDATE OF turn_id ON kernel_runs
+WHEN EXISTS (SELECT 1 FROM kernel_initial_inputs i WHERE i.run_id=NEW.run_id
+    AND (NEW.turn_id IS NULL OR i.turn_id<>NEW.turn_id))
+BEGIN SELECT RAISE(ABORT, 'Kernel turn differs from frozen initial input'); END;
+"#;
 const MIGRATION_55: &str = r#"
 CREATE TABLE kernel_model_configs (
     run_id TEXT PRIMARY KEY REFERENCES kernel_runs(run_id) ON DELETE CASCADE,
@@ -6382,6 +6414,7 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     )?;
     apply_migration(&transaction, 54, MIGRATION_54, now)?;
     apply_migration(&transaction, 55, MIGRATION_55, now)?;
+    apply_migration(&transaction, 56, MIGRATION_56, now)?;
     transaction.commit()
 }
 
@@ -11580,6 +11613,8 @@ mod tests {
                 execution_profile_id, prompt_config_hash, frozen_config_json, created_at)
              VALUES ('old-shadow','old-run','old-conversation','old-turn','pi','shadow',2,'manifest','permission','legacy','prompt','{}',1);
              DROP TABLE kernel_shadow_checkpoints;
+             DROP TABLE kernel_initial_inputs;
+             DROP TRIGGER kernel_initial_input_start_guard;
              DROP TABLE kernel_model_configs;
              DROP TABLE run_control_bindings;
              DELETE FROM schema_migrations WHERE version>=53;"

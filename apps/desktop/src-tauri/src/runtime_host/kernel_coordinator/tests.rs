@@ -33,6 +33,17 @@ fn fixture_with_model(clock: &TestClock, config: &crate::kernel_model_config::Ke
 }
 
 fn fixture_with_model_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>) -> (Database, PathBuf, String) {
+    fixture_with_initial_opt(clock, prompt_hash, model, false)
+}
+
+fn initial_input(run_id: &str, prompt_hash: &str) -> fox_engine_protocol::KernelInitialModelInput {
+    fox_engine_protocol::KernelInitialModelInput {
+        schema_version: 1, run_id: run_id.into(), turn_id: "turn-1".into(), prompt_config_hash: prompt_hash.into(),
+        messages: vec![json!({"role":"user","content":"初始问题：保留原文 😀"})],
+    }
+}
+
+fn fixture_with_initial_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool) -> (Database, PathBuf, String) {
     let root = std::env::temp_dir().join(format!("fox-coordinator-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("proof.txt"), "durable coordinator 中文 😀").unwrap();
@@ -95,6 +106,17 @@ fn fixture_with_model_opt(clock: &TestClock, prompt_hash: &str, model: Option<&c
     )
     .unwrap();
     if let Some(model) = model { db.freeze_kernel_model_config(&run_id, model).unwrap(); }
+    if initial {
+        let original = initial_input(&run_id, prompt_hash);
+        let mut wrong = original.clone(); wrong.prompt_config_hash = "wrong-model".into();
+        assert!(db.freeze_kernel_initial_input(&wrong).is_err());
+        wrong = original.clone(); wrong.run_id = "wrong-run".into();
+        assert!(db.freeze_kernel_initial_input(&wrong).is_err());
+        db.freeze_kernel_initial_input(&original).unwrap();
+        assert_eq!(db.kernel_initial_input(&run_id).unwrap(), original);
+        let (wrong_controller, wrong_effects) = RunController::start(&run_id, "wrong-turn", config.clone(), clock).unwrap();
+        assert!(db.kernel_commit_decision(&run_id, clock.now_wall_ms(), &wrong_controller.persist_command(&wrong_effects)).is_err());
+    }
     let (controller, effects) = RunController::start(&run_id, "turn-1", config, clock).unwrap();
     db.kernel_commit_decision(
         &run_id,
@@ -910,5 +932,82 @@ fn v54_model_snapshot_upgrade_preserves_existing_runs_without_backfilling() {
         assert_eq!(db.kernel_rehydrate(&run_id).unwrap().unwrap().state, kernel::RunState::Running);
         assert!(db.kernel_model_config(&run_id).unwrap_err().contains("missing"));
         assert!(db.freeze_kernel_model_config(&run_id, &config).is_err());
+    }
+}
+
+#[test]
+fn initial_input_reopens_exactly_and_does_not_follow_current_messages() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let (db, root, run_id) = fixture_with_initial_opt(&clock, &config.hash().unwrap(), Some(&config), true);
+    let original = initial_input(&run_id, &config.hash().unwrap());
+    db.freeze_kernel_initial_input(&original).unwrap();
+    let mut changed = original.clone();
+    changed.messages[0]["content"] = json!("Changed current conversation");
+    assert!(db.freeze_kernel_initial_input(&changed).is_err());
+    drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    assert_eq!(db.kernel_initial_input(&run_id).unwrap(), original);
+    assert_eq!(db.kernel_rehydrate(&run_id).unwrap().unwrap().state, kernel::RunState::Running);
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    assert!(connection.execute("UPDATE kernel_initial_inputs SET input_json=input_json WHERE run_id=?1", [&run_id]).is_err());
+    assert!(connection.execute("UPDATE kernel_runs SET turn_id='different-turn' WHERE run_id=?1", [&run_id]).is_err());
+    // Snapshot storage must not claim or create a model dispatch.
+    let count: i64 = connection.query_row("SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND status='leased'", [&run_id], |row| row.get(0)).unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn initial_input_missing_or_changed_configuration_never_backfills_after_start() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let (db, root, run_id) = fixture_with_model(&clock, &config);
+    assert!(db.kernel_initial_input(&run_id).unwrap_err().contains("missing"));
+    assert!(db.freeze_kernel_initial_input(&initial_input(&run_id, &config.hash().unwrap())).is_err());
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let count: i64 = connection.query_row("SELECT COUNT(*) FROM kernel_initial_inputs", [], |row| row.get(0)).unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn initial_input_tampering_is_rejected_without_exposing_message_content() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let (db, root, run_id) = fixture_with_initial_opt(&clock, &config.hash().unwrap(), Some(&config), true);
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let original = initial_input(&run_id, &config.hash().unwrap());
+    let encoded = serde_json::to_string(&original).unwrap();
+    let original_hash = format!("sha256:{}", hex::encode(Sha256::digest(encoded.as_bytes())));
+    connection.execute_batch("DROP TRIGGER kernel_initial_input_immutable").unwrap();
+    for (column, changed) in [("input_json", "{}"), ("input_hash", "wrong"), ("turn_id", "wrong"), ("prompt_config_hash", "wrong")] {
+        connection.execute(&format!("UPDATE kernel_initial_inputs SET {column}=?1 WHERE run_id=?2"), rusqlite::params![changed,run_id]).unwrap();
+        let error = db.kernel_initial_input(&run_id).unwrap_err();
+        assert!(!error.contains("初始问题"));
+        assert!(db.freeze_kernel_initial_input(&original).is_err());
+        connection.execute("UPDATE kernel_initial_inputs SET input_json=?1,input_hash=?2,turn_id=?3,prompt_config_hash=?4 WHERE run_id=?5",
+            rusqlite::params![encoded,original_hash,original.turn_id,original.prompt_config_hash,run_id]).unwrap();
+    }
+    connection.execute_batch("DROP TRIGGER kernel_model_config_immutable").unwrap();
+    connection.execute("UPDATE kernel_model_configs SET config_hash='wrong' WHERE run_id=?1", [&run_id]).unwrap();
+    assert!(db.kernel_initial_input(&run_id).is_err());
+    assert!(db.freeze_kernel_initial_input(&original).is_err());
+}
+
+#[test]
+fn v55_initial_input_upgrade_preserves_runs_without_inventing_old_context() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let (db, root, run_id) = fixture_with_model(&clock, &config);
+    let binding = db.run_control_binding(&run_id).unwrap().unwrap();
+    drop(db);
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    connection.execute_batch("DROP TABLE kernel_initial_inputs; DROP TRIGGER kernel_initial_input_start_guard; DELETE FROM schema_migrations WHERE version=56").unwrap();
+    drop(connection);
+    for _ in 0..2 {
+        let db = Database::open(root.join("facts.db")).unwrap();
+        assert_eq!(db.run_control_binding(&run_id).unwrap().unwrap(), binding);
+        assert_eq!(db.kernel_model_config(&run_id).unwrap(), config);
+        assert!(db.kernel_initial_input(&run_id).unwrap_err().contains("missing"));
+        assert!(db.freeze_kernel_initial_input(&initial_input(&run_id, &config.hash().unwrap())).is_err());
     }
 }

@@ -68,7 +68,7 @@ fn model_response_cannot_claim_completion_with_tools_or_unfinished_output() {
     assert!(response.validate().is_err());
 }
 
-fn validate_checkpoint_parts(history: &[Value], assistant: &Value) -> Result<(), String> {
+fn validate_history(history: &[Value]) -> Result<(), String> {
     let mut pending = std::collections::HashMap::new();
     for message in history {
         match message["role"].as_str() {
@@ -96,6 +96,11 @@ fn validate_checkpoint_parts(history: &[Value], assistant: &Value) -> Result<(),
         }
     }
     if !pending.is_empty() { return Err("incomplete historical tool batch".into()); }
+    Ok(())
+}
+
+fn validate_checkpoint_parts(history: &[Value], assistant: &Value) -> Result<(), String> {
+    validate_history(history)?;
     if assistant["role"] != "assistant" || assistant["stopReason"] != "toolUse" { return Err("missing original assistant tool proposal".into()); }
     let content = assistant["content"].as_array().ok_or("missing assistant content")?;
     let calls = content.iter().filter(|block| block["type"] == "toolCall").collect::<Vec<_>>();
@@ -109,6 +114,55 @@ fn validate_checkpoint_parts(history: &[Value], assistant: &Value) -> Result<(),
         }
     }
     Ok(())
+}
+
+/// Host-owned initial prompt snapshot, not a dispatch request or permission.
+/// A separate durable dispatch intent is required before invoking an engine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelInitialModelInput {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub turn_id: String,
+    pub prompt_config_hash: String,
+    pub messages: Vec<Value>,
+}
+
+impl KernelInitialModelInput {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != 1 || self.run_id.trim().is_empty() || self.turn_id.trim().is_empty()
+            || self.prompt_config_hash.trim().is_empty() || self.messages.is_empty()
+            || serde_json::to_vec(self).map_err(|_| "invalid initial input")?.len() > 1_048_576 {
+            return Err("invalid Kernel initial input identity or size".into());
+        }
+        validate_history(&self.messages)?;
+        if self.messages.last().is_none_or(|message| message["role"] != "user") {
+            return Err("Kernel initial input must end with the current user message".into());
+        }
+        // Accept only adapter-supported blocks. In particular a user message
+        // cannot smuggle tool calls/results into the model's input history.
+        for message in &self.messages {
+            if message["role"] == "assistant" {
+                let calls = message["content"].as_array().is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "toolCall"));
+                if let Some(reason) = message.get("stopReason") {
+                    if reason != if calls { "toolUse" } else { "stop" } {
+                        return Err("unfinished or inconsistent historical assistant message".into());
+                    }
+                }
+            }
+            if let Some(blocks) = message["content"].as_array() {
+                for block in blocks {
+                    let valid = block["type"] == "text" && block["text"].is_string()
+                        || message["role"] != "assistant" && block["type"] == "image"
+                            && block["data"].is_string() && block["mimeType"].is_string()
+                        || message["role"] == "assistant" && block["type"] == "thinking" && block["thinking"].is_string()
+                        || message["role"] == "assistant" && block["type"] == "toolCall" && block["arguments"].is_object();
+                    if !valid { return Err("unsupported Kernel initial input content".into()); }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn validate_result_content(result: &Value) -> Result<(), String> {
@@ -200,6 +254,38 @@ impl KernelBatchResumeFrame {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn initial_input_requires_current_user_and_complete_supported_history() {
+        let good = KernelInitialModelInput {
+            schema_version: 1, run_id: "run".into(), turn_id: "turn".into(), prompt_config_hash: "hash".into(),
+            messages: vec![json!({"role":"user","content":"中文 😀"})],
+        };
+        good.validate().unwrap();
+        assert_eq!(serde_json::from_value::<KernelInitialModelInput>(serde_json::to_value(&good).unwrap()).unwrap(), good);
+        for messages in [
+            vec![], vec![json!({"role":"assistant","content":"not a user"})],
+            vec![json!({"role":"system","content":"override"}),good.messages[0].clone()],
+            vec![json!({"role":"assistant","content":[{"type":"toolCall","id":"t","name":"read","arguments":{}}]}),good.messages[0].clone()],
+            vec![json!({"role":"toolResult","toolCallId":"t","toolName":"read","isError":false,"content":[]}),good.messages[0].clone()],
+            vec![json!({"role":"user","content":[{"type":"toolCall","id":"t","name":"read","arguments":{}}]})],
+            vec![json!({"role":"user","content":[{"type":"unknown"}]})],
+            vec![json!({"role":"assistant","stopReason":"length","content":[]}),good.messages[0].clone()],
+        ] {
+            let mut bad = good.clone(); bad.messages = messages;
+            assert!(bad.validate().is_err());
+        }
+        let mut complete = good.clone();
+        complete.messages = vec![good.messages[0].clone(),
+            json!({"role":"assistant","content":[{"type":"toolCall","id":"t","name":"read","arguments":{}}]}),
+            json!({"role":"toolResult","toolCallId":"t","toolName":"read","isError":false,"content":[{"type":"text","text":"result"}]}),
+            json!({"role":"user","content":[{"type":"text","text":"continue"},{"type":"image","data":"AA==","mimeType":"image/png"}]})];
+        complete.validate().unwrap();
+        complete.messages[0]["content"] = json!("x".repeat(1_048_577));
+        assert!(complete.validate().is_err());
+        let mut wire = serde_json::to_value(&good).unwrap(); wire["apiKey"] = json!("not allowed");
+        assert!(serde_json::from_value::<KernelInitialModelInput>(wire).is_err());
+    }
 
     #[test]
     fn durable_batch_resume_roundtrips_and_never_accepts_unsettled_or_changed_tools() {

@@ -4,6 +4,17 @@ import { SCHEMA_BUNDLE, PROTOCOL_NAME, PROTOCOL_VERSION, RUNTIME_TOOL_CATALOG, v
 import { createCapabilityManifest, validateCapabilityManifest } from '../../../services/agent-runtime/src/runtime-contract.mjs'
 import { createEnvelope } from '../../../services/agent-runtime/src/protocol.mjs'
 
+test('initial input snapshot schema preserves identity and rejects extra control fields', () => {
+  const input = { schemaVersion: 1, runId: 'r', turnId: 't', promptConfigHash: 'hash', messages: [{ role: 'user', content: '中文 😀' }] }
+  assert.deepEqual(validateWireValue('KernelInitialModelInput', JSON.parse(JSON.stringify(input))), [])
+  assert.ok(validateWireValue('KernelInitialModelInput', { ...input, apiKey: 'not-a-snapshot-field' }).length)
+  assert.ok(validateWireValue('KernelInitialModelInput', { ...input, messages: 'not-an-array' }).length)
+  const { turnId, ...missingTurn } = input
+  assert.ok(validateWireValue('KernelInitialModelInput', missingTurn).length)
+  // History completeness and current-user semantics are checked in Rust;
+  // schema validation alone never authorizes an engine dispatch.
+})
+
 test('the actual Node request serializes to the Rust-generated wire schema', () => {
   const request = createEnvelope('request', 'run.start', { runId: 'r', payload: { text: 'hello' } })
   assert.equal(request.protocol, PROTOCOL_NAME)

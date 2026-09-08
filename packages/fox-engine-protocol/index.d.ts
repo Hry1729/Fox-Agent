@@ -4,6 +4,7 @@ export type KernelSettledToolResult = { "canonicalInput": unknown; "result": unk
 export type KernelSettledToolState = "completed" | "failed"
 export type KernelBatchResumeFrame = { "assistantMessage": unknown; "batchId": string; "checkpointSeq": number; "history": Array<unknown>; "idempotencyKey": string; "schemaVersion": number; "tools": Array<KernelSettledToolResult>; "turnId": string; }
 export type KernelEngineBatchCheckpoint = { "assistantMessage": unknown; "batchId": string; "history": Array<unknown>; "schemaVersion": number; }
+export type KernelInitialModelInput = { "messages": Array<unknown>; "promptConfigHash": string; "runId": string; "schemaVersion": number; "turnId": string; }
 export type KernelModelResponse = { "assistantMessage": unknown; "batchId": string; "checkpointSeq": number; "runId": string; "schemaVersion": number; "turnId": string; }
 export type KernelToolSnapshot = { "approvalState"?: (string | null); "batchId": string; "sourceOrder": number; "state": string; "tool": string; "toolCallId": string; }
 export type KernelRunSnapshot = { "approvalDeadlineWallMs"?: (number | null); "compactions": number; "engineId": string; "lastEventSeq": string; "providerAttempts": number; "retryDueWallMs"?: (number | null); "runId": string; "runningElapsedMs": number; "schemaVersion": number; "state": string; "terminalWritten": boolean; "tools": Array<KernelToolSnapshot>; "turnAttempts": number; "turnId": string; }
