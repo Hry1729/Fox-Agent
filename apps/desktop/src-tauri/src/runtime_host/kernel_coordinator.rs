@@ -20,6 +20,11 @@ fn checkpoint_hash(value: &Value) -> String {
     )
 }
 
+enum DecisionLease<'a> {
+    Tool(&'a str, &'a str),
+    Batch(&'a str, &'a str),
+}
+
 pub(crate) struct KernelCoordinator<'a> {
     database: &'a Database,
     clock: &'a dyn Clock,
@@ -74,7 +79,7 @@ impl<'a> KernelCoordinator<'a> {
     /// A failed decision transaction never leaves speculative state in memory.
     fn apply(
         &self,
-        lease: Option<(&str, &str)>,
+        lease: Option<DecisionLease<'_>>,
         action: impl FnOnce(&mut RunController, ClockReading) -> Result<Vec<Effect>, KernelError>,
     ) -> Result<(), String> {
         // Re-read the immutable, hash-verified resource binding on each entry.
@@ -94,17 +99,18 @@ impl<'a> KernelCoordinator<'a> {
         let now = self.clock.read();
         let effects = action(&mut candidate, now).map_err(|error| error.to_string())?;
         let command = candidate.persist_command(&effects);
-        if let Some((tool_call_id, owner)) = lease {
-            self.database.kernel_commit_tool_result(
+        match lease {
+            Some(DecisionLease::Tool(tool_call_id, owner)) => self.database.kernel_commit_tool_result(
                 &self.binding.run_id,
                 now.wall_ms,
                 &command,
                 tool_call_id,
                 owner,
-            )?;
-        } else {
-            self.database
-                .kernel_commit_decision(&self.binding.run_id, now.wall_ms, &command)?;
+            )?,
+            Some(DecisionLease::Batch(batch_id, owner)) => self.database.kernel_commit_batch_response(
+                &self.binding.run_id, now.wall_ms, &command, batch_id, owner,
+            )?,
+            None => self.database.kernel_commit_decision(&self.binding.run_id, now.wall_ms, &command)?,
         }
         // Persist cancellation first, then signal every issued execution token.
         for effect in &effects {
@@ -331,13 +337,13 @@ impl<'a> KernelCoordinator<'a> {
         Ok(frame)
     }
 
-    /// Deliver a committed barrier to the engine. The callback acknowledges
-    /// acceptance, not a Run terminal; the next model event must still settle
-    /// the persisted request budget through a Kernel decision.
+    /// Deliver a committed barrier, then atomically persist the original model
+    /// response with its terminal or next-batch decision and lease completion.
     pub(crate) fn dispatch_batch(
         &self, batch_id: &str, owner: &str,
+        policy: &dyn PolicyDecisionPort,
         deliver: impl FnOnce(&RunControlBinding, &fox_engine_protocol::KernelBatchResumeFrame,
-            &kernel::CancellationToken) -> Result<(), String>,
+            &kernel::CancellationToken) -> Result<fox_engine_protocol::KernelModelResponse, String>,
     ) -> Result<(), String> {
         let frame = self.prepare_stored_batch_resume(batch_id)?;
         let token = self.cancellation.run_token(&self.binding.run_id)?;
@@ -358,11 +364,50 @@ impl<'a> KernelCoordinator<'a> {
         }
         token.check()?;
         // No lock is held across engine I/O. Uncertain failures retain the lease.
-        deliver(&self.binding, &frame, &token)?;
+        let response = deliver(&self.binding, &frame, &token)?;
+        response.validate()?;
+        if response.run_id != self.binding.run_id || response.turn_id != frame.turn_id
+            || response.batch_id != frame.batch_id || response.checkpoint_seq != frame.checkpoint_seq {
+            return Err("model response belongs to another batch delivery".into());
+        }
         self.tick()?;
         token.check()?;
-        self.database.kernel_outbox_complete(&self.binding.run_id,
-            &kernel::batch_delivery_effect_key(batch_id), owner)
+        let response_json = serde_json::to_string(&response).map_err(|error| error.to_string())?;
+        // Node supplies only the new assistant message. Preserve the original
+        // history and reconstruct prior results exclusively from durable facts.
+        let next = if response.assistant_message["stopReason"] == "toolUse" {
+            let mut history = frame.history.clone();
+            history.push(frame.assistant_message.clone());
+            history.extend(frame.tools.iter().map(|tool| serde_json::json!({
+                "role":"toolResult", "toolCallId":tool.tool_call_id, "toolName":tool.tool,
+                "content":tool.result["content"], "details":{},
+                "isError":tool.state == fox_engine_protocol::KernelSettledToolState::Failed,
+                "timestamp":frame.assistant_message["timestamp"].as_i64().unwrap_or(0),
+            })));
+            let checkpoint = fox_engine_protocol::KernelEngineBatchCheckpoint {
+                schema_version: 1, batch_id: format!("model-batch:{}", frame.checkpoint_seq),
+                history, assistant_message: response.assistant_message,
+            };
+            checkpoint.validate()?;
+            Some(checkpoint)
+        } else { None };
+        self.apply(Some(DecisionLease::Batch(batch_id, owner)), |controller, now| {
+            let mut effects = vec![controller.record_batch_model_response(batch_id, &response_json)?];
+            if let Some(checkpoint) = next {
+                let value = serde_json::to_value(&checkpoint).map_err(|error| KernelError::FailClosed(error.to_string()))?;
+                let stored = serde_json::json!({"hash":checkpoint_hash(&value),"value":value});
+                let calls = checkpoint.assistant_message["content"].as_array().unwrap().iter()
+                    .filter(|block| block["type"] == "toolCall").enumerate().map(|(source_order, call)| ToolCallRequest {
+                        tool_call_id:call["id"].as_str().unwrap().into(), tool:call["name"].as_str().unwrap().into(),
+                        canonical_input_json:call["arguments"].to_string(), source_order,
+                    }).collect();
+                effects.extend(controller.propose_tool_batch(&checkpoint.batch_id, calls, policy, now.monotonic_ms, now.wall_ms)?);
+                effects.push(controller.checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?);
+            } else {
+                effects.extend(controller.terminate(kernel::RunOutcome::Completed));
+            }
+            Ok(effects)
+        })
     }
 
     /// Dispatch exactly one durable intent. Err after lease is uncertain and is
@@ -426,7 +471,7 @@ impl<'a> KernelCoordinator<'a> {
         token.check()?;
         let (succeeded, result) = execute(&self.binding, &leased, &token)?;
         self.tick()?;
-        self.apply(Some((tool_call_id, owner)), |controller, _| {
+        self.apply(Some(DecisionLease::Tool(tool_call_id, owner)), |controller, _| {
             controller.tool_settled(tool_call_id, succeeded, &result.to_string())
         })?;
         Ok(true)

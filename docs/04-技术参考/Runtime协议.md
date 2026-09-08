@@ -42,6 +42,24 @@ stdout 只能输出 Envelope；日志必须写 stderr。Host 校验 protocol/ver
 
 ## Host 到 Runtime
 
+### 冻结控制与受控 Kernel 交接
+
+`RunControlBinding` 冻结 Run/Conversation、引擎、权威模式、执行 Profile、权限内容及哈希、只读执行位置和四类时间预算。Pi Legacy `prompt` 只接受 Legacy/Pi；显式空值、损坏绑定或不同身份拒绝。仅缺省字段保留旧 v1 兼容。
+
+Kernel 的受控适配入口使用下列共享 DTO；它们尚不是默认 sidecar 命令，不改变上文 Envelope 版本或默认 Legacy 路径：
+
+| DTO | 权威内容与约束 |
+|---|---|
+| `KernelEngineBatchCheckpoint` | 原始历史与 assistant 工具提议，同提议、审批和工具事实一次落库并校验内容哈希 |
+| `KernelBatchResumeFrame` | 已落库的整批结果；绑定 Turn/Batch、事件游标和交付幂等键，结果按 source order 排列，缺失或未终结结果拒绝 |
+| `KernelModelResponse` | 同一 Run/Turn/Batch 和游标对应的新 assistant 消息；只接受完整回答或合法工具提议，不允许 Node 提供替换历史或下一批身份 |
+
+受控 Pi 会话关闭自动重试和自动压缩，只暴露提议用工具描述而无资源执行器；公开的、被等待的 `message_end` 边界在任何工具准备之前停止该回合。Host 从原始检查点和持久结果构造下一批历史，重新决定权限和审批。交付领取与模型超时起点同事务提交；模型响应、下一批或完成决定、交付完成也同事务提交。已发送但结果不确定的交付不能自动重播。
+
+上述路径已用于真实 Pi 子进程与 SQLite/Rust 受控联测，不代表默认 `resume_session` 已恢复待审批工具，也不代表 Tauri UI 或生产切权已经验收。
+
+### 默认命令
+
 | type | 必需上下文 | 说明 | 响应 |
 |---|---|---|---|
 | `initialize` | payload.modelService + executionProfile + executionStrategy | 模型、能力与受支持执行策略初始化 | `ready` |
@@ -67,7 +85,7 @@ Runtime 隐藏只减少模型暴露面，不构成权限事实。旧客户端、
 ## Runtime 到 Host 的请求
 
 - `tool.preflight`：只接受 canonical `execution=runtime / approval=preflight` 的工具，校验只读工具路径与权限。
-- `tool.execute`：只接受 canonical `execution=host` 的工具，执行附件、写入、命令、通用 Host 能力、知识、MCP、A0/A1 工作闭环、持久只读 Graph 或 A5 Child Run 工具。
+- `tool.execute`：常规接受 canonical `execution=host` 的工具，执行附件、写入、命令、通用 Host 能力、知识、MCP、A0/A1 工作闭环、持久只读 Graph 或 A5 Child Run 工具。仅当 Run 冻结 `readOnlyExecutor=rust` 时，另允许将 canonical 只读工具交 Rust Resource Gateway；Host 校验预检规范化参数与不可变原始参数一致，失败不回退 Node。
 
 Host 返回 `tool.preflight_allowed/blocked` 或 `tool.execute_completed/failed`，并使用原请求 `requestId` 关联。两个请求以及全部 `runtime_event` 在处理前都必须携带非空 `conversationId/runId/runtimeSessionId`；Host 将三者绑定到当前 Worker 的 conversation、active run、runtime session，并从 DB 核对 `runId` 的权威会话归属。任何不匹配在非 Shadow 路径 fail-closed，Proposal 的 conversation 只能从 DB 派生，不能采用 Runtime 自报值。工具生命周期事件还必须携带非空 `tool`，先复核同一 Profile/Manifest canonical tuple，再重验 delegated、Assistant 与 Expert scope。匹配 Host-owned ToolCall 的 Runtime lifecycle echo 仍作为原始 RunEvent 保留，但 Event projector 对它 no-op，不能覆盖 Host 已持久化的 status/result/error。
 

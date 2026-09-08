@@ -7,18 +7,72 @@ import { RUNTIME_TOOL_CATALOG, validateWireValue } from '../../../packages/fox-e
 
 const knownTools = new Set(RUNTIME_TOOL_CATALOG.map(tool => tool.name))
 const deliveries = new WeakMap()
+const proposalToolsBySession = new WeakMap()
 const fail = message => { throw new Error(`Invalid Kernel batch resume: ${message}`) }
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const nonempty = value => typeof value === 'string' && value.trim().length > 0
 
-function canonical(value) {
+function canonical(value, omitUndefined = false) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value
   if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (Array.isArray(value)) return value.map(canonical)
-  if (record(value)) return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]))
+  if (Array.isArray(value)) return value.map(item => canonical(item, omitUndefined))
+  if (record(value)) return Object.fromEntries(Object.keys(value).sort()
+    .filter(key => !omitUndefined || value[key] !== undefined).map(key => [key, canonical(value[key], omitUndefined)]))
   fail('non-JSON value')
 }
 const sameJson = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b))
+
+// Advertise schemas without installing a Resource executor. The public event
+// boundary below stops the disposable engine before argument preparation or
+// any tool callback. Even a broken boundary cannot execute a local resource.
+export function installKernelProposalTools(session, definitions) {
+  if (session?.isIdle !== true || !Array.isArray(session.agent?.state?.tools)
+      || session.agent.state.tools.length || typeof session.agent.subscribe !== 'function'
+      || typeof session.agent.abort !== 'function') fail('proposal tools require an empty idle public Pi adapter')
+  if (!Array.isArray(definitions) || definitions.length > 64) fail('invalid proposal tool definitions')
+  const names = new Set()
+  const tools = definitions.map(definition => {
+    if (!knownTools.has(definition?.name) || names.has(definition.name) || !nonempty(definition.description)
+        || !record(definition.parameters) || definition.parameters.type !== 'object') fail('invalid proposal tool schema')
+    names.add(definition.name)
+    const parameters = canonical(definition.parameters)
+    if (Buffer.byteLength(JSON.stringify(parameters), 'utf8') > 131_072) fail('proposal schema is too large')
+    return Object.freeze({ name: definition.name, label: definition.name, description: definition.description,
+      parameters, executionMode: 'parallel', execute: async () => { fail('proposal-only engine has no resource executor') } })
+  })
+  proposalToolsBySession.set(session, tools)
+  session.agent.state.tools = tools
+}
+
+export function prepareKernelModelResponse(assistantMessage, prepared) {
+  // Pi uses undefined for absent optional metadata. Omit those object fields
+  // as JSON transport does, but never repair non-JSON proposed arguments.
+  for (const block of assistantMessage?.content ?? []) {
+    if (block?.type === 'toolCall') canonical(block.arguments)
+  }
+  assistantMessage = canonical(assistantMessage, true)
+  const response = { schemaVersion: 1, runId: prepared.runId, turnId: prepared.turnId,
+    batchId: prepared.batchId, checkpointSeq: prepared.checkpointSeq, assistantMessage }
+  canonical(response)
+  if (Buffer.byteLength(JSON.stringify(response), 'utf8') > 1_048_576) fail('model response exceeds protocol size limit')
+  const errors = validateWireValue('KernelModelResponse', response)
+  if (errors.length) fail(errors.join('; '))
+  if (!nonempty(response.runId) || !nonempty(response.turnId) || !nonempty(response.batchId) || !Number.isSafeInteger(response.checkpointSeq) || response.checkpointSeq < 1
+      || assistantMessage?.role !== 'assistant' || !Array.isArray(assistantMessage.content)) fail('invalid model response')
+  if (assistantMessage.stopReason === 'toolUse') {
+    const calls = assistantMessage.content.filter(block => block?.type === 'toolCall')
+    const ids = new Set()
+    if (!calls.length || calls.length > 64) fail('invalid next tool batch size')
+    for (const call of calls) {
+      if (!nonempty(call.id) || ids.has(call.id) || !knownTools.has(call.name) || !record(call.arguments)) fail('invalid next tool proposal')
+      ids.add(call.id)
+    }
+  } else if (assistantMessage.stopReason !== 'stop' || assistantMessage.content.some(block =>
+    !(block?.type === 'text' && typeof block.text === 'string' || block?.type === 'thinking' && typeof block.thinking === 'string'))) {
+    fail('model continuation has no completed response')
+  }
+  return structuredClone(response)
+}
 
 function assertCompleteHistory(history) {
   const pending = new Map()
@@ -100,7 +154,8 @@ export function prepareKernelBatchResume(request, identity) {
   // All results were checked before the normal provider projection; no synthetic
   // recovery failures may be inserted to fill a missing result here.
   const messages = sanitizeProviderHistory(structuredClone([...frame.history, assistant, ...results]))
-  return { messages, idempotencyKey: frame.idempotencyKey, batchId: frame.batchId, checkpointSeq: frame.checkpointSeq }
+  return { messages, runId: request.runId, turnId: frame.turnId,
+    idempotencyKey: frame.idempotencyKey, batchId: frame.batchId, checkpointSeq: frame.checkpointSeq }
 }
 
 export async function resumePiKernelBatch(session, request, identity, signal) {
@@ -109,9 +164,9 @@ export async function resumePiKernelBatch(session, request, identity, signal) {
   if (!signal || typeof signal.addEventListener !== 'function') fail('missing Host cancellation signal')
   if (signal.aborted) fail('Host cancelled the resume')
   if (session.isIdle !== true || session.state?.isStreaming || session.agent.signal) fail('session is already running')
-  // Until the authoritative next-batch bridge is installed, this handoff may
-  // continue model output but cannot expose any local tool executor to Pi.
-  if (!Array.isArray(session.agent.state.tools) || session.agent.state.tools.length) fail('replacement session must not retain executable local tools')
+  const installed = proposalToolsBySession.get(session) ?? []
+  if (!Array.isArray(session.agent.state.tools) || session.agent.state.tools.length !== installed.length
+      || session.agent.state.tools.some((tool, index) => tool !== installed[index])) fail('replacement session must not retain executable local tools')
   const settings = session.settingsManager
   if (settings?.getRetryEnabled?.() !== false || settings?.getRetrySettings?.().maxRetries !== 0
       || settings?.getProviderRetrySettings?.().maxRetries !== 0 || settings?.getCompactionEnabled?.() !== false) {
@@ -133,7 +188,19 @@ export async function resumePiKernelBatch(session, request, identity, signal) {
   }
   signal.addEventListener('abort', abort, { once: true })
   const timer = setTimeout(() => { timedOut = true; abort() }, request.payload.controlBinding.budgets.modelRequestMs)
+  let proposed
+  const stopMarker = `fox-kernel-proposal-boundary:${request.runId}:${prepared.idempotencyKey}`
+  let unsubscribe
   try {
+  unsubscribe = typeof session.agent.subscribe === 'function' ? session.agent.subscribe(event => {
+    if (event.type !== 'message_end' || event.message?.role !== 'assistant'
+        || event.message.stopReason !== 'toolUse' && !event.message.content?.some?.(block => block?.type === 'toolCall')) return
+    proposed = prepareKernelModelResponse(event.message, prepared)
+    // Throwing from this awaited public event prevents even tool preparation.
+    // Do not await session.abort() here: it waits on the same event listener.
+    session.agent.abort()
+    throw new Error(stopMarker)
+  }) : undefined
     // Pi 0.84's documented public state setter copies the message array.
     session.agent.state.messages = prepared.messages
     await session.agent.continue()
@@ -142,13 +209,18 @@ export async function resumePiKernelBatch(session, request, identity, signal) {
     if (timedOut) fail('frozen model request deadline exceeded')
     if (signal.aborted) fail('Host cancelled the resume')
     const final = session.agent.state.messages.at(-1)
-    if (final?.role !== 'assistant' || !['stop', 'length'].includes(final.stopReason)
-        || !Array.isArray(final.content) || final.content.some(block => block?.type === 'toolCall')) {
+    if (proposed) {
+      if (final?.stopReason !== 'aborted' || final.errorMessage !== stopMarker) fail('proposal boundary did not stop the engine')
+      return { idempotencyKey: prepared.idempotencyKey, checkpointSeq: prepared.checkpointSeq, response: proposed }
+    }
+    if (final?.role !== 'assistant' || final.stopReason !== 'stop') {
       fail(`model continuation has no completed response (${final?.stopReason ?? final?.role ?? 'missing'})`)
     }
-    return { idempotencyKey: prepared.idempotencyKey, checkpointSeq: prepared.checkpointSeq }
+    const response = prepareKernelModelResponse(final, prepared)
+    return { idempotencyKey: prepared.idempotencyKey, checkpointSeq: prepared.checkpointSeq, response }
   } finally {
     clearTimeout(timer)
+    unsubscribe?.()
     signal.removeEventListener('abort', abort)
   }
 }

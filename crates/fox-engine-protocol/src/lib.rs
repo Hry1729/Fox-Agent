@@ -320,7 +320,8 @@ pub fn schema_bundle() -> Value {
             "RuntimeCapabilityManifest": schemars::schema_for!(RuntimeCapabilityManifest),
             "RunControlBinding": schemars::schema_for!(RunControlBinding),
             "KernelBatchResumeFrame": schemars::schema_for!(KernelBatchResumeFrame),
-            "KernelEngineBatchCheckpoint": schemars::schema_for!(KernelEngineBatchCheckpoint)
+            "KernelEngineBatchCheckpoint": schemars::schema_for!(KernelEngineBatchCheckpoint),
+            "KernelModelResponse": schemars::schema_for!(KernelModelResponse)
         },
         "toolContracts": TOOL_CONTRACTS.iter().map(|t| serde_json::json!({
             "name": t.0, "category": t.1, "execution": t.2, "approval": t.3

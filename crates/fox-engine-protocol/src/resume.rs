@@ -16,6 +16,58 @@ pub struct KernelEngineBatchCheckpoint {
     pub assistant_message: Value,
 }
 
+/// One model response to an identified, durable batch delivery. History and
+/// the next batch identity remain Host-owned and are never supplied by Node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelModelResponse {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub turn_id: String,
+    pub batch_id: String,
+    pub checkpoint_seq: u64,
+    pub assistant_message: Value,
+}
+
+impl KernelModelResponse {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != 1 || self.run_id.trim().is_empty() || self.turn_id.trim().is_empty() || self.batch_id.trim().is_empty()
+            || self.checkpoint_seq == 0 || self.checkpoint_seq > 9_007_199_254_740_991
+            || serde_json::to_vec(self).map_err(|error| error.to_string())?.len() > 1_048_576 {
+            return Err("invalid Kernel model response identity or size".into());
+        }
+        let message = &self.assistant_message;
+        if message["stopReason"] == "toolUse" { return validate_checkpoint_parts(&[], message); }
+        if message["role"] != "assistant" || message["stopReason"] != "stop" {
+            return Err("model response is neither a completed answer nor a tool proposal".into());
+        }
+        let content = message["content"].as_array().ok_or("missing model response content")?;
+        if content.iter().any(|block| !(block["type"] == "text" && block["text"].is_string()
+            || block["type"] == "thinking" && block["thinking"].is_string())) {
+            return Err("invalid completed model response content".into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn model_response_cannot_claim_completion_with_tools_or_unfinished_output() {
+    let mut response = KernelModelResponse {
+        schema_version: 1, run_id: "run".into(), turn_id: "turn".into(), batch_id: "batch".into(), checkpoint_seq: 8,
+        assistant_message: serde_json::json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"done"}]}),
+    };
+    assert!(response.validate().is_ok());
+    response.assistant_message["stopReason"] = serde_json::json!("length");
+    assert!(response.validate().is_err());
+    response.assistant_message = serde_json::json!({"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"next","name":"read","arguments":{"path":"next.txt"}}]});
+    assert!(response.validate().is_ok());
+    response.assistant_message["stopReason"] = serde_json::json!("stop");
+    assert!(response.validate().is_err());
+    response.checkpoint_seq = 0;
+    assert!(response.validate().is_err());
+}
+
 fn validate_checkpoint_parts(history: &[Value], assistant: &Value) -> Result<(), String> {
     let mut pending = std::collections::HashMap::new();
     for message in history {

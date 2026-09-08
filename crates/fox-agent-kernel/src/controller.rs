@@ -1541,6 +1541,21 @@ impl RunController {
         }))])
     }
 
+    pub fn record_batch_model_response(&mut self, batch_id: &str, response_json: &str) -> Result<Effect, KernelError> {
+        if self.state != RunState::Running || !self.model_request_in_flight
+            || !self.batches.iter().any(|batch| batch.batch_id == batch_id && batch.barrier_emitted)
+            || response_json.len() > 1_048_576 {
+            return Err(KernelError::FailClosed("model response has no active batch request".into()));
+        }
+        let response: serde_json::Value = serde_json::from_str(response_json)
+            .map_err(|error| KernelError::FailClosed(error.to_string()))?;
+        if !response.is_object() { return Err(KernelError::FailClosed("model response must be an object".into())); }
+        self.settle_model_request();
+        Ok(self.append_event("engine.batch_response", serde_json::json!({
+            "batchId": batch_id, "turnId": self.turn_id, "engineId": self.config.engine_id, "response": response,
+        })))
+    }
+
     /// Settle the in-flight model request (first output / tool batch / terminal).
     /// Disarms the model-request timeout; the tool-execution timeout governs
     /// any dispatched tools instead.

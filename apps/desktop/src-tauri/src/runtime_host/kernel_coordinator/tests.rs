@@ -464,6 +464,7 @@ fn pi_checkpoint_sqlite_reopen_rust_readers_and_replacement_pi_share_one_result_
     let (db, root, run_id) = fixture(&clock);
     std::fs::write(root.join("a.txt"), "Rust persisted result A 中文").unwrap();
     std::fs::write(root.join("b.txt"), "Rust persisted result B 😀").unwrap();
+    std::fs::write(root.join("c.txt"), "Rust persisted next result C").unwrap();
     let captured = pi_batch_probe("capture", json!({}));
     assert_eq!(captured["executions"], 0);
     let messages = captured["messages"].as_array().unwrap();
@@ -501,7 +502,7 @@ fn pi_checkpoint_sqlite_reopen_rust_readers_and_replacement_pi_share_one_result_
             })
             .unwrap();
     }
-    coordinator.dispatch_batch("pi-batch", "pi-delivery", |binding, frame, token| {
+    coordinator.dispatch_batch("pi-batch", "pi-delivery", &Ask, |binding, frame, token| {
         token.check()?;
         assert!(coordinator.prepare_stored_batch_resume("pi-batch").is_err());
         let facts = db.kernel_rehydrate(&run_id)?.unwrap();
@@ -509,15 +510,46 @@ fn pi_checkpoint_sqlite_reopen_rust_readers_and_replacement_pi_share_one_result_
         let identity = json!({"runId":run_id,"conversationId":binding.conversation_id,"runtimeSessionId":"replacement-pi","executionProfileId":binding.execution_profile_id});
         let request = json!({"runId":run_id,"conversationId":binding.conversation_id,"runtimeSessionId":"replacement-pi",
             "payload":{"controlBinding":binding,"batchResume":frame}});
-        let resumed = pi_batch_probe("resume", json!({"request":request,"identity":identity,
+        let resumed = pi_batch_probe("resume-propose", json!({"request":request,"identity":identity,
             "expectedResults":["Rust persisted result A 中文","Rust persisted result B 😀"]}));
         assert_eq!(resumed["executions"], 0);
         assert_eq!(resumed["consumed"], json!(["read-a", "read-b"]));
-        assert_eq!(resumed["answer"], "durable batch consumed");
-        Ok(())
+        assert_eq!(resumed["providerRequests"], 1);
+        assert_eq!(resumed["toolExecutionStarts"], 0);
+        assert_eq!(resumed["response"]["assistantMessage"]["stopReason"], "toolUse");
+        serde_json::from_value(resumed["response"].clone()).map_err(|error| error.to_string())
     }).unwrap();
     assert!(coordinator.prepare_stored_batch_resume("pi-batch").is_err());
+    let facts = db.kernel_rehydrate(&run_id).unwrap().unwrap();
+    assert_eq!(facts.state, kernel::RunState::WaitingApproval);
+    assert_eq!(facts.model_request_since_wall_ms, None);
+    let next_batch = facts.tools.iter().find(|tool| tool.tool_call_id == "read-c").unwrap().batch_id.clone();
+    let next_checkpoint = db.kernel_engine_batch_checkpoint(&run_id, &next_batch).unwrap().unwrap();
+    assert_eq!(next_checkpoint["checkpoint"]["value"]["history"].as_array().unwrap().iter()
+        .filter(|message| message["role"] == "toolResult").count(), 2);
+    drop(coordinator);
+    drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.resolve_approval("read-c", kernel::ApprovalDecision::AllowOnce).unwrap();
+    coordinator.dispatch_tool("read-c", "next-reader", |binding, effect, token| {
+        let payload: Value = serde_json::from_str(&effect.payload_json).unwrap();
+        Ok((true, crate::resource_gateway::execute(binding, "read", &payload["input"], token)?))
+    }).unwrap();
+    coordinator.dispatch_batch(&next_batch, "next-pi-delivery", &Ask, |binding, frame, token| {
+        token.check()?;
+        let identity = json!({"runId":run_id,"conversationId":binding.conversation_id,"runtimeSessionId":"next-pi","executionProfileId":binding.execution_profile_id});
+        let request = json!({"runId":run_id,"conversationId":binding.conversation_id,"runtimeSessionId":"next-pi",
+            "payload":{"controlBinding":binding,"batchResume":frame}});
+        let resumed = pi_batch_probe("resume", json!({"request":request,"identity":identity,
+            "expectedResults":["Rust persisted result A 中文","Rust persisted result B 😀","Rust persisted next result C"]}));
+        assert_eq!(resumed["executions"], 0);
+        assert_eq!(resumed["providerRequests"], 1);
+        assert_eq!(resumed["answer"], "durable batch consumed");
+        serde_json::from_value(resumed["response"].clone()).map_err(|error| error.to_string())
+    }).unwrap();
     assert!(coordinator.snapshot().unwrap().pending_effects.is_empty());
+    assert_eq!(db.kernel_rehydrate(&run_id).unwrap().unwrap().state, kernel::RunState::Completed);
 }
 
 #[test]
@@ -580,14 +612,14 @@ fn batch_dispatch_claim_and_deadline_are_atomic_and_uncertain_delivery_is_not_re
     let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
     connection.execute_batch("CREATE TRIGGER reject_model_dispatch BEFORE INSERT ON kernel_events WHEN NEW.event_type='engine.batch_dispatched' BEGIN SELECT RAISE(ABORT,'injected model dispatch failure'); END;").unwrap();
     let executions = AtomicUsize::new(0);
-    assert!(coordinator.dispatch_batch("batch", "model", |_, _, _| {
-        executions.fetch_add(1, Ordering::SeqCst); Ok(())
+    assert!(coordinator.dispatch_batch("batch", "model", &Allow, |_, _, _| {
+        executions.fetch_add(1, Ordering::SeqCst); Err("must not send".into())
     }).is_err());
     assert_eq!(executions.load(Ordering::SeqCst), 0);
     assert_eq!(db.kernel_rehydrate(&run_id).unwrap().unwrap().model_request_since_wall_ms, None);
     assert!(coordinator.prepare_stored_batch_resume("batch").is_ok());
     connection.execute_batch("DROP TRIGGER reject_model_dispatch;").unwrap();
-    assert!(coordinator.dispatch_batch("batch", "model", |_, _, token| {
+    assert!(coordinator.dispatch_batch("batch", "model", &Allow, |_, _, token| {
         token.check()?;
         executions.fetch_add(1, Ordering::SeqCst);
         Err("connection lost after sending request".into())
@@ -596,13 +628,57 @@ fn batch_dispatch_claim_and_deadline_are_atomic_and_uncertain_delivery_is_not_re
     assert_eq!(started_at, Some(1_000));
     drop(coordinator);
     let reopened = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
-    assert!(reopened.dispatch_batch("batch", "new-owner", |_, _, _| {
-        executions.fetch_add(1, Ordering::SeqCst); Ok(())
+    assert!(reopened.dispatch_batch("batch", "new-owner", &Allow, |_, _, _| {
+        executions.fetch_add(1, Ordering::SeqCst); Err("must not resend".into())
     }).is_err());
     assert_eq!(executions.load(Ordering::SeqCst), 1);
     assert_eq!(db.kernel_rehydrate(&run_id).unwrap().unwrap().model_request_since_wall_ms, started_at);
     clock.advance(120_001);
     reopened.tick().unwrap();
     assert!(db.kernel_rehydrate(&run_id).unwrap().unwrap().state.is_terminal());
-    assert!(reopened.dispatch_batch("batch", "expired", |_, _, _| panic!("expired model dispatched")).is_err());
+    assert!(reopened.dispatch_batch("batch", "expired", &Allow, |_, _, _| panic!("expired model dispatched")).is_err());
+}
+
+#[test]
+fn model_response_failure_never_partially_commits_terminal_or_next_batch() {
+    for failure in ["commit", "foreign-owner", "foreign-run", "foreign-cursor", "cancel"] {
+        let clock = TestClock::new(1_000);
+        let cancellation = CancellationRegistry::default();
+        let (db, root, run_id) = fixture(&clock);
+        let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+        coordinator.propose_engine_batch(fox_engine_protocol::KernelEngineBatchCheckpoint {
+            schema_version: 1, batch_id: "batch".into(),
+            history: vec![json!({"role":"user","content":"read"})],
+            assistant_message: json!({"role":"assistant","stopReason":"toolUse","content":[
+                {"type":"toolCall","id":"read-a","name":"read","arguments":{"path":"proof.txt"}}]}),
+        }, &Allow).unwrap();
+        coordinator.dispatch_tool("read-a", "reader", |_, _, _| Ok((true,
+            json!({"content":[{"type":"text","text":"durable"}]})))).unwrap();
+        let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+        if failure == "commit" {
+            connection.execute_batch("CREATE TRIGGER reject_model_response BEFORE INSERT ON kernel_events WHEN NEW.event_type='engine.batch_response' BEGIN SELECT RAISE(ABORT,'injected model response failure'); END;").unwrap();
+        }
+        let result = coordinator.dispatch_batch("batch", "model", &Ask, |binding, frame, _| {
+            if failure == "foreign-owner" {
+                connection.execute("UPDATE kernel_effect_outbox SET lease_owner='foreign' WHERE run_id=?1 AND effect_type='deliver_tool_batch'", [&run_id]).unwrap();
+            }
+            if failure == "cancel" { coordinator.cancel()?; }
+            Ok(fox_engine_protocol::KernelModelResponse {
+                schema_version: 1,
+                run_id: if failure == "foreign-run" { "different-run".into() } else { binding.run_id.clone() },
+                turn_id: frame.turn_id.clone(), batch_id: frame.batch_id.clone(),
+                checkpoint_seq: frame.checkpoint_seq + u64::from(failure == "foreign-cursor"),
+                assistant_message: json!({"role":"assistant","stopReason":"toolUse","content":[
+                    {"type":"toolCall","id":"read-next","name":"read","arguments":{"path":"proof.txt"}}]}),
+            })
+        });
+        assert!(result.is_err(), "{failure}");
+        let facts = db.kernel_rehydrate(&run_id).unwrap().unwrap();
+        assert_eq!(facts.tools.len(), 1, "{failure}");
+        assert_ne!(facts.state, kernel::RunState::Completed, "{failure}");
+        let responses: i64 = connection.query_row("SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='engine.batch_response'", [&run_id], |row| row.get(0)).unwrap();
+        assert_eq!(responses, 0, "{failure}");
+        let delivered: i64 = connection.query_row("SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='deliver_tool_batch' AND status='completed'", [&run_id], |row| row.get(0)).unwrap();
+        assert_eq!(delivered, 0, "{failure}");
+    }
 }

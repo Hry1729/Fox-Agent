@@ -3,10 +3,35 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { prepareKernelBatchResume, resumePiKernelBatch } from '../src/pi-kernel-batch-resume.mjs'
+import { installKernelProposalTools, prepareKernelModelResponse, prepareKernelBatchResume, resumePiKernelBatch } from '../src/pi-kernel-batch-resume.mjs'
 import { validatePromptControl } from '../src/control-binding.mjs'
 
 const identity = { runId: 'kernel-run', conversationId: 'kernel-conversation', runtimeSessionId: 'kernel-session', executionProfileId: 'legacy' }
+
+test('model responses preserve required arguments while omitting absent optional Pi metadata', () => {
+  const prepared = { runId: 'run-1', turnId: 'turn-1', batchId: 'batch-1', checkpointSeq: 8 }
+  const answer = { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'done' }], errorMessage: undefined }
+  assert.equal(Object.hasOwn(prepareKernelModelResponse(answer, prepared).assistantMessage, 'errorMessage'), false)
+  for (const message of [
+    { ...answer, stopReason: 'length' }, { ...answer, stopReason: 'error' },
+    { ...answer, content: [{ type: 'unknown', text: 'done' }] },
+    { role: 'assistant', stopReason: 'toolUse', content: [] },
+    { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'a', name: 'unknown', arguments: {} }] },
+    { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'a', name: 'read', arguments: { path: undefined } }] },
+  ]) assert.throws(() => prepareKernelModelResponse(message, prepared))
+})
+
+test('proposal schemas cannot retain or replace local resource executors', async () => {
+  const session = controlledSession(async () => {})
+  session.agent.subscribe = () => () => {}
+  session.agent.abort = () => {}
+  assert.throws(() => installKernelProposalTools(session, [{ name: 'unknown', description: 'bad', parameters: { type: 'object' } }]))
+  installKernelProposalTools(session, [{ name: 'read', description: 'Host-only read', parameters: { type: 'object' },
+    execute: () => { throw new Error('untrusted executor'); } }])
+  await assert.rejects(session.agent.state.tools[0].execute(), /no resource executor/)
+  session.agent.state.tools = [{ ...session.agent.state.tools[0], execute: async () => ({}) }]
+  await assert.rejects(resumePiKernelBatch(session, fixture(), identity, new AbortController().signal), /executable local tools/)
+})
 function controlledSession(continueModel, abortModel = async () => {}) {
   const session = {
     isIdle: true, state: { isStreaming: false }, abort: abortModel,
@@ -167,4 +192,14 @@ test('a new real Pi process consumes the original batch with durable results ins
   assert.equal(resumed.executions, 0, 'original tools must not execute in the replacement process')
   assert.deepEqual(resumed.consumed, ['read-a', 'read-b'])
   assert.equal(resumed.answer, 'durable batch consumed')
+  assert.equal(resumed.response.assistantMessage.stopReason, 'stop')
+  const proposed = run('resume-propose', { request, identity })
+  assert.equal(proposed.providerRequests, 1, 'the adapter may not autonomously start the next model request')
+  assert.equal(proposed.toolExecutionStarts, 0, 'stop before tool preparation, not only before local execution')
+  assert.equal(proposed.executions, 0)
+  assert.equal(proposed.response.batchId, request.payload.batchResume.batchId)
+  assert.equal(proposed.response.checkpointSeq, request.payload.batchResume.checkpointSeq)
+  assert.deepEqual(proposed.response.assistantMessage.content, [
+    { type: 'toolCall', id: 'read-c', name: 'read', arguments: { path: 'c.txt' } },
+  ])
 })

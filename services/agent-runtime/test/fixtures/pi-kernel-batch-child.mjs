@@ -7,16 +7,18 @@ import {
   DefaultResourceLoader, SessionManager, SettingsManager, createFoxAgentSession,
   createFoxModelRuntime, registerFauxProvider, fauxAssistantMessage,
 } from '../../src/pi-adapter.mjs'
-import { resumePiKernelBatch } from '../../src/pi-kernel-batch-resume.mjs'
+import { installKernelProposalTools, resumePiKernelBatch } from '../../src/pi-kernel-batch-resume.mjs'
 
 let input = ''
 for await (const chunk of process.stdin) input += chunk
 const { request, identity, expectedResults = ['durable result a', 'durable result b'] } = JSON.parse(input)
 const mode = process.argv[2]
-if (!['capture', 'resume'].includes(mode)) throw new Error('unknown probe mode')
+if (!['capture', 'resume', 'resume-propose'].includes(mode)) throw new Error('unknown probe mode')
 const directory = await mkdtemp(join(tmpdir(), 'fox-pi-batch-child-'))
 const provider = registerFauxProvider({ api: 'faux-batch-child', provider: 'faux-batch-child', models: [{ id: 'batch-child' }], tokensPerSecond: 1000 })
 let executions = 0
+let toolExecutionStarts = 0
+let providerRequests = 0
 let consumed = []
 let capture
 const captured = new Promise(resolve => { capture = resolve })
@@ -56,14 +58,23 @@ try {
     await prompting
     output = { messages, executions }
   } else {
+    if (mode === 'resume-propose') installKernelProposalTools(session, [{
+      name: 'read', description: 'Propose a Host-owned file read.', parameters: Type.Object({ path: Type.String() }),
+    }])
+    session.agent.subscribe(event => { if (event.type === 'tool_execution_start') toolExecutionStarts++ })
     provider.setResponses([context => {
+      providerRequests++
       const results = context.messages.filter(message => message.role === 'toolResult')
       consumed = results.map(message => message.toolCallId)
       if (JSON.stringify(results.map(message => message.content[0]?.text)) !== JSON.stringify(expectedResults)) throw new Error('model did not receive exact durable results')
+      if (mode === 'resume-propose') {
+        if (JSON.stringify(context.tools?.map(tool => tool.name)) !== JSON.stringify(['read'])) throw new Error('proposal schemas were not advertised')
+        return fauxAssistantMessage([{ type: 'toolCall', id: 'read-c', name: 'read', arguments: { path: 'c.txt' } }], { stopReason: 'toolUse' })
+      }
       return fauxAssistantMessage('durable batch consumed')
     }])
-    await resumePiKernelBatch(session, request, identity, new AbortController().signal)
-    output = { executions, consumed, answer: session.state.messages.at(-1)?.content?.find(block => block.type === 'text')?.text }
+    const resumed = await resumePiKernelBatch(session, request, identity, new AbortController().signal)
+    output = { executions, toolExecutionStarts, providerRequests, consumed, response: resumed.response, answer: session.state.messages.at(-1)?.content?.find(block => block.type === 'text')?.text }
   }
   process.stdout.write(JSON.stringify(output))
 } finally {

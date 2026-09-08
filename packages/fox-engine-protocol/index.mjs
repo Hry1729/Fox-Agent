@@ -182,6 +182,43 @@ export const SCHEMA_BUNDLE = {
       "title": "KernelEngineBatchCheckpoint",
       "type": "object"
     },
+    "KernelModelResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "One model response to an identified, durable batch delivery. History and\nthe next batch identity remain Host-owned and are never supplied by Node.",
+      "properties": {
+        "assistantMessage": true,
+        "batchId": {
+          "type": "string"
+        },
+        "checkpointSeq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "runId",
+        "turnId",
+        "batchId",
+        "checkpointSeq",
+        "assistantMessage"
+      ],
+      "title": "KernelModelResponse",
+      "type": "object"
+    },
     "RunControlBinding": {
       "$defs": {
         "ExecutionAuthority": {

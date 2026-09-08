@@ -4,6 +4,7 @@ export type KernelSettledToolResult = { "canonicalInput": unknown; "result": unk
 export type KernelSettledToolState = "completed" | "failed"
 export type KernelBatchResumeFrame = { "assistantMessage": unknown; "batchId": string; "checkpointSeq": number; "history": Array<unknown>; "idempotencyKey": string; "schemaVersion": number; "tools": Array<KernelSettledToolResult>; "turnId": string; }
 export type KernelEngineBatchCheckpoint = { "assistantMessage": unknown; "batchId": string; "history": Array<unknown>; "schemaVersion": number; }
+export type KernelModelResponse = { "assistantMessage": unknown; "batchId": string; "checkpointSeq": number; "runId": string; "schemaVersion": number; "turnId": string; }
 export type ExecutionAuthority = "legacy" | "authoritative"
 export type FrozenPermission = { "grants": Array<PermissionGrant>; "mode": PermissionMode; "projectRoot"?: (string | null); }
 export type PermissionGrant = { "scope": string; "tool": string; }

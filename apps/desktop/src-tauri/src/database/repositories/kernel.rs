@@ -702,7 +702,7 @@ impl Database {
         wall_now_ms: i64,
         cmd: &crate::kernel::KernelPersistCommand,
     ) -> Result<(), String> {
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None)
     }
 
     /// Commit a tool result only while this executor still owns its dispatch.
@@ -719,7 +719,7 @@ impl Database {
         if cmd.settled_dispatch_tool_call_ids.len() != 1 || cmd.settled_dispatch_tool_call_ids[0] != tool_call_id {
             return Err("kernel result must settle exactly its owned tool dispatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, Some((tool_call_id, lease_owner)), None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, Some((tool_call_id, lease_owner)), None, None)
     }
 
     /// Claim exactly one pending result delivery and persist its model deadline
@@ -738,7 +738,26 @@ impl Database {
             || payload["startedAt"].as_i64() != Some(wall_now_ms) {
             return Err("Kernel batch dispatch identity mismatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, Some((batch_id, lease_owner)))
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, Some((batch_id, lease_owner)), None)
+    }
+
+    /// The response, terminal/next-batch decision, and consumed delivery lease
+    /// commit together. An uncertain or foreign worker cannot settle this lease.
+    pub fn kernel_commit_batch_response(&self, run_id: &str, wall_now_ms: i64,
+        cmd: &crate::kernel::KernelPersistCommand, batch_id: &str, lease_owner: &str) -> Result<(), String> {
+        if batch_id.trim().is_empty() || lease_owner.trim().is_empty() || cmd.model_request_since_wall_ms.is_some() {
+            return Err("invalid Kernel batch response decision".into());
+        }
+        let events = cmd.events.iter().filter(|event| event.event_type == "engine.batch_response").collect::<Vec<_>>();
+        if events.len() != 1 { return Err("Kernel batch response must contain exactly one original response".into()); }
+        let payload: serde_json::Value = serde_json::from_str(&events[0].payload_json).map_err(|error| error.to_string())?;
+        let response: fox_engine_protocol::KernelModelResponse = serde_json::from_value(payload["response"].clone()).map_err(|error| error.to_string())?;
+        response.validate()?;
+        if payload["batchId"].as_str() != Some(batch_id) || response.batch_id != batch_id
+            || response.run_id != run_id || response.turn_id != cmd.turn_id {
+            return Err("Kernel batch response identity mismatch".into());
+        }
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, Some((batch_id, lease_owner)))
     }
 
     fn kernel_commit_decision_with_dispatch_lease(
@@ -748,6 +767,7 @@ impl Database {
         cmd: &crate::kernel::KernelPersistCommand,
         dispatch_lease: Option<(&str, &str)>,
         batch_lease: Option<(&str, &str)>,
+        batch_response_lease: Option<(&str, &str)>,
     ) -> Result<(), String> {
         if !valid_run_state(cmd.run_state.as_str()) {
             return Err(format!(
@@ -770,6 +790,27 @@ impl Database {
             .map_err(|error| format!("serialize kernel compaction state: {error}"))?;
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
+            if let Some((batch_id, lease_owner)) = batch_response_lease {
+                let event = cmd.events.iter().find(|event| event.event_type == "engine.batch_response")
+                    .ok_or_else(|| kernel_err("missing model response event"))?;
+                let payload: serde_json::Value = serde_json::from_str(&event.payload_json)
+                    .map_err(|error| kernel_err(error.to_string()))?;
+                let checkpoint_seq = payload["response"]["checkpointSeq"].as_u64()
+                    .ok_or_else(|| kernel_err("missing model response cursor"))?;
+                let changed = transaction.execute(
+                    "UPDATE kernel_effect_outbox SET status='completed', completed_at=?4, updated_at=?4, lease_owner=NULL
+                     WHERE run_id=?1 AND batch_id=?2 AND effect_key=?5 AND effect_type='deliver_tool_batch'
+                       AND status='leased' AND lease_owner=?3
+                       AND EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1
+                           AND r.kernel_mode='authoritative' AND r.state='running'
+                           AND r.model_request_since_wall_ms IS NOT NULL)
+                       AND EXISTS(SELECT 1 FROM kernel_events e WHERE e.run_id=?1
+                           AND e.event_type='engine.batch_dispatched' AND e.seq=?6
+                           AND json_extract(e.payload_json,'$.batchId')=?2)",
+                    params![run_id, batch_id, lease_owner, wall_now_ms, crate::kernel::batch_delivery_effect_key(batch_id), checkpoint_seq + 1],
+                )?;
+                if changed != 1 { return Err(kernel_err("Kernel batch response lost lease ownership or active model request")); }
+            }
             if let Some((batch_id, lease_owner)) = batch_lease {
                 let changed = transaction.execute(
                     "UPDATE kernel_effect_outbox SET status='leased', lease_owner=?3, leased_at=?4,
