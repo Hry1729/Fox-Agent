@@ -1,4 +1,5 @@
 import { lazy, memo, Profiler, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { subscribeNotificationRefresh } from '../notification-subscriptions'
 import {
   Activity,
   Archive,
@@ -237,7 +238,6 @@ import {
   normalizeNotificationSoundId,
   notificationIsVisibleInContext,
   playNotificationSound,
-  runtimeEventRefreshesNotifications,
   type InAppNotificationEventDetail,
 } from '@/features/notifications'
 import type { LocalKnowledgeBaseDto } from '@/features/conversations/api/desktop-client'
@@ -579,6 +579,7 @@ function NotificationCenter({
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [manuallyPinnedIds, setManuallyPinnedIds] = useState<Set<string>>(loadManuallyPinnedNotificationIds)
   const observedNotifications = useRef<Map<string, string> | null>(null)
+  const loadGeneration = useRef(0)
   const toastTimers = useRef(new Map<string, { leave: number; remove: number }>())
 
   const removeToast = useCallback((instanceId: string) => {
@@ -645,6 +646,7 @@ function NotificationCenter({
   }, [enqueueToast])
 
   const load = useCallback(async (quiet = false) => {
+    const generation = ++loadGeneration.current
     if (!desktopRuntimeAvailable) {
       setItems([])
       setError(null)
@@ -656,6 +658,7 @@ function NotificationCenter({
         desktopClient.listAppNotifications(unreadOnly, 100),
         desktopClient.getNotificationPreferences(),
       ])
+      if (generation !== loadGeneration.current) return
       const visibleUnreadIds = new Set(nextItems
         .filter((item) => item.readAt == null && notificationIsVisibleInContext(item, {
           appVisible: document.visibilityState === 'visible',
@@ -668,6 +671,7 @@ function NotificationCenter({
       if (visibleUnreadIds.size) {
         await Promise.allSettled([...visibleUnreadIds].map((id) => desktopClient.setAppNotificationRead(id, true)))
       }
+      if (generation !== loadGeneration.current) return
       const seenAt = Date.now()
       const presentedItems = nextItems.map((item) => visibleUnreadIds.has(item.id) ? { ...item, readAt: seenAt } : item)
       const nextObserved = new Map(presentedItems.map((item) => [item.id, notificationFingerprint(item)]))
@@ -693,11 +697,13 @@ function NotificationCenter({
       setPreferences(nextPreferences)
       setError(null)
     } catch (cause) {
-      setError(desktopErrorDetails(cause).message)
+      if (generation === loadGeneration.current) setError(desktopErrorDetails(cause).message)
     } finally {
-      if (!quiet) setLoading(false)
+      if (generation === loadGeneration.current) setLoading(false)
     }
   }, [activeConversationId, activeEntityId, activeView, enqueueToast, unreadOnly])
+
+  useEffect(() => () => { loadGeneration.current += 1 }, [load])
 
   useEffect(() => {
     const refresh = () => void load(true)
@@ -716,7 +722,6 @@ function NotificationCenter({
     if (!desktopRuntimeAvailable) return
     let disposed = false
     let refreshTimer: number | null = null
-    const unlisten: Array<() => void> = []
     const scheduleRefresh = () => {
       if (disposed) return
       if (refreshTimer !== null) window.clearTimeout(refreshTimer)
@@ -730,23 +735,14 @@ function NotificationCenter({
     }
     window.addEventListener('focus', scheduleRefresh)
     document.addEventListener('visibilitychange', visibilityRefresh)
-    void Promise.all([
-      desktopClient.listenRuntimeEvents((notification) => {
-        if (runtimeEventRefreshesNotifications(notification.event.type)) scheduleRefresh()
-      }),
-      desktopClient.listenWorkEvents(scheduleRefresh),
-      desktopClient.listenApprovalRequests(scheduleRefresh),
-      desktopClient.listenApprovalResolved(scheduleRefresh),
-    ]).then((subscriptions) => {
-      if (disposed) subscriptions.forEach((unsubscribe) => unsubscribe())
-      else unlisten.push(...subscriptions)
-    }).catch(() => undefined)
+    const unsubscribe = subscribeNotificationRefresh(desktopClient, scheduleRefresh,
+      () => setError('实时通知连接失败，将继续定时同步；也可以手动刷新通知。'))
     return () => {
       disposed = true
       if (refreshTimer !== null) window.clearTimeout(refreshTimer)
       window.removeEventListener('focus', scheduleRefresh)
       document.removeEventListener('visibilitychange', visibilityRefresh)
-      unlisten.forEach((unsubscribe) => unsubscribe())
+      unsubscribe()
     }
   }, [load])
 
@@ -3247,7 +3243,7 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
             {activeExpert && onViewExpert && onChangeExpert && onRemoveExpert && <ExpertBindingChip expert={activeExpert} readOnly={expertReadOnly} toolAvailability={expertToolAvailability} onView={onViewExpert} onChange={onChangeExpert} onRemove={onRemoveExpert} />}
           </PromptInputTools>
           <div className="fox-composer-submit">
-            <PromptInputSelect value={activeAgent?.id ?? ''} onValueChange={(value) => value !== activeAgent?.id && onAgentChange?.(value)} disabled={!activeAgent}>
+            <PromptInputSelect value={activeAgent?.id ?? ''} onValueChange={(value) => value && value !== activeAgent?.id && onAgentChange?.(value)} disabled={!activeAgent}>
               <PromptInputSelectTrigger className="fox-agent-control"><Sparkles size={14} /><PromptInputSelectValue /></PromptInputSelectTrigger>
               <PromptInputSelectContent position="popper" side="top" align="end" sideOffset={6}>
                 {activeAgent && !selectableAgents.some((item) => item.id === activeAgent.id) && <PromptInputSelectItem value={activeAgent.id} disabled>{activeAgent.name}</PromptInputSelectItem>}

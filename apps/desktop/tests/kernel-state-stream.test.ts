@@ -20,6 +20,7 @@ function harness() {
     useEffect: (effect: () => () => void) => { cleanup = effect() },
     desktopRuntimeAvailable: true,
     desktopClient: {
+      listenKernelModelPreviews: async () => () => {},
       listenKernelStateInvalidations: (handler: typeof listener) => { listener = handler; return new Promise<() => void>((resolve) => { registered = resolve }) },
       loadConversation: async () => { loads++; return { conversation: { id: 'conversation-1' } } },
     },

@@ -90,6 +90,7 @@ pub fn plan_recovery(facts: Vec<RecoveryFacts>) -> RecoveryPlan {
                         && matches!(
                             effect.kind,
                             OutboxEffectKind::DispatchTool
+                                | OutboxEffectKind::InitialModel
                                 | OutboxEffectKind::DeliverToolBatch
                                 | OutboxEffectKind::PublishSnapshot
                         );

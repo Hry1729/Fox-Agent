@@ -12,6 +12,7 @@ import type {
   WorkEventRecord,
 } from './types'
 import { conversationRunIsActive, mergeKernelSnapshot, snapshotForRun } from './kernel-snapshot'
+import { previewBelongsToSnapshot } from './kernel-model-preview'
 
 export function runRecordIsActive(run: RunRecord | null) {
   return run?.status === 'queued' || run?.status === 'running' || run?.status === 'cancelling'
@@ -106,7 +107,7 @@ function mergeApprovals(persisted: ConversationDetail['approvals'], current: Con
   const records = new Map(current.map((approval) => [approval.id, approval]))
   for (const approval of persisted) {
     const existing = records.get(approval.id)
-    if (existing?.status !== 'pending' && approval.status === 'pending') continue
+    if (existing && existing.status !== 'pending' && approval.status === 'pending') continue
     records.set(approval.id, approval)
   }
   return [...records.values()]
@@ -127,6 +128,7 @@ function preferRun(persistedDetail: ConversationDetail, currentDetail: Conversat
 export function mergeConversationDetail(persisted: ConversationDetail, current: ConversationDetail | null) {
   if (!current || current.conversation.id !== persisted.conversation.id) return persisted
   const lastRun = preferRun(persisted, current)
+  const kernelSnapshot = mergeKernelSnapshot(persisted, current, lastRun?.id)
   const runtimeEvents = mergeRecords(
     persisted.runtimeEvents,
     current.runtimeEvents,
@@ -135,8 +137,8 @@ export function mergeConversationDetail(persisted: ConversationDetail, current: 
 
   return {
     ...persisted,
-    kernelSnapshot: mergeKernelSnapshot(persisted, current, lastRun?.id),
-    messages: mergeMessages(persisted.messages, current.messages),
+    kernelSnapshot,
+    messages: mergeMessages(persisted.messages, current.messages.filter(message => previewBelongsToSnapshot(message, kernelSnapshot))),
     runtimeEvents,
     toolCalls: mergeRecords(persisted.toolCalls, current.toolCalls, (toolCall) => toolCall.id),
     approvals: mergeApprovals(persisted.approvals, current.approvals),

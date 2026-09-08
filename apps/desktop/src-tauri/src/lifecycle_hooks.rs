@@ -128,7 +128,7 @@ pub fn run_event(
     Ok(annotations)
 }
 
-fn matcher_matches(patterns: &str, value: &str) -> bool {
+pub(crate) fn matcher_matches(patterns: &str, value: &str) -> bool {
     patterns
         .split([',', '|'])
         .map(str::trim)

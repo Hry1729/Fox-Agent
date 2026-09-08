@@ -52,12 +52,12 @@ export function prepareKernelModelResponse(assistantMessage, prepared) {
   }
   assistantMessage = canonical(assistantMessage, true)
   const response = { schemaVersion: 1, runId: prepared.runId, turnId: prepared.turnId,
-    batchId: prepared.batchId, checkpointSeq: prepared.checkpointSeq, assistantMessage }
+    ...(prepared.initial ? {} : { batchId: prepared.batchId }), checkpointSeq: prepared.checkpointSeq, assistantMessage }
   canonical(response)
   if (Buffer.byteLength(JSON.stringify(response), 'utf8') > 1_048_576) fail('model response exceeds protocol size limit')
-  const errors = validateWireValue('KernelModelResponse', response)
+  const errors = validateWireValue(prepared.initial ? 'KernelInitialModelResponse' : 'KernelModelResponse', response)
   if (errors.length) fail(errors.join('; '))
-  if (!nonempty(response.runId) || !nonempty(response.turnId) || !nonempty(response.batchId) || !Number.isSafeInteger(response.checkpointSeq) || response.checkpointSeq < 1
+  if (!nonempty(response.runId) || !nonempty(response.turnId) || !prepared.initial && !nonempty(response.batchId) || !Number.isSafeInteger(response.checkpointSeq) || response.checkpointSeq < 1
       || assistantMessage?.role !== 'assistant' || !Array.isArray(assistantMessage.content)) fail('invalid model response')
   if (assistantMessage.stopReason === 'toolUse') {
     const calls = assistantMessage.content.filter(block => block?.type === 'toolCall')
@@ -158,8 +158,42 @@ export function prepareKernelBatchResume(request, identity) {
     idempotencyKey: frame.idempotencyKey, batchId: frame.batchId, checkpointSeq: frame.checkpointSeq }
 }
 
-export async function resumePiKernelBatch(session, request, identity, signal) {
-  const prepared = prepareKernelBatchResume(request, identity)
+export function prepareKernelInitialModel(request, identity) {
+  validateKernelControl(request, identity?.executionProfileId)
+  if (!identity || ['runId', 'conversationId', 'runtimeSessionId'].some(key => !nonempty(identity[key]) || request[key] !== identity[key])) fail('initial identity mismatch')
+  canonical(request)
+  if (Buffer.byteLength(JSON.stringify(request), 'utf8') > 1_048_576) fail('initial frame is too large')
+  const frame = request.payload?.initialModel
+  if (validateWireValue('KernelInitialModelFrame', frame).length || frame.schemaVersion !== 1
+      || frame.idempotencyKey !== 'initial-model-delivery' || !Number.isSafeInteger(frame.checkpointSeq) || frame.checkpointSeq < 1) fail('invalid initial frame')
+  const input = frame.input
+  if (input.schemaVersion !== 1 || input.runId !== request.runId || !nonempty(input.turnId) || !nonempty(input.promptConfigHash)
+      || !input.messages.length || input.messages.at(-1)?.role !== 'user') fail('invalid initial input')
+  assertCompleteHistory(input.messages)
+  for (const message of input.messages) {
+    const calls = Array.isArray(message.content) && message.content.some(block => block?.type === 'toolCall')
+    if (message.role === 'assistant' && Object.hasOwn(message, 'stopReason') && message.stopReason !== (calls ? 'toolUse' : 'stop')) fail('unfinished initial history')
+    for (const block of Array.isArray(message.content) ? message.content : []) {
+      if (block?.type === 'text' && typeof block.text === 'string'
+          || message.role !== 'assistant' && block?.type === 'image' && typeof block.data === 'string' && typeof block.mimeType === 'string'
+          || message.role === 'assistant' && block?.type === 'thinking' && typeof block.thinking === 'string'
+          || message.role === 'assistant' && block?.type === 'toolCall' && record(block.arguments)) continue
+      fail('unsupported initial content')
+    }
+  }
+  return { messages: sanitizeProviderHistory(structuredClone(input.messages)), runId: input.runId, turnId: input.turnId,
+    idempotencyKey: frame.idempotencyKey, checkpointSeq: frame.checkpointSeq, initial: true }
+}
+
+export async function startPiKernelInitial(session, request, identity, signal, preview) {
+  return runPiKernelModel(session, request, prepareKernelInitialModel(request, identity), signal, preview)
+}
+
+export async function resumePiKernelBatch(session, request, identity, signal, preview) {
+  return runPiKernelModel(session, request, prepareKernelBatchResume(request, identity), signal, preview)
+}
+
+async function runPiKernelModel(session, request, prepared, signal, preview) {
   if (!session?.agent?.state || typeof session.agent.continue !== 'function' || typeof session.abort !== 'function') fail('missing public Pi session adapter')
   if (!signal || typeof signal.addEventListener !== 'function') fail('missing Host cancellation signal')
   if (signal.aborted) fail('Host cancelled the resume')
@@ -191,8 +225,23 @@ export async function resumePiKernelBatch(session, request, identity, signal) {
   let proposed
   const stopMarker = `fox-kernel-proposal-boundary:${request.runId}:${prepared.idempotencyKey}`
   let unsubscribe
+  let previewRevision = 0
+  let lastPreviewAt = 0
+  let lastPreviewText = ''
   try {
   unsubscribe = typeof session.agent.subscribe === 'function' ? session.agent.subscribe(event => {
+    if (preview && !signal.aborted && !timedOut && ['message_update','message_end'].includes(event.type)
+        && event.message?.role === 'assistant' && Array.isArray(event.message.content)) {
+      const text = event.message.content.filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join('')
+      const now = performance.now()
+      if (text !== lastPreviewText && Buffer.byteLength(text,'utf8') <= 262_144
+          && (previewRevision===0 || now-lastPreviewAt>=100 || event.type==='message_end')) {
+        lastPreviewText = text
+        lastPreviewAt = now
+        preview({ schemaVersion:1,runId:request.runId,conversationId:request.conversationId,turnId:prepared.turnId,
+          checkpointSeq:prepared.checkpointSeq,revision:++previewRevision,text })
+      }
+    }
     if (event.type !== 'message_end' || event.message?.role !== 'assistant'
         || event.message.stopReason !== 'toolUse' && !event.message.content?.some?.(block => block?.type === 'toolCall')) return
     proposed = prepareKernelModelResponse(event.message, prepared)

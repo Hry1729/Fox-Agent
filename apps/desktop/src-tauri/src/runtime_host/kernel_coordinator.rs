@@ -21,6 +21,7 @@ fn checkpoint_hash(value: &Value) -> String {
 }
 
 enum DecisionLease<'a> {
+    Initial(&'a str),
     Tool(&'a str, &'a str),
     Batch(&'a str, &'a str),
 }
@@ -31,9 +32,19 @@ pub(crate) struct KernelCoordinator<'a> {
     cancellation: &'a CancellationRegistry,
     binding: RunControlBinding,
     controller: Mutex<RunController>,
+    preview: Option<&'a super::kernel_model_worker::PreviewSink>,
 }
 
 impl<'a> KernelCoordinator<'a> {
+    pub(crate) fn start_prepared(database: &'a Database, clock: &'a dyn Clock, run_id: &str,
+        cancellation: &'a CancellationRegistry) -> Result<Self, String> {
+        let (input, config, hash) = database.kernel_initial_start_state(run_id)?;
+        let (controller, effects) = RunController::start_with_initial_input(run_id, &input.turn_id, config, &hash, clock)
+            .map_err(|error| error.to_string())?;
+        database.kernel_commit_decision(run_id, clock.now_wall_ms(), &controller.persist_command(&effects))?;
+        Self::reopen(database, clock, run_id, cancellation)
+    }
+
     pub(crate) fn reopen(
         database: &'a Database,
         clock: &'a dyn Clock,
@@ -73,7 +84,13 @@ impl<'a> KernelCoordinator<'a> {
             cancellation,
             binding,
             controller: Mutex::new(controller),
+            preview: None,
         })
+    }
+
+    pub(super) fn with_preview(mut self, preview: &'a super::kernel_model_worker::PreviewSink) -> Self {
+        self.preview = Some(preview);
+        self
     }
 
     /// A failed decision transaction never leaves speculative state in memory.
@@ -100,6 +117,9 @@ impl<'a> KernelCoordinator<'a> {
         let effects = action(&mut candidate, now).map_err(|error| error.to_string())?;
         let command = candidate.persist_command(&effects);
         match lease {
+            Some(DecisionLease::Initial(owner)) => self.database.kernel_commit_initial_model(
+                &self.binding.run_id, now.wall_ms, &command, owner, true,
+            )?,
             Some(DecisionLease::Tool(tool_call_id, owner)) => self.database.kernel_commit_tool_result(
                 &self.binding.run_id,
                 now.wall_ms,
@@ -242,6 +262,17 @@ impl<'a> KernelCoordinator<'a> {
         self.apply(None, |controller, _| Ok(controller.request_cancel()))
     }
 
+    /// Host calls this only after its owned model/tool executors have stopped.
+    pub(crate) fn settle_cancellation(&self) -> Result<(), String> {
+        self.apply(None, |controller, _| Ok(controller.settle_cancellation()))
+    }
+
+    pub(crate) fn fail(&self, code: &str, message: &str) -> Result<(), String> {
+        self.apply(None, |controller, _| Ok(controller.terminate(kernel::RunOutcome::Failed {
+            code: code.into(), message: message.into(),
+        })))
+    }
+
     pub(crate) fn snapshot(&self) -> Result<kernel::KernelSnapshot, String> {
         self.database
             .kernel_build_full_snapshot(&self.binding.run_id)
@@ -337,6 +368,74 @@ impl<'a> KernelCoordinator<'a> {
         Ok(frame)
     }
 
+    pub(super) fn dispatch_initial_with_worker(&self, owner: &str, policy: &dyn PolicyDecisionPort,
+        runtime: &super::RuntimeCommand, api_key: &str) -> Result<(), String> {
+        let config = self.database.kernel_model_config(&self.binding.run_id)?;
+        self.dispatch_initial(owner, policy, |binding, frame, token| {
+            let now = self.clock.read();
+            let facts = self.controller.lock().map_err(|_| "Kernel coordinator lock poisoned")?.shadow_checkpoint(now.monotonic_ms);
+            let since = facts.model_request_since_wall_ms.ok_or("initial model deadline is missing")?;
+            if now.wall_ms < since { return Err("initial model clock moved backwards".into()); }
+            let remaining = binding.budgets.run_execution_ms.saturating_sub(facts.running_elapsed_ms)
+                .min(binding.budgets.model_request_ms.saturating_sub(now.wall_ms.saturating_sub(since)));
+            super::kernel_model_worker::deliver_initial_with_preview(runtime, &config, api_key, binding, frame, token, remaining,self.preview)
+        })
+    }
+
+    pub(crate) fn dispatch_initial(&self, owner: &str, policy: &dyn PolicyDecisionPort,
+        deliver: impl FnOnce(&RunControlBinding, &fox_engine_protocol::KernelInitialModelFrame, &kernel::CancellationToken)
+            -> Result<fox_engine_protocol::KernelInitialModelResponse, String>) -> Result<(), String> {
+        self.tick()?;
+        self.database.kernel_validate_resource_acquisition(&self.binding.run_id)?;
+        let input = self.database.kernel_initial_input(&self.binding.run_id)?;
+        let token = self.cancellation.run_token(&self.binding.run_id)?;
+        token.check()?;
+        let frame = {
+            let mut guard = self.controller.lock().map_err(|_| "Kernel coordinator lock poisoned")?;
+            if self.database.run_control_binding(&self.binding.run_id)?.as_ref() != Some(&self.binding) { return Err("initial control binding changed".into()); }
+            let frame = fox_engine_protocol::KernelInitialModelFrame { schema_version: 1, input,
+                idempotency_key: kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into(), checkpoint_seq: guard.last_event_seq() };
+            frame.validate()?;
+            let mut candidate = guard.clone();
+            let now = self.clock.read();
+            let effects = candidate.begin_initial_model_request(now.monotonic_ms, now.wall_ms).map_err(|error| error.to_string())?;
+            self.database.kernel_commit_initial_model(&self.binding.run_id, now.wall_ms, &candidate.persist_command(&effects), owner, false)?;
+            *guard = candidate;
+            frame
+        };
+        token.check()?;
+        let response = deliver(&self.binding, &frame, &token)?;
+        response.validate()?;
+        if response.run_id != self.binding.run_id || response.turn_id != frame.input.turn_id || response.checkpoint_seq != frame.checkpoint_seq {
+            return Err("initial response belongs to another request".into());
+        }
+        self.tick()?;
+        token.check()?;
+        let encoded = serde_json::to_string(&response).map_err(|_| "invalid initial response")?;
+        let next = if response.assistant_message["stopReason"] == "toolUse" {
+            let checkpoint = fox_engine_protocol::KernelEngineBatchCheckpoint { schema_version: 1,
+                batch_id: format!("initial-batch:{}:{}", self.binding.run_id, frame.checkpoint_seq), history: frame.input.messages,
+                assistant_message: response.assistant_message };
+            checkpoint.validate()?;
+            Some(checkpoint)
+        } else { None };
+        self.apply(Some(DecisionLease::Initial(owner)), |controller, now| {
+            let mut effects = vec![controller.record_initial_model_response(&encoded)?];
+            if let Some(checkpoint) = next {
+                let value = serde_json::to_value(&checkpoint).map_err(|_| KernelError::FailClosed("invalid initial checkpoint".into()))?;
+                let stored = serde_json::json!({"hash":checkpoint_hash(&value),"value":value});
+                let calls = checkpoint.assistant_message["content"].as_array().unwrap().iter()
+                    .filter(|block| block["type"] == "toolCall").enumerate().map(|(source_order, call)| ToolCallRequest {
+                        tool_call_id:call["id"].as_str().unwrap().into(), tool:call["name"].as_str().unwrap().into(),
+                        canonical_input_json:call["arguments"].to_string(), source_order,
+                    }).collect();
+                effects.extend(controller.propose_tool_batch(&checkpoint.batch_id, calls, policy, now.monotonic_ms, now.wall_ms)?);
+                effects.push(controller.checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?);
+            } else { effects.extend(controller.terminate(kernel::RunOutcome::Completed)); }
+            Ok(effects)
+        })
+    }
+
     /// Only the durable snapshot can configure a formal worker dispatch.
     pub(super) fn dispatch_stored_batch_with_worker(
         &self, batch_id: &str, owner: &str, policy: &dyn PolicyDecisionPort,
@@ -366,7 +465,7 @@ impl<'a> KernelCoordinator<'a> {
             if now.wall_ms < since { return Err("Kernel model clock moved backwards".into()); }
             let remaining = binding.budgets.run_execution_ms.saturating_sub(facts.running_elapsed_ms)
                 .min(binding.budgets.model_request_ms.saturating_sub(now.wall_ms.saturating_sub(since)));
-            super::kernel_model_worker::deliver(runtime, config, api_key, binding, frame, token, remaining)
+            super::kernel_model_worker::deliver_with_preview(runtime, config, api_key, binding, frame, token, remaining,self.preview)
         })
     }
 
@@ -379,6 +478,7 @@ impl<'a> KernelCoordinator<'a> {
             &kernel::CancellationToken) -> Result<fox_engine_protocol::KernelModelResponse, String>,
     ) -> Result<(), String> {
         let frame = self.prepare_stored_batch_resume(batch_id)?;
+        self.database.kernel_validate_resource_acquisition(&self.binding.run_id)?;
         let token = self.cancellation.run_token(&self.binding.run_id)?;
         token.check()?;
         {
@@ -418,7 +518,7 @@ impl<'a> KernelCoordinator<'a> {
                 "timestamp":frame.assistant_message["timestamp"].as_i64().unwrap_or(0),
             })));
             let checkpoint = fox_engine_protocol::KernelEngineBatchCheckpoint {
-                schema_version: 1, batch_id: format!("model-batch:{}", frame.checkpoint_seq),
+                schema_version: 1, batch_id: format!("model-batch:{}:{}", self.binding.run_id, frame.checkpoint_seq),
                 history, assistant_message: response.assistant_message,
             };
             checkpoint.validate()?;

@@ -325,6 +325,9 @@ pub fn schema_bundle() -> Value {
             "KernelEngineBatchCheckpoint": schemars::schema_for!(KernelEngineBatchCheckpoint),
             "KernelModelResponse": schemars::schema_for!(KernelModelResponse),
             "KernelInitialModelInput": schemars::schema_for!(KernelInitialModelInput),
+            "KernelInitialModelFrame": schemars::schema_for!(KernelInitialModelFrame),
+            "KernelInitialModelResponse": schemars::schema_for!(KernelInitialModelResponse),
+            "KernelModelPreview": schemars::schema_for!(KernelModelPreview),
             "KernelRunSnapshot": schemars::schema_for!(KernelRunSnapshot),
             "KernelStateInvalidation": schemars::schema_for!(KernelStateInvalidation)
         },

@@ -1,6 +1,6 @@
 import type { KernelRunSnapshot } from '../../../../../../packages/fox-engine-protocol'
 
-export type { KernelRunSnapshot, KernelStateInvalidation } from '../../../../../../packages/fox-engine-protocol'
+export type { KernelRunSnapshot, KernelStateInvalidation, KernelModelPreview } from '../../../../../../packages/fox-engine-protocol'
 
 export interface DesktopErrorDetails {
   code: string
@@ -364,6 +364,8 @@ export interface ConversationSummary {
 }
 
 export interface ConversationMessage {
+  /** Ephemeral display cursor; never sent back as persisted model history. */
+  kernelPreview?: { checkpointSeq: number; revision: number }
   id: string
   conversationId: string
   runId: string | null

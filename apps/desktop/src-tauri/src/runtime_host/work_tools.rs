@@ -76,7 +76,7 @@ pub struct WorkToolOutcome {
     pub post_finalize: Option<WorkToolPostFinalizeDirective>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub enum WorkToolPostFinalizeDirective {
     StartChild(WorkToolChildDispatch),
     CancelGraphChild(WorkToolGraphCancelDirective),
@@ -84,24 +84,24 @@ pub enum WorkToolPostFinalizeDirective {
     AcceptReadOnlyGraph(WorkToolGraphAcceptanceDirective),
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct WorkToolChildDispatch {
     pub started: StartRunResult,
     pub child_run: ChildRunRecord,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct WorkToolGraphCancelDirective {
     pub intent_id: String,
     pub child_run_id: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct WorkToolGraphReviewDirective {
     pub request_id: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct WorkToolGraphAcceptanceDirective {
     pub acceptance_id: String,
 }

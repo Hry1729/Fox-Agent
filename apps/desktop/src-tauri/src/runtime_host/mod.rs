@@ -2,6 +2,10 @@ mod capability_tools;
 mod continuation;
 pub(crate) mod kernel_coordinator;
 mod kernel_model_worker;
+mod kernel_run_lock;
+mod kernel_host;
+mod kernel_gateway;
+mod kernel_delegation;
 mod protocol;
 pub(crate) mod shadow_reconcile;
 #[cfg(test)]
@@ -688,6 +692,8 @@ fn node_dependency_is_available(script: &Path, package: &str) -> bool {
 
 struct RuntimeHostState {
     cancellation: crate::kernel::CancellationRegistry,
+    kernel_active_runs: HashSet<String>,
+    shutting_down: bool,
     state: String,
     worker: Option<WorkerHandle>,
     stderr: VecDeque<String>,
@@ -916,6 +922,8 @@ impl RuntimeHost {
             database: database.clone(),
             state: Arc::new(Mutex::new(RuntimeHostState {
                 cancellation: crate::kernel::CancellationRegistry::default(),
+                kernel_active_runs: HashSet::new(),
+                shutting_down: false,
                 state: "stopped".to_owned(),
                 worker: None,
                 stderr: VecDeque::new(),
@@ -1494,7 +1502,7 @@ impl RuntimeHost {
             let Ok(mut state) = self.state.lock() else {
                 return;
             };
-            if state.dispatching_run_id.is_some()
+            if state.shutting_down || state.dispatching_run_id.is_some() || !state.kernel_active_runs.is_empty()
                 || state
                     .worker
                     .as_ref()
@@ -1602,6 +1610,11 @@ impl RuntimeHost {
     }
 
     fn record_start_failure(&self, started: &StartRunResult, message: String) {
+        if self.database.run_control_binding(&started.run.id).ok().flatten()
+            .is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative) {
+            let _ = self.record_kernel_start_failure(&started.run.id);
+            return;
+        }
         let (code, detail) = structured_runtime_error(&message);
         let seq = self.database.next_run_seq(&started.run.id).unwrap_or(1);
         let payload = json!({
@@ -1659,6 +1672,7 @@ impl RuntimeHost {
         attachments: &[AttachmentRecord],
     ) -> Result<(), String> {
         if let Ok(mut state) = self.state.lock() {
+            if state.shutting_down { return Err("Runtime Host is shutting down".into()); }
             state.recovery_attempts = 0;
         }
         self.cancel_stale_pending_approvals_for_conversation(
@@ -1672,23 +1686,45 @@ impl RuntimeHost {
         } else {
             "primary"
         };
-        crate::lifecycle_hooks::run_event(
-            &self.database,
-            "before_run",
-            &started.run.id,
-            run_kind,
-            &json!({
-                "conversationId": started.run.conversation_id,
-                "runKind": run_kind,
-                "depth": if run_kind == "child" { 1 } else { 0 },
-            }),
-        )?;
-        self.ensure_worker(&started.run.conversation_id)?;
-        let execution_profile = self.current_execution_profile()?;
+        let frozen_binding = self.database.run_control_binding(&started.run.id)?;
+        let authority = match frozen_binding.as_ref() {
+            Some(binding) => binding.authority,
+            None => match std::env::var("FOX_KERNEL_MODE") {
+                Err(std::env::VarError::NotPresent) => fox_engine_protocol::ExecutionAuthority::Legacy,
+                Ok(value) if value == "legacy" => fox_engine_protocol::ExecutionAuthority::Legacy,
+                Ok(value) if value == "authoritative" => fox_engine_protocol::ExecutionAuthority::Authoritative,
+                _ => return Err("FOX_KERNEL_MODE must be legacy or authoritative".into()),
+            },
+        };
+        let kernel_ownership = if authority == fox_engine_protocol::ExecutionAuthority::Authoritative {
+            Some(kernel_host::acquire(&self.sessions_dir, &started.run.id)?)
+        } else { None };
+        if authority == fox_engine_protocol::ExecutionAuthority::Legacy {
+            crate::lifecycle_hooks::run_event(&self.database,"before_run",&started.run.id,run_kind,
+                &json!({"conversationId":started.run.conversation_id,"runKind":run_kind,
+                    "depth":if run_kind=="child" {1} else {0}}))?;
+        }
+        let execution_profile = if authority == fox_engine_protocol::ExecutionAuthority::Authoritative {
+            if let Some(binding) = &frozen_binding {
+                continuation::ExecutionProfileSelection::resolve(&binding.execution_profile_id)?
+            } else if let Some(profile) = self.execution_profile_override {
+                continuation::ExecutionProfileSelection::resolve(profile)?
+            } else { continuation::ExecutionProfileSelection::load(&self.database)? }
+        } else {
+            self.ensure_worker(&started.run.conversation_id)?;
+            self.current_execution_profile()?
+        };
         self.database
             .freeze_run_execution_profile(&started.run.id, execution_profile.id())
             .map_err(|error| error.to_string())?;
-        let (runtime_session_id, _) = self.open_runtime_session(&started.run.conversation_id)?;
+        if authority == fox_engine_protocol::ExecutionAuthority::Authoritative
+            && self.database.kernel_host_run_state(&started.run.id)?.is_some() {
+            let binding = frozen_binding.as_ref().ok_or("existing Kernel has no binding")?;
+            return self.start_kernel_run(kernel_ownership.ok_or("missing Kernel ownership")?, binding, Value::Null, Value::Null);
+        }
+        let runtime_session_id = if authority == fox_engine_protocol::ExecutionAuthority::Legacy {
+            self.open_runtime_session(&started.run.conversation_id)?.0
+        } else { String::new() };
         let images = self.runtime_images(&started.run.conversation_id, attachments)?;
 
         let model_service = self
@@ -1825,8 +1861,15 @@ impl RuntimeHost {
                 "activatedAt": binding.activated_at,
             })
         });
-        let control_binding = match self.database.run_control_binding(&started.run.id)? {
+        let control_binding = match frozen_binding {
             Some(binding) => binding,
+            None if authority == fox_engine_protocol::ExecutionAuthority::Authoritative => {
+                let mut budgets = fox_engine_protocol::TimeBudgets::default();
+                if let Some(budget) = &self.run_budget_override {
+                    budgets.run_execution_ms = budgets.run_execution_ms.min(budget.max_duration_ms as i64);
+                }
+                self.database.freeze_kernel_run_control(&started.run.id, execution_profile.id(), budgets)?
+            }
             None => {
                 let executor = match std::env::var("FOX_RESOURCE_GATEWAY_READS") {
                     Err(std::env::VarError::NotPresent) => fox_engine_protocol::ResourceExecutor::Runtime,
@@ -1837,11 +1880,11 @@ impl RuntimeHost {
                 self.database.freeze_legacy_run_control_with_executor(&started.run.id, execution_profile.id(), executor)?
             }
         };
-        if control_binding.authority != fox_engine_protocol::ExecutionAuthority::Legacy
+        if control_binding.authority != authority
             || control_binding.engine_id != "pi"
             || control_binding.conversation_id != started.run.conversation_id
             || control_binding.execution_profile_id != execution_profile.id() {
-            return Err("Legacy startup cannot replace the frozen Run engine/authority/profile/conversation".into());
+            return Err("Startup cannot replace the frozen Run engine/authority/profile/conversation".into());
         }
         let project_context = json!({
             "projectRoot": control_binding.permission.project_root,
@@ -1855,6 +1898,18 @@ impl RuntimeHost {
             8,
             6_000,
         )?;
+
+        if let Some(ownership) = kernel_ownership {
+            let prompt = json!({
+                "text":text,"messages":messages,"images":images,"systemPrompt":system_prompt,"skillPrompt":skill_prompt,
+                "assistantPackage":assistant_package,"expertPackage":expert_package,"expertBinding":expert_binding_payload,
+                "runContext":run_context,"projectContext":project_context,"workSnapshot":work_snapshot,"memoryContext":memory_context,
+                "promptBudget":{"maxPromptTokens":input_tokens},
+            });
+            let service = json!({"baseUrl":model_service.base_url,"modelId":model_service.model_id,"apiType":model_service.api_type,
+                "contextWindow":model_service.context_window,"maxOutputTokens":effective_max_output_tokens,"supportsImageInput":model_service.supports_image_input});
+            return self.start_kernel_run(ownership, &control_binding, prompt, service);
+        }
 
         let _transition = self
             .run_transition
@@ -2085,6 +2140,23 @@ impl RuntimeHost {
                 .database
                 .graph_attempt_id_for_child_run(&child_run_id)?
                 .is_some();
+        if let Some(parent) = self.database.run_control_binding(&child_run.parent_run_id)?
+            .filter(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative) {
+            if self.database.pending_kernel_host_commands(&parent.run_id)?.iter().any(|command| command.kind=="cancel")
+                || self.database.kernel_host_run_state(&parent.run_id)?.as_deref()!=Some("running") {
+                return Err("Kernel parent is no longer admitting child execution".into());
+            }
+            let mut inherited = parent;
+            inherited.run_id = child_run_id.clone();
+            inherited.conversation_id = child_run.child_conversation_id.clone();
+            if enforce_count_budget_override { inherited.permission.mode = fox_engine_protocol::PermissionMode::ReadOnly; }
+            if graph_review_request_id.is_some() { inherited.execution_profile_id = GRAPH_REVIEWER_EXECUTION_PROFILE.into(); }
+            inherited.permission_snapshot_id = Database::run_control_permission_hash(&inherited.permission)?;
+            inherited.budgets.run_execution_ms = inherited.budgets.run_execution_ms.min(child_run.budget.max_duration_ms);
+            inherited.budgets.tool_execution_ms = inherited.budgets.tool_execution_ms.min(inherited.budgets.run_execution_ms);
+            inherited.budgets.model_request_ms = inherited.budgets.model_request_ms.min(inherited.budgets.run_execution_ms);
+            self.database.freeze_run_control(&inherited)?;
+        }
         let mut child_host = RuntimeHost::new(
             self.app.clone(),
             self.database.clone(),
@@ -2153,7 +2225,12 @@ impl RuntimeHost {
         let coordinator = self.clone();
         thread::spawn(move || {
             let prompt = started.user_message.content.clone();
+            let kernel_owned = coordinator.database.run_control_binding(&child_run_id)
+                .ok().flatten().is_some_and(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative);
             if let Err(error) = child_host.start_run(&started, &prompt, &[]) {
+                if kernel_owned {
+                    let _ = child_host.record_kernel_start_failure(&child_run_id);
+                } else {
                 let (code, detail) = structured_runtime_error(&error);
                 let _ = coordinator.database.mark_run_failed(
                     &child_run_id,
@@ -2164,6 +2241,7 @@ impl RuntimeHost {
                     },
                     detail,
                 );
+                }
             } else {
                 if let Ok(Some(record)) = coordinator.database.child_run(&child_run_id) {
                     coordinator.emit_child_run_update(&parent_conversation_id, &record);
@@ -2171,7 +2249,10 @@ impl RuntimeHost {
                 let deadline =
                     Instant::now() + Duration::from_millis(child_run.budget.max_duration_ms as u64);
                 loop {
-                    let duration_exceeded = Instant::now() >= deadline;
+                    // Kernel owns its paused execution clock and terminal
+                    // facts. The Legacy wall timer must not override approval
+                    // waits or settle the child ahead of executor cleanup.
+                    let duration_exceeded = !kernel_owned && Instant::now() >= deadline;
                     if duration_exceeded {
                         let _ = child_host.cancel_run(&child_run_id);
                         let _ = child_host.stop_worker();
@@ -2575,6 +2656,10 @@ impl RuntimeHost {
     }
 
     fn cancel_child_runtime(&self, child_run_id: &str) -> Result<bool, String> {
+        if self.database.run_control_binding(child_run_id)?.is_some_and(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative) {
+            let host = self.child_hosts.lock().map_err(|_| "child runtime map is poisoned")?.get(child_run_id).cloned();
+            return host.as_ref().unwrap_or(self).cancel_run(child_run_id);
+        }
         if self
             .database
             .child_run_status(child_run_id)?
@@ -2582,6 +2667,14 @@ impl RuntimeHost {
             .is_none_or(run_status_is_terminal)
         {
             return Ok(false);
+        }
+        if let Some(child) = self.database.child_run(child_run_id)? {
+            if self.database.run_control_binding(&child.parent_run_id)?.is_some_and(|parent|
+                parent.authority==fox_engine_protocol::ExecutionAuthority::Authoritative) {
+                let _ownership = kernel_host::acquire(&self.sessions_dir,child_run_id)?;
+                if self.database.kernel_cancel_unstarted_child(&child.parent_run_id,child_run_id)? { return Ok(true); }
+                return Err("Kernel child preparation is changing; cancellation was not delegated to Legacy".into());
+            }
         }
         if self.database.mark_run_cancelling(child_run_id)?.is_none() {
             return Ok(false);
@@ -2619,6 +2712,9 @@ impl RuntimeHost {
         child_run_id: &str,
         allow_redelivery: bool,
     ) -> Result<bool, String> {
+        if self.database.run_control_binding(child_run_id)?.is_some_and(|binding| binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative) {
+            return self.cancel_child_runtime(child_run_id);
+        }
         let child_host = self
             .child_hosts
             .lock()
@@ -2760,15 +2856,30 @@ impl RuntimeHost {
             .database
             .get_expert_team(team_run_id)?
             .ok_or_else(|| "team.not_found".to_owned())?;
+        let kernel_parent = self.database.run_control_binding(&snapshot.run.parent_run_id)?
+            .filter(|binding|binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative);
         for member in &snapshot.members {
             if !run_status_is_terminal(&member.status) {
-                let _ = self.cancel_child_runtime(&member.child_run_id);
+                let result = self.cancel_child_runtime(&member.child_run_id);
+                if kernel_parent.is_some() { result?; }
             }
+        }
+        if let Some(binding) = kernel_parent {
+            let selected = snapshot.members.iter().map(|member|member.child_run_id.clone()).collect();
+            self.wait_kernel_selected_children(&binding,false,Some(&selected))?;
         }
         self.database.cancel_expert_team(team_run_id, reason)
     }
 
     pub fn cancel_run(&self, run_id: &str) -> Result<bool, String> {
+        if self.database.run_control_binding(run_id)?.is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative) {
+            let queued = self.database.queue_kernel_host_command(run_id, None)?;
+            self.state.lock().map_err(|_| "runtime state lock poisoned")?.cancellation.request_run_cancel(run_id);
+            for child_run_id in self.database.active_child_run_ids(run_id)? {
+                if child_run_id != run_id { let _ = self.cancel_child_runtime(&child_run_id); }
+            }
+            return Ok(queued);
+        }
         let _ = self
             .database
             .cancel_expert_teams_for_parent(run_id, "parent Run cancelled");
@@ -2826,6 +2937,14 @@ impl RuntimeHost {
         approval_id: &str,
         decision: ApprovalDecision,
     ) -> Result<bool, String> {
+        if let Some((run_id, tool_id)) = self.database.kernel_host_approval_target(approval_id)? {
+            let decision = match decision {
+                ApprovalDecision::AllowOnce => "allow_once",
+                ApprovalDecision::AllowConversation => "allow_conversation",
+                ApprovalDecision::Deny => "denied",
+            };
+            return self.database.queue_kernel_host_command(&run_id, Some((&tool_id, decision)));
+        }
         let resolved = self.database.resolve_approval(approval_id, decision)?;
         let Some(approval) = resolved else {
             return Ok(false);
@@ -2936,6 +3055,7 @@ impl RuntimeHost {
 
     pub fn shutdown(&self) -> Result<(), String> {
         self.digital_scheduler_stop.store(true, Ordering::SeqCst);
+        self.stop_kernel_runs()?;
         let child_hosts = self
             .child_hosts
             .lock()
@@ -2943,6 +3063,10 @@ impl RuntimeHost {
             .drain()
             .collect::<Vec<_>>();
         for (run_id, child_host) in child_hosts {
+            if self.database.run_control_binding(&run_id)?.is_some_and(|binding| binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative) {
+                child_host.stop_kernel_runs()?;
+                continue;
+            }
             let _ = child_host.cancel_run(&run_id);
             let _ = child_host.stop_worker();
             self.database.mark_run_interrupted(
@@ -5157,6 +5281,17 @@ fn execute_memory_tool_request(
                 hook_decision.approval_reason.as_deref(),
             )?;
         }
+        execute_memory_operation(database,conversation_id,run_id,tool,&input)
+    })();
+    finalize_host_tool_execution(
+        database,run_id,tool_call_id,tool,&input,hook_decision.annotations,outcome,
+    )
+}
+
+// Shared operation only: execution authority, approvals and result commits
+// remain with the calling Legacy or Kernel owner.
+fn execute_memory_operation(database: &Database, conversation_id: &str, run_id: &str,
+    tool: &str, input: &Value) -> Result<Value,String> {
         match tool {
             "memory_search" => {
                 let query = input.get("query").and_then(Value::as_str).unwrap_or("");
@@ -5203,16 +5338,6 @@ fn execute_memory_tool_request(
             }
             _ => Err(format!("unsupported memory tool: {tool}")),
         }
-    })();
-    finalize_host_tool_execution(
-        database,
-        run_id,
-        tool_call_id,
-        tool,
-        &input,
-        hook_decision.annotations,
-        outcome,
-    )
 }
 
 fn execute_work_tool_request(
@@ -6920,6 +7045,26 @@ async fn execute_knowledge_tool_request(
             )?;
         }
         let bindings = database.conversation_knowledge_reference_bindings(conversation_id)?;
+        let service = database.get_yuxi_service()?;
+        execute_bound_knowledge_tool(service.as_ref(), yuxi_client, local_knowledge, &bindings, tool, &input).await
+    }
+    .await;
+    finalize_host_tool_execution(
+        database,
+        run_id,
+        tool_call_id,
+        tool,
+        &input,
+        hook_decision.annotations,
+        outcome,
+    )
+}
+
+
+async fn execute_bound_knowledge_tool(
+    remote_service: Option<&crate::database::YuxiServiceRecord>, yuxi_client: &YuxiClient, local_knowledge: &LocalKnowledgeStore,
+    bindings: &[crate::database::KnowledgeReferenceBindingRecord], tool: &str, input: &Value,
+) -> Result<Value, String> {
     let ensure_bound = |target: &KnowledgeToolTarget| {
         bindings
             .iter()
@@ -6979,7 +7124,7 @@ async fn execute_knowledge_tool_request(
                 json!({ "items": items })
             } else {
                 let mut items = Vec::with_capacity(bindings.len());
-                for binding in &bindings {
+                for binding in bindings {
                     if binding.reference.source == "local" {
                         let base = local_knowledge
                             .list_bases_for_ids(std::slice::from_ref(&binding.reference.id))
@@ -7038,8 +7183,7 @@ async fn execute_knowledge_tool_request(
                         .search_lexical(&target.id, query, requested_limit, requested_max_chars)
                         .map_err(|error| format!("[{}] {}", error.code(), error))?
                 } else {
-                    let service = database
-                        .get_yuxi_service()?
+                    let service = remote_service
                         .ok_or_else(|| "Yuxi service is not configured".to_owned())?;
                     let token = get_access_token(&service.base_url)
                         .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
@@ -7085,8 +7229,7 @@ async fn execute_knowledge_tool_request(
                     })
                     .map_err(|error| format!("[{}] {}", error.code(), error))?
             } else {
-                let service = database
-                    .get_yuxi_service()?
+                let service = remote_service
                     .ok_or_else(|| "Yuxi service is not configured".to_owned())?;
                 let token = get_access_token(&service.base_url)
                     .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
@@ -7117,8 +7260,7 @@ async fn execute_knowledge_tool_request(
                 .and_then(Value::as_i64)
                 .unwrap_or(80)
                 .clamp(1, 200);
-            let service = database
-                .get_yuxi_service()?
+            let service = remote_service
                 .ok_or_else(|| "Yuxi service is not configured".to_owned())?;
             let token = get_access_token(&service.base_url)
                 .ok_or_else(|| "Yuxi authentication is not configured".to_owned())?;
@@ -7146,17 +7288,6 @@ async fn execute_knowledge_tool_request(
         _ => return Err(format!("unsupported knowledge tool: {tool}")),
     };
         Ok(bounded_knowledge_tool_result(result))
-    }
-    .await;
-    finalize_host_tool_execution(
-        database,
-        run_id,
-        tool_call_id,
-        tool,
-        &input,
-        hook_decision.annotations,
-        outcome,
-    )
 }
 
 #[derive(Debug, Clone)]

@@ -145,6 +145,7 @@ pub trait SnapshotProjectionPort: Send + Sync {
 /// Kind of durable external effect tracked by the outbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboxEffectKind {
+    InitialModel,
     DispatchTool,
     RequestApproval,
     CancelEngineTurn,
@@ -156,6 +157,7 @@ pub enum OutboxEffectKind {
 impl OutboxEffectKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            OutboxEffectKind::InitialModel => "initial_model",
             OutboxEffectKind::DispatchTool => "dispatch_tool",
             OutboxEffectKind::RequestApproval => "request_approval",
             OutboxEffectKind::CancelEngineTurn => "cancel_engine_turn",
@@ -167,6 +169,7 @@ impl OutboxEffectKind {
 
     pub fn parse(value: &str) -> Option<OutboxEffectKind> {
         match value {
+            "initial_model" => Some(OutboxEffectKind::InitialModel),
             "dispatch_tool" => Some(OutboxEffectKind::DispatchTool),
             "request_approval" => Some(OutboxEffectKind::RequestApproval),
             "cancel_engine_turn" => Some(OutboxEffectKind::CancelEngineTurn),

@@ -144,6 +144,22 @@ mod tests {
         assert!(db.freeze_legacy_run_control("missing-run", "test-profile").is_err());
         assert_eq!(db.run_control_binding("missing-run").unwrap(), None);
     }
+
+    #[test]
+    fn kernel_startup_freezes_permissions_budgets_and_refuses_legacy_takeover() {
+        let (db, path, run_id) = fixture();
+        let mut budgets = fox_engine_protocol::TimeBudgets::default();
+        budgets.run_execution_ms = 60_000;
+        let binding = db.freeze_kernel_run_control(&run_id, "legacy", budgets.clone()).unwrap();
+        assert_eq!(binding.authority, ExecutionAuthority::Authoritative);
+        assert_eq!(binding.read_only_executor, ResourceExecutor::Rust);
+        assert_eq!(binding.budgets, budgets);
+        assert!(db.freeze_legacy_run_control(&run_id, "legacy").is_err());
+        db.update_conversation_permission_mode(&binding.conversation_id, "allow").unwrap();
+        drop(db);
+        let db = Database::open(path).unwrap();
+        assert_eq!(db.freeze_kernel_run_control(&run_id, "legacy", fox_engine_protocol::TimeBudgets::default()).unwrap(), binding);
+    }
 }
 
 impl Database {
@@ -205,21 +221,31 @@ impl Database {
         }
     }
 
-    /// Capture all mutable permission inputs in one SQLite snapshot. This is
-    /// deliberately Legacy-only until authoritative dispatch is integrated.
+    /// Capture all mutable permission inputs in one SQLite snapshot.
     pub fn freeze_legacy_run_control(&self, run_id: &str, profile_id: &str) -> Result<RunControlBinding, String> {
         self.freeze_legacy_run_control_with_executor(run_id, profile_id, fox_engine_protocol::ResourceExecutor::Runtime)
     }
 
     pub fn freeze_legacy_run_control_with_executor(&self, run_id: &str, profile_id: &str, executor: fox_engine_protocol::ResourceExecutor) -> Result<RunControlBinding, String> {
+        self.freeze_selected_run_control(run_id, profile_id, ExecutionAuthority::Legacy, executor, fox_engine_protocol::TimeBudgets::default())
+    }
+
+    pub(crate) fn freeze_kernel_run_control(&self, run_id: &str, profile_id: &str, budgets: fox_engine_protocol::TimeBudgets) -> Result<RunControlBinding, String> {
+        budgets.validate()?;
+        self.freeze_selected_run_control(run_id, profile_id, ExecutionAuthority::Authoritative, fox_engine_protocol::ResourceExecutor::Rust, budgets)
+    }
+
+    fn freeze_selected_run_control(&self, run_id: &str, profile_id: &str, authority: ExecutionAuthority,
+        executor: fox_engine_protocol::ResourceExecutor, budgets: fox_engine_protocol::TimeBudgets) -> Result<RunControlBinding, String> {
         // A restart must reuse the existing binding, never recapture permissions.
         if let Some(binding) = self.run_control_binding(run_id)? {
-            if binding.execution_profile_id != profile_id || binding.authority != ExecutionAuthority::Legacy {
-                return Err("frozen Run authority/profile cannot be replaced by Legacy startup".into());
+            if binding.execution_profile_id != profile_id || binding.authority != authority {
+                return Err("frozen Run authority/profile cannot be replaced by startup".into());
             }
             return Ok(binding);
         }
-        use fox_engine_protocol::{FrozenPermission, PermissionGrant, TimeBudgets};
+        use fox_engine_protocol::{FrozenPermission, PermissionGrant};
+        let authority_name = match authority { ExecutionAuthority::Legacy => "legacy", ExecutionAuthority::Authoritative => "authoritative" };
         let binding = self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             let (conversation_id, mode, root): (String, String, Option<String>) = transaction.query_row(
@@ -239,14 +265,14 @@ impl Database {
             let binding = RunControlBinding {
                 schema_version: fox_engine_protocol::CONTROL_SCHEMA_VERSION,
                 run_id: run_id.into(), conversation_id, engine_id: "pi".into(),
-                execution_profile_id: profile_id.into(), authority: ExecutionAuthority::Legacy,
+                execution_profile_id: profile_id.into(), authority,
                 read_only_executor: executor, permission_snapshot_id, permission,
-                budgets: TimeBudgets::default(),
+                budgets,
             };
             let json = encode(&binding).map_err(rusqlite::Error::InvalidParameterName)?;
             transaction.execute(
-                "INSERT INTO run_control_bindings(run_id,conversation_id,authority,engine_id,binding_json,binding_hash,created_at) VALUES(?1,?2,'legacy','pi',?3,?4,?5)",
-                params![run_id,binding.conversation_id,json,content_hash(&json),now_ms()])?;
+                "INSERT INTO run_control_bindings(run_id,conversation_id,authority,engine_id,binding_json,binding_hash,created_at) VALUES(?1,?2,?6,'pi',?3,?4,?5)",
+                params![run_id,binding.conversation_id,json,content_hash(&json),now_ms(),authority_name])?;
             transaction.commit()?;
             Ok(binding)
         })?;

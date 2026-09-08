@@ -146,6 +146,10 @@ fn result(text: String, mut details: Value, max_chars: usize) -> Value {
 }
 
 pub fn execute(binding: &RunControlBinding, tool: &str, input: &Value, cancellation: &CancellationToken) -> Result<Value, String> {
+    execute_with_budget(binding, tool, input, cancellation, Duration::from_millis(binding.budgets.tool_execution_ms as u64))
+}
+
+pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input: &Value, cancellation: &CancellationToken, budget: Duration) -> Result<Value,String> {
     binding.validate()?;
     if binding.read_only_executor != ResourceExecutor::Rust || !is_reader(tool) {
         return Err("resource gateway is not the frozen executor for this tool".into());
@@ -153,7 +157,7 @@ pub fn execute(binding: &RunControlBinding, tool: &str, input: &Value, cancellat
     let approved = crate::tool_guard::approve_read_only_tool(tool, input, binding.permission.project_root.as_deref())?;
     let root = Path::new(binding.permission.project_root.as_deref().ok_or("missing frozen project root")?).canonicalize().map_err(|error| error.to_string())?;
     let limits = ReadLimits::for_profile(&binding.execution_profile_id);
-    let mut gateway = Gateway { root, cancellation, deadline: Instant::now() + Duration::from_millis(binding.budgets.tool_execution_ms as u64), remaining_bytes: MAX_SCAN_BYTES, limits };
+    let mut gateway = Gateway { root, cancellation, deadline: Instant::now() + budget.min(Duration::from_millis(binding.budgets.tool_execution_ms as u64)), remaining_bytes: MAX_SCAN_BYTES, limits };
     gateway.check()?;
     let path = approved.resolved_path;
     if tool == "read" {

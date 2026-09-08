@@ -4,7 +4,8 @@ import {
 } from './pi-adapter.mjs'
 import { createEnvelope, validateEnvelope } from './protocol.mjs'
 import { resolveModelProfile, transportProvider } from './model-profile.mjs'
-import { installKernelProposalTools, prepareKernelBatchResume, resumePiKernelBatch } from './pi-kernel-batch-resume.mjs'
+import { installKernelProposalTools, prepareKernelBatchResume, resumePiKernelBatch, prepareKernelInitialModel, startPiKernelInitial } from './pi-kernel-batch-resume.mjs'
+import { describeKernelRun } from './pi-kernel-description.mjs'
 
 const nonempty = value => typeof value === 'string' && value.trim().length > 0
 
@@ -77,20 +78,29 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
       if (error) throw new Error(error)
       if (Buffer.byteLength(JSON.stringify(request), 'utf8') > 1_048_576) throw new Error('Kernel request exceeds protocol size limit')
       switch (request.type) {
+        case 'kernel.describe':
+          if (state !== 'fresh') throw new Error('Description requires a fresh isolated worker')
+          state = 'consumed'
+          respond(request, 'kernel.description', describeKernelRun(request))
+          break
         case 'kernel.initialize':
           if (state !== 'fresh') throw new Error('Kernel worker is single-use')
           startedInitialization = true
           setup = initialize(request)
           await setup
           break
+        case 'kernel.start_initial':
         case 'kernel.resume_batch': {
           if (state !== 'ready' || !owns(request)) throw new Error('Kernel worker is not ready for this identity')
           // Validate before claiming; after dispatch even a failed/cancelled
           // request consumes this process and must be reconciled by Host.
-          prepareKernelBatchResume(request, identity)
+          const initial = request.type === 'kernel.start_initial'
+          if (initial) prepareKernelInitialModel(request, identity)
+          else prepareKernelBatchResume(request, identity)
           state = 'running'
           abort = new AbortController()
-          active = resumePiKernelBatch(session, request, identity, abort.signal)
+          const preview = request.payload.streamPreview === true ? payload => respond(request,'kernel.model_preview',payload) : undefined
+          active = initial ? startPiKernelInitial(session, request, identity, abort.signal, preview) : resumePiKernelBatch(session, request, identity, abort.signal, preview)
           try { respond(request, 'kernel.model_response', await active) }
           finally { state = 'consumed'; active = null; provider?.unregister(); provider = null }
           break
@@ -112,7 +122,7 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
       }
       // Never echo configuration, credentials, histories or provider errors.
       // Detailed provider responses are not safe transport diagnostics.
-      const message = request?.type === 'kernel.resume_batch' && state === 'consumed'
+      const message = ['kernel.resume_batch', 'kernel.start_initial'].includes(request?.type) && state === 'consumed'
         ? 'Kernel model round failed or was cancelled; reconcile delivery before any retry'
         : 'Kernel worker rejected the request; check identity, state and configuration'
       respond(request ?? {}, 'request_failed', { code: 'kernel.request_failed', message })

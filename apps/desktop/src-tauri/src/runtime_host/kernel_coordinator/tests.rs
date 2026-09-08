@@ -44,6 +44,10 @@ fn initial_input(run_id: &str, prompt_hash: &str) -> fox_engine_protocol::Kernel
 }
 
 fn fixture_with_initial_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool) -> (Database, PathBuf, String) {
+    fixture_with_start_opt(clock, prompt_hash, model, initial, false)
+}
+
+fn fixture_with_start_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool) -> (Database, PathBuf, String) {
     let root = std::env::temp_dir().join(format!("fox-coordinator-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("proof.txt"), "durable coordinator 中文 😀").unwrap();
@@ -117,6 +121,7 @@ fn fixture_with_initial_opt(clock: &TestClock, prompt_hash: &str, model: Option<
         let (wrong_controller, wrong_effects) = RunController::start(&run_id, "wrong-turn", config.clone(), clock).unwrap();
         assert!(db.kernel_commit_decision(&run_id, clock.now_wall_ms(), &wrong_controller.persist_command(&wrong_effects)).is_err());
     }
+    if prepared { return (db, root, run_id); }
     let (controller, effects) = RunController::start(&run_id, "turn-1", config, clock).unwrap();
     db.kernel_commit_decision(
         &run_id,
@@ -737,6 +742,97 @@ fn real_worker_command() -> super::super::RuntimeCommand {
     }
 }
 
+#[test]
+fn kernel_repair_override_cannot_be_auto_approved_or_prompt_for_ineligible_work() {
+    let clock=TestClock::new(1_000);
+    let config = worker_configuration();
+    let (db,_,run_id)=fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    let mut scope=freeze_host_scope(&db,&run_id);
+    scope.tool_names.insert("task_repair_escalate_start".into());
+    let mut binding=db.run_control_binding(&run_id).unwrap().unwrap();
+    binding.execution_profile_id="durable_v2".into();
+    binding.permission.mode=PermissionMode::Allow;
+    binding.permission.grants.push(fox_engine_protocol::PermissionGrant {tool:"task_repair_escalate_start".into(),scope:"project".into()});
+    binding.permission_snapshot_id=Database::run_control_permission_hash(&binding.permission).unwrap();
+    let policy=super::super::kernel_gateway::GatewayPolicy {binding,scope};
+    let input=json!({"taskId":"missing-task","attemptId":"repair-attempt","expectedVersion":1,
+        "rootCause":"Confirmed root cause","findingIds":["missing-finding"],"escalationReason":"One bounded repair"}).to_string();
+    assert!(matches!(policy.decide(&run_id,"repair","task_repair_escalate_start",&input),PolicyDecision::RequireApproval));
+    let proposals=super::super::kernel_gateway::GatewayProposalPolicy {gateway:&policy,database:&db};
+    assert!(matches!(proposals.decide(&run_id,"repair","task_repair_escalate_start",&input),PolicyDecision::Deny {..}));
+}
+
+fn freeze_host_scope(db: &Database, run_id: &str) -> crate::database::KernelHostScope {
+    let scope = crate::database::KernelHostScope { schema_version: 1, tool_names: ["read".into()].into_iter().collect(),
+        mcp_server_hashes: Default::default(), knowledge_reference_hashes: Default::default(), knowledge_connection_hashes: Default::default(), office_tools: Default::default(), lifecycle_hooks:Vec::new() };
+    db.freeze_kernel_host_scope(run_id, &scope).unwrap();
+    scope
+}
+
+#[test]
+fn owning_host_loop_starts_real_model_and_commits_one_visible_final() {
+    let config = worker_configuration();
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    freeze_host_scope(&db, &run_id);
+    super::super::kernel_host::drive(super::super::kernel_host::acquire(&root, &run_id).unwrap(),
+        &db, &clock, &cancellation, &run_id, &real_worker_command(), "test-key", &Allow,
+        |_,_,_| panic!("plain model answer must not execute resources")).unwrap();
+    assert_eq!(db.kernel_build_full_snapshot(&run_id).unwrap().state, "completed");
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let output: (i64,String) = connection.query_row("SELECT COUNT(*),MAX(content) FROM messages WHERE run_id=?1 AND role='assistant'",
+        [&run_id], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+    assert_eq!(output, (1,"Host consumed the durable batch".into()));
+}
+
+#[test]
+fn owning_host_recovery_consumes_queued_approvals_then_real_reads_and_model() {
+    let config = worker_configuration();
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    let scope = freeze_host_scope(&db, &run_id);
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.dispatch_initial("proposal", &Ask, |binding, frame, _| Ok(fox_engine_protocol::KernelInitialModelResponse {
+        schema_version: 1, run_id: binding.run_id.clone(), turn_id: frame.input.turn_id.clone(), checkpoint_seq: frame.checkpoint_seq,
+        assistant_message: json!({"role":"assistant","stopReason":"toolUse","content":[
+            {"type":"toolCall","id":"read-a","name":"read","arguments":{"path":"proof.txt"}}]}),
+    })).unwrap();
+    db.queue_kernel_host_command(&run_id, Some(("read-a","allow_once"))).unwrap();
+    drop(coordinator); drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let policy = super::super::kernel_gateway::GatewayPolicy { binding: db.run_control_binding(&run_id).unwrap().unwrap(), scope };
+    let count = AtomicUsize::new(0);
+    super::super::kernel_host::drive(super::super::kernel_host::acquire(&root, &run_id).unwrap(),
+        &db, &clock, &cancellation, &run_id, &real_worker_command(), "test-key", &policy,
+        |_,effect,token| {
+            count.fetch_add(1, Ordering::SeqCst);
+            let payload: Value = serde_json::from_str(&effect.payload_json).unwrap();
+            Ok((true,policy.execute(&db, "read", &payload["input"], token)?))
+        }).unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    assert_eq!(db.kernel_build_full_snapshot(&run_id).unwrap().state, "completed");
+    assert!(db.pending_kernel_host_commands(&run_id).unwrap().is_empty());
+}
+
+#[test]
+fn owning_host_recovery_never_replays_an_uncertain_model_request() {
+    let config = worker_configuration();
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    freeze_host_scope(&db, &run_id);
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    assert!(coordinator.dispatch_initial("uncertain", &Allow, |_,_,_| Err("simulated lost response".into())).is_err());
+    drop(coordinator);
+    let invalid_worker = super::super::RuntimeCommand { program: "must-not-start-a-model".into(), script: None };
+    super::super::kernel_host::drive(super::super::kernel_host::acquire(&root, &run_id).unwrap(),
+        &db, &clock, &cancellation, &run_id, &invalid_worker, "test-key", &Allow,
+        |_,_,_| panic!("uncertain recovery must not execute resources")).unwrap();
+    assert_eq!(db.kernel_build_full_snapshot(&run_id).unwrap().state, "failed");
+}
+
 fn settle_worker_batch(coordinator: &KernelCoordinator<'_>) {
     coordinator.propose_engine_batch(fox_engine_protocol::KernelEngineBatchCheckpoint {
         schema_version: 1, batch_id: "worker-batch".into(),
@@ -1010,4 +1106,493 @@ fn v55_initial_input_upgrade_preserves_runs_without_inventing_old_context() {
         assert!(db.kernel_initial_input(&run_id).unwrap_err().contains("missing"));
         assert!(db.freeze_kernel_initial_input(&initial_input(&run_id, &config.hash().unwrap())).is_err());
     }
+}
+
+#[test]
+fn initial_model_real_worker_after_reopen_commits_final_and_consumes_once() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().pending_effects.iter().filter(|e| e.kind == kernel::OutboxEffectKind::InitialModel).count(), 1);
+    assert!(db.kernel_outbox_lease_effect(&run_id, kernel::INITIAL_MODEL_EFFECT_KEY, "wrong-path").unwrap().is_none());
+    drop(coordinator); drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.dispatch_initial_with_worker("first", &Allow, &real_worker_command(), "test-key").unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "completed");
+    assert!(coordinator.dispatch_initial_with_worker("replay", &Allow, &real_worker_command(), "test-key").is_err());
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let (status, attempts): (String, i64) = connection.query_row("SELECT status,attempts FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key='initial-model'", [&run_id], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+    assert_eq!((status, attempts), ("completed".into(), 1));
+}
+
+#[test]
+fn initial_model_lost_response_stays_uncertain_after_reopen() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    assert!(coordinator.dispatch_initial("lost", &Allow, |_, _, _| Err("connection lost".into())).is_err());
+    drop(coordinator); drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    assert!(coordinator.dispatch_initial("retry", &Allow, |_, _, _| panic!("must not replay uncertain initial request")).is_err());
+    assert_eq!(coordinator.snapshot().unwrap().pending_effects.iter().find(|e| e.kind == kernel::OutboxEffectKind::InitialModel).unwrap().status, kernel::OutboxStatus::Leased);
+}
+
+#[test]
+fn initial_model_proposal_enters_the_existing_approval_and_batch_pipeline() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, _, run_id) = fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.dispatch_initial("initial", &Ask, |binding, frame, _| Ok(fox_engine_protocol::KernelInitialModelResponse {
+        schema_version: 1, run_id:binding.run_id.clone(), turn_id:frame.input.turn_id.clone(), checkpoint_seq:frame.checkpoint_seq,
+        assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"first-read","name":"read","arguments":{"path":"proof.txt"}}]}),
+    })).unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "waiting_approval");
+    assert_eq!(coordinator.snapshot().unwrap().tool_calls.len(), 1);
+    assert!(coordinator.prepare_stored_batch_resume(&format!("initial-batch:{run_id}:2")).is_err());
+}
+
+#[test]
+fn kernel_host_scope_and_commands_survive_reopen_without_double_decisions() {
+    let config = worker_configuration();
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    let scope = crate::database::KernelHostScope {
+        schema_version: 1, tool_names: ["read".into()].into_iter().collect(),
+        mcp_server_hashes: Default::default(), knowledge_reference_hashes: Default::default(), knowledge_connection_hashes: Default::default(), office_tools: Default::default(), lifecycle_hooks:Vec::new(),
+    };
+    let mut bad = scope.clone(); bad.tool_names.clear();
+    assert!(db.freeze_kernel_host_scope(&run_id, &bad).is_err());
+    db.freeze_kernel_host_scope(&run_id, &scope).unwrap();
+    db.freeze_kernel_host_scope(&run_id, &scope).unwrap();
+    assert_eq!(db.kernel_host_scope(&run_id).unwrap(), scope);
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.dispatch_initial("initial", &Ask, |binding, frame, _| Ok(fox_engine_protocol::KernelInitialModelResponse {
+        schema_version: 1, run_id: binding.run_id.clone(), turn_id: frame.input.turn_id.clone(), checkpoint_seq: frame.checkpoint_seq,
+        assistant_message: json!({"role":"assistant","stopReason":"toolUse","content":[
+            {"type":"text","text":"只投影可见文字"},
+            {"type":"thinking","thinking":"private reasoning must never become chat text"},
+            {"type":"toolCall","id":"first","name":"read","arguments":{"path":"proof.txt"}},
+            {"type":"toolCall","id":"second","name":"read","arguments":{"path":"proof.txt"}}]}),
+    })).unwrap();
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let projected: (i64,String) = connection.query_row("SELECT COUNT(*),MAX(content) FROM messages WHERE run_id=?1 AND role='assistant'",
+        [&run_id], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+    assert_eq!(projected, (1,"只投影可见文字".into()));
+    let approvals: i64 = connection.query_row("SELECT COUNT(*) FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id
+        WHERE t.run_id=?1 AND a.status='pending' AND t.status='pending'", [&run_id], |row| row.get(0)).unwrap();
+    assert_eq!(approvals, 2);
+    db.repair_interrupted_runs().unwrap();
+    assert!(!db.apply_runtime_event(&run_id, 99_999, &json!({"type":"run.failed","code":"legacy","message":"must not overwrite"})).unwrap());
+    assert!(db.mark_run_failed(&run_id, "legacy", "must not overwrite").is_err());
+    assert!(db.mark_run_interrupted(&run_id, "legacy", "must not overwrite").is_err());
+    let still_pending: i64 = connection.query_row("SELECT COUNT(*) FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id
+        WHERE t.run_id=?1 AND a.status='pending' AND t.status='pending'", [&run_id], |row| row.get(0)).unwrap();
+    assert_eq!(still_pending, 2);
+    assert!(db.queue_kernel_host_command(&run_id, Some(("first", "allow_once"))).unwrap());
+    assert!(!db.queue_kernel_host_command(&run_id, Some(("first", "allow_once"))).unwrap());
+    assert!(db.queue_kernel_host_command(&run_id, Some(("first", "denied"))).is_err());
+    assert!(db.queue_kernel_host_command(&run_id, Some(("missing", "allow_once"))).is_err());
+    let command = db.pending_kernel_host_commands(&run_id).unwrap().remove(0);
+    assert!(db.complete_kernel_host_command(&run_id, command.seq).is_err());
+    connection.execute_batch("CREATE TRIGGER reject_kernel_projection BEFORE UPDATE ON approvals
+        BEGIN SELECT RAISE(ABORT,'projection rollback test'); END;").unwrap();
+    assert!(coordinator.resolve_approval("first", kernel::ApprovalDecision::AllowOnce).is_err());
+    let approval: String = connection.query_row("SELECT state FROM kernel_approvals WHERE run_id=?1 AND tool_call_id='first'",
+        [&run_id], |row| row.get(0)).unwrap();
+    assert_eq!(approval, "pending");
+    connection.execute_batch("DROP TRIGGER reject_kernel_projection").unwrap();
+    coordinator.resolve_approval("first", kernel::ApprovalDecision::AllowOnce).unwrap();
+    // Crash window: the domain decision persisted, but queue acknowledgement did not.
+    drop(coordinator); drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    assert_eq!(db.kernel_host_scope(&run_id).unwrap(), scope);
+    assert_eq!(db.pending_kernel_host_commands(&run_id).unwrap(), vec![command.clone()]);
+    db.complete_kernel_host_command(&run_id, command.seq).unwrap();
+    assert!(db.pending_kernel_host_commands(&run_id).unwrap().is_empty());
+    assert_eq!(db.kernel_host_recoverable_runs().unwrap(), vec![run_id.clone()]);
+    assert!(db.queue_kernel_host_command(&run_id, None).unwrap());
+    assert!(!db.queue_kernel_host_command(&run_id, None).unwrap());
+    assert!(db.queue_kernel_host_command(&run_id, Some(("second", "allow_once"))).is_err());
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.cancel().unwrap();
+    coordinator.settle_cancellation().unwrap();
+    let cancel = db.pending_kernel_host_commands(&run_id).unwrap().remove(0);
+    db.complete_kernel_host_command(&run_id, cancel.seq).unwrap();
+    assert!(db.kernel_host_recoverable_runs().unwrap().is_empty());
+    let projected_status: String = connection.query_row("SELECT status FROM runs WHERE id=?1", [&run_id], |row| row.get(0)).unwrap();
+    assert_eq!(projected_status, "cancelled");
+    assert_eq!(db.kernel_host_scope(&run_id).unwrap(), scope);
+    bad = scope.clone(); bad.office_tools.insert("new-live-tool".into());
+    assert!(db.freeze_kernel_host_scope(&run_id, &bad).is_err());
+}
+
+#[test]
+fn initial_model_dispatch_rollback_does_not_call_engine_or_arm_deadline() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_initial_dispatch BEFORE INSERT ON kernel_events WHEN NEW.event_type='engine.initial_dispatched' BEGIN SELECT RAISE(ABORT,'injected initial dispatch failure'); END;").unwrap();
+    assert!(coordinator.dispatch_initial("blocked", &Allow, |_, _, _| panic!("rolled-back dispatch must not call engine")).is_err());
+    assert_eq!(db.kernel_rehydrate(&run_id).unwrap().unwrap().model_request_since_wall_ms, None);
+    let pending = coordinator.snapshot().unwrap().pending_effects.into_iter().find(|e| e.kind == kernel::OutboxEffectKind::InitialModel).unwrap();
+    assert_eq!(pending.status, kernel::OutboxStatus::Pending);
+    connection.execute_batch("DROP TRIGGER reject_initial_dispatch").unwrap();
+    coordinator.dispatch_initial_with_worker("allowed", &Allow, &real_worker_command(), "test-key").unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "completed");
+}
+
+#[test]
+fn initial_model_second_coordinator_cannot_claim_an_inflight_delivery() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.dispatch_initial("first", &Allow, |binding, frame, _| {
+        let other_db = Database::open(root.join("facts.db"))?;
+        let other_registry = CancellationRegistry::default();
+        let other = KernelCoordinator::reopen(&other_db, &clock, &run_id, &other_registry)?;
+        assert!(other.dispatch_initial("second", &Allow, |_, _, _| panic!("second owner cannot call engine")).is_err());
+        Ok(fox_engine_protocol::KernelInitialModelResponse {
+            schema_version: 1, run_id: binding.run_id.clone(), turn_id: frame.input.turn_id.clone(), checkpoint_seq: frame.checkpoint_seq,
+            assistant_message: json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"one delivery"}]}),
+        })
+    }).unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "completed");
+}
+
+#[test]
+fn kernel_initial_response_projects_usage_and_message_atomically() {
+    for reject_usage in [false,true] {
+        let config = worker_configuration();
+        let clock = TestClock::new(1_000);
+        let cancellation = CancellationRegistry::default();
+        let (db,root,run_id) = fixture_with_start_opt(&clock,&config.hash().unwrap(),Some(&config),true,true);
+        let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
+        let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+        if reject_usage {
+            connection.execute_batch("CREATE TRIGGER reject_kernel_usage BEFORE INSERT ON run_events
+                WHEN NEW.event_type='usage.updated' BEGIN SELECT RAISE(ABORT,'usage projection failure'); END;").unwrap();
+        }
+        let result = coordinator.dispatch_initial("usage-model",&Allow,|binding,frame,_| Ok(fox_engine_protocol::KernelInitialModelResponse {
+            schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
+            assistant_message:json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"usage and message"}],
+                "usage":{"input":10,"output":4,"cacheRead":2,"cacheWrite":0,"totalTokens":16}}),
+        }));
+        assert_eq!(result.is_err(),reject_usage);
+        let counts: (i64,i64) = connection.query_row("SELECT
+            (SELECT COUNT(*) FROM messages WHERE run_id=?1 AND role='assistant'),
+            (SELECT COUNT(*) FROM run_events WHERE run_id=?1 AND event_type='usage.updated')",[&run_id],|row|Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(counts,if reject_usage {(0,0)} else {(1,1)});
+        assert_eq!(coordinator.snapshot().unwrap().state,if reject_usage {"running"} else {"completed"});
+    }
+}
+
+#[test]
+fn kernel_managed_child_quota_blocks_model_before_dispatch() {
+    for (total, output) in [(256,0),(0,64),(0,0)] {
+        let config = worker_configuration();
+        let clock = TestClock::new(1_000);
+        let cancellation = CancellationRegistry::default();
+        let (db,root,run_id) = fixture_with_start_opt(&clock,&config.hash().unwrap(),Some(&config),true,true);
+        let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
+        let parent_conversation = db.create_conversation(db.default_agent_id(),None,None,None).unwrap();
+        let parent_id = db.create_run(&parent_conversation.id,"quota parent",None).unwrap().run.id;
+        let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+        conn.execute("INSERT INTO child_run_delegations(id,parent_run_id,child_run_id,child_conversation_id,
+            tool_call_id,worker_agent_id,objective,status,max_duration_ms,max_total_tokens,max_output_tokens,
+            max_tool_calls,created_at,total_tokens,output_tokens)
+            SELECT 'quota-test',?4,r.id,r.conversation_id,'parent-tool',c.agent_id,'test','running',1000,256,64,0,0,?2,?3
+            FROM runs r JOIN conversations c ON c.id=r.conversation_id WHERE r.id=?1",
+            rusqlite::params![run_id,total,output,parent_id]).unwrap();
+        let calls = AtomicUsize::new(0);
+        let result = coordinator.dispatch_initial("quota-model",&Allow,|_,_,_| {
+            calls.fetch_add(1,Ordering::SeqCst);
+            Err("test stops after admission".into())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst),usize::from(total==0 && output==0));
+        if total>0 || output>0 {
+            assert!(!coordinator.snapshot().unwrap().pending_effects.iter()
+                .any(|effect| effect.kind==kernel::OutboxEffectKind::InitialModel && effect.status==kernel::OutboxStatus::Leased));
+        }
+    }
+}
+
+#[test]
+fn kernel_host_action_waits_for_result_commit_and_never_replays_claimed_action() {
+    for outcome in ["success","failure","uncertain","cancel"] {
+        let clock = TestClock::new(1_000);
+        let cancellation = CancellationRegistry::default();
+        let (db,root,run_id) = fixture(&clock);
+        let coordinator = KernelCoordinator::reopen(&db,&clock,&run_id,&cancellation).unwrap();
+        coordinator.propose_tools("actions",calls(),&Allow).unwrap();
+        let body = json!({"kind":"start_child","childRunId":"test-child"}).to_string();
+        assert!(db.stage_kernel_host_action(&run_id,"read-a",&body).is_err());
+        let result = coordinator.dispatch_tool("read-a","action-owner",|_,_,_| {
+            db.stage_kernel_host_action(&run_id,"read-a",&body)?;
+            db.stage_kernel_host_action(&run_id,"read-a",&body)?;
+            assert!(db.stage_kernel_host_action(&run_id,"read-a","{}").is_err());
+            assert!(db.claim_kernel_host_action(&run_id,"read-a")?.is_none());
+            if outcome=="uncertain" { return Err("interrupted after action staged".into()); }
+            Ok((outcome!="failure",json!({"content":[]})))
+        });
+        assert_eq!(result.is_err(),outcome=="uncertain");
+        if outcome=="cancel" { db.queue_kernel_host_command(&run_id,None).unwrap(); }
+        drop(coordinator);
+        drop(db);
+        let db = Database::open(root.join("facts.db")).unwrap();
+        let claimed = db.claim_kernel_host_action(&run_id,"read-a").unwrap();
+        assert_eq!(claimed,if outcome=="success" {Some(body)} else {None});
+        if outcome=="success" {
+            assert!(db.claim_kernel_host_action(&run_id,"read-a").is_err());
+            db.complete_kernel_host_action(&run_id,"read-a").unwrap();
+            assert!(db.claim_kernel_host_action(&run_id,"read-a").unwrap().is_none());
+        } else {
+            assert!(db.complete_kernel_host_action(&run_id,"read-a").is_err());
+        }
+    }
+}
+
+#[test]
+fn kernel_parent_cancel_waits_for_unstarted_child_cleanup_without_model_io() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db,root,run_id) = fixture_with_start_opt(&clock,&config.hash().unwrap(),Some(&config),true,true);
+    db.freeze_kernel_host_scope(&run_id,&crate::database::KernelHostScope { schema_version:1,
+        tool_names:config.proposal_tools.iter().map(|tool|tool["name"].as_str().unwrap().to_owned()).collect(),
+        mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),
+        knowledge_connection_hashes:Default::default(),office_tools:Default::default(),lifecycle_hooks:Vec::new() }).unwrap();
+    let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
+    let child_conversation = db.create_conversation(db.default_agent_id(),None,None,None).unwrap();
+    let child_id = db.create_run(&child_conversation.id,"unstarted child",None).unwrap().run.id;
+    let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    conn.execute("UPDATE runs SET parent_run_id=?2,depth=1 WHERE id=?1",rusqlite::params![child_id,run_id]).unwrap();
+    conn.execute("INSERT INTO child_run_delegations(id,parent_run_id,child_run_id,child_conversation_id,
+        tool_call_id,worker_agent_id,objective,status,max_duration_ms,max_total_tokens,max_output_tokens,max_tool_calls,created_at)
+        VALUES('orphan',?1,?2,?3,'orphan-tool','fox-general','test','queued',1000,256,64,1,0)",
+        rusqlite::params![run_id,child_id,child_conversation.id]).unwrap();
+    assert!(!db.kernel_fail_unstarted_child("foreign-parent",&child_id).unwrap());
+    db.queue_kernel_host_command(&run_id,None).unwrap();
+    let calls = AtomicUsize::new(0);
+    let ownership = super::super::kernel_host::acquire(&root,&run_id).unwrap();
+    super::super::kernel_host::drive_with_actions(&ownership,&db,&clock,&cancellation,&run_id,
+        &super::super::RuntimeCommand {program:"must-not-start-a-model".into(),script:None},"",&Allow,
+        |_,_,_| panic!("cancelling parent cannot execute resources"),|_|Ok(()),|_| {
+            calls.fetch_add(1,Ordering::SeqCst);
+            assert_eq!(coordinator.snapshot()?.state,"running","parent must not be terminal before child cleanup");
+            assert!(db.kernel_fail_unstarted_child(&run_id,&child_id)?);
+            assert_eq!(db.child_run(&child_id)?.unwrap().status,"failed");
+            assert!(db.active_child_run_ids(&run_id)?.is_empty());
+            Ok(())
+        },&|_|{}).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst),1);
+    assert_eq!(coordinator.snapshot().unwrap().state,"cancelled");
+    assert!(!db.kernel_fail_unstarted_child(&run_id,&child_id).unwrap());
+    assert!(db.run_control_binding(&child_id).unwrap().is_none());
+}
+
+#[test]
+fn kernel_work_snapshot_uses_projected_tool_identity_and_frozen_gateway() {
+    let mut config = worker_configuration();
+    config.proposal_tools = vec![json!({"name":"work_snapshot_get","description":"Read work state",
+        "parameters":{"type":"object","properties":{}}})];
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db,_,run_id) = fixture_with_start_opt(&clock,&config.hash().unwrap(),Some(&config),true,true);
+    let scope = crate::database::KernelHostScope { schema_version:1,tool_names:["work_snapshot_get".into()].into_iter().collect(),
+        mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),office_tools:Default::default(),lifecycle_hooks:Vec::new() };
+    db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
+    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope};
+    let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
+    coordinator.dispatch_initial("work-model",&policy,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {
+        schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
+        assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[
+            {"type":"toolCall","id":"work-1","name":"work_snapshot_get","arguments":{}}]}),
+    })).unwrap();
+    assert!(coordinator.dispatch_tool("work-1","work-executor",|_,_,token| {
+        let result = policy.execute_work(&db,"work-1","work_snapshot_get",&json!({}),token)?;
+        assert!(result["content"].is_array());
+        assert!(policy.execute_work(&db,"work-1","goal_propose",&json!({}),token).is_err());
+        Ok((true,result))
+    }).unwrap());
+    assert_eq!(coordinator.snapshot().unwrap().tool_calls[0].state,"completed");
+    assert!(db.pending_kernel_host_action_ids(&run_id).unwrap().is_empty());
+}
+
+#[test]
+fn kernel_frozen_hooks_keep_block_and_approval_policy_and_transactional_audit() {
+    for action in ["block","require_approval"] {
+        let config = worker_configuration();
+        let clock = TestClock::new(1_000);
+        let cancellation = CancellationRegistry::default();
+        let (db,root,run_id) = fixture_with_start_opt(&clock,&config.hash().unwrap(),Some(&config),true,true);
+        let hook = db.save_lifecycle_hook("kernel-rule","Frozen guard","before_tool","read",action,"frozen reason",true,10).unwrap();
+        let after = db.save_lifecycle_hook("kernel-after","Tool audit","after_tool","read","annotate","tool finished",true,20).unwrap();
+        let before_run = db.save_lifecycle_hook("kernel-start","Run audit","before_run","primary","annotate","run started",true,20).unwrap();
+        let after_run = db.save_lifecycle_hook("kernel-end","Run audit","after_run","run.*","annotate","run ended",true,20).unwrap();
+        let scope = crate::database::KernelHostScope {schema_version:1,tool_names:["read".into()].into_iter().collect(),
+            mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),
+            knowledge_connection_hashes:Default::default(),office_tools:Default::default(),
+            lifecycle_hooks:vec![hook,after,before_run,after_run]};
+        db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
+        db.save_lifecycle_hook("kernel-rule","Changed live rule","before_tool","*","annotate","changed",false,10).unwrap();
+        let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope};
+        let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
+        coordinator.dispatch_initial("hooks-model",&policy,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {
+            schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
+            assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[
+                {"type":"toolCall","id":"guarded-read","name":"read","arguments":{"path":"proof.txt"}}]}),
+        })).unwrap();
+        if action=="block" {
+            assert_eq!(coordinator.snapshot().unwrap().tool_calls[0].state,"failed");
+            assert!(matches!(policy.decide(&run_id,"ignored","read","{\"path\":\"proof.txt\"}"),PolicyDecision::Deny {..}));
+        } else {
+            assert_eq!(coordinator.snapshot().unwrap().state,"waiting_approval");
+            coordinator.resolve_approval("guarded-read",kernel::ApprovalDecision::AllowOnce).unwrap();
+            coordinator.dispatch_tool("guarded-read","hook-resource",|_,_,token| {
+                Ok((true,policy.execute(&db,"read",&json!({"path":"proof.txt"}),token)?))
+            }).unwrap();
+        }
+        coordinator.fail("test.finished","Finish audit fixture").unwrap();
+        coordinator.tick().unwrap();
+        let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM lifecycle_hook_executions WHERE run_id=?1 AND id LIKE 'kernel-hook:%'",[&run_id],|row|row.get(0)).unwrap();
+        assert_eq!(count,4,"one before/after audit per tool and run despite repeated commits");
+        let frozen: String = conn.query_row("SELECT details_json FROM lifecycle_hook_executions WHERE run_id=?1 AND hook_id='kernel-rule'",[&run_id],|row|row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&frozen).unwrap()["reason"],"frozen reason");
+    }
+}
+
+#[test]
+fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
+    let supported = super::super::kernel_gateway::supported_tools();
+    assert_eq!(supported.len(),64);
+    assert_eq!(supported.iter().collect::<std::collections::BTreeSet<_>>().len(),64);
+    let mut config = worker_configuration();
+    config.model_service["maxOutputTokens"] = json!(1024);
+    config.proposal_tools = ["child_agent_list","child_run_start","child_run_collect","child_run_cancel"].iter()
+        .map(|name|json!({"name":name,"description":"Host delegation","parameters":{"type":"object","properties":{}}})).collect();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db,_,run_id) = fixture_with_start_opt(&clock,&config.hash().unwrap(),Some(&config),true,true);
+    let scope = crate::database::KernelHostScope {schema_version:1,
+        tool_names:config.proposal_tools.iter().map(|tool|tool["name"].as_str().unwrap().to_owned()).collect(),
+        mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),
+        office_tools:Default::default(),lifecycle_hooks:Vec::new()};
+    db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
+    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope};
+    let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
+    let input = json!({"objective":"One bounded concern","context":"Explicit context only", "budget":{
+        "maxDurationMs":1000,"maxTotalTokens":256,"maxOutputTokens":64,"maxToolCalls":0}});
+    coordinator.dispatch_initial("child-model",&Allow,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {
+        schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
+        assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[
+            {"type":"toolCall","id":"delegate","name":"child_run_start","arguments":input}]}),
+    })).unwrap();
+    coordinator.dispatch_tool("delegate","child-owner",|_,_,token| {
+        let result = policy.execute_delegation(&db,"delegate","child_run_start",&input,token)?;
+        let child_id = result["details"]["childRun"]["childRunId"].as_str().unwrap();
+        assert!(db.kernel_host_run_state(child_id)?.is_none());
+        assert!(db.run_control_binding(child_id)?.is_none());
+        assert!(db.claim_kernel_host_action(&run_id,"delegate")?.is_none());
+        assert!(policy.execute_delegation(&db,"delegate","child_run_collect",&json!({"childRunIds":["foreign-child"]}),token).is_err());
+        Ok((true,result))
+    }).unwrap();
+    let children = db.child_runs_for_parent(&run_id).unwrap();
+    assert_eq!(children.len(),1);
+    assert_eq!(children[0].status,"queued");
+    assert_eq!(db.pending_kernel_host_action_ids(&run_id).unwrap(),vec!["delegate"]);
+    let body = db.claim_kernel_host_action(&run_id,"delegate").unwrap().unwrap();
+    let directive: super::super::work_tools::WorkToolPostFinalizeDirective = serde_json::from_str(&body).unwrap();
+    let super::super::work_tools::WorkToolPostFinalizeDirective::StartChild(child) = directive else {panic!("expected child action")};
+    assert_eq!(child.child_run.child_run_id,children[0].child_run_id);
+    assert!(db.claim_kernel_host_action(&run_id,"delegate").is_err());
+    assert!(db.kernel_fail_unstarted_child(&run_id,&child.child_run.child_run_id).unwrap());
+    assert!(db.active_child_run_ids(&run_id).unwrap().is_empty());
+}
+
+#[test]
+fn kernel_context_resources_preserve_conversation_scope_and_use_kernel_results() {
+    let mut config = worker_configuration();
+    config.proposal_tools = ["memory_search","memory_propose","read_attachment"].iter()
+        .map(|name|json!({"name":name,"description":"Host context resource","parameters":{"type":"object","properties":{}}})).collect();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db,root,run_id) = fixture_with_start_opt(&clock,&config.hash().unwrap(),Some(&config),true,true);
+    let scope = crate::database::KernelHostScope {schema_version:1,
+        tool_names:config.proposal_tools.iter().map(|tool|tool["name"].as_str().unwrap().to_owned()).collect(),
+        mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),
+        office_tools:Default::default(),lifecycle_hooks:Vec::new()};
+    db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
+    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope};
+    let foreign = db.create_conversation(db.default_agent_id(),None,None,None).unwrap();
+    for (id,conversation_id) in [("own-attachment",policy.binding.conversation_id.as_str()),("foreign-attachment",foreign.id.as_str())] {
+        db.add_attachments(&[crate::database::AttachmentRecord {id:id.into(),conversation_id:conversation_id.into(),message_id:None,
+            display_name:"proof.txt".into(),storage_path:root.join("proof.txt").to_string_lossy().into_owned(),media_type:Some("text/plain".into()),
+            byte_size:0,sha256:None,status:"ready".into(),created_at:0}]).unwrap();
+    }
+    let inputs = [("memory_propose",json!({"kind":"preference","canonicalKey":"style","content":"Prefer concise answers",
+        "evidenceExcerpt":"Test explicitly requests concise answers"})),("memory_search",json!({"query":"concise"})),
+        ("read_attachment",json!({"attachmentId":"own-attachment"}))];
+    let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
+    coordinator.dispatch_initial("context-model",&Allow,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {
+        schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
+        assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":inputs.iter().map(|(tool,input)|
+            json!({"type":"toolCall","id":tool,"name":tool,"arguments":input})).collect::<Vec<_>>()}),
+    })).unwrap();
+    for (tool,input) in inputs {
+        coordinator.dispatch_tool(tool,"context-owner",|_,_,token| {
+            let result = policy.execute_context_resource(&db,&root,tool,&input,token)?;
+            if tool=="read_attachment" {
+                assert_eq!(result["details"]["text"],"durable coordinator 中文 😀");
+                assert!(policy.execute_context_resource(&db,&root,tool,&json!({"attachmentId":"foreign-attachment"}),token).is_err());
+            }
+            Ok((true,result))
+        }).unwrap();
+    }
+    assert!(coordinator.snapshot().unwrap().tool_calls.iter().all(|tool|tool.state=="completed"));
+    let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM tool_calls WHERE run_id=?1",[run_id],|row|row.get(0)).unwrap();
+    assert_eq!(count,3,"only Kernel-projected tools, no parallel Legacy tools");
+}
+
+#[test]
+fn kernel_real_model_previews_are_transient_until_the_response_transaction_commits() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db,root,run_id) = fixture_with_start_opt(&clock,&config.hash().unwrap(),Some(&config),true,true);
+    let previews = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = previews.clone();
+    let path = root.join("facts.db");
+    let sink = move |notice: &fox_engine_protocol::KernelModelPreview| {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM messages WHERE run_id=?1 AND role='assistant'",[&notice.run_id],|row|row.get(0)).unwrap();
+        assert_eq!(count,0,"preview must not be written as a completed message");
+        observed.lock().unwrap().push(notice.clone());
+    };
+    let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap().with_preview(&sink);
+    coordinator.dispatch_initial_with_worker("preview-model",&Allow,&real_worker_command(),"").unwrap();
+    let notices = previews.lock().unwrap();
+    assert!(!notices.is_empty());
+    assert_eq!(notices.last().unwrap().text,"Host consumed the durable batch");
+    assert!(notices.iter().all(|notice|notice.run_id==run_id && notice.checkpoint_seq==2));
+    assert_eq!(coordinator.snapshot().unwrap().state,"completed");
+    let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM messages WHERE run_id=?1 AND role='assistant'",[&run_id],|row|row.get(0)).unwrap();
+    assert_eq!(count,1);
 }

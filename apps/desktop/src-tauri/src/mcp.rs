@@ -12,6 +12,8 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use url::Url;
+mod owned;
+pub(crate) use owned::execute_owned;
 
 const CREDENTIAL_SERVICE: &str = "com.fox.agent.mcp";
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
@@ -373,6 +375,8 @@ struct HttpMcpSession {
     initialized: bool,
     protocol_version: String,
     session_id: Option<String>,
+    execution_deadline: Option<std::time::Instant>,
+    cancellation: Option<crate::kernel::CancellationToken>,
 }
 
 impl HttpMcpSession {
@@ -385,6 +389,8 @@ impl HttpMcpSession {
             initialized: false,
             protocol_version: MCP_PROTOCOL_VERSION.to_owned(),
             session_id: None,
+            execution_deadline: None,
+            cancellation: None,
         })
     }
 
@@ -463,9 +469,13 @@ impl HttpMcpSession {
     }
 
     fn send(&mut self, body: &Value) -> Result<Response, String> {
+        if let Some(token) = &self.cancellation { token.check()?; }
+        let timeout = self.execution_deadline.map(|deadline| deadline.checked_duration_since(std::time::Instant::now())
+            .ok_or_else(|| "MCP execution budget exceeded".to_owned())).transpose()?.unwrap_or(TIMEOUT).min(TIMEOUT);
         let mut request = self
             .client
             .post(self.endpoint.clone())
+            .timeout(timeout)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json, text/event-stream")
             .headers(self.credential_headers.clone());
@@ -791,6 +801,32 @@ mod tests {
             .expect("tools/call should succeed");
         assert_eq!(result["content"][0]["text"], "hello");
         invalidate_connection(&server.id);
+    }
+
+    #[test]
+    fn kernel_owned_mcp_validates_arguments_and_never_reuses_pooled_sessions() {
+        let registry = crate::kernel::CancellationRegistry::default();
+        registry.register_run("owned-mcp").unwrap();
+        let token = registry.run_token("owned-mcp").unwrap();
+        let server = server("valid");
+        let result = execute_owned(&server, Some(("echo", &json!({"text":"owned 中文"}))), &token, Duration::from_secs(5)).unwrap();
+        assert_eq!(result["content"][0]["text"], "owned 中文");
+        assert!(execute_owned(&server, Some(("echo", &json!({"text":42}))), &token, Duration::from_secs(5)).is_err());
+        assert!(execute_owned(&server, Some(("missing", &json!({}))), &token, Duration::from_secs(5)).is_err());
+    }
+
+    #[test]
+    fn kernel_owned_mcp_cancellation_stops_waiting_and_reaps_its_server() {
+        use crate::kernel::CancellationPort;
+        let registry = crate::kernel::CancellationRegistry::default();
+        registry.register_run("cancel-mcp").unwrap();
+        let token = registry.run_token("cancel-mcp").unwrap();
+        let cancel = registry.clone();
+        let sender = thread::spawn(move || { thread::sleep(Duration::from_millis(150)); cancel.request_run_cancel("cancel-mcp"); });
+        let start = std::time::Instant::now();
+        assert!(execute_owned(&server("timeout"), None, &token, Duration::from_secs(10)).is_err());
+        assert!(start.elapsed() < Duration::from_secs(5));
+        sender.join().unwrap();
     }
 
     #[test]

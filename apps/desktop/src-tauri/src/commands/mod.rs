@@ -2045,6 +2045,23 @@ mod command_tests {
     use uuid::Uuid;
 
     #[test]
+    fn kernel_cancel_command_routes_before_legacy_writes_and_never_falls_back() {
+        let path = std::env::temp_dir().join(format!("fox-command-cancel-{}.db", Uuid::new_v4()));
+        let db = crate::database::Database::open(path).unwrap();
+        let conversation = db.create_conversation("fox-general", Some("cancel routing"), None, None).unwrap();
+        let run = db.create_run(&conversation.id, "cancel test", None).unwrap().run;
+        assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || panic!("unbound Legacy Run must not route to Kernel")).unwrap(), None);
+        db.freeze_kernel_run_control(&run.id, "legacy", fox_engine_protocol::TimeBudgets::default()).unwrap();
+        assert!(db.mark_run_cancelling(&run.id).is_err());
+        assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || db.queue_kernel_host_command(&run.id, None)).unwrap(), Some(true));
+        assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || db.queue_kernel_host_command(&run.id, None)).unwrap(), Some(false));
+        assert_eq!(db.pending_kernel_host_commands(&run.id).unwrap().len(), 1);
+        assert_eq!(super::cancel_kernel_owned_run(&db, &run.id, || Err("owner unavailable".into())).unwrap_err(), "owner unavailable");
+        let detail = db.load_conversation(&conversation.id).unwrap();
+        assert_eq!(detail.last_run.unwrap().status, "queued");
+    }
+
+    #[test]
     fn external_url_validation_only_allows_http_and_https() {
         assert_eq!(
             validated_external_url(" https://example.com/path ").unwrap(),
@@ -2645,6 +2662,12 @@ pub async fn run_cancel(
     state: State<'_, AppState>,
     request: CancelRunRequest,
 ) -> Result<ApiResponse<bool>, String> {
+    // Frozen authority must be selected before touching Legacy read models.
+    match cancel_kernel_owned_run(&state.database, &request.run_id, || state.runtime_host.cancel_managed_run(&request.run_id)) {
+        Ok(Some(cancelled)) => return Ok(ApiResponse::success(cancelled)),
+        Ok(None) => {},
+        Err(error) => return Ok(ApiResponse::failure("runtime.cancel_failed", error, true)),
+    }
     let conversation = match state.database.mark_run_cancelling(&request.run_id) {
         Ok(conversation) => conversation,
         Err(error) => return Ok(storage_error(error)),
@@ -2686,6 +2709,19 @@ pub async fn run_cancel(
             );
             Ok(ApiResponse::failure("runtime.cancel_failed", error, true))
         }
+    }
+}
+
+fn cancel_kernel_owned_run(
+    database: &crate::database::Database,
+    run_id: &str,
+    cancel: impl FnOnce() -> Result<bool, String>,
+) -> Result<Option<bool>, String> {
+    if database.run_control_binding(run_id)?.is_some_and(|binding|
+        binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative) {
+        cancel().map(Some)
+    } else {
+        Ok(None)
     }
 }
 
@@ -3088,6 +3124,11 @@ pub async fn goal_running_set(
         let _ = app.emit("fox://work-event", event);
     }
     if let Some(run_id) = active_run_id {
+        let kernel_cancelled = match cancel_kernel_owned_run(&state.database, &run_id, || state.runtime_host.cancel_managed_run(&run_id)) {
+            Ok(result) => result.is_some(),
+            Err(error) => return Ok(ApiResponse::failure("runtime.cancel_failed", error, true)),
+        };
+        if !kernel_cancelled {
         let marked = match state.database.mark_run_cancelling(&run_id) {
             Ok(marked) => marked.is_some(),
             Err(error) => return Ok(storage_error(error)),
@@ -3122,6 +3163,7 @@ pub async fn goal_running_set(
                     return Ok(ApiResponse::failure("runtime.cancel_failed", error, true));
                 }
             }
+        }
         }
     }
 

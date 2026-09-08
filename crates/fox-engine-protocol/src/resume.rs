@@ -3,6 +3,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use schemars::JsonSchema;
 
+/// Transient display only. Never a committed message, decision or replay input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelModelPreview {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub checkpoint_seq: u64,
+    pub revision: u64,
+    pub text: String,
+}
+
+impl KernelModelPreview {
+    pub fn validate(&self) -> Result<(),String> {
+        if self.schema_version!=1 || [&self.run_id,&self.conversation_id,&self.turn_id].iter()
+            .any(|id|id.trim().is_empty() || id.len()>512) || self.checkpoint_seq==0 || self.checkpoint_seq>9_007_199_254_740_991
+            || self.revision==0 || self.revision>9_007_199_254_740_991 || self.text.len()>262_144 {
+            return Err("invalid transient Kernel model preview".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum KernelSettledToolState { Completed, Failed }
@@ -36,7 +60,11 @@ impl KernelModelResponse {
             || serde_json::to_vec(self).map_err(|error| error.to_string())?.len() > 1_048_576 {
             return Err("invalid Kernel model response identity or size".into());
         }
-        let message = &self.assistant_message;
+        validate_model_message(&self.assistant_message)
+    }
+}
+
+fn validate_model_message(message: &Value) -> Result<(), String> {
         if message["stopReason"] == "toolUse" { return validate_checkpoint_parts(&[], message); }
         if message["role"] != "assistant" || message["stopReason"] != "stop" {
             return Err("model response is neither a completed answer nor a tool proposal".into());
@@ -47,6 +75,47 @@ impl KernelModelResponse {
             return Err("invalid completed model response content".into());
         }
         Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelInitialModelFrame {
+    pub schema_version: u32,
+    pub input: KernelInitialModelInput,
+    pub idempotency_key: String,
+    pub checkpoint_seq: u64,
+}
+
+impl KernelInitialModelFrame {
+    pub fn validate(&self) -> Result<(), String> {
+        self.input.validate()?;
+        if self.schema_version != 1 || self.idempotency_key != "initial-model-delivery"
+            || self.checkpoint_seq == 0 || self.checkpoint_seq > 9_007_199_254_740_991
+            || serde_json::to_vec(self).map_err(|_| "invalid initial model frame")?.len() > 1_048_576 {
+            return Err("invalid initial model delivery frame".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelInitialModelResponse {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub turn_id: String,
+    pub checkpoint_seq: u64,
+    pub assistant_message: Value,
+}
+
+impl KernelInitialModelResponse {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != 1 || self.run_id.trim().is_empty() || self.turn_id.trim().is_empty()
+            || self.checkpoint_seq == 0 || self.checkpoint_seq > 9_007_199_254_740_991
+            || serde_json::to_vec(self).map_err(|_| "invalid initial model response")?.len() > 1_048_576 {
+            return Err("invalid initial model response identity or size".into());
+        }
+        validate_model_message(&self.assistant_message)
     }
 }
 

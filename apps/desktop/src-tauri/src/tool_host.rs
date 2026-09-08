@@ -333,7 +333,7 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
 }
 
 #[cfg(windows)]
-fn terminate_process_tree(child: &mut std::process::Child) {
+pub(crate) fn terminate_process_tree(child: &mut std::process::Child) {
     // `Child::kill` only terminates cmd.exe. Kill its descendants as well so
     // a timed-out compiler, shell script, or package manager cannot survive
     // invisibly after Fox reports the tool failure.
@@ -350,7 +350,7 @@ fn terminate_process_tree(child: &mut std::process::Child) {
 }
 
 #[cfg(not(windows))]
-fn terminate_process_tree(child: &mut std::process::Child) {
+pub(crate) fn terminate_process_tree(child: &mut std::process::Child) {
     let _ = child.kill();
     let _ = child.wait();
 }

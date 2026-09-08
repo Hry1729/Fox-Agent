@@ -429,11 +429,22 @@ Fox 只在确有差异时做模型家族分支：MiniMax、DeepSeek、Claude、O
 - 需要工作模式确认的 Run 以 `awaiting_confirmation` 持久化，不调用 Runtime；批准后恢复同一 Run，拒绝后取消未派发 Run。
 - 进程崩溃生成 `runtime.process_crashed` 或中断状态，刷新从数据库恢复。
 
-## 隔离 Kernel 批次进程（受控接线）
+## 隔离 Kernel 模型进程与桌面权威接线
+
+桌面 RuntimeHost 已支持显式 `FOX_KERNEL_MODE=authoritative`。新 Run 冻结执行权、权限、模型、输入与资源范围后，由独占 Host 循环执行；默认仍为 Legacy，已有 Run 不随设置改换执行权。启动恢复读取持久事实与命令队列，不能重发结果不明的 leased 模型请求或已领取 Host 动作。隔离桌面实测使用本机合成 Provider，不代表云模型质量、线上性能或生产默认切换。
+
+资源入口提供 64 项受支持工具，实际暴露还受冻结 Profile、助手/专家、项目、知识引用、MCP/Office 范围限制。模型只持有描述，读写、命令、通用能力、知识、记忆、附件、工作和子任务操作均由 Host 执行。生命周期 block/require_approval 规则随 Run 冻结；资源执行前复核身份、计数与剩余预算，失败不回落到旧引擎执行。取消不能撤销外部服务已经接受的副作用。
+
+`task_repair_escalate_start` 在提议前检查业务资格，始终要求本次批准，不使用 Allow 或会话 grant 自动放行。审批仅支持 `allow_once/deny`，同事务复核当前 Kernel 工具 running、审批 AllowOnce、dispatch 租约、业务 CAS 与一次性 claim；不能先写 Legacy 工具状态再补 Kernel 事实。
+
+子任务/Graph 后续动作经 v59 日志在工具成功事务之后领取；父任务等待子执行器退出及清理后才继续模型或终态。Legacy 的 Graph 恢复扫描排除 Kernel 父任务，避免第二条调度路径。取消命令先按冻结执行权路由，Kernel 已终态或请求失败均不尝试 Legacy 回退。
+
+桌面审批、Run、工具、子任务、团队、消息及用量是 Kernel 提交事务的兼容投影。`fox://kernel-state-invalidated` 仅提示重新读取事实；聊天和通知中心不把通知本身视作终态。`fox://kernel-model-preview` 为临时可见正文，绑定 Run/Turn/请求游标和递增修订；不持久化、不含 thinking，正式响应提交后替换，取消或请求推进后丢弃。
 
 正式 Runtime 的 `--kernel-worker` 启动参数选择独立的一次性进程模式；默认 Legacy 进程不接受此协议。仅支持以下请求，均使用原 JSONL envelope：
 
 - `kernel.initialize`：绑定 envelope 的 Run/Conversation/Session，以及 payload 的 `executionProfileId`、`modelService`、`systemPrompt`、`proposalTools`。返回 `kernel.ready`；重复初始化拒绝。模型凭证仅经 stdin 提供，不作为命令行参数。
+- `kernel.start_initial`：payload 为 `controlBinding` 和 `initialModel: KernelInitialModelFrame`，后者包含冻结输入、幂等键和检查点游标。返回 `kernel.model_response`，其中 `response` 使用 `KernelInitialModelResponse`，没有虚构的 Batch 身份。与批次请求共用一次性派发约束、取消和模型预算。
 - `kernel.resume_batch`：payload 使用共享 `controlBinding` 与 `batchResume`，完整匹配初始化身份。返回 `kernel.model_response`，payload 为 `{idempotencyKey, checkpointSeq, response: KernelModelResponse}`。仅返回模型响应/提议，不执行资源；真正派发后进程永久 consumed，失败必须由 Host 对持久交付事实进行核对，不能重发。
 - `kernel.cancel`：核对完整身份后请求取消，`kernel.cancelling` 只表示接收取消，不代表模型已退出或 Run 已提交终态。原批次请求会在模型结束后失败。关闭 stdin 同样触发取消及清理。
 
@@ -441,9 +452,9 @@ Fox 只在确有差异时做模型家族分支：MiniMax、DeepSeek、Claude、O
 
 Rust `KernelCoordinator::dispatch_stored_batch_with_worker` 是受控正式调用入口：只从 v55 `kernel_model_configs` 恢复模型/提示/工具描述/Profile 配置，核对内容哈希与持久 `prompt_config_hash` 后才进入 Outbox 领取事务；外部调用者不能传入当前配置作为替代。快照必须在 Run 启动前冻结，缺失或损坏不自动回填。凭证单独传入，不进入该配置哈希或命令行参数。`kernel.ready.adapterVersion` 必须与快照支持的 `pi-0.84.2/fox-kernel-worker-v1` 匹配。启动与管道写入、响应等待共享剩余 Run/模型预算；取消/超时清理并回收该次创建的子进程，不复用 Legacy 进程。不确定交付保持租约事实，不能因进程已退出就重播。
 
-Host 校验响应的协议版本、类型、请求 ID、Run/Conversation/Session、批次及游标，拒绝超大帧、其他身份和非预期事件。模型响应仍经协调器同事务提交。配置内容已可持久恢复并用于受控批次派发；初始模型回合及默认桌面启动尚未接线，本入口不构成生产权威切换。
+Host 校验响应的协议版本、类型、请求 ID、Run/Conversation/Session、批次及游标，拒绝超大帧、其他身份和非预期事件。模型响应仍经协调器同事务提交。配置内容可持久恢复，并用于桌面显式权威模式下的批次及首轮派发；不构成默认生产权威切换。
 
-共享 DTO `KernelInitialModelInput`（schemaVersion=1）定义 Host 拥有的初始上下文：`runId`、`turnId`、`promptConfigHash`、`messages`。v56 输入表在 Run 启动前冻结，读取时与模型配置在同一数据库事务校验；完整历史须以当前用户消息结束，不接受孤立工具结果、悬空工具调用或未知内容块，上限 1 MiB。此 DTO 不是新的 JSONL 请求，不授权模型派发；独立初始请求 Outbox、首响应协议与正式启动接线仍是下一阶段。
+共享 DTO `KernelInitialModelInput`（schemaVersion=1）定义 Host 拥有的初始上下文：`runId`、`turnId`、`promptConfigHash`、`messages`。v56 输入表在 Run 启动前冻结，读取时与模型配置在同一数据库事务校验；完整历史须以当前用户消息结束，不接受孤立工具结果、悬空工具调用或未知内容块，上限 1 MiB。此输入 DTO 本身不授权派发：`start_prepared` 持久创建 v57 首轮 Outbox，`dispatch_initial_with_worker` 验证冻结配置并以专用事务领取后，才构造 `KernelInitialModelFrame` 发给隔离进程。首响应与 Outbox 完成、后续批次或终态一并提交，失联不得自动重发。正式桌面显式权威路径使用该入口。
 
 ## 错误
 
@@ -453,9 +464,9 @@ Host 校验响应的协议版本、类型、请求 ID、Run/Conversation/Session
 
 重试分类：Provider HTTP 重试（单次请求的传输/5xx/429 有界重试，遵循服务端 `Retry-After`）与整轮 Turn 重试是两套独立策略，分别配置、分别观测，禁止两层对同一失败重复重试。Sidecar 默认 Turn 重试关闭（由 Fox Kernel/Host 决定），Provider 重试使用模型画像的有界上限；`run.request_snapshot.retryPolicy` 回传本轮冻结的两层上限。Kernel 侧 `run.retrying`（整轮重试调度）、`run.provider_retry`（Provider 重试观测）与 `context.compaction.started/completed`（上下文压缩）是相互独立的状态/事件，重试调度进入 `retry_scheduled` 并持久化 wall-clock scheduled/due time，压缩进入 `compacting`，二者不共用状态。
 
-时间与超时：四类预算分别建模。模型请求超时由显式生命周期信号驱动：turn 派发时 `begin_model_request`、模型首个输出/工具批次/终态时 `settle_model_request`（不是从“无工具在途”推断，避免工具结算后误触发）；在途请求超过 `model_request_timeout_ms` 产出唯一失败终态 `model.request_timeout`，retry resume / compaction 结束后由下一次派发重新 arm，`waiting_approval` 期间不 arm。模型请求墙钟锚点持久化（v51 `model_request_since_wall_ms`），rehydrate 后按崩溃前已流逝时间计时，连续崩溃不重置超时窗口；工具执行超时为 `tool.execution_timeout`；Run 执行预算耗尽为 `runtime.duration_budget_exceeded`；审批等待超时为 `approval.wait_timeout`。审批等待用持久化墙钟截止，不被模型请求超时或普通 Host 请求超时提前终止；取消与超时竞态由终态守卫保证单一权威终态（进入 `cancelling` 后迟到超时只进审计）。模型请求超时在 Kernel 决策核执行并由测试覆盖（含 settle 后不触发、rehydrate 不重置窗口、取消压过超时），Host/Pi 侧请求生命周期的物理 abort 仍属后续接线。
+时间与超时：模型、工具执行、Run 执行和审批等待分别计时。Kernel 模型请求在实际持久派发时启动，在完整响应提交时结束；临时正文预览不终止该时钟。模型请求墙钟锚点持久化，恢复不重置窗口；审批等待暂停 Run 执行计时，但使用独立持久化截止。错误分别为 `model.request_timeout`、`tool.execution_timeout`、`runtime.duration_budget_exceeded` 和 `approval.wait_timeout`。Host/Pi 已接入取消及超时清理并等待自身进程退出；进入 cancelling 后，迟到成功或超时不能覆盖取消终态。
 
-Kernel 持久编排（当前未接生产权威，仅关闭路径与测试使用）：v49 outbox 加 v50 `deliver_tool_batch` 覆盖工具派发、审批请求、引擎/工具取消以及 all-settled 批次向下一模型回合交付；状态为 `pending/leased/completed/failed`，每行带稳定幂等键。严格连续事件、Run/Batch/Tool（含 canonical input）状态、审批 CAS 与待执行 outbox 在同一 SQLite 事务提交；审批结论、最终 Tool 状态与 dispatch 意图必须一致，`wall_now >= deadline` 时普通批准/拒绝均视为迟到，提前写 `expired` 也会拒绝；工具结果与对应 leased dispatch 完成也同事务。exact replay 逐字段比对冲突并 fail-closed，complete/fail 要求 lease owner。恢复只执行安全 pending 动作；终态只排空取消，不复活 dispatch/审批/批次交付；leased 崩溃遗留必须按幂等键对账或标记 `requires_reconcile`。rehydrate 在单一读事务中核对全部冻结身份列、事件 cursor、终态、批次成员、审批、dispatch/barrier 一致性；新进程首个 tick 重新锚定 Run/Tool 单调超时。单事务 Snapshot 另复核冻结身份与事件 cursor；缺失或损坏不回退默认值。上述测试合同不等于真实线上 Run 恢复；生产 Host 尚未扫描、派发或消费这些 Kernel facts。
+Kernel 持久编排已接桌面显式权威路径：v49–50 Outbox 及 v57 `initial_model` 覆盖首请求、工具派发、审批、取消和整批模型续接；状态为 `pending/leased/completed/failed`，每行具有稳定幂等键。连续事件、Run/Batch/Tool、审批 CAS 与效果在同一事务提交，工具结果及租约完成亦原子提交。过期审批拒绝，重放逐字段比较且要求匹配所有者。恢复仅执行安全 pending 动作；结果不明的 leased 请求需要对账，不自动重发。rehydrate 和 Snapshot 以单事务核对身份、游标及审批/批次屏障，缺失或损坏不回退。Host 启动恢复已经接线，但默认生产权威仍未切换，受控恢复测试不等于所有线上故障场景均已验证。
 
 Kernel Shadow（v51，生产 Legacy 仍为权威）：每次 Legacy Run 启动在 Host 用 `ShadowContext::start` 创建并运行一个真实的 shadow RunController（`kernel_shadow_runs`，`shadow-{legacyRunId}`），并写入首条 `not_comparable` 观察记录。Shadow 跑纯决策核但不派发工具、不发网络、不弹第二次审批、不取消真实 Run、不交付第二份批次、不改写 Legacy 终态；可执行 Effect 在 ShadowContext 内分类后丢弃。比较结果写入独立 `kernel_shadow_diffs`（类别 `match / state_mismatch / approval_mismatch / tool_param_or_order_mismatch / terminal_mismatch / timeout_retry_mismatch / not_comparable / shadow_error`；disposition 携带工具名/canonical input/source order/batch 顺序与 retry/timeout 事实，不按 ID 排序抹序；含 cursor、冻结身份、schemaVersion）。Shadow 副作用**三层物理隔离**：(1) `kernel_create_run` 写入边界拒绝 `kernel_mode='shadow'`（shadow 只能进 `kernel_shadow_runs`）；(2) 单 Run 与全局租约扫描 SQL 带 `kernel_mode <> 'shadow'`；(3) shadow 代码路径无执行器句柄且 `kernel_executable_outbox_count=0`。diff cursor 严格单调，身份/配置冲突 fail-closed（不用 INSERT OR IGNORE）。Shadow 引导失败只进诊断，不影响 Legacy。逐事件在线 diff（`on_tool_batch`/`on_terminal`）尚未接入 Host 事件循环，启动点之后的生产比对待后续阶段。
 

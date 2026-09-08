@@ -6259,6 +6259,69 @@ END;
 "#;
 
 const CONVERSATION_TOOL_PERMISSION_SCHEMA_VERSION: i64 = 23;
+const MIGRATION_59: &str = r#"
+CREATE TABLE kernel_host_actions (
+    run_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    body_json TEXT NOT NULL CHECK(json_valid(body_json)),
+    body_hash TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','claimed','completed')),
+    created_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    PRIMARY KEY(run_id,tool_call_id),
+    FOREIGN KEY(run_id,tool_call_id) REFERENCES kernel_tool_calls(run_id,tool_call_id) ON DELETE CASCADE
+);
+CREATE TRIGGER kernel_host_action_immutable BEFORE UPDATE OF run_id,tool_call_id,body_json,body_hash ON kernel_host_actions
+BEGIN SELECT RAISE(ABORT, 'Kernel post-commit action is immutable'); END;
+"#;
+const MIGRATION_58: &str = r#"
+CREATE TABLE kernel_host_runs (
+    run_id TEXT PRIMARY KEY REFERENCES kernel_initial_inputs(run_id) ON DELETE CASCADE,
+    scope_json TEXT NOT NULL CHECK(json_valid(scope_json)),
+    scope_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TRIGGER kernel_host_scope_immutable BEFORE UPDATE ON kernel_host_runs
+BEGIN SELECT RAISE(ABORT, 'Kernel host scope is immutable'); END;
+CREATE TRIGGER kernel_host_scope_insert_guard BEFORE INSERT ON kernel_host_runs
+WHEN NOT EXISTS (SELECT 1 FROM kernel_runs r JOIN run_control_bindings b ON b.run_id=r.run_id
+    WHERE r.run_id=NEW.run_id AND r.state='created' AND r.last_event_seq=0
+      AND r.kernel_mode='authoritative' AND b.authority='authoritative')
+BEGIN SELECT RAISE(ABORT, 'Kernel host scope must be frozen before Run start'); END;
+CREATE TABLE kernel_host_commands (
+    command_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES run_control_bindings(run_id) ON DELETE CASCADE,
+    command_key TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('cancel','approval')),
+    tool_call_id TEXT,
+    decision TEXT CHECK(decision IN ('allow_once','allow_conversation','denied')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','completed')),
+    created_at INTEGER NOT NULL,
+    completed_at INTEGER,
+    UNIQUE(run_id,command_key),
+    CHECK((kind='cancel' AND tool_call_id IS NULL AND decision IS NULL)
+       OR (kind='approval' AND length(tool_call_id)>0 AND decision IS NOT NULL))
+);
+CREATE INDEX idx_kernel_host_commands_pending ON kernel_host_commands(run_id,status,command_seq);
+"#;
+const MIGRATION_57: &str = r#"
+ALTER TABLE kernel_effect_outbox RENAME TO kernel_effect_outbox_v56;
+CREATE TABLE kernel_effect_outbox (
+    run_id TEXT NOT NULL, effect_key TEXT NOT NULL,
+    effect_type TEXT NOT NULL CHECK(effect_type IN ('dispatch_tool','request_approval','cancel_engine_turn',
+        'cancel_tool_call','deliver_tool_batch','initial_model','publish_snapshot')),
+    idempotency_key TEXT NOT NULL, tool_call_id TEXT, batch_id TEXT, payload_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','leased','completed','failed')),
+    attempts INTEGER NOT NULL DEFAULT 0, lease_owner TEXT, leased_at INTEGER, completed_at INTEGER,
+    last_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id,effect_key)
+);
+INSERT INTO kernel_effect_outbox SELECT * FROM kernel_effect_outbox_v56;
+DROP TABLE kernel_effect_outbox_v56;
+CREATE INDEX idx_kernel_outbox_status ON kernel_effect_outbox(run_id,status);
+CREATE INDEX idx_kernel_outbox_due ON kernel_effect_outbox(status,created_at);
+CREATE UNIQUE INDEX idx_kernel_outbox_idem ON kernel_effect_outbox(run_id,idempotency_key);
+"#;
 const MIGRATION_56: &str = r#"
 CREATE TABLE kernel_initial_inputs (
     run_id TEXT PRIMARY KEY REFERENCES kernel_model_configs(run_id) ON DELETE CASCADE,
@@ -6415,6 +6478,9 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     apply_migration(&transaction, 54, MIGRATION_54, now)?;
     apply_migration(&transaction, 55, MIGRATION_55, now)?;
     apply_migration(&transaction, 56, MIGRATION_56, now)?;
+    apply_migration(&transaction, 57, MIGRATION_57, now)?;
+    apply_migration(&transaction, 58, MIGRATION_58, now)?;
+    apply_migration(&transaction, 59, MIGRATION_59, now)?;
     transaction.commit()
 }
 
@@ -11613,6 +11679,9 @@ mod tests {
                 execution_profile_id, prompt_config_hash, frozen_config_json, created_at)
              VALUES ('old-shadow','old-run','old-conversation','old-turn','pi','shadow',2,'manifest','permission','legacy','prompt','{}',1);
              DROP TABLE kernel_shadow_checkpoints;
+             DROP TABLE kernel_host_actions;
+             DROP TABLE kernel_host_commands;
+             DROP TABLE kernel_host_runs;
              DROP TABLE kernel_initial_inputs;
              DROP TRIGGER kernel_initial_input_start_guard;
              DROP TABLE kernel_model_configs;

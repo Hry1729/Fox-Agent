@@ -3,7 +3,7 @@ mod kernel_changes;
 mod models;
 mod repositories;
 
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 56;
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 59;
 pub use models::*;
 #[allow(unused_imports)]
 pub use repositories::{
@@ -20,7 +20,7 @@ pub use repositories::{
     WORK_EVENT_TYPES,
 };
 pub(crate) use repositories::{
-    package_snapshot_hash, CreateChildRunInput, MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
+    package_snapshot_hash, CreateChildRunInput, KernelHostScope, MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
 };
 #[allow(unused_imports)]
 pub use repositories::{

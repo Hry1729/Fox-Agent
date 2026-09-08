@@ -80,7 +80,7 @@ pub(crate) fn kernel_tool_policy(tool: &str) -> PolicyDecision {
 }
 
 /// Production clock. Execution/elapsed time uses a real monotonic source
-fn frozen_kernel_tool_policy(snapshot: &Value, tool: &str, input_json: &str) -> PolicyDecision {
+pub(super) fn frozen_kernel_tool_policy(snapshot: &Value, tool: &str, input_json: &str) -> PolicyDecision {
     let deny = |reason: &str| PolicyDecision::Deny {
         reason: reason.to_string(),
     };

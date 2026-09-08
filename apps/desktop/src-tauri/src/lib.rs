@@ -124,12 +124,24 @@ pub fn local_knowledge_retrieval_worker_exit_code(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let mut context = tauri::generate_context!();
+    // An explicit data directory must isolate WebView storage as well as SQLite.
+    // Otherwise two development/acceptance instances can share localStorage and
+    // cached conversation selections despite using different databases.
+    let isolated_windows = std::env::var_os("FOX_DATA_DIR").map(|_| {
+        context.config_mut().app.windows.iter_mut().filter(|window|window.create).map(|window| {
+            let config = window.clone();
+            window.create = false;
+            config
+        }).collect::<Vec<_>>()
+    });
     let app = tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             let app_data_dir = std::env::var_os("FOX_DATA_DIR")
                 .map(std::path::PathBuf::from)
                 .unwrap_or(app.path().app_data_dir()?);
             std::fs::create_dir_all(&app_data_dir)?;
+            let isolated_webview_dir = app_data_dir.join("webviews");
             maintenance::apply_pending_restore(&app_data_dir)?;
 
             let database = Database::open(app_data_dir.join("fox.db"))?;
@@ -191,6 +203,13 @@ pub fn run() {
                 skills_dir,
             ));
             maintenance::recover_knowledge_preview_cache(&app.state::<AppState>())?;
+            app.state::<AppState>().runtime_host.recover_kernel_runs_detached()?;
+            if let Some(windows) = &isolated_windows {
+                for config in windows {
+                    tauri::WebviewWindowBuilder::from_config(app,config)?
+                        .data_directory(isolated_webview_dir.join(&config.label)).build()?;
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -406,7 +425,7 @@ pub fn run() {
             local_knowledge_vector::local_knowledge_document_delete,
             local_knowledge_vector::local_knowledge_document_reparse,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building Fox");
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::ExitRequested { .. }) {

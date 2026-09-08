@@ -702,7 +702,7 @@ impl Database {
         wall_now_ms: i64,
         cmd: &crate::kernel::KernelPersistCommand,
     ) -> Result<(), String> {
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, None)
     }
 
     /// Commit a tool result only while this executor still owns its dispatch.
@@ -719,7 +719,7 @@ impl Database {
         if cmd.settled_dispatch_tool_call_ids.len() != 1 || cmd.settled_dispatch_tool_call_ids[0] != tool_call_id {
             return Err("kernel result must settle exactly its owned tool dispatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, Some((tool_call_id, lease_owner)), None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, Some((tool_call_id, lease_owner)), None, None, None)
     }
 
     /// Claim exactly one pending result delivery and persist its model deadline
@@ -738,7 +738,7 @@ impl Database {
             || payload["startedAt"].as_i64() != Some(wall_now_ms) {
             return Err("Kernel batch dispatch identity mismatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, Some((batch_id, lease_owner)), None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, Some((batch_id, lease_owner)), None, None)
     }
 
     /// The response, terminal/next-batch decision, and consumed delivery lease
@@ -757,7 +757,29 @@ impl Database {
             || response.run_id != run_id || response.turn_id != cmd.turn_id {
             return Err("Kernel batch response identity mismatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, Some((batch_id, lease_owner)))
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, Some((batch_id, lease_owner)), None)
+    }
+
+    pub(crate) fn kernel_commit_initial_model(&self, run_id: &str, wall_now_ms: i64,
+        cmd: &crate::kernel::KernelPersistCommand, owner: &str, response: bool) -> Result<(), String> {
+        if owner.trim().is_empty() { return Err("initial model lease owner is empty".into()); }
+        if response {
+            let events = cmd.events.iter().filter(|event| event.event_type == "engine.initial_response").collect::<Vec<_>>();
+            if events.len() != 1 || cmd.model_request_since_wall_ms.is_some() { return Err("invalid initial model response decision".into()); }
+            let payload: serde_json::Value = serde_json::from_str(&events[0].payload_json).map_err(|_| "invalid initial response event")?;
+            let value: fox_engine_protocol::KernelInitialModelResponse = serde_json::from_value(payload["response"].clone()).map_err(|_| "invalid initial response")?;
+            value.validate()?;
+            if value.run_id != run_id || value.turn_id != cmd.turn_id { return Err("initial response identity mismatch".into()); }
+        } else {
+            if cmd.events.len() != 1 || cmd.events[0].event_type != "engine.initial_dispatched"
+                || cmd.run_state != crate::kernel::RunState::Running || cmd.model_request_since_wall_ms != Some(wall_now_ms) {
+                return Err("invalid initial model dispatch decision".into());
+            }
+            let payload: serde_json::Value = serde_json::from_str(&cmd.events[0].payload_json).map_err(|_| "invalid initial dispatch event")?;
+            if payload["turnId"] != cmd.turn_id || payload["idempotencyKey"] != crate::kernel::INITIAL_MODEL_IDEMPOTENCY_KEY
+                || payload["startedAt"].as_i64() != Some(wall_now_ms) { return Err("initial dispatch identity mismatch".into()); }
+        }
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, Some((owner, response)))
     }
 
     fn kernel_commit_decision_with_dispatch_lease(
@@ -768,6 +790,7 @@ impl Database {
         dispatch_lease: Option<(&str, &str)>,
         batch_lease: Option<(&str, &str)>,
         batch_response_lease: Option<(&str, &str)>,
+        initial_lease: Option<(&str, bool)>,
     ) -> Result<(), String> {
         if !valid_run_state(cmd.run_state.as_str()) {
             return Err(format!(
@@ -790,6 +813,30 @@ impl Database {
             .map_err(|error| format!("serialize kernel compaction state: {error}"))?;
         let changed = self.with_connection(|connection| {
             let transaction = connection.transaction()?;
+            if let Some((owner, response)) = initial_lease {
+                let input = super::kernel_initial_input::read_input(&transaction, run_id)?;
+                if input.turn_id != cmd.turn_id { return Err(kernel_err("initial input turn changed")); }
+                let changed = if response {
+                    let event = cmd.events.iter().find(|event| event.event_type == "engine.initial_response").unwrap();
+                    let payload: serde_json::Value = serde_json::from_str(&event.payload_json).map_err(|_| kernel_err("invalid initial response"))?;
+                    let seq = payload["response"]["checkpointSeq"].as_u64().ok_or_else(|| kernel_err("missing initial cursor"))?;
+                    transaction.execute("UPDATE kernel_effect_outbox SET status='completed',completed_at=?3,updated_at=?3,lease_owner=NULL
+                        WHERE run_id=?1 AND effect_key='initial-model' AND effect_type='initial_model' AND status='leased' AND lease_owner=?2
+                        AND EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.kernel_mode='authoritative'
+                            AND r.state='running' AND r.model_request_since_wall_ms IS NOT NULL)
+                        AND EXISTS(SELECT 1 FROM kernel_events e WHERE e.run_id=?1 AND e.event_type='engine.initial_dispatched' AND e.seq=?4)",
+                        params![run_id,owner,wall_now_ms,seq+1])?
+                } else {
+                    transaction.execute("UPDATE kernel_effect_outbox SET status='leased',lease_owner=?2,leased_at=?3,updated_at=?3,attempts=attempts+1
+                        WHERE run_id=?1 AND effect_key='initial-model' AND effect_type='initial_model' AND status='pending'
+                        AND idempotency_key='initial-model-delivery'
+                        AND json_extract(payload_json,'$.inputHash')=(SELECT input_hash FROM kernel_initial_inputs WHERE run_id=?1)
+                        AND EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.kernel_mode='authoritative'
+                            AND r.state='running' AND r.model_request_since_wall_ms IS NULL)
+                        AND NOT EXISTS(SELECT 1 FROM kernel_tool_batches WHERE run_id=?1)", params![run_id,owner,wall_now_ms])?
+                };
+                if changed != 1 { return Err(kernel_err("initial model delivery is not owned or already consumed")); }
+            }
             if let Some((batch_id, lease_owner)) = batch_response_lease {
                 let event = cmd.events.iter().find(|event| event.event_type == "engine.batch_response")
                     .ok_or_else(|| kernel_err("missing model response event"))?;
@@ -1440,6 +1487,17 @@ impl Database {
                 let payload_value: serde_json::Value = serde_json::from_str(&effect.payload_json)
                     .map_err(|error| kernel_err(error.to_string()))?;
                 match effect.kind {
+                    crate::kernel::OutboxEffectKind::InitialModel => {
+                        let input = super::kernel_initial_input::read_input(&transaction, run_id)?;
+                        let hash: String = transaction.query_row("SELECT input_hash FROM kernel_initial_inputs WHERE run_id=?1", [run_id], |row| row.get(0))?;
+                        if effect.effect_key != crate::kernel::INITIAL_MODEL_EFFECT_KEY
+                            || effect.idempotency_key != crate::kernel::INITIAL_MODEL_IDEMPOTENCY_KEY
+                            || effect.tool_call_id.is_some() || effect.batch_id.is_some()
+                            || payload_value["turnId"] != input.turn_id || payload_value["inputHash"] != hash
+                            || !cmd.events.iter().any(|event| event.seq == 2 && event.event_type == "engine.initial_requested") {
+                            return Err(kernel_err("initial model effect differs from frozen input"));
+                        }
+                    }
                     crate::kernel::OutboxEffectKind::DispatchTool
                     | crate::kernel::OutboxEffectKind::RequestApproval => {
                         let tool_call_id = effect.tool_call_id.as_deref().ok_or_else(|| {
@@ -1702,7 +1760,7 @@ impl Database {
                             updated_at=?2, lease_owner=NULL
                       WHERE run_id=?1 AND status='pending'
                         AND effect_type IN (
-                            'dispatch_tool','request_approval','deliver_tool_batch','publish_snapshot'
+                            'dispatch_tool','request_approval','deliver_tool_batch','initial_model','publish_snapshot'
                         )",
                     params![run_id, wall_now_ms],
                 )?;
@@ -1764,6 +1822,7 @@ impl Database {
             if affected != 1 {
                 return Err(kernel_err(format!("kernel run disappeared during commit: {run_id}")));
             }
+            super::kernel_projection::project(&transaction, run_id, wall_now_ms, persisted_last_seq)?;
             transaction.commit()?;
             Ok(kernel_mode == "authoritative" && final_last_seq != persisted_last_seq)
         })?;
@@ -1950,6 +2009,7 @@ impl Database {
                    FROM kernel_effect_outbox o
                    JOIN kernel_runs r ON r.run_id=o.run_id
                   WHERE o.run_id=?1 AND o.status='pending'
+                    AND o.effect_type<>'initial_model'
                     AND r.kernel_mode = 'authoritative'
                     AND (
                         r.state NOT IN ('cancelling','completed','failed','cancelled','budget_exhausted')
@@ -1997,6 +2057,7 @@ impl Database {
                         o.batch_id, o.payload_json, o.status, o.attempts
                  FROM kernel_effect_outbox o JOIN kernel_runs r ON r.run_id=o.run_id
                  WHERE o.run_id=?1 AND o.effect_key=?2 AND o.status='pending'
+                   AND o.effect_type<>'initial_model'
                    AND r.kernel_mode='authoritative'
                    AND (r.state NOT IN ('cancelling','completed','failed','cancelled','budget_exhausted')
                         OR o.effect_type IN ('cancel_engine_turn','cancel_tool_call'))",
@@ -2033,6 +2094,7 @@ impl Database {
                    FROM kernel_effect_outbox o
                    JOIN kernel_runs r ON r.run_id = o.run_id
                   WHERE o.status='pending'
+                    AND o.effect_type<>'initial_model'
                     AND r.kernel_mode = 'authoritative'
                     AND (
                         r.state NOT IN ('cancelling','completed','failed','cancelled','budget_exhausted')

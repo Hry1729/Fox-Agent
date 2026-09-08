@@ -385,7 +385,7 @@ pub struct ConversationSearchRequest {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageRecord {
     pub id: String,
@@ -400,7 +400,7 @@ pub struct MessageRecord {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRecord {
     pub id: String,
@@ -1371,7 +1371,7 @@ impl ApprovalDecision {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentRecord {
     pub id: String,
@@ -1745,7 +1745,7 @@ pub struct UpdateMcpServerEnabledRequest {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleHookRecord {
     pub id: String,
@@ -1994,7 +1994,7 @@ pub struct CancelRunRequest {
     pub run_id: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartRunResult {
     pub run: RunRecord,

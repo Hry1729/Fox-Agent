@@ -1415,6 +1415,8 @@ impl Database {
                       AND reviewer.graph_task_attempt_id IS NULL
                      WHERE request.activated_at IS NOT NULL
                        AND request.settled_at IS NULL
+                       AND NOT EXISTS(SELECT 1 FROM run_control_bindings binding
+                           WHERE binding.run_id=request.parent_run_id AND binding.authority='authoritative')
                      ORDER BY request.activated_at, request.id",
                 )
                 .map_err(database_error)?;
@@ -1802,6 +1804,8 @@ impl Database {
                       AND accept_call.status = 'completed'
                       AND accept_call.error_message IS NULL
                      WHERE graph_acceptance.accepted_at IS NULL
+                       AND NOT EXISTS(SELECT 1 FROM run_control_bindings binding
+                           WHERE binding.run_id=accept_call.run_id AND binding.authority='authoritative')
                      ORDER BY graph_acceptance.created_at, graph_acceptance.id",
                 )
                 .map_err(database_error)?;
@@ -2110,6 +2114,8 @@ impl Database {
                        AND child_run.status IN ('queued', 'running', 'cancelling')
                        AND child_run.finished_at IS NULL
                      WHERE intent.activated_at IS NOT NULL
+                       AND NOT EXISTS(SELECT 1 FROM run_control_bindings binding
+                           WHERE binding.run_id=intent.parent_run_id AND binding.authority='authoritative')
                      ORDER BY intent.activated_at, intent.id",
                 )
                 .map_err(database_error)?
@@ -6496,6 +6502,13 @@ mod tests {
             fixture.database.create_graph_node_cancel_intent(changed),
             Err(RepositoryError::ConstraintViolation(_))
         ));
+        // Once the parent is Kernel-owned, legacy recovery must not redispatch
+        // even this already-activated intent. The owning Host action journal
+        // is the sole recovery path, including uncertain claimed actions.
+        fixture.database.freeze_kernel_run_control(
+            &fixture.run.run.id, "durable_v2", fox_engine_protocol::TimeBudgets::default(),
+        ).unwrap();
+        assert!(fixture.database.active_graph_node_cancel_intents_for_recovery().unwrap().is_empty());
         cleanup(fixture);
     }
 

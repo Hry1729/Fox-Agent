@@ -25,13 +25,27 @@ fn main() {
                         // json_patch merge treats an explicit null as "remove this
                         // key", so the merged config drops only the zvec glob;
                         // every other bundle resource is untouched.
-                        let overrides = serde_json::json!({
-                            "bundle": {
-                                "resources": {
-                                    "target/*/build/zvec-rust-sys-*/out/zvec-prebuilt/zvec_c_api.dll": null
+                        // Preserve caller-supplied dev URL/window overrides;
+                        // isolated desktop acceptance uses those as well.
+                        let mut overrides = env::var("TAURI_CONFIG")
+                            .ok()
+                            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                            .unwrap_or_else(|| serde_json::json!({}));
+                        if let Some(root) = overrides.as_object_mut() {
+                            let bundle = root
+                                .entry("bundle")
+                                .or_insert_with(|| serde_json::json!({}));
+                            if let Some(bundle) = bundle.as_object_mut() {
+                                let resources = bundle
+                                    .entry("resources")
+                                    .or_insert_with(|| serde_json::json!({}));
+                                if let Some(resources) = resources.as_object_mut() {
+                                    resources.insert(key.into(), serde_json::Value::Null);
+                                } else if let Some(resources) = resources.as_array_mut() {
+                                    resources.retain(|resource| resource.as_str() != Some(key));
                                 }
                             }
-                        });
+                        }
                         env::set_var("TAURI_CONFIG", serde_json::to_string(&overrides).unwrap());
                     }
                 }

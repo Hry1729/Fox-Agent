@@ -29,6 +29,7 @@ pub use recovery::{
 };
 
 pub use controller::{
+    INITIAL_MODEL_EFFECT_KEY, INITIAL_MODEL_IDEMPOTENCY_KEY,
     approval_effect_key, batch_delivery_effect_key, batch_delivery_idempotency_key,
     dispatch_effect_key, dispatch_idempotency_key, persist_events, Effect, KernelPersistCommand,
     PersistApprovalResolution, PersistBatch, PersistEvent, PersistOutboxEffect, PersistTool,

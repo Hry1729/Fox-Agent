@@ -83,6 +83,18 @@ describe('runtime event reducer', () => {
     })
   })
 
+  test('adds a newly committed pending approval to an open conversation', () => {
+    const persisted = detail()
+    persisted.approvals = [{
+      id: 'approval-new', toolCallId: 'tool-new', runId: 'run-1', conversationId: 'conversation-1',
+      toolName: 'write_file', status: 'pending', requestedAction: 'write', request: {}, decision: null,
+      requestedAt: 1000, resolvedAt: null,
+    }]
+    const merged = mergeConversationDetail(persisted, detail())
+    expect(merged.approvals).toEqual(persisted.approvals)
+    expect(mergeConversationDetail(persisted, merged).approvals).toHaveLength(1)
+  })
+
   test('does not regress an optimistically resolved approval back to pending', () => {
     const persisted = detail()
     persisted.approvals = [{

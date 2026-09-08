@@ -35,6 +35,9 @@ mod kernel;
 mod run_control;
 mod kernel_model_config;
 mod kernel_initial_input;
+mod kernel_host;
+mod kernel_projection;
+pub(crate) use kernel_host::KernelHostScope;
 mod memory;
 mod observability;
 mod work_events;
@@ -121,6 +124,14 @@ const AGENT_RECORD_COLUMNS: &str =
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
     kernel_changes: Arc<super::kernel_changes::KernelChanges>,
+}
+
+fn require_legacy_run_writer(connection: &Connection, run_id: &str) -> rusqlite::Result<()> {
+    if connection.query_row("SELECT EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1 AND authority='authoritative')",
+        [run_id], |row| row.get::<_,bool>(0))? {
+        return Err(projection_violation("Kernel-owned read models cannot be changed by a Legacy writer".into()));
+    }
+    Ok(())
 }
 
 impl Database {
@@ -797,6 +808,7 @@ impl Database {
                      error_code = 'runtime.application_restarted',
                      error_message = 'Fox closed before the run reached a terminal state.'
                  WHERE status IN ('queued', 'running', 'cancelling')
+                   AND NOT EXISTS (SELECT 1 FROM run_control_bindings b WHERE b.run_id=runs.id AND b.authority='authoritative')
                    AND NOT EXISTS (
                        SELECT 1 FROM conversations c JOIN agents a ON a.id = c.agent_id
                        WHERE c.id = runs.conversation_id AND a.runtime_type = 'yuxi'
@@ -807,6 +819,7 @@ impl Database {
             transaction.execute(
                 "UPDATE messages SET status = 'interrupted', updated_at = ?1
                  WHERE status = 'streaming'
+                   AND NOT EXISTS (SELECT 1 FROM run_control_bindings b WHERE b.run_id=messages.run_id AND b.authority='authoritative')
                    AND NOT EXISTS (
                        SELECT 1 FROM runs r
                        JOIN conversations c ON c.id = r.conversation_id
@@ -820,6 +833,7 @@ impl Database {
             transaction.execute(
                 "UPDATE tool_calls SET status = 'interrupted', completed_at = ?1, updated_at = ?1
                  WHERE status IN ('pending', 'running')
+                   AND NOT EXISTS (SELECT 1 FROM run_control_bindings b WHERE b.run_id=tool_calls.run_id AND b.authority='authoritative')
                    AND NOT EXISTS (
                        SELECT 1 FROM runs r
                        JOIN conversations c ON c.id = r.conversation_id
@@ -835,6 +849,8 @@ impl Database {
                  SET status = 'expired', decision_json = '{\"reason\":\"application_restarted\"}',
                       resolved_at = ?1
                  WHERE status = 'pending'
+                   AND NOT EXISTS (SELECT 1 FROM tool_calls t JOIN run_control_bindings b ON b.run_id=t.run_id
+                       WHERE t.id=approvals.tool_call_id AND b.authority='authoritative')
                    AND NOT EXISTS (
                        SELECT 1 FROM tool_calls t
                        JOIN runs r ON r.id = t.run_id
@@ -3677,6 +3693,7 @@ impl Database {
         self.with_connection(|connection| {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            require_legacy_run_writer(&transaction, run_id)?;
             let (conversation_id, run_status): (String, String) = transaction.query_row(
                 "SELECT conversation_id, status FROM runs WHERE id = ?1",
                 [run_id],
@@ -3829,6 +3846,7 @@ impl Database {
         };
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
+            require_legacy_run_writer(&transaction, run_id)?;
             let changed = transaction.execute(
                 "UPDATE tool_calls
                  SET status = ?3, result_json = ?4, error_message = ?5,
@@ -3946,6 +3964,8 @@ impl Database {
         let id = Uuid::new_v4().to_string();
         let request_json = serde_json::to_string(request).map_err(|error| error.to_string())?;
         let approval = self.with_connection(|connection| {
+            let run_id: String = connection.query_row("SELECT run_id FROM tool_calls WHERE id=?1", [tool_call_id], |row| row.get(0))?;
+            require_legacy_run_writer(connection, &run_id)?;
             connection.execute(
                 "INSERT INTO approvals(
                     id, tool_call_id, status, requested_action, request_json, requested_at,
@@ -4047,6 +4067,7 @@ impl Database {
         } else { None };
         self.with_connection(|connection| {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            require_legacy_run_writer(&transaction, &existing.run_id)?;
             let now = now_ms();
             let expired = window.is_some_and(|(start, deadline)| now < start || now >= deadline);
             let approved = decision.approved() && !expired;
@@ -4108,6 +4129,7 @@ impl Database {
         self.with_connection(|connection| {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            require_legacy_run_writer(&transaction, run_id)?;
             let approval_id = transaction
                 .query_row(
                     "SELECT a.id
@@ -4989,6 +5011,7 @@ impl Database {
         let now = now_ms();
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
+            require_legacy_run_writer(&transaction, run_id)?;
             let conversation_id = transaction
                 .query_row(
                     "SELECT conversation_id FROM runs WHERE id = ?1 AND status IN ('queued', 'running')",
@@ -5021,6 +5044,10 @@ impl Database {
         let now = now_ms();
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
+            if transaction.query_row("SELECT EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1 AND authority='authoritative')",
+                [run_id], |row| row.get::<_,bool>(0))? {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
             let (status, existing_code, existing_message): (
                 String,
                 Option<String>,
@@ -5115,6 +5142,10 @@ impl Database {
         let now = now_ms();
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
+            if transaction.query_row("SELECT EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1 AND authority='authoritative')",
+                [run_id], |row| row.get::<_,bool>(0))? {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
             let (status, existing_code, existing_message): (
                 String,
                 Option<String>,
@@ -5564,6 +5595,10 @@ impl Database {
         self.with_connection(|connection| {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if transaction.query_row("SELECT EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1 AND authority='authoritative')",
+                [run_id], |row| row.get::<_,bool>(0))? {
+                return Ok(false);
+            }
             let (run_status, last_seq): (String, i64) = transaction.query_row(
                 "SELECT status, last_seq FROM runs WHERE id = ?1",
                 [run_id],
@@ -7446,6 +7481,12 @@ fn validate_managed_tool_acquisition(
     now: i64,
     fresh_slot: bool,
 ) -> rusqlite::Result<()> {
+    validate_managed_tool_acquisition_with_clock(transaction,run_id,now,fresh_slot,true)
+}
+
+fn validate_managed_tool_acquisition_with_clock(
+    transaction: &rusqlite::Transaction<'_>, run_id: &str, now: i64, fresh_slot: bool, wall_clock: bool,
+) -> rusqlite::Result<()> {
     let run_status: String =
         transaction.query_row("SELECT status FROM runs WHERE id = ?1", [run_id], |row| {
             row.get(0)
@@ -7466,7 +7507,7 @@ fn validate_managed_tool_acquisition(
         )
         .optional()?;
     if let Some((started_at, max_duration)) = child_duration {
-        enforce_completion_deadline(run_id, "child_run", started_at, max_duration, now)?;
+        if wall_clock { enforce_completion_deadline(run_id, "child_run", started_at, max_duration, now)?; }
         return Ok(());
     }
 
@@ -7538,7 +7579,7 @@ fn validate_managed_tool_acquisition(
                 "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' has an invalid frozen daily window"
             ))
         })?;
-    enforce_completion_deadline(run_id, "digital_colleague", started_at, max_duration, now)?;
+    if wall_clock { enforce_completion_deadline(run_id, "digital_colleague", started_at, max_duration, now)?; }
     if total >= max_total {
         return Err(projection_violation(format!(
             "[digital_colleague.budget_exceeded] Digital colleague Run '{run_id}' reached its frozen per-Run total-token budget ({total}/{max_total})"

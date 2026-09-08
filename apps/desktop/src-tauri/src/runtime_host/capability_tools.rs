@@ -45,6 +45,43 @@ const DEFAULT_PROCESS_SECONDS: u64 = 120;
 const MAX_PROCESS_SECONDS: u64 = 600;
 const DEFAULT_WEB_TEXT_CHARS: usize = 120_000;
 
+// Scoped to this synchronous adapter call; never shared with another Run or
+// inherited by unrelated worker threads. Nested calls restore the prior scope.
+thread_local! {
+    static EXECUTION_CONTROL: std::cell::RefCell<Option<(crate::kernel::CancellationToken,Instant)>> = const { std::cell::RefCell::new(None) };
+}
+
+fn check_execution_control() -> Result<(),String> {
+    EXECUTION_CONTROL.with(|control| {
+        if let Some((token,deadline)) = control.borrow().as_ref() {
+            token.check()?;
+            if Instant::now() >= *deadline { return Err("capability execution budget exceeded".into()); }
+        }
+        Ok(())
+    })
+}
+
+fn bounded_timeout(requested: Duration) -> Result<Duration,String> {
+    check_execution_control()?;
+    EXECUTION_CONTROL.with(|control| match control.borrow().as_ref() {
+        Some((_,deadline)) => deadline.checked_duration_since(Instant::now()).map(|remaining| remaining.min(requested))
+            .ok_or_else(|| "capability execution budget exceeded".into()),
+        None => Ok(requested),
+    })
+}
+
+pub(super) fn execute_with_cancellation(action: PreparedCapabilityTool, token: &crate::kernel::CancellationToken, budget: Duration) -> Result<Value,String> {
+    struct Restore(Option<(crate::kernel::CancellationToken,Instant)>);
+    impl Drop for Restore {
+        fn drop(&mut self) { EXECUTION_CONTROL.with(|slot| { slot.replace(self.0.take()); }); }
+    }
+    token.check()?;
+    let _restore = Restore(EXECUTION_CONTROL.with(|slot| slot.replace(Some((token.clone(),Instant::now()+budget)))));
+    let result = execute(action);
+    check_execution_control()?;
+    result
+}
+
 pub fn is_capability_tool(tool: &str) -> bool {
     CAPABILITY_TOOLS.contains(&tool)
 }
@@ -266,6 +303,7 @@ pub fn prepare(
 }
 
 pub fn execute(action: PreparedCapabilityTool) -> Result<Value, String> {
+    check_execution_control()?;
     match action {
         PreparedCapabilityTool::WebSearch {
             query,
@@ -997,7 +1035,7 @@ fn execute_web_search(
     let provider = resolve_search_provider(provider)?;
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(8))
-        .timeout(Duration::from_secs(20))
+        .timeout(bounded_timeout(Duration::from_secs(20))?)
         .redirect(Policy::limited(3))
         .user_agent(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
@@ -1170,6 +1208,7 @@ fn search_brave(client: &Client, query: &str, max_results: usize) -> Result<Valu
         .get("https://api.search.brave.com/res/v1/web/search")
         .header("X-Subscription-Token", key)
         .query(&[("q", query), ("count", &max_results.to_string())])
+        .timeout(bounded_timeout(Duration::from_secs(20))?)
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|error| format!("Brave Search request failed: {error}"))?
@@ -1197,6 +1236,7 @@ fn search_tavily(
             "include_answer": false,
             "include_raw_content": false,
         }))
+        .timeout(bounded_timeout(Duration::from_secs(20))?)
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|error| format!("Tavily request failed: {error}"))?
@@ -1222,6 +1262,7 @@ fn search_exa(
             "excludeDomains": exclude_domains,
             "contents": { "text": { "maxCharacters": 800 } },
         }))
+        .timeout(bounded_timeout(Duration::from_secs(20))?)
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|error| format!("Exa request failed: {error}"))?
@@ -1247,6 +1288,7 @@ fn search_searxng(client: &Client, query: &str, max_results: usize) -> Result<Va
     client
         .get(url)
         .query(&[("q", query), ("format", "json"), ("pageno", "1")])
+        .timeout(bounded_timeout(Duration::from_secs(20))?)
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|error| format!("SearXNG request failed: {error}"))?
@@ -1269,6 +1311,7 @@ fn search_duckduckgo(client: &Client, query: &str, max_results: usize) -> Result
         )
         .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
         .query(&[("q", query)])
+        .timeout(bounded_timeout(Duration::from_secs(20))?)
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|error| format!("DuckDuckGo search request failed: {error}"))?;
@@ -1313,6 +1356,7 @@ fn search_yahoo(client: &Client, query: &str, max_results: usize) -> Result<Valu
         )
         .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9,en;q=0.8")
         .query(&[("p", query), ("ei", "UTF-8"), ("nojs", "1")])
+        .timeout(bounded_timeout(Duration::from_secs(20))?)
         .send()
         .and_then(|response| response.error_for_status())
         .map_err(|error| format!("Yahoo search request failed: {error}"))?;
@@ -1649,7 +1693,7 @@ fn execute_http_request(
         let port = url.port_or_known_default().unwrap_or(443);
         let mut builder = Client::builder()
             .connect_timeout(timeout.min(Duration::from_secs(8)))
-            .timeout(timeout)
+            .timeout(bounded_timeout(timeout)?)
             .redirect(Policy::none())
             .user_agent("Fox/0.1 http_request");
         for address in addresses {
@@ -1666,6 +1710,7 @@ fn execute_http_request(
             request = request.body(body.to_vec());
         }
         let response = request
+            .timeout(bounded_timeout(timeout)?)
             .send()
             .map_err(|error| format!("HTTP request failed: {error}"))?;
         if response.status().is_redirection() {
@@ -1874,6 +1919,7 @@ fn execute_sqlite_read(
     row_limit: usize,
     timeout: Duration,
 ) -> Result<Value, String> {
+    let timeout = bounded_timeout(timeout)?;
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -1884,7 +1930,7 @@ fn execute_sqlite_read(
         .map_err(|error| format!("failed to configure SQLite timeout: {error}"))?;
     let started = Instant::now();
     let deadline_started = started;
-    connection.progress_handler(1_000, Some(move || deadline_started.elapsed() >= timeout));
+    connection.progress_handler(1_000, Some(move || deadline_started.elapsed() >= timeout || check_execution_control().is_err()));
     let mut statement = connection
         .prepare(query)
         .map_err(|error| format!("failed to prepare SQLite query: {error}"))?;
@@ -2000,7 +2046,7 @@ fn fetch_public_url(mut url: Url) -> Result<(String, String, Vec<u8>), String> {
         let port = url.port_or_known_default().unwrap_or(443);
         let mut builder = Client::builder()
             .connect_timeout(Duration::from_secs(8))
-            .timeout(Duration::from_secs(20))
+            .timeout(bounded_timeout(Duration::from_secs(20))?)
             .redirect(Policy::none())
             .user_agent("Fox/0.1 web_read");
         for address in addresses {
@@ -2015,6 +2061,7 @@ fn fetch_public_url(mut url: Url) -> Result<(String, String, Vec<u8>), String> {
                 header::ACCEPT,
                 "text/html,text/plain,application/json,application/xml;q=0.9,*/*;q=0.1",
             )
+            .timeout(bounded_timeout(Duration::from_secs(20))?)
             .send()
             .map_err(|error| format!("failed to read webpage: {error}"))?;
         if response.status().is_redirection() {
@@ -2959,6 +3006,7 @@ fn run_process(
     cwd: &Path,
     timeout: Duration,
 ) -> Result<ProcessOutput, String> {
+    let timeout = bounded_timeout(timeout)?;
     let start = Instant::now();
     let mut command = Command::new(program);
     command
@@ -2986,10 +3034,18 @@ fn run_process(
     let stdout_reader = thread::spawn(move || read_process_stream(stdout));
     let stderr_reader = thread::spawn(move || read_process_stream(stderr));
     loop {
+        if let Err(error) = check_execution_control() {
+            terminate_process_tree(&mut child);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(error);
+        }
         let status = match child.try_wait() {
             Ok(status) => status,
             Err(error) => {
                 terminate_process_tree(&mut child);
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
                 return Err(format!("failed to wait for command: {error}"));
             }
         };
@@ -3013,6 +3069,8 @@ fn run_process(
         }
         if start.elapsed() >= timeout {
             terminate_process_tree(&mut child);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
             return Err(format!(
                 "command timed out after {} seconds",
                 timeout.as_secs()
@@ -3538,6 +3596,31 @@ fn python_program() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kernel_capability_cancel_and_deadline_restore_the_previous_scope() {
+        use crate::kernel::CancellationPort;
+        let registry = crate::kernel::CancellationRegistry::default();
+        registry.register_run("capability-scope").unwrap();
+        let token = registry.run_token("capability-scope").unwrap();
+        let action = || prepare("structured_data", &json!({"data":"{\"ok\":true}","inputFormat":"json"}), None).unwrap();
+        assert!(execute_with_cancellation(action(), &token, Duration::from_secs(2)).is_ok());
+        assert!(EXECUTION_CONTROL.with(|slot| slot.borrow().is_none()));
+        assert!(execute_with_cancellation(action(), &token, Duration::ZERO).is_err());
+        assert!(EXECUTION_CONTROL.with(|slot| slot.borrow().is_none()));
+        registry.register_run("outer-capability-scope").unwrap();
+        let outer = registry.run_token("outer-capability-scope").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        EXECUTION_CONTROL.with(|slot| slot.replace(Some((outer, deadline))));
+        let result = execute_with_cancellation(action(), &token, Duration::ZERO);
+        let restored = EXECUTION_CONTROL.with(|slot| slot.replace(None));
+        assert!(result.is_err());
+        assert_eq!(restored.unwrap().1, deadline);
+        registry.request_run_cancel("capability-scope");
+        assert!(execute_with_cancellation(action(), &token, Duration::from_secs(2)).is_err());
+        assert!(EXECUTION_CONTROL.with(|slot| slot.borrow().is_none()));
+        assert!(execute(action()).is_ok(), "legacy execution must not inherit another Run's cancellation");
+    }
 
     #[test]
     fn capability_tool_catalog_is_stable() {

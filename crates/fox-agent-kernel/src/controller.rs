@@ -28,6 +28,9 @@ use crate::state::{ApprovalDecision, KernelError, RunOutcome, RunState, ToolCall
 /// consumed inside that same transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    /// First model call, committed before any engine starts. Payload is a hash
+    /// of Host-frozen input, never a reconstructed conversation.
+    RequestInitialModel { input_hash: String },
     /// Append a durable event (`(run_id, seq)` idempotent).
     AppendEvent {
         seq: u64,
@@ -102,6 +105,9 @@ pub fn batch_delivery_effect_key(batch_id: &str) -> String {
 pub fn batch_delivery_idempotency_key(batch_id: &str) -> String {
     format!("tool-batch-delivery:{batch_id}")
 }
+
+pub const INITIAL_MODEL_EFFECT_KEY: &str = "initial-model";
+pub const INITIAL_MODEL_IDEMPOTENCY_KEY: &str = "initial-model-delivery";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ToolCall {
@@ -294,6 +300,42 @@ impl RunController {
         controller.running_since_mono_ms = Some(reading.monotonic_ms);
         effects.push(Effect::PublishSnapshot);
         Ok((controller, effects))
+    }
+
+    pub fn start_with_initial_input(run_id: &str, turn_id: &str, config: RunFrozenConfig,
+        input_hash: &str, clock: &dyn Clock) -> Result<(RunController, Vec<Effect>), KernelError> {
+        if config.kernel_mode != "authoritative" || input_hash.trim().is_empty() {
+            return Err(KernelError::FailClosed("initial model input requires an authoritative hash".into()));
+        }
+        let (mut controller, mut effects) = Self::start(run_id, turn_id, config, clock)?;
+        // Pending is not in-flight; the deadline is armed atomically with lease.
+        controller.settle_model_request();
+        effects.push(controller.append_event("engine.initial_requested", serde_json::json!({
+            "turnId":turn_id, "inputHash":input_hash, "idempotencyKey":INITIAL_MODEL_IDEMPOTENCY_KEY,
+        })));
+        effects.push(Effect::RequestInitialModel { input_hash: input_hash.into() });
+        Ok((controller, effects))
+    }
+
+    pub fn begin_initial_model_request(&mut self, monotonic_ms: i64, wall_ms: i64) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Running || self.model_request_in_flight || !self.batches.is_empty() || !self.tools.is_empty() {
+            return Err(KernelError::FailClosed("initial model request has already advanced".into()));
+        }
+        self.arm_model_request(monotonic_ms, wall_ms);
+        Ok(vec![self.append_event("engine.initial_dispatched", serde_json::json!({
+            "turnId":self.turn_id, "idempotencyKey":INITIAL_MODEL_IDEMPOTENCY_KEY, "startedAt":wall_ms,
+        }))])
+    }
+
+    pub fn record_initial_model_response(&mut self, response_json: &str) -> Result<Effect, KernelError> {
+        if self.state != RunState::Running || !self.model_request_in_flight || !self.batches.is_empty()
+            || response_json.len() > 1_048_576 {
+            return Err(KernelError::FailClosed("initial response has no active model request".into()));
+        }
+        let response: serde_json::Value = serde_json::from_str(response_json)
+            .map_err(|_| KernelError::FailClosed("invalid initial model response".into()))?;
+        self.settle_model_request();
+        Ok(self.append_event("engine.initial_response", serde_json::json!({"response":response})))
     }
 
     /// Reconstruct a controller from durable facts after a restart. Monotonic
@@ -1720,6 +1762,11 @@ impl RunController {
         let mut settled_dispatch_tool_call_ids = Vec::new();
         for effect in effects {
             match effect {
+                Effect::RequestInitialModel { input_hash } => outbox.push(PersistOutboxEffect {
+                    effect_key: INITIAL_MODEL_EFFECT_KEY.into(), kind: crate::ports::OutboxEffectKind::InitialModel,
+                    idempotency_key: INITIAL_MODEL_IDEMPOTENCY_KEY.into(), tool_call_id: None, batch_id: None,
+                    payload_json: serde_json::json!({"turnId":self.turn_id,"inputHash":input_hash}).to_string(),
+                }),
                 Effect::AppendEvent {
                     seq,
                     event_type,

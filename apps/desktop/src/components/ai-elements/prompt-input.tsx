@@ -40,6 +40,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { clearSubmittedPromptText } from "./prompt-input-reset";
 import type { ChatStatus, FileUIPart, SourceDocumentUIPart } from "ai";
 import {
   CornerDownLeftIcon,
@@ -867,10 +868,10 @@ export const PromptInput = ({
         text,
       });
 
-      // Reset form immediately after capturing text to avoid race condition
-      // where user input during async blob conversion would be lost
+      // Clear only message text. A native form.reset() also resets controlled
+      // assistant/model selectors, whose callbacks can switch conversations.
       if (!usingProvider) {
-        form.reset();
+        clearSubmittedPromptText(form);
       }
 
       try {

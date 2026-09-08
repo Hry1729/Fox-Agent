@@ -2,6 +2,7 @@ import { useEffect, type Dispatch, type SetStateAction } from 'react'
 import { desktopClient, desktopRuntimeAvailable } from '../api/desktop-client'
 import { createCoalescedRefresh } from '../model/coalesced-refresh'
 import { mergeConversationDetail } from '../model/runtime-event-reducer'
+import { applyKernelModelPreview } from '../model/kernel-model-preview'
 import type { ConversationDetail, DesktopErrorDetails } from '../model/types'
 
 export function useKernelStateStream({ conversationId, setDetail, setError, setErrorDetails }: {
@@ -14,6 +15,7 @@ export function useKernelStateStream({ conversationId, setDetail, setError, setE
     if (!desktopRuntimeAvailable || !conversationId) return
     let disposed = false
     let unlisten: (() => void) | undefined
+    let stopPreviews: (() => void) | undefined
     let ownError: string | null = null
     const report = (cause: unknown) => {
       if (disposed) return
@@ -45,6 +47,11 @@ export function useKernelStateStream({ conversationId, setDetail, setError, setE
       // window between opening a conversation and subscribing to new commits.
       refresh.invalidate()
     }).catch(report)
-    return () => { disposed = true; refresh.dispose(); unlisten?.() }
+    void desktopClient.listenKernelModelPreviews((notice) => {
+      if (!disposed && notice?.conversationId === conversationId) setDetail(current => applyKernelModelPreview(current, notice))
+    }).then(stop => { if (disposed) stop(); else stopPreviews = stop }).catch(() => {
+      // Transient display is optional; durable state still refreshes normally.
+    })
+    return () => { disposed = true; refresh.dispose(); unlisten?.(); stopPreviews?.() }
   }, [conversationId, setDetail, setError, setErrorDetails])
 }

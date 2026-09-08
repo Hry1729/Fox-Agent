@@ -182,6 +182,70 @@ export const SCHEMA_BUNDLE = {
       "title": "KernelEngineBatchCheckpoint",
       "type": "object"
     },
+    "KernelInitialModelFrame": {
+      "$defs": {
+        "KernelInitialModelInput": {
+          "additionalProperties": false,
+          "description": "Host-owned initial prompt snapshot, not a dispatch request or permission.\nA separate durable dispatch intent is required before invoking an engine.",
+          "properties": {
+            "messages": {
+              "items": true,
+              "type": "array"
+            },
+            "promptConfigHash": {
+              "type": "string"
+            },
+            "runId": {
+              "type": "string"
+            },
+            "schemaVersion": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "turnId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "schemaVersion",
+            "runId",
+            "turnId",
+            "promptConfigHash",
+            "messages"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "checkpointSeq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "input": {
+          "$ref": "#/$defs/KernelInitialModelInput"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "input",
+        "idempotencyKey",
+        "checkpointSeq"
+      ],
+      "title": "KernelInitialModelFrame",
+      "type": "object"
+    },
     "KernelInitialModelInput": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
@@ -214,6 +278,83 @@ export const SCHEMA_BUNDLE = {
         "messages"
       ],
       "title": "KernelInitialModelInput",
+      "type": "object"
+    },
+    "KernelInitialModelResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "assistantMessage": true,
+        "checkpointSeq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "runId",
+        "turnId",
+        "checkpointSeq",
+        "assistantMessage"
+      ],
+      "title": "KernelInitialModelResponse",
+      "type": "object"
+    },
+    "KernelModelPreview": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Transient display only. Never a committed message, decision or replay input.",
+      "properties": {
+        "checkpointSeq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "text": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "runId",
+        "conversationId",
+        "turnId",
+        "checkpointSeq",
+        "revision",
+        "text"
+      ],
+      "title": "KernelModelPreview",
       "type": "object"
     },
     "KernelModelResponse": {

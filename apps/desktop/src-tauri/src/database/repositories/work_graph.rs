@@ -945,6 +945,28 @@ impl Database {
             let policy = eligibility.policy;
             let normal_repair_used = eligibility.normal_repair_used;
             let normal_repair_budget = eligibility.normal_repair_budget;
+            let kernel_owned: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1 AND authority='authoritative')",
+                [&input.run_id],|row|row.get(0)).map_err(RepositoryError::database)?;
+            if kernel_owned {
+                // The desktop approval row is only a projection. Require the
+                // exact Kernel decision and a currently leased dispatch too.
+                let authorized: bool = transaction.query_row("SELECT EXISTS(
+                    SELECT 1 FROM kernel_tool_calls t JOIN kernel_approvals a
+                      ON a.run_id=t.run_id AND a.tool_call_id=t.tool_call_id
+                    JOIN kernel_effect_outbox o ON o.run_id=t.run_id AND o.tool_call_id=t.tool_call_id
+                    JOIN kernel_runs k ON k.run_id=t.run_id
+                    WHERE t.run_id=?1 AND 'kernel-tool:'||t.run_id||':'||t.tool_call_id=?2
+                      AND 'kernel-approval:'||t.run_id||':'||t.tool_call_id=?3
+                      AND t.tool='task_repair_escalate_start' AND t.state='running'
+                      AND a.state='allow_once' AND o.effect_type='dispatch_tool' AND o.status='leased'
+                      AND k.state='running' AND NOT EXISTS(SELECT 1 FROM kernel_host_commands c
+                        WHERE c.run_id=t.run_id AND c.kind='cancel'))",
+                    params![input.run_id,input.tool_call_id,input.approval_id],|row|row.get(0))
+                    .map_err(RepositoryError::database)?;
+                if !authorized { return Err(RepositoryError::ConstraintViolation(
+                    "Kernel repair override requires its one-time decision and active dispatch lease".into())); }
+            }
 
             let approval = transaction
                 .query_row(
@@ -999,7 +1021,7 @@ impl Database {
                 || approval.6 != input.conversation_id
                 || approval.7 != "task_repair_escalate_start"
                 || tool_input != canonical_input
-                || approval.9 != "pending"
+                || approval.9 != if kernel_owned { "running" } else { "pending" }
                 || approval.10 != 1
             {
                 return Err(RepositoryError::ConstraintViolation(
@@ -1008,12 +1030,16 @@ impl Database {
                 ));
             }
 
-            if let Err(error) = super::validate_managed_tool_acquisition(
+            if let Err(error) = super::validate_managed_tool_acquisition_with_clock(
                 transaction,
                 &input.run_id,
                 super::now_ms(),
                 false,
+                !kernel_owned,
             ) {
+                // Kernel alone settles the tool and Run; do not publish a
+                // Legacy failed ToolCall or consume a projection-only grant.
+                if kernel_owned { return Err(RepositoryError::database(error)); }
                 let error_message = error.to_string();
                 let claimed = transaction
                     .execute(
@@ -1152,13 +1178,13 @@ impl Database {
                     params![input.approval_id, now, input.run_id],
                 )
                 .map_err(RepositoryError::database)?;
-            let tool_claimed = transaction
+            let tool_claimed = if kernel_owned { 1 } else { transaction
                 .execute(
                     "UPDATE tool_calls SET status = 'running', updated_at = ?2
                      WHERE id = ?1 AND status = 'pending' AND requires_approval = 1",
                     params![input.tool_call_id, now],
                 )
-                .map_err(RepositoryError::database)?;
+                .map_err(RepositoryError::database)? };
             if claimed != 1 || tool_claimed != 1 {
                 return Err(RepositoryError::ConstraintViolation(
                     "repair override approval claim lost its one-time CAS".to_owned(),
@@ -1190,11 +1216,15 @@ impl Database {
     ) -> Result<(), RepositoryError> {
         validate_preflight_task_repair_override(&input)?;
         with_read_transaction(self, |transaction| {
-            super::validate_managed_tool_acquisition(
+            let kernel_owned: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM run_control_bindings WHERE run_id=?1 AND authority='authoritative')",
+                [&input.run_id],|row|row.get(0)).map_err(RepositoryError::database)?;
+            super::validate_managed_tool_acquisition_with_clock(
                 transaction,
                 &input.run_id,
                 super::now_ms(),
                 false,
+                !kernel_owned,
             )
             .map_err(RepositoryError::database)?;
             validate_task_repair_override_eligibility(
@@ -6619,6 +6649,69 @@ mod tests {
             task,
             finding,
         }
+    }
+
+    #[test]
+    fn kernel_repair_override_requires_once_decision_and_dispatch_lease() {
+        use crate::kernel::{self, Clock, PolicyDecisionPort};
+        use crate::runtime_host::kernel_coordinator::KernelCoordinator;
+        struct Ask;
+        impl PolicyDecisionPort for Ask {
+            fn decide(&self,_: &str,_: &str,_: &str,_: &str)->kernel::PolicyDecision {
+                kernel::PolicyDecision::RequireApproval
+            }
+        }
+        let (database,path)=test_database();
+        let fixture=repair_override_fixture(&database,"durable_v2",true);
+        let binding=database.freeze_kernel_run_control(&fixture.run_id,"durable_v2",fox_engine_protocol::TimeBudgets::default()).unwrap();
+        let config=kernel::RunFrozenConfig {
+            engine_id:"pi".into(),kernel_mode:"authoritative".into(),capability_manifest_version:2,
+            capability_manifest_hash:"repair-fixture".into(),permission_snapshot_id:binding.permission_snapshot_id.clone(),
+            execution_profile_id:"durable_v2".into(),prompt_config_hash:"repair-fixture".into(),
+            model_request_timeout_ms:binding.budgets.model_request_ms,tool_execution_timeout_ms:binding.budgets.tool_execution_ms,
+            run_execution_budget_ms:binding.budgets.run_execution_ms,approval_wait_timeout_ms:binding.budgets.approval_wait_ms,
+            provider_max_retries:0,turn_max_retries:0,
+        };
+        database.kernel_create_run(&fixture.run_id,"pi","authoritative",2,&binding.permission_snapshot_id,
+            "durable_v2","repair-fixture",&serde_json::to_string(&config).unwrap()).unwrap();
+        let clock=kernel::TestClock::new(super::now_ms());
+        let (controller,effects)=kernel::RunController::start(&fixture.run_id,"repair-turn",config,&clock).unwrap();
+        database.kernel_commit_decision(&fixture.run_id,clock.now_wall_ms(),&controller.persist_command(&effects)).unwrap();
+        let cancellation=kernel::CancellationRegistry::default();
+        let coordinator=KernelCoordinator::reopen(&database,&clock,&fixture.run_id,&cancellation).unwrap();
+        let input=StartTaskRepairOverrideInput {
+            attempt_id:"kernel-repair-attempt".into(),task_id:fixture.task.id.clone(),run_id:fixture.run_id.clone(),
+            conversation_id:fixture.conversation_id.clone(),tool_call_id:format!("kernel-tool:{}:repair",fixture.run_id),
+            approval_id:format!("kernel-approval:{}:repair",fixture.run_id),expected_task_version:fixture.task.version,
+            root_cause:"operator confirmed root cause".into(),finding_ids:vec![fixture.finding.id.clone()],
+            escalation_reason:"Authorize one bounded repair after the normal budget is exhausted.".into(),
+        };
+        coordinator.propose_tools("repair-batch",vec![kernel::ToolCallRequest {
+            tool_call_id:"repair".into(),tool:"task_repair_escalate_start".into(),
+            canonical_input_json:task_repair_override_input_value(&input).to_string(),source_order:0,
+        }],&Ask).unwrap();
+        let approval=database.load_conversation(&fixture.conversation_id).unwrap().approvals.into_iter()
+            .find(|approval|approval.id==input.approval_id).unwrap();
+        assert_eq!(approval.category,"task_repair_budget_override");
+        assert_eq!(approval.request["availableDecisions"],serde_json::json!(["allow_once","deny"]));
+        assert!(database.queue_kernel_host_command(&fixture.run_id,Some(("repair","allow_conversation"))).is_err());
+        assert!(database.start_task_repair_override(input.clone()).is_err());
+        coordinator.resolve_approval("repair",kernel::ApprovalDecision::AllowOnce).unwrap();
+        assert!(database.start_task_repair_override(input.clone()).is_err(),"a decision alone is not a dispatch lease");
+        assert!(coordinator.dispatch_tool("repair","repair-owner",|_,_,_| {
+            let result=database.start_task_repair_override(input.clone()).map_err(|error|error.to_string())?;
+            assert_eq!(result.attempt.id,input.attempt_id);
+            let replay=database.start_task_repair_override(input.clone()).map_err(|error|error.to_string())?;
+            assert_eq!(replay.override_event.id,result.override_event.id);
+            Ok((true,serde_json::json!({"attemptId":result.attempt.id})))
+        }).unwrap());
+        let detail=database.load_conversation(&fixture.conversation_id).unwrap();
+        assert_eq!(detail.tool_calls.iter().find(|tool|tool.id==input.tool_call_id).unwrap().status,"completed");
+        let approval=detail.approvals.iter().find(|approval|approval.id==input.approval_id).unwrap();
+        assert_eq!(approval.decision.as_ref().unwrap()["scope"],"once");
+        assert!(approval.claimed_at.is_some());
+        drop(coordinator);
+        cleanup(database,path);
     }
 
     fn approved_repair_override(

@@ -42,6 +42,7 @@ async function worker(t, args = ['--kernel-worker']) {
       const line = output.slice(0, end); output = output.slice(end + 1)
       const message = JSON.parse(line)
       events.push(message)
+      if (message.type === 'kernel.model_preview') continue
       pending.get(message.requestId)?.(message)
       pending.delete(message.requestId)
     }
@@ -64,6 +65,40 @@ async function worker(t, args = ['--kernel-worker']) {
   }
   return { request, events }
 }
+
+test('description mode returns scoped schemas and prompt without initializing a model', { timeout: 30000 }, async t => {
+  const child = await worker(t)
+  const described = await child.request('kernel.describe', {
+    executionProfileId: 'legacy',
+    modelService: { apiType: 'faux', modelId: 'description-only', baseUrl: 'http://localhost' },
+    supportedTools: ['read', 'web_search'],
+    prompt: { systemPrompt: 'Host-only instructions', projectContext: { projectRoot: null, permissionMode: 'ask' },
+      workSnapshot: { schemaVersion: 1, goal: null, tasks: [], evidence: [] } },
+  })
+  assert.equal(described.type, 'kernel.description')
+  assert.deepEqual(described.payload.proposalTools.map(tool => tool.name), ['web_search'])
+  assert.match(described.payload.systemPrompt, /Host-only instructions/)
+  assert.ok(described.payload.proposalTools.every(tool => Object.keys(tool).sort().join(',') === 'description,name,parameters'))
+  assert.equal((await child.request('kernel.initialize', initialization())).type, 'request_failed')
+  assert.ok(child.events.every(event => event.kind === 'response'))
+})
+
+test('initial model round uses frozen input and does not fabricate a tool batch', { timeout: 30000 }, async t => {
+  const child = await worker(t)
+  assert.equal((await child.request('kernel.initialize', initialization())).type, 'kernel.ready')
+  const payload = { controlBinding: resumePayload().controlBinding, initialModel: {
+    schemaVersion: 1, idempotencyKey: 'initial-model-delivery', checkpointSeq: 2,
+    input: { schemaVersion: 1, runId: identity.runId, turnId: 'first-turn', promptConfigHash: 'frozen-hash',
+      messages: [{ role: 'user', content: 'First question 中文 😀', timestamp: 1 }] } } }
+  const invalid = structuredClone(payload); invalid.initialModel.input.messages[0].role = 'system'
+  assert.equal((await child.request('kernel.start_initial', invalid)).type, 'request_failed')
+  const response = await child.request('kernel.start_initial', payload)
+  assert.equal(response.type, 'kernel.model_response')
+  assert.equal(response.payload.response.turnId, 'first-turn')
+  assert.equal(response.payload.response.batchId, undefined)
+  assert.equal(response.payload.response.assistantMessage.stopReason, 'stop')
+  assert.equal((await child.request('kernel.start_initial', payload)).type, 'request_failed')
+})
 
 test('real isolated worker returns one model response and refuses replay or Legacy commands', { timeout: 30000 }, async t => {
   const child = await worker(t)
@@ -145,4 +180,26 @@ test('concurrent initialization is single-owner and cancellation prevents readin
   assert.equal((await initializing).type, 'request_failed')
   assert.equal((await child.request('kernel.resume_batch', resumePayload())).type, 'request_failed')
   assert.ok(child.events.every(event => event.type !== 'kernel.ready'))
+})
+
+test('opt-in model previews carry only transient visible text and an ordered delivery cursor', { timeout: 30000 }, async t => {
+  const child = await worker(t)
+  const config = initialization()
+  config.modelService.fauxResponses = [{content:[
+    {type:'thinking',thinking:'internal reasoning must not be in display previews'},
+    {type:'text',text:'可见的流式回复 😀，最终消息仍须由 Host 提交。'}],stopReason:'stop'}]
+  assert.equal((await child.request('kernel.initialize',config)).type,'kernel.ready')
+  const payload = resumePayload(); payload.streamPreview = true
+  const result = await child.request('kernel.resume_batch',payload)
+  assert.equal(result.type,'kernel.model_response')
+  const previews = child.events.filter(event=>event.type==='kernel.model_preview').map(event=>event.payload)
+  assert.ok(previews.length>0)
+  assert.equal(previews.at(-1).text,'可见的流式回复 😀，最终消息仍须由 Host 提交。')
+  for (let i=0;i<previews.length;i++) {
+    assert.deepEqual(Object.keys(previews[i]).sort(),['checkpointSeq','conversationId','revision','runId','schemaVersion','text','turnId'])
+    assert.equal(previews[i].checkpointSeq,8)
+    assert.equal(previews[i].runId,identity.runId)
+    assert.ok(previews[i].revision>(previews[i-1]?.revision ?? 0))
+    assert.doesNotMatch(JSON.stringify(previews[i]),/internal reasoning/)
+  }
 })

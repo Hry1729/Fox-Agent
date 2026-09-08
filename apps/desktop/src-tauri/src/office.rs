@@ -464,7 +464,9 @@ pub fn prepare(
     Ok(action)
 }
 
-fn invoke(binary: &Path, args: &[String], cwd: Option<&Path>) -> Result<String, String> {
+fn invoke(binary: &Path, args: &[String], cwd: Option<&Path>, cancellation: Option<&crate::kernel::CancellationToken>, deadline: Instant) -> Result<String, String> {
+    if let Some(token) = cancellation { token.check()?; }
+    if Instant::now() >= deadline { return Err("Office execution budget exceeded".into()); }
     let mut command = Command::new(binary);
     command
         .args(args)
@@ -507,12 +509,26 @@ fn invoke(binary: &Path, args: &[String], cwd: Option<&Path>) -> Result<String, 
     let err = capture(Box::new(stderr));
     let start = Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-            break status;
+        if cancellation.is_some_and(|token| token.is_cancelled()) || Instant::now() >= deadline {
+            crate::tool_host::terminate_process_tree(&mut child);
+            let _ = out.join();
+            let _ = err.join();
+            return Err("Office execution cancelled or budget exceeded; owned process stopped".into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {},
+            Err(error) => {
+                crate::tool_host::terminate_process_tree(&mut child);
+                let _ = out.join();
+                let _ = err.join();
+                return Err(format!("Office process status failed: {error}"));
+            }
         }
         if start.elapsed() > Duration::from_secs(90) {
-            let _ = child.kill();
-            let _ = child.wait();
+            crate::tool_host::terminate_process_tree(&mut child);
+            let _ = out.join();
+            let _ = err.join();
             return Err("Office 操作超过 90 秒，已终止".into());
         }
         thread::sleep(Duration::from_millis(25));
@@ -532,15 +548,35 @@ pub fn execute(
     root: Option<&str>,
     permission: &str,
 ) -> Result<Value, String> {
+    execute_with_cancellation(server, tool, input, root, permission, None, Duration::from_secs(270))
+}
+
+pub(crate) fn execute_with_cancellation(
+    server: &McpServerRecord, tool: &str, input: &Value, root: Option<&str>, permission: &str,
+    cancellation: Option<&crate::kernel::CancellationToken>, budget: Duration,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + budget;
+    let check = || -> Result<(),String> {
+        if let Some(token) = cancellation { token.check()?; }
+        if Instant::now() >= deadline { return Err("Office execution budget exceeded".into()); }
+        Ok(())
+    };
+    check()?;
     if server.id != SERVER_ID || !server.enabled {
         return Err("Office 连接器未启用".into());
     }
-    let _lock = EXECUTION_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .map_err(|_| "Office 执行锁不可用")?;
+    let lock = EXECUTION_LOCK.get_or_init(|| Mutex::new(()));
+    let _lock = loop {
+        check()?;
+        match lock.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => return Err("Office 执行锁不可用".into()),
+        }
+    };
     let binary = Path::new(&server.command);
     verify_binary(binary)?;
+    check()?;
     // Recheck all paths and permissions immediately before execution.
     let action = prepare(tool, input, root, permission)?;
     let cwd = (!action.root.as_os_str().is_empty()).then_some(action.root.as_path());
@@ -574,7 +610,7 @@ pub fn execute(
         let stdout = if tool == "office_create" && action.source.is_some() {
             "Template copied".to_owned()
         } else {
-            invoke(binary, &args, cwd)?
+            invoke(binary, &args, cwd, cancellation, deadline)?
         };
         let mut validation = None;
         if let Some(temp) = &temporary {
@@ -590,6 +626,7 @@ pub fn execute(
                         "--json".into(),
                     ],
                     cwd,
+                    cancellation, deadline,
                 )?);
                 // A second open proves the saved document can actually be read.
                 invoke(
@@ -601,9 +638,11 @@ pub fn execute(
                         "--json".into(),
                     ],
                     cwd,
+                    cancellation, deadline,
                 )?;
             }
             let output = action.output.as_ref().expect("output");
+            check()?;
             scoped_path(
                 &action.root,
                 &output
@@ -652,6 +691,25 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn kernel_office_process_cancellation_reaps_owned_process() {
+        use crate::kernel::CancellationPort;
+        let registry = crate::kernel::CancellationRegistry::default();
+        registry.register_run("office-cancel").unwrap();
+        let token = registry.run_token("office-cancel").unwrap();
+        let cancel = registry.clone();
+        let sender = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            cancel.request_run_cancel("office-cancel");
+        });
+        let start = Instant::now();
+        let result = invoke(Path::new("node"), &["-e".into(), "setInterval(()=>{},1000)".into()],
+            None, Some(&token), start + Duration::from_secs(15));
+        sender.join().unwrap();
+        assert!(result.unwrap_err().contains("owned process stopped"));
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
     #[test]
     #[ignore = "requires the pinned OfficeCLI binary; run explicitly for integration verification"]
     fn real_documents_roundtrip_through_managed_connector() {

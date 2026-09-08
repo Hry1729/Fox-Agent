@@ -10,6 +10,12 @@ edition = "2021"
 default = ["local-embedding", "zvec"]
 zvec = ["dep:zvec-rust"]
 local-embedding = ["dep:ort", "dep:tokenizers"]
+kernel-acceptance = []
+
+[[bin]]
+name = "kernel-desktop-acceptance"
+path = "src/bin/kernel-desktop-acceptance.rs"
+required-features = ["kernel-acceptance"]
 
 [[bin]]
 name = "local-embedding-smoke"
