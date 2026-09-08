@@ -1,0 +1,180 @@
+//! Host-owned, already-settled batch handoff. Never an approval or dispatch request.
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use schemars::JsonSchema;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum KernelSettledToolState { Completed, Failed }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelEngineBatchCheckpoint {
+    pub schema_version: u32,
+    pub batch_id: String,
+    pub history: Vec<Value>,
+    pub assistant_message: Value,
+}
+
+fn validate_checkpoint_parts(history: &[Value], assistant: &Value) -> Result<(), String> {
+    let mut pending = std::collections::HashMap::new();
+    for message in history {
+        match message["role"].as_str() {
+            Some("toolResult") => {
+                let id = message["toolCallId"].as_str().ok_or("missing historical result id")?;
+                let name = message["toolName"].as_str().ok_or("missing historical result name")?;
+                if id.trim().is_empty() || name.trim().is_empty() || pending.remove(id) != Some(name) { return Err("orphan or mismatched historical result".into()); }
+                if !message["isError"].is_boolean() { return Err("historical result has no error classification".into()); }
+                validate_result_content(message)?;
+            }
+            Some("user" | "assistant") => {
+                if !pending.is_empty() { return Err("incomplete historical tool batch".into()); }
+                if !message["content"].is_string() && !message["content"].is_array() { return Err("invalid history content".into()); }
+                if message["role"] == "assistant" {
+                    if let Some(blocks) = message["content"].as_array() {
+                        for block in blocks.iter().filter(|block| block["type"] == "toolCall") {
+                            let id = block["id"].as_str().filter(|value| !value.trim().is_empty()).ok_or("invalid historical tool id")?;
+                            let name = block["name"].as_str().filter(|value| !value.trim().is_empty()).ok_or("invalid historical tool name")?;
+                            if pending.insert(id, name).is_some() { return Err("duplicate historical tool id".into()); }
+                        }
+                    }
+                }
+            }
+            _ => return Err("unsupported history message".into()),
+        }
+    }
+    if !pending.is_empty() { return Err("incomplete historical tool batch".into()); }
+    if assistant["role"] != "assistant" || assistant["stopReason"] != "toolUse" { return Err("missing original assistant tool proposal".into()); }
+    let content = assistant["content"].as_array().ok_or("missing assistant content")?;
+    let calls = content.iter().filter(|block| block["type"] == "toolCall").collect::<Vec<_>>();
+    if calls.is_empty() || calls.len() > 64 { return Err("invalid engine tool batch size".into()); }
+    let mut ids = std::collections::HashSet::new();
+    for call in calls {
+        let id = call["id"].as_str().filter(|value| !value.trim().is_empty()).ok_or("invalid proposed tool id")?;
+        let tool = call["name"].as_str().ok_or("missing proposed tool name")?;
+        if !ids.insert(id) || !call["arguments"].is_object() || super::canonical_runtime_tool_contract(tool).is_none() {
+            return Err("invalid proposed tool identity or input".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_result_content(result: &Value) -> Result<(), String> {
+    let blocks = result.get("content").and_then(Value::as_array).ok_or("missing durable result content")?;
+    for block in blocks {
+        let valid = block["type"] == "text" && block["text"].is_string()
+            || block["type"] == "image" && block["data"].is_string() && block["mimeType"].is_string();
+        if !valid { return Err("unsupported durable result content".into()); }
+    }
+    Ok(())
+}
+
+impl KernelEngineBatchCheckpoint {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != 1 || self.batch_id.trim().is_empty() || serde_json::to_vec(self).map_err(|error| error.to_string())?.len() > 1_048_576 {
+            return Err("invalid engine checkpoint identity or size".into());
+        }
+        validate_checkpoint_parts(&self.history, &self.assistant_message)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelSettledToolResult {
+    pub tool_call_id: String,
+    pub tool: String,
+    pub canonical_input: Value,
+    pub source_order: u32,
+    pub state: KernelSettledToolState,
+    pub result: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelBatchResumeFrame {
+    pub schema_version: u32,
+    pub turn_id: String,
+    pub batch_id: String,
+    pub idempotency_key: String,
+    pub checkpoint_seq: u64,
+    /// Complete prior history. Engines must reject rather than synthesize missing results.
+    pub history: Vec<Value>,
+    /// Original proposal, including provider metadata needed by the engine adapter.
+    pub assistant_message: Value,
+    pub tools: Vec<KernelSettledToolResult>,
+}
+
+impl KernelBatchResumeFrame {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_checkpoint_parts(&self.history, &self.assistant_message)?;
+        if self.schema_version != 1 || self.turn_id.trim().is_empty() || self.batch_id.trim().is_empty()
+            || self.idempotency_key != format!("tool-batch-delivery:{}", self.batch_id)
+            || self.checkpoint_seq == 0 || self.checkpoint_seq > 9_007_199_254_740_991 {
+            return Err("invalid durable batch resume identity".into());
+        }
+        if serde_json::to_vec(self).map_err(|error| error.to_string())?.len() > 1_048_576 {
+            return Err("batch resume exceeds the protocol size limit".into());
+        }
+        if self.assistant_message["role"] != "assistant" || self.assistant_message["stopReason"] != "toolUse" {
+            return Err("batch resume requires the original assistant tool proposal".into());
+        }
+        let content = self.assistant_message["content"].as_array().ok_or("missing assistant content")?;
+        let calls = content.iter().filter(|block| block["type"] == "toolCall").collect::<Vec<_>>();
+        if calls.is_empty() || calls.len() > 64 || calls.len() != self.tools.len() {
+            return Err("incomplete durable result barrier".into());
+        }
+        let mut ids = std::collections::HashSet::new();
+        for item in &self.tools {
+            if item.tool_call_id.trim().is_empty() || !ids.insert(item.tool_call_id.as_str()) {
+                return Err("duplicate or missing durable result identity".into());
+            }
+            let call = calls.get(item.source_order as usize).ok_or("invalid result source order")?;
+            if call["id"].as_str() != Some(item.tool_call_id.as_str()) || call["name"].as_str() != Some(item.tool.as_str())
+                || !item.canonical_input.is_object() || call["arguments"] != item.canonical_input
+                || super::canonical_runtime_tool_contract(&item.tool).is_none() {
+                return Err("durable result differs from approved tool identity".into());
+            }
+            let result = item.result.as_object().ok_or("missing durable tool result")?;
+            if result.get("isError").is_some_and(|value| value.as_bool() != Some(item.state == KernelSettledToolState::Failed)) {
+                return Err("tool result contradicts durable terminal state".into());
+            }
+            validate_result_content(&item.result)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn durable_batch_resume_roundtrips_and_never_accepts_unsettled_or_changed_tools() {
+        let frame = KernelBatchResumeFrame {
+            schema_version: 1, turn_id: "turn".into(), batch_id: "batch".into(),
+            idempotency_key: "tool-batch-delivery:batch".into(), checkpoint_seq: 1,
+            history: vec![json!({"role":"user","content":"read"})],
+            assistant_message: json!({"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"read-1","name":"read","arguments":{"path":"a.txt"}}]}),
+            tools: vec![KernelSettledToolResult {
+                tool_call_id: "read-1".into(), tool: "read".into(), canonical_input: json!({"path":"a.txt"}), source_order: 0,
+                state: KernelSettledToolState::Completed, result: json!({"content":[{"type":"text","text":"proof"}]}),
+            }],
+        };
+        frame.validate().unwrap();
+        let wire = serde_json::to_value(&frame).unwrap();
+        assert_eq!(serde_json::from_value::<KernelBatchResumeFrame>(wire.clone()).unwrap(), frame);
+        let mut bad = frame.clone();
+        bad.tools[0].canonical_input = json!({"path":"changed"});
+        assert!(bad.validate().is_err());
+        bad = frame.clone();
+        bad.tools.clear();
+        assert!(bad.validate().is_err());
+        bad = frame.clone();
+        bad.tools[0].result["isError"] = json!(true);
+        assert!(bad.validate().is_err());
+        let mut unsettled = wire;
+        unsettled["tools"][0]["state"] = json!("running");
+        assert!(serde_json::from_value::<KernelBatchResumeFrame>(unsettled).is_err());
+    }
+}

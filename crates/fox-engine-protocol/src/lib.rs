@@ -7,6 +7,8 @@ use uuid::Uuid;
 
 mod control;
 pub use control::*;
+mod resume;
+pub use resume::*;
 
 pub const PROTOCOL_NAME: &str = "fox-runtime-jsonl";
 pub const PROTOCOL_VERSION: u32 = 1;
@@ -316,7 +318,9 @@ pub fn schema_bundle() -> Value {
             "RuntimeEnvelope": schemars::schema_for!(RuntimeEnvelope),
             "HostResponse": schemars::schema_for!(HostResponse),
             "RuntimeCapabilityManifest": schemars::schema_for!(RuntimeCapabilityManifest),
-            "RunControlBinding": schemars::schema_for!(RunControlBinding)
+            "RunControlBinding": schemars::schema_for!(RunControlBinding),
+            "KernelBatchResumeFrame": schemars::schema_for!(KernelBatchResumeFrame),
+            "KernelEngineBatchCheckpoint": schemars::schema_for!(KernelEngineBatchCheckpoint)
         },
         "toolContracts": TOOL_CONTRACTS.iter().map(|t| serde_json::json!({
             "name": t.0, "category": t.1, "execution": t.2, "approval": t.3

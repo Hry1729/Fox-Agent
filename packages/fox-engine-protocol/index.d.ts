@@ -1,5 +1,9 @@
 // Generated from fox-engine-protocol Rust DTOs. Do not edit; run node scripts/generate-engine-protocol.mjs.
 export type HostResponse = { "conversationId"?: (string | null); "id": string; "kind": string; "payload": unknown; "protocol": string; "requestId": string; "runId"?: (string | null); "runtimeSessionId"?: (string | null); "timestamp": string; "type": string; "version": number; }
+export type KernelSettledToolResult = { "canonicalInput": unknown; "result": unknown; "sourceOrder": number; "state": KernelSettledToolState; "tool": string; "toolCallId": string; }
+export type KernelSettledToolState = "completed" | "failed"
+export type KernelBatchResumeFrame = { "assistantMessage": unknown; "batchId": string; "checkpointSeq": number; "history": Array<unknown>; "idempotencyKey": string; "schemaVersion": number; "tools": Array<KernelSettledToolResult>; "turnId": string; }
+export type KernelEngineBatchCheckpoint = { "assistantMessage": unknown; "batchId": string; "history": Array<unknown>; "schemaVersion": number; }
 export type ExecutionAuthority = "legacy" | "authoritative"
 export type FrozenPermission = { "grants": Array<PermissionGrant>; "mode": PermissionMode; "projectRoot"?: (string | null); }
 export type PermissionGrant = { "scope": string; "tool": string; }

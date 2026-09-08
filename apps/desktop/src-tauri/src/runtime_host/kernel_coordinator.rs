@@ -10,7 +10,15 @@ use crate::{
 };
 use fox_engine_protocol::{ExecutionAuthority, RunControlBinding};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::sync::Mutex;
+
+fn checkpoint_hash(value: &Value) -> String {
+    format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(value.to_string().as_bytes()))
+    )
+}
 
 pub(crate) struct KernelCoordinator<'a> {
     database: &'a Database,
@@ -130,6 +138,89 @@ impl<'a> KernelCoordinator<'a> {
         })
     }
 
+    pub(crate) fn propose_engine_batch(
+        &self,
+        checkpoint: fox_engine_protocol::KernelEngineBatchCheckpoint,
+        policy: &dyn PolicyDecisionPort,
+    ) -> Result<(), String> {
+        checkpoint.validate()?;
+        if self
+            .database
+            .run_control_binding(&self.binding.run_id)?
+            .as_ref()
+            != Some(&self.binding)
+        {
+            return Err("authoritative Run control binding changed".into());
+        }
+        let value = serde_json::to_value(&checkpoint).map_err(|error| error.to_string())?;
+        let stored = serde_json::json!({"value":value,"hash":checkpoint_hash(&value)});
+        if let Some(existing) = self
+            .database
+            .kernel_engine_batch_checkpoint(&self.binding.run_id, &checkpoint.batch_id)?
+        {
+            if existing["checkpoint"] == stored
+                && existing["engineId"].as_str() == Some(self.binding.engine_id.as_str())
+            {
+                return Ok(());
+            }
+            return Err("immutable engine checkpoint replay conflict".into());
+        }
+        let calls = checkpoint.assistant_message["content"]
+            .as_array()
+            .ok_or("missing engine proposal")?
+            .iter()
+            .filter(|block| block["type"] == "toolCall")
+            .enumerate()
+            .map(|(source_order, call)| ToolCallRequest {
+                tool_call_id: call["id"].as_str().unwrap().into(),
+                tool: call["name"].as_str().unwrap().into(),
+                canonical_input_json: call["arguments"].to_string(),
+                source_order,
+            })
+            .collect();
+        self.tick()?;
+        self.apply(None, |controller, now| {
+            let mut effects = controller.propose_tool_batch(
+                &checkpoint.batch_id,
+                calls,
+                policy,
+                now.monotonic_ms,
+                now.wall_ms,
+            )?;
+            effects
+                .push(controller.checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?);
+            Ok(effects)
+        })
+    }
+
+    pub(crate) fn prepare_stored_batch_resume(
+        &self,
+        batch_id: &str,
+    ) -> Result<fox_engine_protocol::KernelBatchResumeFrame, String> {
+        let event = self
+            .database
+            .kernel_engine_batch_checkpoint(&self.binding.run_id, batch_id)?
+            .ok_or("original engine checkpoint is missing; it must not be regenerated")?;
+        let value = &event["checkpoint"]["value"];
+        if event["checkpoint"]["hash"].as_str() != Some(checkpoint_hash(value).as_str())
+            || event["engineId"].as_str() != Some(self.binding.engine_id.as_str())
+        {
+            return Err("persisted engine checkpoint hash or engine identity mismatch".into());
+        }
+        let checkpoint: fox_engine_protocol::KernelEngineBatchCheckpoint =
+            serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+        checkpoint.validate()?;
+        if checkpoint.batch_id != batch_id {
+            return Err("persisted engine checkpoint batch mismatch".into());
+        }
+        let frame =
+            self.prepare_batch_resume(batch_id, checkpoint.history, checkpoint.assistant_message)?;
+        if event["turnId"].as_str() != Some(frame.turn_id.as_str()) {
+            return Err("persisted engine checkpoint turn mismatch".into());
+        }
+        Ok(frame)
+    }
+
     pub(crate) fn resolve_approval(
         &self,
         tool_call_id: &str,
@@ -148,6 +239,96 @@ impl<'a> KernelCoordinator<'a> {
     pub(crate) fn snapshot(&self) -> Result<kernel::KernelSnapshot, String> {
         self.database
             .kernel_build_full_snapshot(&self.binding.run_id)
+    }
+
+    /// Project a committed result barrier for a replacement engine session.
+    /// The caller supplies the original engine checkpoint, never fresh model
+    /// output. This read does not claim or complete the batch-delivery outbox.
+    fn prepare_batch_resume(
+        &self,
+        batch_id: &str,
+        history: Vec<Value>,
+        assistant_message: Value,
+    ) -> Result<fox_engine_protocol::KernelBatchResumeFrame, String> {
+        use fox_engine_protocol::{
+            KernelBatchResumeFrame, KernelSettledToolResult, KernelSettledToolState,
+        };
+        self.tick()?;
+        let guard = self
+            .controller
+            .lock()
+            .map_err(|_| "Kernel coordinator lock poisoned")?;
+        let snapshot = self.snapshot()?;
+        if guard.state() != kernel::RunState::Running
+            || snapshot.last_event_seq != guard.last_event_seq()
+        {
+            return Err("batch resume requires a current running Kernel snapshot".into());
+        }
+        let data = guard.shadow_checkpoint(self.clock.now_monotonic_ms());
+        let batch = data
+            .batches
+            .iter()
+            .find(|batch| batch.batch_id == batch_id && batch.barrier_emitted)
+            .ok_or("batch result barrier has not committed")?;
+        let effect = snapshot.pending_effects.iter().find(|effect| effect.effect_key == kernel::batch_delivery_effect_key(batch_id)
+            && effect.kind == kernel::OutboxEffectKind::DeliverToolBatch && effect.status == kernel::OutboxStatus::Pending)
+            .ok_or("batch delivery is missing, claimed or already completed; reconcile instead of replaying")?;
+        let payload: Value =
+            serde_json::from_str(&effect.payload_json).map_err(|error| error.to_string())?;
+        if effect.batch_id.as_deref() != Some(batch_id)
+            || effect.idempotency_key != kernel::batch_delivery_idempotency_key(batch_id)
+            || payload["orderedToolCallIds"] != serde_json::json!(batch.ordered)
+        {
+            return Err("durable batch delivery identity mismatch".into());
+        }
+        let mut tools = Vec::new();
+        for id in &batch.ordered {
+            let tool = data
+                .tools
+                .iter()
+                .find(|tool| &tool.tool_call_id == id)
+                .ok_or("batch tool fact is missing")?;
+            let state = match tool.state {
+                kernel::ToolCallState::Completed => KernelSettledToolState::Completed,
+                kernel::ToolCallState::Failed => KernelSettledToolState::Failed,
+                _ => return Err("unsettled or cancelled tool cannot resume the model".into()),
+            };
+            let raw: Value = match tool.result_json.as_deref() {
+                Some(value) => serde_json::from_str(value).map_err(|error| error.to_string())?,
+                // Policy denial is a durable failed fact, not an unknown result.
+                None if state == KernelSettledToolState::Failed => {
+                    serde_json::json!({"state":"failed","toolCallId":id,"outputRecorded":false})
+                }
+                None => return Err("completed tool has no durable result".into()),
+            };
+            let result = if raw.get("content").is_some() {
+                raw
+            } else {
+                serde_json::json!({"content":[{"type":"text","text":raw.to_string()}]})
+            };
+            tools.push(KernelSettledToolResult {
+                tool_call_id: id.clone(),
+                tool: tool.tool.clone(),
+                canonical_input: serde_json::from_str(&tool.input_json)
+                    .map_err(|error| error.to_string())?,
+                source_order: u32::try_from(tool.source_order)
+                    .map_err(|error| error.to_string())?,
+                state,
+                result,
+            });
+        }
+        let frame = KernelBatchResumeFrame {
+            schema_version: 1,
+            turn_id: data.turn_id,
+            batch_id: batch_id.into(),
+            idempotency_key: effect.idempotency_key.clone(),
+            checkpoint_seq: snapshot.last_event_seq,
+            history,
+            assistant_message,
+            tools,
+        };
+        frame.validate()?;
+        Ok(frame)
     }
 
     /// Dispatch exactly one durable intent. Err after lease is uncertain and is

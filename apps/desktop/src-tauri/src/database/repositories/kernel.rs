@@ -143,6 +143,23 @@ pub struct KernelRunRecovery {
 }
 
 impl Database {
+    /// The checkpoint is an append-only event committed with the original tool
+    /// proposal, so no new table or second-transaction crash window is needed.
+    pub fn kernel_engine_batch_checkpoint(&self, run_id: &str, batch_id: &str) -> Result<Option<serde_json::Value>, String> {
+        self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT e.payload_json FROM kernel_events e JOIN kernel_runs r ON r.run_id=e.run_id
+                 WHERE e.run_id=?1 AND e.event_type='engine.batch_checkpoint'
+                   AND json_extract(e.payload_json,'$.batchId')=?2
+                   AND r.kernel_mode='authoritative' ORDER BY e.seq LIMIT 2",
+            )?;
+            let rows = statement.query_map(params![run_id, batch_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            if rows.len() > 1 { return Err(kernel_err("multiple engine checkpoints for one immutable batch")); }
+            rows.first().map(|row| serde_json::from_str(row).map_err(|error| kernel_err(error.to_string()))).transpose()
+        })
+    }
+
     /// Create the durable kernel run row with its frozen configuration.
     pub fn kernel_create_run(
         &self,
@@ -1854,7 +1871,7 @@ impl Database {
                   WHERE o.run_id=?1 AND o.status='pending'
                     AND r.kernel_mode = 'authoritative'
                     AND (
-                        r.state NOT IN ('completed','failed','cancelled','budget_exhausted')
+                        r.state NOT IN ('cancelling','completed','failed','cancelled','budget_exhausted')
                         OR o.effect_type IN ('cancel_engine_turn','cancel_tool_call')
                     )
                   ORDER BY o.created_at ASC, o.effect_key ASC",
@@ -1900,7 +1917,7 @@ impl Database {
                  FROM kernel_effect_outbox o JOIN kernel_runs r ON r.run_id=o.run_id
                  WHERE o.run_id=?1 AND o.effect_key=?2 AND o.status='pending'
                    AND r.kernel_mode='authoritative'
-                   AND (r.state NOT IN ('completed','failed','cancelled','budget_exhausted')
+                   AND (r.state NOT IN ('cancelling','completed','failed','cancelled','budget_exhausted')
                         OR o.effect_type IN ('cancel_engine_turn','cancel_tool_call'))",
                 params![run_id, effect_key], map_outbox_effect,
             ).optional()?;
@@ -1937,7 +1954,7 @@ impl Database {
                   WHERE o.status='pending'
                     AND r.kernel_mode = 'authoritative'
                     AND (
-                        r.state NOT IN ('completed','failed','cancelled','budget_exhausted')
+                        r.state NOT IN ('cancelling','completed','failed','cancelled','budget_exhausted')
                         OR o.effect_type IN ('cancel_engine_turn','cancel_tool_call')
                     )
                   ORDER BY o.created_at ASC, o.effect_key ASC",
@@ -4489,6 +4506,11 @@ mod tests {
             &controller.persist_command(&cancelling),
         )
         .unwrap();
+        let cancelling_plan = plan_recovery(vec![db.kernel_recovery_facts("run-terminal-cancel").unwrap().unwrap()]);
+        assert!(cancelling_plan.republish_approvals.is_empty());
+        assert!(cancelling_plan.redispatch_pending.iter().all(|(_, effect)| matches!(effect.kind,
+            crate::kernel::OutboxEffectKind::CancelEngineTurn | crate::kernel::OutboxEffectKind::CancelToolCall)));
+        assert!(db.kernel_outbox_lease_effect("run-terminal-cancel", "dispatch:call-cancel", "must-not-run").unwrap().is_none());
         let terminal = controller.settle_cancellation();
         db.kernel_commit_decision(
             "run-terminal-cancel",

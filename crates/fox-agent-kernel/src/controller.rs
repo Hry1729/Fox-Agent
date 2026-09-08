@@ -613,6 +613,22 @@ impl RunController {
     }
 
     /// The engine proposed a batch of tool calls.
+    /// Persist an opaque engine checkpoint with the same decision transaction
+    /// as its tool proposal. The adapter validates engine-specific contents.
+    pub fn checkpoint_tool_batch(&mut self, batch_id: &str, checkpoint_json: &str) -> Result<Effect, KernelError> {
+        self.ensure_live()?;
+        if !self.batches.iter().any(|batch| batch.batch_id == batch_id) || checkpoint_json.len() > 1_048_576 {
+            return Err(KernelError::FailClosed("invalid engine batch checkpoint scope/size".into()));
+        }
+        let checkpoint: serde_json::Value = serde_json::from_str(checkpoint_json)
+            .map_err(|error| KernelError::FailClosed(error.to_string()))?;
+        if !checkpoint.is_object() { return Err(KernelError::FailClosed("engine checkpoint must be an object".into())); }
+        Ok(self.append_event("engine.batch_checkpoint", serde_json::json!({
+            "batchId":batch_id, "engineId":self.config.engine_id, "turnId":self.turn_id, "checkpoint":checkpoint,
+        })))
+    }
+
+    /// The engine proposed a batch of tool calls.
     pub fn propose_tool_batch(
         &mut self,
         batch_id: &str,

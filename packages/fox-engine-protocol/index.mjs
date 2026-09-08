@@ -65,6 +65,123 @@ export const SCHEMA_BUNDLE = {
       "title": "HostResponse",
       "type": "object"
     },
+    "KernelBatchResumeFrame": {
+      "$defs": {
+        "KernelSettledToolResult": {
+          "additionalProperties": false,
+          "properties": {
+            "canonicalInput": true,
+            "result": true,
+            "sourceOrder": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "$ref": "#/$defs/KernelSettledToolState"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "toolCallId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "toolCallId",
+            "tool",
+            "canonicalInput",
+            "sourceOrder",
+            "state",
+            "result"
+          ],
+          "type": "object"
+        },
+        "KernelSettledToolState": {
+          "enum": [
+            "completed",
+            "failed"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "assistantMessage": {
+          "description": "Original proposal, including provider metadata needed by the engine adapter."
+        },
+        "batchId": {
+          "type": "string"
+        },
+        "checkpointSeq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "history": {
+          "description": "Complete prior history. Engines must reject rather than synthesize missing results.",
+          "items": true,
+          "type": "array"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tools": {
+          "items": {
+            "$ref": "#/$defs/KernelSettledToolResult"
+          },
+          "type": "array"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "turnId",
+        "batchId",
+        "idempotencyKey",
+        "checkpointSeq",
+        "history",
+        "assistantMessage",
+        "tools"
+      ],
+      "title": "KernelBatchResumeFrame",
+      "type": "object"
+    },
+    "KernelEngineBatchCheckpoint": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "assistantMessage": true,
+        "batchId": {
+          "type": "string"
+        },
+        "history": {
+          "items": true,
+          "type": "array"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "batchId",
+        "history",
+        "assistantMessage"
+      ],
+      "title": "KernelEngineBatchCheckpoint",
+      "type": "object"
+    },
     "RunControlBinding": {
       "$defs": {
         "ExecutionAuthority": {

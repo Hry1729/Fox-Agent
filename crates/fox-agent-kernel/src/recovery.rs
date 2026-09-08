@@ -72,7 +72,8 @@ pub fn plan_recovery(facts: Vec<RecoveryFacts>) -> RecoveryPlan {
         if terminal {
             plan.terminal_run_ids.push(fact.run_id.clone());
         }
-        if !terminal {
+        let resume_work = !terminal && fact.state != "cancelling";
+        if resume_work {
             for approval in fact.pending_approvals {
                 plan.republish_approvals.push(approval);
             }
@@ -85,7 +86,7 @@ pub fn plan_recovery(facts: Vec<RecoveryFacts>) -> RecoveryPlan {
                     let safe_pending = matches!(
                         effect.kind,
                         OutboxEffectKind::CancelEngineTurn | OutboxEffectKind::CancelToolCall
-                    ) || !terminal
+                    ) || resume_work
                         && matches!(
                             effect.kind,
                             OutboxEffectKind::DispatchTool

@@ -6,15 +6,25 @@ const knownTools = new Set(RUNTIME_TOOL_CATALOG.map(tool => tool.name))
 // The wire schema validates shape; the adapter validates the identity it can
 // actually execute. No adapter may silently accept another engine/authority.
 export function validatePromptControl(request, executionProfileId) {
+  return validateAdapterControl(request, executionProfileId, 'legacy', true)
+}
+
+// Separate entry point: this does NOT enable authoritative prompts in the
+// Legacy sidecar. Only the controlled Kernel handoff may use this validator.
+export function validateKernelControl(request, executionProfileId) {
+  return validateAdapterControl(request, executionProfileId, 'authoritative', false)
+}
+
+function validateAdapterControl(request, executionProfileId, authority, allowAbsent) {
   const binding = request.payload?.controlBinding
   // Protocol v1 hosts predating frozen control remain supported. Explicit null
   // or malformed bindings are not the same as an absent compatibility field.
-  if (!Object.hasOwn(request.payload ?? {}, 'controlBinding')) return null
+  if (allowAbsent && !Object.hasOwn(request.payload ?? {}, 'controlBinding')) return null
   const errors = validateWireValue('RunControlBinding', binding)
   if (errors.length) throw new Error(`Invalid frozen Run control: ${errors.join('; ')}`)
   if (binding.schemaVersion !== 1) throw new Error('Unsupported frozen Run control version')
-  if (binding.engineId !== 'pi' || binding.authority !== 'legacy') {
-    throw new Error('Pi Legacy adapter cannot execute the frozen Run engine/authority')
+  if (binding.engineId !== 'pi' || binding.authority !== authority) {
+    throw new Error(`Pi ${authority === 'legacy' ? 'Legacy' : 'Kernel'} adapter cannot execute the frozen Run engine/authority`)
   }
   if (!binding.runId.trim() || !binding.conversationId.trim()
       || binding.runId !== request.runId || binding.conversationId !== request.conversationId

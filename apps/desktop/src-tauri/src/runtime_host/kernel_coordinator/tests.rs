@@ -234,6 +234,14 @@ fn expired_approval_and_cancel_never_reach_executor() {
     let cancelled = KernelCoordinator::reopen(&db2, &clock, &run2, &cancellation).unwrap();
     cancelled.propose_tools("batch", calls(), &Allow).unwrap();
     cancelled.cancel().unwrap();
+    assert!(db2
+        .kernel_outbox_lease_all_pending("cancel-drain")
+        .unwrap()
+        .iter()
+        .all(|(_, effect)| matches!(
+            effect.kind,
+            kernel::OutboxEffectKind::CancelEngineTurn | kernel::OutboxEffectKind::CancelToolCall
+        )));
     assert!(!cancelled
         .dispatch_tool("read-a", "owner", |_, _, _| panic!("cancelled"))
         .unwrap());
@@ -391,4 +399,171 @@ fn independent_reads_can_execute_concurrently_without_holding_the_controller_loc
         .tool_calls
         .iter()
         .all(|tool| tool.state == "completed"));
+}
+
+fn pi_batch_probe(mode: &str, input: Value) -> Value {
+    use std::{
+        io::Write,
+        process::{Child, Command, Stdio},
+        time::{Duration, Instant},
+    };
+    struct ProbeChild(Option<Child>);
+    impl Drop for ProbeChild {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let mut command = Command::new("node");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = ProbeChild(Some(
+        command
+            .arg(repository.join("services/agent-runtime/test/fixtures/pi-kernel-batch-child.mjs"))
+            .arg(mode)
+            .current_dir(&repository)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    child
+        .0
+        .as_mut()
+        .unwrap()
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.to_string().as_bytes())
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while child.0.as_mut().unwrap().try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "Pi batch probe timed out");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.0.take().unwrap().wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "Pi batch probe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn pi_checkpoint_sqlite_reopen_rust_readers_and_replacement_pi_share_one_result_batch() {
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture(&clock);
+    std::fs::write(root.join("a.txt"), "Rust persisted result A 中文").unwrap();
+    std::fs::write(root.join("b.txt"), "Rust persisted result B 😀").unwrap();
+    let captured = pi_batch_probe("capture", json!({}));
+    assert_eq!(captured["executions"], 0);
+    let messages = captured["messages"].as_array().unwrap();
+    let original = messages.last().unwrap().clone();
+    let history = messages[..messages.len() - 1].to_vec();
+    {
+        let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+        coordinator
+            .propose_engine_batch(
+                fox_engine_protocol::KernelEngineBatchCheckpoint {
+                    schema_version: 1,
+                    batch_id: "pi-batch".into(),
+                    history,
+                    assistant_message: original,
+                },
+                &Ask,
+            )
+            .unwrap();
+        assert!(coordinator.prepare_stored_batch_resume("pi-batch").is_err());
+    }
+    drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    for id in ["read-b", "read-a"] {
+        coordinator
+            .resolve_approval(id, kernel::ApprovalDecision::AllowOnce)
+            .unwrap();
+        coordinator
+            .dispatch_tool(id, "rust-reader", |binding, effect, token| {
+                let payload: Value = serde_json::from_str(&effect.payload_json).unwrap();
+                Ok((
+                    true,
+                    crate::resource_gateway::execute(binding, "read", &payload["input"], token)?,
+                ))
+            })
+            .unwrap();
+    }
+    let frame = coordinator.prepare_stored_batch_resume("pi-batch").unwrap();
+    let binding = db.run_control_binding(&run_id).unwrap().unwrap();
+    let identity = json!({"runId":run_id,"conversationId":binding.conversation_id,"runtimeSessionId":"replacement-pi","executionProfileId":binding.execution_profile_id});
+    let request = json!({"runId":run_id,"conversationId":binding.conversation_id,"runtimeSessionId":"replacement-pi",
+        "payload":{"controlBinding":binding,"batchResume":frame}});
+    let effect_key = kernel::batch_delivery_effect_key("pi-batch");
+    db.kernel_outbox_lease_effect(&run_id, &effect_key, "pi-delivery")
+        .unwrap()
+        .unwrap();
+    assert!(coordinator.prepare_stored_batch_resume("pi-batch").is_err());
+    let resumed = pi_batch_probe(
+        "resume",
+        json!({"request":request,"identity":identity,
+        "expectedResults":["Rust persisted result A 中文","Rust persisted result B 😀"]}),
+    );
+    assert_eq!(resumed["executions"], 0);
+    assert_eq!(resumed["consumed"], json!(["read-a", "read-b"]));
+    assert_eq!(resumed["answer"], "durable batch consumed");
+    db.kernel_outbox_complete(&run_id, &effect_key, "pi-delivery")
+        .unwrap();
+    assert!(coordinator.prepare_stored_batch_resume("pi-batch").is_err());
+    assert!(coordinator.snapshot().unwrap().pending_effects.is_empty());
+}
+
+#[test]
+fn original_engine_checkpoint_and_proposal_commit_atomically_and_replay_exactly() {
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture(&clock);
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    let checkpoint = fox_engine_protocol::KernelEngineBatchCheckpoint {
+        schema_version: 1,
+        batch_id: "checkpoint-batch".into(),
+        history: vec![json!({"role":"user","content":"read proof"})],
+        assistant_message: json!({"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"read-a","name":"read","arguments":{"path":"proof.txt"}}]}),
+    };
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_checkpoint BEFORE INSERT ON kernel_events WHEN NEW.event_type='engine.batch_checkpoint' BEGIN SELECT RAISE(ABORT,'injected checkpoint failure'); END;").unwrap();
+    assert!(coordinator
+        .propose_engine_batch(checkpoint.clone(), &Ask)
+        .is_err());
+    assert!(coordinator.snapshot().unwrap().tool_calls.is_empty());
+    assert!(db
+        .kernel_engine_batch_checkpoint(&run_id, "checkpoint-batch")
+        .unwrap()
+        .is_none());
+    connection
+        .execute_batch("DROP TRIGGER reject_checkpoint;")
+        .unwrap();
+    coordinator
+        .propose_engine_batch(checkpoint.clone(), &Ask)
+        .unwrap();
+    let before = coordinator.snapshot().unwrap();
+    coordinator
+        .propose_engine_batch(checkpoint.clone(), &Ask)
+        .unwrap();
+    assert_eq!(coordinator.snapshot().unwrap(), before);
+    let mut changed = checkpoint;
+    changed.history[0]["content"] = json!("different history");
+    assert!(coordinator.propose_engine_batch(changed, &Ask).is_err());
+    connection.execute("UPDATE kernel_events SET payload_json=json_set(payload_json,'$.checkpoint.hash','corrupt') WHERE run_id=?1 AND event_type='engine.batch_checkpoint'", [&run_id]).unwrap();
+    assert!(coordinator
+        .prepare_stored_batch_resume("checkpoint-batch")
+        .unwrap_err()
+        .contains("hash"));
 }
