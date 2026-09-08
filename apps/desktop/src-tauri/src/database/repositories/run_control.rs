@@ -31,6 +31,27 @@ mod tests {
     }
 
     #[test]
+    fn run_control_shadow_projection_preserves_grants_and_legacy_compatibility() {
+        let (db, _path, run_id) = fixture();
+        let conversation: String = db.with_connection(|connection| connection.query_row(
+            "SELECT conversation_id FROM runs WHERE id=?1", [&run_id], |row| row.get(0),
+        )).unwrap();
+        db.with_connection(|connection| connection.execute(
+            "INSERT INTO conversation_tool_permissions(conversation_id,tool_name,scope_key,granted_at) VALUES(?1,'read','project',0)",
+            [&conversation],
+        )).unwrap();
+        let legacy = db.run_shadow_permission_snapshot(&run_id, &conversation).unwrap();
+        assert!(db.run_shadow_permission_snapshot(&run_id, "foreign").is_err());
+        assert!(db.run_shadow_permission_snapshot("missing", &conversation).is_err());
+        db.freeze_legacy_run_control(&run_id, "test-profile").unwrap();
+        db.with_connection(|connection| connection.execute(
+            "DELETE FROM conversation_tool_permissions WHERE conversation_id=?1", [&conversation],
+        )).unwrap();
+        assert_eq!(db.run_shadow_permission_snapshot(&run_id, &conversation).unwrap(), legacy);
+        assert_eq!(legacy["grants"], serde_json::json!([["read", "project"]]));
+    }
+
+    #[test]
     fn run_control_survives_reopen_and_ignores_live_permission_changes() {
         let (db, path, run_id) = fixture();
         let binding = db.freeze_legacy_run_control(&run_id, "test-profile").unwrap();
@@ -38,6 +59,10 @@ mod tests {
         assert_eq!(binding.read_only_executor, ResourceExecutor::Runtime);
         assert_eq!(binding.permission.mode, PermissionMode::Ask);
         db.update_conversation_permission_mode(&binding.conversation_id, "allow").unwrap();
+        let shadow = db.run_shadow_permission_snapshot(&run_id, &binding.conversation_id).unwrap();
+        assert_eq!(shadow["mode"], "ask");
+        assert_eq!(shadow["grants"], serde_json::json!([]));
+        assert!(db.run_shadow_permission_snapshot(&run_id, "foreign-conversation").is_err());
         assert_eq!(db.freeze_legacy_run_control(&run_id, "test-profile").unwrap(), binding);
         assert!(db.freeze_legacy_run_control(&run_id, "different-profile").is_err());
         drop(db);
@@ -61,6 +86,7 @@ mod tests {
         db.with_connection(|connection| connection.execute("UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1", [&run_id])).unwrap();
         assert!(db.run_control_binding(&run_id).unwrap_err().contains("hash mismatch"));
         assert!(db.freeze_legacy_run_control(&run_id, "test-profile").is_err());
+        assert!(db.run_shadow_permission_snapshot(&run_id, &binding.conversation_id).is_err());
     }
 
     #[test]
@@ -75,6 +101,45 @@ mod tests {
 }
 
 impl Database {
+    /// Project the same frozen policy used by execution into Shadow's legacy
+    /// JSON contract. Only pre-binding Runs may use the compatibility reader;
+    /// corrupt or mismatched bindings must never fall back to live permissions.
+    pub fn run_shadow_permission_snapshot(&self, run_id: &str, conversation_id: &str) -> Result<serde_json::Value, String> {
+        match self.run_control_binding(run_id)? {
+            Some(binding) => {
+                if binding.conversation_id != conversation_id {
+                    return Err("frozen Run permission belongs to another conversation".into());
+                }
+                Ok(serde_json::json!({
+                    "mode": binding.permission.mode.as_str(),
+                    "projectRoot": binding.permission.project_root,
+                    "grants": binding.permission.grants.iter().map(|grant| (&grant.tool, &grant.scope)).collect::<Vec<_>>(),
+                }))
+            }
+            None => {
+                let owner: String = self.with_connection(|connection| connection.query_row(
+                    "SELECT conversation_id FROM runs WHERE id=?1", [run_id], |row| row.get(0),
+                ))?;
+                if owner != conversation_id {
+                    return Err("legacy Run permission belongs to another conversation".into());
+                }
+                self.kernel_shadow_permission_snapshot(conversation_id)
+            }
+        }
+    }
+
+    pub fn run_time_budgets(&self, run_id: &str) -> Result<fox_engine_protocol::TimeBudgets, String> {
+        match self.run_control_binding(run_id)? {
+            Some(binding) => Ok(binding.budgets),
+            None => {
+                self.with_connection(|connection| connection.query_row(
+                    "SELECT id FROM runs WHERE id=?1", [run_id], |row| row.get::<_, String>(0),
+                ))?;
+                Ok(fox_engine_protocol::TimeBudgets::default())
+            }
+        }
+    }
+
     /// Capture all mutable permission inputs in one SQLite snapshot. This is
     /// deliberately Legacy-only until authoritative dispatch is integrated.
     pub fn freeze_legacy_run_control(&self, run_id: &str, profile_id: &str) -> Result<RunControlBinding, String> {

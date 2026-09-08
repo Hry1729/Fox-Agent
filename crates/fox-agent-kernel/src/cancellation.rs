@@ -63,7 +63,9 @@ impl CancellationPort for CancellationRegistry {
     }
     fn request_tool_cancel(&self, run_id: &str, tool_call_id: &str) {
         if let Ok(mut runs) = self.runs.lock() {
-            if let Some(scope) = runs.get_mut(run_id) { scope.tools.entry(tool_call_id.into()).or_default().store(true, Ordering::Release); }
+            // Preserve a cancellation received before Run registration. The
+            // later registration may enable other tools, never this identity.
+            runs.entry(run_id.into()).or_default().tools.entry(tool_call_id.into()).or_default().store(true, Ordering::Release);
         }
     }
     fn is_tool_cancelled(&self, run_id: &str, tool_call_id: &str) -> bool {
@@ -101,6 +103,10 @@ mod tests {
         assert!(registry.tool_token("unknown", "tool").is_err());
         registry.request_run_cancel("before-start");
         assert!(registry.register_run("before-start").is_err());
+        registry.request_tool_cancel("tool-before-start", "cancelled-tool");
+        registry.register_run("tool-before-start").unwrap();
+        assert!(registry.tool_token("tool-before-start", "cancelled-tool").unwrap().is_cancelled());
+        assert!(!registry.tool_token("tool-before-start", "other-tool").unwrap().is_cancelled());
         registry.register_run("r").unwrap();
         let token = registry.tool_token("r", "t").unwrap();
         registry.retire_run("r");

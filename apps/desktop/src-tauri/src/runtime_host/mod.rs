@@ -48,7 +48,6 @@ pub(crate) fn runtime_tool_is_supported(tool: &str) -> bool {
 }
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CANCELLED_BEFORE_SUBMISSION: &str = "runtime run was cancelled before submission";
 const STDERR_LIMIT: usize = 80;
 const MAX_PROTOCOL_LINE_BYTES: usize = 1024 * 1024;
@@ -1271,11 +1270,12 @@ impl RuntimeHost {
             .unwrap_or_else(|| format!("manifest-v{manifest_version}"));
         let permission_snapshot = self
             .database
-            .kernel_shadow_permission_snapshot(conversation_id)?;
+            .run_shadow_permission_snapshot(legacy_run_id, conversation_id)?;
         let manifest_hash = runtime_shadow_hash(&format!(
             "manifest|{engine}|v{manifest_version}|{capabilities_json}"
         ));
         let permission_snapshot_id = runtime_shadow_hash(&permission_snapshot.to_string());
+        let budgets = self.database.run_time_budgets(legacy_run_id)?;
         let frozen = crate::kernel::RunFrozenConfig {
             engine_id: engine.to_owned(),
             kernel_mode: crate::kernel::KernelMode::Shadow.as_str().to_owned(),
@@ -1284,10 +1284,10 @@ impl RuntimeHost {
             permission_snapshot_id,
             execution_profile_id: execution_profile_id.to_owned(),
             prompt_config_hash: prompt_config_hash.to_owned(),
-            model_request_timeout_ms: 120_000,
-            tool_execution_timeout_ms: 600_000,
-            run_execution_budget_ms: 1_800_000,
-            approval_wait_timeout_ms: 3_600_000,
+            model_request_timeout_ms: budgets.model_request_ms,
+            tool_execution_timeout_ms: budgets.tool_execution_ms,
+            run_execution_budget_ms: budgets.run_execution_ms,
+            approval_wait_timeout_ms: budgets.approval_wait_ms,
             provider_max_retries: 2,
             turn_max_retries: 0,
         };
@@ -5695,6 +5695,68 @@ fn attach_permission_scope(request: &mut Value, scope: Option<&str>) {
     }
 }
 
+/// Keep cleanup in the caller on both binding failures and receive failures.
+/// Invalid persisted control must never silently reset the approval deadline.
+fn receive_run_approval(
+    database: &Database,
+    run_id: &str,
+    receiver: &mpsc::Receiver<bool>,
+) -> Result<bool, String> {
+    let budgets = database.run_time_budgets(run_id)?;
+    receiver.recv_timeout(Duration::from_millis(budgets.approval_wait_ms as u64))
+        .map_err(|error| match error {
+            mpsc::RecvTimeoutError::Timeout => "Approval request timed out".to_owned(),
+            mpsc::RecvTimeoutError::Disconnected => "Approval request was interrupted".to_owned(),
+        })
+}
+
+#[cfg(test)]
+mod frozen_approval_tests {
+    use super::*;
+
+    #[test]
+    fn frozen_approval_deadline_is_enforced_and_corruption_cannot_fall_back() {
+        let path = std::env::temp_dir().join(format!("fox-approval-budget-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(path.clone()).unwrap();
+        let conversation = db.create_conversation("fox-general", Some("budget test"), None, None).unwrap();
+        let seed = db.create_run(&conversation.id, "seed", None).unwrap();
+        let mut binding = db.freeze_legacy_run_control(&seed.run.id, "test-profile").unwrap();
+        let short_conversation = db.create_conversation("fox-general", Some("short budget"), None, None).unwrap();
+        let run = db.create_run(&short_conversation.id, "short budget", None).unwrap();
+        binding.run_id = run.run.id.clone();
+        binding.conversation_id = short_conversation.id;
+        binding.budgets.approval_wait_ms = 1;
+        db.freeze_run_control(&binding).unwrap();
+        drop(db);
+        let db = Database::open(path.clone()).unwrap();
+        assert_eq!(db.run_time_budgets(&run.run.id).unwrap().approval_wait_ms, 1);
+        let (sender, receiver) = mpsc::channel();
+        assert_eq!(receive_run_approval(&db, &run.run.id, &receiver).unwrap_err(), "Approval request timed out");
+        sender.send(true).unwrap();
+        assert!(receive_run_approval(&db, &run.run.id, &receiver).unwrap());
+        rusqlite::Connection::open(path).unwrap().execute(
+            "UPDATE run_control_bindings SET binding_hash='corrupt' WHERE run_id=?1", [&run.run.id],
+        ).unwrap();
+        sender.send(true).unwrap();
+        assert!(receive_run_approval(&db, &run.run.id, &receiver).unwrap_err().contains("hash mismatch"));
+        assert!(receive_run_approval(&db, "unknown-run", &receiver).is_err());
+    }
+
+    #[test]
+    fn legacy_approval_keeps_default_and_disconnection_is_not_approval() {
+        let path = std::env::temp_dir().join(format!("fox-approval-legacy-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(path).unwrap();
+        let conversation = db.create_conversation("fox-general", Some("legacy budget"), None, None).unwrap();
+        let run = db.create_run(&conversation.id, "legacy", None).unwrap();
+        assert_eq!(db.run_time_budgets(&run.run.id).unwrap().approval_wait_ms, 300_000);
+        let (sender, receiver) = mpsc::channel();
+        sender.send(false).unwrap();
+        assert!(!receive_run_approval(&db, &run.run.id, &receiver).unwrap());
+        drop(sender);
+        assert_eq!(receive_run_approval(&db, &run.run.id, &receiver).unwrap_err(), "Approval request was interrupted");
+    }
+}
+
 fn request_declarative_hook_approval(
     app: &AppHandle,
     database: &Database,
@@ -5752,7 +5814,7 @@ fn request_declarative_hook_approval(
     drop(pending);
     let approval_id = approval.id.clone();
     let _ = app.emit("fox://approval-requested", approval);
-    let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
+    let approval_result = receive_run_approval(database, run_id, &receiver);
     if let Ok(runtime_state) = state.lock() {
         if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
             pending.remove(&approval_id);
@@ -5766,14 +5828,7 @@ fn request_declarative_hook_approval(
             {
                 let _ = app.emit("fox://approval-resolved", resolved);
             }
-            return Err(match error {
-                std::sync::mpsc::RecvTimeoutError::Timeout => {
-                    "Lifecycle Hook approval request timed out".to_owned()
-                }
-                std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                    "Lifecycle Hook approval request was interrupted".to_owned()
-                }
-            });
+            return Err(error);
         }
     };
     if !approved {
@@ -5844,7 +5899,7 @@ fn request_task_repair_override_approval(
     drop(pending);
     let approval_id = approval.id.clone();
     let _ = app.emit("fox://approval-requested", approval.clone());
-    let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
+    let approval_result = receive_run_approval(database, run_id, &receiver);
     if let Ok(runtime_state) = state.lock() {
         if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
             pending.remove(&approval_id);
@@ -5858,15 +5913,7 @@ fn request_task_repair_override_approval(
             {
                 let _ = app.emit("fox://approval-resolved", resolved);
             }
-            let message = match error {
-                std::sync::mpsc::RecvTimeoutError::Timeout => {
-                    "Task repair override approval timed out"
-                }
-                std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                    "Task repair override approval was interrupted"
-                }
-            };
-            return Err(message.to_owned());
+            return Err(error);
         }
     };
     if !approved {
@@ -6215,7 +6262,7 @@ fn execute_mcp_tool_request(
                     );
                 let approval_id = approval.id.clone();
                 let _ = app.emit("fox://approval-requested", approval);
-                let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
+                let approval_result = receive_run_approval(database, run_id, &receiver);
                 if let Ok(runtime_state) = state.lock() {
                     if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
                         pending.remove(&approval_id);
@@ -6229,14 +6276,7 @@ fn execute_mcp_tool_request(
                         {
                             let _ = app.emit("fox://approval-resolved", resolved);
                         }
-                        return Err(match error {
-                            std::sync::mpsc::RecvTimeoutError::Timeout => {
-                                "MCP approval request timed out".to_owned()
-                            }
-                            std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                                "MCP approval request was interrupted".to_owned()
-                            }
-                        });
+                        return Err(error);
                     }
                 };
                 if !approved {
@@ -7533,7 +7573,7 @@ fn execute_host_tool_request(
                 );
             let approval_id = approval.id.clone();
             let _ = app.emit("fox://approval-requested", approval);
-            let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
+            let approval_result = receive_run_approval(database, run_id, &receiver);
             if let Ok(runtime_state) = state.lock() {
                 if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
                     pending.remove(&approval_id);
@@ -7547,14 +7587,7 @@ fn execute_host_tool_request(
                     {
                         let _ = app.emit("fox://approval-resolved", resolved);
                     }
-                    return Err(match error {
-                        std::sync::mpsc::RecvTimeoutError::Timeout => {
-                            "Approval request timed out".to_owned()
-                        }
-                        std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                            "Approval request was interrupted".to_owned()
-                        }
-                    });
+                    return Err(error);
                 }
             };
             if !approved {
@@ -7679,7 +7712,7 @@ fn execute_capability_tool_request(
                 );
             let approval_id = approval.id.clone();
             let _ = app.emit("fox://approval-requested", approval);
-            let approval_result = receiver.recv_timeout(APPROVAL_TIMEOUT);
+            let approval_result = receive_run_approval(database, run_id, &receiver);
             if let Ok(runtime_state) = state.lock() {
                 if let Ok(mut pending) = runtime_state.pending_approvals.lock() {
                     pending.remove(&approval_id);
@@ -7693,14 +7726,7 @@ fn execute_capability_tool_request(
                     {
                         let _ = app.emit("fox://approval-resolved", resolved);
                     }
-                    return Err(match error {
-                        std::sync::mpsc::RecvTimeoutError::Timeout => {
-                            "Approval request timed out".to_owned()
-                        }
-                        std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                            "Approval request was interrupted".to_owned()
-                        }
-                    });
+                    return Err(error);
                 }
             };
             if !approved {
