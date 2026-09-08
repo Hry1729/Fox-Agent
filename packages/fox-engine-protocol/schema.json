@@ -1,0 +1,812 @@
+{
+  "capabilityManifestVersion": 2,
+  "protocolName": "fox-runtime-jsonl",
+  "protocolVersion": 1,
+  "schemaVersion": 1,
+  "schemas": {
+    "HostResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "payload": true,
+        "protocol": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": "string"
+        },
+        "runId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtimeSessionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocol",
+        "version",
+        "kind",
+        "id",
+        "requestId",
+        "timestamp",
+        "type",
+        "payload"
+      ],
+      "title": "HostResponse",
+      "type": "object"
+    },
+    "RunControlBinding": {
+      "$defs": {
+        "ExecutionAuthority": {
+          "enum": [
+            "legacy",
+            "authoritative"
+          ],
+          "type": "string"
+        },
+        "FrozenPermission": {
+          "additionalProperties": false,
+          "properties": {
+            "grants": {
+              "items": {
+                "$ref": "#/$defs/PermissionGrant"
+              },
+              "type": "array"
+            },
+            "mode": {
+              "$ref": "#/$defs/PermissionMode"
+            },
+            "projectRoot": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "mode",
+            "grants"
+          ],
+          "type": "object"
+        },
+        "PermissionGrant": {
+          "additionalProperties": false,
+          "properties": {
+            "scope": {
+              "type": "string"
+            },
+            "tool": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tool",
+            "scope"
+          ],
+          "type": "object"
+        },
+        "PermissionMode": {
+          "enum": [
+            "ask",
+            "read_only",
+            "allow"
+          ],
+          "type": "string"
+        },
+        "ResourceExecutor": {
+          "enum": [
+            "runtime",
+            "rust"
+          ],
+          "type": "string"
+        },
+        "TimeBudgets": {
+          "additionalProperties": false,
+          "properties": {
+            "approvalWaitMs": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "modelRequestMs": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "runExecutionMs": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "toolExecutionMs": {
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "modelRequestMs",
+            "toolExecutionMs",
+            "runExecutionMs",
+            "approvalWaitMs"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/ExecutionAuthority"
+        },
+        "budgets": {
+          "$ref": "#/$defs/TimeBudgets"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "engineId": {
+          "type": "string"
+        },
+        "executionProfileId": {
+          "type": "string"
+        },
+        "permission": {
+          "$ref": "#/$defs/FrozenPermission"
+        },
+        "permissionSnapshotId": {
+          "type": "string"
+        },
+        "readOnlyExecutor": {
+          "$ref": "#/$defs/ResourceExecutor"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "runId",
+        "conversationId",
+        "engineId",
+        "executionProfileId",
+        "authority",
+        "readOnlyExecutor",
+        "permissionSnapshotId",
+        "permission",
+        "budgets"
+      ],
+      "title": "RunControlBinding",
+      "type": "object"
+    },
+    "RuntimeCapabilityManifest": {
+      "$defs": {
+        "RuntimeToolCapability": {
+          "properties": {
+            "approval": {
+              "type": "string"
+            },
+            "category": {
+              "type": "string"
+            },
+            "execution": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "category",
+            "execution",
+            "approval"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "cancellation": {
+          "type": "boolean"
+        },
+        "contextCompaction": {
+          "type": "boolean"
+        },
+        "dynamicModelSwitch": {
+          "type": "boolean"
+        },
+        "imageInput": {
+          "type": "boolean"
+        },
+        "manifestVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reasoning": {
+          "type": "boolean"
+        },
+        "sessionResume": {
+          "type": "boolean"
+        },
+        "steering": {
+          "type": "boolean"
+        },
+        "streamingText": {
+          "type": "boolean"
+        },
+        "toolApproval": {
+          "type": "boolean"
+        },
+        "tools": {
+          "items": {
+            "$ref": "#/$defs/RuntimeToolCapability"
+          },
+          "type": "array"
+        },
+        "workLoop": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "manifestVersion",
+        "streamingText",
+        "cancellation",
+        "reasoning",
+        "sessionResume",
+        "toolApproval",
+        "imageInput",
+        "steering",
+        "contextCompaction",
+        "dynamicModelSwitch",
+        "tools"
+      ],
+      "title": "RuntimeCapabilityManifest",
+      "type": "object"
+    },
+    "RuntimeEnvelope": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "payload": true,
+        "protocol": {
+          "type": "string"
+        },
+        "requestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtimeSessionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seq": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocol",
+        "version",
+        "kind",
+        "id",
+        "type",
+        "timestamp"
+      ],
+      "title": "RuntimeEnvelope",
+      "type": "object"
+    },
+    "RuntimeRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "conversationId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "payload": true,
+        "protocol": {
+          "type": "string"
+        },
+        "runId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtimeSessionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocol",
+        "version",
+        "kind",
+        "id",
+        "timestamp",
+        "type"
+      ],
+      "title": "RuntimeRequest",
+      "type": "object"
+    }
+  },
+  "toolContracts": [
+    {
+      "approval": "preflight",
+      "category": "project-read",
+      "execution": "runtime",
+      "name": "read"
+    },
+    {
+      "approval": "preflight",
+      "category": "project-read",
+      "execution": "runtime",
+      "name": "ls"
+    },
+    {
+      "approval": "preflight",
+      "category": "project-read",
+      "execution": "runtime",
+      "name": "find"
+    },
+    {
+      "approval": "preflight",
+      "category": "project-read",
+      "execution": "runtime",
+      "name": "grep"
+    },
+    {
+      "approval": "none",
+      "category": "project-read",
+      "execution": "runtime",
+      "name": "graph_readonly_run"
+    },
+    {
+      "approval": "none",
+      "category": "attachment",
+      "execution": "host",
+      "name": "read_attachment"
+    },
+    {
+      "approval": "policy",
+      "category": "project-write",
+      "execution": "host",
+      "name": "write_file"
+    },
+    {
+      "approval": "policy",
+      "category": "project-write",
+      "execution": "host",
+      "name": "edit_file"
+    },
+    {
+      "approval": "always",
+      "category": "process",
+      "execution": "host",
+      "name": "run_command"
+    },
+    {
+      "approval": "always",
+      "category": "skill",
+      "execution": "host",
+      "name": "web_search"
+    },
+    {
+      "approval": "always",
+      "category": "skill",
+      "execution": "host",
+      "name": "web_read"
+    },
+    {
+      "approval": "always",
+      "category": "skill",
+      "execution": "host",
+      "name": "http_request"
+    },
+    {
+      "approval": "always",
+      "category": "skill",
+      "execution": "host",
+      "name": "system_info"
+    },
+    {
+      "approval": "always",
+      "category": "project-read",
+      "execution": "host",
+      "name": "sqlite_read"
+    },
+    {
+      "approval": "none",
+      "category": "skill",
+      "execution": "host",
+      "name": "structured_data"
+    },
+    {
+      "approval": "none",
+      "category": "project-read",
+      "execution": "host",
+      "name": "git_read"
+    },
+    {
+      "approval": "always",
+      "category": "process",
+      "execution": "host",
+      "name": "test_run"
+    },
+    {
+      "approval": "always",
+      "category": "process",
+      "execution": "host",
+      "name": "code_check"
+    },
+    {
+      "approval": "always",
+      "category": "project-write",
+      "execution": "host",
+      "name": "format_code"
+    },
+    {
+      "approval": "none",
+      "category": "project-read",
+      "execution": "host",
+      "name": "tabular_data"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "work_snapshot_get"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "graph_readonly_activate"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "graph_readonly_snapshot_get"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "graph_readonly_node_start"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "graph_readonly_node_review"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "graph_readonly_node_finish"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "graph_readonly_node_cancel"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "graph_readonly_accept"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "workflow_snapshot_get"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "workflow_start"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "workflow_stage_start"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "workflow_stage_complete"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "workflow_stage_fail"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "workflow_cancel"
+    },
+    {
+      "approval": "none",
+      "category": "delegation",
+      "execution": "host",
+      "name": "team_snapshot_get"
+    },
+    {
+      "approval": "none",
+      "category": "delegation",
+      "execution": "host",
+      "name": "team_start"
+    },
+    {
+      "approval": "none",
+      "category": "delegation",
+      "execution": "host",
+      "name": "team_member_start"
+    },
+    {
+      "approval": "none",
+      "category": "delegation",
+      "execution": "host",
+      "name": "team_collect"
+    },
+    {
+      "approval": "none",
+      "category": "delegation",
+      "execution": "host",
+      "name": "team_cancel"
+    },
+    {
+      "approval": "none",
+      "category": "delegation",
+      "execution": "host",
+      "name": "child_agent_list"
+    },
+    {
+      "approval": "none",
+      "category": "delegation",
+      "execution": "host",
+      "name": "child_run_start"
+    },
+    {
+      "approval": "none",
+      "category": "delegation",
+      "execution": "host",
+      "name": "child_run_collect"
+    },
+    {
+      "approval": "none",
+      "category": "delegation",
+      "execution": "host",
+      "name": "child_run_cancel"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "goal_propose"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "goal_complete"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "task_create_many"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "task_update"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "task_attempt_start"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "task_repair_start"
+    },
+    {
+      "approval": "always",
+      "category": "work",
+      "execution": "host",
+      "name": "task_repair_escalate_start"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "task_attempt_finish"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "task_evidence_add"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "task_evidence_validate"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "plan_revision_create"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "review_finding_add"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "review_finding_resolve"
+    },
+    {
+      "approval": "none",
+      "category": "work",
+      "execution": "host",
+      "name": "acceptance_submit"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "memory_search"
+    },
+    {
+      "approval": "none",
+      "category": "memory",
+      "execution": "host",
+      "name": "memory_propose"
+    },
+    {
+      "approval": "none",
+      "category": "knowledge",
+      "execution": "host",
+      "name": "list_knowledge_bases"
+    },
+    {
+      "approval": "none",
+      "category": "knowledge",
+      "execution": "host",
+      "name": "search_knowledge"
+    },
+    {
+      "approval": "none",
+      "category": "knowledge",
+      "execution": "host",
+      "name": "read_knowledge_document"
+    },
+    {
+      "approval": "none",
+      "category": "knowledge",
+      "execution": "host",
+      "name": "query_knowledge_graph"
+    },
+    {
+      "approval": "none",
+      "category": "mcp",
+      "execution": "host",
+      "name": "list_mcp_tools"
+    },
+    {
+      "approval": "always",
+      "category": "mcp",
+      "execution": "host",
+      "name": "call_mcp_tool"
+    }
+  ]
+}

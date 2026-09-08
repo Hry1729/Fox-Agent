@@ -1,5 +1,5 @@
-export const PROTOCOL_NAME = 'fox-runtime-jsonl'
-export const PROTOCOL_VERSION = 1
+import { PROTOCOL_NAME, PROTOCOL_VERSION } from '../../../packages/fox-engine-protocol/index.mjs'
+export { PROTOCOL_NAME, PROTOCOL_VERSION }
 
 let messageSequence = 0
 
