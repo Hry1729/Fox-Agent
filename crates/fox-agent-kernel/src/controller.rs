@@ -1,0 +1,1816 @@
+//! Fox Agent Kernel — `RunController`, the pure decision core.
+//!
+//! The controller owns the run state machine, tool-batch barrier, approval,
+//! retry/compaction transitions, execution/approval/tool budgets and
+//! cancellation. It is synchronous and free of IO: each transition returns an
+//! ordered list of [`Effect`]s that the host adapter persists and performs. The
+//! durable facts (events, run/tool state, approvals, outbox effects) are
+//! committed in a single SQLite transaction BEFORE any external executor runs,
+//! so a crash does not lose a decision; uncertain leased effects are reconciled
+//! by idempotency key instead of being blindly executed again.
+//!
+//! Time is split into two domains (see [`crate::ports::Clock`]):
+//! in-process execution time uses a monotonic clock that is not comparable
+//! across restarts (the accumulated execution time is persisted instead), and
+//! the human-approval deadline uses wall time so an approval wait survives
+//! restart; a backwards wall jump is detected and fails closed.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::ports::{
+    Clock, CompactionState, EventStorePort, PolicyDecisionPort, RetryState, RunFrozenConfig,
+    ToolCallRequest,
+};
+use crate::state::{ApprovalDecision, KernelError, RunOutcome, RunState, ToolCallState};
+
+/// Ordered effects the host adapter must persist in the decision transaction.
+/// External variants are performed only after commit; bookkeeping variants are
+/// consumed inside that same transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {
+    /// Append a durable event (`(run_id, seq)` idempotent).
+    AppendEvent {
+        seq: u64,
+        event_type: String,
+        payload_json: String,
+    },
+    /// Ask a human to approve a tool call; the run is parked in waiting_approval.
+    /// Durable outbox key: `approval:{run}:{tool}`.
+    RequestApproval {
+        tool_call_id: String,
+        tool: String,
+        input_json: String,
+    },
+    /// Dispatch an allowed tool call to the Resource Gateway, which re-validates
+    /// the final parameters before any side effect. Durable outbox key:
+    /// `dispatch:{run}:{tool}` — stable across retry and restart.
+    DispatchTool {
+        tool_call_id: String,
+        tool: String,
+        input_json: String,
+    },
+    /// Cancel the engine turn (model stream / waiting hooks / host request).
+    CancelEngineTurn { turn_id: String },
+    /// Notify a running tool that it is cancelled.
+    CancelToolCall { tool_call_id: String },
+    /// Durable bookkeeping: resolve the approval fact in the same transaction as
+    /// the resulting tool state and dispatch intent. This is not external IO.
+    ApprovalResolved {
+        tool_call_id: String,
+        decision: ApprovalDecision,
+    },
+    /// Durable bookkeeping for a request that timed out before a human decision.
+    ApprovalExpired { tool_call_id: String },
+    /// Durable bookkeeping for a request abandoned by run cancellation.
+    ApprovalCancelled { tool_call_id: String },
+    /// Durable bookkeeping: settle the leased dispatch intent in the same
+    /// transaction as the tool result. This closes the result/outbox crash window.
+    ToolDispatchSettled { tool_call_id: String },
+    /// All calls in a batch reached a terminal state. The result array handed to
+    /// the model MUST be ordered by `ordered_tool_call_ids` (source order),
+    /// regardless of completion order.
+    BatchBarrier {
+        batch_id: String,
+        ordered_tool_call_ids: Vec<String>,
+    },
+    /// Publish a rebuilt run snapshot for React to read.
+    PublishSnapshot,
+    /// A late event arrived after the run was terminal; record for audit only.
+    /// It must never resurrect or reclassify the run.
+    Audit { message: String },
+}
+
+/// Stable outbox effect key (unique within a run).
+pub fn dispatch_effect_key(tool_call_id: &str) -> String {
+    format!("dispatch:{tool_call_id}")
+}
+/// Stable external idempotency key for a tool dispatch (unique within a run).
+pub fn dispatch_idempotency_key(tool_call_id: &str) -> String {
+    format!("tool-dispatch:{tool_call_id}")
+}
+/// Stable outbox effect key for an approval prompt.
+pub fn approval_effect_key(tool_call_id: &str) -> String {
+    format!("approval:{tool_call_id}")
+}
+
+/// Stable outbox key for delivering one fully settled batch to the next model turn.
+pub fn batch_delivery_effect_key(batch_id: &str) -> String {
+    format!("deliver-batch:{batch_id}")
+}
+
+/// Stable idempotency key for one logical batch delivery.
+pub fn batch_delivery_idempotency_key(batch_id: &str) -> String {
+    format!("tool-batch-delivery:{batch_id}")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolCall {
+    tool_call_id: String,
+    tool: String,
+    input_json: String,
+    source_order: usize,
+    batch_id: String,
+    state: ToolCallState,
+    result_json: Option<String>,
+    /// Monotonic time the tool started running in THIS process. Not comparable
+    /// across restarts; crash recovery of a running tool uses the durable outbox
+    /// lease, not this value.
+    started_at_mono_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct ToolBatch {
+    batch_id: String,
+    /// Source order of the calls in this batch.
+    ordered: Vec<String>,
+    barrier_emitted: bool,
+}
+
+/// Durable rehydration input for one tool call, loaded by the repository.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RehydratedToolCall {
+    pub tool_call_id: String,
+    pub tool: String,
+    pub input_json: String,
+    pub source_order: usize,
+    pub batch_id: String,
+    pub state: ToolCallState,
+    pub result_json: Option<String>,
+}
+
+/// Durable rehydration input for one tool batch.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RehydratedBatch {
+    pub batch_id: String,
+    pub ordered: Vec<String>,
+    pub barrier_emitted: bool,
+}
+
+/// Everything needed to reconstruct a `RunController` from durable facts. The
+/// repository fills this from a consistent read; the controller never reads IO.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RehydratedRun {
+    pub run_id: String,
+    pub turn_id: String,
+    pub config: RunFrozenConfig,
+    pub state: RunState,
+    pub seq: u64,
+    pub running_elapsed_ms: i64,
+    pub approval_deadline_wall_ms: Option<i64>,
+    pub terminal_written: bool,
+    pub batches: Vec<RehydratedBatch>,
+    pub tools: Vec<RehydratedToolCall>,
+    pub retry: RetryState,
+    pub compaction: CompactionState,
+    /// Persisted wall anchor of a model request that was in flight at the
+    /// crash boundary; preserves the timeout window across restarts.
+    pub model_request_since_wall_ms: Option<i64>,
+}
+
+/// Per-run aggregate. Constructed via [`RunController::start`] for a new run or
+/// [`RunController::rehydrate`] after a restart.
+pub struct RunController {
+    run_id: String,
+    turn_id: String,
+    config: RunFrozenConfig,
+    state: RunState,
+    seq: u64,
+    /// Accumulated running time (monotonic domain), excluding approval waits.
+    /// Persisted across restarts.
+    running_elapsed_ms: i64,
+    /// Monotonic time the run entered Running in THIS process (None across
+    /// restarts until the first tick re-anchors the fresh monotonic domain).
+    running_since_mono_ms: Option<i64>,
+    /// Persisted wall-clock approval deadline; survives restart.
+    approval_deadline_wall_ms: Option<i64>,
+    retry: RetryState,
+    compaction: CompactionState,
+    /// Whether a model request is EXPLICITLY in flight. Model-request timeout
+    /// is only armed between an explicit `begin_model_request` (turn dispatch)
+    /// and `settle_model_request` (first model output / tool batch / terminal);
+    /// it is NOT inferred from "no tool in flight", which would misfire after
+    /// tool settlement while a durable batch delivery is still pending.
+    model_request_in_flight: bool,
+    /// Monotonic anchor for the current model request (this process only).
+    model_request_since_mono_ms: Option<i64>,
+    /// Persisted wall-clock anchor for a model request that was in flight at a
+    /// crash/restart boundary; survives restart so the timeout is NOT reset to a
+    /// full fresh window on each crash. None when no request is in flight.
+    model_request_since_wall_ms: Option<i64>,
+    tools: BTreeMap<String, ToolCall>,
+    batches: Vec<ToolBatch>,
+    terminal_written: bool,
+}
+
+impl RunController {
+    /// Observation-only snapshot. No outbox or executable effects are included.
+    pub fn shadow_checkpoint(&self, monotonic_ms: i64) -> RehydratedRun {
+        RehydratedRun {
+            run_id: self.run_id.clone(),
+            turn_id: self.turn_id.clone(),
+            config: self.config.clone(),
+            state: self.state,
+            seq: self.seq,
+            running_elapsed_ms: self.running_elapsed_ms.saturating_add(
+                self.running_since_mono_ms
+                    .map(|start| monotonic_ms.saturating_sub(start).max(0))
+                    .unwrap_or(0),
+            ),
+            approval_deadline_wall_ms: self.approval_deadline_wall_ms,
+            terminal_written: self.terminal_written,
+            batches: self
+                .batches
+                .iter()
+                .map(|b| RehydratedBatch {
+                    batch_id: b.batch_id.clone(),
+                    ordered: b.ordered.clone(),
+                    barrier_emitted: b.barrier_emitted,
+                })
+                .collect(),
+            tools: self
+                .tools
+                .values()
+                .map(|t| RehydratedToolCall {
+                    tool_call_id: t.tool_call_id.clone(),
+                    tool: t.tool.clone(),
+                    input_json: t.input_json.clone(),
+                    source_order: t.source_order,
+                    batch_id: t.batch_id.clone(),
+                    state: t.state,
+                    result_json: t.result_json.clone(),
+                })
+                .collect(),
+            retry: self.retry.clone(),
+            compaction: self.compaction.clone(),
+            model_request_since_wall_ms: self.model_request_since_wall_ms,
+        }
+    }
+
+    /// Start a run. Unknown engine/mode or invalid budgets fail closed.
+    pub fn start(
+        run_id: &str,
+        turn_id: &str,
+        config: RunFrozenConfig,
+        clock: &dyn Clock,
+    ) -> Result<(RunController, Vec<Effect>), KernelError> {
+        Self::validate_config(&config)?;
+        if run_id.trim().is_empty() || turn_id.trim().is_empty() {
+            return Err(KernelError::FailClosed(
+                "run id and turn id must be non-empty".into(),
+            ));
+        }
+        let reading = clock.read();
+        let mut controller = RunController {
+            run_id: run_id.to_string(),
+            turn_id: turn_id.to_string(),
+            config,
+            state: RunState::Created,
+            seq: 0,
+            running_elapsed_ms: 0,
+            running_since_mono_ms: None,
+            approval_deadline_wall_ms: None,
+            retry: RetryState::default(),
+            compaction: CompactionState::default(),
+            model_request_in_flight: false,
+            model_request_since_mono_ms: None,
+            model_request_since_wall_ms: None,
+            tools: BTreeMap::new(),
+            batches: Vec::new(),
+            terminal_written: false,
+        };
+        controller.retry.provider_max = controller.config.provider_max_retries;
+        controller.retry.turn_max = controller.config.turn_max_retries;
+        // The run dispatches its first model request immediately.
+        controller.arm_model_request(reading.monotonic_ms, reading.wall_ms);
+        let mut effects = vec![controller.append_event(
+            "run.started",
+            serde_json::json!({
+                "engineId": controller.config.engine_id,
+                "capabilityManifestHash": controller.config.capability_manifest_hash,
+            }),
+        )];
+        controller.state = RunState::Running;
+        controller.running_since_mono_ms = Some(reading.monotonic_ms);
+        effects.push(Effect::PublishSnapshot);
+        Ok((controller, effects))
+    }
+
+    /// Reconstruct a controller from durable facts after a restart. Monotonic
+    /// execution time is restored from the persisted accumulator (monotonic
+    /// readings are NOT compared across restarts); the approval deadline is a
+    /// wall time that remains valid. Fails closed on inconsistent input.
+    pub fn rehydrate(data: RehydratedRun) -> Result<RunController, KernelError> {
+        Self::validate_config(&data.config)?;
+        if data.run_id.trim().is_empty() || data.turn_id.trim().is_empty() {
+            return Err(KernelError::FailClosed(
+                "rehydrated run id and turn id must be non-empty".into(),
+            ));
+        }
+        if data.state.is_terminal() != data.terminal_written {
+            return Err(KernelError::FailClosed(
+                "rehydrated terminal flag disagrees with run state".into(),
+            ));
+        }
+        if data.running_elapsed_ms < 0 {
+            return Err(KernelError::FailClosed(
+                "rehydrated running elapsed time must not be negative".into(),
+            ));
+        }
+        if (data.state == RunState::WaitingApproval) != data.approval_deadline_wall_ms.is_some() {
+            return Err(KernelError::FailClosed(
+                "rehydrated approval deadline disagrees with run state".into(),
+            ));
+        }
+        if data
+            .approval_deadline_wall_ms
+            .is_some_and(|deadline| deadline <= 0)
+        {
+            return Err(KernelError::FailClosed(
+                "rehydrated approval deadline must be positive".into(),
+            ));
+        }
+        if data.retry.provider_max != data.config.provider_max_retries
+            || data.retry.turn_max != data.config.turn_max_retries
+            || data.retry.provider_attempts > data.retry.provider_max
+            || data.retry.turn_attempts > data.retry.turn_max
+        {
+            return Err(KernelError::FailClosed(
+                "rehydrated retry state disagrees with frozen retry policy".into(),
+            ));
+        }
+        let retry_scheduled = data.state == RunState::RetryScheduled;
+        if retry_scheduled
+            != (data.retry.scheduled_at_wall_ms.is_some() && data.retry.due_wall_ms.is_some())
+            || data.retry.scheduled_at_wall_ms.is_some() != data.retry.due_wall_ms.is_some()
+            || matches!(
+                (data.retry.scheduled_at_wall_ms, data.retry.due_wall_ms),
+                (Some(start), Some(due)) if start <= 0 || due < start
+            )
+        {
+            return Err(KernelError::FailClosed(
+                "rehydrated retry schedule is incomplete or inconsistent".into(),
+            ));
+        }
+
+        let mut batch_ids = BTreeSet::new();
+        let mut ordered_members = BTreeSet::new();
+        for batch in &data.batches {
+            if batch.batch_id.trim().is_empty()
+                || batch.ordered.is_empty()
+                || !batch_ids.insert(batch.batch_id.clone())
+            {
+                return Err(KernelError::FailClosed(
+                    "rehydrated tool batch identity is empty or duplicated".into(),
+                ));
+            }
+            let mut local = BTreeSet::new();
+            for tool_call_id in &batch.ordered {
+                if tool_call_id.trim().is_empty()
+                    || !local.insert(tool_call_id.clone())
+                    || !ordered_members.insert(tool_call_id.clone())
+                {
+                    return Err(KernelError::FailClosed(format!(
+                        "rehydrated batch {} has duplicate/empty tool membership",
+                        batch.batch_id
+                    )));
+                }
+            }
+        }
+
+        let mut seen_tools = BTreeSet::new();
+        for tool in &data.tools {
+            if tool.tool_call_id.trim().is_empty()
+                || tool.tool.trim().is_empty()
+                || tool.batch_id.trim().is_empty()
+                || !seen_tools.insert(tool.tool_call_id.clone())
+            {
+                return Err(KernelError::FailClosed(
+                    "rehydrated tool identity is empty or duplicated".into(),
+                ));
+            }
+            if !matches!(
+                serde_json::from_str::<serde_json::Value>(&tool.input_json),
+                Ok(serde_json::Value::Object(_))
+            ) {
+                return Err(KernelError::FailClosed(format!(
+                    "rehydrated tool input is not a JSON object: {}",
+                    tool.tool_call_id
+                )));
+            }
+            if !tool.state.is_terminal() && tool.result_json.is_some()
+                || tool.state == ToolCallState::Completed && tool.result_json.is_none()
+            {
+                return Err(KernelError::FailClosed(format!(
+                    "rehydrated tool result disagrees with state: {}",
+                    tool.tool_call_id
+                )));
+            }
+        }
+        if seen_tools != ordered_members {
+            return Err(KernelError::FailClosed(
+                "rehydrated tools and batch membership disagree".into(),
+            ));
+        }
+        for batch in &data.batches {
+            let all_settled = batch.ordered.iter().enumerate().all(|(source_order, id)| {
+                data.tools.iter().any(|tool| {
+                    tool.tool_call_id == *id
+                        && tool.batch_id == batch.batch_id
+                        && tool.source_order == source_order
+                        && tool.state.is_terminal()
+                })
+            });
+            if batch.barrier_emitted && !all_settled
+                || all_settled
+                    && !batch.barrier_emitted
+                    && !data.state.is_terminal()
+                    && data.state != RunState::Cancelling
+            {
+                return Err(KernelError::FailClosed(format!(
+                    "rehydrated batch barrier disagrees with settlement: {}",
+                    batch.batch_id
+                )));
+            }
+        }
+        if data.state.is_terminal() && data.tools.iter().any(|tool| !tool.state.is_terminal()) {
+            return Err(KernelError::FailClosed(
+                "rehydrated terminal run has unresolved tool calls".into(),
+            ));
+        }
+        if data.state == RunState::WaitingApproval
+            && !data
+                .tools
+                .iter()
+                .any(|tool| tool.state == ToolCallState::WaitingApproval)
+        {
+            return Err(KernelError::FailClosed(
+                "rehydrated waiting run has no waiting approval tool".into(),
+            ));
+        }
+        let mut tools = BTreeMap::new();
+        for tool in data.tools {
+            tools.insert(
+                tool.tool_call_id.clone(),
+                ToolCall {
+                    tool_call_id: tool.tool_call_id,
+                    tool: tool.tool,
+                    input_json: tool.input_json,
+                    source_order: tool.source_order,
+                    batch_id: tool.batch_id,
+                    state: tool.state,
+                    result_json: tool.result_json,
+                    // Restarted monotonic domain: in-process tool timeout cannot
+                    // be carried over; running tools are reconciled via outbox.
+                    started_at_mono_ms: None,
+                },
+            );
+        }
+        let batches = data
+            .batches
+            .into_iter()
+            .map(|batch| ToolBatch {
+                batch_id: batch.batch_id,
+                ordered: batch.ordered,
+                barrier_emitted: batch.barrier_emitted,
+            })
+            .collect();
+        Ok(RunController {
+            run_id: data.run_id,
+            turn_id: data.turn_id,
+            config: data.config,
+            state: data.state,
+            seq: data.seq,
+            running_elapsed_ms: data.running_elapsed_ms,
+            // Re-anchor on the first tick in the fresh monotonic domain.
+            running_since_mono_ms: None,
+            approval_deadline_wall_ms: data.approval_deadline_wall_ms,
+            retry: data.retry,
+            compaction: data.compaction,
+            // After restart the model-request flag is re-anchored from the
+            // PERSISTED wall anchor ONLY for a non-terminal run: a request in
+            // flight at crash remains in flight (continuous crashes cannot grant
+            // a fresh full window), but a terminal run must never hold an anchor.
+            model_request_in_flight: data.model_request_since_wall_ms.is_some()
+                && !data.state.is_terminal(),
+            model_request_since_mono_ms: None,
+            model_request_since_wall_ms: if data.state.is_terminal() {
+                None
+            } else {
+                data.model_request_since_wall_ms
+            },
+            tools,
+            batches,
+            terminal_written: data.terminal_written,
+        })
+    }
+
+    /// Validate the frozen identity and budget contract at persistence boundaries.
+    /// Adapters use the same validation as `start` and `rehydrate`.
+    pub fn validate_config(config: &RunFrozenConfig) -> Result<(), KernelError> {
+        if crate::state::EngineId::parse(&config.engine_id).is_none() {
+            return Err(KernelError::FailClosed(format!(
+                "unknown engine id: {}",
+                config.engine_id
+            )));
+        }
+        if crate::state::KernelMode::parse(&config.kernel_mode).is_none() {
+            return Err(KernelError::FailClosed(format!(
+                "unknown kernel mode: {}",
+                config.kernel_mode
+            )));
+        }
+        if config.permission_snapshot_id.trim().is_empty() {
+            return Err(KernelError::FailClosed(
+                "missing permission snapshot".into(),
+            ));
+        }
+        if config.capability_manifest_version == 0
+            || config.capability_manifest_hash.trim().is_empty()
+            || config.execution_profile_id.trim().is_empty()
+            || config.prompt_config_hash.trim().is_empty()
+        {
+            return Err(KernelError::FailClosed(
+                "missing frozen capability manifest hash, execution profile, or prompt identity"
+                    .into(),
+            ));
+        }
+        if config.provider_max_retries > 5 || config.turn_max_retries > 5 {
+            return Err(KernelError::FailClosed(
+                "retry budgets exceed the supported bound".into(),
+            ));
+        }
+        if config.model_request_timeout_ms <= 0
+            || config.tool_execution_timeout_ms <= 0
+            || config.run_execution_budget_ms <= 0
+            || config.approval_wait_timeout_ms <= 0
+        {
+            return Err(KernelError::FailClosed(
+                "time budgets must be positive".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn state(&self) -> RunState {
+        self.state
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        self.state.is_terminal()
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn turn_id(&self) -> &str {
+        &self.turn_id
+    }
+
+    pub fn config(&self) -> &RunFrozenConfig {
+        &self.config
+    }
+
+    /// (provider_attempts, provider_max, turn_attempts, turn_max) retry counters.
+    pub fn retry_counters(&self) -> (u32, u32, u32, u32) {
+        (
+            self.retry.provider_attempts,
+            self.retry.provider_max,
+            self.retry.turn_attempts,
+            self.retry.turn_max,
+        )
+    }
+
+    pub fn terminal_written(&self) -> bool {
+        self.terminal_written
+    }
+
+    pub fn last_event_seq(&self) -> u64 {
+        self.seq
+    }
+
+    pub fn running_elapsed_ms(&self) -> i64 {
+        self.running_elapsed_ms
+    }
+
+    pub fn approval_deadline_wall_ms(&self) -> Option<i64> {
+        self.approval_deadline_wall_ms
+    }
+
+    fn next_seq(&mut self) -> u64 {
+        self.seq += 1;
+        self.seq
+    }
+
+    fn append_event(&mut self, event_type: &str, payload: serde_json::Value) -> Effect {
+        let seq = self.next_seq();
+        Effect::AppendEvent {
+            seq,
+            event_type: event_type.to_string(),
+            payload_json: payload.to_string(),
+        }
+    }
+
+    /// The engine proposed a batch of tool calls.
+    pub fn propose_tool_batch(
+        &mut self,
+        batch_id: &str,
+        calls: Vec<ToolCallRequest>,
+        policy: &dyn PolicyDecisionPort,
+        now_monotonic_ms: i64,
+        now_wall_ms: i64,
+    ) -> Result<Vec<Effect>, KernelError> {
+        self.ensure_live()?;
+        if self.state != RunState::Running {
+            return Err(KernelError::IllegalTransition {
+                from: self.state.as_str(),
+                to: "tool_batch_proposed",
+            });
+        }
+        if batch_id.trim().is_empty() {
+            return Err(KernelError::FailClosed("empty tool batch id".into()));
+        }
+        if calls.is_empty() {
+            return Err(KernelError::FailClosed("empty tool batch".into()));
+        }
+        let mut call_ids = BTreeSet::new();
+        let mut source_orders = BTreeSet::new();
+        for call in &calls {
+            if call.tool_call_id.trim().is_empty() || call.tool.trim().is_empty() {
+                return Err(KernelError::FailClosed(
+                    "tool call id and tool name must be non-empty".into(),
+                ));
+            }
+            if !call_ids.insert(call.tool_call_id.as_str()) {
+                return Err(KernelError::FailClosed(format!(
+                    "duplicate tool call id in batch: {}",
+                    call.tool_call_id
+                )));
+            }
+            if !source_orders.insert(call.source_order) {
+                return Err(KernelError::FailClosed(format!(
+                    "duplicate source order in batch: {}",
+                    call.source_order
+                )));
+            }
+            match serde_json::from_str::<serde_json::Value>(&call.canonical_input_json) {
+                Ok(serde_json::Value::Object(_)) => {}
+                _ => {
+                    return Err(KernelError::FailClosed(format!(
+                        "tool input is not a canonical JSON object: {}",
+                        call.tool_call_id
+                    )))
+                }
+            }
+        }
+        if source_orders.iter().copied().ne(0..calls.len()) {
+            return Err(KernelError::FailClosed(
+                "tool source orders must be contiguous from zero".into(),
+            ));
+        }
+
+        let mut requested_order = calls.iter().collect::<Vec<_>>();
+        requested_order.sort_by_key(|call| call.source_order);
+        let requested_order = requested_order
+            .into_iter()
+            .map(|call| call.tool_call_id.clone())
+            .collect::<Vec<_>>();
+        if let Some(existing) = self.batches.iter().find(|batch| batch.batch_id == batch_id) {
+            let same_identity = existing.ordered == requested_order
+                && calls.iter().all(|call| {
+                    self.tools.get(&call.tool_call_id).is_some_and(|tool| {
+                        tool.batch_id == batch_id
+                            && tool.tool == call.tool
+                            && tool.input_json == call.canonical_input_json
+                            && tool.source_order == call.source_order
+                    })
+                });
+            if same_identity {
+                return Ok(vec![Effect::Audit {
+                    message: format!("duplicate tool batch {batch_id} replay ignored"),
+                }]);
+            }
+            return Err(KernelError::FailClosed(format!(
+                "tool batch identity conflict: {batch_id}"
+            )));
+        }
+        if let Some(conflict) = calls
+            .iter()
+            .find(|call| self.tools.contains_key(&call.tool_call_id))
+        {
+            return Err(KernelError::FailClosed(format!(
+                "tool call id already belongs to another batch: {}",
+                conflict.tool_call_id
+            )));
+        }
+        let mut effects = Vec::new();
+        // State events are emitted first; external actions follow so the adapter
+        // can persist the whole decision before showing an approval or dispatching.
+        let mut action_effects = Vec::new();
+        for call in &calls {
+            self.tools.insert(
+                call.tool_call_id.clone(),
+                ToolCall {
+                    tool_call_id: call.tool_call_id.clone(),
+                    tool: call.tool.clone(),
+                    input_json: call.canonical_input_json.clone(),
+                    source_order: call.source_order,
+                    batch_id: batch_id.to_string(),
+                    state: ToolCallState::Pending,
+                    result_json: None,
+                    started_at_mono_ms: None,
+                },
+            );
+        }
+        self.batches.push(ToolBatch {
+            batch_id: batch_id.to_string(),
+            ordered: requested_order,
+            barrier_emitted: false,
+        });
+
+        let mut any_waiting = false;
+        for call in calls {
+            if self.tools[&call.tool_call_id].state != ToolCallState::Pending {
+                continue;
+            }
+            let decision = policy.decide(
+                &self.run_id,
+                &self.config.permission_snapshot_id,
+                &call.tool,
+                &call.canonical_input_json,
+            );
+            match decision {
+                crate::ports::PolicyDecision::Allow => {
+                    {
+                        let tool = self.tools.get_mut(&call.tool_call_id).unwrap();
+                        tool.state = ToolCallState::Running;
+                        tool.started_at_mono_ms = Some(now_monotonic_ms);
+                    }
+                    action_effects.push(Effect::DispatchTool {
+                        tool_call_id: call.tool_call_id.clone(),
+                        tool: call.tool.clone(),
+                        input_json: call.canonical_input_json.clone(),
+                    });
+                }
+                crate::ports::PolicyDecision::RequireApproval => {
+                    any_waiting = true;
+                    self.tools.get_mut(&call.tool_call_id).unwrap().state =
+                        ToolCallState::WaitingApproval;
+                    action_effects.push(Effect::RequestApproval {
+                        tool_call_id: call.tool_call_id.clone(),
+                        tool: call.tool.clone(),
+                        input_json: call.canonical_input_json.clone(),
+                    });
+                }
+                crate::ports::PolicyDecision::Deny { reason } => {
+                    self.tools.get_mut(&call.tool_call_id).unwrap().state = ToolCallState::Failed;
+                    effects.push(self.append_event(
+                        "tool.failed",
+                        serde_json::json!({
+                            "toolCallId": call.tool_call_id,
+                            "tool": call.tool,
+                            "code": "kernel.policy_denied",
+                            "message": reason,
+                        }),
+                    ));
+                }
+            }
+        }
+
+        if any_waiting && self.state == RunState::Running {
+            // Suspend the execution budget while awaiting a human; approval uses
+            // its own wall clock, never the ordinary host-request timeout. The
+            // deadline is a persistent wall time so the wait survives restart.
+            self.suspend_running_clock(now_monotonic_ms);
+            self.approval_deadline_wall_ms =
+                Some(now_wall_ms.saturating_add(self.config.approval_wait_timeout_ms));
+            self.state = RunState::WaitingApproval;
+            effects.push(self.append_event(
+                "run.waiting_approval",
+                serde_json::json!({
+                    "approvalWaitTimeoutMs": self.config.approval_wait_timeout_ms,
+                    "approvalDeadlineWallMs": self.approval_deadline_wall_ms,
+                }),
+            ));
+        }
+        effects.extend(action_effects);
+        effects.extend(self.maybe_barrier_effects());
+        // The model responded by proposing this batch; the model-request wait
+        // is settled. It re-arms on the next turn dispatch (batch delivery to
+        // the following model request).
+        self.settle_model_request();
+        effects.push(Effect::PublishSnapshot);
+        Ok(effects)
+    }
+
+    /// A human resolved an approval. Only valid while the tool is waiting and the
+    /// run is non-terminal; an approval after cancel/terminal fails closed.
+    pub fn resolve_approval(
+        &mut self,
+        tool_call_id: &str,
+        decision: ApprovalDecision,
+        now_monotonic_ms: i64,
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state.is_terminal() || self.state == RunState::Cancelling {
+            return Err(KernelError::Terminal {
+                current: self.state.as_str(),
+            });
+        }
+        let (tool_name, input_json) = {
+            let tool = self
+                .tools
+                .get(tool_call_id)
+                .ok_or_else(|| KernelError::UnknownToolCall(tool_call_id.to_string()))?;
+            if tool.state != ToolCallState::WaitingApproval {
+                return Err(KernelError::NotWaitingApproval(tool_call_id.to_string()));
+            }
+            (tool.tool.clone(), tool.input_json.clone())
+        };
+        let mut effects = vec![Effect::ApprovalResolved {
+            tool_call_id: tool_call_id.to_string(),
+            decision,
+        }];
+        match decision {
+            ApprovalDecision::Deny => {
+                self.tools.get_mut(tool_call_id).unwrap().state = ToolCallState::Failed;
+                effects.push(self.append_event(
+                    "tool.failed",
+                    serde_json::json!({
+                        "toolCallId": tool_call_id,
+                        "tool": tool_name,
+                        "code": "approval.denied",
+                        "message": "The user denied this action.",
+                    }),
+                ));
+            }
+            ApprovalDecision::AllowOnce | ApprovalDecision::AllowConversation => {
+                {
+                    let tool = self.tools.get_mut(tool_call_id).unwrap();
+                    tool.state = ToolCallState::Running;
+                    tool.started_at_mono_ms = Some(now_monotonic_ms);
+                }
+                effects.push(Effect::DispatchTool {
+                    tool_call_id: tool_call_id.to_string(),
+                    tool: tool_name,
+                    input_json,
+                });
+            }
+        }
+        // Resume the run (and its execution budget clock) once nothing is still
+        // waiting for approval. Wall deadline is cleared.
+        if !self
+            .tools
+            .values()
+            .any(|t| t.state == ToolCallState::WaitingApproval)
+            && self.state == RunState::WaitingApproval
+        {
+            self.state = RunState::Running;
+            self.running_since_mono_ms = Some(now_monotonic_ms);
+            self.approval_deadline_wall_ms = None;
+        }
+        effects.extend(self.maybe_barrier_effects());
+        effects.push(Effect::PublishSnapshot);
+        Ok(effects)
+    }
+
+    /// A tool reached a terminal result. Idempotent on tool call id. A late
+    /// success after the run was cancelled is audited, never resurrects the run.
+    pub fn tool_settled(
+        &mut self,
+        tool_call_id: &str,
+        ok: bool,
+        result_json: &str,
+    ) -> Result<Vec<Effect>, KernelError> {
+        let prior_state = match self.tools.get(tool_call_id) {
+            Some(tool) => tool.state,
+            None => {
+                if self.state.is_terminal() || self.state == RunState::Cancelling {
+                    return Ok(vec![Effect::Audit {
+                        message: format!(
+                            "late result for unknown tool {tool_call_id} after terminal"
+                        ),
+                    }]);
+                }
+                return Err(KernelError::UnknownToolCall(tool_call_id.to_string()));
+            }
+        };
+        if prior_state.is_terminal() {
+            return Ok(vec![Effect::Audit {
+                message: format!("duplicate settlement for tool {tool_call_id} ignored"),
+            }]);
+        }
+        let late_after_cancel = self.state == RunState::Cancelling || self.state.is_terminal();
+        if !late_after_cancel && prior_state != ToolCallState::Running {
+            return Err(KernelError::FailClosed(format!(
+                "tool result received before dispatch/approval: {tool_call_id} ({})",
+                prior_state.as_str()
+            )));
+        }
+        let new_state = if late_after_cancel {
+            ToolCallState::Cancelled
+        } else if ok {
+            ToolCallState::Completed
+        } else {
+            ToolCallState::Failed
+        };
+        if let Some(tool) = self.tools.get_mut(tool_call_id) {
+            tool.state = new_state;
+            tool.result_json = Some(result_json.to_string());
+            tool.started_at_mono_ms = None;
+        }
+        let event = if late_after_cancel {
+            self.append_event(
+                "tool.audit_late",
+                serde_json::json!({
+                    "toolCallId": tool_call_id,
+                    "lateAfterCancellation": true,
+                    "ok": ok,
+                }),
+            )
+        } else if ok {
+            self.append_event(
+                "tool.completed",
+                serde_json::json!({ "toolCallId": tool_call_id, "result": serde_json::from_str::<serde_json::Value>(result_json).unwrap_or(serde_json::json!({})) }),
+            )
+        } else {
+            self.append_event(
+                "tool.failed",
+                serde_json::json!({ "toolCallId": tool_call_id, "error": result_json }),
+            )
+        };
+        let mut effects = vec![event];
+        if prior_state == ToolCallState::Running {
+            effects.push(Effect::ToolDispatchSettled {
+                tool_call_id: tool_call_id.to_string(),
+            });
+        }
+        if late_after_cancel {
+            effects.push(Effect::Audit {
+                message: format!(
+                    "result for {tool_call_id} arrived during cancellation; audited, not applied"
+                ),
+            });
+            return Ok(effects);
+        }
+        effects.extend(self.maybe_barrier_effects());
+        effects.push(Effect::PublishSnapshot);
+        Ok(effects)
+    }
+
+    /// User/host requests cancellation. Run-scoped only.
+    pub fn request_cancel(&mut self) -> Vec<Effect> {
+        if self.terminal_written || self.state.is_terminal() {
+            return vec![Effect::Audit {
+                message: "cancel ignored; run already terminal".into(),
+            }];
+        }
+        if self.state == RunState::Cancelling {
+            return vec![Effect::Audit {
+                message: "cancel ignored; already cancelling".into(),
+            }];
+        }
+        self.retry.scheduled_at_wall_ms = None;
+        self.retry.due_wall_ms = None;
+        self.approval_deadline_wall_ms = None;
+        self.state = RunState::Cancelling;
+        let mut effects = vec![self.append_event("run.cancelling", serde_json::json!({}))];
+        effects.push(Effect::CancelEngineTurn {
+            turn_id: self.turn_id.clone(),
+        });
+        for tool in self.tools.values() {
+            match tool.state {
+                ToolCallState::Running => effects.push(Effect::CancelToolCall {
+                    tool_call_id: tool.tool_call_id.clone(),
+                }),
+                ToolCallState::WaitingApproval => {
+                    effects.push(Effect::ApprovalCancelled {
+                        tool_call_id: tool.tool_call_id.clone(),
+                    });
+                    effects.push(Effect::Audit {
+                        message: format!(
+                            "approval for {} abandoned by cancellation",
+                            tool.tool_call_id
+                        ),
+                    });
+                }
+                _ => {}
+            }
+        }
+        effects.push(Effect::PublishSnapshot);
+        effects
+    }
+
+    pub fn settle_cancellation(&mut self) -> Vec<Effect> {
+        if self.terminal_written {
+            return vec![Effect::Audit {
+                message: "cancellation terminal already written".into(),
+            }];
+        }
+        if self.state != RunState::Cancelling {
+            return vec![Effect::Audit {
+                message: format!(
+                    "cancellation settlement ignored while run is {}",
+                    self.state.as_str()
+                ),
+            }];
+        }
+        let mut cancelled_tool_ids = Vec::new();
+        for tool in self.tools.values_mut() {
+            if !tool.state.is_terminal() {
+                tool.state = ToolCallState::Cancelled;
+                cancelled_tool_ids.push(tool.tool_call_id.clone());
+            }
+        }
+        // Invariant: a cancelled (terminal) run drops any in-flight model
+        // request anchor.
+        self.settle_model_request();
+        self.terminal_written = true;
+        self.state = RunState::Cancelled;
+        let mut effects = cancelled_tool_ids
+            .into_iter()
+            .map(|tool_call_id| {
+                self.append_event(
+                    "tool.cancelled",
+                    serde_json::json!({ "toolCallId": tool_call_id }),
+                )
+            })
+            .collect::<Vec<_>>();
+        effects.push(self.append_event("run.cancelled", serde_json::json!({})));
+        effects.push(Effect::PublishSnapshot);
+        effects
+    }
+
+    pub fn terminate(&mut self, outcome: RunOutcome) -> Vec<Effect> {
+        if self.terminal_written || self.state.is_terminal() {
+            return vec![Effect::Audit {
+                message: format!(
+                    "terminal {} ignored; run already {}",
+                    outcome.event_type(),
+                    self.state.as_str()
+                ),
+            }];
+        }
+        if self.state == RunState::Cancelling && !matches!(outcome, RunOutcome::Cancelled) {
+            return vec![Effect::Audit {
+                message: format!(
+                    "terminal {} ignored while cancellation is authoritative",
+                    outcome.event_type()
+                ),
+            }];
+        }
+        if matches!(outcome, RunOutcome::Cancelled) && self.state != RunState::Cancelling {
+            return vec![Effect::Audit {
+                message: format!(
+                    "run.cancelled ignored without a cancelling transition (current {})",
+                    self.state.as_str()
+                ),
+            }];
+        }
+        if matches!(outcome, RunOutcome::Cancelled) {
+            return self.settle_cancellation();
+        }
+        if matches!(outcome, RunOutcome::Completed)
+            && self.tools.values().any(|tool| !tool.state.is_terminal())
+        {
+            return vec![Effect::Audit {
+                message: "run.completed ignored while tool calls are unresolved".into(),
+            }];
+        }
+        let unresolved = self
+            .tools
+            .values()
+            .filter(|tool| !tool.state.is_terminal())
+            .map(|tool| (tool.tool_call_id.clone(), tool.state))
+            .collect::<Vec<_>>();
+        for (tool_call_id, _) in &unresolved {
+            if let Some(tool) = self.tools.get_mut(tool_call_id) {
+                tool.state = ToolCallState::Cancelled;
+            }
+        }
+        self.retry.scheduled_at_wall_ms = None;
+        self.retry.due_wall_ms = None;
+        self.approval_deadline_wall_ms = None;
+        // Invariant: a terminal run must not hold an in-flight model-request
+        // anchor (it would be meaningless after termination and must not be
+        // re-armed by a restart).
+        self.settle_model_request();
+        self.terminal_written = true;
+        self.state = outcome.state();
+        let payload = match &outcome {
+            RunOutcome::Completed | RunOutcome::Cancelled => serde_json::json!({}),
+            RunOutcome::Failed { code, message }
+            | RunOutcome::BudgetExhausted { code, message } => {
+                serde_json::json!({ "code": code, "message": message })
+            }
+        };
+        let mut effects = Vec::new();
+        for (tool_call_id, prior_state) in unresolved {
+            effects.push(self.append_event(
+                "tool.cancelled",
+                serde_json::json!({
+                    "toolCallId": tool_call_id,
+                    "reason": outcome.event_type(),
+                }),
+            ));
+            if prior_state == ToolCallState::Running {
+                effects.push(Effect::CancelToolCall { tool_call_id });
+            }
+        }
+        effects.push(self.append_event(outcome.event_type(), payload));
+        effects.push(Effect::PublishSnapshot);
+        effects
+    }
+
+    /// Whole-turn retry: schedule another agent turn after a terminal turn
+    /// failure. Distinct from provider HTTP retry. Enters `retry_scheduled`;
+    /// exhausts to a failed terminal when the turn budget is spent.
+    pub fn schedule_turn_retry(
+        &mut self,
+        now_monotonic_ms: i64,
+        now_wall_ms: i64,
+        reason_code: &str,
+        delay_ms: i64,
+    ) -> Result<Vec<Effect>, KernelError> {
+        self.ensure_live()?;
+        if self.state != RunState::Running {
+            return Err(KernelError::IllegalTransition {
+                from: self.state.as_str(),
+                to: "retry_scheduled",
+            });
+        }
+        self.retry.turn_attempts = self.retry.turn_attempts.saturating_add(1);
+        if self.retry.turn_attempts > self.retry.turn_max {
+            // Retry budget exhausted: terminal failure, not an infinite loop.
+            return Ok(self.terminate(RunOutcome::Failed {
+                code: "runtime.turn_retry_exhausted".into(),
+                message: format!("Turn retry budget ({}) exhausted.", self.retry.turn_max),
+            }));
+        }
+        self.suspend_running_clock(now_monotonic_ms);
+        self.state = RunState::RetryScheduled;
+        self.retry.scheduled_at_wall_ms = Some(now_wall_ms);
+        self.retry.due_wall_ms = Some(now_wall_ms.saturating_add(delay_ms.max(0)));
+        let mut effects = vec![self.append_event(
+            "run.retrying",
+            serde_json::json!({
+                "attempt": self.retry.turn_attempts,
+                "maxAttempts": self.retry.turn_max,
+                "delayMs": delay_ms.max(0),
+                "scheduledAtWallMs": self.retry.scheduled_at_wall_ms,
+                "dueWallMs": self.retry.due_wall_ms,
+                "reasonCode": reason_code,
+            }),
+        )];
+        effects.push(Effect::PublishSnapshot);
+        Ok(effects)
+    }
+
+    /// Resume after a scheduled turn retry.
+    pub fn retry_resume(
+        &mut self,
+        now_monotonic_ms: i64,
+        now_wall_ms: i64,
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::RetryScheduled {
+            return Err(KernelError::IllegalTransition {
+                from: self.state.as_str(),
+                to: "running",
+            });
+        }
+        let scheduled_at = self.retry.scheduled_at_wall_ms.ok_or_else(|| {
+            KernelError::FailClosed("retry_scheduled is missing its durable wall anchor".into())
+        })?;
+        let due = self.retry.due_wall_ms.ok_or_else(|| {
+            KernelError::FailClosed("retry_scheduled is missing its durable due time".into())
+        })?;
+        if now_wall_ms < scheduled_at {
+            return Err(KernelError::FailClosed(
+                "wall clock moved backwards during a scheduled retry".into(),
+            ));
+        }
+        if now_wall_ms < due {
+            return Err(KernelError::FailClosed(format!(
+                "scheduled retry is not due until {due}"
+            )));
+        }
+        self.state = RunState::Running;
+        self.retry.scheduled_at_wall_ms = None;
+        self.retry.due_wall_ms = None;
+        self.running_since_mono_ms = Some(now_monotonic_ms);
+        // The retried turn dispatches a fresh model request.
+        self.arm_model_request(now_monotonic_ms, now_wall_ms);
+        let mut effects = vec![self.append_event(
+            "run.retry.completed",
+            serde_json::json!({ "success": true, "attempt": self.retry.turn_attempts }),
+        )];
+        effects.push(Effect::PublishSnapshot);
+        Ok(effects)
+    }
+
+    /// Record a provider HTTP retry (observational; bounded independently of turn
+    /// retry). Fails closed once the provider budget is spent.
+    pub fn record_provider_retry(&mut self) -> Result<Vec<Effect>, KernelError> {
+        self.retry.provider_attempts = self.retry.provider_attempts.saturating_add(1);
+        if self.retry.provider_attempts > self.retry.provider_max {
+            return Err(KernelError::FailClosed(format!(
+                "provider retry budget ({}) exhausted",
+                self.retry.provider_max
+            )));
+        }
+        Ok(vec![self.append_event(
+            "run.provider_retry",
+            serde_json::json!({ "attempt": self.retry.provider_attempts }),
+        )])
+    }
+
+    /// Begin context compaction. Distinct state from retry.
+    pub fn begin_compaction(
+        &mut self,
+        now_monotonic_ms: i64,
+        reason: &str,
+    ) -> Result<Vec<Effect>, KernelError> {
+        self.ensure_live()?;
+        if self.state != RunState::Running {
+            return Err(KernelError::IllegalTransition {
+                from: self.state.as_str(),
+                to: "compacting",
+            });
+        }
+        self.suspend_running_clock(now_monotonic_ms);
+        self.state = RunState::Compacting;
+        let mut effects = vec![self.append_event(
+            "context.compaction.started",
+            serde_json::json!({ "reason": reason }),
+        )];
+        effects.push(Effect::PublishSnapshot);
+        Ok(effects)
+    }
+
+    /// End context compaction. `aborted` returns the run to Running for a retry
+    /// path; a completed compaction resumes Running directly.
+    pub fn end_compaction(
+        &mut self,
+        now_monotonic_ms: i64,
+        aborted: bool,
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Compacting {
+            return Err(KernelError::IllegalTransition {
+                from: self.state.as_str(),
+                to: "running",
+            });
+        }
+        self.compaction.compactions = self.compaction.compactions.saturating_add(1);
+        self.compaction.last_reason = None;
+        self.state = RunState::Running;
+        self.running_since_mono_ms = Some(now_monotonic_ms);
+        // Post-compaction the run dispatches a fresh model request. The adapter
+        // passes paired monotonic/wall readings; here the same value anchors
+        // both (deterministic in tests).
+        self.arm_model_request(now_monotonic_ms, now_monotonic_ms);
+        let mut effects = vec![self.append_event(
+            "context.compaction.completed",
+            serde_json::json!({ "aborted": aborted, "willRetry": aborted }),
+        )];
+        effects.push(Effect::PublishSnapshot);
+        Ok(effects)
+    }
+
+    /// Periodic budget/timeout check. `monotonic_ms` drives in-process execution
+    /// and tool timeouts; `wall_ms` drives the persistent approval deadline.
+    pub fn tick(&mut self, monotonic_ms: i64, wall_ms: i64) -> Vec<Effect> {
+        if matches!(self.state, RunState::Running | RunState::WaitingApproval) {
+            // A recovered process has a fresh monotonic-clock domain. Anchor
+            // every in-flight tool on its first tick so its timeout resumes
+            // instead of remaining disabled forever after rehydration.
+            for tool in self.tools.values_mut() {
+                if tool.state == ToolCallState::Running && tool.started_at_mono_ms.is_none() {
+                    tool.started_at_mono_ms = Some(monotonic_ms);
+                }
+            }
+            let mut tool_timeout_effects = self.expire_running_tools(monotonic_ms);
+            if !tool_timeout_effects.is_empty() {
+                tool_timeout_effects.extend(self.maybe_barrier_effects());
+                tool_timeout_effects.push(Effect::PublishSnapshot);
+                return tool_timeout_effects;
+            }
+        }
+
+        if self.state == RunState::RetryScheduled {
+            let Some(scheduled_at) = self.retry.scheduled_at_wall_ms else {
+                return self.terminate(RunOutcome::Failed {
+                    code: "retry.schedule_missing".into(),
+                    message: "Scheduled retry is missing its durable wall-clock anchor.".into(),
+                });
+            };
+            let Some(due) = self.retry.due_wall_ms else {
+                return self.terminate(RunOutcome::Failed {
+                    code: "retry.schedule_missing".into(),
+                    message: "Scheduled retry is missing its durable due time.".into(),
+                });
+            };
+            if wall_ms < scheduled_at {
+                return self.terminate(RunOutcome::Failed {
+                    code: "retry.clock_rollback".into(),
+                    message: "Wall clock moved backwards during a scheduled retry.".into(),
+                });
+            }
+            if wall_ms >= due {
+                return self
+                    .retry_resume(monotonic_ms, wall_ms)
+                    .unwrap_or_else(|error| {
+                        self.terminate(RunOutcome::Failed {
+                            code: "retry.resume_failed".into(),
+                            message: error.to_string(),
+                        })
+                    });
+            }
+            return Vec::new();
+        }
+
+        if self.state == RunState::WaitingApproval {
+            let Some(deadline) = self.approval_deadline_wall_ms else {
+                return vec![Effect::Audit {
+                    message: "waiting_approval has no persisted approval deadline".into(),
+                }];
+            };
+            // Fail closed on a backwards wall clock rather than waiting forever.
+            if wall_ms < deadline.saturating_sub(self.config.approval_wait_timeout_ms) {
+                return self.terminate(RunOutcome::Failed {
+                    code: "approval.clock_rollback".into(),
+                    message: "Wall clock moved backwards during an approval wait.".into(),
+                });
+            }
+            if wall_ms < deadline {
+                return Vec::new();
+            }
+            let waiting_ids = self
+                .tools
+                .values()
+                .filter(|tool| tool.state == ToolCallState::WaitingApproval)
+                .map(|tool| tool.tool_call_id.clone())
+                .collect::<Vec<_>>();
+            let running_ids = self
+                .tools
+                .values()
+                .filter(|tool| tool.state == ToolCallState::Running)
+                .map(|tool| tool.tool_call_id.clone())
+                .collect::<Vec<_>>();
+            for id in &waiting_ids {
+                if let Some(tool) = self.tools.get_mut(id) {
+                    tool.state = ToolCallState::Failed;
+                }
+            }
+            for id in &running_ids {
+                if let Some(tool) = self.tools.get_mut(id) {
+                    tool.state = ToolCallState::Cancelled;
+                }
+            }
+            self.approval_deadline_wall_ms = None;
+            let mut effects = Vec::new();
+            for tool_call_id in waiting_ids {
+                effects.push(Effect::ApprovalExpired {
+                    tool_call_id: tool_call_id.clone(),
+                });
+                effects.push(self.append_event(
+                    "tool.failed",
+                    serde_json::json!({
+                        "toolCallId": tool_call_id,
+                        "code": "approval.wait_timeout",
+                        "message": "The approval request expired before the user decided."
+                    }),
+                ));
+            }
+            for tool_call_id in running_ids {
+                effects.push(Effect::CancelToolCall {
+                    tool_call_id: tool_call_id.clone(),
+                });
+                effects.push(self.append_event(
+                    "tool.cancelled",
+                    serde_json::json!({
+                        "toolCallId": tool_call_id,
+                        "reason": "approval_wait_timeout"
+                    }),
+                ));
+            }
+            effects.extend(self.terminate(RunOutcome::Failed {
+                code: "approval.wait_timeout".into(),
+                message: format!(
+                    "Approval was not resolved within {}ms.",
+                    self.config.approval_wait_timeout_ms
+                ),
+            }));
+            return effects;
+        }
+
+        if self.state == RunState::Running {
+            if let Some(since) = self.running_since_mono_ms.take() {
+                self.running_elapsed_ms += (monotonic_ms - since).max(0);
+                self.running_since_mono_ms = Some(monotonic_ms);
+            } else {
+                // Rehydrate cannot compare the previous process's monotonic
+                // value. The first tick establishes the new local anchor for the
+                // RUNNING budget; the model-request timeout deliberately keeps
+                // its monotonic anchor None after rehydrate so it measures
+                // against the PERSISTED WALL anchor (a crash must not grant a
+                // fresh full model-request window).
+                self.running_since_mono_ms = Some(monotonic_ms);
+            }
+            if self.running_elapsed_ms >= self.config.run_execution_budget_ms {
+                return self.terminate(RunOutcome::BudgetExhausted {
+                    code: "runtime.duration_budget_exceeded".into(),
+                    message: format!(
+                        "Run exceeded its {}ms execution budget.",
+                        self.config.run_execution_budget_ms
+                    ),
+                });
+            }
+            // Model-request timeout is armed ONLY by an explicit
+            // begin_model_request (turn dispatch) and disarmed on
+            // settle_model_request (first output / tool batch / terminal). It is
+            // NOT inferred from "no tool in flight", which would misfire after a
+            // tool settles while a durable batch delivery is still pending. It
+            // never arms during an approval wait (separate wall deadline). The
+            // timeout uses the persisted WALL anchor so a crash cannot reset it
+            // to a fresh full window; within one process the monotonic anchor
+            // measures the elapsed time.
+            if self.model_request_in_flight {
+                let elapsed = match self.model_request_since_mono_ms {
+                    // Same-process request: measure elapsed monotonic time.
+                    Some(since) => monotonic_ms.saturating_sub(since),
+                    // Rehydrated after a crash: monotonic anchor is gone; fall
+                    // back to the persisted wall anchor elapsed time so the
+                    // pre-crash wait still counts against the timeout.
+                    None => self
+                        .model_request_since_wall_ms
+                        .map(|since| wall_ms.saturating_sub(since))
+                        .unwrap_or(0),
+                };
+                if elapsed >= self.config.model_request_timeout_ms {
+                    self.settle_model_request();
+                    return self.terminate(RunOutcome::Failed {
+                        code: "model.request_timeout".into(),
+                        message: format!(
+                            "Model request exceeded its {}ms timeout.",
+                            self.config.model_request_timeout_ms
+                        ),
+                    });
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    fn expire_running_tools(&mut self, monotonic_ms: i64) -> Vec<Effect> {
+        let timed_out = self
+            .tools
+            .values()
+            .filter(|tool| {
+                tool.state == ToolCallState::Running
+                    && tool.started_at_mono_ms.is_some_and(|started| {
+                        monotonic_ms.saturating_sub(started)
+                            >= self.config.tool_execution_timeout_ms
+                    })
+            })
+            .map(|tool| tool.tool_call_id.clone())
+            .collect::<Vec<_>>();
+        let mut effects = Vec::new();
+        for id in timed_out {
+            if let Some(tool) = self.tools.get_mut(&id) {
+                tool.state = ToolCallState::Failed;
+                tool.started_at_mono_ms = None;
+            }
+            effects.push(Effect::CancelToolCall {
+                tool_call_id: id.clone(),
+            });
+            effects.push(Effect::ToolDispatchSettled {
+                tool_call_id: id.clone(),
+            });
+            effects.push(self.append_event(
+                "tool.failed",
+                serde_json::json!({
+                    "toolCallId": id,
+                    "code": "tool.execution_timeout",
+                    "message": format!("Tool exceeded its {}ms execution timeout.", self.config.tool_execution_timeout_ms),
+                }),
+            ));
+        }
+        effects
+    }
+
+    /// Set the persisted wall approval deadline when entering waiting_approval.
+    /// Called by the adapter with the wall time at decision commit.
+    pub fn set_approval_deadline(&mut self, deadline_wall_ms: i64) {
+        self.approval_deadline_wall_ms = Some(deadline_wall_ms);
+    }
+
+    /// Begin waiting on a model request (turn dispatch). Arms the explicit
+    /// model-request timeout; the wall anchor is persisted so a crash does not
+    /// reset the timeout window.
+    pub fn begin_model_request(&mut self, monotonic_ms: i64, wall_ms: i64) {
+        self.arm_model_request(monotonic_ms, wall_ms);
+    }
+
+    /// Settle the in-flight model request (first output / tool batch / terminal).
+    /// Disarms the model-request timeout; the tool-execution timeout governs
+    /// any dispatched tools instead.
+    pub fn settle_model_request(&mut self) {
+        self.model_request_in_flight = false;
+        self.model_request_since_mono_ms = None;
+        self.model_request_since_wall_ms = None;
+    }
+
+    pub fn model_request_in_flight(&self) -> bool {
+        self.model_request_in_flight
+    }
+
+    fn arm_model_request(&mut self, monotonic_ms: i64, wall_ms: i64) {
+        self.model_request_in_flight = true;
+        self.model_request_since_mono_ms = Some(monotonic_ms);
+        self.model_request_since_wall_ms = Some(wall_ms);
+    }
+
+    fn suspend_running_clock(&mut self, now_monotonic_ms: i64) {
+        if let Some(since) = self.running_since_mono_ms.take() {
+            self.running_elapsed_ms += (now_monotonic_ms - since).max(0);
+        }
+    }
+
+    fn ensure_live(&self) -> Result<(), KernelError> {
+        if self.state.is_terminal() {
+            return Err(KernelError::Terminal {
+                current: self.state.as_str(),
+            });
+        }
+        if self.state == RunState::Cancelling {
+            return Err(KernelError::Terminal {
+                current: self.state.as_str(),
+            });
+        }
+        Ok(())
+    }
+
+    fn maybe_barrier_effects(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for batch in &mut self.batches {
+            if batch.barrier_emitted {
+                continue;
+            }
+            let all_settled = batch.ordered.iter().all(|id| {
+                self.tools
+                    .get(id)
+                    .map(|t| t.state.is_terminal())
+                    .unwrap_or(false)
+            });
+            if all_settled {
+                let mut ordered = batch.ordered.clone();
+                ordered.sort_by_key(|id| self.tools[id].source_order);
+                effects.push(Effect::BatchBarrier {
+                    batch_id: batch.batch_id.clone(),
+                    ordered_tool_call_ids: ordered,
+                });
+                batch.barrier_emitted = true;
+            }
+        }
+        effects
+    }
+}
+
+/// Persist a sequence of events through an adapter, stopping on the first error.
+pub fn persist_events(
+    store: &dyn EventStorePort,
+    run_id: &str,
+    effects: &[Effect],
+) -> Result<(), String> {
+    for effect in effects {
+        if let Effect::AppendEvent {
+            seq,
+            event_type,
+            payload_json,
+        } = effect
+        {
+            store.append_event(run_id, *seq, event_type, payload_json)?;
+        }
+    }
+    Ok(())
+}
+
+/// One durable event to append in the decision transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistEvent {
+    pub seq: u64,
+    pub event_type: String,
+    pub payload_json: String,
+}
+
+/// One tool call's durable state to upsert in the decision transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistTool {
+    pub tool_call_id: String,
+    pub batch_id: String,
+    pub tool: String,
+    pub canonical_input_json: String,
+    pub source_order: usize,
+    pub state: ToolCallState,
+    pub result_json: Option<String>,
+    pub dispatch_idempotency_key: Option<String>,
+}
+
+/// One batch identity and monotonic barrier state to persist atomically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistBatch {
+    pub batch_id: String,
+    pub ordered_tool_call_ids: Vec<String>,
+    pub barrier_emitted: bool,
+}
+
+/// One approval CAS performed inside the decision transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistApprovalResolution {
+    pub tool_call_id: String,
+    pub state: String,
+}
+
+/// One external side effect to enqueue durably before execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistOutboxEffect {
+    pub effect_key: String,
+    pub kind: crate::ports::OutboxEffectKind,
+    pub idempotency_key: String,
+    pub tool_call_id: Option<String>,
+    pub batch_id: Option<String>,
+    pub payload_json: String,
+}
+
+/// The complete durable write-set for one decision. The repository commits this
+/// in a single transaction BEFORE any external executor runs, so events, run/tool
+/// state, approvals and pending side effects are all-or-nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelPersistCommand {
+    pub run_state: RunState,
+    pub terminal_written: bool,
+    pub running_elapsed_ms: i64,
+    pub approval_deadline_wall_ms: Option<i64>,
+    /// Persisted wall anchor of an in-flight model request; None when settled.
+    pub model_request_since_wall_ms: Option<i64>,
+    pub turn_id: String,
+    pub retry: crate::ports::RetryState,
+    pub compaction: crate::ports::CompactionState,
+    pub events: Vec<PersistEvent>,
+    pub batches: Vec<PersistBatch>,
+    pub tools: Vec<PersistTool>,
+    pub outbox: Vec<PersistOutboxEffect>,
+    pub approval_resolutions: Vec<PersistApprovalResolution>,
+    pub settled_dispatch_tool_call_ids: Vec<String>,
+}
+
+impl RunController {
+    /// Build the durable write-set for the effects just produced. Derived purely
+    /// from controller state, so the adapter commits one transaction and only
+    /// then performs the returned external effects via the outbox.
+    pub fn persist_command(&self, effects: &[Effect]) -> KernelPersistCommand {
+        let mut events = Vec::new();
+        let mut outbox = Vec::new();
+        let mut approval_resolutions = Vec::new();
+        let mut settled_dispatch_tool_call_ids = Vec::new();
+        for effect in effects {
+            match effect {
+                Effect::AppendEvent {
+                    seq,
+                    event_type,
+                    payload_json,
+                } => events.push(PersistEvent {
+                    seq: *seq,
+                    event_type: event_type.clone(),
+                    payload_json: payload_json.clone(),
+                }),
+                Effect::DispatchTool {
+                    tool_call_id,
+                    tool,
+                    input_json,
+                } => outbox.push(PersistOutboxEffect {
+                    effect_key: dispatch_effect_key(tool_call_id),
+                    kind: crate::ports::OutboxEffectKind::DispatchTool,
+                    idempotency_key: dispatch_idempotency_key(tool_call_id),
+                    tool_call_id: Some(tool_call_id.clone()),
+                    batch_id: self.tools.get(tool_call_id).map(|t| t.batch_id.clone()),
+                    payload_json: serde_json::json!({
+                        "tool": tool,
+                        "input": serde_json::from_str::<serde_json::Value>(input_json)
+                            .expect("controller tool input invariant")
+                    })
+                    .to_string(),
+                }),
+                Effect::RequestApproval {
+                    tool_call_id,
+                    tool,
+                    input_json,
+                } => outbox.push(PersistOutboxEffect {
+                    effect_key: approval_effect_key(tool_call_id),
+                    kind: crate::ports::OutboxEffectKind::RequestApproval,
+                    idempotency_key: approval_effect_key(tool_call_id),
+                    tool_call_id: Some(tool_call_id.clone()),
+                    batch_id: self.tools.get(tool_call_id).map(|t| t.batch_id.clone()),
+                    payload_json: serde_json::json!({
+                        "tool": tool,
+                        "input": serde_json::from_str::<serde_json::Value>(input_json)
+                            .expect("controller tool input invariant")
+                    })
+                    .to_string(),
+                }),
+                Effect::CancelEngineTurn { turn_id } => outbox.push(PersistOutboxEffect {
+                    effect_key: format!("cancel-engine:{turn_id}"),
+                    kind: crate::ports::OutboxEffectKind::CancelEngineTurn,
+                    idempotency_key: format!("cancel-engine:{turn_id}"),
+                    tool_call_id: None,
+                    batch_id: None,
+                    payload_json: serde_json::json!({ "turnId": turn_id }).to_string(),
+                }),
+                Effect::CancelToolCall { tool_call_id } => outbox.push(PersistOutboxEffect {
+                    effect_key: format!("cancel-tool:{tool_call_id}"),
+                    kind: crate::ports::OutboxEffectKind::CancelToolCall,
+                    idempotency_key: format!("cancel-tool:{tool_call_id}"),
+                    tool_call_id: Some(tool_call_id.clone()),
+                    batch_id: None,
+                    payload_json: "{}".to_string(),
+                }),
+                Effect::ApprovalResolved {
+                    tool_call_id,
+                    decision,
+                } => approval_resolutions.push(PersistApprovalResolution {
+                    tool_call_id: tool_call_id.clone(),
+                    state: decision.as_str().to_string(),
+                }),
+                Effect::ApprovalExpired { tool_call_id } => {
+                    approval_resolutions.push(PersistApprovalResolution {
+                        tool_call_id: tool_call_id.clone(),
+                        state: "expired".to_string(),
+                    });
+                }
+                Effect::ApprovalCancelled { tool_call_id } => {
+                    approval_resolutions.push(PersistApprovalResolution {
+                        tool_call_id: tool_call_id.clone(),
+                        state: "cancelled".to_string(),
+                    });
+                }
+                Effect::ToolDispatchSettled { tool_call_id } => {
+                    settled_dispatch_tool_call_ids.push(tool_call_id.clone());
+                }
+                Effect::BatchBarrier {
+                    batch_id,
+                    ordered_tool_call_ids,
+                } => outbox.push(PersistOutboxEffect {
+                    effect_key: batch_delivery_effect_key(batch_id),
+                    kind: crate::ports::OutboxEffectKind::DeliverToolBatch,
+                    idempotency_key: batch_delivery_idempotency_key(batch_id),
+                    tool_call_id: None,
+                    batch_id: Some(batch_id.clone()),
+                    payload_json: serde_json::json!({
+                        "orderedToolCallIds": ordered_tool_call_ids
+                    })
+                    .to_string(),
+                }),
+                Effect::PublishSnapshot | Effect::Audit { .. } => {}
+            }
+        }
+        let batches = self
+            .batches
+            .iter()
+            .map(|batch| PersistBatch {
+                batch_id: batch.batch_id.clone(),
+                ordered_tool_call_ids: batch.ordered.clone(),
+                barrier_emitted: batch.barrier_emitted,
+            })
+            .collect();
+        let tools = self
+            .tools
+            .values()
+            .map(|tool| PersistTool {
+                tool_call_id: tool.tool_call_id.clone(),
+                batch_id: tool.batch_id.clone(),
+                tool: tool.tool.clone(),
+                canonical_input_json: tool.input_json.clone(),
+                source_order: tool.source_order,
+                state: tool.state,
+                result_json: tool.result_json.clone(),
+                dispatch_idempotency_key: (tool.state == ToolCallState::Running)
+                    .then(|| dispatch_idempotency_key(&tool.tool_call_id)),
+            })
+            .collect();
+        KernelPersistCommand {
+            run_state: self.state,
+            terminal_written: self.terminal_written,
+            running_elapsed_ms: self.running_elapsed_ms,
+            approval_deadline_wall_ms: self.approval_deadline_wall_ms,
+            model_request_since_wall_ms: self.model_request_since_wall_ms,
+            turn_id: self.turn_id.clone(),
+            retry: self.retry.clone(),
+            compaction: self.compaction.clone(),
+            events,
+            batches,
+            tools,
+            outbox,
+            approval_resolutions,
+            settled_dispatch_tool_call_ids,
+        }
+    }
+}
