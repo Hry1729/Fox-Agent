@@ -7,6 +7,7 @@ export type KernelEngineBatchCheckpoint = { "assistantMessage": unknown; "batchI
 export type KernelModelResponse = { "assistantMessage": unknown; "batchId": string; "checkpointSeq": number; "runId": string; "schemaVersion": number; "turnId": string; }
 export type KernelToolSnapshot = { "approvalState"?: (string | null); "batchId": string; "sourceOrder": number; "state": string; "tool": string; "toolCallId": string; }
 export type KernelRunSnapshot = { "approvalDeadlineWallMs"?: (number | null); "compactions": number; "engineId": string; "lastEventSeq": string; "providerAttempts": number; "retryDueWallMs"?: (number | null); "runId": string; "runningElapsedMs": number; "schemaVersion": number; "state": string; "terminalWritten": boolean; "tools": Array<KernelToolSnapshot>; "turnAttempts": number; "turnId": string; }
+export type KernelStateInvalidation = { "schemaVersion": number; }
 export type ExecutionAuthority = "legacy" | "authoritative"
 export type FrozenPermission = { "grants": Array<PermissionGrant>; "mode": PermissionMode; "projectRoot"?: (string | null); }
 export type PermissionGrant = { "scope": string; "tool": string; }

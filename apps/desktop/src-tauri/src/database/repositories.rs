@@ -118,6 +118,7 @@ const AGENT_RECORD_COLUMNS: &str =
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
+    kernel_changes: Arc<super::kernel_changes::KernelChanges>,
 }
 
 impl Database {
@@ -126,11 +127,16 @@ impl Database {
         migrations::run(&mut connection, now_ms()).map_err(|error| error.to_string())?;
         let database = Self {
             connection: Arc::new(Mutex::new(connection)),
+            kernel_changes: Arc::new(super::kernel_changes::KernelChanges::default()),
         };
         database.seed_builtin_agents()?;
         database.seed_bundled_experts()?;
         database.seed_expert_avatars()?;
         Ok(database)
+    }
+
+    pub(crate) fn subscribe_kernel_changes(&self) -> std::sync::mpsc::Receiver<()> {
+        self.kernel_changes.subscribe()
     }
 
     pub fn default_agent_id(&self) -> &'static str {

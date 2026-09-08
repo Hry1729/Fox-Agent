@@ -8,6 +8,7 @@ mod expert_packages;
 mod expert_teams;
 mod expert_workflows;
 mod kernel;
+mod kernel_state_publisher;
 mod lifecycle_hooks;
 #[cfg(feature = "local-embedding")]
 mod local_embedding;
@@ -133,6 +134,7 @@ pub fn run() {
             let database = Database::open(app_data_dir.join("fox.db"))?;
             database.repair_interrupted_runs()?;
             database.audit_interrupted_tasks()?;
+            app.manage(kernel_state_publisher::KernelStatePublisher::start(app.handle().clone(), &database)?);
             let runtime_sessions_dir = app_data_dir.join("runtime-sessions");
             std::fs::create_dir_all(&runtime_sessions_dir)?;
             let attachments_dir = app_data_dir.join("attachments");
@@ -407,6 +409,7 @@ pub fn run() {
         .expect("error while building Fox");
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            app_handle.state::<kernel_state_publisher::KernelStatePublisher>().shutdown();
             let _ = app_handle.state::<AppState>().runtime_host.shutdown();
             mcp::shutdown_connections();
         }

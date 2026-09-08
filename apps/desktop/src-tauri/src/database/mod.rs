@@ -1,4 +1,5 @@
 mod migrations;
+mod kernel_changes;
 mod models;
 mod repositories;
 

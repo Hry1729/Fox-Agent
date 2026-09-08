@@ -324,7 +324,8 @@ pub fn schema_bundle() -> Value {
             "KernelBatchResumeFrame": schemars::schema_for!(KernelBatchResumeFrame),
             "KernelEngineBatchCheckpoint": schemars::schema_for!(KernelEngineBatchCheckpoint),
             "KernelModelResponse": schemars::schema_for!(KernelModelResponse),
-            "KernelRunSnapshot": schemars::schema_for!(KernelRunSnapshot)
+            "KernelRunSnapshot": schemars::schema_for!(KernelRunSnapshot),
+            "KernelStateInvalidation": schemars::schema_for!(KernelStateInvalidation)
         },
         "toolContracts": TOOL_CONTRACTS.iter().map(|t| serde_json::json!({
             "name": t.0, "category": t.1, "execution": t.2, "approval": t.3

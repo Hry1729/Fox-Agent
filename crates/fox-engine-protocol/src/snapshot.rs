@@ -1,6 +1,13 @@
 //! Read-only UI projection. Never carries executable outbox payloads or tool data.
 use serde::{Deserialize, Serialize};
 
+/// A coalescible global invalidation, NOT a state transition or authority claim.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelStateInvalidation {
+    pub schema_version: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KernelRunSnapshot {

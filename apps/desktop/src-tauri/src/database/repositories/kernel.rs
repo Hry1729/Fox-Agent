@@ -788,7 +788,7 @@ impl Database {
             .map_err(|error| format!("serialize kernel retry state: {error}"))?;
         let compaction_json = serde_json::to_string(&cmd.compaction)
             .map_err(|error| format!("serialize kernel compaction state: {error}"))?;
-        self.with_connection(|connection| {
+        let changed = self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             if let Some((batch_id, lease_owner)) = batch_response_lease {
                 let event = cmd.events.iter().find(|event| event.event_type == "engine.batch_response")
@@ -1765,8 +1765,12 @@ impl Database {
                 return Err(kernel_err(format!("kernel run disappeared during commit: {run_id}")));
             }
             transaction.commit()?;
-            Ok(())
-        })
+            Ok(kernel_mode == "authoritative" && final_last_seq != persisted_last_seq)
+        })?;
+        // Publish only AFTER commit and AFTER releasing the connection lock.
+        // A failed UI delivery must never make a committed decision look failed.
+        if changed { self.kernel_changes.committed(); }
+        Ok(())
     }
 
     /// Compatibility helper for the narrow allow-path: CAS an approval and create
@@ -3919,6 +3923,8 @@ mod tests {
     #[test]
     fn conversation_snapshot_is_owned_authoritative_and_payload_free() {
         let db = fresh_db();
+        let notifications = db.clone().subscribe_kernel_changes();
+        notifications.try_recv().unwrap(); // Subscribe/reopen initial invalidation.
         db.with_connection(|connection| {
             connection.execute("INSERT INTO conversations(id, agent_id, title, status, created_at, updated_at)
                 SELECT 'snapshot-conversation', id, 'snapshot', 'active', 1, 1 FROM agents LIMIT 1", [])?;
@@ -3934,9 +3940,13 @@ mod tests {
         let config = phase3b_config();
         db.kernel_create_run("snapshot-auth", "pi", "authoritative", 2, "perm-1", "legacy", "h",
             &serde_json::to_string(&config).unwrap()).unwrap();
-        let (controller, effects) = crate::kernel::RunController::start(
+        let (mut controller, effects) = crate::kernel::RunController::start(
             "snapshot-auth", "turn-1", config, &crate::kernel::TestClock::new(0)).unwrap();
         db.kernel_commit_decision("snapshot-auth", 0, &controller.persist_command(&effects)).unwrap();
+        notifications.try_recv().unwrap();
+        // Exact replay causes neither a new revision nor a spurious UI refresh.
+        db.kernel_commit_decision("snapshot-auth", 0, &controller.persist_command(&effects)).unwrap();
+        assert!(notifications.try_recv().is_err());
         let snapshot = db.kernel_conversation_snapshot("snapshot-conversation", "snapshot-auth").unwrap().unwrap();
         assert_eq!(snapshot.run_id, "snapshot-auth");
         assert_eq!(snapshot.state, "running");
@@ -3946,6 +3956,17 @@ mod tests {
             assert!(!json.contains(forbidden));
         }
         assert!(db.kernel_conversation_snapshot("other-conversation", "snapshot-auth").is_err());
+        let cancel = controller.request_cancel();
+        db.with_connection(|connection| connection.execute_batch(
+            "CREATE TRIGGER reject_kernel_commit BEFORE UPDATE ON kernel_runs BEGIN SELECT RAISE(ABORT, 'injected rollback'); END;"
+        )).unwrap();
+        assert!(db.kernel_commit_decision("snapshot-auth", 1, &controller.persist_command(&cancel)).is_err());
+        assert!(notifications.try_recv().is_err());
+        assert_eq!(db.kernel_build_full_snapshot("snapshot-auth").unwrap().state, "running");
+        db.with_connection(|connection| connection.execute_batch("DROP TRIGGER reject_kernel_commit;")).unwrap();
+        db.kernel_commit_decision("snapshot-auth", 1, &controller.persist_command(&cancel)).unwrap();
+        notifications.try_recv().unwrap();
+        assert_ne!(db.kernel_build_full_snapshot("snapshot-auth").unwrap().state, "running");
         // Corrupt authority must fail closed, never turn into a Legacy fallback.
         db.with_connection(|connection| {
             connection.execute("UPDATE kernel_runs SET frozen_config_json='{}' WHERE run_id='snapshot-auth'", [])?;

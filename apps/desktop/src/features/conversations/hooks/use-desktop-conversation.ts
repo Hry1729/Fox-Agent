@@ -8,6 +8,7 @@ import { extractedAttachmentContext } from '../model/attachment-content'
 import { resolveConversationAgentId } from '../model/agent-initialization'
 import { withWorkspaceInitializationTimeout } from '../model/workspace-initialization'
 import { useRuntimeEventStream } from './use-runtime-event-stream'
+import { useKernelStateStream } from './use-kernel-state-stream'
 import type {
   ConversationDetail,
   ChildRunNotification,
@@ -684,6 +685,7 @@ export function useDesktopConversation(): DesktopConversationState {
     setErrorDetails,
     refreshList,
   })
+  useKernelStateStream({ conversationId: detail?.conversation.id ?? null, setDetail, setError, setErrorDetails })
 
   useEffect(() => {
     if (!desktopRuntimeAvailable) return

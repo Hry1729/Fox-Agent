@@ -29,6 +29,7 @@ function harness() {
     useEffect: () => {},
     useLayoutEffect: () => {},
     useRuntimeEventStream: () => {},
+    useKernelStateStream: () => {},
     desktopRuntimeAvailable: false,
     desktopClient: {
       initialize: async () => ({ defaultAgentId: 'fox-general' }),

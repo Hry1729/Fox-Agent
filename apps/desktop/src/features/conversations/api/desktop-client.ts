@@ -1,6 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { snapshotForRun } from '../model/kernel-snapshot'
+import type { KernelStateInvalidation } from '../model/types'
 import type {
   AgentRecord,
   ApiResponse,
@@ -826,6 +827,8 @@ export const desktopClient = {
   deleteModelProvider: (providerId: string) => command<boolean>('model_provider_delete', { providerId }),
   listenRuntimeEvents: (handler: (event: RuntimeEventNotification) => void): Promise<UnlistenFn> =>
     listen<RuntimeEventNotification>('fox://runtime-event', ({ payload }) => handler(payload)),
+  listenKernelStateInvalidations: (handler: (event: KernelStateInvalidation) => void): Promise<UnlistenFn> =>
+    listen<KernelStateInvalidation>('fox://kernel-state-invalidated', ({ payload }) => handler(payload)),
   listenChildRunUpdates: (handler: (event: ChildRunNotification) => void): Promise<UnlistenFn> =>
     listen<ChildRunNotification>('fox://child-run-updated', ({ payload }) => handler(payload)),
   listenWorkEvents: (handler: (event: WorkEventRecord) => void): Promise<UnlistenFn> =>

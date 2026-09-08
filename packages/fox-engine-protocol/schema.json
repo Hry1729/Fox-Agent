@@ -340,6 +340,23 @@
       "title": "KernelRunSnapshot",
       "type": "object"
     },
+    "KernelStateInvalidation": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "A coalescible global invalidation, NOT a state transition or authority claim.",
+      "properties": {
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schemaVersion"
+      ],
+      "title": "KernelStateInvalidation",
+      "type": "object"
+    },
     "RunControlBinding": {
       "$defs": {
         "ExecutionAuthority": {
