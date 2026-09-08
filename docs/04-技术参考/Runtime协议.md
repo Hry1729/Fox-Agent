@@ -429,9 +429,7 @@ Fox 只在确有差异时做模型家族分支：MiniMax、DeepSeek、Claude、O
 - 需要工作模式确认的 Run 以 `awaiting_confirmation` 持久化，不调用 Runtime；批准后恢复同一 Run，拒绝后取消未派发 Run。
 - 进程崩溃生成 `runtime.process_crashed` 或中断状态，刷新从数据库恢复。
 
-## 错误
-
-### 隔离 Kernel 批次进程（受控接线）
+## 隔离 Kernel 批次进程（受控接线）
 
 正式 Runtime 的 `--kernel-worker` 启动参数选择独立的一次性进程模式；默认 Legacy 进程不接受此协议。仅支持以下请求，均使用原 JSONL envelope：
 
@@ -439,7 +437,13 @@ Fox 只在确有差异时做模型家族分支：MiniMax、DeepSeek、Claude、O
 - `kernel.resume_batch`：payload 使用共享 `controlBinding` 与 `batchResume`，完整匹配初始化身份。返回 `kernel.model_response`，payload 为 `{idempotencyKey, checkpointSeq, response: KernelModelResponse}`。仅返回模型响应/提议，不执行资源；真正派发后进程永久 consumed，失败必须由 Host 对持久交付事实进行核对，不能重发。
 - `kernel.cancel`：核对完整身份后请求取消，`kernel.cancelling` 只表示接收取消，不代表模型已退出或 Run 已提交终态。原批次请求会在模型结束后失败。关闭 stdin 同样触发取消及清理。
 
-初始化与批次请求上限均为 1 MiB；错误不包含原始凭证、历史或 Provider 响应。模型请求受冻结预算约束，取消后仍等待引擎结束；Host 需独立控制进程失联和不确定交付。本模式尚未挂接默认桌面启动，也不替代 Host 持久配置校验、Outbox 租约或 Kernel 决策事务。
+初始化与批次请求上限均为 1 MiB；错误不包含原始凭证、历史或 Provider 响应。模型请求受冻结预算约束，Node 取消后仍等待引擎结束。
+
+Rust `KernelCoordinator::dispatch_batch_with_worker` 是受控正式调用入口：派发前将调用者提供的模型/提示/工具描述/Profile 配置哈希与持久 `prompt_config_hash` 比较，再进入已有 Outbox 领取事务。凭证单独传入，不进入该配置哈希或命令行参数。启动与管道写入、响应等待共享剩余 Run/模型预算；取消/超时清理并回收该次创建的子进程，不复用 Legacy 进程。不确定交付保持租约事实，不能因进程已退出就重播。
+
+Host 校验响应的协议版本、类型、请求 ID、Run/Conversation/Session、批次及游标，拒绝超大帧、其他身份和非预期事件。模型响应仍经协调器同事务提交。配置内容的持久存储/自动恢复、初始模型回合及默认桌面启动尚未接线；本入口不构成生产权威切换。
+
+## 错误
 
 协议错误：`protocol.invalid_message`、`protocol.unknown_request`；Runtime 请求错误：`runtime.request_failed`；Pi 执行错误：`runtime.pi_failed`；Provider 错误：`provider.request_failed`。
 

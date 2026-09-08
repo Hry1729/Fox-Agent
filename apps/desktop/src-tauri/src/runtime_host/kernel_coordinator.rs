@@ -337,6 +337,31 @@ impl<'a> KernelCoordinator<'a> {
         Ok(frame)
     }
 
+    /// Formal isolated transport, with configuration checked before claiming.
+    /// Callers must recover the matching config; current settings are not a fallback.
+    pub(super) fn dispatch_batch_with_worker(
+        &self, batch_id: &str, owner: &str, policy: &dyn PolicyDecisionPort,
+        runtime: &super::RuntimeCommand, config: &super::kernel_model_worker::KernelModelConfig,
+        api_key: &str,
+    ) -> Result<(), String> {
+        let stored = self.database.kernel_rehydrate(&self.binding.run_id)?
+            .ok_or("Kernel Run is missing")?;
+        if config.hash()? != stored.config.prompt_config_hash
+            || config.execution_profile_id != self.binding.execution_profile_id {
+            return Err("Kernel model configuration differs from the frozen Run".into());
+        }
+        self.dispatch_batch(batch_id, owner, policy, |binding, frame, token| {
+            let now = self.clock.read();
+            let facts = self.controller.lock().map_err(|_| "Kernel coordinator lock poisoned")?
+                .shadow_checkpoint(now.monotonic_ms);
+            let since = facts.model_request_since_wall_ms.ok_or("Kernel model request has no durable deadline")?;
+            if now.wall_ms < since { return Err("Kernel model clock moved backwards".into()); }
+            let remaining = binding.budgets.run_execution_ms.saturating_sub(facts.running_elapsed_ms)
+                .min(binding.budgets.model_request_ms.saturating_sub(now.wall_ms.saturating_sub(since)));
+            super::kernel_model_worker::deliver(runtime, config, api_key, binding, frame, token, remaining)
+        })
+    }
+
     /// Deliver a committed barrier, then atomically persist the original model
     /// response with its terminal or next-batch decision and lease completion.
     pub(crate) fn dispatch_batch(

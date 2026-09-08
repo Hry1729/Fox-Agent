@@ -21,6 +21,10 @@ impl PolicyDecisionPort for Allow {
 }
 
 fn fixture(clock: &TestClock) -> (Database, PathBuf, String) {
+    fixture_with_prompt(clock, "test-prompt")
+}
+
+fn fixture_with_prompt(clock: &TestClock, prompt_hash: &str) -> (Database, PathBuf, String) {
     let root = std::env::temp_dir().join(format!("fox-coordinator-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("proof.txt"), "durable coordinator 中文 😀").unwrap();
@@ -63,7 +67,7 @@ fn fixture(clock: &TestClock) -> (Database, PathBuf, String) {
         capability_manifest_hash: "coordinator-test-manifest".into(),
         permission_snapshot_id: binding.permission_snapshot_id.clone(),
         execution_profile_id: binding.execution_profile_id.clone(),
-        prompt_config_hash: "test-prompt".into(),
+        prompt_config_hash: prompt_hash.into(),
         model_request_timeout_ms: binding.budgets.model_request_ms,
         tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
         run_execution_budget_ms: binding.budgets.run_execution_ms,
@@ -78,7 +82,7 @@ fn fixture(clock: &TestClock) -> (Database, PathBuf, String) {
         2,
         &binding.permission_snapshot_id,
         "legacy",
-        "test-prompt",
+        prompt_hash,
         &serde_json::to_string(&config).unwrap(),
     )
     .unwrap();
@@ -681,4 +685,143 @@ fn model_response_failure_never_partially_commits_terminal_or_next_batch() {
         let delivered: i64 = connection.query_row("SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='deliver_tool_batch' AND status='completed'", [&run_id], |row| row.get(0)).unwrap();
         assert_eq!(delivered, 0, "{failure}");
     }
+}
+
+fn worker_configuration() -> super::super::kernel_model_worker::KernelModelConfig {
+    super::super::kernel_model_worker::KernelModelConfig {
+        execution_profile_id: "legacy".into(),
+        model_service: json!({"apiType":"faux","modelId":"kernel-host-test","baseUrl":"http://localhost",
+            "fauxResponses":["Host consumed the durable batch"]}),
+        system_prompt: "Use the durable supplied history only.".into(),
+        proposal_tools: vec![json!({"name":"read","description":"Propose a Host-owned read",
+            "parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}})],
+    }
+}
+
+fn real_worker_command() -> super::super::RuntimeCommand {
+    super::super::RuntimeCommand {
+        program: "node".into(),
+        script: Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../services/agent-runtime/src/pi-runtime.mjs")),
+    }
+}
+
+fn settle_worker_batch(coordinator: &KernelCoordinator<'_>) {
+    coordinator.propose_engine_batch(fox_engine_protocol::KernelEngineBatchCheckpoint {
+        schema_version: 1, batch_id: "worker-batch".into(),
+        history: vec![json!({"role":"user","content":"read the file"})],
+        assistant_message: json!({"role":"assistant","stopReason":"toolUse","content":[
+            {"type":"toolCall","id":"worker-read","name":"read","arguments":{"path":"proof.txt"}}]}),
+    }, &Allow).unwrap();
+    coordinator.dispatch_tool("worker-read", "real-reader", |binding, effect, token| {
+        let payload: Value = serde_json::from_str(&effect.payload_json).unwrap();
+        Ok((true, crate::resource_gateway::execute(binding, "read", &payload["input"], token)?))
+    }).unwrap();
+}
+
+#[test]
+fn formal_worker_transport_checks_frozen_configuration_before_lease_and_commits_real_response() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_prompt(&clock, &config.hash().unwrap());
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+    drop(coordinator);
+    drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    for part in ["prompt", "model", "schema", "profile", "credential"] {
+        let mut changed = config.clone();
+        match part {
+            "prompt" => changed.system_prompt.push_str(" changed"),
+            "model" => changed.model_service["modelId"] = json!("different"),
+            "schema" => changed.proposal_tools.clear(),
+            "profile" => changed.execution_profile_id = "shadow".into(),
+            _ => changed.model_service["apiKey"] = json!("must-not-freeze"),
+        }
+        let before = coordinator.snapshot().unwrap();
+        assert!(coordinator.dispatch_batch_with_worker("worker-batch", "worker", &Allow,
+            &real_worker_command(), &changed, "test-key").is_err(), "{part}");
+        assert_eq!(coordinator.snapshot().unwrap(), before, "{part}");
+        assert!(coordinator.prepare_stored_batch_resume("worker-batch").is_ok());
+    }
+    coordinator.dispatch_batch_with_worker("worker-batch", "worker", &Allow,
+        &real_worker_command(), &config, "test-key").unwrap();
+    assert_eq!(db.kernel_rehydrate(&run_id).unwrap().unwrap().state, kernel::RunState::Completed);
+    assert!(coordinator.dispatch_batch_with_worker("worker-batch", "worker-again", &Allow,
+        &real_worker_command(), &config, "test-key").is_err());
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let responses: i64 = connection.query_row("SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='engine.batch_response'",
+        [&run_id], |row| row.get(0)).unwrap();
+    assert_eq!(responses, 1);
+}
+
+#[test]
+fn formal_worker_protocol_failure_retains_uncertain_delivery_across_reopen() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_prompt(&clock, &config.hash().unwrap());
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+    let mut wrong = real_worker_command();
+    // The fake Legacy runtime is a real process but cannot speak this protocol.
+    wrong.script = Some(wrong.script.unwrap().with_file_name("fake-runtime.mjs"));
+    assert!(coordinator.dispatch_batch_with_worker("worker-batch", "worker", &Allow,
+        &wrong, &config, "test-key").is_err());
+    drop(coordinator); drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    assert!(coordinator.dispatch_batch_with_worker("worker-batch", "new-worker", &Allow,
+        &real_worker_command(), &config, "test-key").is_err());
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let status: String = connection.query_row("SELECT status FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='deliver_tool_batch'",
+        [&run_id], |row| row.get(0)).unwrap();
+    assert_eq!(status, "leased");
+    assert_ne!(db.kernel_rehydrate(&run_id).unwrap().unwrap().state, kernel::RunState::Completed);
+}
+
+#[test]
+fn formal_worker_can_be_cancelled_without_holding_the_coordinator_lock() {
+    let mut config = worker_configuration();
+    config.model_service["fauxTokensPerSecond"] = json!(1);
+    config.model_service["fauxResponses"] = json!(["This model response must be cancelled before completion"]);
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, _, run_id) = fixture_with_prompt(&clock, &config.hash().unwrap());
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+    let started = std::time::Instant::now();
+    std::thread::scope(|scope| {
+        let running = scope.spawn(|| coordinator.dispatch_batch_with_worker("worker-batch", "worker", &Allow,
+            &real_worker_command(), &config, "test-key"));
+        // Wait for the durable claim, not an arbitrary delay before cancellation.
+        while db.kernel_rehydrate(&run_id).unwrap().unwrap().model_request_since_wall_ms.is_none() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        coordinator.cancel().unwrap();
+        assert!(running.join().unwrap().is_err());
+    });
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert_ne!(db.kernel_rehydrate(&run_id).unwrap().unwrap().state, kernel::RunState::Completed);
+}
+
+#[test]
+fn formal_worker_uses_remaining_run_budget_instead_of_a_fresh_full_window() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, _, run_id) = fixture_with_prompt(&clock, &config.hash().unwrap());
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+    clock.advance(1_800_000 - 1);
+    let started = std::time::Instant::now();
+    let error = coordinator.dispatch_batch_with_worker("worker-batch", "worker", &Allow,
+        &real_worker_command(), &config, "test-key").unwrap_err();
+    assert!(error.contains("deadline"), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert!(coordinator.prepare_stored_batch_resume("worker-batch").is_err());
+    assert_ne!(db.kernel_rehydrate(&run_id).unwrap().unwrap().state, kernel::RunState::Completed);
 }
