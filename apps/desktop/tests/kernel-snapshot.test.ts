@@ -1,10 +1,11 @@
 import { describe, expect, test } from 'bun:test'
-import { mergeKernelSnapshot, snapshotForRun } from '../src/features/conversations/model/kernel-snapshot'
+import { conversationRunFingerprint, conversationRunIsActive, conversationRunState, mergeKernelSnapshot, snapshotForRun } from '../src/features/conversations/model/kernel-snapshot'
 import type { ConversationDetail, KernelRunSnapshot } from '../src/features/conversations/model/types'
 
 function detail(seq: string, patch: Partial<KernelRunSnapshot> = {}): ConversationDetail {
   return {
     lastRun: { id: 'run-1', lastSeq: 999999 },
+    messages: [],
     kernelSnapshot: {
       schemaVersion: 1, runId: 'run-1', turnId: 'turn-1', engineId: 'pi', state: 'running',
       lastEventSeq: seq, terminalWritten: false, runningElapsedMs: 0, tools: [],
@@ -14,6 +15,19 @@ function detail(seq: string, patch: Partial<KernelRunSnapshot> = {}): Conversati
 }
 
 describe('authoritative snapshot read model', () => {
+  test('drives polling and liveness from authority while preserving Legacy behavior', () => {
+    const waiting = detail('12', { state: 'waiting_approval' })
+    waiting.lastRun!.status = 'completed'
+    expect(conversationRunState(waiting)).toBe('waiting_approval')
+    expect(conversationRunIsActive(waiting)).toBe(true)
+    expect(conversationRunFingerprint(waiting)).toBe('kernel:waiting_approval:12:0')
+    const completed = detail('13', { state: 'completed', terminalWritten: true })
+    completed.lastRun!.status = 'running'
+    expect(conversationRunIsActive(completed)).toBe(false)
+    delete completed.kernelSnapshot
+    expect(conversationRunIsActive(completed)).toBe(true)
+    expect(conversationRunFingerprint(completed)).toBe('legacy:running:999999:0')
+  })
   test('does not derive authority from Legacy events or a different run', () => {
     expect(snapshotForRun({ lastRun: { id: 'run-1' } } as ConversationDetail)).toBeNull()
     expect(snapshotForRun(detail('1', { runId: 'other' }))).toBeNull()

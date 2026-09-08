@@ -11,7 +11,7 @@ import type {
   RuntimeEventNotification,
   WorkEventRecord,
 } from './types'
-import { mergeKernelSnapshot } from './kernel-snapshot'
+import { conversationRunIsActive, mergeKernelSnapshot, snapshotForRun } from './kernel-snapshot'
 
 export function runRecordIsActive(run: RunRecord | null) {
   return run?.status === 'queued' || run?.status === 'running' || run?.status === 'cancelling'
@@ -112,11 +112,13 @@ function mergeApprovals(persisted: ConversationDetail['approvals'], current: Con
   return [...records.values()]
 }
 
-function preferRun(persisted: RunRecord | null, current: RunRecord | null) {
+function preferRun(persistedDetail: ConversationDetail, currentDetail: ConversationDetail) {
+  const persisted = persistedDetail.lastRun
+  const current = currentDetail.lastRun
   if (!persisted) return current
   if (!current) return persisted
   if (current.id.startsWith('pending-run-')) return persisted
-  if (persisted.id !== current.id) return runRecordIsActive(current) ? current : persisted
+  if (persisted.id !== current.id) return conversationRunIsActive(currentDetail) ? current : persisted
   if (persisted.lastSeq > current.lastSeq) return persisted
   if (persisted.lastSeq < current.lastSeq) return current
   return runRecordIsActive(current) && !runRecordIsActive(persisted) ? persisted : current
@@ -124,7 +126,7 @@ function preferRun(persisted: RunRecord | null, current: RunRecord | null) {
 
 export function mergeConversationDetail(persisted: ConversationDetail, current: ConversationDetail | null) {
   if (!current || current.conversation.id !== persisted.conversation.id) return persisted
-  const lastRun = preferRun(persisted.lastRun, current.lastRun)
+  const lastRun = preferRun(persisted, current)
   const runtimeEvents = mergeRecords(
     persisted.runtimeEvents,
     current.runtimeEvents,
@@ -256,6 +258,9 @@ export function applyRuntimeNotification(
     ? event.taskId
     : typeof taskEvent.id === 'string' ? taskEvent.id : null
   const currentRun = current.lastRun
+  // This stream is Legacy Engine output, not a Kernel commit notification.
+  // Once authority is known, only persisted snapshots may advance this run.
+  if (snapshotForRun(current)?.runId === notification.runId) return current
   const sameRun = currentRun?.id === notification.runId
   const replacesPendingRun = Boolean(currentRun?.id.startsWith('pending-run-'))
   const updatesActiveRun = !currentRun || sameRun || replacesPendingRun

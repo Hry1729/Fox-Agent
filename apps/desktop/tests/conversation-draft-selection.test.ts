@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { resolveConversationAgentId } from '../src/features/conversations/model/agent-initialization'
 import { knowledgeReferenceKey, knowledgeReferenceFromLegacyBinding } from '../src/features/conversations/api/desktop-client'
+import { conversationRunFingerprint, conversationRunState, snapshotForRun } from '../src/features/conversations/model/kernel-snapshot'
 
 // Run the production hook's actions with deterministic state/ref slots. Effects
 // are excluded here; these tests exercise selection ordering without a Host or DOM.
@@ -48,6 +49,9 @@ function harness() {
     flushSync: (fn: () => void) => fn(),
     extractedAttachmentContext: async () => '',
     runIsActive: () => false,
+    conversationRunFingerprint,
+    conversationRunState,
+    snapshotForRun,
     resolveConversationAgentId,
     withWorkspaceInitializationTimeout: (promise: Promise<unknown>) => promise,
     activeConversationExpertBinding: (detail: any) => detail?.expertBindings?.find((item: any) => item.state === 'active'),

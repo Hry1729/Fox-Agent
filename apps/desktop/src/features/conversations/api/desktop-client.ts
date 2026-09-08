@@ -1,5 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { snapshotForRun } from '../model/kernel-snapshot'
 import type {
   AgentRecord,
   ApiResponse,
@@ -584,6 +585,9 @@ export const desktopClient = {
     command<ConversationSummary>('conversation_create', request),
   loadConversation: async (conversationId: string) => {
     const detail = await command<ConversationDetail>('conversation_load', { conversationId })
+    if (detail.kernelSnapshot && !snapshotForRun(detail)) {
+      throw new Error('运行状态快照无效，请刷新对话后重试')
+    }
     const knowledgeReferences = Array.isArray(detail.knowledgeReferences)
       ? detail.knowledgeReferences.map(normalizeKnowledgeReference)
       : (detail.knowledgeBindings ?? []).map(knowledgeReferenceFromLegacyBinding)

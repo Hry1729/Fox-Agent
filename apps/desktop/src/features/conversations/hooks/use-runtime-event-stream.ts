@@ -7,6 +7,7 @@ import { mergeConversationDetail, reduceRuntimeNotifications } from '../model/ru
 import type { ConversationDetail, DesktopErrorDetails, RuntimeEventNotification } from '../model/types'
 
 interface RuntimeEventStreamOptions {
+  authoritativeRunIdRef: MutableRefObject<string | null>
   activeConversationIdRef: MutableRefObject<string | null>
   runtimeListenerReadyRef: MutableRefObject<Promise<void> | null>
   runtimeEventQueueRef: MutableRefObject<RuntimeEventNotification[]>
@@ -29,6 +30,7 @@ const terminalEventTypes = new Set([
 
 export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
   const {
+    authoritativeRunIdRef,
     activeConversationIdRef,
     runtimeListenerReadyRef,
     runtimeEventQueueRef,
@@ -50,6 +52,7 @@ export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
       runtimeEventFrameRef.current = null
       if (disposed || runtimeEventQueueRef.current.length === 0) return
       const notifications = takeRuntimeEventFrame(runtimeEventQueueRef.current)
+        .filter((notification) => notification.runId !== authoritativeRunIdRef.current)
       flushSync(() => {
         setDetail((current) => current ? reduceRuntimeNotifications(current, notifications) : current)
       })
@@ -105,6 +108,7 @@ export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
     }
     const subscription = desktopClient.listenRuntimeEvents((notification) => {
       if (disposed) return
+      if (notification.runId === authoritativeRunIdRef.current) return
       const event = notification.event
       if (event.type === 'run.started') {
         setError(null)
@@ -149,6 +153,7 @@ export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
       runtimeListenerReadyRef.current = null
     }
   }, [
+    authoritativeRunIdRef,
     activeConversationIdRef,
     lastRuntimeEventAtRef,
     refreshList,

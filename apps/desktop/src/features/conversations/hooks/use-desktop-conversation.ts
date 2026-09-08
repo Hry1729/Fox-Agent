@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable, knowledgeReferenceKey, knowledgeReferenceFromLegacyBinding } from '../api/desktop-client'
-import { applyWorkEvent, mergeConversationDetail, runRecordIsActive } from '../model/runtime-event-reducer'
+import { applyWorkEvent, mergeConversationDetail } from '../model/runtime-event-reducer'
+import { conversationRunFingerprint, conversationRunIsActive, conversationRunState, snapshotForRun } from '../model/kernel-snapshot'
 import { pendingRuntimeQuestion } from '../model/pending-interactions'
 import { extractedAttachmentContext } from '../model/attachment-content'
 import { resolveConversationAgentId } from '../model/agent-initialization'
@@ -87,7 +88,7 @@ interface DesktopConversationState {
 }
 
 function runIsActive(detail: ConversationDetail | null) {
-  return runRecordIsActive(detail?.lastRun ?? null)
+  return conversationRunIsActive(detail)
 }
 
 export function activeConversationExpertBinding(detail: ConversationDetail | null) {
@@ -103,7 +104,7 @@ export function conversationExpertBindingLockError(detail: ConversationDetail | 
       retryable: false,
     }
   }
-  if (runRecordIsActive(detail.lastRun)) {
+  if (runIsActive(detail)) {
     return {
       code: 'conversation.expert_binding_locked',
       message: 'conversation expert cannot change while a run is active',
@@ -157,6 +158,8 @@ export function useDesktopConversation(): DesktopConversationState {
   const [trashedConversations, setTrashedConversations] = useState<ConversationSummary[]>([])
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
   const [detail, setDetail] = useState<ConversationDetail | null>(null)
+  const authoritativeRunIdRef = useRef<string | null>(null)
+  authoritativeRunIdRef.current = detail ? snapshotForRun(detail)?.runId ?? null : null
   const [draftAgentId, setDraftAgentId] = useState<string | null>(null)
   const [draftExpertId, setDraftExpertId] = useState<string | null>(null)
   const [draftProjectRoot, setDraftProjectRoot] = useState<string | null>(null)
@@ -668,6 +671,7 @@ export function useDesktopConversation(): DesktopConversationState {
   }, [])
 
   useRuntimeEventStream({
+    authoritativeRunIdRef,
     activeConversationIdRef,
     runtimeListenerReadyRef,
     runtimeEventQueueRef,
@@ -708,18 +712,18 @@ export function useDesktopConversation(): DesktopConversationState {
 
   const activeConversationId = detail?.conversation.id ?? null
   const activeRunId = detail?.lastRun?.id ?? null
-  const activeRunStatus = detail?.lastRun?.status ?? null
+  const activeRunStatus = conversationRunState(detail)
   useEffect(() => {
     if (!desktopRuntimeAvailable || !activeConversationId || !activeRunId) return
     const recoverableYuxiRun = runNeedsYuxiReconciliation(detail)
-    if (activeRunId.startsWith('pending-run-') || (!['queued', 'running', 'cancelling'].includes(activeRunStatus ?? '') && !recoverableYuxiRun)) return
+    if (activeRunId.startsWith('pending-run-') || (!runIsActive(detail) && !recoverableYuxiRun)) return
 
     let disposed = false
     let loading = false
     let timer: number | null = null
     let delayMs = 750
     let keepPolling = true
-    let lastFingerprint = `${activeRunStatus}:${detail?.lastRun?.lastSeq ?? 0}:${detail?.messages.length ?? 0}`
+    let lastFingerprint = conversationRunFingerprint(detail)
     const schedule = (delay = delayMs) => {
       if (disposed || !keepPolling) return
       if (timer !== null) window.clearTimeout(timer)
@@ -740,17 +744,17 @@ export function useDesktopConversation(): DesktopConversationState {
         if (runtimeEventQueueRef.current.length > 0 || lastRuntimeEventAtRef.current !== lastRuntimeEventAt) return
         if (persisted.lastRun?.id !== activeRunId) {
           keepPolling = false
-          activeRunIdRef.current = runRecordIsActive(persisted.lastRun) ? persisted.lastRun?.id ?? null : null
+          activeRunIdRef.current = runIsActive(persisted) ? persisted.lastRun?.id ?? null : null
           setDetail((current) => mergeConversationDetail(persisted, current))
           void refreshList()
           return
         }
-        const fingerprint = `${persisted.lastRun.status}:${persisted.lastRun.lastSeq}:${persisted.messages.length}`
+        const fingerprint = conversationRunFingerprint(persisted)
         const changed = fingerprint !== lastFingerprint
         lastFingerprint = fingerprint
         delayMs = changed ? 750 : Math.min(3_000, Math.round(delayMs * 1.6))
         setDetail((current) => mergeConversationDetail(persisted, current))
-        if (!runRecordIsActive(persisted.lastRun)) {
+        if (!runIsActive(persisted)) {
           keepPolling = false
           activeRunIdRef.current = null
           void refreshList()
@@ -1056,11 +1060,11 @@ export function useDesktopConversation(): DesktopConversationState {
       await desktopClient.cancelRun(runId)
       const deadline = Date.now() + 8_000
       let persisted = await desktopClient.loadConversation(conversationId)
-      while (persisted.lastRun?.id === runId && runRecordIsActive(persisted.lastRun) && Date.now() < deadline) {
+      while (persisted.lastRun?.id === runId && runIsActive(persisted) && Date.now() < deadline) {
         await new Promise((resolve) => window.setTimeout(resolve, 100))
         persisted = await desktopClient.loadConversation(conversationId)
       }
-      if (persisted.lastRun?.id === runId && runRecordIsActive(persisted.lastRun)) {
+      if (persisted.lastRun?.id === runId && runIsActive(persisted)) {
         const details = {
           code: 'runtime.cancel_timeout',
           message: '停止任务仍在处理中，请稍候再编辑或重新发送',
@@ -1140,7 +1144,7 @@ export function useDesktopConversation(): DesktopConversationState {
     try {
       await desktopClient.resolveWorkModeConfirmation(conversationId, goalId, expectedVersion, approved)
       const persisted = await desktopClient.loadConversation(conversationId)
-      activeRunIdRef.current = runRecordIsActive(persisted.lastRun) ? persisted.lastRun?.id ?? null : null
+      activeRunIdRef.current = runIsActive(persisted) ? persisted.lastRun?.id ?? null : null
       setDetail((current) => mergeConversationDetail(persisted, current))
       setError(null)
       void refreshList()
@@ -1160,7 +1164,7 @@ export function useDesktopConversation(): DesktopConversationState {
     try {
       await desktopClient.resolvePlanRevision(conversationId, planRevisionId, decision)
       const persisted = await desktopClient.loadConversation(conversationId)
-      activeRunIdRef.current = runRecordIsActive(persisted.lastRun) ? persisted.lastRun?.id ?? null : null
+      activeRunIdRef.current = runIsActive(persisted) ? persisted.lastRun?.id ?? null : null
       setDetail((current) => mergeConversationDetail(persisted, current))
       setError(null)
       return true
@@ -1187,7 +1191,7 @@ export function useDesktopConversation(): DesktopConversationState {
         }
       })
       const persisted = await desktopClient.loadConversation(conversationId)
-      activeRunIdRef.current = runRecordIsActive(persisted.lastRun) ? persisted.lastRun?.id ?? null : null
+      activeRunIdRef.current = runIsActive(persisted) ? persisted.lastRun?.id ?? null : null
       setDetail((current) => current?.conversation.id === conversationId ? persisted : current)
       setError(null)
       void refreshList()

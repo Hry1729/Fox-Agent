@@ -34,6 +34,35 @@ function notification(seq: number, event: RuntimeEventNotification['event']): Ru
 }
 
 describe('runtime event reducer', () => {
+  test('a known authoritative run ignores late Legacy lifecycle and text events', () => {
+    const current = detail()
+    current.kernelSnapshot = {
+      schemaVersion: 1, runId: 'run-1', turnId: 'turn-1', engineId: 'pi', state: 'waiting_approval',
+      lastEventSeq: '12', terminalWritten: false, runningElapsedMs: 0, tools: [],
+      providerAttempts: 0, turnAttempts: 0, compactions: 0,
+    }
+    const result = reduceRuntimeNotifications(current, [
+      notification(999, { type: 'run.completed' }),
+      notification(1000, { type: 'message.delta', delta: 'stale result' }),
+    ])
+    expect(result).toBe(current)
+    expect(result.kernelSnapshot?.state).toBe('waiting_approval')
+  })
+
+  test('a terminal Kernel snapshot lets a new run replace a stale active Legacy record', () => {
+    const current = detail()
+    current.lastRun!.status = 'running'
+    current.kernelSnapshot = {
+      schemaVersion: 1, runId: 'run-1', turnId: 'turn-1', engineId: 'pi', state: 'completed',
+      lastEventSeq: '12', terminalWritten: true, runningElapsedMs: 0, tools: [],
+      providerAttempts: 0, turnAttempts: 0, compactions: 0,
+    }
+    const persisted = detail()
+    persisted.lastRun!.id = 'run-2'
+    const merged = mergeConversationDetail(persisted, current)
+    expect(merged.lastRun?.id).toBe('run-2')
+    expect(merged.kernelSnapshot).toBeNull()
+  })
   test('keeps the persisted final answer when a later terminal event only updates status', () => {
     const persisted = detail()
     persisted.lastRun = { ...persisted.lastRun!, status: 'completed', lastSeq: 7, finishedAt: 7000 }

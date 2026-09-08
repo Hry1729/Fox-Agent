@@ -11,9 +11,24 @@ export function snapshotForRun(detail: ConversationDetail): KernelRunSnapshot | 
   const snapshot = detail.kernelSnapshot
   if (!snapshot || snapshot.schemaVersion !== 1 || snapshot.runId !== detail.lastRun?.id
     || !snapshot.turnId || !states.has(snapshot.state)
-    || !/^(0|[1-9]\d*)$/.test(snapshot.lastEventSeq)
+    || typeof snapshot.lastEventSeq !== 'string' || !/^(0|[1-9]\d{0,18})$/.test(snapshot.lastEventSeq)
     || terminalStates.has(snapshot.state) !== snapshot.terminalWritten) return null
   return snapshot
+}
+
+export function conversationRunState(detail: ConversationDetail | null): string | null {
+  if (!detail) return null
+  return snapshotForRun(detail)?.state ?? detail.lastRun?.status ?? null
+}
+
+export function conversationRunIsActive(detail: ConversationDetail | null): boolean {
+  const state = conversationRunState(detail)
+  return state !== null && ['queued', 'created', 'running', 'waiting_approval', 'retry_scheduled', 'compacting', 'cancelling'].includes(state)
+}
+
+export function conversationRunFingerprint(detail: ConversationDetail | null): string {
+  const snapshot = detail && snapshotForRun(detail)
+  return `${snapshot ? 'kernel' : 'legacy'}:${conversationRunState(detail)}:${snapshot?.lastEventSeq ?? detail?.lastRun?.lastSeq ?? 0}:${detail?.messages.length ?? 0}`
 }
 
 export function mergeKernelSnapshot(

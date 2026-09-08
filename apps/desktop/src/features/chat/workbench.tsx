@@ -224,6 +224,7 @@ import { conversationModelOverride, yuxiModelOverrideAllowed } from './model-sel
 import { resolveExpertKnowledgeDeclaration } from '@/features/agents/expert-knowledge'
 import { useKnowledgeBases } from '@/features/knowledge/use-knowledge'
 import { latestMessage, runIsActive, useDesktopConversation } from '@/features/conversations/hooks/use-desktop-conversation'
+import { conversationRunState } from '@/features/conversations/model/kernel-snapshot'
 import { pendingRuntimeQuestion } from '@/features/conversations/model/pending-interactions'
 import { allowedApprovalDecisions, isRepairOverrideApproval, repairOverrideApprovalDetails, resolveAllowedApprovalDecision } from '@/features/conversations/model/approval-decision-policy'
 import type { RuntimeQuestion, RuntimeQuestionRequest } from '@/features/conversations/model/pending-interactions'
@@ -4467,7 +4468,7 @@ export function Workbench() {
       ))
     : undefined
   const desktopRunning = desktopConversation.enabled && runIsActive(desktopConversation.detail)
-  const desktopRunStatus = desktopConversation.detail?.lastRun?.status
+  const desktopRunStatus = conversationRunState(desktopConversation.detail)
   const selectableAgents = chatSelectableAgents(agentResource.agents)
   const activeAgent = resolveActiveChatAgent(agentResource.agents, desktopConversation.selectedAgentId)
   const activeExpert = agentResource.agents.find((item) => item.id === desktopConversation.selectedExpertId) ?? null
