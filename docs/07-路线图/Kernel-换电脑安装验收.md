@@ -12,9 +12,15 @@
 .\Start-IsolatedFox.ps1 -ExePath 'C:\Users\你的用户名\AppData\Local\Fox\fox-desktop.exe' -Mode authoritative
 ```
 
-启动脚本只为新进程设置模式和独立数据目录。测试数据位于脚本旁 `TestData`；模式、程序校验值和 PID 记录在 `last-launch.json`。普通快捷方式仍使用普通数据目录与默认 Legacy 模式；本流程请一直使用脚本。
+启动脚本只为新进程设置模式和独立数据目录。测试数据位于脚本旁 `TestData`；模式、程序校验值和 PID 记录在 `last-launch.json`。普通快捷方式不会采用本脚本的进程设置；未另设环境变量时默认使用 Legacy。本流程请一直使用脚本。
 
 4. 在新窗口中配置你允许用于测试的模型。只输入合成测试内容。该安装包包含 Pi、DeepSeek Harness 适配代码；原生 Codex 还需要该电脑额外具备兼容的 Codex 程序，本脚本默认只测试 Pi。
+
+可用下面的只读检查核对安装文件是否齐全、是否与交付包一致。它不会启动程序，会在测试包旁生成 `installed-files-result.json`；文件一致仍不等于所有功能通过。
+
+```powershell
+.\Verify-InstalledFiles.ps1 -InstallDirectory 'C:\Users\你的用户名\AppData\Local\Fox'
+```
 
 ## 基本任务与审批
 
