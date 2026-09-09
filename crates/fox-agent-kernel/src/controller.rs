@@ -302,10 +302,17 @@ impl RunController {
         Ok((controller, effects))
     }
 
-    pub fn start_with_initial_input(run_id: &str, turn_id: &str, config: RunFrozenConfig,
-        input_hash: &str, clock: &dyn Clock) -> Result<(RunController, Vec<Effect>), KernelError> {
+    pub fn start_with_initial_input(
+        run_id: &str,
+        turn_id: &str,
+        config: RunFrozenConfig,
+        input_hash: &str,
+        clock: &dyn Clock,
+    ) -> Result<(RunController, Vec<Effect>), KernelError> {
         if config.kernel_mode != "authoritative" || input_hash.trim().is_empty() {
-            return Err(KernelError::FailClosed("initial model input requires an authoritative hash".into()));
+            return Err(KernelError::FailClosed(
+                "initial model input requires an authoritative hash".into(),
+            ));
         }
         let (mut controller, mut effects) = Self::start(run_id, turn_id, config, clock)?;
         // Pending is not in-flight; the deadline is armed atomically with lease.
@@ -313,13 +320,25 @@ impl RunController {
         effects.push(controller.append_event("engine.initial_requested", serde_json::json!({
             "turnId":turn_id, "inputHash":input_hash, "idempotencyKey":INITIAL_MODEL_IDEMPOTENCY_KEY,
         })));
-        effects.push(Effect::RequestInitialModel { input_hash: input_hash.into() });
+        effects.push(Effect::RequestInitialModel {
+            input_hash: input_hash.into(),
+        });
         Ok((controller, effects))
     }
 
-    pub fn begin_initial_model_request(&mut self, monotonic_ms: i64, wall_ms: i64) -> Result<Vec<Effect>, KernelError> {
-        if self.state != RunState::Running || self.model_request_in_flight || !self.batches.is_empty() || !self.tools.is_empty() {
-            return Err(KernelError::FailClosed("initial model request has already advanced".into()));
+    pub fn begin_initial_model_request(
+        &mut self,
+        monotonic_ms: i64,
+        wall_ms: i64,
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Running
+            || self.model_request_in_flight
+            || !self.batches.is_empty()
+            || !self.tools.is_empty()
+        {
+            return Err(KernelError::FailClosed(
+                "initial model request has already advanced".into(),
+            ));
         }
         self.arm_model_request(monotonic_ms, wall_ms);
         Ok(vec![self.append_event("engine.initial_dispatched", serde_json::json!({
@@ -327,15 +346,26 @@ impl RunController {
         }))])
     }
 
-    pub fn record_initial_model_response(&mut self, response_json: &str) -> Result<Effect, KernelError> {
-        if self.state != RunState::Running || !self.model_request_in_flight || !self.batches.is_empty()
-            || response_json.len() > 1_048_576 {
-            return Err(KernelError::FailClosed("initial response has no active model request".into()));
+    pub fn record_initial_model_response(
+        &mut self,
+        response_json: &str,
+    ) -> Result<Effect, KernelError> {
+        if self.state != RunState::Running
+            || !self.model_request_in_flight
+            || !self.batches.is_empty()
+            || response_json.len() > 1_048_576
+        {
+            return Err(KernelError::FailClosed(
+                "initial response has no active model request".into(),
+            ));
         }
         let response: serde_json::Value = serde_json::from_str(response_json)
             .map_err(|_| KernelError::FailClosed("invalid initial model response".into()))?;
         self.settle_model_request();
-        Ok(self.append_event("engine.initial_response", serde_json::json!({"response":response})))
+        Ok(self.append_event(
+            "engine.initial_response",
+            serde_json::json!({"response":response}),
+        ))
     }
 
     /// Reconstruct a controller from durable facts after a restart. Monotonic
@@ -344,6 +374,23 @@ impl RunController {
     /// wall time that remains valid. Fails closed on inconsistent input.
     pub fn rehydrate(data: RehydratedRun) -> Result<RunController, KernelError> {
         Self::validate_config(&data.config)?;
+        if let Some(pending) = &data.compaction.pending {
+            if pending.id.trim().is_empty()
+                || pending.id.len() > 512
+                || pending
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.trim().is_empty() || owner.len() > 512)
+                || !data.state.is_terminal()
+                    && data.state != RunState::Cancelling
+                    && (data.state != RunState::Compacting
+                        || pending.owner.is_some() != data.model_request_since_wall_ms.is_some())
+            {
+                return Err(KernelError::FailClosed(
+                    "invalid rehydrated compaction intent".into(),
+                ));
+            }
+        }
         if data.run_id.trim().is_empty() || data.turn_id.trim().is_empty() {
             return Err(KernelError::FailClosed(
                 "rehydrated run id and turn id must be non-empty".into(),
@@ -657,14 +704,26 @@ impl RunController {
     /// The engine proposed a batch of tool calls.
     /// Persist an opaque engine checkpoint with the same decision transaction
     /// as its tool proposal. The adapter validates engine-specific contents.
-    pub fn checkpoint_tool_batch(&mut self, batch_id: &str, checkpoint_json: &str) -> Result<Effect, KernelError> {
+    pub fn checkpoint_tool_batch(
+        &mut self,
+        batch_id: &str,
+        checkpoint_json: &str,
+    ) -> Result<Effect, KernelError> {
         self.ensure_live()?;
-        if !self.batches.iter().any(|batch| batch.batch_id == batch_id) || checkpoint_json.len() > 1_048_576 {
-            return Err(KernelError::FailClosed("invalid engine batch checkpoint scope/size".into()));
+        if !self.batches.iter().any(|batch| batch.batch_id == batch_id)
+            || checkpoint_json.len() > 1_048_576
+        {
+            return Err(KernelError::FailClosed(
+                "invalid engine batch checkpoint scope/size".into(),
+            ));
         }
         let checkpoint: serde_json::Value = serde_json::from_str(checkpoint_json)
             .map_err(|error| KernelError::FailClosed(error.to_string()))?;
-        if !checkpoint.is_object() { return Err(KernelError::FailClosed("engine checkpoint must be an object".into())); }
+        if !checkpoint.is_object() {
+            return Err(KernelError::FailClosed(
+                "engine checkpoint must be an object".into(),
+            ));
+        }
         Ok(self.append_event("engine.batch_checkpoint", serde_json::json!({
             "batchId":batch_id, "engineId":self.config.engine_id, "turnId":self.turn_id, "checkpoint":checkpoint,
         })))
@@ -1231,14 +1290,21 @@ impl RunController {
         effect_key: &str, failure_json: &str, provider: bool, delay_ms: i64,
     ) -> Result<Vec<Effect>, KernelError> {
         self.ensure_live()?;
-        if self.state != RunState::Running || !self.model_request_in_flight || delay_ms < 0
-            || self.tools.values().any(|tool| !tool.state.is_terminal()) {
-            return Err(KernelError::FailClosed("model retry requires an exclusively active model request".into()));
+        if self.state != RunState::Running
+            || !self.model_request_in_flight
+            || delay_ms < 0
+            || self.tools.values().any(|tool| !tool.state.is_terminal())
+        {
+            return Err(KernelError::FailClosed(
+                "model retry requires an exclusively active model request".into(),
+            ));
         }
         let (used, maximum) = if provider { (self.retry.provider_attempts, self.retry.provider_max) }
             else { (self.retry.turn_attempts, self.retry.turn_max) };
         if used >= maximum {
-            return Err(KernelError::FailClosed("frozen model retry budget exhausted".into()));
+            return Err(KernelError::FailClosed(
+                "frozen model retry budget exhausted".into(),
+            ));
         }
         let failure: serde_json::Value = serde_json::from_str(failure_json)
             .map_err(|_| KernelError::FailClosed("invalid model failure evidence".into()))?;
@@ -1248,15 +1314,25 @@ impl RunController {
         self.retry.scheduled_at_wall_ms = Some(now_wall_ms);
         self.retry.due_wall_ms = Some(now_wall_ms.saturating_add(delay_ms));
         self.retry.model_dispatch_pending = true;
-        if provider { self.retry.provider_attempts += 1; } else { self.retry.turn_attempts += 1; }
-        let mut effects = vec![self.append_event("engine.model_rejected", serde_json::json!({
-            "effectKey": effect_key, "failure": failure,
-        }))];
-        effects.push(self.append_event("run.retrying", serde_json::json!({
-            "kind": if provider { "provider" } else { "turn" }, "attempt": used + 1,
-            "maxAttempts": maximum, "delayMs": delay_ms, "scheduledAtWallMs": now_wall_ms,
-            "dueWallMs": self.retry.due_wall_ms,
-        })));
+        if provider {
+            self.retry.provider_attempts += 1;
+        } else {
+            self.retry.turn_attempts += 1;
+        }
+        let mut effects = vec![self.append_event(
+            "engine.model_rejected",
+            serde_json::json!({
+                "effectKey": effect_key, "failure": failure,
+            }),
+        )];
+        effects.push(self.append_event(
+            "run.retrying",
+            serde_json::json!({
+                "kind": if provider { "provider" } else { "turn" }, "attempt": used + 1,
+                "maxAttempts": maximum, "delayMs": delay_ms, "scheduledAtWallMs": now_wall_ms,
+                "dueWallMs": self.retry.due_wall_ms,
+            }),
+        ));
         effects.push(Effect::PublishSnapshot);
         Ok(effects)
     }
@@ -1357,19 +1433,118 @@ impl RunController {
                 to: "running",
             });
         }
-        self.compaction.compactions = self.compaction.compactions.saturating_add(1);
+        if !aborted {
+            self.compaction.compactions = self.compaction.compactions.saturating_add(1);
+        }
         self.compaction.last_reason = None;
+        self.compaction.pending = None;
         self.state = RunState::Running;
         self.running_since_mono_ms = Some(now_monotonic_ms);
-        // Post-compaction the run dispatches a fresh model request. The adapter
-        // passes paired monotonic/wall readings; here the same value anchors
-        // both (deterministic in tests).
-        self.arm_model_request(now_monotonic_ms, now_monotonic_ms);
+        // A prepared normal model delivery is still pending, not in flight.
+        // Its own atomic dispatch will arm a fresh, paired clock reading.
+        self.settle_model_request();
         let mut effects = vec![self.append_event(
             "context.compaction.completed",
             serde_json::json!({ "aborted": aborted, "willRetry": aborted }),
         )];
         effects.push(Effect::PublishSnapshot);
+        Ok(effects)
+    }
+
+    /// Persist an input before launching a summarizer. No tool may be in flight.
+    pub fn prepare_context_compaction(
+        &mut self,
+        id: &str,
+        plan_json: &str,
+        monotonic_ms: i64,
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.config.kernel_mode != "authoritative"
+            || self.model_request_in_flight
+            || self.compaction.pending.is_some()
+            || id.trim().is_empty()
+            || id.len() > 512
+            || self.tools.values().any(|tool| !tool.state.is_terminal())
+            || plan_json.len() > 2_097_152
+        {
+            return Err(KernelError::FailClosed(
+                "context compaction requires an idle authoritative boundary".into(),
+            ));
+        }
+        let plan: serde_json::Value = serde_json::from_str(plan_json)
+            .map_err(|_| KernelError::FailClosed("invalid compaction plan".into()))?;
+        let mut effects = self.begin_compaction(monotonic_ms, "host_context_threshold")?;
+        self.compaction.last_reason = Some("host_context_threshold".into());
+        self.compaction.pending = Some(crate::ports::PendingCompaction {
+            id: id.into(),
+            owner: None,
+        });
+        // Summarization is execution work, unlike waiting for human approval.
+        self.running_since_mono_ms = Some(monotonic_ms);
+        effects.push(self.append_event(
+            "context.compaction.prepared",
+            serde_json::json!({"id":id,"plan":plan}),
+        ));
+        Ok(effects)
+    }
+
+    pub fn dispatch_context_compaction(
+        &mut self,
+        id: &str,
+        owner: &str,
+        monotonic_ms: i64,
+        wall_ms: i64,
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Compacting
+            || self.model_request_in_flight
+            || owner.trim().is_empty()
+            || owner.len() > 512
+            || wall_ms <= 0
+            || self
+                .compaction
+                .pending
+                .as_ref()
+                .is_none_or(|pending| pending.id != id || pending.owner.is_some())
+        {
+            return Err(KernelError::FailClosed(
+                "compaction dispatch is already claimed or invalid".into(),
+            ));
+        }
+        self.compaction.pending.as_mut().unwrap().owner = Some(owner.into());
+        self.arm_model_request(monotonic_ms, wall_ms);
+        Ok(vec![self.append_event(
+            "context.compaction.dispatched",
+            serde_json::json!({"id":id,"owner":owner,"startedAt":wall_ms}),
+        )])
+    }
+
+    pub fn complete_context_compaction(
+        &mut self,
+        id: &str,
+        owner: &str,
+        result_json: &str,
+        applied: bool,
+        monotonic_ms: i64,
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Compacting
+            || !self.model_request_in_flight
+            || self
+                .compaction
+                .pending
+                .as_ref()
+                .is_none_or(|pending| pending.id != id || pending.owner.as_deref() != Some(owner))
+            || result_json.len() > 32_768
+        {
+            return Err(KernelError::FailClosed(
+                "compaction result lost its dispatch owner".into(),
+            ));
+        }
+        let result: serde_json::Value = serde_json::from_str(result_json)
+            .map_err(|_| KernelError::FailClosed("invalid compaction result".into()))?;
+        let mut effects = vec![self.append_event(
+            "context.compaction.result",
+            serde_json::json!({"id":id,"owner":owner,"result":result}),
+        )];
+        effects.extend(self.end_compaction(monotonic_ms, !applied)?);
         Ok(effects)
     }
 
@@ -1500,7 +1675,19 @@ impl RunController {
             return effects;
         }
 
-        if self.state == RunState::Running {
+        if self.state == RunState::Running
+            || self.state == RunState::Compacting && self.compaction.pending.is_some()
+        {
+            if self.state == RunState::Compacting
+                && self
+                    .model_request_since_wall_ms
+                    .is_some_and(|since| wall_ms < since)
+            {
+                return self.terminate(RunOutcome::Failed {
+                    code: "kernel.compaction_clock_regressed".into(),
+                    message: "Compaction clock moved backwards; request was not repeated.".into(),
+                });
+            }
             if let Some(since) = self.running_since_mono_ms.take() {
                 self.running_elapsed_ms += (monotonic_ms - since).max(0);
                 self.running_since_mono_ms = Some(monotonic_ms);
@@ -1610,27 +1797,57 @@ impl RunController {
 
     /// The host must persist this decision together with its batch-delivery
     /// lease before invoking the engine. Never renew an in-flight request.
-    pub fn begin_batch_model_request(&mut self, batch_id: &str, monotonic_ms: i64, wall_ms: i64) -> Result<Vec<Effect>, KernelError> {
-        if self.state != RunState::Running || self.model_request_in_flight
-            || !self.batches.iter().any(|batch| batch.batch_id == batch_id && batch.barrier_emitted) {
-            return Err(KernelError::FailClosed("model dispatch requires a settled batch and no in-flight request".into()));
+    pub fn begin_batch_model_request(
+        &mut self,
+        batch_id: &str,
+        monotonic_ms: i64,
+        wall_ms: i64,
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Running
+            || self.model_request_in_flight
+            || !self
+                .batches
+                .iter()
+                .any(|batch| batch.batch_id == batch_id && batch.barrier_emitted)
+        {
+            return Err(KernelError::FailClosed(
+                "model dispatch requires a settled batch and no in-flight request".into(),
+            ));
         }
         self.arm_model_request(monotonic_ms, wall_ms);
-        Ok(vec![self.append_event("engine.batch_dispatched", serde_json::json!({
-            "batchId": batch_id, "turnId": self.turn_id, "engineId": self.config.engine_id,
-            "idempotencyKey": batch_delivery_idempotency_key(batch_id), "startedAt": wall_ms,
-        }))])
+        Ok(vec![self.append_event(
+            "engine.batch_dispatched",
+            serde_json::json!({
+                "batchId": batch_id, "turnId": self.turn_id, "engineId": self.config.engine_id,
+                "idempotencyKey": batch_delivery_idempotency_key(batch_id), "startedAt": wall_ms,
+            }),
+        )])
     }
 
-    pub fn record_batch_model_response(&mut self, batch_id: &str, response_json: &str) -> Result<Effect, KernelError> {
-        if self.state != RunState::Running || !self.model_request_in_flight
-            || !self.batches.iter().any(|batch| batch.batch_id == batch_id && batch.barrier_emitted)
-            || response_json.len() > 1_048_576 {
-            return Err(KernelError::FailClosed("model response has no active batch request".into()));
+    pub fn record_batch_model_response(
+        &mut self,
+        batch_id: &str,
+        response_json: &str,
+    ) -> Result<Effect, KernelError> {
+        if self.state != RunState::Running
+            || !self.model_request_in_flight
+            || !self
+                .batches
+                .iter()
+                .any(|batch| batch.batch_id == batch_id && batch.barrier_emitted)
+            || response_json.len() > 1_048_576
+        {
+            return Err(KernelError::FailClosed(
+                "model response has no active batch request".into(),
+            ));
         }
         let response: serde_json::Value = serde_json::from_str(response_json)
             .map_err(|error| KernelError::FailClosed(error.to_string()))?;
-        if !response.is_object() { return Err(KernelError::FailClosed("model response must be an object".into())); }
+        if !response.is_object() {
+            return Err(KernelError::FailClosed(
+                "model response must be an object".into(),
+            ));
+        }
         self.settle_model_request();
         Ok(self.append_event("engine.batch_response", serde_json::json!({
             "batchId": batch_id, "turnId": self.turn_id, "engineId": self.config.engine_id, "response": response,

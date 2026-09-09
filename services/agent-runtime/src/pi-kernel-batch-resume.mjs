@@ -206,7 +206,7 @@ export async function resumePiKernelBatch(session, request, identity, signal, pr
   return runPiKernelModel(session, request, prepareKernelBatchResume(request, identity), signal, preview)
 }
 
-async function runPiKernelModel(session, request, prepared, signal, preview) {
+export async function runPiKernelModel(session, request, prepared, signal, preview) {
   if (!session?.agent?.state || typeof session.agent.continue !== 'function' || typeof session.abort !== 'function') fail('missing public Pi session adapter')
   if (!signal || typeof signal.addEventListener !== 'function') fail('missing Host cancellation signal')
   if (signal.aborted) fail('Host cancelled the resume')

@@ -7,6 +7,7 @@ import { resolveModelProfile, transportProvider } from './model-profile.mjs'
 import { installKernelProposalTools, prepareKernelBatchResume, resumePiKernelBatch, prepareKernelInitialModel, startPiKernelInitial } from './pi-kernel-batch-resume.mjs'
 import { describeKernelRun } from './pi-kernel-description.mjs'
 import { observeKernelModelTransport } from './pi-kernel-model-failure.mjs'
+import { prepareKernelCompaction, compactPiKernelContext } from './pi-kernel-compaction.mjs'
 
 const nonempty = value => typeof value === 'string' && value.trim().length > 0
 
@@ -70,7 +71,7 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
     modelFailure = observeKernelModelTransport(session)
     if (state !== 'initializing') throw new Error('Kernel initialization was cancelled')
     state = 'ready'
-    respond(request, 'kernel.ready', { singleUse: true, resourceExecution: false, automaticReplay: false,
+    respond(request, 'kernel.ready', { singleUse: true, resourceExecution: false, automaticReplay: false, hostCompaction: true,
       adapterVersion: `pi-${PI_PACKAGE_VERSION}/fox-kernel-worker-v1` })
   }
 
@@ -110,6 +111,17 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
             if (!evidence) throw error
             respond(request, 'kernel.model_failure', evidence)
           }
+          finally { state = 'consumed'; active = null; provider?.unregister(); provider = null }
+          break
+        }
+        case 'kernel.compact_context': {
+          if (state !== 'ready' || !owns(request)) throw new Error('Kernel worker is not ready for compaction')
+          prepareKernelCompaction(request, identity)
+          if (session.agent.state.tools.length !== 0) throw new Error('Compaction cannot retain tool proposals')
+          state = 'running'
+          abort = new AbortController()
+          active = compactPiKernelContext(session, request, identity, abort.signal)
+          try { respond(request, 'kernel.compaction_result', await active) }
           finally { state = 'consumed'; active = null; provider?.unregister(); provider = null }
           break
         }

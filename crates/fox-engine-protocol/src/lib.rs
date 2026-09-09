@@ -9,6 +9,8 @@ mod control;
 pub use control::*;
 mod resume;
 pub use resume::*;
+mod compaction;
+pub use compaction::*;
 mod snapshot;
 pub use snapshot::*;
 
@@ -235,7 +237,6 @@ pub fn timestamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-
 /// Stable declaration order is part of the runtime tool-registration contract.
 pub const TOOL_CONTRACTS: &[(&str, &str, &str, &str)] = &[
     ("read", "project-read", "runtime", "preflight"),
@@ -305,8 +306,13 @@ pub const TOOL_CONTRACTS: &[(&str, &str, &str, &str)] = &[
     ("call_mcp_tool", "mcp", "host", "always"),
 ];
 
-pub fn canonical_runtime_tool_contract(tool: &str) -> Option<(&'static str, &'static str, &'static str)> {
-    TOOL_CONTRACTS.iter().find(|entry| entry.0 == tool).map(|entry| (entry.1, entry.2, entry.3))
+pub fn canonical_runtime_tool_contract(
+    tool: &str,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    TOOL_CONTRACTS
+        .iter()
+        .find(|entry| entry.0 == tool)
+        .map(|entry| (entry.1, entry.2, entry.3))
 }
 
 pub fn schema_bundle() -> Value {
@@ -329,6 +335,8 @@ pub fn schema_bundle() -> Value {
             "KernelInitialModelResponse": schemars::schema_for!(KernelInitialModelResponse),
             "KernelModelPreview": schemars::schema_for!(KernelModelPreview),
             "KernelModelFailure": schemars::schema_for!(KernelModelFailure),
+            "KernelCompactionRequest": schemars::schema_for!(KernelCompactionRequest),
+            "KernelCompactionResponse": schemars::schema_for!(KernelCompactionResponse),
             "KernelRunSnapshot": schemars::schema_for!(KernelRunSnapshot),
             "KernelStateInvalidation": schemars::schema_for!(KernelStateInvalidation)
         },

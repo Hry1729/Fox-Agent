@@ -9,9 +9,11 @@
 //! Runtime adapters decide whether to use it in observer or authoritative mode;
 //! extracting the crate does not change production authority.
 
-pub mod controller;
 pub mod cancellation;
+pub mod controller;
 pub use cancellation::{CancellationRegistry, CancellationToken};
+#[cfg(test)]
+mod compaction_tests;
 #[cfg(test)]
 pub mod corpus;
 pub mod ports;
@@ -29,11 +31,11 @@ pub use recovery::{
 };
 
 pub use controller::{
-    INITIAL_MODEL_EFFECT_KEY, INITIAL_MODEL_IDEMPOTENCY_KEY,
     approval_effect_key, batch_delivery_effect_key, batch_delivery_idempotency_key,
     dispatch_effect_key, dispatch_idempotency_key, persist_events, Effect, KernelPersistCommand,
     PersistApprovalResolution, PersistBatch, PersistEvent, PersistOutboxEffect, PersistTool,
-    RehydratedBatch, RehydratedRun, RehydratedToolCall, RunController,
+    RehydratedBatch, RehydratedRun, RehydratedToolCall, RunController, INITIAL_MODEL_EFFECT_KEY,
+    INITIAL_MODEL_IDEMPOTENCY_KEY,
 };
 pub use ports::{
     CancellationPort, Clock, ClockReading, CompactionState, EnginePort, EventStorePort,

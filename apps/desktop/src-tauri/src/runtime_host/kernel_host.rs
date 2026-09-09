@@ -177,7 +177,9 @@ pub(super) fn drive_with_actions(
                         | OutboxEffectKind::DeliverToolBatch
                 )
         });
-        let result = if let Some(effect) = next {
+        let result = if snapshot.state == "compacting" {
+            coordinator.resume_context_compaction(&owner, runtime, api_key)
+        } else if let Some(effect) = next {
             match effect.kind {
                 OutboxEffectKind::InitialModel => {
                     coordinator.dispatch_initial_with_worker(&owner, policy, runtime, api_key)
@@ -215,7 +217,7 @@ pub(super) fn drive_with_actions(
             )?;
             continue;
         };
-        if result.is_err() {
+        if let Err(error) = result {
             settle_children(true)?;
             // Prefer a durable UI cancellation over classifying the interrupted
             // worker as an engine error. The executor has already cleaned up.
@@ -230,10 +232,16 @@ pub(super) fn drive_with_actions(
             if !terminal(&coordinator.snapshot()?.state) {
                 // Do not persist arbitrary adapter errors: they may contain
                 // request bodies or credentials. Detailed diagnostics stay local.
-                coordinator.fail(
-                    "kernel.execution_failed",
-                    "The owned model or resource executor failed; uncertain work was not replayed.",
-                )?;
+                let (code, message) = match error.as_str() {
+                    crate::kernel_compaction::UNCERTAIN => (crate::kernel_compaction::UNCERTAIN,
+                        "上下文压缩请求已发出，但结果未确认。原始历史保留，未自动重复请求；请检查后重新发起任务。"),
+                    crate::kernel_compaction::INSUFFICIENT => (crate::kernel_compaction::INSUFFICIENT,
+                        "保留工具结果、执行凭据和最近消息后，上下文仍超出安全容量。原始历史未删改，请缩小任务或新建对话。"),
+                    crate::kernel_compaction::FAILED => (crate::kernel_compaction::FAILED,
+                        "上下文压缩未取得有效结果，任务已停止。原始历史保留，未自动重复请求。"),
+                    _ => ("kernel.execution_failed", "The owned model or resource executor failed; uncertain work was not replayed."),
+                };
+                coordinator.fail(code, message)?;
             }
         }
     }

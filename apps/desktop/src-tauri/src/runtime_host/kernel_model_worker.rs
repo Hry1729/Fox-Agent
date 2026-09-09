@@ -1,9 +1,11 @@
 //! Isolated transport for a claimed Kernel batch; never shares Legacy workers.
 use super::RuntimeCommand;
 use crate::kernel::CancellationToken;
-use fox_engine_protocol::{KernelBatchResumeFrame, KernelModelResponse, RunControlBinding, PROTOCOL_NAME, PROTOCOL_VERSION};
-use serde_json::{json, Value};
 pub(super) use crate::kernel_model_config::KernelModelConfig;
+use fox_engine_protocol::{
+    KernelBatchResumeFrame, KernelModelResponse, RunControlBinding, PROTOCOL_NAME, PROTOCOL_VERSION,
+};
+use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, Command, Stdio},
@@ -21,8 +23,14 @@ pub(super) fn settled_failure(error: &str) -> Option<fox_engine_protocol::Kernel
     Some(evidence)
 }
 
-pub(super) fn describe(runtime: &RuntimeCommand, binding: &RunControlBinding, model_service: Value,
-    prompt: Value, supported_tools: Vec<&str>, token: &CancellationToken) -> Result<KernelModelConfig, String> {
+pub(super) fn describe(
+    runtime: &RuntimeCommand,
+    binding: &RunControlBinding,
+    model_service: Value,
+    prompt: Value,
+    supported_tools: Vec<&str>,
+    token: &CancellationToken,
+) -> Result<KernelModelConfig, String> {
     token.check()?;
     let request = json!({
         "protocol": PROTOCOL_NAME, "version": PROTOCOL_VERSION, "kind": "request", "type": "kernel.describe",
@@ -32,13 +40,28 @@ pub(super) fn describe(runtime: &RuntimeCommand, binding: &RunControlBinding, mo
         "payload": {"executionProfileId":binding.execution_profile_id,"modelService":model_service,"prompt":prompt,"supportedTools":supported_tools},
     });
     let mut worker = Worker::spawn(runtime)?;
-    let result = worker.exchange(request, "kernel.description", token, Instant::now() + Duration::from_secs(30))?;
-    if result["schemaVersion"] != 1 || result["executionProfileId"] != binding.execution_profile_id {
+    let result = worker.exchange(
+        request,
+        "kernel.description",
+        token,
+        Instant::now() + Duration::from_secs(30),
+    )?;
+    if result["schemaVersion"] != 1 || result["executionProfileId"] != binding.execution_profile_id
+    {
         return Err("Kernel description identity mismatch".into());
     }
-    let config = KernelModelConfig { execution_profile_id: binding.execution_profile_id.clone(), model_service,
-        system_prompt: result["systemPrompt"].as_str().ok_or("missing Kernel system prompt")?.into(),
-        proposal_tools: result["proposalTools"].as_array().ok_or("missing Kernel tool descriptions")?.clone() };
+    let config = KernelModelConfig {
+        execution_profile_id: binding.execution_profile_id.clone(),
+        model_service,
+        system_prompt: result["systemPrompt"]
+            .as_str()
+            .ok_or("missing Kernel system prompt")?
+            .into(),
+        proposal_tools: result["proposalTools"]
+            .as_array()
+            .ok_or("missing Kernel tool descriptions")?
+            .clone(),
+    };
     config.hash()?;
     if config.proposal_tools.iter().any(|tool| !supported_tools.contains(&tool["name"].as_str().unwrap_or_default())) {
         return Err("Kernel description added unsupported resource tools".into());
@@ -68,14 +91,20 @@ impl Drop for Worker {
     }
 }
 
-fn wait<T>(receiver: &Receiver<T>, token: &CancellationToken, deadline: Instant) -> Result<T, String> {
+fn wait<T>(
+    receiver: &Receiver<T>,
+    token: &CancellationToken,
+    deadline: Instant,
+) -> Result<T, String> {
     loop {
         token.check()?;
         let remaining = deadline.checked_duration_since(Instant::now()).ok_or("Kernel worker deadline exceeded; reconcile delivery")?;
         match receiver.recv_timeout(remaining.min(Duration::from_millis(20))) {
             Ok(value) => { token.check()?; return Ok(value); }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err("Kernel worker disconnected; reconcile delivery".into()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("Kernel worker disconnected; reconcile delivery".into())
+            }
         }
     }
 }
@@ -110,15 +139,33 @@ impl Worker {
                 if sender.try_send(message).is_err() || failed { break; }
             }
         });
-        Ok(Self { child, stdin, reader: Some(reader), writer: None, messages })
+        Ok(Self {
+            child,
+            stdin,
+            reader: Some(reader),
+            writer: None,
+            messages,
+        })
     }
 
-    fn exchange(&mut self, request: Value, expected: &str, token: &CancellationToken, deadline: Instant) -> Result<Value, String> {
-        self.exchange_with_preview(request,expected,token,deadline,None)
+    fn exchange(
+        &mut self,
+        request: Value,
+        expected: &str,
+        token: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Value, String> {
+        self.exchange_with_preview(request, expected, token, deadline, None)
     }
 
-    fn exchange_with_preview(&mut self, request: Value, expected: &str, token: &CancellationToken, deadline: Instant,
-        preview: Option<&PreviewSink>) -> Result<Value, String> {
+    fn exchange_with_preview(
+        &mut self,
+        request: Value,
+        expected: &str,
+        token: &CancellationToken,
+        deadline: Instant,
+        preview: Option<&PreviewSink>,
+    ) -> Result<Value, String> {
         let mut bytes = serde_json::to_vec(&request).map_err(|_| "invalid Kernel request")?;
         bytes.push(b'\n');
         if bytes.len() > MAX_FRAME { return Err("Kernel request exceeds frame limit".into()); }
@@ -134,43 +181,77 @@ impl Worker {
         result?;
         let mut revision = 0;
         loop {
-        let response = wait(&self.messages, token, deadline)??;
-        if response["protocol"] != PROTOCOL_NAME || response["version"] != PROTOCOL_VERSION
-            || response["kind"] != "response"
-            || response["requestId"] != request["id"]
-            || ["runId", "conversationId", "runtimeSessionId"].iter().any(|key| response[key] != request[key]) {
-            // No child message/provider error is copied into durable diagnostics.
-            return Err("Kernel worker response identity/type mismatch; reconcile delivery".into());
-        }
-        if response["type"]=="kernel.model_preview" {
-            let Some(sink) = preview.filter(|_|expected=="kernel.model_response") else { return Err("unexpected Kernel model preview".into()); };
-            let notice: fox_engine_protocol::KernelModelPreview = serde_json::from_value(response["payload"].clone()).map_err(|_| "invalid Kernel model preview")?;
-            notice.validate()?;
-            let frame = request["payload"].get("initialModel").or_else(||request["payload"].get("batchResume")).ok_or("missing model preview cursor")?;
-            let turn = frame.get("turnId").or_else(||frame.get("input").and_then(|input|input.get("turnId")));
-            if notice.run_id!=request["runId"] || notice.conversation_id!=request["conversationId"]
-                || Some(&Value::String(notice.turn_id.clone()))!=turn || notice.checkpoint_seq!=frame["checkpointSeq"]
-                || notice.revision<=revision { return Err("Kernel model preview identity/order mismatch".into()); }
-            revision = notice.revision;
-            token.check()?;
-            sink(&notice);
-            continue;
-        }
-        if response["type"] == "kernel.model_failure" && expected == "kernel.model_response" {
-            let failure: fox_engine_protocol::KernelModelFailure = serde_json::from_value(response["payload"].clone())
-                .map_err(|_| "invalid settled Kernel model failure")?;
-            failure.validate()?;
-            let frame = request["payload"].get("initialModel").or_else(||request["payload"].get("batchResume"))
-                .ok_or("missing failure request identity")?;
-            let turn = frame.get("turnId").or_else(||frame.get("input").and_then(|input|input.get("turnId")));
-            if failure.run_id != request["runId"] || Some(&Value::String(failure.turn_id.clone())) != turn
-                || failure.checkpoint_seq != frame["checkpointSeq"] {
-                return Err("Kernel failure belongs to another model request".into());
+            let response = wait(&self.messages, token, deadline)??;
+            if response["protocol"] != PROTOCOL_NAME
+                || response["version"] != PROTOCOL_VERSION
+                || response["kind"] != "response"
+                || response["requestId"] != request["id"]
+                || ["runId", "conversationId", "runtimeSessionId"]
+                    .iter()
+                    .any(|key| response[key] != request[key])
+            {
+                // No child message/provider error is copied into durable diagnostics.
+                return Err(
+                    "Kernel worker response identity/type mismatch; reconcile delivery".into(),
+                );
             }
-            return Err(format!("{SETTLED_FAILURE_PREFIX}{}",serde_json::to_string(&failure).map_err(|_| "invalid failure")?));
-        }
-        if response["type"]!=expected { return Err("Kernel worker response identity/type mismatch; reconcile delivery".into()); }
-        return Ok(response["payload"].clone());
+            if response["type"] == "kernel.model_preview" {
+                let Some(sink) = preview.filter(|_| expected == "kernel.model_response") else {
+                    return Err("unexpected Kernel model preview".into());
+                };
+                let notice: fox_engine_protocol::KernelModelPreview =
+                    serde_json::from_value(response["payload"].clone())
+                        .map_err(|_| "invalid Kernel model preview")?;
+                notice.validate()?;
+                let frame = request["payload"]
+                    .get("initialModel")
+                    .or_else(|| request["payload"].get("batchResume"))
+                    .ok_or("missing model preview cursor")?;
+                let turn = frame
+                    .get("turnId")
+                    .or_else(|| frame.get("input").and_then(|input| input.get("turnId")));
+                if notice.run_id != request["runId"]
+                    || notice.conversation_id != request["conversationId"]
+                    || Some(&Value::String(notice.turn_id.clone())) != turn
+                    || notice.checkpoint_seq != frame["checkpointSeq"]
+                    || notice.revision <= revision
+                {
+                    return Err("Kernel model preview identity/order mismatch".into());
+                }
+                revision = notice.revision;
+                token.check()?;
+                sink(&notice);
+                continue;
+            }
+            if response["type"] == "kernel.model_failure" && expected == "kernel.model_response" {
+                let failure: fox_engine_protocol::KernelModelFailure =
+                    serde_json::from_value(response["payload"].clone())
+                        .map_err(|_| "invalid settled Kernel model failure")?;
+                failure.validate()?;
+                let frame = request["payload"]
+                    .get("initialModel")
+                    .or_else(|| request["payload"].get("batchResume"))
+                    .ok_or("missing failure request identity")?;
+                let turn = frame
+                    .get("turnId")
+                    .or_else(|| frame.get("input").and_then(|input| input.get("turnId")));
+                if failure.run_id != request["runId"]
+                    || Some(&Value::String(failure.turn_id.clone())) != turn
+                    || failure.checkpoint_seq != frame["checkpointSeq"]
+                {
+                    return Err("Kernel failure belongs to another model request".into());
+                }
+                return Err(format!(
+                    "{SETTLED_FAILURE_PREFIX}{}",
+                    serde_json::to_string(&failure).map_err(|_| "invalid failure")?
+                ));
+            }
+            if response["type"] != expected {
+                return Err(
+                    "Kernel worker response identity/type mismatch; reconcile delivery".into(),
+                );
+            }
+            return Ok(response["payload"].clone());
         }
     }
 }
@@ -180,7 +261,16 @@ pub(crate) fn deliver(
     binding: &RunControlBinding, frame: &KernelBatchResumeFrame, token: &CancellationToken,
     remaining_budget_ms: i64,
 ) -> Result<KernelModelResponse, String> {
-    deliver_with_preview(runtime,config,api_key,binding,frame,token,remaining_budget_ms,None)
+    deliver_with_preview(
+        runtime,
+        config,
+        api_key,
+        binding,
+        frame,
+        token,
+        remaining_budget_ms,
+        None,
+    )
 }
 
 pub(super) fn deliver_with_preview(
@@ -190,9 +280,20 @@ pub(super) fn deliver_with_preview(
 ) -> Result<KernelModelResponse, String> {
     token.check()?;
     frame.validate()?;
-    let payload = call_model(runtime, config, api_key, binding, "kernel.resume_batch",
-        json!({"controlBinding":binding,"batchResume":frame}), token, remaining_budget_ms,preview)?;
-    if payload["idempotencyKey"] != frame.idempotency_key || payload["checkpointSeq"] != frame.checkpoint_seq {
+    let payload = call_model(
+        runtime,
+        config,
+        api_key,
+        binding,
+        "kernel.resume_batch",
+        json!({"controlBinding":binding,"batchResume":frame}),
+        token,
+        remaining_budget_ms,
+        preview,
+    )?;
+    if payload["idempotencyKey"] != frame.idempotency_key
+        || payload["checkpointSeq"] != frame.checkpoint_seq
+    {
         return Err("Kernel worker returned a different delivery cursor".into());
     }
     let response: KernelModelResponse = serde_json::from_value(payload["response"].clone()).map_err(|_| "invalid Kernel model response")?;
@@ -203,22 +304,61 @@ pub(super) fn deliver_with_preview(
     Ok(response)
 }
 
-pub(crate) fn deliver_initial(runtime: &RuntimeCommand, config: &KernelModelConfig, api_key: &str,
-    binding: &RunControlBinding, frame: &fox_engine_protocol::KernelInitialModelFrame,
-    token: &CancellationToken, remaining_budget_ms: i64) -> Result<fox_engine_protocol::KernelInitialModelResponse, String> {
-    deliver_initial_with_preview(runtime,config,api_key,binding,frame,token,remaining_budget_ms,None)
+pub(crate) fn deliver_initial(
+    runtime: &RuntimeCommand,
+    config: &KernelModelConfig,
+    api_key: &str,
+    binding: &RunControlBinding,
+    frame: &fox_engine_protocol::KernelInitialModelFrame,
+    token: &CancellationToken,
+    remaining_budget_ms: i64,
+) -> Result<fox_engine_protocol::KernelInitialModelResponse, String> {
+    deliver_initial_with_preview(
+        runtime,
+        config,
+        api_key,
+        binding,
+        frame,
+        token,
+        remaining_budget_ms,
+        None,
+    )
 }
 
-pub(super) fn deliver_initial_with_preview(runtime: &RuntimeCommand, config: &KernelModelConfig, api_key: &str,
-    binding: &RunControlBinding, frame: &fox_engine_protocol::KernelInitialModelFrame,
-    token: &CancellationToken, remaining_budget_ms: i64, preview: Option<&PreviewSink>) -> Result<fox_engine_protocol::KernelInitialModelResponse, String> {
+pub(super) fn deliver_initial_with_preview(
+    runtime: &RuntimeCommand,
+    config: &KernelModelConfig,
+    api_key: &str,
+    binding: &RunControlBinding,
+    frame: &fox_engine_protocol::KernelInitialModelFrame,
+    token: &CancellationToken,
+    remaining_budget_ms: i64,
+    preview: Option<&PreviewSink>,
+) -> Result<fox_engine_protocol::KernelInitialModelResponse, String> {
     token.check()?;
     frame.validate()?;
-    if frame.input.run_id != binding.run_id || frame.input.prompt_config_hash != config.hash()? { return Err("initial input configuration mismatch".into()); }
-    let payload = call_model(runtime, config, api_key, binding, "kernel.start_initial",
-        json!({"controlBinding":binding,"initialModel":frame}), token, remaining_budget_ms,preview)?;
-    if payload["idempotencyKey"] != frame.idempotency_key || payload["checkpointSeq"] != frame.checkpoint_seq { return Err("initial delivery cursor mismatch".into()); }
-    let response: fox_engine_protocol::KernelInitialModelResponse = serde_json::from_value(payload["response"].clone()).map_err(|_| "invalid initial model response")?;
+    if frame.input.run_id != binding.run_id || frame.input.prompt_config_hash != config.hash()? {
+        return Err("initial input configuration mismatch".into());
+    }
+    let payload = call_model(
+        runtime,
+        config,
+        api_key,
+        binding,
+        "kernel.start_initial",
+        json!({"controlBinding":binding,"initialModel":frame}),
+        token,
+        remaining_budget_ms,
+        preview,
+    )?;
+    if payload["idempotencyKey"] != frame.idempotency_key
+        || payload["checkpointSeq"] != frame.checkpoint_seq
+    {
+        return Err("initial delivery cursor mismatch".into());
+    }
+    let response: fox_engine_protocol::KernelInitialModelResponse =
+        serde_json::from_value(payload["response"].clone())
+            .map_err(|_| "invalid initial model response")?;
     response.validate()?;
     if response.run_id != binding.run_id || response.turn_id != frame.input.turn_id || response.checkpoint_seq != frame.checkpoint_seq {
         return Err("initial model response identity mismatch".into());
@@ -227,9 +367,17 @@ pub(super) fn deliver_initial_with_preview(runtime: &RuntimeCommand, config: &Ke
     Ok(response)
 }
 
-fn call_model(runtime: &RuntimeCommand, config: &KernelModelConfig, api_key: &str,
-    binding: &RunControlBinding, kind: &str, mut request_payload: Value, token: &CancellationToken,
-    remaining_budget_ms: i64, preview: Option<&PreviewSink>) -> Result<Value, String> {
+fn call_model(
+    runtime: &RuntimeCommand,
+    config: &KernelModelConfig,
+    api_key: &str,
+    binding: &RunControlBinding,
+    kind: &str,
+    mut request_payload: Value,
+    token: &CancellationToken,
+    remaining_budget_ms: i64,
+    preview: Option<&PreviewSink>,
+) -> Result<Value, String> {
     config.hash()?;
     binding.validate()?;
     if binding.engine_id != "pi" || binding.authority != fox_engine_protocol::ExecutionAuthority::Authoritative
@@ -240,21 +388,87 @@ fn call_model(runtime: &RuntimeCommand, config: &KernelModelConfig, api_key: &st
     if budget <= 0 { return Err("Kernel worker has no remaining execution budget".into()); }
     let deadline = Instant::now() + Duration::from_millis(budget.try_into().map_err(|_| "invalid model budget")?);
     let session_id = format!("kernel-once-{}", uuid::Uuid::new_v4());
-    let request = |kind: &str, payload: Value| json!({
-        "protocol": PROTOCOL_NAME, "version": PROTOCOL_VERSION, "kind": "request",
-        "id": uuid::Uuid::new_v4().to_string(), "timestamp": fox_engine_protocol::timestamp(), "type": kind,
-        "runId": binding.run_id, "conversationId": binding.conversation_id, "runtimeSessionId": session_id, "payload": payload,
-    });
-    let mut initialization = serde_json::to_value(config).map_err(|_| "invalid Kernel configuration")?;
+    let request = |kind: &str, payload: Value| {
+        json!({
+            "protocol": PROTOCOL_NAME, "version": PROTOCOL_VERSION, "kind": "request",
+            "id": uuid::Uuid::new_v4().to_string(), "timestamp": fox_engine_protocol::timestamp(), "type": kind,
+            "runId": binding.run_id, "conversationId": binding.conversation_id, "runtimeSessionId": session_id, "payload": payload,
+        })
+    };
+    let mut initialization =
+        serde_json::to_value(config).map_err(|_| "invalid Kernel configuration")?;
     initialization["modelService"]["apiKey"] = Value::String(api_key.into());
     let mut worker = Worker::spawn(runtime)?;
-    let ready = worker.exchange(request("kernel.initialize", initialization), "kernel.ready", token, deadline)?;
-    if ready["singleUse"] != true || ready["resourceExecution"] != false || ready["automaticReplay"] != false
-        || ready["adapterVersion"] != crate::kernel_model_config::KERNEL_MODEL_ADAPTER {
+    let ready = worker.exchange(
+        request("kernel.initialize", initialization),
+        "kernel.ready",
+        token,
+        deadline,
+    )?;
+    if ready["singleUse"] != true
+        || ready["resourceExecution"] != false
+        || ready["automaticReplay"] != false
+        || ready["adapterVersion"] != crate::kernel_model_config::KERNEL_MODEL_ADAPTER
+    {
         return Err("Kernel worker lacks isolated single-use capability".into());
     }
     request_payload["streamPreview"] = json!(preview.is_some());
-    worker.exchange_with_preview(request(kind, request_payload), "kernel.model_response", token, deadline,preview)
+    let expected = if kind == "kernel.compact_context" {
+        if ready["hostCompaction"] != true {
+            return Err("Kernel worker lacks Host compaction capability".into());
+        }
+        "kernel.compaction_result"
+    } else {
+        "kernel.model_response"
+    };
+    worker.exchange_with_preview(
+        request(kind, request_payload),
+        expected,
+        token,
+        deadline,
+        preview,
+    )
+}
+
+pub(super) fn compact_context(
+    runtime: &RuntimeCommand,
+    frozen: &KernelModelConfig,
+    api_key: &str,
+    binding: &RunControlBinding,
+    input: &fox_engine_protocol::KernelCompactionRequest,
+    token: &CancellationToken,
+    remaining_ms: i64,
+) -> Result<fox_engine_protocol::KernelCompactionResponse, String> {
+    input.validate()?;
+    if input.run_id != binding.run_id {
+        return Err("compaction Run identity mismatch".into());
+    }
+    // The caller verifies the original frozen hash. This derived configuration
+    // can only remove capabilities; credentials still arrive separately.
+    let mut summarizer = frozen.clone();
+    summarizer.system_prompt = crate::kernel_compaction::SUMMARY_PROMPT.into();
+    summarizer.proposal_tools.clear();
+    let output = frozen.model_service["maxOutputTokens"]
+        .as_u64()
+        .unwrap_or(8192)
+        .min(2048);
+    summarizer.model_service["maxOutputTokens"] = json!(output);
+    let payload = call_model(
+        runtime,
+        &summarizer,
+        api_key,
+        binding,
+        "kernel.compact_context",
+        json!({"controlBinding":binding,"compaction":input}),
+        token,
+        remaining_ms,
+        None,
+    )?;
+    let response: fox_engine_protocol::KernelCompactionResponse =
+        serde_json::from_value(payload).map_err(|_| "invalid compaction response")?;
+    response.validate_for(input)?;
+    token.check()?;
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -267,7 +481,13 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let script = root.join("worker.mjs");
         std::fs::write(&script, source).unwrap();
-        (root, RuntimeCommand { program: "node".into(), script: Some(script) })
+        (
+            root,
+            RuntimeCommand {
+                program: "node".into(),
+                script: Some(script),
+            },
+        )
     }
 
     #[test]
@@ -279,8 +499,12 @@ mod tests {
         let start = Instant::now();
         {
             let mut worker = Worker::spawn(&runtime).unwrap();
-            let result = worker.exchange(json!({"id":"r","payload":"x".repeat(900_000)}), "unused", &token,
-                Instant::now() + Duration::from_millis(200));
+            let result = worker.exchange(
+                json!({"id":"r","payload":"x".repeat(900_000)}),
+                "unused",
+                &token,
+                Instant::now() + Duration::from_millis(200),
+            );
             assert!(result.unwrap_err().contains("deadline"));
         }
         assert!(start.elapsed() < Duration::from_secs(5));

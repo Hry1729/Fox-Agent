@@ -1040,6 +1040,7 @@ impl Database {
                 )));
             }
 
+            super::kernel_compaction::validate_decision(&transaction, run_id, wall_now_ms, persisted_last_seq, cmd)?;
             // 1. Append events. Exact replays are accepted, but every new event
             // must continue the durable sequence without a gap.
             let actual_last_seq: i64 = transaction.query_row(

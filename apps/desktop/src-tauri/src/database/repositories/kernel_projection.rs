@@ -60,17 +60,27 @@ pub(super) fn project(
             decision_json=excluded.decision_json,resolved_at=excluded.resolved_at", [run_id])?;
 
     let mut query = tx.prepare(
-        "SELECT seq,payload_json FROM kernel_events WHERE run_id=?1 AND seq>?2
-        AND event_type IN ('engine.initial_response','engine.batch_response') ORDER BY seq",
+        "SELECT seq,payload_json,event_type FROM kernel_events WHERE run_id=?1 AND seq>?2
+        AND event_type IN ('engine.initial_response','engine.batch_response','context.compaction.result') ORDER BY seq",
     )?;
-    let responses: Vec<(i64, String)> = query
+    let responses: Vec<(i64, String, String)> = query
         .query_map(params![run_id, previous_seq], |row| {
-            Ok((row.get(0)?, row.get(1)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?
         .collect::<Result<_, _>>()?;
-    for (seq, body) in responses {
+    for (seq, body, kind) in responses {
         let payload: Value = serde_json::from_str(&body)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        if kind == "context.compaction.result" {
+            project_usage(
+                tx,
+                run_id,
+                seq,
+                &payload["result"]["response"]["usage"],
+                now,
+            )?;
+            continue; // A summary is a model view, never a visible assistant answer.
+        }
         let response = &payload["response"];
         if let Some(usage) = response["assistantMessage"].get("usage") {
             project_usage(tx, run_id, seq, usage, now)?;

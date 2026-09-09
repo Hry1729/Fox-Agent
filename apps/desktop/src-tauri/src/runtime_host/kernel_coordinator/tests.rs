@@ -1,4 +1,6 @@
 use super::*;
+#[path = "compaction_tests.rs"]
+mod compaction_tests;
 use crate::kernel::{CancellationRegistry, PolicyDecision, TestClock};
 use fox_engine_protocol::{FrozenPermission, PermissionMode, ResourceExecutor, TimeBudgets};
 use serde_json::json;

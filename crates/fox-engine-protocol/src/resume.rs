@@ -168,7 +168,7 @@ fn model_response_cannot_claim_completion_with_tools_or_unfinished_output() {
     assert!(response.validate().is_err());
 }
 
-fn validate_history(history: &[Value]) -> Result<(), String> {
+pub fn validate_kernel_history(history: &[Value]) -> Result<(), String> {
     let mut pending = std::collections::HashMap::new();
     for message in history {
         match message["role"].as_str() {
@@ -200,7 +200,7 @@ fn validate_history(history: &[Value]) -> Result<(), String> {
 }
 
 fn validate_checkpoint_parts(history: &[Value], assistant: &Value) -> Result<(), String> {
-    validate_history(history)?;
+    validate_kernel_history(history)?;
     if assistant["role"] != "assistant" || assistant["stopReason"] != "toolUse" { return Err("missing original assistant tool proposal".into()); }
     let content = assistant["content"].as_array().ok_or("missing assistant content")?;
     let calls = content.iter().filter(|block| block["type"] == "toolCall").collect::<Vec<_>>();
@@ -235,7 +235,7 @@ impl KernelInitialModelInput {
             || serde_json::to_vec(self).map_err(|_| "invalid initial input")?.len() > 1_048_576 {
             return Err("invalid Kernel initial input identity or size".into());
         }
-        validate_history(&self.messages)?;
+        validate_kernel_history(&self.messages)?;
         if self.messages.last().is_none_or(|message| message["role"] != "user") {
             return Err("Kernel initial input must end with the current user message".into());
         }

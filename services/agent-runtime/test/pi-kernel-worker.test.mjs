@@ -129,6 +129,67 @@ function initialization(overrides = {}) {
     modelService: { apiType: 'faux', modelId: 'kernel-test', baseUrl: 'http://localhost', fauxResponses: ['durable batch consumed'] },
     ...overrides }
 }
+
+function compactionPayload() {
+  return {controlBinding:resumePayload().controlBinding,compaction:{schemaVersion:1,runId:identity.runId,
+    turnId:'turn-k',compactionId:'summary-k',inputHash:`sha256:${'a'.repeat(64)}`,
+    messages:[{role:'user',content:'Earlier request: retain constraints and uncertainty.'}],maxSummaryBytes:1024}}
+}
+
+test('Host cancellation aborts an active compaction and prevents any late result or replay', {timeout:30000}, async t=>{
+  const child=await worker(t)
+  await child.request('kernel.initialize',initialization({proposalTools:[],modelService:{apiType:'faux',modelId:'slow-summary',
+    baseUrl:'http://localhost',fauxTokensPerSecond:1,fauxResponses:['a deliberately slow summary that must be cancelled']}}))
+  const pending=child.request('kernel.compact_context',compactionPayload())
+  await new Promise(resolve=>setTimeout(resolve,150))
+  const started=performance.now()
+  assert.equal((await child.request('kernel.cancel')).type,'kernel.cancelling')
+  assert.equal((await pending).type,'request_failed')
+  assert.ok(performance.now()-started<5000)
+  assert.ok(child.events.every(event=>event.type!=='kernel.compaction_result'))
+  assert.equal((await child.request('kernel.compact_context',compactionPayload())).type,'request_failed')
+})
+
+test('Host compaction uses a real single-use HTTP model with no tools and a distinct result', {timeout:30000}, async t=>{
+  const requests=[]
+  const server=createServer(async(req,res)=>{
+    let body='';for await(const chunk of req) body+=chunk
+    requests.push(JSON.parse(body))
+    res.writeHead(200,{'content-type':'text/event-stream'})
+    for(const choice of [{index:0,delta:{role:'assistant',content:'保留约束；尚未验证执行结果。'},finish_reason:null},
+      {index:0,delta:{},finish_reason:'stop'}]) res.write(`data: ${JSON.stringify({id:'summary',object:'chat.completion.chunk',created:1,model:'summary-test',choices:[choice]})}\n\n`)
+    res.end('data: [DONE]\n\n')
+  })
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve))
+  t.after(()=>{server.closeAllConnections();server.close()})
+  const child=await worker(t)
+  const ready=await child.request('kernel.initialize',initialization({proposalTools:[],systemPrompt:'Summarize only; no task execution.',
+    modelService:{apiType:'openai-completions',modelId:'summary-test',baseUrl:`http://127.0.0.1:${server.address().port}/v1`,apiKey:'local-test'}}))
+  assert.equal(ready.payload.hostCompaction,true)
+  const result=await child.request('kernel.compact_context',compactionPayload())
+  assert.equal(result.type,'kernel.compaction_result')
+  assert.equal(result.payload.summary,'保留约束；尚未验证执行结果。')
+  assert.equal(result.payload.compactionId,'summary-k')
+  assert.equal(result.payload.inputHash,compactionPayload().compaction.inputHash)
+  assert.equal(requests.length,1)
+  assert.ok(!requests[0].tools?.length)
+  assert.equal((await child.request('kernel.compact_context',compactionPayload())).type,'request_failed')
+  assert.equal((await child.request('kernel.start_initial',{})).type,'request_failed')
+  assert.ok(child.events.every(event=>event.kind==='response' && event.type!=='kernel.model_preview'))
+})
+
+test('compaction rejects retained tool proposals, overlong summaries and model tool calls', {timeout:30000}, async t=>{
+  const withTools=await worker(t)
+  await withTools.request('kernel.initialize',initialization())
+  assert.equal((await withTools.request('kernel.compact_context',compactionPayload())).type,'request_failed')
+  for(const response of ['中'.repeat(600),{stopReason:'toolUse',content:[{type:'toolCall',id:'bad',name:'read',arguments:{path:'never.txt'}}]}]) {
+    const child=await worker(t)
+    await child.request('kernel.initialize',initialization({proposalTools:[],modelService:{apiType:'faux',modelId:'summary-test',
+      baseUrl:'http://localhost',fauxResponses:[response]}}))
+    assert.equal((await child.request('kernel.compact_context',compactionPayload())).type,'request_failed')
+    assert.ok(child.events.every(event=>event.kind==='response'))
+  }
+})
 function resumePayload() {
   const permission = { mode: 'read_only', projectRoot: null, grants: [] }
   return { controlBinding: { schemaVersion: 1, runId: identity.runId, conversationId: identity.conversationId,

@@ -155,6 +155,90 @@ export const SCHEMA_BUNDLE = {
       "title": "KernelBatchResumeFrame",
       "type": "object"
     },
+    "KernelCompactionRequest": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "compactionId": {
+          "type": "string"
+        },
+        "inputHash": {
+          "type": "string"
+        },
+        "maxSummaryBytes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "messages": {
+          "description": "Only old, plain conversational prose; never tool calls/results or images.",
+          "items": true,
+          "type": "array"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "runId",
+        "turnId",
+        "compactionId",
+        "inputHash",
+        "messages",
+        "maxSummaryBytes"
+      ],
+      "title": "KernelCompactionRequest",
+      "type": "object"
+    },
+    "KernelCompactionResponse": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "compactionId": {
+          "type": "string"
+        },
+        "inputHash": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "usage": {
+          "description": "Bounded provider usage, accounted separately from visible chat messages."
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "runId",
+        "turnId",
+        "compactionId",
+        "inputHash",
+        "summary",
+        "usage"
+      ],
+      "title": "KernelCompactionResponse",
+      "type": "object"
+    },
     "KernelEngineBatchCheckpoint": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,

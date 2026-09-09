@@ -32,6 +32,7 @@ mod expert_teams;
 mod expert_workflows;
 mod graph_lead;
 mod kernel;
+mod kernel_compaction;
 mod run_control;
 mod kernel_model_config;
 mod kernel_initial_input;

@@ -1,5 +1,5 @@
-//! Durable authoritative coordinator. Not attached to default RuntimeHost startup:
-//! Pi protocol, capability and desktop rollout gates remain separate prerequisites.
+//! Durable coordinator for opt-in authoritative RuntimeHost execution.
+//! Default Legacy mode and production rollout gates remain separate.
 //! The executor receives a frozen binding and must revalidate resources itself.
 use crate::{
     database::Database,
@@ -13,6 +13,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Mutex;
 
+mod compaction;
 mod receipt;
 
 fn checkpoint_hash(value: &Value) -> String {
@@ -39,12 +40,21 @@ pub(crate) struct KernelCoordinator<'a> {
 }
 
 impl<'a> KernelCoordinator<'a> {
-    pub(crate) fn start_prepared(database: &'a Database, clock: &'a dyn Clock, run_id: &str,
-        cancellation: &'a CancellationRegistry) -> Result<Self, String> {
+    pub(crate) fn start_prepared(
+        database: &'a Database,
+        clock: &'a dyn Clock,
+        run_id: &str,
+        cancellation: &'a CancellationRegistry,
+    ) -> Result<Self, String> {
         let (input, config, hash) = database.kernel_initial_start_state(run_id)?;
-        let (controller, effects) = RunController::start_with_initial_input(run_id, &input.turn_id, config, &hash, clock)
-            .map_err(|error| error.to_string())?;
-        database.kernel_commit_decision(run_id, clock.now_wall_ms(), &controller.persist_command(&effects))?;
+        let (controller, effects) =
+            RunController::start_with_initial_input(run_id, &input.turn_id, config, &hash, clock)
+                .map_err(|error| error.to_string())?;
+        database.kernel_commit_decision(
+            run_id,
+            clock.now_wall_ms(),
+            &controller.persist_command(&effects),
+        )?;
         Self::reopen(database, clock, run_id, cancellation)
     }
 
@@ -91,7 +101,10 @@ impl<'a> KernelCoordinator<'a> {
         })
     }
 
-    pub(super) fn with_preview(mut self, preview: &'a super::kernel_model_worker::PreviewSink) -> Self {
+    pub(super) fn with_preview(
+        mut self,
+        preview: &'a super::kernel_model_worker::PreviewSink,
+    ) -> Self {
         self.preview = Some(preview);
         self
     }
@@ -120,23 +133,44 @@ impl<'a> KernelCoordinator<'a> {
         let effects = action(&mut candidate, now).map_err(|error| error.to_string())?;
         let command = candidate.persist_command(&effects);
         match lease {
-            Some(DecisionLease::ModelRetry(effect_key,owner)) => self.database.kernel_commit_model_retry(
-                &self.binding.run_id,now.wall_ms,&command,effect_key,owner,
-            )?,
+            Some(DecisionLease::ModelRetry(effect_key, owner)) => {
+                self.database.kernel_commit_model_retry(
+                    &self.binding.run_id,
+                    now.wall_ms,
+                    &command,
+                    effect_key,
+                    owner,
+                )?
+            }
             Some(DecisionLease::Initial(owner)) => self.database.kernel_commit_initial_model(
-                &self.binding.run_id, now.wall_ms, &command, owner, true,
-            )?,
-            Some(DecisionLease::Tool(tool_call_id, owner)) => self.database.kernel_commit_tool_result(
                 &self.binding.run_id,
                 now.wall_ms,
                 &command,
-                tool_call_id,
                 owner,
+                true,
             )?,
-            Some(DecisionLease::Batch(batch_id, owner)) => self.database.kernel_commit_batch_response(
-                &self.binding.run_id, now.wall_ms, &command, batch_id, owner,
-            )?,
-            None => self.database.kernel_commit_decision(&self.binding.run_id, now.wall_ms, &command)?,
+            Some(DecisionLease::Tool(tool_call_id, owner)) => {
+                self.database.kernel_commit_tool_result(
+                    &self.binding.run_id,
+                    now.wall_ms,
+                    &command,
+                    tool_call_id,
+                    owner,
+                )?
+            }
+            Some(DecisionLease::Batch(batch_id, owner)) => {
+                self.database.kernel_commit_batch_response(
+                    &self.binding.run_id,
+                    now.wall_ms,
+                    &command,
+                    batch_id,
+                    owner,
+                )?
+            }
+            None => {
+                self.database
+                    .kernel_commit_decision(&self.binding.run_id, now.wall_ms, &command)?
+            }
         }
         // Persist cancellation first, then signal every issued execution token.
         for effect in &effects {
@@ -245,8 +279,8 @@ impl<'a> KernelCoordinator<'a> {
         if checkpoint.batch_id != batch_id {
             return Err("persisted engine checkpoint batch mismatch".into());
         }
-        let frame =
-            self.prepare_batch_resume(batch_id, checkpoint.history, checkpoint.assistant_message)?;
+        let history = self.context_view(batch_id, &checkpoint.history)?;
+        let frame = self.prepare_batch_resume(batch_id, history, checkpoint.assistant_message)?;
         if event["turnId"].as_str() != Some(frame.turn_id.as_str()) {
             return Err("persisted engine checkpoint turn mismatch".into());
         }
@@ -274,9 +308,12 @@ impl<'a> KernelCoordinator<'a> {
     }
 
     pub(crate) fn fail(&self, code: &str, message: &str) -> Result<(), String> {
-        self.apply(None, |controller, _| Ok(controller.terminate(kernel::RunOutcome::Failed {
-            code: code.into(), message: message.into(),
-        })))
+        self.apply(None, |controller, _| {
+            Ok(controller.terminate(kernel::RunOutcome::Failed {
+                code: code.into(),
+                message: message.into(),
+            }))
+        })
     }
 
     pub(crate) fn snapshot(&self) -> Result<kernel::KernelSnapshot, String> {
@@ -353,8 +390,15 @@ impl<'a> KernelCoordinator<'a> {
                 .map_err(|error| error.to_string())?;
             let projected = snapshot.tool_calls.iter().find(|item| item.tool_call_id == *id)
                 .ok_or("missing durable tool approval projection")?;
-            receipt::append_execution_receipt(&mut result, &self.binding.run_id, id, &tool.tool,
-                state == KernelSettledToolState::Completed, projected.approval_state.as_deref(), &canonical_input)?;
+            receipt::append_execution_receipt(
+                &mut result,
+                &self.binding.run_id,
+                id,
+                &tool.tool,
+                state == KernelSettledToolState::Completed,
+                projected.approval_state.as_deref(),
+                &canonical_input,
+            )?;
             tools.push(KernelSettledToolResult {
                 tool_call_id: id.clone(),
                 tool: tool.tool.clone(),
@@ -379,67 +423,163 @@ impl<'a> KernelCoordinator<'a> {
         Ok(frame)
     }
 
-    pub(super) fn dispatch_initial_with_worker(&self, owner: &str, policy: &dyn PolicyDecisionPort,
-        runtime: &super::RuntimeCommand, api_key: &str) -> Result<(), String> {
+    pub(super) fn dispatch_initial_with_worker(
+        &self,
+        owner: &str,
+        policy: &dyn PolicyDecisionPort,
+        runtime: &super::RuntimeCommand,
+        api_key: &str,
+    ) -> Result<(), String> {
+        self.ensure_context_with_worker("initial", 4096, owner, runtime, api_key)?;
         let config = self.database.kernel_model_config(&self.binding.run_id)?;
         self.dispatch_initial(owner, policy, |binding, frame, token| {
             let now = self.clock.read();
-            let facts = self.controller.lock().map_err(|_| "Kernel coordinator lock poisoned")?.shadow_checkpoint(now.monotonic_ms);
-            let since = facts.model_request_since_wall_ms.ok_or("initial model deadline is missing")?;
-            if now.wall_ms < since { return Err("initial model clock moved backwards".into()); }
-            let remaining = binding.budgets.run_execution_ms.saturating_sub(facts.running_elapsed_ms)
-                .min(binding.budgets.model_request_ms.saturating_sub(now.wall_ms.saturating_sub(since)));
-            super::kernel_model_worker::deliver_initial_with_preview(runtime, &config, api_key, binding, frame, token, remaining,self.preview)
+            let facts = self
+                .controller
+                .lock()
+                .map_err(|_| "Kernel coordinator lock poisoned")?
+                .shadow_checkpoint(now.monotonic_ms);
+            let since = facts
+                .model_request_since_wall_ms
+                .ok_or("initial model deadline is missing")?;
+            if now.wall_ms < since {
+                return Err("initial model clock moved backwards".into());
+            }
+            let remaining = binding
+                .budgets
+                .run_execution_ms
+                .saturating_sub(facts.running_elapsed_ms)
+                .min(
+                    binding
+                        .budgets
+                        .model_request_ms
+                        .saturating_sub(now.wall_ms.saturating_sub(since)),
+                );
+            super::kernel_model_worker::deliver_initial_with_preview(
+                runtime,
+                &config,
+                api_key,
+                binding,
+                frame,
+                token,
+                remaining,
+                self.preview,
+            )
         })
     }
 
-    fn retry_settled_model(&self, effect_key: &str, owner: &str, cursor: u64, error: String) -> Result<(), String> {
-        let failure = super::kernel_model_worker::settled_failure(&error).ok_or_else(||error.clone())?;
+    fn retry_settled_model(
+        &self,
+        effect_key: &str,
+        owner: &str,
+        cursor: u64,
+        error: String,
+    ) -> Result<(), String> {
+        let failure =
+            super::kernel_model_worker::settled_failure(&error).ok_or_else(|| error.clone())?;
         if failure.run_id != self.binding.run_id || failure.checkpoint_seq != cursor {
             return Err("model failure belongs to another dispatch".into());
         }
         self.tick()?;
         self.cancellation.run_token(&self.binding.run_id)?.check()?;
-        let failure_json = serde_json::to_string(&failure).map_err(|_|"invalid model failure")?;
-        self.apply(Some(DecisionLease::ModelRetry(effect_key,owner)),|controller,now| {
-            let (providers,_,turns,_) = controller.retry_counters();
-            let provider = failure.category == "provider_unavailable";
-            let attempt = if provider { providers } else { turns };
-            let delay = (1_000_i64.saturating_mul(1_i64 << attempt.min(5)))
-                .max(failure.retry_after_ms.unwrap_or(0) as i64);
-            let elapsed = controller.shadow_checkpoint(now.monotonic_ms).running_elapsed_ms;
-            if delay >= self.binding.budgets.run_execution_ms.saturating_sub(elapsed) {
-                return Err(KernelError::FailClosed("model retry delay exceeds remaining Run budget".into()));
-            }
-            controller.schedule_model_retry(now.monotonic_ms,now.wall_ms,effect_key,&failure_json,provider,delay)
-        })
+        let failure_json = serde_json::to_string(&failure).map_err(|_| "invalid model failure")?;
+        self.apply(
+            Some(DecisionLease::ModelRetry(effect_key, owner)),
+            |controller, now| {
+                let (providers, _, turns, _) = controller.retry_counters();
+                let provider = failure.category == "provider_unavailable";
+                let attempt = if provider { providers } else { turns };
+                let delay = (1_000_i64.saturating_mul(1_i64 << attempt.min(5)))
+                    .max(failure.retry_after_ms.unwrap_or(0) as i64);
+                let elapsed = controller
+                    .shadow_checkpoint(now.monotonic_ms)
+                    .running_elapsed_ms;
+                if delay
+                    >= self
+                        .binding
+                        .budgets
+                        .run_execution_ms
+                        .saturating_sub(elapsed)
+                {
+                    return Err(KernelError::FailClosed(
+                        "model retry delay exceeds remaining Run budget".into(),
+                    ));
+                }
+                controller.schedule_model_retry(
+                    now.monotonic_ms,
+                    now.wall_ms,
+                    effect_key,
+                    &failure_json,
+                    provider,
+                    delay,
+                )
+            },
+        )
     }
 
-    pub(crate) fn dispatch_initial(&self, owner: &str, policy: &dyn PolicyDecisionPort,
-        deliver: impl FnOnce(&RunControlBinding, &fox_engine_protocol::KernelInitialModelFrame, &kernel::CancellationToken)
-            -> Result<fox_engine_protocol::KernelInitialModelResponse, String>) -> Result<(), String> {
+    pub(crate) fn dispatch_initial(
+        &self,
+        owner: &str,
+        policy: &dyn PolicyDecisionPort,
+        deliver: impl FnOnce(
+            &RunControlBinding,
+            &fox_engine_protocol::KernelInitialModelFrame,
+            &kernel::CancellationToken,
+        ) -> Result<fox_engine_protocol::KernelInitialModelResponse, String>,
+    ) -> Result<(), String> {
         self.tick()?;
-        self.database.kernel_validate_resource_acquisition(&self.binding.run_id)?;
-        let input = self.database.kernel_initial_input(&self.binding.run_id)?;
+        self.database
+            .kernel_validate_resource_acquisition(&self.binding.run_id)?;
+        let mut input = self.database.kernel_initial_input(&self.binding.run_id)?;
+        input.messages = self.context_view("initial", &input.messages)?;
         let token = self.cancellation.run_token(&self.binding.run_id)?;
         token.check()?;
         let frame = {
-            let mut guard = self.controller.lock().map_err(|_| "Kernel coordinator lock poisoned")?;
-            if self.database.run_control_binding(&self.binding.run_id)?.as_ref() != Some(&self.binding) { return Err("initial control binding changed".into()); }
-            let frame = fox_engine_protocol::KernelInitialModelFrame { schema_version: 1, input,
-                idempotency_key: kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into(), checkpoint_seq: guard.last_event_seq() };
+            let mut guard = self
+                .controller
+                .lock()
+                .map_err(|_| "Kernel coordinator lock poisoned")?;
+            if self
+                .database
+                .run_control_binding(&self.binding.run_id)?
+                .as_ref()
+                != Some(&self.binding)
+            {
+                return Err("initial control binding changed".into());
+            }
+            let frame = fox_engine_protocol::KernelInitialModelFrame {
+                schema_version: 1,
+                input,
+                idempotency_key: kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into(),
+                checkpoint_seq: guard.last_event_seq(),
+            };
             frame.validate()?;
             let mut candidate = guard.clone();
             let now = self.clock.read();
-            let effects = candidate.begin_initial_model_request(now.monotonic_ms, now.wall_ms).map_err(|error| error.to_string())?;
-            self.database.kernel_commit_initial_model(&self.binding.run_id, now.wall_ms, &candidate.persist_command(&effects), owner, false)?;
+            let effects = candidate
+                .begin_initial_model_request(now.monotonic_ms, now.wall_ms)
+                .map_err(|error| error.to_string())?;
+            self.database.kernel_commit_initial_model(
+                &self.binding.run_id,
+                now.wall_ms,
+                &candidate.persist_command(&effects),
+                owner,
+                false,
+            )?;
             *guard = candidate;
             frame
         };
         token.check()?;
         let response = match deliver(&self.binding, &frame, &token) {
             Ok(response) => response,
-            Err(error) => return self.retry_settled_model(kernel::INITIAL_MODEL_EFFECT_KEY,owner,frame.checkpoint_seq,error),
+            Err(error) => {
+                return self.retry_settled_model(
+                    kernel::INITIAL_MODEL_EFFECT_KEY,
+                    owner,
+                    frame.checkpoint_seq,
+                    error,
+                )
+            }
         };
         response.validate()?;
         if response.run_id != self.binding.run_id || response.turn_id != frame.input.turn_id || response.checkpoint_seq != frame.checkpoint_seq {
@@ -449,9 +589,15 @@ impl<'a> KernelCoordinator<'a> {
         token.check()?;
         let encoded = serde_json::to_string(&response).map_err(|_| "invalid initial response")?;
         let next = if response.assistant_message["stopReason"] == "toolUse" {
-            let checkpoint = fox_engine_protocol::KernelEngineBatchCheckpoint { schema_version: 1,
-                batch_id: format!("initial-batch:{}:{}", self.binding.run_id, frame.checkpoint_seq), history: frame.input.messages,
-                assistant_message: response.assistant_message };
+            let checkpoint = fox_engine_protocol::KernelEngineBatchCheckpoint {
+                schema_version: 1,
+                batch_id: format!(
+                    "initial-batch:{}:{}",
+                    self.binding.run_id, frame.checkpoint_seq
+                ),
+                history: frame.input.messages,
+                assistant_message: response.assistant_message,
+            };
             checkpoint.validate()?;
             Some(checkpoint)
         } else { None };
@@ -460,14 +606,32 @@ impl<'a> KernelCoordinator<'a> {
             if let Some(checkpoint) = next {
                 let value = serde_json::to_value(&checkpoint).map_err(|_| KernelError::FailClosed("invalid initial checkpoint".into()))?;
                 let stored = serde_json::json!({"hash":checkpoint_hash(&value),"value":value});
-                let calls = checkpoint.assistant_message["content"].as_array().unwrap().iter()
-                    .filter(|block| block["type"] == "toolCall").enumerate().map(|(source_order, call)| ToolCallRequest {
-                        tool_call_id:call["id"].as_str().unwrap().into(), tool:call["name"].as_str().unwrap().into(),
-                        canonical_input_json:call["arguments"].to_string(), source_order,
-                    }).collect();
-                effects.extend(controller.propose_tool_batch(&checkpoint.batch_id, calls, policy, now.monotonic_ms, now.wall_ms)?);
-                effects.push(controller.checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?);
-            } else { effects.extend(controller.terminate(kernel::RunOutcome::Completed)); }
+                let calls = checkpoint.assistant_message["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|block| block["type"] == "toolCall")
+                    .enumerate()
+                    .map(|(source_order, call)| ToolCallRequest {
+                        tool_call_id: call["id"].as_str().unwrap().into(),
+                        tool: call["name"].as_str().unwrap().into(),
+                        canonical_input_json: call["arguments"].to_string(),
+                        source_order,
+                    })
+                    .collect();
+                effects.extend(controller.propose_tool_batch(
+                    &checkpoint.batch_id,
+                    calls,
+                    policy,
+                    now.monotonic_ms,
+                    now.wall_ms,
+                )?);
+                effects.push(
+                    controller.checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?,
+                );
+            } else {
+                effects.extend(controller.terminate(kernel::RunOutcome::Completed));
+            }
             Ok(effects)
         })
     }
@@ -478,6 +642,11 @@ impl<'a> KernelCoordinator<'a> {
         runtime: &super::RuntimeCommand, api_key: &str,
     ) -> Result<(), String> {
         let config = self.database.kernel_model_config(&self.binding.run_id)?;
+        let frame = self.prepare_stored_batch_resume(batch_id)?;
+        let extra = crate::kernel_compaction::bytes(&frame.assistant_message)?
+            .saturating_add(crate::kernel_compaction::bytes(&frame.tools)?)
+            .saturating_add(4096);
+        self.ensure_context_with_worker(batch_id, extra, owner, runtime, api_key)?;
         self.dispatch_batch_with_worker(batch_id, owner, policy, runtime, &config, api_key)
     }
 
@@ -497,11 +666,32 @@ impl<'a> KernelCoordinator<'a> {
             let now = self.clock.read();
             let facts = self.controller.lock().map_err(|_| "Kernel coordinator lock poisoned")?
                 .shadow_checkpoint(now.monotonic_ms);
-            let since = facts.model_request_since_wall_ms.ok_or("Kernel model request has no durable deadline")?;
-            if now.wall_ms < since { return Err("Kernel model clock moved backwards".into()); }
-            let remaining = binding.budgets.run_execution_ms.saturating_sub(facts.running_elapsed_ms)
-                .min(binding.budgets.model_request_ms.saturating_sub(now.wall_ms.saturating_sub(since)));
-            super::kernel_model_worker::deliver_with_preview(runtime, config, api_key, binding, frame, token, remaining,self.preview)
+            let since = facts
+                .model_request_since_wall_ms
+                .ok_or("Kernel model request has no durable deadline")?;
+            if now.wall_ms < since {
+                return Err("Kernel model clock moved backwards".into());
+            }
+            let remaining = binding
+                .budgets
+                .run_execution_ms
+                .saturating_sub(facts.running_elapsed_ms)
+                .min(
+                    binding
+                        .budgets
+                        .model_request_ms
+                        .saturating_sub(now.wall_ms.saturating_sub(since)),
+                );
+            super::kernel_model_worker::deliver_with_preview(
+                runtime,
+                config,
+                api_key,
+                binding,
+                frame,
+                token,
+                remaining,
+                self.preview,
+            )
         })
     }
 
@@ -510,8 +700,11 @@ impl<'a> KernelCoordinator<'a> {
     pub(crate) fn dispatch_batch(
         &self, batch_id: &str, owner: &str,
         policy: &dyn PolicyDecisionPort,
-        deliver: impl FnOnce(&RunControlBinding, &fox_engine_protocol::KernelBatchResumeFrame,
-            &kernel::CancellationToken) -> Result<fox_engine_protocol::KernelModelResponse, String>,
+        deliver: impl FnOnce(
+            &RunControlBinding,
+            &fox_engine_protocol::KernelBatchResumeFrame,
+            &kernel::CancellationToken,
+        ) -> Result<fox_engine_protocol::KernelModelResponse, String>,
     ) -> Result<(), String> {
         let frame = self.prepare_stored_batch_resume(batch_id)?;
         self.database.kernel_validate_resource_acquisition(&self.binding.run_id)?;
@@ -527,15 +720,27 @@ impl<'a> KernelCoordinator<'a> {
             let now = self.clock.read();
             let effects = candidate.begin_batch_model_request(batch_id, now.monotonic_ms, now.wall_ms)
                 .map_err(|error| error.to_string())?;
-            self.database.kernel_commit_batch_dispatch(&self.binding.run_id, now.wall_ms,
-                &candidate.persist_command(&effects), batch_id, owner)?;
+            self.database.kernel_commit_batch_dispatch(
+                &self.binding.run_id,
+                now.wall_ms,
+                &candidate.persist_command(&effects),
+                batch_id,
+                owner,
+            )?;
             *guard = candidate;
         }
         token.check()?;
         // No lock is held across engine I/O. Uncertain failures retain the lease.
         let response = match deliver(&self.binding, &frame, &token) {
             Ok(response) => response,
-            Err(error) => return self.retry_settled_model(&kernel::batch_delivery_effect_key(batch_id),owner,frame.checkpoint_seq,error),
+            Err(error) => {
+                return self.retry_settled_model(
+                    &kernel::batch_delivery_effect_key(batch_id),
+                    owner,
+                    frame.checkpoint_seq,
+                    error,
+                )
+            }
         };
         response.validate()?;
         if response.run_id != self.binding.run_id || response.turn_id != frame.turn_id
@@ -550,36 +755,62 @@ impl<'a> KernelCoordinator<'a> {
         let next = if response.assistant_message["stopReason"] == "toolUse" {
             let mut history = frame.history.clone();
             history.push(frame.assistant_message.clone());
-            history.extend(frame.tools.iter().map(|tool| serde_json::json!({
-                "role":"toolResult", "toolCallId":tool.tool_call_id, "toolName":tool.tool,
-                "content":tool.result["content"], "details":{},
-                "isError":tool.state == fox_engine_protocol::KernelSettledToolState::Failed,
-                "timestamp":frame.assistant_message["timestamp"].as_i64().unwrap_or(0),
-            })));
+            history.extend(frame.tools.iter().map(|tool| {
+                serde_json::json!({
+                    "role":"toolResult", "toolCallId":tool.tool_call_id, "toolName":tool.tool,
+                    "content":tool.result["content"], "details":{},
+                    "isError":tool.state == fox_engine_protocol::KernelSettledToolState::Failed,
+                    "timestamp":frame.assistant_message["timestamp"].as_i64().unwrap_or(0),
+                })
+            }));
             let checkpoint = fox_engine_protocol::KernelEngineBatchCheckpoint {
                 schema_version: 1, batch_id: format!("model-batch:{}:{}", self.binding.run_id, frame.checkpoint_seq),
                 history, assistant_message: response.assistant_message,
             };
             checkpoint.validate()?;
             Some(checkpoint)
-        } else { None };
-        self.apply(Some(DecisionLease::Batch(batch_id, owner)), |controller, now| {
-            let mut effects = vec![controller.record_batch_model_response(batch_id, &response_json)?];
-            if let Some(checkpoint) = next {
-                let value = serde_json::to_value(&checkpoint).map_err(|error| KernelError::FailClosed(error.to_string()))?;
-                let stored = serde_json::json!({"hash":checkpoint_hash(&value),"value":value});
-                let calls = checkpoint.assistant_message["content"].as_array().unwrap().iter()
-                    .filter(|block| block["type"] == "toolCall").enumerate().map(|(source_order, call)| ToolCallRequest {
-                        tool_call_id:call["id"].as_str().unwrap().into(), tool:call["name"].as_str().unwrap().into(),
-                        canonical_input_json:call["arguments"].to_string(), source_order,
-                    }).collect();
-                effects.extend(controller.propose_tool_batch(&checkpoint.batch_id, calls, policy, now.monotonic_ms, now.wall_ms)?);
-                effects.push(controller.checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?);
-            } else {
-                effects.extend(controller.terminate(kernel::RunOutcome::Completed));
-            }
-            Ok(effects)
-        })
+        } else {
+            None
+        };
+        self.apply(
+            Some(DecisionLease::Batch(batch_id, owner)),
+            |controller, now| {
+                let mut effects =
+                    vec![controller.record_batch_model_response(batch_id, &response_json)?];
+                if let Some(checkpoint) = next {
+                    let value = serde_json::to_value(&checkpoint)
+                        .map_err(|error| KernelError::FailClosed(error.to_string()))?;
+                    let stored = serde_json::json!({"hash":checkpoint_hash(&value),"value":value});
+                    let calls = checkpoint.assistant_message["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|block| block["type"] == "toolCall")
+                        .enumerate()
+                        .map(|(source_order, call)| ToolCallRequest {
+                            tool_call_id: call["id"].as_str().unwrap().into(),
+                            tool: call["name"].as_str().unwrap().into(),
+                            canonical_input_json: call["arguments"].to_string(),
+                            source_order,
+                        })
+                        .collect();
+                    effects.extend(controller.propose_tool_batch(
+                        &checkpoint.batch_id,
+                        calls,
+                        policy,
+                        now.monotonic_ms,
+                        now.wall_ms,
+                    )?);
+                    effects.push(
+                        controller
+                            .checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?,
+                    );
+                } else {
+                    effects.extend(controller.terminate(kernel::RunOutcome::Completed));
+                }
+                Ok(effects)
+            },
+        )
     }
 
     /// Dispatch exactly one durable intent. Err after lease is uncertain and is
@@ -643,9 +874,10 @@ impl<'a> KernelCoordinator<'a> {
         token.check()?;
         let (succeeded, result) = execute(&self.binding, &leased, &token)?;
         self.tick()?;
-        self.apply(Some(DecisionLease::Tool(tool_call_id, owner)), |controller, _| {
-            controller.tool_settled(tool_call_id, succeeded, &result.to_string())
-        })?;
+        self.apply(
+            Some(DecisionLease::Tool(tool_call_id, owner)),
+            |controller, _| controller.tool_settled(tool_call_id, succeeded, &result.to_string()),
+        )?;
         Ok(true)
     }
 }

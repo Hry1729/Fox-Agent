@@ -252,6 +252,15 @@ pub struct RetryState {
 pub struct CompactionState {
     pub compactions: u32,
     pub last_reason: Option<String>,
+    #[serde(default)]
+    pub pending: Option<PendingCompaction>,
+}
+
+/// Durable single-flight intent. Full input and output are append-only events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingCompaction {
+    pub id: String,
+    pub owner: Option<String>,
 }
 
 /// One tool call as projected into the rich snapshot.
