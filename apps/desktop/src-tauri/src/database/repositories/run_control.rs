@@ -160,6 +160,26 @@ mod tests {
         let db = Database::open(path).unwrap();
         assert_eq!(db.freeze_kernel_run_control(&run_id, "legacy", fox_engine_protocol::TimeBudgets::default()).unwrap(), binding);
     }
+
+    #[test]
+    fn rollback_new_runs_to_legacy_preserves_frozen_authoritative_runs() {
+        let (db, path, original_id) = fixture();
+        let original = db.freeze_kernel_run_control(&original_id, "legacy", Default::default()).unwrap();
+        drop(db);
+        // Reopen the same database as a process started after rollback would.
+        let db = Database::open(path.clone()).unwrap();
+        let conversation = db.create_conversation("fox-general", Some("after rollback"), None, None).unwrap();
+        let new_id = db.create_run(&conversation.id, "new legacy task", None).unwrap().run.id;
+        let new_binding = db.freeze_legacy_run_control(&new_id, "legacy").unwrap();
+        assert_eq!(new_binding.authority, ExecutionAuthority::Legacy);
+        assert_eq!(db.run_control_binding(&original_id).unwrap(), Some(original.clone()));
+        assert!(db.freeze_legacy_run_control(&original_id, "legacy").is_err());
+        assert!(db.freeze_kernel_run_control(&new_id, "legacy", Default::default()).is_err());
+        drop(db);
+        let db = Database::open(path).unwrap();
+        assert_eq!(db.run_control_binding(&original_id).unwrap(), Some(original));
+        assert_eq!(db.run_control_binding(&new_id).unwrap(), Some(new_binding));
+    }
 }
 
 impl Database {

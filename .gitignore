@@ -37,3 +37,4 @@ Thumbs.db
 apps/desktop/src-tauri/resources/officecli/officecli
 apps/desktop/src-tauri/resources/officecli/officecli.exe
 apps/desktop/src-tauri/resources/officecli/*.download
+apps/desktop/src-tauri/resources/windows-runtime/

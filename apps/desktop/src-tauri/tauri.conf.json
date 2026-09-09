@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "node ../../scripts/prepare-officecli.mjs && node ../../scripts/start-desktop-dev.mjs",
     "devUrl": "http://127.0.0.1:1421",
-    "beforeBuildCommand": "node ../../scripts/prepare-officecli.mjs && pnpm build",
+    "beforeBuildCommand": "node ../../scripts/prepare-officecli.mjs && node ../../scripts/prepare-windows-runtime.mjs && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
