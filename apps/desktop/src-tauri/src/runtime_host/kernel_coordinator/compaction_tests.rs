@@ -1,6 +1,40 @@
 use super::*;
 use crate::kernel_compaction as context;
 
+#[test]
+fn acceptance_task3_long_history_reopens_between_every_compaction_pass() {
+    for count in [12, 24, 120] {
+        let clock = TestClock::new(1000);
+        let cancellation = CancellationRegistry::default();
+        let (mut db, root, run_id) = compaction_fixture_count(&clock, count);
+        let original = db.kernel_initial_input(&run_id).unwrap();
+        drop(KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap());
+        let mut passes = 0;
+        let insufficient = loop {
+            let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+            match coordinator.prepare_context_if_needed("initial", 4096) {
+                Ok(false) => break false,
+                Err(error) => { assert_eq!(error, context::INSUFFICIENT); break true; }
+                Ok(true) => {
+                    coordinator.dispatch_pending_compaction("acceptance-owner", |_, request, _, _| Ok(response(request))).unwrap();
+                    passes += 1;
+                    assert!(passes <= context::MAX_PASSES);
+                    let view = coordinator.context_view("initial", &original.messages).unwrap();
+                    assert_eq!(view[0], original.messages[0]);
+                    assert_eq!(&view[view.len()-8..], &original.messages[original.messages.len()-8..]);
+                    assert_eq!(db.kernel_initial_input(&run_id).unwrap(), original);
+                }
+            }
+            drop(coordinator);
+            drop(db);
+            db = Database::open(root.join("facts.db")).unwrap();
+        };
+        assert_eq!(insufficient, count == 120);
+        assert!(passes > 0);
+        println!("TASK3 old_messages={count} passes={passes} insufficient={insufficient} source_unchanged=true");
+    }
+}
+
 fn compaction_fixture(clock: &TestClock) -> (Database, PathBuf, String) {
     compaction_fixture_count(clock, 12)
 }

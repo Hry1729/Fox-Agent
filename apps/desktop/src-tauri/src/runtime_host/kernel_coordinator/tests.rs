@@ -1,4 +1,37 @@
 use super::*;
+#[test]
+fn acceptance_task4_external_marker_survives_lost_result_without_duplicate_execution() {
+    use std::io::Write;
+    for commit_failure in [false, true] {
+        let clock = TestClock::new(1000);
+        let cancellation = CancellationRegistry::default();
+        let (db, root, run_id) = fixture(&clock);
+        let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+        coordinator.propose_tools("batch", calls(), &Allow).unwrap();
+        let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+        if commit_failure {
+            conn.execute_batch("CREATE TRIGGER acceptance_drop_result BEFORE INSERT ON kernel_events WHEN NEW.event_type='tool.completed' BEGIN SELECT RAISE(ABORT,'acceptance result loss'); END;").unwrap();
+        }
+        let marker = root.join("external-effect-marker.txt");
+        assert!(coordinator.dispatch_tool("read-a", "original-owner", |_, _, _| {
+            // Fault-injection executor: a real isolated marker represents an external side effect.
+            // This does not exercise a production write tool or a business connector.
+            std::fs::OpenOptions::new().create(true).append(true).open(&marker).unwrap().write_all(b"executed-once\n").unwrap();
+            if commit_failure { Ok((true, json!({"proof":"executed"}))) }
+            else { Err("injected response loss after external marker".into()) }
+        }).is_err());
+        drop(coordinator); drop(conn); drop(db);
+        for _ in 0..3 {
+            let db = Database::open(root.join("facts.db")).unwrap();
+            let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+            assert!(!coordinator.dispatch_tool("read-a", "replacement-owner", |_, _, _| panic!("must not repeat external effect")).unwrap());
+            let plan = kernel::plan_recovery(vec![db.kernel_recovery_facts(&run_id).unwrap().unwrap()]);
+            assert_eq!(plan.uncertain_leased.len(), 1);
+            assert_eq!(std::fs::read_to_string(&marker).unwrap(), "executed-once\n");
+        }
+        println!("TASK4 commit_failure={commit_failure} reopen_count=3 marker_count=1 uncertain_count=1");
+    }
+}
 #[path = "compaction_tests.rs"]
 mod compaction_tests;
 use crate::kernel::{CancellationRegistry, PolicyDecision, TestClock};
