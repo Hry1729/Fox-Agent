@@ -14,6 +14,7 @@ use std::time::Duration;
 use url::Url;
 mod owned;
 pub(crate) use owned::execute_owned;
+pub(crate) use owned::execute_owned_readonly;
 
 const CREDENTIAL_SERVICE: &str = "com.fox.agent.mcp";
 const MCP_PROTOCOL_VERSION: &str = "2025-03-26";
@@ -244,6 +245,8 @@ fn normalize_tools(tools: Vec<Value>) -> Result<Vec<Value>, String> {
                 "name": name,
                 "description": tool.get("description").and_then(Value::as_str).unwrap_or_default(),
                 "inputSchema": schema,
+                "annotations": {"readOnlyHint": tool["annotations"]["readOnlyHint"] == true,
+                    "destructiveHint": tool["annotations"]["destructiveHint"] != false},
             }))
         })
         .collect()
@@ -813,6 +816,17 @@ mod tests {
         assert_eq!(result["content"][0]["text"], "owned 中文");
         assert!(execute_owned(&server, Some(("echo", &json!({"text":42}))), &token, Duration::from_secs(5)).is_err());
         assert!(execute_owned(&server, Some(("missing", &json!({}))), &token, Duration::from_secs(5)).is_err());
+    }
+
+    #[test]
+    fn reconciliation_connector_queries_require_live_explicit_readonly_schema() {
+        let registry=crate::kernel::CancellationRegistry::default();
+        registry.register_run("query").unwrap();let token=registry.run_token("query").unwrap();
+        let result=execute_owned_readonly(&server("readonly"),Some(("echo",&json!({"text":"receipt-46"}))),&token,Duration::from_secs(5)).unwrap();
+        assert_eq!(result["content"][0]["text"],"receipt-46");
+        let error=execute_owned_readonly(&server("valid"),Some(("echo",&json!({"text":"must-not-execute"}))),&token,Duration::from_secs(5)).unwrap_err();
+        assert!(error.contains("只读查询"));
+        assert!(execute_owned_readonly(&server("readonly"),Some(("echo",&json!({"text":42}))),&token,Duration::from_secs(5)).is_err());
     }
 
     #[test]

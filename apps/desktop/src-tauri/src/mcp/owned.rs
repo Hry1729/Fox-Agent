@@ -6,6 +6,16 @@ use std::time::Instant;
 
 pub(crate) fn execute_owned(server: &McpServerRecord, call: Option<(&str,&Value)>, token: &CancellationToken,
     budget: Duration) -> Result<Value,String> {
+    execute_owned_checked(server, call, token, budget, false)
+}
+
+pub(crate) fn execute_owned_readonly(server: &McpServerRecord, call: Option<(&str,&Value)>, token: &CancellationToken,
+    budget: Duration) -> Result<Value,String> {
+    execute_owned_checked(server, call, token, budget, true)
+}
+
+fn execute_owned_checked(server: &McpServerRecord, call: Option<(&str,&Value)>, token: &CancellationToken,
+    budget: Duration, read_only: bool) -> Result<Value,String> {
     token.check()?;
     if !server.enabled || server.id == crate::office::SERVER_ID { return Err("MCP connection requires a dedicated authorized adapter".into()); }
     let deadline = Instant::now() + budget;
@@ -36,6 +46,10 @@ pub(crate) fn execute_owned(server: &McpServerRecord, call: Option<(&str,&Value)
     let tools = normalize_tools(tools)?;
     let Some((name,arguments)) = call else { return Ok(json!({"tools":tools})); };
     let definition = tools.iter().find(|tool| tool["name"] == name).ok_or("MCP tool is not declared by the frozen connection")?;
+    // Checked against the same owned session's live schema, not a UI-supplied flag.
+    if read_only && (definition["annotations"]["readOnlyHint"] != true || definition["annotations"]["destructiveHint"] != false) {
+        return Err("连接器未明确声明此工具为非破坏性只读查询，已拒绝执行".into());
+    }
     let validator = jsonschema::validator_for(&definition["inputSchema"]).map_err(|_| "invalid MCP input schema")?;
     if !validator.is_valid(arguments) { return Err("MCP arguments do not match its declared schema".into()); }
     let result = if let Some(session) = &mut stdio { session.request("tools/call", json!({"name":name,"arguments":arguments}), token, deadline)? }

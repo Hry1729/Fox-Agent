@@ -9,6 +9,7 @@ mod expert_teams;
 mod expert_workflows;
 mod kernel;
 mod kernel_compaction;
+mod kernel_reconciliation;
 mod kernel_model_config;
 mod kernel_state_publisher;
 mod lifecycle_hooks;
@@ -332,6 +333,11 @@ pub fn run() {
             commands::run_start,
             commands::run_rewind,
             commands::run_resume,
+            commands::kernel_reconciliation_load,
+            commands::kernel_reconciliation_options,
+            commands::kernel_reconciliation_query,
+            commands::kernel_reconciliation_confirm,
+            commands::kernel_reconciliation_resume,
             commands::run_cancel,
             commands::child_run_cancel_by_user,
             commands::approval_resolve,

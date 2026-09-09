@@ -1,4 +1,6 @@
 use super::*;
+#[path = "reconciliation_tests.rs"]
+mod reconciliation_tests;
 #[test]
 fn acceptance_task4_external_marker_survives_lost_result_without_duplicate_execution() {
     use std::io::Write;

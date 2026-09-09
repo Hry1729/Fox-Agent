@@ -6259,6 +6259,24 @@ END;
 "#;
 
 const CONVERSATION_TOOL_PERMISSION_SCHEMA_VERSION: i64 = 23;
+const MIGRATION_60: &str = r#"
+CREATE TABLE kernel_reconciliation_events (
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    effect_key TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('query','confirmation','resume')),
+    body_json TEXT NOT NULL CHECK(json_valid(body_json)),
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id,revision)
+);
+CREATE TRIGGER kernel_reconciliation_event_immutable BEFORE UPDATE ON kernel_reconciliation_events
+BEGIN SELECT RAISE(ABORT, 'Reconciliation evidence is append-only'); END;
+CREATE TABLE kernel_recovery_runs (
+    source_run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    recovery_run_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL
+);
+"#;
 const MIGRATION_59: &str = r#"
 CREATE TABLE kernel_host_actions (
     run_id TEXT NOT NULL,
@@ -6481,6 +6499,7 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     apply_migration(&transaction, 57, MIGRATION_57, now)?;
     apply_migration(&transaction, 58, MIGRATION_58, now)?;
     apply_migration(&transaction, 59, MIGRATION_59, now)?;
+    apply_migration(&transaction, 60, MIGRATION_60, now)?;
     transaction.commit()
 }
 
@@ -11685,6 +11704,8 @@ mod tests {
              DROP TABLE kernel_initial_inputs;
              DROP TRIGGER kernel_initial_input_start_guard;
              DROP TABLE kernel_model_configs;
+             DROP TABLE kernel_recovery_runs;
+             DROP TABLE kernel_reconciliation_events;
              DROP TABLE run_control_bindings;
              DELETE FROM schema_migrations WHERE version>=53;"
         ).unwrap();

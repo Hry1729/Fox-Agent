@@ -1,0 +1,21 @@
+.fox-reconciliation { flex: 0 0 auto; width: min(100% - 32px, 800px); margin: 12px auto; color: var(--foreground); border: 1px solid var(--border); border-radius: var(--fox-radius-control, 8px); background: var(--background); font-size: var(--fox-type-meta, 13px); }
+.fox-reconciliation-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; }
+.fox-reconciliation p { margin: 4px 0 10px; line-height: 1.6; }
+.fox-reconciliation-heading p { margin: 4px 0 0; }
+.fox-reconciliation-body { padding: 0 16px 16px; max-height: min(60vh, 640px); overflow: auto; scrollbar-color: var(--border) transparent; }
+.fox-reconciliation-item { padding: 18px 0; border-top: 1px solid var(--border); }
+.fox-reconciliation-item h3 { margin: 0 0 10px; font-weight: 600; display: flex; flex-wrap: wrap; gap: 10px; }
+.fox-reconciliation-item h3 span { font-weight: 400; }
+.fox-reconciliation-item label { display: block; margin: 12px 0 6px; }
+.fox-reconciliation-item textarea, .fox-reconciliation-item select { display: block; box-sizing: border-box; width: 100%; padding: 8px 10px; border: 1px solid var(--input); border-radius: var(--fox-radius-control, 8px); background: var(--background); color: var(--foreground); font: inherit; margin-bottom: 10px; caret-color: var(--primary); }
+.fox-reconciliation-item textarea { resize: vertical; min-height: 72px; }
+.fox-reconciliation-item textarea:focus-visible, .fox-reconciliation-item select:focus-visible, .fox-reconciliation summary:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.fox-reconciliation-item textarea:disabled, .fox-reconciliation-item select:disabled { opacity: .6; cursor: not-allowed; }
+.fox-reconciliation summary { cursor: pointer; text-underline-offset: 3px; padding: 4px 0; }
+.fox-reconciliation summary:hover { text-decoration: underline; }
+.fox-reconciliation pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; padding: 10px; background: var(--muted); font-size: 12px; line-height: 1.6; }
+.fox-reconciliation-actions { margin: 10px 0; }
+.fox-reconciliation-query, .fox-reconciliation-evidence { margin: 12px 0; }
+.fox-reconciliation-footer { border-top: 1px solid var(--border); padding-top: 14px; }
+.fox-reconciliation-error { padding: 0 16px 8px; color: var(--destructive); }
+@media (max-width: 520px) { .fox-reconciliation-heading { align-items: flex-start; flex-direction: column; gap: 8px; } }

@@ -1,6 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { snapshotForRun } from '../model/kernel-snapshot'
+import type { ReconciliationRequest, ReconciliationView, ReconciliationOptions } from '../model/reconciliation'
 import type { KernelStateInvalidation, KernelModelPreview } from '../model/types'
 import type {
   AgentRecord,
@@ -647,6 +648,11 @@ export const desktopClient = {
   resumeRun: (request: { conversationId: string; parentRunId: string; text: string; answers: Record<string, string | string[]> }) =>
     command<StartRunResult>('run_resume', request),
   cancelRun: (runId: string) => command<boolean>('run_cancel', { runId }),
+  reconciliationLoad: (request: ReconciliationRequest) => command<ReconciliationView>('kernel_reconciliation_load', request),
+  reconciliationOptions: (request: ReconciliationRequest) => command<ReconciliationOptions>('kernel_reconciliation_options', request),
+  reconciliationQuery: (request: ReconciliationRequest) => command<ReconciliationView>('kernel_reconciliation_query', request),
+  reconciliationConfirm: (request: ReconciliationRequest) => command<ReconciliationView>('kernel_reconciliation_confirm', request),
+  reconciliationResume: (request: ReconciliationRequest) => command<StartRunResult>('kernel_reconciliation_resume', request),
   cancelChildRun: (parentConversationId: string, childRunId: string) =>
     command<boolean>('child_run_cancel_by_user', { parentConversationId, childRunId }),
   resolveApproval: (approvalId: string, decision: import('../model/types').ApprovalDecision) =>

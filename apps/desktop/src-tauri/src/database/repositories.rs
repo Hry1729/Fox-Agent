@@ -33,6 +33,7 @@ mod expert_workflows;
 mod graph_lead;
 mod kernel;
 mod kernel_compaction;
+pub(crate) mod kernel_reconciliation;
 mod run_control;
 mod kernel_model_config;
 mod kernel_initial_input;

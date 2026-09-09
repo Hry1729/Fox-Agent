@@ -26,6 +26,20 @@ impl ReadLimits {
 
 pub fn is_reader(tool: &str) -> bool { matches!(tool, "read" | "ls" | "find" | "grep") }
 
+/// Independent byte-level observation. No model text or prior result is used
+/// as evidence, and a matching file is not proof of which process wrote it.
+pub(crate) fn reconciliation_fingerprint(binding: &RunControlBinding, path: &str, token: &CancellationToken) -> Result<Value,String> {
+    use sha2::{Digest,Sha256};
+    binding.validate()?;
+    let approved=crate::tool_guard::approve_read_only_tool("read",&json!({"path":path}),binding.permission.project_root.as_deref())?;
+    let root=Path::new(binding.permission.project_root.as_deref().ok_or("missing frozen project root")?).canonicalize().map_err(|_|"原项目目录不可访问")?;
+    let gateway=Gateway {root,cancellation:token,deadline:Instant::now()+Duration::from_secs(10),remaining_bytes:MAX_FILE_BYTES,limits:ReadLimits::for_profile(&binding.execution_profile_id)};
+    let mut file=gateway.open(&approved.resolved_path,false)?;
+    let mut hash=Sha256::new();let mut bytes=0u64;let mut chunk=[0u8;16*1024];
+    loop {gateway.check()?;let n=file.read(&mut chunk).map_err(|_|"文件读取失败")?;if n==0 {break;}bytes+=n as u64;if bytes>MAX_FILE_BYTES{return Err("文件超过 8 MiB 独立核验上限".into());}hash.update(&chunk[..n]);}
+    Ok(json!({"bytes":bytes,"sha256":format!("sha256:{}",hex::encode(hash.finalize()))}))
+}
+
 struct Gateway<'a> {
     root: PathBuf,
     cancellation: &'a CancellationToken,
@@ -232,6 +246,20 @@ mod tests {
         let searched = execute(&binding, "grep", &json!({"path":".","pattern":"fox"}), &token).unwrap();
         assert_eq!(searched["details"]["count"], 2);
         assert!(searched["content"][0]["text"].as_str().unwrap().contains(":2:second Fox line"));
+    }
+
+    #[test]
+    fn reconciliation_fingerprint_reads_exact_bytes_and_rejects_scope_escape() {
+        use sha2::{Digest,Sha256};
+        let (binding,_,token)=fixture();
+        let observed=reconciliation_fingerprint(&binding,"src/note.txt",&token).unwrap();
+        let content="A😀Fox\r\nsecond Fox line\n";
+        assert_eq!(observed["bytes"],content.len());
+        assert_eq!(observed["sha256"],format!("sha256:{}",hex::encode(Sha256::digest(content.as_bytes()))));
+        assert!(reconciliation_fingerprint(&binding,"../outside.txt",&token).is_err());
+        let large=Path::new(binding.permission.project_root.as_ref().unwrap()).join("large.bin");
+        File::create(&large).unwrap().set_len(MAX_FILE_BYTES+1).unwrap();
+        assert!(reconciliation_fingerprint(&binding,"large.bin",&token).is_err());
     }
 
     #[test]

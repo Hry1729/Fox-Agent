@@ -16,10 +16,11 @@ input.on('line', (line) => {
   }
   if (request.method === 'notifications/initialized') return
   if (request.method === 'tools/list') {
-    send(request.id, { tools: [{ name: 'echo', description: 'Echo text', inputSchema: mode === 'invalid-schema' ? { type: 'string' } : { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }] })
+    send(request.id, { tools: [{ name: 'echo', description: 'Echo text', annotations: mode === 'readonly' ? { readOnlyHint: true, destructiveHint: false } : undefined, inputSchema: mode === 'invalid-schema' ? { type: 'string' } : { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] } }] })
     return
   }
   if (request.method === 'tools/call') {
+    if (mode === 'valid' && request.params.arguments.text === 'must-not-execute') process.exit(77)
     send(request.id, { content: [{ type: 'text', text: request.params.arguments.text }] })
   }
 })

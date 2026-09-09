@@ -1,3 +1,5 @@
+mod kernel_reconciliation;
+pub use kernel_reconciliation::*;
 use crate::model_service::{
     api_key_configured, clear_api_key, get_api_key, normalize_model_base_url, normalize_model_id,
     set_api_key,
