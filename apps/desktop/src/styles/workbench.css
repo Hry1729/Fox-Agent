@@ -4976,6 +4976,45 @@ button.fox-chat-project-row:disabled {
   padding: 0;
 }
 
+.fox-composer-selection-row {
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.fox-composer-selection-row > [data-slot],
+.fox-composer-selection-row > button {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 180px;
+}
+
+.fox-composer-selection-row > button {
+  width: auto;
+  height: 28px;
+  opacity: 1 !important;
+}
+
+.fox-composer-selection-row > .fox-composer-overflow {
+  flex: 0 0 28px;
+  width: 28px;
+  opacity: 1 !important;
+}
+
+.fox-composer-overflow-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.fox-composer-overflow-list > button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+}
+
 .fox-composer-context > span {
   height: 28px;
   display: flex;
@@ -9793,7 +9832,7 @@ button.fox-chat-project-row:disabled {
 
 @keyframes foxSpin { to { transform: rotate(360deg); } }
 @keyframes foxSidebarMascot { 0%, 100% { transform: translateY(0) rotate(-1deg); } 50% { transform: translateY(-4px) rotate(1deg); } }
-@keyframes foxMascotIn { from { opacity: 0; transform: translateY(5px) scale(.86); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes foxMascotIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes foxMascotPath { 0%, 100% { transform: translate(-2px, 1px); } 50% { transform: translate(3px, -2px); } }
 @keyframes foxMascotBody { to { transform: rotate(4deg) scale(1.04); } }
 @keyframes foxWater { 0% { transform: translateX(-2px) scale(.75); opacity: 0; } 35% { opacity: .8; } 100% { transform: translateX(6px) scale(1.2); opacity: 0; } }

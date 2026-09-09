@@ -102,8 +102,8 @@ export function createHostTools(requestHost) {
     {
       name: 'read_attachment',
       label: 'Read attachment',
-      description: 'Read a UTF-8 text, DOCX, XLSX or PPTX attachment from the current conversation by its Fox attachment ID. XLSX includes sheet names and cell addresses; formula results are cached, not recalculated. Legacy DOC/XLS/PPT and extracted text larger than 1 MiB are rejected.',
-      parameters: Type.Object({ attachmentId: Type.String() }),
+      description: 'Read a page of a UTF-8 text, DOCX, XLS, XLSX, PPT or PPTX attachment from this conversation. Spreadsheets include sheet names and cell addresses; formula results are cached, not recalculated. Returns hasMore, nextOffset and totalCharacters. Continue with offset=nextOffset to read all data before computing full-file statistics. Offsets count Unicode characters. Default limit 12000, maximum 24000. Legacy DOC and extracted text larger than 1 MiB are rejected.',
+      parameters: Type.Object({ attachmentId: Type.String(), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 24000 })) }),
       execute: (toolCallId, params, signal) =>
         executeHostTool(toolCallId, 'read_attachment', params, requestHost, signal),
     },

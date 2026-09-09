@@ -1822,7 +1822,10 @@ fn kernel_context_resources_preserve_conversation_scope_and_use_kernel_results()
         coordinator.dispatch_tool(tool,"context-owner",|_,_,token| {
             let result = policy.execute_context_resource(&db,&root,tool,&input,token)?;
             if tool=="read_attachment" {
-                assert_eq!(result["details"]["text"],"durable coordinator 中文 😀");
+                let page: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+                assert_eq!(page["text"],"durable coordinator 中文 😀");
+                assert_eq!(page["hasMore"],false);
+                assert!(result["details"].get("text").is_none(), "the raw text must not be duplicated in UI metadata");
                 assert!(policy.execute_context_resource(&db,&root,tool,&json!({"attachmentId":"foreign-attachment"}),token).is_err());
             }
             Ok((true,result))

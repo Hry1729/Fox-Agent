@@ -10,6 +10,10 @@ import { cn } from "@/lib/utils";
 import type { FileUIPart, SourceDocumentUIPart } from "ai";
 import {
   FileTextIcon,
+  FileSpreadsheetIcon,
+  PresentationIcon,
+  FileArchiveIcon,
+  FileCodeIcon,
   GlobeIcon,
   ImageIcon,
   Music2Icon,
@@ -255,7 +259,12 @@ export const AttachmentPreview = ({
       return <video className="size-full object-cover" muted src={data.url} />;
     }
 
-    const Icon = mediaCategoryIcons[mediaCategory];
+    const extension = data.type === "file" ? data.filename?.split('.').pop()?.toLowerCase() : undefined;
+    const Icon = extension && /^(xlsx?|csv|ods|tsv)$/.test(extension) ? FileSpreadsheetIcon
+      : extension && /^(pptx?|odp)$/.test(extension) ? PresentationIcon
+      : extension && /^(zip|rar|7z|tar|gz)$/.test(extension) ? FileArchiveIcon
+      : extension && /^(json|xml|html|js|ts|py|rs|css)$/.test(extension) ? FileCodeIcon
+      : mediaCategoryIcons[mediaCategory];
     return fallbackIcon ?? renderIcon(Icon);
   };
 

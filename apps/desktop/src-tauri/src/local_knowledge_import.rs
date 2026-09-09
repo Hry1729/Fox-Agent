@@ -872,14 +872,52 @@ fn parse_zip_based_text(
 pub(crate) fn extract_office_text(bytes: &[u8], filename: &str) -> Result<Option<String>, String> {
     let extension = Path::new(filename).extension().and_then(|value| value.to_str())
         .unwrap_or_default().to_ascii_lowercase();
+    if extension == "xls" {
+        return extract_legacy_xls(bytes).map(Some);
+    }
+    if extension == "ppt" {
+        let document = office_oxide::ppt::PptDocument::from_reader(std::io::Cursor::new(bytes))
+            .map_err(|error| format!("无法读取旧版 PPT：{error}"))?;
+        if document.plain_text().trim().is_empty() { return Err("PPT 中没有可读取的文字，图片内容需要 OCR。".into()); }
+        let mut text = String::new();
+        append_text_section(&mut text, &document.to_markdown()).map_err(|error| error.to_string())?;
+        if text.trim().is_empty() { return Err("PPT 中没有可读取的文字，图片内容需要 OCR。".into()); }
+        return Ok(Some(text));
+    }
     let kind = match extension.as_str() {
         "docx" => SpecializedDocumentKind::Docx,
         "xlsx" => SpecializedDocumentKind::Xlsx,
         "pptx" => SpecializedDocumentKind::Pptx,
-        "doc" | "xls" | "ppt" => return Err("旧版 Office 二进制格式暂不支持读取，请另存为 DOCX、XLSX 或 PPTX 后再添加。".into()),
+        "doc" => return Err("旧版 DOC 暂不支持读取，请另存为 DOCX 后再添加。".into()),
         _ => return Ok(None),
     };
     parse_zip_based_text(bytes, kind).map(Some).map_err(|error| error.to_string())
+}
+
+fn extract_legacy_xls(bytes: &[u8]) -> Result<String, String> {
+    use calamine::{Reader, Xls};
+    let mut workbook = Xls::new(std::io::Cursor::new(bytes))
+        .map_err(|error| format!("无法读取旧版 XLS：{error}"))?;
+    let mut text = String::new();
+    for name in workbook.sheet_names() {
+        let range = workbook.worksheet_range(&name).map_err(|error| error.to_string())?;
+        append_text_section(&mut text, &format!("工作表：{name}（公式使用文件内保存的结果）"))
+            .map_err(|error| error.to_string())?;
+        let (start_row, start_col) = range.start().unwrap_or_default();
+        for (row, col, value) in range.used_cells() {
+            let mut column = col + start_col as usize + 1;
+            let mut address = String::new();
+            while column > 0 {
+                column -= 1;
+                address.insert(0, (b'A' + (column % 26) as u8) as char);
+                column /= 26;
+            }
+            append_text_section(&mut text, &format!("{address}{}: {value}", row + start_row as usize + 1))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    if text.is_empty() { return Err("XLS 中没有可读取的工作表。".into()); }
+    Ok(text)
 }
 
 fn append_text_section(output: &mut String, section: &str) -> Result<(), ImportError> {
@@ -2114,7 +2152,23 @@ mod tests {
         assert!(text.contains("D2: 247 [formula: =B2*2; saved result, not recalculated]"));
         assert!(text.contains("E2: (no cached value)"));
         assert!(text.find("[Sheet: AGV统计]").unwrap() < text.find("[Sheet: 第二页]").unwrap());
-        assert!(extract_office_text(bytes, "old.xls").unwrap_err().contains("另存为"));
+        assert!(extract_office_text(bytes, "old.xls").is_err());
+    }
+
+    #[test]
+    #[ignore = "requires FOX_LEGACY_OFFICE_FIXTURES in the isolated acceptance directory"]
+    fn reads_legacy_office_acceptance_files() {
+        let root = std::path::PathBuf::from(std::env::var("FOX_LEGACY_OFFICE_FIXTURES").unwrap());
+        let xls = extract_office_text(&std::fs::read(root.join("legacy-reading.xls")).unwrap(), "legacy.xls").unwrap().unwrap();
+        assert!(xls.contains("工作表：AGV等待"));
+        assert!(xls.contains("B2: 123.5"));
+        assert!(xls.contains("C3: 中文读取正常"));
+        let ppt = extract_office_text(&std::fs::read(root.join("legacy-basic.ppt")).unwrap(), "legacy.ppt").unwrap().unwrap();
+        assert!(ppt.contains("Slide 1"));
+        assert!(ppt.contains("This is a test title"));
+        assert!(ppt.contains("This is a test subtitle"));
+        assert!(!ppt.contains("Click to edit Master"));
+        println!("PPT extracted: {}", ppt.chars().take(500).collect::<String>());
     }
 
     #[test]

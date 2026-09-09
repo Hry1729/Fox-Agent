@@ -58,6 +58,8 @@ uuid = { version = "1", features = ["v4"] }
 zvec-rust = { version = "0.6.0", optional = true }
 ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray", "download-binaries"], optional = true }
 tokenizers = { version = "0.21.1", default-features = false, features = ["fancy-regex"], optional = true }
+calamine = { version = "0.36.1", default-features = false }
+office_oxide = { version = "0.1.9", default-features = false }
 
 [dev-dependencies]
 fox-agent-kernel = { path = "../../../crates/fox-agent-kernel", features = ["test-support"] }

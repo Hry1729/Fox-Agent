@@ -6578,10 +6578,12 @@ fn execute_attachment_tool_request(
                 hook_decision.approval_reason.as_deref(),
             )?;
         }
-        let result =
-            read_attachment_text(database, attachments_dir, conversation_id, attachment_id)?;
+        let mut result =
+            read_attachment_text(database, attachments_dir, conversation_id, attachment_id, &input)?;
+        let content = result.to_string();
+        if let Some(metadata) = result.as_object_mut() { metadata.remove("text"); }
         Ok(json!({
-                "content": [{ "type": "text", "text": result["text"] }],
+                "content": [{ "type": "text", "text": content }],
                 "details": result,
         }))
     })();
@@ -6601,6 +6603,7 @@ fn read_attachment_text(
     attachments_dir: &std::path::Path,
     conversation_id: &str,
     attachment_id: &str,
+    input: &Value,
 ) -> Result<Value, String> {
     let attachment = database
         .attachment_for_conversation(conversation_id, attachment_id)?
@@ -6636,13 +6639,36 @@ fn read_attachment_text(
     if text.len() > MAX_ATTACHMENT_TEXT_BYTES {
         return Err("Extracted attachment text exceeds the 1 MiB context limit".to_owned());
     }
+    let page = attachment_text_page(&text, input)?;
     Ok(json!({
         "attachmentId": attachment.id,
         "displayName": attachment.display_name,
         "mediaType": attachment.media_type,
         "byteSize": metadata.len(),
-        "text": text,
+        "text": page["text"],
+        "offset": page["offset"],
+        "nextOffset": page["nextOffset"],
+        "totalCharacters": page["totalCharacters"],
+        "hasMore": page["hasMore"],
     }))
+}
+
+fn attachment_text_page(text: &str, input: &Value) -> Result<Value, String> {
+    let read_integer = |key: &str, default: u64| -> Result<usize, String> {
+        match input.get(key) {
+            None => Ok(default as usize),
+            Some(value) => value.as_u64().and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| format!("{key} must be a non-negative integer")),
+        }
+    };
+    let offset = read_integer("offset", 0)?;
+    let limit = read_integer("limit", 12000)?.clamp(1, 24000);
+    let total = text.chars().count();
+    if offset > total { return Err(format!("offset exceeds attachment length ({total})")); }
+    let page: String = text.chars().skip(offset).take(limit).collect();
+    let next = offset + page.chars().count();
+    Ok(json!({"text":page,"offset":offset,"nextOffset":if next < total {Some(next)} else {None},
+        "totalCharacters":total,"hasMore":next < total}))
 }
 
 fn attachment_is_docx(filename: &str, media_type: Option<&str>) -> bool {
@@ -10219,6 +10245,26 @@ mod attachment_tests {
                 > super::MAX_KNOWLEDGE_TOOL_TEXT_BYTES as u64
         );
         assert!(serde_json::to_vec(&wrapped).unwrap().len() < super::MAX_PROTOCOL_LINE_BYTES / 2);
+    }
+
+    #[test]
+    fn attachment_pages_preserve_unicode_and_bound_protocol_size() {
+        let text = "AGV等待🦊\n".repeat(55000);
+        let old_result = json!({"content":[{"type":"text","text":text}],"details":{"text":text}});
+        assert!(serde_json::to_vec(&old_result).unwrap().len() > super::MAX_PROTOCOL_LINE_BYTES);
+        let mut offset = 0;
+        let mut recovered = String::new();
+        loop {
+            let page = super::attachment_text_page(&text, &json!({"offset":offset,"limit":24000})).unwrap();
+            let wrapped = json!({"content":[{"type":"text","text":page.to_string()}],"details":page});
+            assert!(serde_json::to_vec(&wrapped).unwrap().len() < super::MAX_PROTOCOL_LINE_BYTES / 2);
+            recovered.push_str(page["text"].as_str().unwrap());
+            if !page["hasMore"].as_bool().unwrap() { break; }
+            offset = page["nextOffset"].as_u64().unwrap();
+        }
+        assert_eq!(recovered, text);
+        assert!(super::attachment_text_page(&text, &json!({"offset":-1})).is_err());
+        assert!(super::attachment_text_page(&text, &json!({"offset":9999999})).is_err());
     }
 
     #[test]

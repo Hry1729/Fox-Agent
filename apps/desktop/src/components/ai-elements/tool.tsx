@@ -17,9 +17,33 @@ import {
   XCircleIcon,
 } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
-import { isValidElement } from "react";
+import { isValidElement, memo, useMemo, useState } from "react";
 
 import { CodeBlock } from "./code-block";
+
+const TOOL_PAGE_SIZE = 6000;
+
+// Large tool results must never enter the syntax highlighter: a spreadsheet
+// can otherwise create hundreds of thousands of token spans in the chat.
+const ToolValue = memo(function ToolValue({ value }: { value: unknown }) {
+  const text = useMemo(() => typeof value === "string"
+    ? value
+    : JSON.stringify(value, null, 2) ?? String(value), [value]);
+  const [page, setPage] = useState(0);
+  const pages = Math.max(1, Math.ceil(text.length / TOOL_PAGE_SIZE));
+  const currentPage = Math.min(page, pages - 1);
+  if (text.length <= TOOL_PAGE_SIZE) return <CodeBlock code={text} language="json" />;
+  return <div className="space-y-2 p-3">
+    <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+      <span aria-live="polite">内容较长，分页查看 · {currentPage + 1} / {pages}</span>
+      <div className="flex gap-3">
+        <button type="button" className="disabled:opacity-40" disabled={currentPage === 0} onClick={() => setPage(currentPage - 1)}>上一页</button>
+        <button type="button" className="disabled:opacity-40" disabled={currentPage === pages - 1} onClick={() => setPage(currentPage + 1)}>下一页</button>
+      </div>
+    </div>
+    <pre key={currentPage} className="max-h-72 overflow-auto whitespace-pre-wrap break-all text-xs" tabIndex={0} aria-label="工具内容当前页">{text.slice(currentPage * TOOL_PAGE_SIZE, (currentPage + 1) * TOOL_PAGE_SIZE)}</pre>
+  </div>;
+});
 
 export type ToolProps = ComponentProps<typeof Collapsible>;
 
@@ -119,10 +143,10 @@ export type ToolInputProps = ComponentProps<"div"> & {
 export const ToolInput = ({ className, input, ...props }: ToolInputProps) => (
   <div className={cn("space-y-2 overflow-hidden", className)} {...props}>
     <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
-      Parameters
+      参数
     </h4>
     <div className="rounded-md bg-muted/50">
-      <CodeBlock code={JSON.stringify(input, null, 2)} language="json" />
+      <ToolValue value={input} />
     </div>
   </div>
 );
@@ -146,16 +170,16 @@ export const ToolOutput = ({
 
   if (typeof output === "object" && !isValidElement(output)) {
     Output = (
-      <CodeBlock code={JSON.stringify(output, null, 2)} language="json" />
+      <ToolValue value={output} />
     );
   } else if (typeof output === "string") {
-    Output = <CodeBlock code={output} language="json" />;
+    Output = <ToolValue value={output} />;
   }
 
   return (
     <div className={cn("space-y-2", className)} {...props}>
       <h4 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
-        {errorText ? "Error" : "Result"}
+        {errorText ? "错误" : "结果"}
       </h4>
       <div
         className={cn(

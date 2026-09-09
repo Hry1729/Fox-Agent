@@ -2599,18 +2599,21 @@ function ConversationTurnRail({ messages, artifacts }: { messages: ConversationM
   </nav>
 }
 
-function ComposerAttachmentPreview() {
+function ComposerAttachmentPreview({ projectRoot, bindings = [], onProject, onKnowledge }: { projectRoot?: string | null; bindings?: KnowledgeBindingRecord[]; onProject?: () => void; onKnowledge?: () => void }) {
   const attachments = usePromptInputAttachments()
-  if (!attachments.files.length) return null
+  const items: ReactNode[] = []
+  if (projectRoot) items.push(<button type="button" key="project" className="is-authorized" onClick={onProject} title={projectRoot}><FolderOpen size={13} /><span>{projectRoot.split(/[\\/]/).filter(Boolean).at(-1)}</span><Check size={12} /></button>)
+  bindings.forEach((binding) => {
+    const label = binding.knowledgeBaseName || binding.knowledgeBaseId
+    items.push(<button type="button" key={`${binding.serviceConnectionId}:${binding.knowledgeBaseId}`} className="is-authorized is-knowledge" onClick={onKnowledge} title={label}><Library size={13} /><span>{label}</span><Check size={12} /></button>)
+  })
+  attachments.files.forEach((file) => items.push(<Attachment key={file.id} data={file} onRemove={() => attachments.remove(file.id)}><AttachmentPreview /><AttachmentInfo /><AttachmentRemove label="移除附件" /></Attachment>))
+  if (!items.length) return null
+  const labels = [...(projectRoot ? [projectRoot] : []), ...bindings.map((binding) => binding.knowledgeBaseName || binding.knowledgeBaseId), ...attachments.files.map((file) => file.filename || '附件')]
   return (
-    <Attachments variant="inline" className="fox-composer-attachments">
-      {attachments.files.map((file) => (
-        <Attachment key={file.id} data={file} onRemove={() => attachments.remove(file.id)}>
-          <AttachmentPreview />
-          <AttachmentInfo />
-          <AttachmentRemove label="移除附件" />
-        </Attachment>
-      ))}
+    <Attachments variant="inline" className="fox-composer-attachments fox-composer-context fox-composer-selection-row">
+      {items.slice(0, 3)}
+      {items.length > 3 && <Popover><Tooltip><TooltipTrigger asChild><PopoverTrigger asChild><button type="button" className="fox-composer-overflow" aria-label={`查看其余 ${items.length - 3} 项`}>…</button></PopoverTrigger></TooltipTrigger><TooltipContent className="max-h-64 overflow-auto">{labels.slice(3).map((label, index) => <p key={index}>{label}</p>)}</TooltipContent></Tooltip><PopoverContent className="fox-composer-overflow-list" align="start">{items.slice(3)}</PopoverContent></Popover>}
     </Attachments>
   )
 }
@@ -3086,7 +3089,7 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
             <GoalProgress data={goalProgressData} defaultExpanded={false} onEvidenceClick={onEvidenceClick} onResolveConfirmation={onResolveWorkModeConfirmation} onResolvePlanRevision={onResolvePlanRevision} onResolveWorkflowGate={onResolveWorkflowGate} />
           </div>}
         </div> : <BorderBeam
-          active={centered && focused}
+          active={status === 'streaming' || (centered && focused)}
           borderRadius={24}
           brightness={1.06}
           className="fox-prompt-border-beam"
@@ -3131,7 +3134,7 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
         </Command>}
         {mentionOpen && <div className="fox-mention-menu"><div className="fox-command-title"><span>引用工作区文件</span><kbd>@</kbd></div>{['docs/FOX_ARCHITECTURE.md', 'apps/desktop/src/features/chat/workbench.tsx', 'apps/desktop/src/styles/workbench.css'].map((path) => <button type="button" key={path} onMouseDown={(event) => event.preventDefault()} onClick={() => applyMention(path)}><FileText size={14} /><span>{path}</span></button>)}</div>}
         <PromptInput
-          accept={supportsImageInput ? 'image/*,.pdf,.txt,.md,.docx,.xlsx,.pptx,.csv,.tsv' : '.pdf,.txt,.md,.docx,.xlsx,.pptx,.csv,.tsv'}
+          accept={supportsImageInput ? 'image/*,.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv' : '.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv'}
           multiple
           maxFiles={8}
           maxFileSize={5 * 1024 * 1024}
@@ -3196,34 +3199,7 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
           className={`fox-prompt-input ${focused ? 'is-focused' : ''}`}
         >
         <ComposerAttachmentCommandBridge openRef={attachmentDialogRef} />
-        <ComposerAttachmentPreview />
-        {runtimeControlled && (projectRoot || enabledKnowledgeBindings.length > 0) && (
-          <div className="fox-composer-context">
-            {projectRoot && (
-              <button type="button" className="is-authorized" onClick={onProject} title={projectRoot}>
-                <FolderOpen size={13} />
-                <span>{projectRoot.split(/[\\/]/).filter(Boolean).at(-1)}</span>
-                <Check size={12} />
-              </button>
-            )}
-            {enabledKnowledgeBindings.map((binding) => {
-              const label = binding.knowledgeBaseName || binding.knowledgeBaseId
-              return (
-                <button
-                  type="button"
-                  className="is-authorized is-knowledge"
-                  key={`${binding.serviceConnectionId}:${binding.knowledgeBaseId}`}
-                  onClick={openKnowledge}
-                  title={label}
-                >
-                  <Library size={13} />
-                  <span>{label}</span>
-                  <Check size={12} />
-                </button>
-              )
-            })}
-          </div>
-        )}
+        <ComposerAttachmentPreview projectRoot={runtimeControlled ? projectRoot : undefined} bindings={runtimeControlled ? enabledKnowledgeBindings : []} onProject={onProject} onKnowledge={openKnowledge} />
         <PromptInputBody>
           <PromptInputTextarea value={draft} disabled={questionSubmitting} spellCheck={spellcheckEnabled} onChange={onDraftChange} onKeyDown={onComposerKeyDown} className="fox-prompt-textarea" placeholder={activeQuestionRequest ? '补充你的答案，或直接选择上方选项' : '给 Fox 发消息，输入 / 查看命令，@ 引用文件…'} />
         </PromptInputBody>

@@ -404,12 +404,18 @@ impl GatewayPolicy {
                     attachments_dir,
                     &self.binding.conversation_id,
                     id,
+                    input,
                 )?
             }
             _ => return Err("unsupported Kernel context resource".into()),
         };
         token.check()?;
-        Ok(json!({"content":[{"type":"text","text":result.to_string()}],"details":result}))
+        let content = result.to_string();
+        let mut details = result;
+        if tool == "read_attachment" {
+            if let Some(details) = details.as_object_mut() { details.remove("text"); }
+        }
+        Ok(json!({"content":[{"type":"text","text":content}],"details":details}))
     }
 
     pub(super) fn execute_work(

@@ -24,6 +24,20 @@ function objectProperties(schema) {
   return schema.properties
 }
 
+test('attachment pages retain continuation offsets and reject oversized page requests', async () => {
+  const requests = []
+  const tool = toolByName(createHostTools(async (type, payload) => {
+    requests.push(payload)
+    return { payload: { result: { hasMore: true, nextOffset: 24000 } } }
+  }), 'read_attachment')
+  const input = { attachmentId: 'sheet', offset: 12000, limit: 12000 }
+  assert.equal(Check(tool.parameters, input), true)
+  assert.equal(Check(tool.parameters, { ...input, offset: -1 }), false)
+  assert.equal(Check(tool.parameters, { ...input, limit: 1000000 }), false)
+  await tool.execute('page-two', input, new AbortController().signal)
+  assert.deepEqual(requests[0].input, input)
+})
+
 test('knowledge tools normalize serialized references before strict schema validation', () => {
   const reference = { source: 'remote', connectionId: 'yuxi-primary', id: 'kb-crane' }
   const search = toolByName(createKnowledgeTools(() => {}), KNOWLEDGE_TOOL_NAMES.search)

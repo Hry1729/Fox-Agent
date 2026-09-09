@@ -627,7 +627,7 @@ fn builtin_tool_description(tool: &str) -> &'static str {
         "ls" => "列出授权目录中的文件和文件夹，帮助快速浏览项目结构。",
         "find" => "按名称或路径模式查找项目文件，快速定位目标资源。",
         "grep" => "在项目文件中搜索文本或正则表达式，定位代码与配置引用。",
-        "read_attachment" => "读取当前对话中的文本、DOCX、XLSX 或 PPTX 附件内容。表格公式使用已保存的结果。",
+        "read_attachment" => "分页读取对话中的文本、DOCX、XLS/XLSX 或 PPT/PPTX 附件。表格公式使用已保存的结果。",
         "write_file" => "在授权项目内创建或覆盖文本文件，并遵循当前写入权限。",
         "edit_file" => "精确替换文件中的指定文本片段，生成可审查的修改。",
         "run_command" => "在授权项目目录运行非交互命令，每次执行都需要明确批准。",
