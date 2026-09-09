@@ -23,7 +23,8 @@
     "knowledge:verify-preview:test": "node --test scripts/verify-knowledge-preview-contract.test.mjs",
     "tauri": "pnpm --dir apps/desktop tauri",
     "tauri:build": "pnpm prepare:office && pnpm runtime:build && pnpm --dir apps/desktop tauri build",
-    "tauri:build:windows": "pnpm prepare:office && pnpm runtime:build && pnpm --dir apps/desktop tauri build --bundles nsis --config src-tauri/tauri.installer.conf.json"
+    "tauri:build:windows": "pnpm prepare:office && pnpm runtime:build && pnpm --dir apps/desktop tauri build --bundles nsis --config src-tauri/tauri.installer.conf.json",
+    "tauri:build:kernel-preview": "pnpm prepare:office && pnpm runtime:build && pnpm --dir apps/desktop tauri build --bundles nsis --features kernel-default --config src-tauri/tauri.kernel-preview.conf.json"
   },
   "dependencies": {
     "border-beam": "^1.3.0"

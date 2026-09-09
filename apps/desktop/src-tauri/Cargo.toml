@@ -11,6 +11,7 @@ default = ["local-embedding", "zvec"]
 zvec = ["dep:zvec-rust"]
 local-embedding = ["dep:ort", "dep:tokenizers"]
 kernel-acceptance = []
+kernel-default = []
 
 [[bin]]
 name = "kernel-desktop-acceptance"

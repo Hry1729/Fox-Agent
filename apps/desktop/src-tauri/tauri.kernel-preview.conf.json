@@ -1,0 +1,20 @@
+{
+  "productName": "Fox Kernel Preview",
+  "identifier": "com.fox.agent.kernel-preview",
+  "build": { "features": ["kernel-default"] },
+  "app": {
+    "windows": [{
+      "title": "Fox 新 Kernel 验收版",
+      "width": 1200,
+      "height": 800,
+      "minWidth": 760,
+      "minHeight": 560,
+      "decorations": false,
+      "resizable": true,
+      "center": true
+    }]
+  },
+  "bundle": {
+    "resources": { "resources/windows-runtime/*.dll": "" }
+  }
+}

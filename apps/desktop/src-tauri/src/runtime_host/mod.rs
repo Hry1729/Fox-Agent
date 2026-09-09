@@ -4,6 +4,7 @@ pub(crate) mod kernel_coordinator;
 mod kernel_model_worker;
 mod kernel_run_lock;
 mod kernel_host;
+mod kernel_authority;
 mod kernel_gateway;
 mod kernel_delegation;
 mod protocol;
@@ -1687,15 +1688,10 @@ impl RuntimeHost {
             "primary"
         };
         let frozen_binding = self.database.run_control_binding(&started.run.id)?;
-        let authority = match frozen_binding.as_ref() {
-            Some(binding) => binding.authority,
-            None => match std::env::var("FOX_KERNEL_MODE") {
-                Err(std::env::VarError::NotPresent) => fox_engine_protocol::ExecutionAuthority::Legacy,
-                Ok(value) if value == "legacy" => fox_engine_protocol::ExecutionAuthority::Legacy,
-                Ok(value) if value == "authoritative" => fox_engine_protocol::ExecutionAuthority::Authoritative,
-                _ => return Err("FOX_KERNEL_MODE must be legacy or authoritative".into()),
-            },
-        };
+        let authority = kernel_authority::select(
+            frozen_binding.as_ref().map(|binding| binding.authority),
+            std::env::var("FOX_KERNEL_MODE"),
+        )?;
         let kernel_ownership = if authority == fox_engine_protocol::ExecutionAuthority::Authoritative {
             Some(kernel_host::acquire(&self.sessions_dir, &started.run.id)?)
         } else { None };
