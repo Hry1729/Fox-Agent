@@ -8,6 +8,17 @@ import { validatePromptControl } from '../src/control-binding.mjs'
 
 const identity = { runId: 'kernel-run', conversationId: 'kernel-conversation', runtimeSessionId: 'kernel-session', executionProfileId: 'legacy' }
 
+test('Host execution receipts survive provider projection without rewriting durable results', () => {
+  const request = fixture()
+  const receipt = 'FOX_EXECUTION_RECEIPT_V1\n' + JSON.stringify({source:'fox_kernel_host',approvalDecision:'allow_once',executionState:'completed',write:{exactSubmittedContent:'中文 😀\n',utf8Bytes:12}})
+  request.payload.batchResume.tools[0].result.content.push({type:'text',text:receipt})
+  const before = structuredClone(request)
+  const prepared = prepareKernelBatchResume(request, identity)
+  assert.equal(prepared.messages.at(-1).content.at(-1).text, receipt)
+  assert.deepEqual(prepared.messages.at(-1).details, {})
+  assert.deepEqual(request, before)
+})
+
 test('Kernel replay supplies local estimation metadata without changing durable facts or restoring provider diagnostics', () => {
   const request = fixture()
   request.payload.batchResume.assistantMessage.usage = { totalTokens: 999999 }

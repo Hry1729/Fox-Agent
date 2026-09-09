@@ -1,4 +1,17 @@
-import type { ArtifactRecord, RunEventRecord } from '@/features/conversations/model/types'
+import type { ArtifactRecord, ConversationMessage, RunEventRecord } from '@/features/conversations/model/types'
+
+export function latestRunAssistantId(messages: readonly ConversationMessage[], runId?: string) {
+  if (!runId) return undefined
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message.role === 'assistant' && message.runId === runId) return message.id
+  }
+  return undefined
+}
+
+export function assistantDisplayContent(message: ConversationMessage, streamTargetId: string | undefined, streamingText: string) {
+  return message.id === streamTargetId ? streamingText || message.content : message.content
+}
 
 export const EMPTY_RUNTIME_EVENTS: RunEventRecord[] = []
 export const EMPTY_RUNTIME_ARTIFACTS: ArtifactRecord[] = []

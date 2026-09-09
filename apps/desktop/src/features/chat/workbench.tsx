@@ -254,7 +254,8 @@ import type { MessageResponseProps } from '@/components/ai-elements/message-resp
 import { normalizeAssistantMarkdown } from '@/features/conversations/model/assistant-presentation'
 import { UserProfileDialog, useUserProfile } from '@/features/profile/user-profile'
 import { childRunIsActive, childRunStatusLabel, formatDurationMs, isWebToolCall, latestConversationContextUsage, normalizeBrowserUrl, webActivitySummary, type ConversationUsage } from './sidebar-model'
-import { EMPTY_RUNTIME_ARTIFACTS, EMPTY_RUNTIME_EVENTS, groupRuntimeRecords } from './runtime-timeline-performance'
+import { EMPTY_RUNTIME_ARTIFACTS, EMPTY_RUNTIME_EVENTS, groupRuntimeRecords, latestRunAssistantId, assistantDisplayContent } from './runtime-timeline-performance'
+import { approvalPresentation } from '../conversations/model/approval-presentation'
 
 const OnboardingPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.OnboardingPage })))
 const MessageResponse = lazy(() => import('@/components/ai-elements/message-response').then((module) => ({ default: module.MessageResponse })))
@@ -1644,6 +1645,7 @@ function ApprovalPrompt({ onApprove, onDeny }: { onApprove: () => void; onDeny: 
 
 function RuntimeApprovalPrompt({ approval, onResolve }: { approval: ApprovalRecord; onResolve: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean> }) {
   const request = approval.request
+  const presentation = approvalPresentation(approval)
   const allowedDecisions = allowedApprovalDecisions(request)
   const repairOverride = isRepairOverrideApproval(request)
   const repairDetails = repairOverrideApprovalDetails(request)
@@ -1663,15 +1665,16 @@ function RuntimeApprovalPrompt({ approval, onResolve }: { approval: ApprovalReco
     <Confirmation approval={{ id: approval.id }} state="approval-requested" className="fox-confirmation fox-runtime-confirmation">
       <ConfirmationRequest>
         <div className="fox-confirmation-body">
-          <div className="fox-confirmation-content"><ConfirmationTitle>{request.title ?? '允许 Fox 执行此操作？'}</ConfirmationTitle><p><code>{request.target ?? request.cwd ?? approval.toolName}</code></p><small>{request.summary ?? approval.requestedAction}</small></div>
+          <div className="fox-confirmation-content"><ConfirmationTitle>{presentation.title}</ConfirmationTitle><p><code>{presentation.target}</code></p><small>{presentation.summary}</small></div>
         </div>
         {repairOverride && <div className={`fox-approval-context ${repairDetails ? '' : 'is-invalid'}`}>
           {repairDetails
             ? <><p><strong>为什么还要再修一次：</strong>{repairDetails.rootCause}</p><p><strong>关联的审查问题：</strong>{repairDetails.findingIds.join('、')}</p></>
             : <p><strong>审批详情不完整。</strong>请先拒绝，并让 Fox 带上根因和关联审查问题重新发起。</p>}
         </div>}
-        {request.command && <div className="fox-approval-command"><Terminal size={13} /><code>{request.command}</code></div>}
-        {request.diff && <pre className="fox-approval-diff"><code>{request.diff}</code></pre>}
+        {presentation.command && <div className="fox-approval-command"><Terminal size={13} /><code>{presentation.command}</code></div>}
+        {presentation.diff && <pre className="fox-approval-diff" aria-label="拟修改差异"><code>{presentation.diff}</code></pre>}
+        {presentation.content !== undefined && <div className="fox-approval-context"><strong>拟写入内容</strong><pre className="fox-approval-diff" aria-label="拟写入内容"><code>{presentation.content || '（空文件）'}</code></pre></div>}
         <ConfirmationActions className="fox-confirmation-actions">
           <ConfirmationAction variant="ghost" disabled={submitting} onClick={() => void resolve('deny')}>拒绝</ConfirmationAction>
           {allowedDecisions.includes('allow_once') && <ConfirmationAction variant="outline" disabled={submitting} onClick={() => void resolve('allow_once')}>只允许这一次</ConfirmationAction>}
@@ -2295,6 +2298,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
     return visible
   }, [activeRunId, eventsByRunId, pendingMessage, runtimeRunning, storedMessages, streamingText])
   const timelineEntries = useMemo(() => mergeExpertBindingsIntoTimeline(visibleMessages, expertBindings), [expertBindings, visibleMessages])
+  const streamTargetId = useMemo(() => latestRunAssistantId(visibleMessages, activeRunId), [visibleMessages, activeRunId])
   const latestUserMessageId = useMemo(() => {
     for (let index = visibleMessages.length - 1; index >= 0; index -= 1) {
       if (visibleMessages[index].role === 'user') return visibleMessages[index].id
@@ -2399,7 +2403,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
             </div>
           }
           const isCurrentRun = Boolean(activeRunId && message.runId === activeRunId)
-          const rawContent = isCurrentRun ? streamingText || message.content : message.content
+          const rawContent = assistantDisplayContent(message, streamTargetId, streamingText)
           const parsedCacheKey = `${message.id}:${rawContent}`
           let parsed = parsedContentCacheRef.current.get(parsedCacheKey)
           if (!parsed) {
@@ -2429,11 +2433,11 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
               syntheticReasoningRef.current.set(cacheKey, processEvents)
             }
           }
-          const running = isCurrentRun && runtimeRunning
+          const running = message.id === streamTargetId && runtimeRunning
           const messageArtifacts = message.runId ? artifactsByRunId.get(message.runId) ?? EMPTY_RUNTIME_ARTIFACTS : EMPTY_RUNTIME_ARTIFACTS
           const eventModel = processEvents.find((item) => item.eventType === 'run.started' && typeof item.event.model === 'string')?.event.model as string | undefined
           const displayMessage = rawContent === message.content ? message : { ...message, content: rawContent }
-          return <div id={`fox-turn-${message.id}`} key={`assistant-turn-${message.runId ?? message.id}`} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onFork={onFork} /></div>
+          return <div id={`fox-turn-${message.id}`} key={`assistant-turn-${message.id}`} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onFork={onFork} /></div>
         })}
         {state === 'error' && <div className="fox-turn-anchor"><Message from="assistant" className="fox-message fox-assistant-message"><MessageContent className="fox-assistant-content"><ErrorPrompt onRetry={onRetry} error={runtimeError} errorDetails={runtimeErrorDetails} /></MessageContent></Message></div>}
       </ConversationContent>

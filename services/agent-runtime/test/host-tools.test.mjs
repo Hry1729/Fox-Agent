@@ -690,6 +690,11 @@ test('publishes bounded Child Run schemas in delegation catalog order', () => {
   const collect = objectProperties(toolByName(tools, 'child_run_collect').parameters)
   assert.equal(collect.childRunIds.minItems, 1)
   assert.equal(collect.childRunIds.maxItems, 8)
+  assert.equal(collect.childRunIds.items.minLength, 1)
+  assert.equal(collect.childRunIds.items.maxLength, 160)
+  assert.match(objectProperties(toolByName(tools, 'child_run_start').parameters).objective.description, /exact key: objective/)
+  assert.equal(toolByName(tools, 'child_run_start').parameters.additionalProperties, false)
+  assert.match(toolByName(tools, 'child_run_collect').description, /never invent IDs/)
   assert.equal(collect.waitMs.maximum, 60000)
 })
 

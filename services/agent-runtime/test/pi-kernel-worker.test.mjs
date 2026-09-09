@@ -71,6 +71,58 @@ test('HTTP rejection reports bounded evidence without SDK retry or provider cont
   assert.equal((await child.request('kernel.resume_batch',resumePayload())).type,'request_failed')
   assert.equal(calls,1)
 })
+test('streamed argument keys and corrective tool feedback survive real HTTP worker rounds exactly', { timeout: 30000 }, async t => {
+  const requests = []
+  const inputs = [{ objctive: '只回复46', mode: 'worker' }, { objective: '只回复46', mode: 'worker' }]
+  const feedback = JSON.stringify({ error: { code: 'child.invalid_arguments', field: 'objective' },
+    executionStarted: false, recovery: 'Use the exact key objective in a NEW call.' })
+  const server = createServer(async (req, res) => {
+    let body = ''
+    for await (const chunk of req) body += chunk
+    requests.push(JSON.parse(body))
+    const round = requests.length - 1
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    const send = delta => res.write(`data: ${JSON.stringify({ id: `stream-${round}`, object: 'chat.completion.chunk',
+      created: 1, model: 'kernel-http-test', choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`)
+    send({ role: 'assistant', tool_calls: [{ index: 0, id: `child-${round}`, type: 'function',
+      function: { name: 'child_run_start', arguments: '' } }] })
+    // Split inside both the misspelled and corrected key, not just between JSON values.
+    for (const part of JSON.stringify(inputs[round]).match(/.{1,3}/gu)) {
+      send({ tool_calls: [{ index: 0, function: { arguments: part } }] })
+    }
+    res.write(`data: ${JSON.stringify({ id: `stream-${round}`, object: 'chat.completion.chunk', created: 1,
+      model: 'kernel-http-test', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`)
+    res.end('data: [DONE]\n\n')
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { server.closeAllConnections(); server.close() })
+  const config = initialization({ modelService: { apiType: 'openai-completions', modelId: 'kernel-http-test',
+    baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'local-test-only' },
+    proposalTools: [{ name: 'child_run_start', description: 'Start a child with objective.', parameters: {
+      type: 'object', properties: { objective: { type: 'string' }, mode: { type: 'string' } }, required: ['objective'], additionalProperties: false } }] })
+  let previous
+  for (let round = 0; round < 2; round++) {
+    const child = await worker(t)
+    assert.equal((await child.request('kernel.initialize', config)).type, 'kernel.ready')
+    const payload = resumePayload()
+    if (round === 1) {
+      payload.batchResume.assistantMessage = previous
+      payload.batchResume.tools = [{ toolCallId: 'child-0', tool: 'child_run_start', sourceOrder: 0,
+        canonicalInput: inputs[0], state: 'failed', result: { isError: true, content: [{ type: 'text', text: feedback }] } }]
+    }
+    const response = await child.request('kernel.resume_batch', payload)
+    assert.equal(response.type, 'kernel.model_response')
+    previous = response.payload.response.assistantMessage
+    assert.deepEqual(previous.content.find(block => block.type === 'toolCall').arguments, inputs[round])
+    assert.ok(child.events.every(event => event.kind === 'response'))
+  }
+  assert.equal(requests.length, 2)
+  const correctionRequest = requests[1]
+  assert.equal(correctionRequest.messages.findLast(message => message.role === 'tool').content, feedback)
+  assert.deepEqual(JSON.parse(correctionRequest.messages.findLast(message => message.tool_calls)?.tool_calls[0].function.arguments), inputs[0])
+  assert.deepEqual(correctionRequest.tools[0].function.parameters.required, ['objective'])
+})
+
 function initialization(overrides = {}) {
   return { executionProfileId: 'legacy', systemPrompt: 'Use only the supplied durable history.',
     proposalTools: [{ name: 'read', description: 'Propose a Host file read.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }],
@@ -143,6 +195,10 @@ test('description mode returns scoped schemas and prompt without initializing a 
   assert.equal(described.type, 'kernel.description')
   assert.deepEqual(described.payload.proposalTools.map(tool => tool.name), ['web_search'])
   assert.match(described.payload.systemPrompt, /Host-only instructions/)
+  assert.match(described.payload.systemPrompt, /FOX_EXECUTION_RECEIPT_V1/)
+  assert.match(described.payload.systemPrompt, /bytes, not a character count/)
+  assert.match(described.payload.systemPrompt, /Correct the actual JSON argument object in a NEW tool call/)
+  assert.match(described.payload.systemPrompt, /not API quota or rate limiting/)
   assert.ok(described.payload.proposalTools.every(tool => Object.keys(tool).sort().join(',') === 'description,name,parameters'))
   assert.equal((await child.request('kernel.initialize', initialization())).type, 'request_failed')
   assert.ok(child.events.every(event => event.kind === 'response'))

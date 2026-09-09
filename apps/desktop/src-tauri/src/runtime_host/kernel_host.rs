@@ -136,6 +136,17 @@ pub(super) fn drive_with_actions(
             coordinator.settle_cancellation()?;
             continue;
         }
+        // Known pre-execution rejection, not uncertain executor work. Read its
+        // durable typed result (also after restart), never arbitrary error text.
+        if super::kernel_delegation::correction_limit_reached(&snapshot) {
+            settle_children(true)?;
+            coordinator.tick()?;
+            coordinator.fail(
+                "kernel.child_arguments_exhausted",
+                "子任务参数连续校验失败，已提供 3 次纠错机会并停止继续派发。请检查工具参数后重试；此错误不是 API 额度不足。",
+            )?;
+            continue;
+        }
         if snapshot.state == "retry_scheduled" {
             std::thread::sleep(Duration::from_millis(100));
             continue;

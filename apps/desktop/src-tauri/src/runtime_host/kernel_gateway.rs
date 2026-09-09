@@ -481,6 +481,34 @@ impl GatewayPolicy {
             return Err("frozen Kernel delegation identity changed".into());
         }
         database.kernel_validate_resource_acquisition(&self.binding.run_id)?;
+        if let Some(result) =
+            super::kernel_delegation::preflight_child(database, &self.binding, tool, input)?
+        {
+            token.check()?;
+            let rejected = database
+                .kernel_build_full_snapshot(&self.binding.run_id)?
+                .tool_calls
+                .iter()
+                .filter(|call| {
+                    matches!(
+                        call.tool.as_str(),
+                        "child_run_start" | "child_run_collect" | "child_run_cancel"
+                    ) && call.state == "failed"
+                        && call
+                            .result_json
+                            .as_deref()
+                            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                            .is_some_and(|value| {
+                                value["details"]["error"]["code"] == "child.invalid_arguments"
+                                    && value["details"]["executionStarted"] == false
+                            })
+                })
+                .count();
+            if rejected >= 3 {
+                return Ok(super::kernel_delegation::correction_limit_result());
+            }
+            return Ok(result);
+        }
         let result = super::kernel_delegation::execute(
             database,
             &self.binding,

@@ -13,6 +13,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Mutex;
 
+mod receipt;
+
 fn checkpoint_hash(value: &Value) -> String {
     format!(
         "sha256:{}",
@@ -342,16 +344,21 @@ impl<'a> KernelCoordinator<'a> {
                 }
                 None => return Err("completed tool has no durable result".into()),
             };
-            let result = if raw.get("content").is_some() {
+            let mut result = if raw.get("content").is_some() {
                 raw
             } else {
                 serde_json::json!({"content":[{"type":"text","text":raw.to_string()}]})
             };
+            let canonical_input: Value = serde_json::from_str(&tool.input_json)
+                .map_err(|error| error.to_string())?;
+            let projected = snapshot.tool_calls.iter().find(|item| item.tool_call_id == *id)
+                .ok_or("missing durable tool approval projection")?;
+            receipt::append_execution_receipt(&mut result, &self.binding.run_id, id, &tool.tool,
+                state == KernelSettledToolState::Completed, projected.approval_state.as_deref(), &canonical_input)?;
             tools.push(KernelSettledToolResult {
                 tool_call_id: id.clone(),
                 tool: tool.tool.clone(),
-                canonical_input: serde_json::from_str(&tool.input_json)
-                    .map_err(|error| error.to_string())?,
+                canonical_input,
                 source_order: u32::try_from(tool.source_order)
                     .map_err(|error| error.to_string())?,
                 state,

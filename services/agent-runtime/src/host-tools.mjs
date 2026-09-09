@@ -589,23 +589,23 @@ export function createHostTools(requestHost) {
           Type.Literal('worker'),
           Type.Literal('expert_consultation'),
         ])),
-        objective: Type.String({ minLength: 1, maxLength: 8000 }),
+        objective: Type.String({ minLength: 1, maxLength: 8000, description: 'Required exact key: objective. State the bounded task for the child; never omit or rename this field.' }),
         context: Type.Optional(Type.String({ maxLength: 12000 })),
         agentId: Type.Optional(Type.String({ minLength: 1, maxLength: 160 })),
         expertId: Type.Optional(Type.String({ minLength: 1, maxLength: 160 })),
         budget: Type.Optional(Type.Object({
           maxDurationMs: Type.Optional(Type.Integer({ minimum: 1000, maximum: 900000 })),
         })),
-      }),
+      }, { additionalProperties: false }),
       execute: (toolCallId, params, signal) =>
         executeHostTool(toolCallId, 'child_run_start', params, requestHost, signal),
     },
     {
       name: 'child_run_collect',
       label: 'Collect child runs',
-      description: 'Collect Host-persisted Child Run statuses and bounded final results. A positive waitMs waits for all requested children to become terminal or until the timeout, without blocking other children.',
+      description: 'Collect Host-persisted Child Run statuses and bounded final results. Use only exact childRunId values returned by successful child_run_start results in this parent Run. Wait for that result before proposing collect; never invent IDs or collect an unknown ID in the same batch as start. A positive waitMs waits for all requested children to become terminal or until the timeout, without blocking other children.',
       parameters: Type.Object({
-        childRunIds: Type.Array(Type.String(), { minItems: 1, maxItems: 8 }),
+        childRunIds: Type.Array(Type.String({ minLength: 1, maxLength: 160 }), { minItems: 1, maxItems: 8 }),
         waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 60000 })),
       }),
       execute: (toolCallId, params, signal) =>

@@ -225,6 +225,22 @@ fn restart_approval_dispatches_real_reads_once_and_preserves_batch_order() {
         coordinator.snapshot().unwrap().tool_calls[0].result_json,
         snapshot.tool_calls[0].result_json
     );
+    let frame = coordinator.prepare_batch_resume("batch", vec![json!({"role":"user","content":"read"})],
+        json!({"role":"assistant","stopReason":"toolUse","content":[
+            {"type":"toolCall","id":"read-a","name":"read","arguments":{"path":"proof.txt"}},
+            {"type":"toolCall","id":"read-b","name":"read","arguments":{"path":"proof.txt"}}
+        ]})).unwrap();
+    for item in &frame.tools {
+        let text = item.result["content"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap();
+        let receipt: Value = serde_json::from_str(text.strip_prefix("FOX_EXECUTION_RECEIPT_V1\n").unwrap()).unwrap();
+        assert_eq!(receipt["approvalDecision"],"allow_once");
+        assert_eq!(receipt["executionState"],"completed");
+        assert_eq!(receipt["runId"],run_id);
+        assert_eq!(receipt["toolCallId"],item.tool_call_id);
+        assert_eq!(item.result["content"][0]["text"],"durable coordinator 中文 😀");
+    }
+    // Projection never changes durable tool facts or rereads the changed file.
+    assert_eq!(coordinator.snapshot().unwrap(), snapshot);
 }
 
 #[test]
@@ -1593,6 +1609,49 @@ fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
     coordinator.dispatch_initial("child-model",&Allow,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {
         schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
         assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[
+            {"type":"toolCall","id":"invalid-delegate","name":"child_run_start","arguments":{"objctive":"typo must not start a child"}}]}),
+    })).unwrap();
+    coordinator.dispatch_tool("invalid-delegate","child-owner",|_,_,token| {
+        for (tool, bad, field) in [
+            ("child_run_start",json!({"objctive":"bounded task"}),"objective"),
+            ("child_run_start",json!({"objective":" "}),"objective"),
+            ("child_run_start",json!({"objective":"task","context":42}),"context"),
+            ("child_run_start",json!({"objective":"task","mode":"invalid"}),"mode"),
+            ("child_run_start",json!({"objective":"task","expertId":"expert"}),"expertId"),
+            ("child_run_start",json!({"objective":"task","agentId":"unknown"}),"agentId"),
+            ("child_run_start",json!({"objective":"task","budget":null}),"budget"),
+            ("child_run_start",json!({"objective":"task","budget":{"maxDurationMs":1}}),"budget"),
+            ("child_run_start",json!({"objective":"task","budget":{"maxOutputTokens":2048}}),"budget"),
+            ("child_run_start",json!({"objective":"task","budget":{"maxTotalTokens":256,"maxOutputTokens":512}}),"budget"),
+            ("child_run_collect",json!({"childRunIds":[]}),"childRunIds"),
+            ("child_run_collect",json!({"childRunIds":["invented"],"waitMs":-1}),"waitMs"),
+            ("child_run_collect",json!({"childRunIds":["invented"]}),"childRunIds"),
+            ("child_run_cancel",json!({"childRunId":"invented"}),"childRunId"),
+        ] {
+            let result = policy.execute_delegation(&db,"invalid-delegate",tool,&bad,token)?;
+            assert_eq!(result["isError"],true);
+            assert_eq!(result["details"]["error"]["field"],field);
+            assert_eq!(result["details"]["executionStarted"],false);
+            if bad.get("objctive").is_some() {
+                assert_eq!(result["details"]["suggestedArguments"]["objective"],bad["objctive"]);
+                assert!(bad.get("objective").is_none(),"the canonical proposal must remain unchanged");
+            }
+            assert!(db.child_runs_for_parent(&run_id)?.is_empty());
+            assert!(db.pending_kernel_host_action_ids(&run_id)?.is_empty());
+        }
+        let mut denied = super::super::kernel_gateway::GatewayPolicy { binding:policy.binding.clone(),scope:policy.scope.clone() };
+        denied.scope.tool_names.clear();
+        assert!(denied.execute_delegation(&db,"invalid-delegate","child_run_start",&input,token).is_err());
+        let result = policy.execute_delegation(&db,"invalid-delegate","child_run_start",&json!({"objctive":"typo"}),token)?;
+        Ok((false,result))
+    }).unwrap();
+    let snapshot = coordinator.snapshot().unwrap();
+    assert_eq!(snapshot.state,"running");
+    assert_eq!(snapshot.tool_calls[0].state,"failed");
+    let batch_id = snapshot.tool_calls[0].batch_id.clone();
+    coordinator.dispatch_batch(&batch_id,"correct-child-model",&Allow,|binding,frame,_|Ok(fox_engine_protocol::KernelModelResponse {
+        schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.turn_id.clone(),batch_id:frame.batch_id.clone(),checkpoint_seq:frame.checkpoint_seq,
+        assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[
             {"type":"toolCall","id":"delegate","name":"child_run_start","arguments":input}]}),
     })).unwrap();
     coordinator.dispatch_tool("delegate","child-owner",|_,_,token| {
@@ -1601,7 +1660,9 @@ fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
         assert!(db.kernel_host_run_state(child_id)?.is_none());
         assert!(db.run_control_binding(child_id)?.is_none());
         assert!(db.claim_kernel_host_action(&run_id,"delegate")?.is_none());
-        assert!(policy.execute_delegation(&db,"delegate","child_run_collect",&json!({"childRunIds":["foreign-child"]}),token).is_err());
+        let invalid = policy.execute_delegation(&db,"delegate","child_run_collect",&json!({"childRunIds":["foreign-child"]}),token)?;
+        assert_eq!(invalid["isError"],true);
+        assert_eq!(invalid["details"]["executionStarted"],false);
         Ok((true,result))
     }).unwrap();
     let children = db.child_runs_for_parent(&run_id).unwrap();
@@ -1615,6 +1676,74 @@ fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
     assert!(db.claim_kernel_host_action(&run_id,"delegate").is_err());
     assert!(db.kernel_fail_unstarted_child(&run_id,&child.child_run.child_run_id).unwrap());
     assert!(db.active_child_run_ids(&run_id).unwrap().is_empty());
+}
+
+#[test]
+fn kernel_delegation_correction_limit_survives_reopen_and_staging_errors_stay_fatal() {
+    for staging_failure in [false, true] {
+        let mut config = worker_configuration();
+        config.model_service["maxOutputTokens"] = json!(1024);
+        config.proposal_tools = vec![json!({"name":"child_run_start","description":"Host delegation","parameters":{"type":"object","properties":{}}})];
+        let clock = TestClock::new(1_000);
+        let cancellation = CancellationRegistry::default();
+        let (db,root,run_id) = fixture_with_start_opt(&clock,&config.hash().unwrap(),Some(&config),true,true);
+        let scope = crate::database::KernelHostScope {schema_version:1,
+            tool_names:["child_run_start".into()].into_iter().collect(),
+            mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),
+            office_tools:Default::default(),lifecycle_hooks:Vec::new()};
+        db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
+        let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope};
+        let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
+        let args = if staging_failure {json!({"objective":"bounded concern"})} else {json!({"objctive":"typo"})};
+        let count = if staging_failure {1} else {4};
+        coordinator.dispatch_initial("child-model",&Allow,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {
+            schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
+            assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":(0..count).map(|i|
+                json!({"type":"toolCall","id":format!("child-{i}"),"name":"child_run_start","arguments":args})).collect::<Vec<_>>()}),
+        })).unwrap();
+        if staging_failure {
+            let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+            conn.execute_batch("CREATE TRIGGER reject_child_action BEFORE INSERT ON kernel_host_actions BEGIN SELECT RAISE(ABORT,'injected staging failure'); END;").unwrap();
+            let result = coordinator.dispatch_tool("child-0","child-owner",|_,_,token| {
+                policy.execute_delegation(&db,"child-0","child_run_start",&args,token).map(|result|(true,result))
+            });
+            assert!(result.is_err(),"failure after child creation must not become a correctable parameter result");
+            assert_eq!(db.child_runs_for_parent(&run_id).unwrap().len(),1);
+            assert!(db.pending_kernel_host_action_ids(&run_id).unwrap().is_empty());
+        } else {
+            for i in 0..3 {
+                let id = format!("child-{i}");
+                coordinator.dispatch_tool(&id,"child-owner",|_,_,token| {
+                    let result = policy.execute_delegation(&db,&id,"child_run_start",&args,token)?;
+                    assert_eq!(result["details"]["error"]["code"],"child.invalid_arguments");
+                    Ok((false,result))
+                }).unwrap();
+            }
+            drop(coordinator);
+            drop(db);
+            let db = Database::open(root.join("facts.db")).unwrap();
+            let reopened = KernelCoordinator::reopen(&db,&clock,&run_id,&cancellation).unwrap();
+            let result = reopened.dispatch_tool("child-3","child-owner",|_,_,token| {
+                policy.execute_delegation(&db,"child-3","child_run_start",&args,token).map(|result|(false,result))
+            });
+            assert!(result.unwrap());
+            assert!(super::super::kernel_delegation::correction_limit_reached(&reopened.snapshot().unwrap()));
+            drop(reopened);
+            drop(db);
+            // A settled limit result survives another reopen and stops the Host
+            // before any model continuation, with a specific persisted UI error.
+            let db = Database::open(root.join("facts.db")).unwrap();
+            super::super::kernel_host::drive(super::super::kernel_host::acquire(&root,&run_id).unwrap(),
+                &db,&clock,&cancellation,&run_id,&real_worker_command(),"test-key",&Allow,
+                |_,_,_|panic!("exhausted correction must not execute another resource")).unwrap();
+            assert_eq!(db.kernel_build_full_snapshot(&run_id).unwrap().state,"failed");
+            let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+            let error: String = conn.query_row("SELECT error_code FROM runs WHERE id=?1",[&run_id],|row|row.get(0)).unwrap();
+            assert_eq!(error,"kernel.child_arguments_exhausted");
+            assert!(db.child_runs_for_parent(&run_id).unwrap().is_empty());
+            assert!(db.pending_kernel_host_action_ids(&run_id).unwrap().is_empty());
+        }
+    }
 }
 
 #[test]
