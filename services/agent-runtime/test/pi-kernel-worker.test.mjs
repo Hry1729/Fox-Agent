@@ -4,8 +4,73 @@ import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createEnvelope } from '../src/protocol.mjs'
+import { createServer } from 'node:http'
 
 const identity = { runId: 'run-k', conversationId: 'conversation-k', runtimeSessionId: 'session-k' }
+
+test('HTTP model handles prior assistant history in initial and tool-batch rounds', { timeout: 30000 }, async t => {
+  const requests = []
+  const server = createServer(async (req, res) => {
+    let body = ''
+    for await (const chunk of req) body += chunk
+    requests.push(JSON.parse(body))
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    for (const choice of [
+      { index: 0, delta: { role: 'assistant', content: '历史续跑成功 😀' }, finish_reason: null },
+      { index: 0, delta: {}, finish_reason: 'stop' },
+    ]) res.write(`data: ${JSON.stringify({ id: 'local-response', object: 'chat.completion.chunk',
+      created: 1, model: 'kernel-http-test', choices: [choice] })}\n\n`)
+    res.end('data: [DONE]\n\n')
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { server.closeAllConnections(); server.close() })
+  for (const mode of ['initial', 'batch']) {
+    const child = await worker(t)
+    const config = initialization({ modelService: { apiType: 'openai-completions', modelId: 'kernel-http-test',
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'local-test-only' } })
+    assert.equal((await child.request('kernel.initialize', config)).type, 'kernel.ready')
+    const payload = mode === 'batch' ? resumePayload() : {
+      controlBinding: resumePayload().controlBinding,
+      initialModel: { schemaVersion: 1, idempotencyKey: 'initial-model-delivery', checkpointSeq: 2,
+        input: { schemaVersion: 1, runId: identity.runId, turnId: 'turn-k', promptConfigHash: 'frozen-hash', messages: [
+          { role: 'user', content: 'Earlier question', timestamp: 1 },
+          { role: 'assistant', content: 'Earlier answer', timestamp: 2 },
+          { role: 'user', content: 'Continue 中文', timestamp: 3 },
+        ] } },
+    }
+    const response = await child.request(mode === 'batch' ? 'kernel.resume_batch' : 'kernel.start_initial', payload)
+    assert.equal(response.type, 'kernel.model_response', mode)
+    assert.equal(response.payload.response.assistantMessage.stopReason, 'stop')
+    assert.equal(response.payload.response.assistantMessage.content.find(block => block.type === 'text').text, '历史续跑成功 😀')
+  }
+  assert.equal(requests.length, 2)
+  assert.ok(requests[0].messages.some(message => message.role === 'assistant' && message.content === 'Earlier answer'))
+  assert.ok(requests[1].messages.some(message => message.role === 'tool' && message.tool_call_id === 'read-a'))
+})
+
+test('HTTP rejection reports bounded evidence without SDK retry or provider content', { timeout: 30000 }, async t => {
+  let calls = 0
+  const server = createServer((req,res) => {
+    calls += 1
+    req.resume()
+    res.writeHead(429, { 'content-type': 'application/json', 'retry-after': '2', 'x-secret': 'private' })
+    res.end(JSON.stringify({ error: { message: 'private credentials and provider body', type: 'rate_limit_error' } }))
+  })
+  await new Promise(resolve => server.listen(0,'127.0.0.1',resolve))
+  t.after(() => { server.closeAllConnections(); server.close() })
+  const child = await worker(t)
+  const config = initialization({ modelService: { apiType:'openai-completions',modelId:'kernel-http-test',
+    baseUrl:`http://127.0.0.1:${server.address().port}/v1`,apiKey:'local-test-only' } })
+  assert.equal((await child.request('kernel.initialize',config)).type,'kernel.ready')
+  const response = await child.request('kernel.resume_batch',resumePayload())
+  assert.equal(response.type,'kernel.model_failure')
+  assert.deepEqual(response.payload,{schemaVersion:1,runId:identity.runId,turnId:'turn-k',checkpointSeq:8,
+    category:'provider_unavailable',httpStatus:429,retryAfterMs:2000})
+  assert.equal(calls,1)
+  assert.doesNotMatch(JSON.stringify(response),/private|credentials|local-test-only|x-secret/)
+  assert.equal((await child.request('kernel.resume_batch',resumePayload())).type,'request_failed')
+  assert.equal(calls,1)
+})
 function initialization(overrides = {}) {
   return { executionProfileId: 'legacy', systemPrompt: 'Use only the supplied durable history.',
     proposalTools: [{ name: 'read', description: 'Propose a Host file read.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } }],

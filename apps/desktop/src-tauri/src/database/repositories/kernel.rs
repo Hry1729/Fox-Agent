@@ -702,7 +702,7 @@ impl Database {
         wall_now_ms: i64,
         cmd: &crate::kernel::KernelPersistCommand,
     ) -> Result<(), String> {
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, None, None)
     }
 
     /// Commit a tool result only while this executor still owns its dispatch.
@@ -719,7 +719,7 @@ impl Database {
         if cmd.settled_dispatch_tool_call_ids.len() != 1 || cmd.settled_dispatch_tool_call_ids[0] != tool_call_id {
             return Err("kernel result must settle exactly its owned tool dispatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, Some((tool_call_id, lease_owner)), None, None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, Some((tool_call_id, lease_owner)), None, None, None, None)
     }
 
     /// Claim exactly one pending result delivery and persist its model deadline
@@ -738,7 +738,7 @@ impl Database {
             || payload["startedAt"].as_i64() != Some(wall_now_ms) {
             return Err("Kernel batch dispatch identity mismatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, Some((batch_id, lease_owner)), None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, Some((batch_id, lease_owner)), None, None, None)
     }
 
     /// The response, terminal/next-batch decision, and consumed delivery lease
@@ -757,7 +757,7 @@ impl Database {
             || response.run_id != run_id || response.turn_id != cmd.turn_id {
             return Err("Kernel batch response identity mismatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, Some((batch_id, lease_owner)), None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, Some((batch_id, lease_owner)), None, None)
     }
 
     pub(crate) fn kernel_commit_initial_model(&self, run_id: &str, wall_now_ms: i64,
@@ -779,7 +779,18 @@ impl Database {
             if payload["turnId"] != cmd.turn_id || payload["idempotencyKey"] != crate::kernel::INITIAL_MODEL_IDEMPOTENCY_KEY
                 || payload["startedAt"].as_i64() != Some(wall_now_ms) { return Err("initial dispatch identity mismatch".into()); }
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, Some((owner, response)))
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, Some((owner, response)), None)
+    }
+
+    pub(crate) fn kernel_commit_model_retry(&self, run_id: &str, wall_now_ms: i64,
+        cmd: &crate::kernel::KernelPersistCommand, effect_key: &str, owner: &str) -> Result<(), String> {
+        if owner.trim().is_empty() || cmd.run_state != crate::kernel::RunState::RetryScheduled
+            || !cmd.retry.model_dispatch_pending || cmd.model_request_since_wall_ms.is_some()
+            || cmd.events.len() != 2 || cmd.events[0].event_type != "engine.model_rejected"
+            || cmd.events[1].event_type != "run.retrying" || !cmd.outbox.is_empty() {
+            return Err("invalid settled model retry decision".into());
+        }
+        self.kernel_commit_decision_with_dispatch_lease(run_id,wall_now_ms,cmd,None,None,None,None,Some((effect_key,owner)))
     }
 
     fn kernel_commit_decision_with_dispatch_lease(
@@ -791,6 +802,7 @@ impl Database {
         batch_lease: Option<(&str, &str)>,
         batch_response_lease: Option<(&str, &str)>,
         initial_lease: Option<(&str, bool)>,
+        model_retry_lease: Option<(&str, &str)>,
     ) -> Result<(), String> {
         if !valid_run_state(cmd.run_state.as_str()) {
             return Err(format!(
@@ -813,6 +825,34 @@ impl Database {
             .map_err(|error| format!("serialize kernel compaction state: {error}"))?;
         let changed = self.with_connection(|connection| {
             let transaction = connection.transaction()?;
+            if let Some((effect_key, owner)) = model_retry_lease {
+                let payload: serde_json::Value = serde_json::from_str(&cmd.events[0].payload_json).map_err(|_|kernel_err("invalid retry evidence"))?;
+                let failure: fox_engine_protocol::KernelModelFailure = serde_json::from_value(payload["failure"].clone()).map_err(|_|kernel_err("invalid retry evidence"))?;
+                failure.validate().map_err(kernel_err)?;
+                if failure.run_id != run_id || failure.turn_id != cmd.turn_id || payload["effectKey"] != effect_key {
+                    return Err(kernel_err("model retry identity mismatch"));
+                }
+                let old_retry: String = transaction.query_row("SELECT retry_state_json FROM kernel_runs WHERE run_id=?1",[run_id],|row|row.get(0))?;
+                let old_retry: crate::kernel::RetryState = serde_json::from_str(&old_retry).map_err(|_|kernel_err("invalid stored retry counters"))?;
+                let provider = failure.category == "provider_unavailable";
+                if cmd.retry.provider_attempts != old_retry.provider_attempts + u32::from(provider)
+                    || cmd.retry.turn_attempts != old_retry.turn_attempts + u32::from(!provider)
+                    || cmd.retry.scheduled_at_wall_ms != Some(wall_now_ms)
+                    || cmd.retry.due_wall_ms.is_none_or(|due| due < wall_now_ms.saturating_add(failure.retry_after_ms.unwrap_or(0) as i64)) {
+                    return Err(kernel_err("model retry counters or server delay were not honored"));
+                }
+                let changed = transaction.execute("UPDATE kernel_effect_outbox SET status='pending',lease_owner=NULL,leased_at=NULL,updated_at=?4
+                    WHERE run_id=?1 AND effect_key=?2 AND lease_owner=?3 AND status='leased'
+                      AND effect_type IN ('initial_model','deliver_tool_batch')
+                      AND EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state='running' AND r.model_request_since_wall_ms IS NOT NULL)
+                      AND NOT EXISTS(SELECT 1 FROM kernel_host_commands c WHERE c.run_id=?1 AND c.kind='cancel')
+                      AND EXISTS(SELECT 1 FROM kernel_events e WHERE e.run_id=?1 AND e.seq=?5
+                        AND ((kernel_effect_outbox.effect_type='initial_model' AND e.event_type='engine.initial_dispatched')
+                          OR (kernel_effect_outbox.effect_type='deliver_tool_batch' AND e.event_type='engine.batch_dispatched'
+                              AND json_extract(e.payload_json,'$.batchId')=kernel_effect_outbox.batch_id)))",
+                    params![run_id,effect_key,owner,wall_now_ms,failure.checkpoint_seq+1])?;
+                if changed != 1 { return Err(kernel_err("model retry lost its settled dispatch lease or cancellation won")); }
+            }
             if let Some((owner, response)) = initial_lease {
                 let input = super::kernel_initial_input::read_input(&transaction, run_id)?;
                 if input.turn_id != cmd.turn_id { return Err(kernel_err("initial input turn changed")); }

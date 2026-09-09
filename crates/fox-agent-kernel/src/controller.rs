@@ -1224,6 +1224,43 @@ impl RunController {
         Ok(effects)
     }
 
+    /// Retry only a model request known to have settled without a usable result.
+    /// Resource effects are never replayed by this transition. The repository
+    /// atomically verifies/reset its model lease alongside these events.
+    pub fn schedule_model_retry(&mut self, now_monotonic_ms: i64, now_wall_ms: i64,
+        effect_key: &str, failure_json: &str, provider: bool, delay_ms: i64,
+    ) -> Result<Vec<Effect>, KernelError> {
+        self.ensure_live()?;
+        if self.state != RunState::Running || !self.model_request_in_flight || delay_ms < 0
+            || self.tools.values().any(|tool| !tool.state.is_terminal()) {
+            return Err(KernelError::FailClosed("model retry requires an exclusively active model request".into()));
+        }
+        let (used, maximum) = if provider { (self.retry.provider_attempts, self.retry.provider_max) }
+            else { (self.retry.turn_attempts, self.retry.turn_max) };
+        if used >= maximum {
+            return Err(KernelError::FailClosed("frozen model retry budget exhausted".into()));
+        }
+        let failure: serde_json::Value = serde_json::from_str(failure_json)
+            .map_err(|_| KernelError::FailClosed("invalid model failure evidence".into()))?;
+        self.suspend_running_clock(now_monotonic_ms);
+        self.settle_model_request();
+        self.state = RunState::RetryScheduled;
+        self.retry.scheduled_at_wall_ms = Some(now_wall_ms);
+        self.retry.due_wall_ms = Some(now_wall_ms.saturating_add(delay_ms));
+        self.retry.model_dispatch_pending = true;
+        if provider { self.retry.provider_attempts += 1; } else { self.retry.turn_attempts += 1; }
+        let mut effects = vec![self.append_event("engine.model_rejected", serde_json::json!({
+            "effectKey": effect_key, "failure": failure,
+        }))];
+        effects.push(self.append_event("run.retrying", serde_json::json!({
+            "kind": if provider { "provider" } else { "turn" }, "attempt": used + 1,
+            "maxAttempts": maximum, "delayMs": delay_ms, "scheduledAtWallMs": now_wall_ms,
+            "dueWallMs": self.retry.due_wall_ms,
+        })));
+        effects.push(Effect::PublishSnapshot);
+        Ok(effects)
+    }
+
     /// Resume after a scheduled turn retry.
     pub fn retry_resume(
         &mut self,
@@ -1257,7 +1294,9 @@ impl RunController {
         self.retry.due_wall_ms = None;
         self.running_since_mono_ms = Some(now_monotonic_ms);
         // The retried turn dispatches a fresh model request.
-        self.arm_model_request(now_monotonic_ms, now_wall_ms);
+        if !self.retry.model_dispatch_pending {
+            self.arm_model_request(now_monotonic_ms, now_wall_ms);
+        }
         let mut effects = vec![self.append_event(
             "run.retry.completed",
             serde_json::json!({ "success": true, "attempt": self.retry.turn_attempts }),
@@ -1612,6 +1651,7 @@ impl RunController {
     }
 
     fn arm_model_request(&mut self, monotonic_ms: i64, wall_ms: i64) {
+        self.retry.model_dispatch_pending = false;
         self.model_request_in_flight = true;
         self.model_request_since_mono_ms = Some(monotonic_ms);
         self.model_request_since_wall_ms = Some(wall_ms);

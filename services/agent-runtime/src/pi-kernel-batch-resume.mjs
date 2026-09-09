@@ -22,6 +22,19 @@ function canonical(value, omitUndefined = false) {
 }
 const sameJson = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b))
 
+function preparePiReplayHistory(messages) {
+  // Keep provider diagnostics stripped. Pi 0.84's context estimator requires
+  // usage on assistant messages even when compaction is disabled. Zero usage
+  // asks it to estimate from content; this is disposable SDK metadata, not
+  // authoritative billing and must never be written back to durable history.
+  return sanitizeProviderHistory(structuredClone(messages)).map(message => message.role === 'assistant'
+    ? { ...message, usage: {
+        input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      } }
+    : message)
+}
+
 // Advertise schemas without installing a Resource executor. The public event
 // boundary below stops the disposable engine before argument preparation or
 // any tool callback. Even a broken boundary cannot execute a local resource.
@@ -153,7 +166,7 @@ export function prepareKernelBatchResume(request, identity) {
   })
   // All results were checked before the normal provider projection; no synthetic
   // recovery failures may be inserted to fill a missing result here.
-  const messages = sanitizeProviderHistory(structuredClone([...frame.history, assistant, ...results]))
+  const messages = preparePiReplayHistory([...frame.history, assistant, ...results])
   return { messages, runId: request.runId, turnId: frame.turnId,
     idempotencyKey: frame.idempotencyKey, batchId: frame.batchId, checkpointSeq: frame.checkpointSeq }
 }
@@ -181,7 +194,7 @@ export function prepareKernelInitialModel(request, identity) {
       fail('unsupported initial content')
     }
   }
-  return { messages: sanitizeProviderHistory(structuredClone(input.messages)), runId: input.runId, turnId: input.turnId,
+  return { messages: preparePiReplayHistory(input.messages), runId: input.runId, turnId: input.turnId,
     idempotencyKey: frame.idempotencyKey, checkpointSeq: frame.checkpointSeq, initial: true }
 }
 

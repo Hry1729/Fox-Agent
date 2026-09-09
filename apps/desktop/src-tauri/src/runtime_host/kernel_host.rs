@@ -136,6 +136,10 @@ pub(super) fn drive_with_actions(
             coordinator.settle_cancellation()?;
             continue;
         }
+        if snapshot.state == "retry_scheduled" {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
         // Exclusive OS ownership establishes that no previous process can still
         // complete its lease. An uncertain action is never replayed automatically.
         if snapshot.pending_effects.iter().any(|effect| {
@@ -514,8 +518,8 @@ impl super::RuntimeHost {
                 tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
                 run_execution_budget_ms: binding.budgets.run_execution_ms,
                 approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
-                provider_max_retries: 0,
-                turn_max_retries: 0,
+                provider_max_retries: 2,
+                turn_max_retries: 1,
             };
             self.database.kernel_create_run(
                 &binding.run_id,

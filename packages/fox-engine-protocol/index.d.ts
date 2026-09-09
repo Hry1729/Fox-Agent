@@ -7,6 +7,7 @@ export type KernelEngineBatchCheckpoint = { "assistantMessage": unknown; "batchI
 export type KernelInitialModelInput = { "messages": Array<unknown>; "promptConfigHash": string; "runId": string; "schemaVersion": number; "turnId": string; }
 export type KernelInitialModelFrame = { "checkpointSeq": number; "idempotencyKey": string; "input": KernelInitialModelInput; "schemaVersion": number; }
 export type KernelInitialModelResponse = { "assistantMessage": unknown; "checkpointSeq": number; "runId": string; "schemaVersion": number; "turnId": string; }
+export type KernelModelFailure = { "category": string; "checkpointSeq": number; "httpStatus"?: (number | null); "retryAfterMs"?: (number | null); "runId": string; "schemaVersion": number; "turnId": string; }
 export type KernelModelPreview = { "checkpointSeq": number; "conversationId": string; "revision": number; "runId": string; "schemaVersion": number; "text": string; "turnId": string; }
 export type KernelModelResponse = { "assistantMessage": unknown; "batchId": string; "checkpointSeq": number; "runId": string; "schemaVersion": number; "turnId": string; }
 export type KernelToolSnapshot = { "approvalState"?: (string | null); "batchId": string; "sourceOrder": number; "state": string; "tool": string; "toolCallId": string; }

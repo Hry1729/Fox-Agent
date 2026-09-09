@@ -48,6 +48,10 @@ fn fixture_with_initial_opt(clock: &TestClock, prompt_hash: &str, model: Option<
 }
 
 fn fixture_with_start_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool) -> (Database, PathBuf, String) {
+    fixture_with_retry_opt(clock,prompt_hash,model,initial,prepared,(0,0))
+}
+
+fn fixture_with_retry_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32)) -> (Database, PathBuf, String) {
     let root = std::env::temp_dir().join(format!("fox-coordinator-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("proof.txt"), "durable coordinator 中文 😀").unwrap();
@@ -95,8 +99,8 @@ fn fixture_with_start_opt(clock: &TestClock, prompt_hash: &str, model: Option<&c
         tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
         run_execution_budget_ms: binding.budgets.run_execution_ms,
         approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
-        provider_max_retries: 0,
-        turn_max_retries: 0,
+        provider_max_retries: retries.0,
+        turn_max_retries: retries.1,
     };
     db.kernel_create_run(
         &run_id,
@@ -1126,6 +1130,94 @@ fn initial_model_real_worker_after_reopen_commits_final_and_consumes_once() {
     let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
     let (status, attempts): (String, i64) = connection.query_row("SELECT status,attempts FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key='initial-model'", [&run_id], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
     assert_eq!((status, attempts), ("completed".into(), 1));
+}
+
+fn settled_provider_rejection(run_id: &str, turn_id: &str, checkpoint_seq: u64) -> String {
+    format!("kernel.settled_model_failure:{}", json!({
+        "schemaVersion": 1, "runId": run_id, "turnId": turn_id,
+        "checkpointSeq": checkpoint_seq, "category": "provider_unavailable",
+        "httpStatus": 429, "retryAfterMs": 2000,
+    }))
+}
+
+#[test]
+fn settled_initial_retry_survives_reopen_and_honors_server_delay() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_retry_opt(&clock, &config.hash().unwrap(), Some(&config), true, true, (1, 0));
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.dispatch_initial("first", &Allow, |binding, frame, _| {
+        Err(settled_provider_rejection(&binding.run_id, &frame.input.turn_id, frame.checkpoint_seq))
+    }).unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
+    assert!(coordinator.dispatch_initial("early", &Allow, |_, _, _| panic!("cannot retry before due time")).is_err());
+    drop(coordinator);
+    drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    clock.advance(1999);
+    coordinator.tick().unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
+    clock.advance(1);
+    coordinator.dispatch_initial("second", &Allow, |binding, frame, _| Ok(fox_engine_protocol::KernelInitialModelResponse {
+        schema_version: 1, run_id: binding.run_id.clone(), turn_id: frame.input.turn_id.clone(),
+        checkpoint_seq: frame.checkpoint_seq,
+        assistant_message: json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"retry complete"}]}),
+    })).unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "completed");
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let attempts: i64 = connection.query_row("SELECT attempts FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key='initial-model'", [&run_id], |row| row.get(0)).unwrap();
+    assert_eq!(attempts, 2);
+}
+
+#[test]
+fn settled_batch_retry_never_reexecutes_completed_resources() {
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, _, run_id) = fixture_with_retry_opt(&clock, "test-prompt", None, false, false, (1, 0));
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+    let tools = coordinator.snapshot().unwrap().tool_calls;
+    coordinator.dispatch_batch("worker-batch", "first", &Allow, |binding, frame, _| {
+        Err(settled_provider_rejection(&binding.run_id, &frame.turn_id, frame.checkpoint_seq))
+    }).unwrap();
+    clock.advance(2000);
+    coordinator.dispatch_batch("worker-batch", "second", &Allow, |binding, frame, _| Ok(fox_engine_protocol::KernelModelResponse {
+        schema_version: 1, run_id: binding.run_id.clone(), turn_id: frame.turn_id.clone(), batch_id: frame.batch_id.clone(),
+        checkpoint_seq: frame.checkpoint_seq,
+        assistant_message: json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"done"}]}),
+    })).unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "completed");
+    assert_eq!(coordinator.snapshot().unwrap().tool_calls, tools);
+}
+
+#[test]
+fn settled_model_retry_cancellation_and_frozen_budget_block_more_dispatch() {
+    for cancel in [false, true] {
+        let config = worker_configuration();
+        let clock = TestClock::new(1_000);
+        let cancellation = CancellationRegistry::default();
+        let (db, _, run_id) = fixture_with_retry_opt(&clock, &config.hash().unwrap(), Some(&config), true, true, (1, 0));
+        let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+        coordinator.dispatch_initial("first", &Allow, |binding, frame, _| {
+            Err(settled_provider_rejection(&binding.run_id, &frame.input.turn_id, frame.checkpoint_seq))
+        }).unwrap();
+        if cancel {
+            coordinator.cancel().unwrap();
+            coordinator.settle_cancellation().unwrap();
+            clock.advance(2000);
+            assert!(coordinator.dispatch_initial("cancelled", &Allow, |_, _, _| panic!("cancelled retry must not dispatch")).is_err());
+            assert_eq!(coordinator.snapshot().unwrap().state, "cancelled");
+        } else {
+            clock.advance(2000);
+            let error = coordinator.dispatch_initial("last", &Allow, |binding, frame, _| {
+                Err(settled_provider_rejection(&binding.run_id, &frame.input.turn_id, frame.checkpoint_seq))
+            }).unwrap_err();
+            assert!(error.contains("budget exhausted"), "{error}");
+            assert!(coordinator.dispatch_initial("extra", &Allow, |_, _, _| panic!("retry budget cannot be reset")).is_err());
+        }
+    }
 }
 
 #[test]

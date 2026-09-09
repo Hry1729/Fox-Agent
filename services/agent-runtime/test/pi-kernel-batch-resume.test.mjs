@@ -8,6 +8,21 @@ import { validatePromptControl } from '../src/control-binding.mjs'
 
 const identity = { runId: 'kernel-run', conversationId: 'kernel-conversation', runtimeSessionId: 'kernel-session', executionProfileId: 'legacy' }
 
+test('Kernel replay supplies local estimation metadata without changing durable facts or restoring provider diagnostics', () => {
+  const request = fixture()
+  request.payload.batchResume.assistantMessage.usage = { totalTokens: 999999 }
+  request.payload.batchResume.assistantMessage.errorMessage = 'private provider diagnostic'
+  const before = structuredClone(request)
+  const prepared = prepareKernelBatchResume(request, identity)
+  const assistant = prepared.messages.find(message => message.role === 'assistant')
+  assert.deepEqual(assistant.usage, {
+    input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  })
+  assert.equal(assistant.errorMessage, undefined)
+  assert.deepEqual(request, before)
+})
+
 test('model responses preserve required arguments while omitting absent optional Pi metadata', () => {
   const prepared = { runId: 'run-1', turnId: 'turn-1', batchId: 'batch-1', checkpointSeq: 8 }
   const answer = { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'done' }], errorMessage: undefined }

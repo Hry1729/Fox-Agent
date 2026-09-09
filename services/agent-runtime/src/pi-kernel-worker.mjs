@@ -6,6 +6,7 @@ import { createEnvelope, validateEnvelope } from './protocol.mjs'
 import { resolveModelProfile, transportProvider } from './model-profile.mjs'
 import { installKernelProposalTools, prepareKernelBatchResume, resumePiKernelBatch, prepareKernelInitialModel, startPiKernelInitial } from './pi-kernel-batch-resume.mjs'
 import { describeKernelRun } from './pi-kernel-description.mjs'
+import { observeKernelModelTransport } from './pi-kernel-model-failure.mjs'
 
 const nonempty = value => typeof value === 'string' && value.trim().length > 0
 
@@ -20,6 +21,7 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
   let abort
   let active
   let setup
+  let modelFailure
   const respond = (request, type, payload = {}) => write(createEnvelope('response', type, {
     requestId: request.id, runId: request.runId ?? null,
     conversationId: request.conversationId ?? null, runtimeSessionId: request.runtimeSessionId ?? null, payload,
@@ -65,6 +67,7 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
     ;({ session } = await createFoxAgentSession({ cwd, agentDir: cwd, model, thinkingLevel: profile.thinkingLevel,
       tools: [], customTools: [], resourceLoader, sessionManager: SessionManager.inMemory(cwd), settingsManager, modelRuntime }))
     installKernelProposalTools(session, definitions)
+    modelFailure = observeKernelModelTransport(session)
     if (state !== 'initializing') throw new Error('Kernel initialization was cancelled')
     state = 'ready'
     respond(request, 'kernel.ready', { singleUse: true, resourceExecution: false, automaticReplay: false,
@@ -102,6 +105,11 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
           const preview = request.payload.streamPreview === true ? payload => respond(request,'kernel.model_preview',payload) : undefined
           active = initial ? startPiKernelInitial(session, request, identity, abort.signal, preview) : resumePiKernelBatch(session, request, identity, abort.signal, preview)
           try { respond(request, 'kernel.model_response', await active) }
+          catch (error) {
+            const evidence = !abort.signal.aborted ? modelFailure?.(request) : null
+            if (!evidence) throw error
+            respond(request, 'kernel.model_failure', evidence)
+          }
           finally { state = 'consumed'; active = null; provider?.unregister(); provider = null }
           break
         }

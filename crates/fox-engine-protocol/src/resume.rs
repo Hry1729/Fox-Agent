@@ -1,6 +1,37 @@
 //! Host-owned, already-settled batch handoff. Never an approval or dispatch request.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Sanitized evidence of a settled model failure, never a permission to retry.
+/// Host still owns retry admission, counters, delay, lease and cancellation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelModelFailure {
+    pub schema_version: u32,
+    pub run_id: String,
+    pub turn_id: String,
+    pub checkpoint_seq: u64,
+    pub category: String,
+    pub http_status: Option<u16>,
+    pub retry_after_ms: Option<u64>,
+}
+
+impl KernelModelFailure {
+    pub fn validate(&self) -> Result<(), String> {
+        let category_valid = match self.category.as_str() {
+            "provider_unavailable" => self.http_status.is_some_and(|status| matches!(status, 429 | 500 | 502 | 503 | 504 | 529)),
+            "incomplete_response" => self.http_status.is_none() && self.retry_after_ms.is_none(),
+            _ => false,
+        };
+        if self.schema_version != 1 || !category_valid
+            || [&self.run_id, &self.turn_id].iter().any(|id| id.trim().is_empty() || id.len() > 512)
+            || self.checkpoint_seq == 0 || self.checkpoint_seq > 9_007_199_254_740_991
+            || self.retry_after_ms.is_some_and(|delay| delay > 86_400_000) {
+            return Err("invalid settled Kernel model failure".into());
+        }
+        Ok(())
+    }
+}
 use schemars::JsonSchema;
 
 /// Transient display only. Never a committed message, decision or replay input.

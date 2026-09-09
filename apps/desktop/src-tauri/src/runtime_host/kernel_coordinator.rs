@@ -21,6 +21,7 @@ fn checkpoint_hash(value: &Value) -> String {
 }
 
 enum DecisionLease<'a> {
+    ModelRetry(&'a str, &'a str),
     Initial(&'a str),
     Tool(&'a str, &'a str),
     Batch(&'a str, &'a str),
@@ -117,6 +118,9 @@ impl<'a> KernelCoordinator<'a> {
         let effects = action(&mut candidate, now).map_err(|error| error.to_string())?;
         let command = candidate.persist_command(&effects);
         match lease {
+            Some(DecisionLease::ModelRetry(effect_key,owner)) => self.database.kernel_commit_model_retry(
+                &self.binding.run_id,now.wall_ms,&command,effect_key,owner,
+            )?,
             Some(DecisionLease::Initial(owner)) => self.database.kernel_commit_initial_model(
                 &self.binding.run_id, now.wall_ms, &command, owner, true,
             )?,
@@ -382,6 +386,28 @@ impl<'a> KernelCoordinator<'a> {
         })
     }
 
+    fn retry_settled_model(&self, effect_key: &str, owner: &str, cursor: u64, error: String) -> Result<(), String> {
+        let failure = super::kernel_model_worker::settled_failure(&error).ok_or_else(||error.clone())?;
+        if failure.run_id != self.binding.run_id || failure.checkpoint_seq != cursor {
+            return Err("model failure belongs to another dispatch".into());
+        }
+        self.tick()?;
+        self.cancellation.run_token(&self.binding.run_id)?.check()?;
+        let failure_json = serde_json::to_string(&failure).map_err(|_|"invalid model failure")?;
+        self.apply(Some(DecisionLease::ModelRetry(effect_key,owner)),|controller,now| {
+            let (providers,_,turns,_) = controller.retry_counters();
+            let provider = failure.category == "provider_unavailable";
+            let attempt = if provider { providers } else { turns };
+            let delay = (1_000_i64.saturating_mul(1_i64 << attempt.min(5)))
+                .max(failure.retry_after_ms.unwrap_or(0) as i64);
+            let elapsed = controller.shadow_checkpoint(now.monotonic_ms).running_elapsed_ms;
+            if delay >= self.binding.budgets.run_execution_ms.saturating_sub(elapsed) {
+                return Err(KernelError::FailClosed("model retry delay exceeds remaining Run budget".into()));
+            }
+            controller.schedule_model_retry(now.monotonic_ms,now.wall_ms,effect_key,&failure_json,provider,delay)
+        })
+    }
+
     pub(crate) fn dispatch_initial(&self, owner: &str, policy: &dyn PolicyDecisionPort,
         deliver: impl FnOnce(&RunControlBinding, &fox_engine_protocol::KernelInitialModelFrame, &kernel::CancellationToken)
             -> Result<fox_engine_protocol::KernelInitialModelResponse, String>) -> Result<(), String> {
@@ -404,7 +430,10 @@ impl<'a> KernelCoordinator<'a> {
             frame
         };
         token.check()?;
-        let response = deliver(&self.binding, &frame, &token)?;
+        let response = match deliver(&self.binding, &frame, &token) {
+            Ok(response) => response,
+            Err(error) => return self.retry_settled_model(kernel::INITIAL_MODEL_EFFECT_KEY,owner,frame.checkpoint_seq,error),
+        };
         response.validate()?;
         if response.run_id != self.binding.run_id || response.turn_id != frame.input.turn_id || response.checkpoint_seq != frame.checkpoint_seq {
             return Err("initial response belongs to another request".into());
@@ -497,7 +526,10 @@ impl<'a> KernelCoordinator<'a> {
         }
         token.check()?;
         // No lock is held across engine I/O. Uncertain failures retain the lease.
-        let response = deliver(&self.binding, &frame, &token)?;
+        let response = match deliver(&self.binding, &frame, &token) {
+            Ok(response) => response,
+            Err(error) => return self.retry_settled_model(&kernel::batch_delivery_effect_key(batch_id),owner,frame.checkpoint_seq,error),
+        };
         response.validate()?;
         if response.run_id != self.binding.run_id || response.turn_id != frame.turn_id
             || response.batch_id != frame.batch_id || response.checkpoint_seq != frame.checkpoint_seq {

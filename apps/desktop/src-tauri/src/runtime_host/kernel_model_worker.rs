@@ -14,6 +14,13 @@ use std::{
 
 const MAX_FRAME: usize = 1_048_576;
 
+const SETTLED_FAILURE_PREFIX: &str = "kernel.settled_model_failure:";
+pub(super) fn settled_failure(error: &str) -> Option<fox_engine_protocol::KernelModelFailure> {
+    let evidence: fox_engine_protocol::KernelModelFailure = serde_json::from_str(error.strip_prefix(SETTLED_FAILURE_PREFIX)?).ok()?;
+    evidence.validate().ok()?;
+    Some(evidence)
+}
+
 pub(super) fn describe(runtime: &RuntimeCommand, binding: &RunControlBinding, model_service: Value,
     prompt: Value, supported_tools: Vec<&str>, token: &CancellationToken) -> Result<KernelModelConfig, String> {
     token.check()?;
@@ -148,6 +155,19 @@ impl Worker {
             token.check()?;
             sink(&notice);
             continue;
+        }
+        if response["type"] == "kernel.model_failure" && expected == "kernel.model_response" {
+            let failure: fox_engine_protocol::KernelModelFailure = serde_json::from_value(response["payload"].clone())
+                .map_err(|_| "invalid settled Kernel model failure")?;
+            failure.validate()?;
+            let frame = request["payload"].get("initialModel").or_else(||request["payload"].get("batchResume"))
+                .ok_or("missing failure request identity")?;
+            let turn = frame.get("turnId").or_else(||frame.get("input").and_then(|input|input.get("turnId")));
+            if failure.run_id != request["runId"] || Some(&Value::String(failure.turn_id.clone())) != turn
+                || failure.checkpoint_seq != frame["checkpointSeq"] {
+                return Err("Kernel failure belongs to another model request".into());
+            }
+            return Err(format!("{SETTLED_FAILURE_PREFIX}{}",serde_json::to_string(&failure).map_err(|_| "invalid failure")?));
         }
         if response["type"]!=expected { return Err("Kernel worker response identity/type mismatch; reconcile delivery".into()); }
         return Ok(response["payload"].clone());

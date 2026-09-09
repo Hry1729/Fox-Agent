@@ -310,6 +310,58 @@
       "title": "KernelInitialModelResponse",
       "type": "object"
     },
+    "KernelModelFailure": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Sanitized evidence of a settled model failure, never a permission to retry.\nHost still owns retry admission, counters, delay, lease and cancellation.",
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "checkpointSeq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "httpStatus": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retryAfterMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "runId",
+        "turnId",
+        "checkpointSeq",
+        "category"
+      ],
+      "title": "KernelModelFailure",
+      "type": "object"
+    },
     "KernelModelPreview": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,

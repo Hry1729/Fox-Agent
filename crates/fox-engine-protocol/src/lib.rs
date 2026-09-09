@@ -328,6 +328,7 @@ pub fn schema_bundle() -> Value {
             "KernelInitialModelFrame": schemars::schema_for!(KernelInitialModelFrame),
             "KernelInitialModelResponse": schemars::schema_for!(KernelInitialModelResponse),
             "KernelModelPreview": schemars::schema_for!(KernelModelPreview),
+            "KernelModelFailure": schemars::schema_for!(KernelModelFailure),
             "KernelRunSnapshot": schemars::schema_for!(KernelRunSnapshot),
             "KernelStateInvalidation": schemars::schema_for!(KernelStateInvalidation)
         },

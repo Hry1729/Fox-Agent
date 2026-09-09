@@ -241,6 +241,10 @@ pub struct RetryState {
     pub scheduled_at_wall_ms: Option<i64>,
     #[serde(default)]
     pub due_wall_ms: Option<i64>,
+    /// A settled model failure is waiting for a new owned dispatch. Unlike a
+    /// legacy observed retry, resuming the delay must not arm the model clock.
+    #[serde(default)]
+    pub model_dispatch_pending: bool,
 }
 
 /// Context-compaction accounting, kept distinct from retry.
