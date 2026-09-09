@@ -4,7 +4,9 @@
 
 ## 已实现的选择与冻结
 
-进程未设置 `FOX_KERNEL_MODE` 时继续使用 Legacy。显式设置为 `authoritative` 后，新 Kernel Run 可通过进程级 `FOX_KERNEL_ENGINE` 选择 `pi`（默认）、`codex` 或 `deepseek_harness`。已有 Run 始终使用自己的持久绑定，不跟随新的环境设置改换引擎。
+普通构建在未设置 `FOX_KERNEL_MODE` 时继续使用 Legacy；用户于 2026-09-10 要求的新验收包启用 `kernel-default` 编译特性，无环境覆盖时直接使用 Authoritative，普通快捷方式启动即可生效。验收包使用独立应用名与数据目录，详见 [新 Kernel 默认验收包](Kernel-新内核默认验收包.md)。
+
+Authoritative 新 Run 可通过进程级 `FOX_KERNEL_ENGINE` 选择 `pi`（默认）、`codex` 或 `deepseek_harness`。显式 `FOX_KERNEL_MODE` 仍可覆盖新任务的内置默认；已有 Run 始终使用自己的持久绑定，不跟随新的环境设置改换引擎。
 
 | 引擎 | 当前适配方式 | 要求与边界 |
 | --- | --- | --- |
@@ -36,4 +38,4 @@ Codex 使用独立临时 `CODEX_HOME`，不加载用户会话和全局配置。N
 
 已生成本地 Windows 安装验收包，补入 Microsoft C++ 运行库，并核对 37 个打包文件、发布程序隔离数据库初始化及回退绑定。换电脑实际安装、v60→v61 迁移和真实界面审批链路尚未通过；其中界面操作被桌面工具应用授权超时阻塞。详见 [安装与稳定性验收记录](实施记录/Kernel-安装与稳定性验收-2026-09-10.md) 与 [换电脑步骤](Kernel-换电脑安装验收.md)。
 
-本轮未推送、未正式发布、未切换默认权威模式，也未主动停止用户的 Fox。云复测仍等待明确范围授权；真实企业范围和生产负载阈值尚未提供。
+本轮未推送或正式发布；普通版本默认仍为 Legacy，新验收包按用户要求默认 Authoritative。用户的 Fox 未被主动停止。云复测仍等待明确范围授权；真实企业范围和生产负载阈值尚未提供。
