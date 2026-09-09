@@ -6620,11 +6620,13 @@ fn read_attachment_text(
         return Err("Attachment is not a readable file within the 5 MiB limit".to_owned());
     }
     let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
-    let text = if attachment_is_docx(&attachment.display_name, attachment.media_type.as_deref()) {
+    let text = if let Some(text) = crate::local_knowledge_import::extract_office_text(&bytes, &attachment.display_name)? {
+        text
+    } else if attachment_is_docx(&attachment.display_name, attachment.media_type.as_deref()) {
         extract_docx_text(&bytes)?
     } else {
         if !attachment_is_text(&attachment.display_name, attachment.media_type.as_deref()) {
-            return Err("Attachment is not a supported text or DOCX file".to_owned());
+            return Err("Attachment is not a supported text, DOCX, XLSX or PPTX file".to_owned());
         }
         if bytes.contains(&0) {
             return Err("Attachment contains binary data".to_owned());

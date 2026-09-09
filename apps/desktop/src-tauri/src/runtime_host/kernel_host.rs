@@ -21,6 +21,31 @@ fn terminal(state: &str) -> bool {
     )
 }
 
+fn resource_failure_result(tool: &str, error: &str) -> Value {
+    // Reader errors describe only the authorized path operation (missing path,
+    // nonexistent file, OS access failure, scope escape). Keep them actionable.
+    // Other executors may return remote bodies or credentials; do not forward.
+    let message = if crate::resource_gateway::is_reader(tool) {
+        format!("Project file operation failed: {}", error.chars().take(600).collect::<String>())
+    } else {
+        "The resource request failed. No successful result is available.".to_owned()
+    };
+    serde_json::json!({"content":[{"type":"text","text":message}],
+        "details":{"code":"kernel.resource_failed","tool":tool}})
+}
+
+#[cfg(test)]
+mod failure_tests {
+    #[test]
+    fn kernel_reader_failure_preserves_reason_without_claiming_policy_denial() {
+        let result = super::resource_failure_result("ls", "tool path cannot be resolved: file not found");
+        assert!(result["content"][0]["text"].as_str().unwrap().contains("file not found"));
+        assert!(!result.to_string().contains("frozen policy"));
+        let remote = super::resource_failure_result("http_request", "response includes private token");
+        assert!(!remote.to_string().contains("private token"));
+    }
+}
+
 /// The lock is acquired before preparation by startup, and before recovery by
 /// restart. Passing it here keeps ownership until every executor has returned.
 #[cfg(test)]
@@ -666,9 +691,9 @@ impl super::RuntimeHost {
                     {
                         Err(error)
                     }
-                    Err(_) if token.check().is_ok() => Ok((
+                    Err(error) if token.check().is_ok() => Ok((
                         false,
-                        serde_json::json!({"content":[{"type":"text","text":"The resource request failed or was rejected by the frozen policy."}]}),
+                        resource_failure_result(tool, &error),
                     )),
                     Err(error) => Err(error),
                 }

@@ -23,13 +23,16 @@ pub fn approve_read_only_tool(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "this conversation has no authorized project folder".to_owned())?;
     let canonical_root = canonical_directory(Path::new(root), "project folder")?;
-    let path = input
-        .as_object()
-        .and_then(|value| value.get("path"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "tool input must contain a non-empty path".to_owned())?;
+    // The canonical ls/find/grep schemas allow path to be omitted. Legacy
+    // Runtime supplied this default before preflight; Kernel dispatch calls
+    // the guard directly, so normalize here for both execution routes.
+    let fields = input.as_object().ok_or("tool input must be an object")?;
+    let path = match fields.get("path") {
+        None if tool != "read" => ".",
+        Some(Value::String(path)) if path.trim().is_empty() && tool != "read" => ".",
+        Some(Value::String(path)) if !path.trim().is_empty() => path.trim(),
+        _ => return Err("tool input must contain a non-empty path".to_owned()),
+    };
     if path.contains('\0') {
         return Err("tool path contains an invalid null byte".to_owned());
     }

@@ -35,7 +35,7 @@ export function createReadOnlyTools(requestPreflight, { limits, executeHost } = 
     {
       name: 'read',
       label: 'Read file',
-      description: 'Read a UTF-8 text file inside the authorized project folder.',
+      description: 'Read a UTF-8 text file inside the authorized project folder. The Rust reader also extracts DOCX, XLSX and PPTX text; spreadsheet formulas use saved results, not recalculation. Legacy DOC/XLS/PPT require conversion.',
       parameters: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }),
       execute: async (toolCallId, params, signal) => {
         return execute(toolCallId, 'read', params, signal)

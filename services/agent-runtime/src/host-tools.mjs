@@ -102,7 +102,7 @@ export function createHostTools(requestHost) {
     {
       name: 'read_attachment',
       label: 'Read attachment',
-      description: 'Read a UTF-8 text or DOCX attachment from the current conversation by its Fox attachment ID. Other binary formats and extracted text larger than 1 MiB are rejected.',
+      description: 'Read a UTF-8 text, DOCX, XLSX or PPTX attachment from the current conversation by its Fox attachment ID. XLSX includes sheet names and cell addresses; formula results are cached, not recalculated. Legacy DOC/XLS/PPT and extracted text larger than 1 MiB are rejected.',
       parameters: Type.Object({ attachmentId: Type.String() }),
       execute: (toolCallId, params, signal) =>
         executeHostTool(toolCallId, 'read_attachment', params, requestHost, signal),

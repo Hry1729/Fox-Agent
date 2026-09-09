@@ -76,7 +76,7 @@ impl Gateway<'_> {
         self.check()?;
         Ok(file)
     }
-    fn text(&mut self, path: &Path) -> Result<String, String> {
+    fn bytes(&mut self, path: &Path) -> Result<Vec<u8>, String> {
         let mut file = self.open(path, false)?;
         let mut contents = Vec::new();
         let mut chunk = [0u8; 16 * 1024];
@@ -89,6 +89,16 @@ impl Gateway<'_> {
             }
             self.remaining_bytes -= count as u64;
             contents.extend_from_slice(&chunk[..count]);
+        }
+        Ok(contents)
+    }
+    fn text(&mut self, path: &Path, extract_office: bool) -> Result<String, String> {
+        let contents = self.bytes(path)?;
+        if extract_office {
+            if let Some(text) = crate::local_knowledge_import::extract_office_text(&contents, &path.to_string_lossy())? {
+                self.check()?;
+                return Ok(text);
+            }
         }
         Ok(String::from_utf8_lossy(&contents).into_owned())
     }
@@ -175,7 +185,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
     gateway.check()?;
     let path = approved.resolved_path;
     if tool == "read" {
-        let text = gateway.text(&path)?;
+        let text = gateway.text(&path, true)?;
         let offset = input.get("offset").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as usize;
         let limit = input.get("limit").and_then(Value::as_f64).filter(|v| *v != 0.0).unwrap_or(limits.read_chars as f64).clamp(1.0, limits.read_chars as f64) as usize;
         let truncated = offset.saturating_add(limit) < text.encode_utf16().count();
@@ -196,7 +206,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
         }
     } else {
         for entry in entries.into_iter().filter(|e| !e.directory) {
-            let text = gateway.text(&entry.path)?;
+            let text = gateway.text(&entry.path, false)?;
             for (index, line) in text.split('\n').enumerate() {
                 gateway.check()?;
                 let line = line.strip_suffix('\r').unwrap_or(line);
@@ -231,6 +241,25 @@ mod tests {
         registry.register_run(&binding.run_id).unwrap();
         let token = registry.tool_token(&binding.run_id, "tool").unwrap();
         (binding, registry, token)
+    }
+
+    #[test]
+    fn resource_gateway_uses_frozen_root_when_directory_path_is_omitted() {
+        let (binding, _, token) = fixture();
+        let root = Path::new(binding.permission.project_root.as_ref().unwrap());
+        fs::write(root.join("AGV长时间任务汇总统计表.xlsx"), "fixture").unwrap();
+        let list = execute(&binding, "ls", &json!({}), &token).unwrap();
+        assert!(list["content"][0]["text"].as_str().unwrap().contains("AGV长时间任务汇总统计表.xlsx"));
+        let found = execute(&binding, "find", &json!({"pattern":"AGV"}), &token).unwrap();
+        assert_eq!(found["details"]["count"], 1);
+        let grep = execute(&binding, "grep", &json!({"pattern":"second Fox"}), &token).unwrap();
+        assert_eq!(grep["details"]["count"], 1);
+        assert!(execute(&binding, "read", &json!({}), &token).is_err());
+        assert!(execute(&binding, "ls", &json!({"path":".."}), &token).is_err());
+        let mut unbound = binding.clone();
+        unbound.permission.project_root = None;
+        unbound.permission_snapshot_id = crate::database::Database::run_control_permission_hash(&unbound.permission).unwrap();
+        assert!(execute(&unbound, "ls", &json!({}), &token).is_err());
     }
 
     #[test]

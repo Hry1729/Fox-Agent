@@ -1,6 +1,156 @@
 use super::*;
 
 #[test]
+fn kernel_reads_project_root_and_office_attachments_through_frozen_gateway() {
+    let mut config = worker_configuration();
+    config.proposal_tools = ["ls", "find", "read", "read_attachment"].iter()
+        .map(|name| json!({"name":name,"description":"reading test","parameters":{"type":"object","properties":{}}})).collect();
+    let clock = TestClock::new(1000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run) =
+        fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    let scope = crate::database::KernelHostScope {
+        schema_version: 1,
+        tool_names: config
+            .proposal_tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_owned())
+            .collect(),
+        mcp_server_hashes: Default::default(),
+        knowledge_reference_hashes: Default::default(),
+        knowledge_connection_hashes: Default::default(),
+        office_tools: Default::default(),
+        lifecycle_hooks: Vec::new(),
+    };
+    db.freeze_kernel_host_scope(&run, &scope).unwrap();
+    let policy = super::super::super::kernel_gateway::GatewayPolicy {
+        binding: db.run_control_binding(&run).unwrap().unwrap(),
+        scope,
+    };
+    let sheet_path = root.join("AGV长时间任务汇总统计表.xlsx");
+    let slides_path = root.join("slides.pptx");
+    std::fs::write(
+        &sheet_path,
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/office-reading.xlsx"
+        )),
+    )
+    .unwrap();
+    std::fs::write(
+        &slides_path,
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/office-reading.pptx"
+        )),
+    )
+    .unwrap();
+    let foreign = db
+        .create_conversation(db.default_agent_id(), None, None, None)
+        .unwrap();
+    for (id, conversation, path, name) in [
+        (
+            "sheet",
+            policy.binding.conversation_id.as_str(),
+            &sheet_path,
+            "AGV.xlsx",
+        ),
+        (
+            "slides",
+            policy.binding.conversation_id.as_str(),
+            &slides_path,
+            "slides.pptx",
+        ),
+        ("foreign", foreign.id.as_str(), &sheet_path, "AGV.xlsx"),
+    ] {
+        db.add_attachments(&[crate::database::AttachmentRecord {
+            id: id.into(),
+            conversation_id: conversation.into(),
+            message_id: None,
+            display_name: name.into(),
+            storage_path: path.to_string_lossy().into_owned(),
+            media_type: None,
+            byte_size: std::fs::metadata(path).unwrap().len() as i64,
+            sha256: None,
+            status: "ready".into(),
+            created_at: 0,
+        }])
+        .unwrap();
+    }
+    let calls = [
+        ("list", "ls", json!({}), "AGV长时间任务汇总统计表.xlsx"),
+        (
+            "find",
+            "find",
+            json!({"pattern":"AGV"}),
+            "AGV长时间任务汇总统计表.xlsx",
+        ),
+        (
+            "read",
+            "read",
+            json!({"path":"AGV长时间任务汇总统计表.xlsx"}),
+            "B2: 123.5",
+        ),
+        (
+            "sheet",
+            "read_attachment",
+            json!({"attachmentId":"sheet"}),
+            "A2: AGV长时间任务",
+        ),
+        (
+            "slides",
+            "read_attachment",
+            json!({"attachmentId":"slides"}),
+            "AGV任务汇总 & 分析",
+        ),
+    ];
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run, &cancellation).unwrap();
+    coordinator.dispatch_initial("read-model", &policy, |binding,frame,_| Ok(fox_engine_protocol::KernelInitialModelResponse {
+        schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
+        assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":calls.iter().map(|(id,tool,input,_)|
+            json!({"type":"toolCall","id":id,"name":tool,"arguments":input})).collect::<Vec<_>>()})
+    })).unwrap();
+    for (id, tool, _, expected) in &calls {
+        coordinator
+            .dispatch_tool(id, "read-owner", |_, effect, token| {
+                let payload: Value = serde_json::from_str(&effect.payload_json).unwrap();
+                let result = if *tool == "read_attachment" {
+                    assert!(policy
+                        .execute_context_resource(
+                            &db,
+                            &root,
+                            tool,
+                            &json!({"attachmentId":"foreign"}),
+                            token
+                        )
+                        .is_err());
+                    policy.execute_context_resource(&db, &root, tool, &payload["input"], token)?
+                } else {
+                    policy.execute(&db, tool, &payload["input"], token)?
+                };
+                assert!(result.to_string().contains(expected));
+                Ok((true, result))
+            })
+            .unwrap();
+    }
+    let snapshot = coordinator.snapshot().unwrap();
+    assert_eq!(snapshot.tool_calls.len(), 5);
+    assert!(snapshot
+        .tool_calls
+        .iter()
+        .all(|tool| tool.state == "completed"));
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let saved: String = connection
+        .query_row(
+            "SELECT result_json FROM tool_calls WHERE run_id=?1 AND tool_name='read'",
+            [&run],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(saved.contains("B2: 123.5"));
+}
+
+#[test]
 fn approved_html_write_and_streamed_answer_remain_available_after_cancel() {
     let config = worker_configuration();
     let clock = TestClock::new(1000);

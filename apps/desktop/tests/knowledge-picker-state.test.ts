@@ -1,7 +1,18 @@
 import { describe, expect, test } from 'bun:test'
-import { filterKnowledgePickerItems, knowledgePickerStatus } from '../src/features/chat/knowledge-picker-state'
+import { filterKnowledgePickerItems, knowledgePickerStatus, localKnowledgePickerState } from '../src/features/chat/knowledge-picker-state'
 
 describe('knowledge picker', () => {
+  test('keyword-ready libraries are selectable without a vector generation', () => {
+    expect(localKnowledgePickerState({ documentCount: 1, activeJobStatus: null, textIndexReady: true, vectorIndexReady: false })).toEqual({ available: true, status: '可用 · 关键词检索', reason: '' })
+    expect(localKnowledgePickerState({ documentCount: 2, activeJobStatus: 'running', textIndexReady: true }).available).toBe(true)
+  })
+  test('imported files are distinguished from a ready index and an empty library', () => {
+    const pending = localKnowledgePickerState({ documentCount: 1, activeJobStatus: 'completed', textIndexReady: false })
+    expect(pending.available).toBe(false)
+    expect(pending.status).toBe('待解析')
+    expect(pending.reason).toContain('文档已导入')
+    expect(localKnowledgePickerState({ documentCount: 0, activeJobStatus: null }).status).toBe('待导入')
+  })
   const items = [
     { source: 'local', name: 'Fox 使用指南', description: '常用操作教程', unavailable: true },
     { source: 'local', name: 'ceshi', description: '29 个文档' },

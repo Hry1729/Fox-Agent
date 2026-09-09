@@ -4319,6 +4319,9 @@ mod tests {
         assert_eq!(listed[0].chunk_count, Some(1));
         assert_eq!(listed[0].vector_count, None);
         assert_eq!(listed[0].fallback_reason.as_deref(), Some("未配置向量模型"));
+        let picker_base = store.list_bases().unwrap().into_iter().find(|item| item.id == base.id).unwrap();
+        assert!(picker_base.text_index_ready, "the chat picker must receive the keyword capability");
+        assert!(picker_base.active_index_generation.is_none(), "keyword imports do not require a vector generation");
 
         let search = store
             .search_lexical(&base.id, "第二段", Some(3), Some(1_000))

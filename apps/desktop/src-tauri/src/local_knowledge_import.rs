@@ -1,4 +1,6 @@
 use flate2::read::{DeflateDecoder, ZlibDecoder};
+#[path = "local_knowledge_ooxml.rs"]
+mod ooxml;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
@@ -856,56 +858,28 @@ fn parse_zip_based_text(
             }
         }
         SpecializedDocumentKind::Pptx => {
-            let mut names = archive
-                .entry_names()
-                .filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            names.sort_by_key(|name| {
-                name.strip_prefix("ppt/slides/slide")
-                    .and_then(|value| value.strip_suffix(".xml"))
-                    .and_then(|value| value.parse::<u32>().ok())
-                    .unwrap_or(u32::MAX)
-            });
-            if names.is_empty() {
-                return Err(parse_error("PPTX contains no slide XML"));
-            }
-            for name in names {
-                let xml = archive
-                    .read_entry(&name)?
-                    .ok_or_else(|| parse_error(format!("PPTX entry {name} is missing")))?;
-                let section = extract_xml_text(&xml, &["t"])?;
-                append_text_section(&mut text, &section)?;
-            }
+            text = ooxml::pptx_text(&archive)?;
         }
         SpecializedDocumentKind::Xlsx => {
-            let mut names = archive
-                .entry_names()
-                .filter(|name| {
-                    *name == "xl/sharedStrings.xml"
-                        || (name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml"))
-                })
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            names.sort();
-            if names.is_empty() {
-                return Err(parse_error("XLSX contains no worksheet XML"));
-            }
-            for name in names {
-                let xml = archive
-                    .read_entry(&name)?
-                    .ok_or_else(|| parse_error(format!("XLSX entry {name} is missing")))?;
-                let allowed = if name == "xl/sharedStrings.xml" {
-                    &["t"][..]
-                } else {
-                    &["t", "v"][..]
-                };
-                let section = extract_xml_text(&xml, allowed)?;
-                append_text_section(&mut text, &section)?;
-            }
+            text = ooxml::xlsx_text(&archive)?;
         }
     }
     Ok(text)
+}
+
+/// Pure, bounded extraction from bytes already read through an authorized
+/// attachment/project handle. Never launches Office or follows external links.
+pub(crate) fn extract_office_text(bytes: &[u8], filename: &str) -> Result<Option<String>, String> {
+    let extension = Path::new(filename).extension().and_then(|value| value.to_str())
+        .unwrap_or_default().to_ascii_lowercase();
+    let kind = match extension.as_str() {
+        "docx" => SpecializedDocumentKind::Docx,
+        "xlsx" => SpecializedDocumentKind::Xlsx,
+        "pptx" => SpecializedDocumentKind::Pptx,
+        "doc" | "xls" | "ppt" => return Err("旧版 Office 二进制格式暂不支持读取，请另存为 DOCX、XLSX 或 PPTX 后再添加。".into()),
+        _ => return Ok(None),
+    };
+    parse_zip_based_text(bytes, kind).map(Some).map_err(|error| error.to_string())
 }
 
 fn append_text_section(output: &mut String, section: &str) -> Result<(), ImportError> {
@@ -2126,6 +2100,38 @@ mod tests {
             text
         );
         cleanup(&root);
+    }
+
+    #[test]
+    fn reads_xlsx_cells_with_sheet_order_shared_strings_and_cached_formulas() {
+        let bytes = include_bytes!("../tests/fixtures/office-reading.xlsx");
+        let text = extract_office_text(bytes, "AGV长时间任务汇总统计表.XLSX").unwrap().unwrap();
+        assert!(text.contains("[Sheet: AGV统计]"));
+        assert!(text.contains("A1: 任务 & 名称"));
+        assert!(text.contains("A2: AGV长时间任务"));
+        assert!(text.contains("B2: 123.5"));
+        assert!(text.contains("C2: TRUE"));
+        assert!(text.contains("D2: 247 [formula: =B2*2; saved result, not recalculated]"));
+        assert!(text.contains("E2: (no cached value)"));
+        assert!(text.find("[Sheet: AGV统计]").unwrap() < text.find("[Sheet: 第二页]").unwrap());
+        assert!(extract_office_text(bytes, "old.xls").unwrap_err().contains("另存为"));
+    }
+
+    #[test]
+    fn xlsx_rejects_invalid_shared_strings_and_document_types() {
+        let bad_index = stored_zip_fixture(&[("xl/worksheets/sheet1.xml", br#"<worksheet><c r="A1" t="s"><v>9</v></c></worksheet>"#)]);
+        assert!(extract_office_text(&bad_index, "bad.xlsx").unwrap_err().contains("out of range"));
+        let doctype = stored_zip_fixture(&[("xl/worksheets/sheet1.xml", br#"<!DOCTYPE x SYSTEM "file:///secret"><worksheet/>"#)]);
+        assert!(extract_office_text(&doctype, "bad.xlsx").unwrap_err().contains("document types"));
+    }
+
+    #[test]
+    fn reads_compressed_pptx_text_in_slide_order() {
+        let bytes = include_bytes!("../tests/fixtures/office-reading.pptx");
+        let text = extract_office_text(bytes, "slides.pptx").unwrap().unwrap();
+        assert!(text.contains("AGV任务汇总 & 分析"));
+        assert!(text.find("AGV任务").unwrap() < text.find("第二页结果").unwrap());
+        assert!(extract_office_text(bytes, "old.ppt").is_err());
     }
 
     #[test]

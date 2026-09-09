@@ -78,7 +78,7 @@ import { flushSync } from 'react-dom'
 import { BorderBeam } from 'border-beam'
 import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable, knowledgeReferenceFromLegacyBinding, knowledgeReferenceKey } from '@/features/conversations/api/desktop-client'
 import { normalizeProjectPermission, selectProjectRoot, validPickedProjectFolder } from './project-access-dialog-state'
-import { filterKnowledgePickerItems, knowledgePickerStatus } from './knowledge-picker-state'
+import { filterKnowledgePickerItems, localKnowledgePickerState } from './knowledge-picker-state'
 import { Button } from '@/components/ui/button'
 import { ShinyText } from '@/components/effects/shiny-text'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -3122,7 +3122,8 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
                 {(runtimeContext.localKnowledgeBases ?? []).map((item) => {
                   const reference: KnowledgeReference = { source: 'local', providerKey: 'local', id: item.id }
                   const selected = selectedKnowledgeReferenceKeys.has(knowledgeReferenceKey(reference))
-                  return <CommandItem key={`local:${item.id}`} value={`本地知识库 ${item.name} ${item.description ?? ''}`} onSelect={() => { if (!runtimeContext.knowledgeLoading) void runtimeContext.onKnowledgeToggle?.(reference, item.name) }}><span className="fox-command-icon"><Library /></span><span className="fox-command-copy"><strong>{item.name}</strong><small>{item.description || `${item.documentCount} 个文档`} · {item.activeIndexGeneration ? '已索引' : '待索引'}</small></span>{selected && <Check className="fox-command-selected-check" />}</CommandItem>
+                  const availability = localKnowledgePickerState(item)
+                  return <CommandItem key={`local:${item.id}`} disabled={!selected && !availability.available} value={`本地知识库 ${item.name} ${item.description ?? ''}`} onSelect={() => { if (!runtimeContext.knowledgeLoading && (selected || availability.available)) void runtimeContext.onKnowledgeToggle?.(reference, item.name) }}><span className="fox-command-icon"><Library /></span><span className="fox-command-copy"><strong>{item.name}</strong><small>{item.description || `${item.documentCount} 个文档`} · {availability.status}</small></span>{selected && <Check className="fox-command-selected-check" />}</CommandItem>
                 })}
               </CommandGroup>
             </>}
@@ -3130,14 +3131,14 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
         </Command>}
         {mentionOpen && <div className="fox-mention-menu"><div className="fox-command-title"><span>引用工作区文件</span><kbd>@</kbd></div>{['docs/FOX_ARCHITECTURE.md', 'apps/desktop/src/features/chat/workbench.tsx', 'apps/desktop/src/styles/workbench.css'].map((path) => <button type="button" key={path} onMouseDown={(event) => event.preventDefault()} onClick={() => applyMention(path)}><FileText size={14} /><span>{path}</span></button>)}</div>}
         <PromptInput
-          accept={supportsImageInput ? 'image/*,.pdf,.txt,.md,.docx' : '.pdf,.txt,.md,.docx'}
+          accept={supportsImageInput ? 'image/*,.pdf,.txt,.md,.docx,.xlsx,.pptx,.csv,.tsv' : '.pdf,.txt,.md,.docx,.xlsx,.pptx,.csv,.tsv'}
           multiple
           maxFiles={8}
           maxFileSize={5 * 1024 * 1024}
           onError={({ code }) => {
             if (code === 'max_file_size') toast.error('单个附件不能超过 5 MB')
             else if (code === 'max_files') toast.error('一次最多添加 8 个附件')
-            else toast.error('不支持这个附件格式')
+            else toast.error('支持 PDF、TXT、MD、DOCX、XLSX、PPTX、CSV、TSV；旧版 DOC、XLS、PPT 请先转换格式')
           }}
           onSubmitStart={({ text, files }) => {
             if (runtimeInitializing) return
@@ -3320,10 +3321,11 @@ export function KnowledgeBindingDialog({ open, remoteItems, localItems, localLoa
   const configuredReferences = Array.isArray(references)
     ? references
     : bindings.filter((item) => item.enabled).map(knowledgeReferenceFromLegacyBinding)
+  const wasOpen = useRef(false)
 
   useEffect(() => {
-    if (!open) return
-    setSelected(configuredReferences.map(knowledgeReferenceKey))
+    if (open && !wasOpen.current) setSelected(configuredReferences.map(knowledgeReferenceKey))
+    wasOpen.current = open
   }, [bindings, open, references])
 
   useEffect(() => {
@@ -3352,10 +3354,10 @@ export function KnowledgeBindingDialog({ open, remoteItems, localItems, localLoa
         id: item.id,
       },
       name: item.name,
-      description: item.description || `${item.documentCount} 个文档`,
+      description: [item.description || `${item.documentCount} 个文档`, localKnowledgePickerState(item).reason].filter(Boolean).join(' · '),
       source: 'local' as const,
-      status: knowledgePickerStatus(item.activeJobStatus, Boolean(item.activeIndexGeneration)),
-      unavailable: !item.activeIndexGeneration,
+      status: localKnowledgePickerState(item).status,
+      unavailable: !localKnowledgePickerState(item).available,
     })),
   ]
   const knownReferenceKeys = new Set(pickerItems.map((item) => knowledgeReferenceKey(item.reference)))
@@ -3419,7 +3421,7 @@ export function KnowledgeBindingDialog({ open, remoteItems, localItems, localLoa
               })}
               {!visibleItems.length && <p className="fox-knowledge-picker-empty" role="status">{loading ? '正在读取知识库…' : search ? '没有匹配的知识库，请换个关键词。' : source === 'local' ? '暂无本地知识库，请先在知识库页面导入。' : remoteError ? '连接恢复后可查看远程知识库。' : '暂无可访问的远程知识库。'}</p>}
             </div>
-            {source === 'local' && <p className="fox-knowledge-picker-hint"><CircleHelp aria-hidden="true" />待导入的知识库暂不可选。</p>}
+            {source === 'local' && <div className="fox-knowledge-picker-hint"><Popover><PopoverTrigger asChild><Button type="button" variant="ghost" size="sm" aria-label="为什么知识库暂不可选"><CircleHelp aria-hidden="true" />选择条件</Button></PopoverTrigger><PopoverContent className="max-w-80 text-sm" align="start"><strong>导入文档后，等待解析完成即可选择</strong><p>关键词检索可用的知识库也能加入聊天，无须安装向量模型。若显示待解析、暂停或失败，请到知识库页面查看任务进度和错误原因。</p></PopoverContent></Popover><span>有可检索内容即可加入聊天。</span><Button type="button" variant="ghost" size="sm" disabled={loading} onClick={onRetry}>刷新</Button></div>}
           </TabsContent>
         </Tabs>
         {error && <p role="alert" className="fox-knowledge-picker-error">{error}</p>}
@@ -4572,6 +4574,17 @@ export function Workbench() {
     refreshKnowledgeChoices()
   }, [knowledgeDialogOpen, refreshKnowledgeChoices])
   useEffect(() => {
+    if (!knowledgeDialogOpen || !desktopRuntimeAvailable
+      || !localKnowledgeBases.some(item => ['queued', 'running'].includes(item.activeJobStatus ?? ''))) return
+    let disposed = false
+    const timer = window.setTimeout(() => {
+      void desktopClient.listLocalKnowledgeBases().then(items => {
+        if (!disposed) setLocalKnowledgeBases(items)
+      }).catch(() => undefined)
+    }, 1500)
+    return () => { disposed = true; window.clearTimeout(timer) }
+  }, [knowledgeDialogOpen, localKnowledgeBases])
+  useEffect(() => {
     if (mascotCelebrating) return
     const mascotPool = desktopRunning ? workingMascots : idleMascots
     const interval = window.setInterval(() => setMascotIndex((value) => {
@@ -5414,7 +5427,7 @@ export function Workbench() {
           <RightPanel compact mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} activeChildAgent={activeChildAgent} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenChildAgent={openChildAgent} onBackChildAgent={() => setActiveChildAgent(null)} onOpenEvidence={openEvidence} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} />
         </SheetContent>
       </Sheet>
-      <KnowledgeBindingDialog open={knowledgeDialogOpen} remoteItems={knowledge.items} localItems={localKnowledgeBases} localLoading={localKnowledgeLoading} remoteLoading={knowledge.loading} remoteError={knowledge.error} onRetry={() => void knowledge.refresh()} references={desktopConversation.knowledgeReferences} bindings={desktopConversation.knowledgeBindings} busy={knowledgeDialogBusy} error={knowledgeDialogError} onOpenChange={setKnowledgeDialogOpen} onConfirm={(references, names) => void saveKnowledgeBindings(references, names)} />
+      <KnowledgeBindingDialog open={knowledgeDialogOpen} remoteItems={knowledge.items} localItems={localKnowledgeBases} localLoading={localKnowledgeLoading} remoteLoading={knowledge.loading} remoteError={knowledge.error} onRetry={refreshKnowledgeChoices} references={desktopConversation.knowledgeReferences} bindings={desktopConversation.knowledgeBindings} busy={knowledgeDialogBusy} error={knowledgeDialogError} onOpenChange={setKnowledgeDialogOpen} onConfirm={(references, names) => void saveKnowledgeBindings(references, names)} />
       <ConversationManagementDialogs conversation={conversationDialog?.conversation ?? null} mode={conversationDialog?.mode ?? null} busy={conversationDialogBusy} error={conversationDialogError} onClose={() => { setConversationDialog(null); setConversationDialogError(null) }} onRename={(title) => void renameManagedConversation(title)} onDelete={() => void purgeManagedConversation()} />
       <ProjectDeleteDialog project={projectDeleteDialog} busy={projectDeleteBusy} onClose={() => setProjectDeleteDialog(null)} onDelete={() => void deleteManagedProject()} />
     </main>
