@@ -78,6 +78,7 @@ function mergeMessages(persisted: ConversationMessage[], current: ConversationMe
   for (const message of current) {
     const stored = persistedMessages.get(message.id)
     if (stored) {
+      if (stored.id.startsWith('kernel-message:') && stored.status !== 'streaming') continue
       const statusRank: Record<ConversationMessage['status'], number> = {
         sending: 0,
         streaming: 1,

@@ -32,14 +32,14 @@ export function useModelProviders() {
 
   const save = useCallback(async (request: SaveModelProviderInput) => {
     setBusyId(request.id ?? 'new'); setError(null)
-    try { const saved = await desktopClient.saveModelProvider(request); await refresh(); return saved }
+    try { const saved = await desktopClient.saveModelProvider(request); await refresh(); window.dispatchEvent(new Event('fox:model-service-changed')); return saved }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return null }
     finally { setBusyId(null) }
   }, [refresh])
 
   const remove = useCallback(async (providerId: string) => {
     setBusyId(providerId); setError(null)
-    try { const deleted = await desktopClient.deleteModelProvider(providerId); await refresh(); return deleted }
+    try { const deleted = await desktopClient.deleteModelProvider(providerId); await refresh(); window.dispatchEvent(new Event('fox:model-service-changed')); return deleted }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return false }
     finally { setBusyId(null) }
   }, [refresh])

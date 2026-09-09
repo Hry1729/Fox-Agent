@@ -23,7 +23,12 @@ export function useModelService() {
     }
   }, [])
 
-  useEffect(() => { void refresh() }, [refresh])
+  useEffect(() => {
+    const changed = () => { void refresh() }
+    changed()
+    window.addEventListener('fox:model-service-changed', changed)
+    return () => window.removeEventListener('fox:model-service-changed', changed)
+  }, [refresh])
 
   const test = useCallback(async (baseUrl?: string, apiKey?: string, apiType?: 'openai-completions' | 'anthropic-messages', modelId?: string) => {
     setTesting(true)
@@ -48,6 +53,7 @@ export function useModelService() {
     try {
       const saved = await desktopClient.saveModelService(request)
       setService(saved)
+      window.dispatchEvent(new Event('fox:model-service-changed'))
       return saved
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))

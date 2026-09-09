@@ -13,12 +13,13 @@ export function applyKernelModelPreview(detail: ConversationDetail | null, value
   if (notice.schemaVersion !== 1 || ![notice.runId, notice.conversationId, notice.turnId].every(id => typeof id === 'string' && id.trim() && id.length <= 512)
     || !Number.isSafeInteger(notice.checkpointSeq) || notice.checkpointSeq <= 0 || !Number.isSafeInteger(notice.revision) || notice.revision <= 0
     || typeof notice.text !== 'string' || new TextEncoder().encode(notice.text).length > 262_144
-    || Object.keys(notice).some(key => !['schemaVersion', 'runId', 'conversationId', 'turnId', 'checkpointSeq', 'revision', 'text'].includes(key))) return detail
+    || (notice.reasoning !== undefined && (typeof notice.reasoning !== 'string' || new TextEncoder().encode(notice.reasoning).length > 262_144))
+    || Object.keys(notice).some(key => !['schemaVersion', 'runId', 'conversationId', 'turnId', 'checkpointSeq', 'revision', 'text', 'reasoning'].includes(key))) return detail
   const snapshot = snapshotForRun(detail)
   if (!snapshot || detail.conversation.id !== notice.conversationId || snapshot.runId !== notice.runId || snapshot.turnId !== notice.turnId
     || snapshot.state !== 'running' || BigInt(snapshot.lastEventSeq) !== BigInt(notice.checkpointSeq) + 1n) return detail
-  const id = `kernel-preview:${notice.runId}:${notice.checkpointSeq}`
-  if (detail.messages.some(message => message.id === `kernel-message:${notice.runId}:${notice.checkpointSeq}`)) return detail
+  const id = `kernel-message:${notice.runId}:${notice.checkpointSeq}`
+  if (detail.messages.some(message => message.id === id && message.status !== 'streaming')) return detail
   const previous = detail.messages.find(message => message.id === id)
   if (previous?.kernelPreview && previous.kernelPreview.revision >= notice.revision) return detail
   const message: ConversationMessage = {
@@ -27,5 +28,5 @@ export function applyKernelModelPreview(detail: ConversationDetail | null, value
     createdAt: previous?.createdAt ?? now, updatedAt: now,
     kernelPreview: { checkpointSeq: notice.checkpointSeq, revision: notice.revision },
   }
-  return { ...detail, messages: [...detail.messages.filter(message => !message.kernelPreview || message.runId !== notice.runId), message] }
+  return { ...detail, messages: [...detail.messages.filter(message => message.id !== id && (!message.kernelPreview || message.runId !== notice.runId)), message] }
 }

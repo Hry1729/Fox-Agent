@@ -1,3 +1,4 @@
+import { HtmlFilePreview } from './html-file-preview'
 import { KernelReconciliationPanel } from './kernel-reconciliation-panel'
 import { lazy, memo, Profiler, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { subscribeNotificationRefresh } from '../notification-subscriptions'
@@ -1981,7 +1982,7 @@ function RuntimeArtifacts({ artifacts, onOpenArtifact }: { artifacts: ArtifactRe
 function RuntimeAssistantMessage({ message, processEvents, running, artifacts, assistantName, modelName, knowledgeBindings, onOpenSource, onOpenArtifact, onFork }: { message: ConversationMessage; processEvents: RunEventRecord[]; running: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onFork?: (messageId: string) => void }) {
   const parsed = useMemo(() => splitAssistantContent(message.content ?? ''), [message.content])
   const process = useMemo(() => runtimeProcess(processEvents), [processEvents])
-  const completed = message.status === 'completed' && !running
+  const completed = !running && ['completed', 'interrupted', 'failed', 'cancelled'].includes(message.status)
   const replyTime = new Date(message.updatedAt || message.createdAt).toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
   const [feedback, setFeedback] = useState<'positive' | 'negative' | null>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
@@ -2030,7 +2031,7 @@ function RuntimeAssistantMessage({ message, processEvents, running, artifacts, a
             <MessageAction tooltip="这条回答有帮助" className={feedback === 'positive' ? 'is-feedback-selected' : ''} aria-pressed={feedback === 'positive'} disabled={running || feedbackSaving} onClick={() => void submitPositiveFeedback()}><ThumbsUp size={14} /></MessageAction>
             <MessageAction tooltip="这条回答需要改进" className={feedback === 'negative' ? 'is-feedback-selected' : ''} aria-pressed={feedback === 'negative'} disabled={running || feedbackSaving} onClick={() => setFeedbackOpen(true)}><ThumbsDown size={14} /></MessageAction>
           </MessageActions>
-          <div className="fox-message-meta"><span>{assistantName}</span>{modelName && modelName !== assistantName && <span>{modelName}</span>}<span>{replyTime}</span>{!completed && <span className="fox-message-live-meta">处理中</span>}</div>
+          <div className="fox-message-meta"><span>{assistantName}</span>{modelName && modelName !== assistantName && <span>{modelName}</span>}<span>{replyTime}</span>{!completed && <span className="fox-message-live-meta">处理中</span>}{message.status === 'interrupted' && <span>已中断 · 内容已保存</span>}</div>
         </div>
       </Message>
       <Dialog open={feedbackOpen} onOpenChange={setFeedbackOpen}>
@@ -2828,7 +2829,7 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
       : []
   const defaultModel = activeAgent?.runtimeType === 'yuxi'
     ? activeAgent.defaultModel
-    : modelService?.modelId ?? activeAgent?.defaultModel ?? '未配置模型'
+    : modelService?.modelId ?? (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) ?? '未配置模型'
   const [model, setModel] = useState(defaultModel)
   const [draft, setDraft] = useState('')
   const [questionFreeform, setQuestionFreeform] = useState('')
@@ -3622,7 +3623,7 @@ function ProjectFilePreviewPane({ conversationId, path, displayPath }: { convers
           ? <div className="fox-panel-loading"><LoaderCircle className="animate-spin" />正在读取文件</div>
           : error
             ? <div className="fox-result-unavailable"><AlertTriangle size={21} /><strong>无法预览文件</strong><span>{error}</span></div>
-            : <pre>{preview?.content ?? ''}</pre>}
+            : /\.html?$/i.test(path) && preview?.content ? <HtmlFilePreview key={path} name={displayPath} content={preview.content} /> : <pre>{preview?.content ?? ''}</pre>}
         {preview?.truncated && <small className="fox-result-truncated">预览已截断，仅显示文件开头部分。</small>}
       </div>
     </div>
@@ -3739,8 +3740,8 @@ function ArtifactFilePreview({ detail, artifactId, displayPath }: { detail: Conv
         {feedback && <p className="fox-result-feedback" role="status">{feedback}</p>}
         <div className="fox-result-raw">
           {inspection?.preview.available && inspection.preview.content !== null
-            ? <pre>{inspection.preview.content}</pre>
-            : <div className="fox-result-unavailable"><FileText size={21} /><strong>{inspection?.preview.reason ?? (loading ? '正在请求 Host 预览…' : '暂时没有可用预览')}</strong><span>{inspection?.preview.kind === 'html' ? 'HTML 以纯文本显示，不会获得 Host Bridge。' : '可使用顶部“打开方式”查看原文件。'}</span></div>}
+            ? inspection.preview.kind === 'html' ? <HtmlFilePreview key={artifact.id} name={artifact.displayName} content={inspection.preview.content} /> : <pre>{inspection.preview.content}</pre>
+            : <div className="fox-result-unavailable"><FileText size={21} /><strong>{inspection?.preview.reason ?? (loading ? '正在请求 Host 预览…' : '暂时没有可用预览')}</strong><span>{inspection?.preview.kind === 'html' ? 'HTML 预览暂不可用，可使用顶部“打开方式”查看原文件。' : '可使用顶部“打开方式”查看原文件。'}</span></div>}
           {inspection?.preview.truncated && <small className="fox-result-truncated">预览已截断，仅显示前 512 KB。</small>}
         </div>
       </div>
@@ -5399,7 +5400,7 @@ export function Workbench() {
         <section className="fox-chat-pane">
           <TimelineRuntimeContext.Provider value={timelineRuntimeContextValue}>
           <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
-          {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || activeAgent?.defaultModel || modelService.service?.modelId || '未配置模型'} usage={conversationUsage} contextWindow={modelService.service?.contextWindow ?? 0} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
+          {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} usage={conversationUsage} contextWindow={modelService.service?.contextWindow ?? 0} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
 <div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} mascotSrc={sidebarMascot} mascotActive={desktopRunning || mascotCelebrating} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} /></Profiler>{desktopConversation.enabled && desktopConversation.detail?.kernelSnapshot?.terminalWritten && desktopConversation.detail.lastRun && desktopConversation.detail.kernelSnapshot.runId === desktopConversation.detail.lastRun.id && <KernelReconciliationPanel key={desktopConversation.detail.lastRun.id} conversationId={desktopConversation.detail.conversation.id} runId={desktopConversation.detail.lastRun.id} onResumed={() => desktopConversation.openConversation(desktopConversation.detail!.conversation.id)} />}<Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} suggestedPrompt={suggestedPrompt} chatState={chatState} centered={timelineEmpty} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={activeProject?.permissionMode ?? desktopConversation.detail?.conversation.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? desktopConversation.detail?.approvals ?? EMPTY_RUNTIME_APPROVALS : EMPTY_RUNTIME_APPROVALS} mascotSrc={timelineEmpty ? undefined : sidebarMascot} mascotActive={desktopRunning || mascotCelebrating} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onDeleteGoal={handleComposerDeleteGoal} onGoalRunningChange={handleComposerGoalRunningChange} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
           </ComposerRuntimeContext.Provider>
           </TimelineRuntimeContext.Provider>

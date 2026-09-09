@@ -241,18 +241,21 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
   let previewRevision = 0
   let lastPreviewAt = 0
   let lastPreviewText = ''
+  let lastPreviewReasoning = ''
   try {
   unsubscribe = typeof session.agent.subscribe === 'function' ? session.agent.subscribe(event => {
     if (preview && !signal.aborted && !timedOut && ['message_update','message_end'].includes(event.type)
         && event.message?.role === 'assistant' && Array.isArray(event.message.content)) {
       const text = event.message.content.filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join('')
+      const reasoning = event.message.content.filter(block => block?.type === 'thinking' && typeof block.thinking === 'string').map(block => block.thinking).join('\n\n')
       const now = performance.now()
-      if (text !== lastPreviewText && Buffer.byteLength(text,'utf8') <= 262_144
+      if ((text !== lastPreviewText || reasoning !== lastPreviewReasoning) && Buffer.byteLength(text,'utf8') <= 262_144 && Buffer.byteLength(reasoning,'utf8') <= 262_144
           && (previewRevision===0 || now-lastPreviewAt>=100 || event.type==='message_end')) {
         lastPreviewText = text
+        lastPreviewReasoning = reasoning
         lastPreviewAt = now
         preview({ schemaVersion:1,runId:request.runId,conversationId:request.conversationId,turnId:prepared.turnId,
-          checkpointSeq:prepared.checkpointSeq,revision:++previewRevision,text })
+          checkpointSeq:prepared.checkpointSeq,revision:++previewRevision,text, ...(reasoning ? { reasoning } : {}) })
       }
     }
     if (event.type !== 'message_end' || event.message?.role !== 'assistant'

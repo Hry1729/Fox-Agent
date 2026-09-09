@@ -59,6 +59,9 @@ pub(super) fn project(
         WHERE a.run_id=?1 ON CONFLICT(tool_call_id) DO UPDATE SET status=excluded.status,
             decision_json=excluded.decision_json,resolved_at=excluded.resolved_at", [run_id])?;
 
+    super::kernel_display::activity(tx, run_id, now)?;
+    super::kernel_display::artifacts(tx, run_id, previous_seq, now)?;
+
     let mut query = tx.prepare(
         "SELECT seq,payload_json,event_type FROM kernel_events WHERE run_id=?1 AND seq>?2
         AND event_type IN ('engine.initial_response','engine.batch_response','context.compaction.result') ORDER BY seq",
@@ -96,13 +99,16 @@ pub(super) fn project(
                     .join("")
             })
             .unwrap_or_default();
-        // Thinking, tool arguments and empty final bubbles are not chat text.
+        let checkpoint = response["checkpointSeq"].as_u64().ok_or(rusqlite::Error::InvalidQuery)?;
+        let thinking = response["assistantMessage"]["content"].as_array().map(|blocks| blocks.iter()
+            .filter(|block| block["type"] == "thinking").filter_map(|block| block["thinking"].as_str()).collect::<Vec<_>>().join("\n\n")).unwrap_or_default();
+        super::kernel_display::reasoning(tx,run_id,checkpoint,&thinking,now)?;
+        // Tool arguments and empty final bubbles are not chat text.
         if content.is_empty() {
+            tx.execute("UPDATE messages SET content='',status='completed',updated_at=?2 WHERE id=?1 AND status='streaming'",
+                params![format!("kernel-message:{run_id}:{checkpoint}"),now])?;
             continue;
         }
-        let checkpoint = response["checkpointSeq"]
-            .as_u64()
-            .ok_or(rusqlite::Error::InvalidQuery)?;
         let id = format!("kernel-message:{run_id}:{checkpoint}");
         let metadata = json!({"authority":"kernel","checkpointSeq":checkpoint}).to_string();
         tx.execute("INSERT INTO messages(id,conversation_id,run_id,role,kind,content,status,ordinal,runtime_message_id,metadata_json,created_at,updated_at)
@@ -137,6 +143,11 @@ pub(super) fn project(
             tx, run_id, kind, &payload, now,
         )?;
         if matches!(kind, "run.completed" | "run.cancelled" | "run.failed") {
+            let mut display_payload=payload.clone();
+            display_payload["type"]=json!(kind);
+            super::kernel_display::event(tx,run_id,"terminal",&display_payload,now)?;
+            tx.execute("UPDATE messages SET status=CASE WHEN ?2='run.completed' THEN 'completed' ELSE 'interrupted' END,updated_at=?3
+                WHERE run_id=?1 AND role='assistant' AND status='streaming'",params![run_id,kind,now])?;
             // Child owners have already returned before a parent terminal.
             // Settle any uncollected/incomplete team without changing child
             // execution facts or leaving a running team behind a terminal Run.
@@ -269,11 +280,12 @@ fn project_usage(
     if !usage.is_object() {
         return Err(rusqlite::Error::InvalidQuery);
     }
+    let display_seq:i64=tx.query_row("SELECT COALESCE(MAX(seq),0)+1 FROM run_events WHERE run_id=?1",[run_id],|r|r.get(0))?;
     let previous: Option<String> = tx
         .query_row(
             "SELECT event_json FROM run_events WHERE run_id=?1
-        AND event_type='usage.updated' AND seq<?2 ORDER BY seq DESC LIMIT 1",
-            params![run_id, seq],
+        AND event_type='usage.updated' ORDER BY seq DESC LIMIT 1",
+            params![run_id],
             |row| row.get(0),
         )
         .optional()?;
@@ -318,14 +330,14 @@ fn project_usage(
         .unwrap_or(0)
         .checked_add(step_total.max(reported))
         .ok_or(rusqlite::Error::InvalidQuery)?);
-    super::validate_runtime_usage_update(tx, run_id, &payload, seq)?;
+    super::validate_runtime_usage_update(tx, run_id, &payload, display_seq)?;
     tx.execute(
         "INSERT INTO run_events(id,run_id,seq,event_type,event_json,created_at)
         VALUES(?1,?2,?3,'usage.updated',?4,?5)",
         params![
             format!("kernel-usage:{run_id}:{seq}"),
             run_id,
-            seq,
+            display_seq,
             payload.to_string(),
             now
         ],
@@ -375,7 +387,7 @@ mod tests {
                 11,
             )?;
             let body: String = tx.query_row(
-                "SELECT event_json FROM run_events WHERE run_id=?1 AND seq=4",
+                "SELECT event_json FROM run_events WHERE run_id=?1 AND event_type='usage.updated' ORDER BY seq DESC LIMIT 1",
                 [&run],
                 |row| row.get(0),
             )?;

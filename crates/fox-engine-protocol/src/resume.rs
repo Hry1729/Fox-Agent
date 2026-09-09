@@ -34,7 +34,7 @@ impl KernelModelFailure {
 }
 use schemars::JsonSchema;
 
-/// Transient display only. Never a committed message, decision or replay input.
+/// Display content only. Host may persist partial text; never a decision or replay input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KernelModelPreview {
@@ -45,13 +45,15 @@ pub struct KernelModelPreview {
     pub checkpoint_seq: u64,
     pub revision: u64,
     pub text: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reasoning: String,
 }
 
 impl KernelModelPreview {
     pub fn validate(&self) -> Result<(),String> {
         if self.schema_version!=1 || [&self.run_id,&self.conversation_id,&self.turn_id].iter()
             .any(|id|id.trim().is_empty() || id.len()>512) || self.checkpoint_seq==0 || self.checkpoint_seq>9_007_199_254_740_991
-            || self.revision==0 || self.revision>9_007_199_254_740_991 || self.text.len()>262_144 {
+            || self.revision==0 || self.revision>9_007_199_254_740_991 || self.text.len()>262_144 || self.reasoning.len()>262_144 {
             return Err("invalid transient Kernel model preview".into());
         }
         Ok(())

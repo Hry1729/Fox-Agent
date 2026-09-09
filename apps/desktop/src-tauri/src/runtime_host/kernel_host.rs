@@ -588,9 +588,12 @@ impl super::RuntimeHost {
             database: &self.database,
         };
         let app = self.app.clone();
+        let display_database = self.database.clone();
         let preview = move |notice: &fox_engine_protocol::KernelModelPreview| {
             use tauri::Emitter;
-            let _ = app.emit("fox://kernel-model-preview", notice);
+            if display_database.save_kernel_model_display(notice).unwrap_or(false) {
+                let _ = app.emit("fox://kernel-model-preview", notice);
+            }
         };
         let result = drive_with_actions(
             &ownership,

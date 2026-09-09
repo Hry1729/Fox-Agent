@@ -451,7 +451,7 @@ export const SCHEMA_BUNDLE = {
     "KernelModelPreview": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
-      "description": "Transient display only. Never a committed message, decision or replay input.",
+      "description": "Display content only. Host may persist partial text; never a decision or replay input.",
       "properties": {
         "checkpointSeq": {
           "format": "uint64",
@@ -459,6 +459,9 @@ export const SCHEMA_BUNDLE = {
           "type": "integer"
         },
         "conversationId": {
+          "type": "string"
+        },
+        "reasoning": {
           "type": "string"
         },
         "revision": {

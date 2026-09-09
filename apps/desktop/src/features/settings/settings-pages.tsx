@@ -192,7 +192,6 @@ export function OnboardingPage({ navigate, onExit }: { navigate: NavigateWorkspa
   const yuxi = useYuxiService()
   const [step, setStep] = useState(0)
   const [stepDirection, setStepDirection] = useState(1)
-  const [isFinishing, setIsFinishing] = useState(false)
   const steps = [
     { title: '连接模型服务', description: '配置 Fox 原生 Agent 使用的模型、API 协议与上下文能力。', ready: Boolean(model.service), action: () => navigate('settings-models'), actionLabel: model.service ? '检查模型配置' : '配置模型服务' },
     { title: '连接知识库服务', description: '连接本机或局域网服务，启用远程专家、知识库和知识图谱。', ready: Boolean(yuxi.service), action: () => navigate('settings-yuxi'), actionLabel: yuxi.service ? '检查知识库连接' : '配置知识库服务' },
@@ -206,20 +205,13 @@ export function OnboardingPage({ navigate, onExit }: { navigate: NavigateWorkspa
       : model.service ? '基础配置已完成，可以开始创建对话' : '你可以跳过，但需要配置模型服务后才能正常对话'
   const advance = () => {
     setStepDirection(1)
-    if (step === 1) {
-      setStep(2)
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => setIsFinishing(true))
-      })
-      return
-    }
     setStep((value) => Math.min(steps.length - 1, value + 1))
   }
   const goBack = () => {
     setStepDirection(-1)
     setStep((value) => Math.max(0, value - 1))
   }
-  return <div className={`fox-onboarding-screen ${isFinishing ? 'is-finishing' : ''}`} data-tauri-drag-region>
+  return <div className="fox-onboarding-screen" data-tauri-drag-region>
     <Grainient
       className="fox-onboarding-background"
       color1="#9fc9ee"
@@ -243,7 +235,7 @@ export function OnboardingPage({ navigate, onExit }: { navigate: NavigateWorkspa
       dpr={1}
     />
     <Button variant="outline" size="sm" className="fox-onboarding-skip" onClick={() => onExit('skipped')}>跳过设置</Button>
-    <div className={`fox-onboarding-shell ${isFinishing ? 'is-finishing' : ''}`}>
+    <div className="fox-onboarding-shell">
       <section className="fox-onboarding-main">
         <header className="fox-onboarding-brand"><span><img src="/mascot/fox/idle/fox_sit_nicely.png" alt="" />Fox</span></header>
         <main className="fox-onboarding-form">
@@ -507,17 +499,19 @@ function ProviderIconPicker({ form, onChange }: { form: ProviderForm; onChange: 
   )
 }
 
-function ProviderEditor({ form, busy, credentialConfigured, error, onChange, onCancel, onSave, onDelete, onTest }: { form: ProviderForm; busy: boolean; credentialConfigured: boolean; error?: string | null; onChange: (form: ProviderForm) => void; onCancel: () => void; onSave: () => void; onDelete?: () => void; onTest: () => void }) {
+function ProviderEditor({ form, busy, testing = false, connectionStatus, credentialConfigured, error, onChange, onCancel, onSave, onDelete, onTest }: { form: ProviderForm; busy: boolean; testing?: boolean; connectionStatus?: string | null; credentialConfigured: boolean; error?: string | null; onChange: (form: ProviderForm) => void; onCancel: () => void; onSave: () => void; onDelete?: () => void; onTest: () => void }) {
   const updateModel = (index: number, patch: Partial<ProviderForm['models'][number]>) => onChange({ ...form, models: form.models.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : patch.isDefault ? { ...item, isDefault: false } : item) })
-  return <div className="fox-provider-editor"><div className="fox-provider-form-grid"><label>供应商名称<Input value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} placeholder="例如 MiniMax" /></label><label>API 协议<Select value={form.apiType} onValueChange={(apiType) => onChange({ ...form, apiType: apiType as ProviderForm['apiType'] })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="openai-completions">OpenAI-compatible</SelectItem><SelectItem value="anthropic-messages">Anthropic Messages</SelectItem></SelectContent></Select></label><ProviderIconPicker form={form} onChange={onChange} /><label className="is-wide">API 地址<Input value={form.baseUrl} onChange={(event) => onChange({ ...form, baseUrl: event.target.value })} placeholder={form.apiType === 'anthropic-messages' ? 'https://api.minimaxi.com/anthropic' : 'https://api.example.com/v1'} /></label><label className="is-wide">API Key<Input type="password" value={form.apiKey} onChange={(event) => onChange({ ...form, apiKey: event.target.value, clearApiKey: false })} placeholder={credentialConfigured ? '已安全保存，留空保持不变' : '输入供应商 API Key'} /></label></div><label className="fox-provider-default-toggle"><span><b>设为默认供应商</b><small>新对话默认使用此供应商中标记为默认的模型</small></span><Switch checked={form.isDefault} onCheckedChange={(isDefault) => onChange({ ...form, isDefault })} /></label><div className="fox-provider-models-head"><div><h3>模型</h3><p>一个供应商可以配置多个模型，并为每个模型设置独立能力。</p></div><Button variant="outline" size="sm" onClick={() => onChange({ ...form, models: [...form.models, { modelId: '', displayName: '', contextWindow: 128000, maxOutputTokens: 8192, supportsImageInput: false, isDefault: false }] })}><Plus />添加模型</Button></div><div className="fox-provider-model-list">{form.models.map((model, index) => <div className="fox-provider-model-row" key={model.id ?? index}><label>模型 ID<Input value={model.modelId} onChange={(event) => updateModel(index, { modelId: event.target.value })} placeholder="例如 MiniMax-M3" /></label><label>显示名称<Input value={model.displayName} onChange={(event) => updateModel(index, { displayName: event.target.value })} placeholder="留空则使用模型 ID" /></label><label>上下文<Input inputMode="numeric" value={model.contextWindow} onChange={(event) => updateModel(index, { contextWindow: Number(event.target.value) || 0 })} /></label><label>最大输出<Input inputMode="numeric" value={model.maxOutputTokens} onChange={(event) => updateModel(index, { maxOutputTokens: Number(event.target.value) || 0 })} /></label><label className="fox-provider-model-toggle"><span>多模态</span><Switch checked={model.supportsImageInput} onCheckedChange={(supportsImageInput) => updateModel(index, { supportsImageInput })} /></label><label className="fox-provider-model-toggle"><span>默认</span><Switch checked={model.isDefault} onCheckedChange={(isDefault) => updateModel(index, { isDefault })} /></label><Button variant="ghost" size="icon-sm" disabled={form.models.length === 1} title="删除模型" onClick={() => onChange({ ...form, models: form.models.filter((_, itemIndex) => itemIndex !== index) })}><Trash2 /></Button></div>)}</div>{form.id && credentialConfigured && <label className="fox-provider-clear-key"><Switch checked={form.clearApiKey} onCheckedChange={(clearApiKey) => onChange({ ...form, clearApiKey, apiKey: clearApiKey ? '' : form.apiKey })} /><span>保存时清除已存 API Key</span></label>}{error && <p className="fox-setting-error">{error}</p>}<div className="fox-provider-editor-actions">{onDelete && <Button variant="ghost" className="is-danger" disabled={busy || form.isDefault} onClick={onDelete}><Trash2 />删除供应商</Button>}<span /><Button variant="outline" disabled={busy} onClick={onCancel}>取消</Button><Button variant="outline" disabled={busy || !form.baseUrl.trim() || !form.models[0]?.modelId.trim()} onClick={onTest}><Zap />验证连接</Button><Button disabled={busy || !form.name.trim() || !form.baseUrl.trim() || form.models.some((item) => !item.modelId.trim())} onClick={onSave}>{busy && <LoaderCircle className="animate-spin" />}保存</Button></div></div>
+  return <div className="fox-provider-editor"><div className="fox-provider-form-grid"><label>供应商名称<Input value={form.name} onChange={(event) => onChange({ ...form, name: event.target.value })} placeholder="例如 MiniMax" /></label><label>API 协议<Select value={form.apiType} onValueChange={(apiType) => onChange({ ...form, apiType: apiType as ProviderForm['apiType'] })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="openai-completions">OpenAI-compatible</SelectItem><SelectItem value="anthropic-messages">Anthropic Messages</SelectItem></SelectContent></Select></label><ProviderIconPicker form={form} onChange={onChange} /><label className="is-wide">API 地址<Input value={form.baseUrl} onChange={(event) => onChange({ ...form, baseUrl: event.target.value })} placeholder={form.apiType === 'anthropic-messages' ? 'https://api.minimaxi.com/anthropic' : 'https://api.example.com/v1'} /></label><label className="is-wide">API Key<Input type="password" value={form.apiKey} onChange={(event) => onChange({ ...form, apiKey: event.target.value, clearApiKey: false })} placeholder={credentialConfigured ? '已安全保存，留空保持不变' : '输入供应商 API Key'} /></label></div><label className="fox-provider-default-toggle"><span><b>设为默认供应商</b><small>新对话默认使用此供应商中标记为默认的模型</small></span><Switch checked={form.isDefault} onCheckedChange={(isDefault) => onChange({ ...form, isDefault })} /></label><div className="fox-provider-models-head"><div><h3>模型</h3><p>一个供应商可以配置多个模型，并为每个模型设置独立能力。</p></div><Button variant="outline" size="sm" onClick={() => onChange({ ...form, models: [...form.models, { modelId: '', displayName: '', contextWindow: 128000, maxOutputTokens: 8192, supportsImageInput: false, isDefault: false }] })}><Plus />添加模型</Button></div><div className="fox-provider-model-list">{form.models.map((model, index) => <div className="fox-provider-model-row" key={model.id ?? index}><label>模型 ID<Input value={model.modelId} onChange={(event) => updateModel(index, { modelId: event.target.value })} placeholder="例如 MiniMax-M3" /></label><label>显示名称<Input value={model.displayName} onChange={(event) => updateModel(index, { displayName: event.target.value })} placeholder="留空则使用模型 ID" /></label><label>上下文<Input inputMode="numeric" value={model.contextWindow} onChange={(event) => updateModel(index, { contextWindow: Number(event.target.value) || 0 })} /></label><label>最大输出<Input inputMode="numeric" value={model.maxOutputTokens} onChange={(event) => updateModel(index, { maxOutputTokens: Number(event.target.value) || 0 })} /></label><label className="fox-provider-model-toggle"><span>多模态</span><Switch checked={model.supportsImageInput} onCheckedChange={(supportsImageInput) => updateModel(index, { supportsImageInput })} /></label><label className="fox-provider-model-toggle"><span>默认</span><Switch checked={model.isDefault} onCheckedChange={(isDefault) => updateModel(index, { isDefault })} /></label><Button variant="ghost" size="icon-sm" disabled={form.models.length === 1} title="删除模型" onClick={() => onChange({ ...form, models: form.models.filter((_, itemIndex) => itemIndex !== index) })}><Trash2 /></Button></div>)}</div>{form.id && credentialConfigured && <label className="fox-provider-clear-key"><Switch checked={form.clearApiKey} onCheckedChange={(clearApiKey) => onChange({ ...form, clearApiKey, apiKey: clearApiKey ? '' : form.apiKey })} /><span>保存时清除已存 API Key</span></label>}{error && <p className="fox-setting-error" role="alert">{error}</p>}{connectionStatus && <p className="fox-provider-test-status" role="status">{connectionStatus}</p>}<div className="fox-provider-editor-actions">{onDelete && <Button variant="ghost" className="is-danger" disabled={busy || form.isDefault} onClick={onDelete}><Trash2 />删除供应商</Button>}<span /><Button variant="outline" disabled={busy} onClick={onCancel}>取消</Button><Button variant="outline" disabled={busy || !form.baseUrl.trim() || !form.models[0]?.modelId.trim()} onClick={onTest}>{testing ? <LoaderCircle className="animate-spin" /> : <Zap />}{testing ? '正在验证…' : '验证连接'}</Button><Button disabled={busy || !form.name.trim() || !form.baseUrl.trim() || form.models.some((item) => !item.modelId.trim())} onClick={onSave}>{busy && <LoaderCircle className="animate-spin" />}保存</Button></div></div>
 }
 
 export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCollapsed: boolean; onSidebar: () => void }) {
   const resource = useModelProviders()
+  const [testing, setTesting] = useState(false)
+  const [connectionStatus, setConnectionStatus] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | 'new' | null>(null)
   const [form, setForm] = useState<ProviderForm | null>(null)
-  const openEditor = (provider?: ModelProviderRecord) => { const next = providerForm(provider); if (!provider) next.isDefault = resource.items.length === 0; setEditingId(provider?.id ?? 'new'); setForm(next) }
-  const openPreset = (preset: ProviderPreset) => { setEditingId('new'); setForm(providerPresetForm(preset, resource.items.length === 0)) }
+  const openEditor = (provider?: ModelProviderRecord) => { setConnectionStatus(null); const next = providerForm(provider); if (!provider) next.isDefault = resource.items.length === 0; setEditingId(provider?.id ?? 'new'); setForm(next) }
+  const openPreset = (preset: ProviderPreset) => { setConnectionStatus(null); setEditingId('new'); setForm(providerPresetForm(preset, resource.items.length === 0)) }
   const unconfiguredPresets = providerPresets.filter((preset) => !resource.items.some((provider) => provider.baseUrl.replace(/\/$/, '') === preset.baseUrl.replace(/\/$/, '')))
   const save = async () => {
     if (!form) return
@@ -525,10 +519,15 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
     if (saved) { setEditingId(null); setForm(null); toast.success('模型供应商已保存') }
   }
   const test = async () => {
-    if (!form) return
+    if (!form || testing) return
     const model = form.models.find((item) => item.isDefault) ?? form.models[0]
-    try { const result = await desktopClient.testModelService(form.baseUrl, form.apiKey || undefined, form.apiType, model?.modelId); toast.success(`连接成功，发现 ${result.models.length} 个模型`) }
-    catch (cause) { toast.error(cause instanceof Error ? cause.message : String(cause)) }
+    setTesting(true)
+    setConnectionStatus('正在验证连接…')
+    try {
+      const result = await desktopClient.testModelService(form.baseUrl, form.apiKey || undefined, form.apiType, model?.modelId)
+      setConnectionStatus(`连接成功，发现 ${result.models.length} 个模型`)
+    } catch (cause) { setConnectionStatus(`连接失败：${desktopErrorDetails(cause).message}`) }
+    finally { setTesting(false) }
   }
   const remove = async (provider: ModelProviderRecord) => {
     if (!window.confirm(`删除模型供应商“${provider.name}”？`)) return
@@ -553,7 +552,7 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
         <Dialog open={editingId === 'new'} onOpenChange={(open) => { if (!open) { setEditingId(null); setForm(null) } }}>
           <DialogContent className="fox-provider-dialog">
             <DialogHeader><DialogTitle>添加模型供应商</DialogTitle><DialogDescription>配置 API 连接和 Fox 可以使用的模型。保存后仍可随时编辑。</DialogDescription></DialogHeader>
-            {editingId === 'new' && form && <ProviderEditor form={form} busy={resource.busyId === 'new'} credentialConfigured={false} error={resource.error} onChange={setForm} onCancel={() => { setEditingId(null); setForm(null) }} onSave={() => void save()} onTest={() => void test()} />}
+            {editingId === 'new' && form && <ProviderEditor form={form} busy={testing || resource.busyId === 'new'} credentialConfigured={false} testing={testing} connectionStatus={connectionStatus} error={resource.error} onChange={(next) => { setConnectionStatus(null); setForm(next) }} onCancel={() => { setEditingId(null); setForm(null) }} onSave={() => void save()} onTest={() => void test()} />}
           </DialogContent>
         </Dialog>
         {resource.loading && <Card className="fox-settings-section"><LoaderCircle className="animate-spin" />正在读取供应商…</Card>}
@@ -571,7 +570,7 @@ export function ModelProvidersPage({ sidebarCollapsed, onSidebar }: { sidebarCol
                 <div className="fox-provider-card-status"><i className={provider.lastStatus === 'connected' ? '' : 'is-muted'} /><span><b>{serviceStatusLabel(provider.lastStatus)}</b><small>{provider.lastLatencyMs != null ? `${provider.lastLatencyMs} ms` : `${provider.models.length} 个模型`}</small></span></div>
                 <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="fox-provider-more" aria-label={`管理 ${provider.name}`}><MoreHorizontal size={18} /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => void rename(provider)}><Pencil />重命名</DropdownMenuItem><DropdownMenuItem onSelect={() => openEditor(provider)}><Wrench />编辑</DropdownMenuItem><DropdownMenuItem onSelect={() => void desktopClient.testModelService(provider.baseUrl, undefined, provider.apiType, provider.models.find((item) => item.isDefault)?.modelId ?? provider.models[0]?.modelId).then((result) => { void resource.refresh(); toast.success(`连接成功，发现 ${result.models.length} 个模型`) }).catch((cause) => toast.error(cause instanceof Error ? cause.message : String(cause)))}><Zap />验证连接</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" disabled={provider.isDefault} onSelect={() => void remove(provider)}><Trash2 />删除</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </Card>
-              {editingId === provider.id && form && <ProviderEditor form={form} busy={resource.busyId === provider.id} credentialConfigured={provider.credentialConfigured} error={resource.error} onChange={setForm} onCancel={() => { setEditingId(null); setForm(null) }} onSave={() => void save()} onDelete={() => void remove(provider)} onTest={() => void test()} />}
+              {editingId === provider.id && form && <ProviderEditor form={form} busy={testing || resource.busyId === provider.id} credentialConfigured={provider.credentialConfigured} testing={testing} connectionStatus={connectionStatus} error={resource.error} onChange={(next) => { setConnectionStatus(null); setForm(next) }} onCancel={() => { setEditingId(null); setForm(null) }} onSave={() => void save()} onDelete={() => void remove(provider)} onTest={() => void test()} />}
             </div>
           })}
           {!resource.loading && unconfiguredPresets.map((preset) => <div className="fox-provider-entry" key={preset.id}>

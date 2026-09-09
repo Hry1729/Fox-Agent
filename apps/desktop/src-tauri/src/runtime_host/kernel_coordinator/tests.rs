@@ -38,6 +38,8 @@ fn acceptance_task4_external_marker_survives_lost_result_without_duplicate_execu
 }
 #[path = "compaction_tests.rs"]
 mod compaction_tests;
+#[path = "display_tests.rs"]
+mod display_tests;
 use crate::kernel::{CancellationRegistry, PolicyDecision, TestClock};
 use fox_engine_protocol::{FrozenPermission, PermissionMode, ResourceExecutor, TimeBudgets};
 use serde_json::json;

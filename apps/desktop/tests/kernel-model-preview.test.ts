@@ -52,3 +52,32 @@ test('persisted final text wins even when shorter; cancellation and later rounds
   }
   expect(mergeConversationDetail(detail(), current).messages).toHaveLength(1)
 })
+
+test('saved partial text survives a cancelled reload and later previews cannot overwrite it', () => {
+  const live = applyKernelModelPreview(detail(), preview)!
+  const cancelled = detail()
+  cancelled.kernelSnapshot = { ...cancelled.kernelSnapshot!, state: 'cancelled', terminalWritten: true, lastEventSeq: '8' }
+  cancelled.lastRun = { ...cancelled.lastRun!, status: 'cancelled', lastSeq: 8 }
+  cancelled.messages = [{ ...live.messages[0], status: 'interrupted', kernelPreview: undefined }]
+  const reloaded = mergeConversationDetail(cancelled, live)
+  expect(reloaded.messages).toHaveLength(1)
+  expect(reloaded.messages[0].content).toBe(preview.text)
+  expect(reloaded.messages[0].status).toBe('interrupted')
+  expect(applyKernelModelPreview(reloaded, { ...preview, revision: 2, text: 'late' })).toBe(reloaded)
+})
+
+test('a completed Kernel response replaces a longer disk-backed streaming draft', () => {
+  const live = applyKernelModelPreview(detail(), preview)!
+  live.messages[0].kernelPreview = undefined
+  const saved = detail()
+  saved.messages = [{ ...live.messages[0], content: '短答案', status: 'completed' }]
+  expect(mergeConversationDetail(saved, live).messages[0].content).toBe('短答案')
+})
+
+test('a new streaming frame replaces the persisted draft instead of adding the same message twice', () => {
+  const live = applyKernelModelPreview(detail(), preview)!
+  live.messages[0].kernelPreview = undefined
+  const updated = applyKernelModelPreview(live, { ...preview, revision: 2, text: '继续输出' })!
+  expect(updated.messages).toHaveLength(1)
+  expect(updated.messages[0].content).toBe('继续输出')
+})

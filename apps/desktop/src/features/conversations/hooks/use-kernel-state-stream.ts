@@ -48,7 +48,10 @@ export function useKernelStateStream({ conversationId, setDetail, setError, setE
       refresh.invalidate()
     }).catch(report)
     void desktopClient.listenKernelModelPreviews((notice) => {
-      if (!disposed && notice?.conversationId === conversationId) setDetail(current => applyKernelModelPreview(current, notice))
+      if (!disposed && notice?.conversationId === conversationId) {
+        setDetail(current => applyKernelModelPreview(current, notice))
+        refresh.invalidate()
+      }
     }).then(stop => { if (disposed) stop(); else stopPreviews = stop }).catch(() => {
       // Transient display is optional; durable state still refreshes normally.
     })

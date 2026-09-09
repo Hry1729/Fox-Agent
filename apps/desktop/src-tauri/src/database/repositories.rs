@@ -39,6 +39,7 @@ mod kernel_model_config;
 mod kernel_initial_input;
 mod kernel_host;
 mod kernel_projection;
+mod kernel_display;
 pub(crate) use kernel_host::KernelHostScope;
 mod memory;
 mod observability;

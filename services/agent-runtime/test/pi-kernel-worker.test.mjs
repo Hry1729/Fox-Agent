@@ -407,11 +407,11 @@ test('concurrent initialization is single-owner and cancellation prevents readin
   assert.ok(child.events.every(event => event.type !== 'kernel.ready'))
 })
 
-test('opt-in model previews carry only transient visible text and an ordered delivery cursor', { timeout: 30000 }, async t => {
+test('opt-in model previews keep provider reasoning separate from answer text with an ordered cursor', { timeout: 30000 }, async t => {
   const child = await worker(t)
   const config = initialization()
   config.modelService.fauxResponses = [{content:[
-    {type:'thinking',thinking:'internal reasoning must not be in display previews'},
+    {type:'thinking',thinking:'供应商提供的思考说明'},
     {type:'text',text:'可见的流式回复 😀，最终消息仍须由 Host 提交。'}],stopReason:'stop'}]
   assert.equal((await child.request('kernel.initialize',config)).type,'kernel.ready')
   const payload = resumePayload(); payload.streamPreview = true
@@ -420,11 +420,12 @@ test('opt-in model previews carry only transient visible text and an ordered del
   const previews = child.events.filter(event=>event.type==='kernel.model_preview').map(event=>event.payload)
   assert.ok(previews.length>0)
   assert.equal(previews.at(-1).text,'可见的流式回复 😀，最终消息仍须由 Host 提交。')
+  assert.equal(previews.at(-1).reasoning,'供应商提供的思考说明')
   for (let i=0;i<previews.length;i++) {
-    assert.deepEqual(Object.keys(previews[i]).sort(),['checkpointSeq','conversationId','revision','runId','schemaVersion','text','turnId'])
+    assert.ok(Object.keys(previews[i]).every(key=>['checkpointSeq','conversationId','reasoning','revision','runId','schemaVersion','text','turnId'].includes(key)))
     assert.equal(previews[i].checkpointSeq,8)
     assert.equal(previews[i].runId,identity.runId)
     assert.ok(previews[i].revision>(previews[i-1]?.revision ?? 0))
-    assert.doesNotMatch(JSON.stringify(previews[i]),/internal reasoning/)
+    assert.doesNotMatch(previews[i].text,/供应商提供的思考说明/)
   }
 })
