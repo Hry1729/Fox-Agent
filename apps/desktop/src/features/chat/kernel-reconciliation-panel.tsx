@@ -5,7 +5,7 @@ import { parseQueryArguments, reconciliationReady } from '@/features/conversatio
 import type { ReconciliationDecision, ReconciliationOptions, ReconciliationView } from '@/features/conversations/model/reconciliation'
 import './kernel-reconciliation.css'
 
-const toolLabel: Record<string, string> = { write_file: '文件写入', read: '文件读取', call_mcp_tool: '连接器操作', initial_model: '模型请求', deliver_tool_batch: '模型续答', context_compaction: '上下文压缩' }
+const toolLabel: Record<string, string> = { write_file: '文件写入', edit_file: '文件编辑', read: '文件读取', call_mcp_tool: '连接器操作', initial_model: '模型请求', deliver_tool_batch: '模型续答', context_compaction: '上下文压缩' }
 const decisionLabel = { executed: '已执行', not_executed: '未执行', unresolved: '暂不恢复' }
 
 export function KernelReconciliationPanel({ conversationId, runId, onResumed }: {
@@ -15,10 +15,12 @@ export function KernelReconciliationPanel({ conversationId, runId, onResumed }: 
   const [expanded, setExpanded] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [recoveryMode, setRecoveryMode] = useState<'read_only' | 'reapprove'>('read_only')
   const [options, setOptions] = useState<Record<string, ReconciliationOptions>>({})
   const [drafts, setDrafts] = useState<Record<string, { decision: ReconciliationDecision | ''; note: string; tool: string; args: string }>>({})
   useEffect(() => {
     let current = true
+    setView(null); setOptions({}); setDrafts({}); setError(null); setRecoveryMode('read_only')
     void desktopClient.reconciliationLoad({ conversationId, runId }).then(value => { if (current) setView(value) })
       .catch(() => { if (current) setError('核对记录暂时无法读取，请刷新重试。') })
     return () => { current = false }
@@ -36,12 +38,12 @@ export function KernelReconciliationPanel({ conversationId, runId, onResumed }: 
   if (!view && !error || view?.items.length === 0) return null
   return <section className="fox-reconciliation" aria-label="中断操作核对" aria-busy={busy}>
     <div className="fox-reconciliation-heading">
-      <div><strong>有执行结果需要核对</strong><p>先核对中断操作，再继续只读核验。</p></div>
+      <div><strong>有执行结果需要核对</strong><p>先核对中断操作，再选择如何继续。</p></div>
       <Button variant="outline" size="sm" onClick={() => setExpanded(value => !value)} aria-expanded={expanded} aria-controls={`reconciliation-${runId}`}>{expanded ? '收起' : '核对与恢复'}</Button>
     </div>
     {error && <p role="alert" className="fox-reconciliation-error">{error} <Button variant="ghost" size="sm" disabled={busy} onClick={() => void act(async () => { setView(await desktopClient.reconciliationLoad({ conversationId, runId })) })}>刷新</Button></p>}
     {expanded && view && <div id={`reconciliation-${runId}`} className="fox-reconciliation-body">
-      <p>查询证据与人工确认会分别记录。原操作不会自动重放；恢复将创建关联的只读任务。</p>
+      <p>查询证据与人工确认会分别记录。恢复将创建关联的新任务，保留原任务记录。</p>
       {view.items.map((item, index) => {
         const draft = drafts[item.effectKey] ?? { decision: item.decision ?? '', note: item.note ?? '', tool: '', args: '{}' }
         const option = options[item.effectKey]
@@ -78,10 +80,15 @@ export function KernelReconciliationPanel({ conversationId, runId, onResumed }: 
           })}>保存人工确认</Button>
         </div>
       })}
-      <div className="fox-reconciliation-footer"><p>{view.recoveryRunId ? '已创建关联的只读核验任务。' : unsaved ? '核对结论有未保存的修改，请先保存。' : reconciliationReady(view) ? '确认已保存。下一步只读核验，不重复执行原操作。' : '请逐项保存明确结论；仍不确定时保留记录，暂不恢复。'}</p>
+      <div className="fox-reconciliation-footer">
+        {!view.recoveryRunId && <fieldset disabled={busy}><legend>继续方式</legend>
+          <label><input type="radio" name={`recovery-mode-${runId}`} checked={recoveryMode === 'read_only'} onChange={() => setRecoveryMode('read_only')} />只读核验：核对当前结果并列出后续步骤</label>
+          <label><input type="radio" name={`recovery-mode-${runId}`} checked={recoveryMode === 'reapprove'} onChange={() => setRecoveryMode('reapprove')} />重新审批后继续：后续写入和外部操作重新申请批准</label>
+        </fieldset>}
+        <p>{view.recoveryRunId ? '已创建关联的恢复任务。' : unsaved ? '核对结论有未保存的修改，请先保存。' : reconciliationReady(view) ? recoveryMode === 'reapprove' ? '确认已保存。先核验当前状态，后续操作重新审批；旧授权不会沿用。' : '确认已保存。下一步只读核验，不重复执行原操作。' : '请逐项保存明确结论；仍不确定时保留记录，暂不恢复。'}</p>
         <Button size="sm" disabled={busy || unsaved || !reconciliationReady(view)} onClick={() => void act(async () => {
-          await desktopClient.reconciliationResume(request()); await onResumed()
-        })}>{busy ? '处理中…' : '继续只读核验'}</Button>
+          await desktopClient.reconciliationResume({ ...request(), recoveryMode }); await onResumed()
+        })}>{busy ? '处理中…' : recoveryMode === 'reapprove' ? '创建待审批的恢复任务' : '继续只读核验'}</Button>
       </div>
     </div>}
   </section>

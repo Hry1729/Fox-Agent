@@ -227,19 +227,25 @@ impl Database {
     }
 
     pub fn freeze_legacy_run_control_with_executor(&self, run_id: &str, profile_id: &str, executor: fox_engine_protocol::ResourceExecutor) -> Result<RunControlBinding, String> {
-        self.freeze_selected_run_control(run_id, profile_id, ExecutionAuthority::Legacy, executor, fox_engine_protocol::TimeBudgets::default())
+        self.freeze_selected_run_control(run_id, profile_id, ExecutionAuthority::Legacy, executor, fox_engine_protocol::TimeBudgets::default(), "pi")
     }
 
     pub(crate) fn freeze_kernel_run_control(&self, run_id: &str, profile_id: &str, budgets: fox_engine_protocol::TimeBudgets) -> Result<RunControlBinding, String> {
         budgets.validate()?;
-        self.freeze_selected_run_control(run_id, profile_id, ExecutionAuthority::Authoritative, fox_engine_protocol::ResourceExecutor::Rust, budgets)
+        self.freeze_kernel_run_control_for_engine(run_id, profile_id, budgets, "pi")
+    }
+
+    pub(crate) fn freeze_kernel_run_control_for_engine(&self, run_id: &str, profile_id: &str, budgets: fox_engine_protocol::TimeBudgets, engine: &str) -> Result<RunControlBinding, String> {
+        budgets.validate()?;
+        if !matches!(engine, "pi" | "codex" | "deepseek_harness") { return Err("unsupported Kernel engine".into()); }
+        self.freeze_selected_run_control(run_id, profile_id, ExecutionAuthority::Authoritative, fox_engine_protocol::ResourceExecutor::Rust, budgets, engine)
     }
 
     fn freeze_selected_run_control(&self, run_id: &str, profile_id: &str, authority: ExecutionAuthority,
-        executor: fox_engine_protocol::ResourceExecutor, budgets: fox_engine_protocol::TimeBudgets) -> Result<RunControlBinding, String> {
+        executor: fox_engine_protocol::ResourceExecutor, budgets: fox_engine_protocol::TimeBudgets, engine: &str) -> Result<RunControlBinding, String> {
         // A restart must reuse the existing binding, never recapture permissions.
         if let Some(binding) = self.run_control_binding(run_id)? {
-            if binding.execution_profile_id != profile_id || binding.authority != authority {
+            if binding.execution_profile_id != profile_id || binding.authority != authority || binding.engine_id != engine {
                 return Err("frozen Run authority/profile cannot be replaced by startup".into());
             }
             return Ok(binding);
@@ -264,15 +270,15 @@ impl Database {
             let permission_snapshot_id = Self::run_control_permission_hash(&permission).map_err(rusqlite::Error::InvalidParameterName)?;
             let binding = RunControlBinding {
                 schema_version: fox_engine_protocol::CONTROL_SCHEMA_VERSION,
-                run_id: run_id.into(), conversation_id, engine_id: "pi".into(),
+                run_id: run_id.into(), conversation_id, engine_id: engine.into(),
                 execution_profile_id: profile_id.into(), authority,
                 read_only_executor: executor, permission_snapshot_id, permission,
                 budgets,
             };
             let json = encode(&binding).map_err(rusqlite::Error::InvalidParameterName)?;
             transaction.execute(
-                "INSERT INTO run_control_bindings(run_id,conversation_id,authority,engine_id,binding_json,binding_hash,created_at) VALUES(?1,?2,?6,'pi',?3,?4,?5)",
-                params![run_id,binding.conversation_id,json,content_hash(&json),now_ms(),authority_name])?;
+                "INSERT INTO run_control_bindings(run_id,conversation_id,authority,engine_id,binding_json,binding_hash,created_at) VALUES(?1,?2,?6,?7,?3,?4,?5)",
+                params![run_id,binding.conversation_id,json,content_hash(&json),now_ms(),authority_name,engine])?;
             transaction.commit()?;
             Ok(binding)
         })?;

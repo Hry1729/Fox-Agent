@@ -6259,6 +6259,36 @@ END;
 "#;
 
 const CONVERSATION_TOOL_PERMISSION_SCHEMA_VERSION: i64 = 23;
+const MIGRATION_61: &str = r#"
+DROP TRIGGER kernel_model_config_insert_guard;
+CREATE TRIGGER kernel_model_config_insert_guard BEFORE INSERT ON kernel_model_configs
+WHEN NOT EXISTS (
+    SELECT 1 FROM kernel_runs r JOIN run_control_bindings b ON b.run_id=r.run_id
+    WHERE r.run_id=NEW.run_id AND r.kernel_mode='authoritative'
+      AND r.engine_id IN ('pi','codex','deepseek_harness') AND b.engine_id=r.engine_id
+      AND b.authority='authoritative' AND r.state='created' AND r.last_event_seq=0
+      AND r.prompt_config_hash=NEW.config_hash
+      AND r.execution_profile_id=json_extract(NEW.config_json,'$.executionProfileId')
+      AND r.engine_id=COALESCE(json_extract(NEW.config_json,'$.engineId'),'pi')
+)
+BEGIN SELECT RAISE(ABORT, 'Kernel model configuration must match frozen engine before Run start'); END;
+DROP TRIGGER kernel_initial_input_insert_guard;
+CREATE TRIGGER kernel_initial_input_insert_guard BEFORE INSERT ON kernel_initial_inputs
+WHEN NOT EXISTS (
+    SELECT 1 FROM kernel_runs r JOIN kernel_model_configs c ON c.run_id=r.run_id
+    JOIN run_control_bindings b ON b.run_id=r.run_id
+    WHERE r.run_id=NEW.run_id AND r.state='created' AND r.last_event_seq=0
+      AND r.kernel_mode='authoritative' AND r.engine_id IN ('pi','codex','deepseek_harness')
+      AND b.authority='authoritative' AND b.engine_id=r.engine_id
+      AND r.prompt_config_hash=NEW.prompt_config_hash AND c.config_hash=NEW.prompt_config_hash
+      AND json_extract(NEW.input_json,'$.runId')=NEW.run_id
+      AND json_extract(NEW.input_json,'$.turnId')=NEW.turn_id
+      AND json_extract(NEW.input_json,'$.promptConfigHash')=NEW.prompt_config_hash
+      AND json_extract(NEW.input_json,'$.schemaVersion')=NEW.schema_version
+      AND length(trim(NEW.turn_id))>0
+)
+BEGIN SELECT RAISE(ABORT, 'Kernel initial input must match frozen engine before Run start'); END;
+"#;
 const MIGRATION_60: &str = r#"
 CREATE TABLE kernel_reconciliation_events (
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -6500,6 +6530,7 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     apply_migration(&transaction, 58, MIGRATION_58, now)?;
     apply_migration(&transaction, 59, MIGRATION_59, now)?;
     apply_migration(&transaction, 60, MIGRATION_60, now)?;
+    apply_migration(&transaction, 61, MIGRATION_61, now)?;
     transaction.commit()
 }
 

@@ -23,7 +23,7 @@ impl EngineId {
     pub fn as_str(self) -> &'static str {
         match self {
             EngineId::Pi => "pi",
-            EngineId::DeepSeekHarness => "deepseek-harness",
+            EngineId::DeepSeekHarness => "deepseek_harness",
             EngineId::Codex => "codex",
         }
     }
@@ -31,7 +31,7 @@ impl EngineId {
     pub fn parse(value: &str) -> Option<EngineId> {
         match value {
             "pi" => Some(EngineId::Pi),
-            "deepseek-harness" => Some(EngineId::DeepSeekHarness),
+            "deepseek_harness" | "deepseek-harness" => Some(EngineId::DeepSeekHarness),
             "codex" => Some(EngineId::Codex),
             _ => None,
         }

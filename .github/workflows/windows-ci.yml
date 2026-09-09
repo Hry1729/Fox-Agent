@@ -93,6 +93,16 @@ jobs:
       - name: Test Agent Runtime
         run: pnpm runtime:test
 
+      - name: Build standalone Runtime
+        run: pnpm runtime:build
+
+      - name: Test packaged Kernel worker
+        shell: pwsh
+        run: |
+          $env:FOX_KERNEL_WORKER_BINARY = Join-Path $env:GITHUB_WORKSPACE 'services\agent-runtime\dist\fox-agent-runtime-x86_64-pc-windows-msvc.exe'
+          node --test services/agent-runtime/test/pi-kernel-worker.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   # Rust Host tests in their own job with an explicit compile-friendly budget.
   rust-host:
     name: Rust Host tests
@@ -119,6 +129,17 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Test Kernel core and shared protocol
+        run: cargo test -p fox-agent-kernel -p fox-engine-protocol
+
+      - name: Check generated protocol and JavaScript contract
+        shell: pwsh
+        run: |
+          pnpm protocol:check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm protocol:test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Test Rust Host without optional Zvec
         run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --no-default-features -- --skip a0_snapshot_and_state_update_p95_stay_within_budget

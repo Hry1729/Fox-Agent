@@ -17,5 +17,10 @@
 .fox-reconciliation-actions { margin: 10px 0; }
 .fox-reconciliation-query, .fox-reconciliation-evidence { margin: 12px 0; }
 .fox-reconciliation-footer { border-top: 1px solid var(--border); padding-top: 14px; }
+.fox-reconciliation-footer fieldset { border: 0; padding: 0; margin: 0 0 12px; min-width: 0; }
+.fox-reconciliation-footer legend { font-weight: 600; margin-bottom: 8px; }
+.fox-reconciliation-footer label { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0; line-height: 1.6; cursor: pointer; }
+.fox-reconciliation-footer input { flex: 0 0 auto; margin: 4px 0 0; accent-color: var(--primary); }
+.fox-reconciliation-footer input:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .fox-reconciliation-error { padding: 0 16px 8px; color: var(--destructive); }
 @media (max-width: 520px) { .fox-reconciliation-heading { align-items: flex-start; flex-direction: column; gap: 8px; } }

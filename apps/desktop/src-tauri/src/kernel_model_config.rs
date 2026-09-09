@@ -5,6 +5,38 @@ use sha2::{Digest, Sha256};
 
 pub(crate) const KERNEL_MODEL_ADAPTER: &str = "pi-0.84.2/fox-kernel-worker-v1";
 
+fn pi_engine() -> String { "pi".into() }
+fn is_pi(value: &str) -> bool { value == "pi" }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NativeAdapterConfig {
+    pub command: String,
+    pub binary_hash: String,
+}
+
+pub(crate) fn configured_engine() -> Result<String, String> {
+    let name = std::env::var("FOX_KERNEL_ENGINE").unwrap_or_else(|_| "pi".into());
+    match name.as_str() {
+        "pi" | "codex" | "deepseek_harness" => Ok(name),
+        _ => Err("FOX_KERNEL_ENGINE must name an installed supported adapter: pi, codex or deepseek_harness".into()),
+    }
+}
+
+pub(crate) fn capture_native_adapter(engine: &str) -> Result<Option<NativeAdapterConfig>, String> {
+    if matches!(engine, "pi" | "deepseek_harness") { return Ok(None); }
+    if engine != "codex" { return Err("Kernel engine is not installed".into()); }
+    let command = std::env::var("FOX_KERNEL_CODEX_BINARY").map_err(|_| "Set FOX_KERNEL_CODEX_BINARY to the verified Codex executable before selecting this engine")?;
+    let path = std::path::Path::new(&command);
+    if !path.is_absolute() { return Err("native engine executable path must be absolute".into()); }
+    let path = path.canonicalize().map_err(|_| "native engine executable is missing")?;
+    let metadata = path.metadata().map_err(|_| "native engine executable cannot be read")?;
+    if !metadata.is_file() || metadata.len() > 536_870_912 { return Err("native engine executable has an invalid size".into()); }
+    let bytes = std::fs::read(&path).map_err(|_| "native engine executable cannot be read")?;
+    Ok(Some(NativeAdapterConfig { command: path.to_string_lossy().into_owned(),
+        binary_hash: format!("sha256:{}", hex::encode(Sha256::digest(bytes))) }))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct KernelModelConfig {
@@ -12,6 +44,10 @@ pub(crate) struct KernelModelConfig {
     pub model_service: Value,
     pub system_prompt: String,
     pub proposal_tools: Vec<Value>,
+    #[serde(default = "pi_engine", skip_serializing_if = "is_pi")]
+    pub engine_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_adapter: Option<NativeAdapterConfig>,
 }
 
 fn secret_field(value: &Value) -> bool {
@@ -27,7 +63,19 @@ fn secret_field(value: &Value) -> bool {
 }
 
 impl KernelModelConfig {
+    pub(crate) fn adapter_version(&self) -> Result<&'static str, String> {
+        match (self.engine_id.as_str(), self.native_adapter.as_ref()) {
+            ("pi", None) => Ok(KERNEL_MODEL_ADAPTER),
+            ("deepseek_harness", None) if self.model_service["apiType"] == "openai-completions" => Ok("deepseek-harness-0.1.2-rc.1/fox-kernel-worker-v1"),
+            ("codex", Some(native)) if self.model_service["apiType"] == "openai-responses"
+                && std::path::Path::new(&native.command).is_absolute()
+                && fox_engine_protocol::valid_hash(&native.binary_hash) => Ok("codex-app-server/fox-kernel-worker-v1"),
+            _ => Err("unsupported or incomplete Kernel engine adapter".into()),
+        }
+    }
+
     pub(crate) fn hash(&self) -> Result<String, String> {
+        self.adapter_version()?;
         let service = self.model_service.as_object().ok_or("invalid Kernel model service")?;
         if secret_field(&self.model_service) { return Err("Kernel credentials must be supplied separately".into()); }
         if self.execution_profile_id.trim().is_empty()
@@ -75,7 +123,7 @@ mod tests {
     use serde_json::json;
 
     fn config() -> KernelModelConfig {
-        KernelModelConfig { execution_profile_id: "legacy".into(),
+        KernelModelConfig { engine_id: "pi".into(), native_adapter: None, execution_profile_id: "legacy".into(),
             model_service: json!({"apiType":"openai-completions","modelId":"test","baseUrl":"https://example.com/v1"}),
             system_prompt: "Host instructions".into(), proposal_tools: vec![] }
     }

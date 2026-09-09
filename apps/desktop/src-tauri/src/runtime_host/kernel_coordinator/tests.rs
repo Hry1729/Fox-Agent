@@ -1,6 +1,8 @@
 use super::*;
 #[path = "reconciliation_tests.rs"]
 mod reconciliation_tests;
+#[path = "native_engine_tests.rs"]
+mod native_engine_tests;
 #[test]
 fn acceptance_task4_external_marker_survives_lost_result_without_duplicate_execution() {
     use std::io::Write;
@@ -89,6 +91,7 @@ fn fixture_with_start_opt(clock: &TestClock, prompt_hash: &str, model: Option<&c
 }
 
 fn fixture_with_retry_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32)) -> (Database, PathBuf, String) {
+    let engine = model.map(|model| model.engine_id.as_str()).unwrap_or("pi");
     let root = std::env::temp_dir().join(format!("fox-coordinator-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("proof.txt"), "durable coordinator 中文 😀").unwrap();
@@ -115,7 +118,7 @@ fn fixture_with_retry_opt(clock: &TestClock, prompt_hash: &str, model: Option<&c
         schema_version: 1,
         run_id: run_id.clone(),
         conversation_id: conversation.id,
-        engine_id: "pi".into(),
+        engine_id: engine.into(),
         execution_profile_id: "legacy".into(),
         authority: ExecutionAuthority::Authoritative,
         read_only_executor: ResourceExecutor::Rust,
@@ -125,7 +128,7 @@ fn fixture_with_retry_opt(clock: &TestClock, prompt_hash: &str, model: Option<&c
     };
     db.freeze_run_control(&binding).unwrap();
     let config = kernel::RunFrozenConfig {
-        engine_id: "pi".into(),
+        engine_id: engine.into(),
         kernel_mode: "authoritative".into(),
         capability_manifest_version: 2,
         capability_manifest_hash: "coordinator-test-manifest".into(),
@@ -141,7 +144,7 @@ fn fixture_with_retry_opt(clock: &TestClock, prompt_hash: &str, model: Option<&c
     };
     db.kernel_create_run(
         &run_id,
-        "pi",
+        engine,
         "authoritative",
         2,
         &binding.permission_snapshot_id,
@@ -782,6 +785,7 @@ fn model_response_failure_never_partially_commits_terminal_or_next_batch() {
 
 fn worker_configuration() -> super::super::kernel_model_worker::KernelModelConfig {
     super::super::kernel_model_worker::KernelModelConfig {
+        engine_id: "pi".into(), native_adapter: None,
         execution_profile_id: "legacy".into(),
         model_service: json!({"apiType":"faux","modelId":"kernel-host-test","baseUrl":"http://localhost",
             "fauxResponses":["Host consumed the durable batch"]}),

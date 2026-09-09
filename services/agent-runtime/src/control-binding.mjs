@@ -11,11 +11,12 @@ export function validatePromptControl(request, executionProfileId) {
 
 // Separate entry point: this does NOT enable authoritative prompts in the
 // Legacy sidecar. Only the controlled Kernel handoff may use this validator.
-export function validateKernelControl(request, executionProfileId) {
-  return validateAdapterControl(request, executionProfileId, 'authoritative', false)
+export function validateKernelControl(request, executionProfileId, engineId = 'pi') {
+  if (!['pi', 'codex', 'deepseek_harness'].includes(engineId)) throw new Error('Unsupported Kernel adapter')
+  return validateAdapterControl(request, executionProfileId, 'authoritative', false, engineId)
 }
 
-function validateAdapterControl(request, executionProfileId, authority, allowAbsent) {
+function validateAdapterControl(request, executionProfileId, authority, allowAbsent, engineId = 'pi') {
   const binding = request.payload?.controlBinding
   // Protocol v1 hosts predating frozen control remain supported. Explicit null
   // or malformed bindings are not the same as an absent compatibility field.
@@ -23,7 +24,7 @@ function validateAdapterControl(request, executionProfileId, authority, allowAbs
   const errors = validateWireValue('RunControlBinding', binding)
   if (errors.length) throw new Error(`Invalid frozen Run control: ${errors.join('; ')}`)
   if (binding.schemaVersion !== 1) throw new Error('Unsupported frozen Run control version')
-  if (binding.engineId !== 'pi' || binding.authority !== authority) {
+  if (binding.engineId !== engineId || binding.authority !== authority) {
     throw new Error(`Pi ${authority === 'legacy' ? 'Legacy' : 'Kernel'} adapter cannot execute the frozen Run engine/authority`)
   }
   if (!binding.runId.trim() || !binding.conversationId.trim()

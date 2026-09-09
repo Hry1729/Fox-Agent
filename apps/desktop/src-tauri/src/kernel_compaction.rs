@@ -239,6 +239,7 @@ mod tests {
 
     pub(super) fn config() -> KernelModelConfig {
         KernelModelConfig {
+            engine_id: "pi".into(), native_adapter: None,
             execution_profile_id: "legacy".into(),
             model_service: json!({"apiType":"faux",
             "modelId":"test","baseUrl":"http://localhost","contextWindow":8192,"maxOutputTokens":512}),

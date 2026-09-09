@@ -1868,7 +1868,7 @@ impl RuntimeHost {
                 if let Some(budget) = &self.run_budget_override {
                     budgets.run_execution_ms = budgets.run_execution_ms.min(budget.max_duration_ms as i64);
                 }
-                self.database.freeze_kernel_run_control(&started.run.id, execution_profile.id(), budgets)?
+                self.database.freeze_kernel_run_control_for_engine(&started.run.id, execution_profile.id(), budgets, &crate::kernel_model_config::configured_engine()?)?
             }
             None => {
                 let executor = match std::env::var("FOX_RESOURCE_GATEWAY_READS") {
@@ -1881,7 +1881,7 @@ impl RuntimeHost {
             }
         };
         if control_binding.authority != authority
-            || control_binding.engine_id != "pi"
+            || authority == fox_engine_protocol::ExecutionAuthority::Legacy && control_binding.engine_id != "pi"
             || control_binding.conversation_id != started.run.conversation_id
             || control_binding.execution_profile_id != execution_profile.id() {
             return Err("Startup cannot replace the frozen Run engine/authority/profile/conversation".into());

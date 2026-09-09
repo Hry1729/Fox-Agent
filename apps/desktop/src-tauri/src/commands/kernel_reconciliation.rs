@@ -77,7 +77,7 @@ pub fn kernel_reconciliation_resume(
         Err(error) => return ApiResponse::failure("kernel.recovery_failed", error, false),
     };
     let prompt = started.user_message.content.clone();
-    // Existing Host startup honors the transactionally frozen authoritative,
-    // read-only binding even when the process default remains Legacy.
+    // Host startup honors the new, transactionally frozen permission mode and
+    // engine. Reapproval mode carries no old grants; the source Run stays terminal.
     dispatch_started_run(&app, &state, started, prompt, true)
 }

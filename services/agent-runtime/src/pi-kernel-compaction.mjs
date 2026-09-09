@@ -10,7 +10,7 @@ const plain = message => ['user', 'assistant'].includes(message?.role)
   && (message.stopReason === undefined || message.stopReason === 'stop')
 
 export function prepareKernelCompaction(request, identity) {
-  validateKernelControl(request, identity?.executionProfileId)
+  validateKernelControl(request, identity?.executionProfileId, identity?.engineId)
   if (!identity || ['runId', 'conversationId', 'runtimeSessionId'].some(key => !identity[key] || request[key] !== identity[key])) fail()
   const input = request.payload?.compaction
   if (validateWireValue('KernelCompactionRequest', input).length || input.schemaVersion !== 1
@@ -34,6 +34,10 @@ export async function compactPiKernelContext(session, request, identity, signal)
   // initial-response shape never leaves this adapter or enters Host chat facts.
   const output = await runPiKernelModel(session, request, prepared, signal)
   const assistant = output.response.assistantMessage
+  return kernelCompactionResult(input, assistant)
+}
+
+export function kernelCompactionResult(input, assistant) {
   if (assistant.stopReason !== 'stop' || !Array.isArray(assistant.content)
       || assistant.content.some(block => !['text','thinking'].includes(block?.type))) fail()
   const summary = assistant.content.filter(block => block.type === 'text').map(block => block.text).join('')

@@ -42,9 +42,26 @@ fn connection(
     }
     Ok(server)
 }
+
+// Inspect the committed operation, never a path supplied by the query request.
+fn file_target(item: &ReconciliationItem) -> Option<&str> {
+    match item.tool.as_str() {
+        "write_file" | "read" | "edit_file" => item.input["path"].as_str(),
+        "call_mcp_tool" if item.input["serverId"] == crate::office::SERVER_ID => {
+            let key = match item.input["tool"].as_str()? {
+                "office_create" | "office_edit" | "office_merge" | "office_render" => "output",
+                "office_read" | "office_validate" => "file",
+                _ => return None,
+            };
+            item.input["arguments"][key].as_str()
+        }
+        _ => None,
+    }
+}
 pub fn options(db: &Database, request: &ReconciliationRequest) -> Result<Value, String> {
     let item = db.kernel_reconciliation_target(request)?;
-    if matches!(item.tool.as_str(), "write_file" | "read") && item.input["path"].is_string() {
+    if file_target(&item).is_some() {
+        if item.tool == "call_mcp_tool" { connection(db, request, &item)?; }
         return Ok(
             json!({"kind":"file","tools":[],"message":"独立读取原目标文件的大小与摘要；一致不代表能确认写入者。"}),
         );
@@ -74,8 +91,8 @@ pub fn options(db: &Database, request: &ReconciliationRequest) -> Result<Value, 
 pub fn query(db: &Database, request: &ReconciliationRequest) -> Result<ReconciliationView, String> {
     let item = db.kernel_reconciliation_target(request)?;
     let observed = crate::database::now_ms();
-    let evidence = if matches!(item.tool.as_str(), "write_file" | "read") {
-        let path = item.input["path"].as_str().ok_or("原目标路径缺失")?;
+    let evidence = if let Some(path) = file_target(&item) {
+        if item.tool == "call_mcp_tool" { connection(db, request, &item)?; }
         let binding = db
             .run_control_binding(&request.run_id)?
             .ok_or("缺少冻结权限")?;
@@ -122,4 +139,25 @@ pub fn query(db: &Database, request: &ReconciliationRequest) -> Result<Reconcili
             "resultHash":hash(&body),"meaning":"连接器返回的数据，未自动认定原操作成功；请核对操作标识和业务结果。"})
     };
     db.kernel_record_reconciliation_query(request, &evidence)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn reconciliation_targets_committed_office_output_and_edit_path_only() {
+        let mut item = ReconciliationItem { effect_key: "e".into(), tool: "call_mcp_tool".into(),
+            input: json!({"serverId":crate::office::SERVER_ID,"tool":"office_edit","arguments":{"file":"source.docx","output":"result.docx"}}),
+            evidence: None, decision: None, note: None };
+        assert_eq!(file_target(&item), Some("result.docx"));
+        item.input["tool"] = json!("office_read");
+        assert_eq!(file_target(&item), Some("source.docx"));
+        item.input["serverId"] = json!("foreign");
+        assert_eq!(file_target(&item), None);
+        item.tool = "edit_file".into();
+        item.input = json!({"path":"edited.txt","newText":"replacement"});
+        assert_eq!(file_target(&item), Some("edited.txt"));
+        item.tool = "execute_command".into();
+        assert_eq!(file_target(&item), None, "arbitrary command output cannot be guessed from a path field");
+    }
 }

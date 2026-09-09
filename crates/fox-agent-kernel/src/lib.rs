@@ -166,6 +166,15 @@ mod tests {
     }
 
     #[test]
+    fn canonical_engine_ids_match_the_frozen_control_contract() {
+        for engine in [EngineId::Pi, EngineId::DeepSeekHarness, EngineId::Codex] {
+            assert_eq!(EngineId::parse(engine.as_str()), Some(engine));
+        }
+        assert_eq!(EngineId::DeepSeekHarness.as_str(), "deepseek_harness");
+        assert_eq!(EngineId::parse("deepseek-harness"), Some(EngineId::DeepSeekHarness));
+    }
+
+    #[test]
     fn allowed_tools_dispatch_and_batch_barriers_in_source_order() {
         let clock = TestClock::new(0);
         let (mut c, _) = RunController::start("r", "t", test_config(), &clock).unwrap();

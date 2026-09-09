@@ -122,7 +122,7 @@ function resultContent(result) {
 
 export function prepareKernelBatchResume(request, identity) {
   if (!identity || !nonempty(identity.executionProfileId)) fail('missing adapter identity')
-  validateKernelControl(request, identity.executionProfileId)
+  validateKernelControl(request, identity.executionProfileId, identity.engineId)
   for (const key of ['runId', 'conversationId', 'runtimeSessionId']) {
     if (!nonempty(identity[key]) || request[key] !== identity[key]) fail(`mismatched ${key}`)
   }
@@ -172,7 +172,7 @@ export function prepareKernelBatchResume(request, identity) {
 }
 
 export function prepareKernelInitialModel(request, identity) {
-  validateKernelControl(request, identity?.executionProfileId)
+  validateKernelControl(request, identity?.executionProfileId, identity?.engineId)
   if (!identity || ['runId', 'conversationId', 'runtimeSessionId'].some(key => !nonempty(identity[key]) || request[key] !== identity[key])) fail('initial identity mismatch')
   canonical(request)
   if (Buffer.byteLength(JSON.stringify(request), 'utf8') > 1_048_576) fail('initial frame is too large')

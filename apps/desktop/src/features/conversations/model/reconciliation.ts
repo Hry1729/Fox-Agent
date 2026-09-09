@@ -23,6 +23,7 @@ export interface ReconciliationRequest {
   note?: string
   queryTool?: string
   arguments?: Record<string, unknown>
+  recoveryMode?: 'read_only' | 'reapprove'
 }
 export interface ReconciliationOptions {
   kind: 'file' | 'connector' | 'manual'

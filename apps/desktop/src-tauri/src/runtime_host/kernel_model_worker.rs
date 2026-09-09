@@ -16,6 +16,10 @@ use std::{
 
 const MAX_FRAME: usize = 1_048_576;
 
+#[cfg(windows)]
+#[path = "kernel_model_worker_job.rs"]
+mod worker_job;
+
 const SETTLED_FAILURE_PREFIX: &str = "kernel.settled_model_failure:";
 pub(super) fn settled_failure(error: &str) -> Option<fox_engine_protocol::KernelModelFailure> {
     let evidence: fox_engine_protocol::KernelModelFailure = serde_json::from_str(error.strip_prefix(SETTLED_FAILURE_PREFIX)?).ok()?;
@@ -51,6 +55,8 @@ pub(super) fn describe(
         return Err("Kernel description identity mismatch".into());
     }
     let config = KernelModelConfig {
+        engine_id: binding.engine_id.clone(),
+        native_adapter: crate::kernel_model_config::capture_native_adapter(&binding.engine_id)?,
         execution_profile_id: binding.execution_profile_id.clone(),
         model_service,
         system_prompt: result["systemPrompt"]
@@ -73,6 +79,8 @@ pub(super) fn describe(
 // readers/writers. A timeout never leaves a pipe writer or model process alive.
 struct Worker {
     child: Child,
+    #[cfg(windows)]
+    job: Option<worker_job::WorkerJob>,
     stdin: Option<ChildStdin>,
     reader: Option<JoinHandle<()>>,
     writer: Option<JoinHandle<()>>,
@@ -83,6 +91,8 @@ pub(super) type PreviewSink = dyn Fn(&fox_engine_protocol::KernelModelPreview) +
 
 impl Drop for Worker {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        self.job.take();
         let _ = self.child.kill();
         self.stdin.take();
         let _ = self.child.wait();
@@ -120,6 +130,11 @@ impl Worker {
             command.creation_flags(0x0800_0000);
         }
         let mut child = command.spawn().map_err(|_| "could not start isolated Kernel worker")?;
+        #[cfg(windows)]
+        let job = match worker_job::WorkerJob::attach(&child) {
+            Ok(job) => Some(job),
+            Err(error) => { let _ = child.kill(); let _ = child.wait(); return Err(error); }
+        };
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().expect("piped worker stdout");
         let (sender, messages) = mpsc::sync_channel(16);
@@ -141,6 +156,8 @@ impl Worker {
         });
         Ok(Self {
             child,
+            #[cfg(windows)]
+            job,
             stdin,
             reader: Some(reader),
             writer: None,
@@ -380,7 +397,7 @@ fn call_model(
 ) -> Result<Value, String> {
     config.hash()?;
     binding.validate()?;
-    if binding.engine_id != "pi" || binding.authority != fox_engine_protocol::ExecutionAuthority::Authoritative
+    if binding.engine_id != config.engine_id || binding.authority != fox_engine_protocol::ExecutionAuthority::Authoritative
         || config.execution_profile_id != binding.execution_profile_id {
         return Err("isolated Kernel model identity mismatch".into());
     }
@@ -408,7 +425,7 @@ fn call_model(
     if ready["singleUse"] != true
         || ready["resourceExecution"] != false
         || ready["automaticReplay"] != false
-        || ready["adapterVersion"] != crate::kernel_model_config::KERNEL_MODEL_ADAPTER
+        || ready["adapterVersion"] != config.adapter_version()?
     {
         return Err("Kernel worker lacks isolated single-use capability".into());
     }

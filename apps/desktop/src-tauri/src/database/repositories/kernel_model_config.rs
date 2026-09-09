@@ -1,5 +1,5 @@
 use super::{now_ms, Database};
-use crate::kernel_model_config::{KernelModelConfig, KERNEL_MODEL_ADAPTER};
+use crate::kernel_model_config::KernelModelConfig;
 use rusqlite::{params, OptionalExtension};
 use sha2::{Digest, Sha256};
 
@@ -18,6 +18,7 @@ impl Database {
         config: &KernelModelConfig,
     ) -> Result<(), String> {
         let hash = config.hash()?;
+        let adapter_version = config.adapter_version()?;
         let encoded =
             serde_json::to_string(config).map_err(|_| "invalid Kernel model configuration")?;
         self.with_connection(|connection| {
@@ -26,12 +27,12 @@ impl Database {
                 "SELECT schema_version,adapter_version,config_json,config_hash FROM kernel_model_configs WHERE run_id=?1",
                 [run_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
             if let Some((version, adapter, body, stored_hash)) = existing {
-                if version != 1 || adapter != KERNEL_MODEL_ADAPTER || body != encoded || stored_hash != hash {
+                if version != 1 || adapter != adapter_version || body != encoded || stored_hash != hash {
                     return Err(invalid("immutable Kernel model configuration conflict"));
                 }
             } else {
                 transaction.execute("INSERT INTO kernel_model_configs(run_id,schema_version,adapter_version,config_json,config_hash,created_at)
-                    VALUES(?1,1,?2,?3,?4,?5)", params![run_id,KERNEL_MODEL_ADAPTER,encoded,hash,now_ms()])?;
+                    VALUES(?1,1,?2,?3,?4,?5)", params![run_id,adapter_version,encoded,hash,now_ms()])?;
             }
             transaction.commit()
         })
@@ -58,14 +59,15 @@ pub(super) fn read_model_config(
                     r.execution_profile_id,r.frozen_config_json,b.binding_json,b.binding_hash
                  FROM kernel_model_configs c JOIN kernel_runs r ON r.run_id=c.run_id
                  JOIN run_control_bindings b ON b.run_id=r.run_id
-                 WHERE c.run_id=?1 AND r.kernel_mode='authoritative' AND r.engine_id='pi'
-                   AND b.authority='authoritative' AND b.engine_id='pi'",
+                 WHERE c.run_id=?1 AND r.kernel_mode='authoritative' AND r.engine_id=b.engine_id
+                   AND b.authority='authoritative' AND r.engine_id=json_extract(b.binding_json,'$.engineId')
+                   AND r.engine_id=COALESCE(json_extract(c.config_json,'$.engineId'),'pi')",
                 [run_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?))).optional()?;
     let (version, adapter, body, hash, run_hash, profile, frozen, binding_json, binding_hash) = row
         .ok_or_else(|| {
             invalid("Kernel model configuration is missing; no current-settings fallback")
         })?;
-    if version != 1 || adapter != KERNEL_MODEL_ADAPTER || body.len() > 1_048_576 {
+    if version != 1 || body.len() > 1_048_576 {
         return Err(invalid(
             "unsupported Kernel model configuration version or size",
         ));
@@ -80,15 +82,16 @@ pub(super) fn read_model_config(
     crate::kernel::RunController::validate_config(&frozen)
         .map_err(|_| invalid("invalid frozen Kernel Run"))?;
     if config.hash().map_err(invalid)? != hash
+        || adapter != config.adapter_version().map_err(invalid)?
         || hash != run_hash
         || hash != frozen.prompt_config_hash
         || config.execution_profile_id != profile
         || profile != frozen.execution_profile_id
         || profile != binding.execution_profile_id
         || binding.run_id != run_id
-        || frozen.engine_id != "pi"
+        || frozen.engine_id != config.engine_id
         || frozen.kernel_mode != "authoritative"
-        || binding.engine_id != "pi"
+        || binding.engine_id != config.engine_id
         || binding.authority != fox_engine_protocol::ExecutionAuthority::Authoritative
         || binding.permission_snapshot_id
             != Database::run_control_permission_hash(&binding.permission).map_err(invalid)?

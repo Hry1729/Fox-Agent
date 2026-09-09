@@ -5,8 +5,51 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createEnvelope } from '../src/protocol.mjs'
 import { createServer } from 'node:http'
+import { readFile } from 'node:fs/promises'
 
 const identity = { runId: 'run-k', conversationId: 'conversation-k', runtimeSessionId: 'session-k' }
+
+for (const engine of ['deepseek_harness', 'codex']) {
+  test(`isolated ${engine} worker supports native continuation and Host compaction`,
+    { skip: engine === 'codex' && !process.env.FOX_TEST_CODEX_BINARY, timeout: 90000 }, async t => {
+      let calls = 0
+      const server = createServer(async (req, res) => {
+        let raw = ''; for await (const chunk of req) raw += chunk
+        const body = JSON.parse(raw); calls++
+        assert.equal(body.model, engine === 'codex' ? 'gpt-5.1-codex' : 'deepseek-v4-flash')
+        if (calls === 2) assert.ok(!body.tools?.length)
+        res.writeHead(200, { 'content-type': 'text/event-stream' })
+        if (engine === 'codex') {
+          const item = { type: 'message', id: `msg-${calls}`, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'Native continuation 中文', annotations: [] }] }
+          for (const event of [{ type: 'response.created', response: { id: `resp-${calls}` } },
+            { type: 'response.output_item.done', output_index: 0, item },
+            { type: 'response.completed', response: { id: `resp-${calls}`, status: 'completed', output: [item], usage: { input_tokens: 20, output_tokens: 5, total_tokens: 25 } } }]) res.write(`data: ${JSON.stringify(event)}\n\n`)
+          res.end()
+        } else {
+          for (const choice of [{ index: 0, delta: { role: 'assistant', content: 'Native continuation 中文' }, finish_reason: null },
+            { index: 0, delta: {}, finish_reason: 'stop' }]) res.write(`data: ${JSON.stringify({ id: `resp-${calls}`, object: 'chat.completion.chunk', model: body.model, created: 1, choices: [choice] })}\n\n`)
+          res.end('data: [DONE]\n\n')
+        }
+      })
+      await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+      t.after(() => { server.closeAllConnections(); server.close() })
+      const nativeAdapter = engine === 'codex' ? { command: process.env.FOX_TEST_CODEX_BINARY,
+        binaryHash: `sha256:${createHash('sha256').update(await readFile(process.env.FOX_TEST_CODEX_BINARY)).digest('hex')}` } : undefined
+      for (const mode of ['batch', 'compaction']) {
+        const child = await worker(t)
+        assert.equal((await child.request('kernel.initialize', initialization({ engineId: engine, nativeAdapter,
+          proposalTools: mode === 'compaction' ? [] : initialization().proposalTools,
+          modelService: { apiType: engine === 'codex' ? 'openai-responses' : 'openai-completions', modelId: engine === 'codex' ? 'gpt-5.1-codex' : 'deepseek-v4-flash',
+            baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'local-test', reasoning: false } }))).type, 'kernel.ready')
+        const payload = mode === 'batch' ? resumePayload() : compactionPayload()
+        payload.controlBinding.engineId = engine
+        const result = await child.request(mode === 'batch' ? 'kernel.resume_batch' : 'kernel.compact_context', payload)
+        assert.equal(result.type, mode === 'batch' ? 'kernel.model_response' : 'kernel.compaction_result')
+        assert.ok(JSON.stringify(result).includes('Native continuation 中文'))
+      }
+      assert.equal(calls, 2)
+    })
+}
 
 test('HTTP model handles prior assistant history in initial and tool-batch rounds', { timeout: 30000 }, async t => {
   const requests = []
