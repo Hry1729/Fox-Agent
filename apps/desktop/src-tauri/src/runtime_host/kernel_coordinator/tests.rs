@@ -93,6 +93,10 @@ fn fixture_with_start_opt(clock: &TestClock, prompt_hash: &str, model: Option<&c
 }
 
 fn fixture_with_retry_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32)) -> (Database, PathBuf, String) {
+    fixture_with_project_opt(clock,prompt_hash,model,initial,prepared,retries,true)
+}
+
+fn fixture_with_project_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32), has_project: bool) -> (Database, PathBuf, String) {
     let engine = model.map(|model| model.engine_id.as_str()).unwrap_or("pi");
     let root = std::env::temp_dir().join(format!("fox-coordinator-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
@@ -102,7 +106,7 @@ fn fixture_with_retry_opt(clock: &TestClock, prompt_hash: &str, model: Option<&c
         .create_conversation(
             db.default_agent_id(),
             None,
-            Some(root.to_str().unwrap()),
+            if has_project {Some(root.to_str().unwrap())} else {None},
             Some("read_only"),
         )
         .unwrap();
@@ -113,7 +117,7 @@ fn fixture_with_retry_opt(clock: &TestClock, prompt_hash: &str, model: Option<&c
         .id;
     let permission = FrozenPermission {
         mode: PermissionMode::ReadOnly,
-        project_root: Some(root.to_string_lossy().into_owned()),
+        project_root: has_project.then(||root.to_string_lossy().into_owned()),
         grants: vec![],
     };
     let binding = RunControlBinding {
@@ -1631,8 +1635,8 @@ fn kernel_frozen_hooks_keep_block_and_approval_policy_and_transactional_audit() 
 #[test]
 fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
     let supported = super::super::kernel_gateway::supported_tools();
-    assert_eq!(supported.len(),64);
-    assert_eq!(supported.iter().collect::<std::collections::BTreeSet<_>>().len(),64);
+    assert_eq!(supported.len(),65);
+    assert_eq!(supported.iter().collect::<std::collections::BTreeSet<_>>().len(),65);
     let mut config = worker_configuration();
     config.model_service["maxOutputTokens"] = json!(1024);
     config.proposal_tools = ["child_agent_list","child_run_start","child_run_collect","child_run_cancel"].iter()
@@ -1820,13 +1824,13 @@ fn kernel_context_resources_preserve_conversation_scope_and_use_kernel_results()
     })).unwrap();
     for (tool,input) in inputs {
         coordinator.dispatch_tool(tool,"context-owner",|_,_,token| {
-            let result = policy.execute_context_resource(&db,&root,tool,&input,token)?;
+            let result = policy.execute_context_resource(&db,&root,&root,tool,&input,token)?;
             if tool=="read_attachment" {
                 let page: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
                 assert_eq!(page["text"],"durable coordinator 中文 😀");
                 assert_eq!(page["hasMore"],false);
                 assert!(result["details"].get("text").is_none(), "the raw text must not be duplicated in UI metadata");
-                assert!(policy.execute_context_resource(&db,&root,tool,&json!({"attachmentId":"foreign-attachment"}),token).is_err());
+                assert!(policy.execute_context_resource(&db,&root,&root,tool,&json!({"attachmentId":"foreign-attachment"}),token).is_err());
             }
             Ok((true,result))
         }).unwrap();

@@ -119,12 +119,13 @@ fn kernel_reads_project_root_and_office_attachments_through_frozen_gateway() {
                         .execute_context_resource(
                             &db,
                             &root,
+                            &root,
                             tool,
                             &json!({"attachmentId":"foreign"}),
                             token
                         )
                         .is_err());
-                    policy.execute_context_resource(&db, &root, tool, &payload["input"], token)?
+                    policy.execute_context_resource(&db, &root, &root, tool, &payload["input"], token)?
                 } else {
                     policy.execute(&db, tool, &payload["input"], token)?
                 };
@@ -384,4 +385,85 @@ fn final_response_replaces_partial_and_projects_tool_process_without_duplicate_u
             .any(|e| e.event_type == "tool.completed"
                 && e.event["result"]["content"] == "read result")
     );
+}
+
+fn exercise_projectless_compute(source: Option<&std::path::Path>, code: &str) -> Value {
+    use sha2::{Digest,Sha256};
+    let mut config=worker_configuration();
+    config.proposal_tools=vec![json!({"name":"attachment_compute","description":"compute","parameters":{"type":"object","properties":{}}})];
+    let clock=TestClock::new(1000);
+    let cancellation=CancellationRegistry::default();
+    let (db,root,run)=fixture_with_project_opt(&clock,&config.hash().unwrap(),Some(&config),true,true,(0,0),false);
+    let binding=db.run_control_binding(&run).unwrap().unwrap();
+    assert!(binding.permission.project_root.is_none());
+    let scope=crate::database::KernelHostScope {schema_version:1,tool_names:["attachment_compute".to_owned()].into_iter().collect(),mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),office_tools:Default::default(),lifecycle_hooks:vec![]};
+    db.freeze_kernel_host_scope(&run,&scope).unwrap();
+    let policy=super::super::super::kernel_gateway::GatewayPolicy {binding,scope};
+    let pure=super::super::super::attachment_compute::execute(&db,&root,&root,&policy.binding.conversation_id,&run,&json!({"code":"return {sum: [1, 2, 3].reduce((a,b)=>a+b,0)};"}),||false).unwrap();
+    assert_eq!(pure["result"]["sum"],6);
+    let file=root.join(if source.is_some(){"input.xlsx"}else{"input.csv"});
+    if let Some(source)=source { std::fs::copy(source,&file).unwrap(); } else {std::fs::write(&file,"id,wait\nA,1.5\nA,3.5\nB,-1\n").unwrap();}
+    let original=std::fs::read(&file).unwrap();
+    let foreign=db.create_conversation(db.default_agent_id(),None,None,None).unwrap();
+    for (id,conversation) in [("source",policy.binding.conversation_id.as_str()),("foreign",foreign.id.as_str())] {
+        db.add_attachments(&[crate::database::AttachmentRecord {id:id.into(),conversation_id:conversation.into(),message_id:None,display_name:file.file_name().unwrap().to_string_lossy().into_owned(),storage_path:file.to_string_lossy().into_owned(),media_type:None,byte_size:original.len() as i64,sha256:Some(hex::encode(Sha256::digest(&original))),status:"ready".into(),created_at:0}]).unwrap();
+    }
+    let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
+    let input=json!({"attachmentIds":["source"],"code":code});
+    coordinator.dispatch_initial("compute-model",&policy,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"compute","name":"attachment_compute","arguments":input}]})})).unwrap();
+    let mut actual=Value::Null;
+    coordinator.dispatch_tool("compute","compute-owner",|_,effect,token|{
+        assert!(policy.execute_context_resource(&db,&root,&root,"attachment_compute",&json!({"attachmentIds":["foreign"],"code":"return 1;"}),token).is_err());
+        let payload:Value=serde_json::from_str(&effect.payload_json).unwrap();
+        let result=policy.execute_context_resource(&db,&root,&root,"attachment_compute",&payload["input"],token)?;
+        assert!(serde_json::to_vec(&result).unwrap().len()<256*1024);
+        actual=result["details"]["result"].clone();
+        Ok((true,result))
+    }).unwrap();
+    let conversation=db.load_conversation(&policy.binding.conversation_id).unwrap();
+    assert!(!conversation.artifacts.is_empty(),"generated files must be projected into the conversation");
+    let own=super::super::super::attachment_compute::authorized_artifact_root(&root,&policy.binding.conversation_id).unwrap().unwrap();
+    let foreign_root=super::super::super::attachment_compute::safe_workspace(&root,&foreign.id,"foreign-run").unwrap();
+    for artifact in &conversation.artifacts {
+        let resolved=crate::artifact_gateway::resolve_artifact_path(artifact,&[own.clone()]).unwrap();
+        assert!(crate::artifact_gateway::resolve_artifact_path(artifact,&[foreign_root.clone()]).is_err());
+        let bytes=std::fs::read(resolved).unwrap();
+        assert_eq!(artifact.byte_size,bytes.len() as i64);
+        assert_eq!(artifact.sha256.as_deref(),Some(hex::encode(Sha256::digest(&bytes)).as_str()));
+        if artifact.display_name.ends_with(".json") { assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(),actual); }
+    }
+    let saved=conversation.artifacts.iter().find(|a|a.display_name.ends_with(".json")).unwrap();
+    let readback=json!({"artifactIds":[saved.id],"code":"return attachments[0].data;"});
+    let batch=coordinator.snapshot().unwrap().tool_calls.iter().find(|tool|tool.tool_call_id=="compute").unwrap().batch_id.clone();
+    coordinator.dispatch_batch(&batch,"readback-model",&policy,|binding,frame,_|Ok(fox_engine_protocol::KernelModelResponse {
+        schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.turn_id.clone(),batch_id:frame.batch_id.clone(),checkpoint_seq:frame.checkpoint_seq,
+        assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"readback","name":"attachment_compute","arguments":readback}]})
+    })).unwrap();
+    coordinator.dispatch_tool("readback","readback-owner",|_,effect,token|{
+        let input:Value=serde_json::from_str(&effect.payload_json).unwrap();
+        let reread=policy.execute_context_resource(&db,&root,&root,"attachment_compute",&input["input"],token)?;
+        assert_eq!(reread["details"]["result"],actual,"a later tool call must reread the saved file");
+        assert!(policy.execute_context_resource(&db,&root,&root,"attachment_compute",&json!({"artifactIds":["foreign-artifact"],"code":"return 1;"}),token).is_err());
+        Ok((true,reread))
+    }).unwrap();
+    assert_eq!(std::fs::read(file).unwrap(),original,"source attachment must remain unchanged");
+    if let Some(source)=source {
+        std::fs::write(source.parent().unwrap().join("product-artifacts.json"),serde_json::to_vec_pretty(&conversation.artifacts).unwrap()).unwrap();
+    }
+    actual
+}
+
+#[test]
+fn projectless_attachment_code_computes_and_persists_scoped_artifacts() {
+    let actual=exercise_projectless_compute(None,r#"const rows=attachments[0].sheets[0].rows.slice(1); const unique=[...new Map(rows.map(r=>[r[0],r])).values()]; const result={count:unique.length,total:unique.reduce((s,r)=>s+Number(r[1]),0)}; saveFile('统计.json',JSON.stringify(result)); return result;"#);
+    assert_eq!(actual,json!({"count":2,"total":2.5}));
+}
+
+#[test]
+#[ignore = "independent external XLSX acceptance fixture"]
+fn projectless_real_xlsx_code_acceptance() {
+    let root=std::path::PathBuf::from(std::env::var("FOX_COMPUTE_ACCEPTANCE_DIR").expect("external fixture directory"));
+    let code=std::fs::read_to_string(root.join("analyze.js")).unwrap();
+    let actual=exercise_projectless_compute(Some(&root.join("AGV-927-task-acceptance.xlsx")),&code);
+    std::fs::write(root.join("product-actual.json"),serde_json::to_vec_pretty(&actual).unwrap()).unwrap();
 }

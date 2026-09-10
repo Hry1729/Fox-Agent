@@ -1,4 +1,5 @@
 mod capability_tools;
+pub(crate) mod attachment_compute;
 mod continuation;
 pub(crate) mod kernel_coordinator;
 mod kernel_model_worker;
@@ -3353,6 +3354,7 @@ impl RuntimeHost {
         let state = self.state.clone();
         let yuxi_client = self.yuxi_client.clone();
         let attachments_dir = self.attachments_dir.clone();
+        let sessions_dir = self.sessions_dir.clone();
         let runtime_host = self.clone();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
@@ -3721,6 +3723,7 @@ impl RuntimeHost {
                     let stdin = stdin.clone();
                     let yuxi_client = yuxi_client.clone();
                     let attachments_dir = attachments_dir.clone();
+                    let sessions_dir = sessions_dir.clone();
                     let child_runtime_host = runtime_host.clone();
                     let Some(tool_handler_permit) = runtime_host.try_acquire_tool_handler() else {
                         let response = HostResponse::for_request(
@@ -3758,11 +3761,12 @@ impl RuntimeHost {
                                 &stdin,
                                 envelope,
                             )
-                        } else if tool == "read_attachment" {
+                        } else if matches!(tool, "read_attachment" | "attachment_compute") {
                             handle_attachment_tool_request(
                                 &app,
                                 &database,
                                 &attachments_dir,
+                                &sessions_dir,
                                 &state,
                                 &stdin,
                                 envelope,
@@ -6482,12 +6486,13 @@ fn handle_attachment_tool_request(
     app: &AppHandle,
     database: &Database,
     attachments_dir: &std::path::Path,
+    sessions_dir: &std::path::Path,
     state: &Arc<Mutex<RuntimeHostState>>,
     stdin: &Arc<Mutex<ChildStdin>>,
     envelope: RuntimeEnvelope,
 ) {
     let response =
-        execute_attachment_tool_request(app, database, attachments_dir, state, &envelope)
+        execute_attachment_tool_request(app, database, attachments_dir, sessions_dir, state, &envelope)
             .unwrap_or_else(|error| json!({ "isError": true, "error": error }));
     let response_type = if response
         .get("isError")
@@ -6508,6 +6513,7 @@ fn execute_attachment_tool_request(
     app: &AppHandle,
     database: &Database,
     attachments_dir: &std::path::Path,
+    sessions_dir: &std::path::Path,
     state: &Arc<Mutex<RuntimeHostState>>,
     envelope: &RuntimeEnvelope,
 ) -> Result<Value, String> {
@@ -6527,10 +6533,16 @@ fn execute_attachment_tool_request(
         .get("toolCallId")
         .and_then(Value::as_str)
         .ok_or_else(|| "attachment tool request is missing toolCallId".to_owned())?;
-    ensure_expert_tool_allowed(database, conversation_id, "read_attachment")?;
+    let tool = payload["tool"].as_str().ok_or("missing attachment tool")?;
+    if !matches!(tool, "read_attachment" | "attachment_compute") { return Err("unsupported attachment tool".into()); }
+    if tool == "attachment_compute" {
+        let binding = database.run_control_binding(run_id)?.ok_or("missing compute run authority")?;
+        if binding.conversation_id != conversation_id { return Err("compute conversation does not own this run".into()); }
+    }
+    ensure_expert_tool_allowed(database, conversation_id, tool)?;
     let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
     if let Some(response) =
-        inspect_existing_host_tool_call(database, run_id, tool_call_id, "read_attachment", &input)?
+        inspect_existing_host_tool_call(database, run_id, tool_call_id, tool, &input)?
     {
         return Ok(response);
     }
@@ -6538,22 +6550,18 @@ fn execute_attachment_tool_request(
         database,
         run_id,
         tool_call_id,
-        "read_attachment",
+        tool,
         &input,
     )?;
     if let Some(reason) = &hook_decision.blocked {
         return Err(format!("[hook.blocked] {reason}"));
     }
-    let attachment_id = input
-        .get("attachmentId")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "attachmentId is required".to_owned())?;
+
     let tool_call = match create_fresh_host_tool_call(
         database,
         run_id,
         tool_call_id,
-        "read_attachment",
+        tool,
         &input,
         if hook_decision.requires_approval {
             "pending"
@@ -6573,13 +6581,18 @@ fn execute_attachment_tool_request(
                 state,
                 run_id,
                 &tool_call,
-                "read_attachment",
+                tool,
                 &input,
                 hook_decision.approval_reason.as_deref(),
             )?;
         }
-        let mut result =
-            read_attachment_text(database, attachments_dir, conversation_id, attachment_id, &input)?;
+        let mut result = if tool == "attachment_compute" {
+            let token=state.lock().map_err(|_| "runtime state lock poisoned")?.cancellation.tool_token(run_id,tool_call_id)?;
+            attachment_compute::execute(database,attachments_dir,sessions_dir,conversation_id,run_id,&input,move || token.is_cancelled())?
+        } else {
+            let id=input["attachmentId"].as_str().ok_or("attachmentId is required")?;
+            read_attachment_text(database,attachments_dir,conversation_id,id,&input)?
+        };
         let content = result.to_string();
         if let Some(metadata) = result.as_object_mut() { metadata.remove("text"); }
         Ok(json!({
@@ -6591,7 +6604,7 @@ fn execute_attachment_tool_request(
         database,
         run_id,
         tool_call_id,
-        "read_attachment",
+        tool,
         &input,
         hook_decision.annotations,
         outcome,

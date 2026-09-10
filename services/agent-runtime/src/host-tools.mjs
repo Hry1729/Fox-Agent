@@ -102,10 +102,22 @@ export function createHostTools(requestHost) {
     {
       name: 'read_attachment',
       label: 'Read attachment',
-      description: 'Read a page of a UTF-8 text, DOCX, XLS, XLSX, PPT or PPTX attachment from this conversation. Spreadsheets include sheet names and cell addresses; formula results are cached, not recalculated. Returns hasMore, nextOffset and totalCharacters. Continue with offset=nextOffset to read all data before computing full-file statistics. Offsets count Unicode characters. Default limit 12000, maximum 24000. Legacy DOC and extracted text larger than 1 MiB are rejected.',
+      description: 'Read a page of a UTF-8 text, DOCX, XLS, XLSX, PPT or PPTX attachment from this conversation. Spreadsheets include sheet names and cell addresses; formula results are cached, not recalculated. Returns hasMore, nextOffset and totalCharacters. For full-file statistics use attachment_compute directly instead of paging all rows into context. Continue with offset=nextOffset only when more source text is needed. Offsets count Unicode characters. Default limit 12000, maximum 24000. Legacy DOC and extracted text larger than 1 MiB are rejected.',
       parameters: Type.Object({ attachmentId: Type.String(), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 24000 })) }),
       execute: (toolCallId, params, signal) =>
         executeHostTool(toolCallId, 'read_attachment', params, requestHost, signal),
+    },
+    {
+      name: 'attachment_compute',
+      label: 'Compute attachment with JavaScript',
+      description: 'Execute JavaScript against whole conversation attachments without copying rows into the model context. Input IDs may be omitted for calculations that need no files. Available without a project; originals stay read-only and generated files go to a conversation workspace. Use this tool for spreadsheet counts, deduplication, grouping, arithmetic, percentages and charts; never compute bulk statistics mentally from paginated read_attachment text. JavaScript globals: attachments = [{id,name,kind,sheets:[{name,rows:[[number|string|boolean|null,...],...]}],text?}]. Workbook rows include the header row. Select sheets by name. Call saveFile(name, UTF8content, optionalMediaType) to create JSON/CSV/SVG/HTML/text output; names must be plain filenames. Generated files return files[].id. In a later call, pass artifactIds:[id] to independently reread or continue calculating from a saved JSON/CSV/text result; it appears in attachments with that ID. Only computed files owned by this conversation are readable. Explicitly return a concise JSON-serializable result from the code. No process, require, filesystem or network APIs. Inspect sheet metadata or a few sample rows with code first if structure is unknown, then compute the full dataset. Use actual column meanings, document deduplication rules and missing values, and do not invent results if execution fails. Formula cells use cached results. Example code: const rows=attachments[0].sheets[0].rows; return {rows:rows.length-1,headers:rows[0]};',
+      parameters: Type.Object({
+        attachmentIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 8, uniqueItems: true })),
+        artifactIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 8, uniqueItems: true })),
+        code: Type.String({ minLength: 1, maxLength: 131072 }),
+        timeoutMs: Type.Optional(Type.Integer({ minimum: 100, maximum: 30000 })),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'attachment_compute', params, requestHost, signal),
     },
     {
       name: 'write_file',

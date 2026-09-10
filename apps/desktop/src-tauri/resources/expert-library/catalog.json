@@ -1,7 +1,7 @@
 {
   "upstream": "https://github.com/jnMetaCode/agency-agents-zh",
   "commit": "972452cdedef8d04fed4a8dd1dc10623e33ed412",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "experts": [
     {
       "id": "fox-report-writer",

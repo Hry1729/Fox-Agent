@@ -31,6 +31,7 @@ pub(super) const SUPPORTED_TOOLS: &[&str] = &[
     "code_check",
     "format_code",
     "tabular_data",
+    "attachment_compute",
     "memory_search",
     "memory_propose",
     "read_attachment",
@@ -56,7 +57,10 @@ pub(super) fn is_knowledge(tool: &str) -> bool {
 }
 
 pub(super) fn is_context_resource(tool: &str) -> bool {
-    matches!(tool, "memory_search" | "memory_propose" | "read_attachment")
+    matches!(
+        tool,
+        "memory_search" | "memory_propose" | "read_attachment" | "attachment_compute"
+    )
 }
 
 fn server_hash(server: &crate::database::McpServerRecord) -> String {
@@ -374,6 +378,7 @@ impl GatewayPolicy {
         &self,
         database: &Database,
         attachments_dir: &std::path::Path,
+        sessions_dir: &std::path::Path,
         tool: &str,
         input: &Value,
         token: &CancellationToken,
@@ -407,6 +412,22 @@ impl GatewayPolicy {
                     input,
                 )?
             }
+            "attachment_compute" => {
+                let mut bounded=input.clone();
+                let remaining=self.remaining_budget(database)?.as_millis().min(30_000) as u64;
+                if input.get("timeoutMs").is_none() || input["timeoutMs"].is_u64() {
+                    bounded["timeoutMs"]=json!(input["timeoutMs"].as_u64().unwrap_or(15_000).min(remaining));
+                }
+                super::attachment_compute::execute(
+                database,
+                attachments_dir,
+                sessions_dir,
+                &self.binding.conversation_id,
+                &self.binding.run_id,
+                &bounded,
+                { let token = token.clone(); move || token.is_cancelled() },
+            )?
+            },
             _ => return Err("unsupported Kernel context resource".into()),
         };
         token.check()?;

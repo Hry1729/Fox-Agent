@@ -1065,6 +1065,12 @@ export const SCHEMA_BUNDLE = {
       "name": "read_attachment"
     },
     {
+      "approval": "none",
+      "category": "attachment",
+      "execution": "host",
+      "name": "attachment_compute"
+    },
+    {
       "approval": "policy",
       "category": "project-write",
       "execution": "host",

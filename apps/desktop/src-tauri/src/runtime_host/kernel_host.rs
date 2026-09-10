@@ -25,7 +25,7 @@ fn resource_failure_result(tool: &str, error: &str) -> Value {
     // Reader errors describe only the authorized path operation (missing path,
     // nonexistent file, OS access failure, scope escape). Keep them actionable.
     // Other executors may return remote bodies or credentials; do not forward.
-    let message = if crate::resource_gateway::is_reader(tool) {
+    let message = if crate::resource_gateway::is_reader(tool) || tool == "attachment_compute" {
         format!("Project file operation failed: {}", error.chars().take(600).collect::<String>())
     } else {
         "The resource request failed. No successful result is available.".to_owned()
@@ -659,6 +659,7 @@ impl super::RuntimeHost {
                     policy.execute_context_resource(
                         &self.database,
                         &self.attachments_dir,
+                        &self.sessions_dir,
                         tool,
                         &payload["input"],
                         token,

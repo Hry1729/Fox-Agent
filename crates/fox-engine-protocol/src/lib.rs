@@ -245,6 +245,7 @@ pub const TOOL_CONTRACTS: &[(&str, &str, &str, &str)] = &[
     ("grep", "project-read", "runtime", "preflight"),
     ("graph_readonly_run", "project-read", "runtime", "none"),
     ("read_attachment", "attachment", "host", "none"),
+    ("attachment_compute", "attachment", "host", "none"),
     ("write_file", "project-write", "host", "policy"),
     ("edit_file", "project-write", "host", "policy"),
     ("run_command", "process", "host", "always"),

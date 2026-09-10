@@ -3,6 +3,7 @@ mod app_state;
 mod artifact_gateway;
 mod commands;
 mod database;
+mod data_compute;
 mod digital_colleagues;
 mod expert_packages;
 mod expert_teams;

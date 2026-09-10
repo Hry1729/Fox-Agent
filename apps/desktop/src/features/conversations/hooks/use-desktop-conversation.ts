@@ -863,7 +863,7 @@ export function useDesktopConversation(): DesktopConversationState {
       const isYuxi = activeConversation.conversation.agentId.startsWith('yuxi:')
       const extractedContext = !isYuxi ? await extractedAttachmentContext(files) : ''
       const attachmentNote = attachments.length && !isYuxi
-        ? `\n\nFox attachments available through read_attachment:\n${attachments.map((item) => `- ${item.id}: ${item.displayName}`).join('\n')}`
+        ? `\n\nFox attachments: use attachment_compute for whole-file code calculations; read_attachment for source text:\n${attachments.map((item) => `- ${item.id}: ${item.displayName}`).join('\n')}`
         : ''
       await Promise.all([runtimeListenerReadyRef.current, workListenerReadyRef.current])
       uiDispatchStartedRef.current.set(activeConversation.conversation.id, performance.now())

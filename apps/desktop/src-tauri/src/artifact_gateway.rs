@@ -342,6 +342,8 @@ fn authorized_roots(
         }
     }
 
+    if let Some(root)=crate::runtime_host::attachment_compute::authorized_artifact_root(&state.data_dir.join("runtime-sessions"),conversation_id)
+        .map_err(|e|ArtifactGatewayError::new("artifact.path_denied",e,false))? { roots.push(root); }
     if roots.is_empty() {
         return Err(ArtifactGatewayError::new(
             "artifact.root_unavailable",
@@ -432,7 +434,7 @@ pub(crate) fn resolve_artifact_path(
     Ok(canonical)
 }
 
-fn validate_record(
+pub(crate) fn validate_record(
     record: &ArtifactRecord,
     roots: &[PathBuf],
 ) -> Result<PathBuf, ArtifactGatewayError> {

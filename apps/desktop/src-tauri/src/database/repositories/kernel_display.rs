@@ -135,7 +135,7 @@ pub(super) fn artifacts(
 ) -> rusqlite::Result<()> {
     let mut query=tx.prepare("SELECT t.tool_call_id,t.tool,t.result_json FROM kernel_events e JOIN kernel_tool_calls t
         ON t.run_id=e.run_id AND t.tool_call_id=json_extract(e.payload_json,'$.toolCallId')
-        WHERE e.run_id=?1 AND e.seq>?2 AND e.event_type='tool.completed' AND t.state='completed' AND t.tool IN ('write_file','edit_file') ORDER BY e.seq")?;
+        WHERE e.run_id=?1 AND e.seq>?2 AND e.event_type='tool.completed' AND t.state='completed' AND t.tool IN ('write_file','edit_file','attachment_compute') ORDER BY e.seq")?;
     let results = query
         .query_map(params![run, previous_seq], |r| {
             Ok((
@@ -148,6 +148,10 @@ pub(super) fn artifacts(
     for (id, tool, result) in results {
         let result: Value =
             serde_json::from_str(&result).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if tool == "attachment_compute" {
+            super::computed_artifacts::persist(tx,run,&id,&result["details"],now)?;
+            continue;
+        }
         let Some(path) = result["details"]["path"].as_str() else {
             continue;
         };

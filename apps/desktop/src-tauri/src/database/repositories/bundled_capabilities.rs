@@ -81,7 +81,7 @@ impl Database {
                     params![r.package_id,r.version],|row|row.get(0),
                 )?;
                 // Preserve user rollbacks and enabled-skill choices on every restart.
-                if installed { continue; }
+                if installed { refresh_compute_bindings(&tx,&r.expert_id,&r.version,now)?; continue; }
                 tx.execute(
                     "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at,
                        icon,category,opening_suggestions_json,is_builtin,package_version,package_manifest_json,
@@ -89,7 +89,7 @@ impl Database {
                      VALUES (?1,?2,?3,'pi',?4,'configured-model',?5,?5,?6,?7,?8,0,?9,?10,
                        'expert','inline','expert_center','imported',?11,?12)
                      ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,
-                       system_prompt=excluded.system_prompt,icon=excluded.icon,category=excluded.category,
+                       system_prompt=excluded.system_prompt,category=excluded.category,
                        opening_suggestions_json=excluded.opening_suggestions_json,is_builtin=0,
                        package_version=excluded.package_version,package_manifest_json=excluded.package_manifest_json,
                        package_source='imported',package_id=excluded.package_id,package_hash=excluded.package_hash,updated_at=excluded.updated_at",
@@ -105,13 +105,42 @@ impl Database {
                 tx.execute(
                     "INSERT INTO agent_runtime_config(agent_id,scope_type,scope_id,config_key,value_json,source,created_at,updated_at)
                      VALUES (?1,'agent',?1,'skills.enabled',?2,'package',?3,?3)
-                     ON CONFLICT(agent_id,scope_type,scope_id,config_key) DO UPDATE SET value_json=excluded.value_json,source='package',updated_at=excluded.updated_at",
+                     ON CONFLICT(agent_id,scope_type,scope_id,config_key) DO NOTHING",
                     params![r.expert_id,json!(r.enabled_skills).to_string(),now],
                 )?;
+                refresh_compute_bindings(&tx,&r.expert_id,&r.version,now)?;
             }
             tx.commit()
         })
     }
+}
+
+
+fn refresh_compute_bindings(tx: &rusqlite::Transaction<'_>, expert_id: &str, version: &str, now: i64) -> rusqlite::Result<()> {
+    let Some(current)=query_agent_record(tx,expert_id)? else {return Ok(());};
+    if current.package_version!=version || current.package_manifest["bundledLibrary"]!="agency-zh-fox-v1"
+        || !current.package_manifest["allowedTools"].as_array().is_some_and(|tools|tools.iter().any(|tool|tool=="attachment_compute")) { return Ok(()); }
+                // Upgrade idle conversations to the newly installed bundled capability.
+                // Keep historical binding snapshots and all in-flight runs immutable.
+                let mut query=tx.prepare("SELECT b.id FROM conversation_expert_bindings b WHERE b.expert_id=?1 AND b.state='active'
+                    AND b.expert_version IN ('1.0.0','1.1.0') AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.conversation_id=b.conversation_id
+                    AND r.status IN ('queued','running','waiting_approval'))")?;
+                let bindings=query.query_map([expert_id],|row|row.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+                drop(query);
+                if !bindings.is_empty() {
+                    let expert=query_agent_record(&tx,expert_id)?.ok_or(rusqlite::Error::InvalidQuery)?;
+                    let snapshot=agent_package_snapshot(&expert);
+                    let hash=package_snapshot_hash(&snapshot);
+                    for old in bindings {
+                        tx.execute("UPDATE conversation_expert_bindings SET state='replaced',deactivated_at=?2 WHERE id=?1",params![old,now])?;
+                        tx.execute("INSERT INTO conversation_expert_bindings(id,conversation_id,expert_id,state,activation_source,expert_version,
+                            package_hash,package_snapshot_json,display_snapshot_json,activated_at,deactivated_at)
+                            SELECT ?1,conversation_id,expert_id,'active','bundled-capability-upgrade',?2,?3,?4,
+                            json_set(display_snapshot_json,'$.packageVersion',?2),?5,NULL FROM conversation_expert_bindings WHERE id=?6",
+                            params![Uuid::new_v4().to_string(),version,hash,snapshot.to_string(),now,old])?;
+                    }
+                }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -178,5 +207,47 @@ mod tests {
     }
     fn fs_cleanup(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(test)]
+mod compute_upgrade_tests {
+    use super::*;
+    #[test]
+    fn compute_upgrade_refreshes_idle_binding_preserves_active_run_and_user_choices() {
+        let root=std::env::temp_dir().join(format!("fox-compute-upgrade-{}",Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let db=Database::open(root.join("test.db")).unwrap();
+        let agent=db.get_agent("fox-data-analyst").unwrap().unwrap();
+        let mut old=agent.package_manifest;
+        old["allowedTools"].as_array_mut().unwrap().retain(|tool|tool!="attachment_compute");
+        db.with_connection(|c| {
+            c.execute("UPDATE agents SET package_version='1.1.0',package_manifest_json=?1,icon='custom-avatar.png' WHERE id='fox-data-analyst'",[old.to_string()])?;
+            c.execute("UPDATE expert_package_versions SET version='1.1.0' WHERE expert_id='fox-data-analyst' AND version='1.2.0'",[])?;
+            c.execute("UPDATE agent_runtime_config SET value_json='[\"custom-skill\"]',source='user' WHERE agent_id='fox-data-analyst' AND config_key='skills.enabled'",[])?;
+            Ok(())
+        }).unwrap();
+        let idle=db.create_conversation(db.default_agent_id(),None,None,Some("read_only")).unwrap();
+        let running=db.create_conversation(db.default_agent_id(),None,None,Some("read_only")).unwrap();
+        let idle_before=db.bind_conversation_expert(&idle.id,"fox-data-analyst","test").unwrap();
+        let active_before=db.bind_conversation_expert(&running.id,"fox-data-analyst","test").unwrap();
+        db.create_run(&running.id,"active test",None).unwrap();
+        assert!(db.conversation_has_active_run(&running.id).unwrap());
+        db.seed_bundled_experts().unwrap();
+        let idle_after=db.current_conversation_expert_binding(&idle.id).unwrap().unwrap();
+        assert_eq!(idle_after.expert_version,"1.2.0");
+        assert_ne!(idle_after.id,idle_before.id);
+        assert!(idle_after.package_snapshot["packageManifest"]["allowedTools"].as_array().unwrap().iter().any(|tool|tool=="attachment_compute"));
+        assert_eq!(db.current_conversation_expert_binding(&running.id).unwrap().unwrap().package_snapshot,active_before.package_snapshot);
+        assert_eq!(db.get_agent("fox-data-analyst").unwrap().unwrap().icon.as_deref(),Some("custom-avatar.png"));
+        db.with_connection(|c| {
+            let prior:String=c.query_row("SELECT package_snapshot_json FROM conversation_expert_bindings WHERE id=?1",[&idle_before.id],|r|r.get(0))?;
+            assert_eq!(serde_json::from_str::<Value>(&prior).unwrap(),idle_before.package_snapshot);
+            let skills:String=c.query_row("SELECT value_json FROM agent_runtime_config WHERE agent_id='fox-data-analyst' AND config_key='skills.enabled'",[],|r|r.get(0))?;
+            assert_eq!(skills,"[\"custom-skill\"]");
+            Ok(())
+        }).unwrap();
+        db.seed_bundled_experts().unwrap();
+        assert_eq!(db.current_conversation_expert_binding(&idle.id).unwrap().unwrap().id,idle_after.id);
     }
 }

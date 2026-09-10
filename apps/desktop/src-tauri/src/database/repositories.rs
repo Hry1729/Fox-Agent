@@ -26,6 +26,7 @@ use uuid::Uuid;
 mod a1_workflow;
 mod app_management;
 mod bundled_capabilities;
+mod computed_artifacts;
 mod child_runs;
 mod digital_colleagues;
 mod expert_teams;
@@ -3896,6 +3897,9 @@ impl Database {
                         params![run_id, runtime_tool_call_id],
                         |row| row.get(0),
                     ).optional()?;
+                    if tool_name.as_deref() == Some("attachment_compute") {
+                        computed_artifacts::persist(&transaction,run_id,runtime_tool_call_id,&result["details"],now)?;
+                    }
                     if matches!(tool_name.as_deref(), Some("write_file") | Some("edit_file")) {
                         if let Some(path) = result.get("details").and_then(|details| details.get("path")).and_then(Value::as_str) {
                             let display_name = PathBuf::from(path).file_name().and_then(|value| value.to_str()).unwrap_or(path).to_owned();
