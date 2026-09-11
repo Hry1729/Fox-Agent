@@ -423,6 +423,8 @@ impl RunController {
             || data.retry.turn_max != data.config.turn_max_retries
             || data.retry.provider_attempts > data.retry.provider_max
             || data.retry.turn_attempts > data.retry.turn_max
+            || data.retry.completion_attempts > data.retry.turn_max
+            || (data.retry.completion_attempts > 0 && data.retry.completion_effect_key.is_none())
         {
             return Err(KernelError::FailClosed(
                 "rehydrated retry state disagrees with frozen retry policy".into(),
@@ -1299,10 +1301,16 @@ impl RunController {
                 "model retry requires an exclusively active model request".into(),
             ));
         }
-        let (used, maximum) = if provider { (self.retry.provider_attempts, self.retry.provider_max) }
-            else { (self.retry.turn_attempts, self.retry.turn_max) };
         let failure: serde_json::Value = serde_json::from_str(failure_json)
             .map_err(|_| KernelError::FailClosed("invalid model failure evidence".into()))?;
+        let completion = failure["category"] == "incomplete_response";
+        if provider != (failure["category"] == "provider_unavailable") || (!provider && !completion) {
+            return Err(KernelError::FailClosed("model retry category mismatch".into()));
+        }
+        let (used, maximum) = if provider { (self.retry.provider_attempts, self.retry.provider_max) }
+            else { (if self.retry.completion_effect_key.as_deref() == Some(effect_key) {
+                self.retry.completion_attempts
+            } else { 0 }, self.retry.turn_max) };
         self.suspend_running_clock(now_monotonic_ms);
         self.settle_model_request();
         let mut effects = vec![self.append_event(
@@ -1326,12 +1334,14 @@ impl RunController {
         if provider {
             self.retry.provider_attempts += 1;
         } else {
-            self.retry.turn_attempts += 1;
+            self.retry.completion_effect_key = Some(effect_key.to_owned());
+            self.retry.completion_attempts = used + 1;
         }
         effects.push(self.append_event(
             "run.retrying",
             serde_json::json!({
-                "kind": if provider { "provider" } else { "turn" }, "attempt": used + 1,
+                "kind": if provider { "provider" } else { "completion" }, "attempt": used + 1,
+                "effectKey": effect_key,
                 "maxAttempts": maximum, "delayMs": delay_ms, "scheduledAtWallMs": now_wall_ms,
                 "dueWallMs": self.retry.due_wall_ms,
             }),

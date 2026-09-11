@@ -1203,8 +1203,7 @@ fn settled_provider_rejection(run_id: &str, turn_id: &str, checkpoint_seq: u64) 
     }))
 }
 
-#[test]
-fn settled_incomplete_http_reply_continues_after_reopen_with_completed_tool_results() {
+fn start_http_model_fixture(replies: Vec<Value>) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<Value>>) {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
@@ -1214,7 +1213,7 @@ fn settled_incomplete_http_reply_continues_after_reopen_with_completed_tool_resu
     let server = std::thread::spawn(move || {
         let mut requests = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(45);
-        while requests.len() < 2 {
+        while requests.len() < replies.len() {
             let mut stream = match listener.accept() {
                 Ok((stream, _)) => stream,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1246,24 +1245,37 @@ fn settled_incomplete_http_reply_continues_after_reopen_with_completed_tool_resu
                 bytes.extend_from_slice(&buffer[..read]);
             }
             let body: Value = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
-            let continued = body["messages"].to_string().contains("Fox 续答提示");
+            let delta = replies[requests.len()].clone();
+            let finish = if delta["tool_calls"].is_array() { "tool_calls" } else { "stop" };
             requests.push(body);
-            let text = if continued { "现有工具结果已核对。\n<fox-final/>" } else { "I have the workbook with 5 sheets. Let me analyze the data comprehensively." };
             let chunks = [
-                json!({"id":"local-pilot-test","object":"chat.completion.chunk","created":1,"model":"kernel-http-test","choices":[{"index":0,"delta":{"role":"assistant","content":text},"finish_reason":null}]}),
-                json!({"id":"local-pilot-test","object":"chat.completion.chunk","created":1,"model":"kernel-http-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+                json!({"id":"local-pilot-test","object":"chat.completion.chunk","created":1,"model":"kernel-http-test","choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
+                json!({"id":"local-pilot-test","object":"chat.completion.chunk","created":1,"model":"kernel-http-test","choices":[{"index":0,"delta":{},"finish_reason":finish}]}),
             ];
             let response = format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", chunks[0], chunks[1]);
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
         }
         requests
     });
+    (address, server)
+}
+
+fn completion_contract_for_test() -> String {
     let prompt = std::process::Command::new("node").args(["--input-type=module", "-e", "import { KERNEL_COMPLETION_CONTRACT } from './services/agent-runtime/src/kernel-completion.mjs'; process.stdout.write(KERNEL_COMPLETION_CONTRACT)"])
         .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
         .output().unwrap();
     assert!(prompt.status.success());
+    String::from_utf8(prompt.stdout).unwrap()
+}
+
+#[test]
+fn settled_incomplete_http_reply_continues_after_reopen_with_completed_tool_results() {
+    let (address, server) = start_http_model_fixture(vec![
+        json!({"role":"assistant","content":"I have the workbook with 5 sheets. Let me analyze the data comprehensively."}),
+        json!({"role":"assistant","content":"现有工具结果已核对。\n<fox-final/>"}),
+    ]);
     let mut config = worker_configuration();
-    config.system_prompt = String::from_utf8(prompt.stdout).unwrap();
+    config.system_prompt = completion_contract_for_test();
     config.model_service = json!({"apiType":"openai-completions","modelId":"kernel-http-test","baseUrl":format!("http://{address}/v1")});
     let clock = TestClock::new(crate::database::now_ms());
     let cancellation = CancellationRegistry::default();
@@ -1291,7 +1303,88 @@ fn settled_incomplete_http_reply_continues_after_reopen_with_completed_tool_resu
 }
 
 #[test]
-fn settled_incomplete_answer_uses_one_turn_retry_without_reexecuting_tools() {
+fn settled_incomplete_http_recovery_after_new_compute_error_keeps_prior_progress() {
+    let invalid_code = "const rows = attachments[0].sheets[0].rows;\nreturn { 含\"为\"字样异常条数: rows.length - 1 };";
+    let valid_code = "const count = attachments[0].sheets[0].rows.length - 1;\nsaveFile('summary.json', {count});\nreturn {count};";
+    let tool_reply = |id: &str, code: &str| json!({"role":"assistant", "tool_calls":[{
+        "index":0,"id":id,"type":"function","function":{"name":"attachment_compute",
+        "arguments":json!({"attachmentIds":["a"],"code":code}).to_string()}}]});
+    let (address, server) = start_http_model_fixture(vec![
+        json!({"role":"assistant","content":"Let me analyze the data comprehensively."}),
+        tool_reply("compute-invalid", invalid_code),
+        json!({"role":"assistant","content":"Let me redo properly with correct indices."}),
+        tool_reply("compute-corrected", valid_code),
+        json!({"role":"assistant","content":"已修正脚本，核对 2 条记录并生成 summary.json。\n<fox-final/>"}),
+    ]);
+    let mut config = worker_configuration();
+    config.system_prompt = completion_contract_for_test();
+    config.model_service = json!({"apiType":"openai-completions","modelId":"kernel-http-test","baseUrl":format!("http://{address}/v1")});
+    config.proposal_tools.push(json!({"name":"attachment_compute","description":"Compute explicitly selected attachment data with JavaScript",
+        "parameters":{"type":"object","properties":{"code":{"type":"string"},"attachmentIds":{"type":"array","items":{"type":"string"}}},"required":["code"]}}));
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_retry_opt(&clock, &config.hash().unwrap(), Some(&config), false, false, (0, 1));
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+    let prior_read = coordinator.snapshot().unwrap().tool_calls[0].clone();
+    let worker = real_worker_command();
+    coordinator.dispatch_batch_with_worker("worker-batch", "preface", &Allow, &worker, &config, "local-test-only").unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
+    clock.advance(1000);
+    coordinator.dispatch_batch_with_worker("worker-batch", "after-preface", &Allow, &worker, &config, "local-test-only").unwrap();
+    let batch = coordinator.snapshot().unwrap().tool_calls.iter().find(|tool| tool.tool_call_id == "compute-invalid").unwrap().batch_id.clone();
+    let source = root.join("data.csv");
+    std::fs::write(&source, "id,value\nA,1\nB,2\n").unwrap();
+    let inputs = vec![("a".to_owned(), source.clone())];
+    coordinator.dispatch_tool("compute-invalid", "compute-error", |_, effect, _| {
+        let payload: Value = serde_json::from_str(&effect.payload_json).unwrap();
+        let error = crate::data_compute::execute(&inputs, &root.join("failed-outputs"), &payload["input"], || false).unwrap_err();
+        assert!(error.contains("code line 2 (1-based"), "{error}");
+        Ok((false, json!({"code":"kernel.resource_failed","message":error,"tool":"attachment_compute"})))
+    }).unwrap();
+    let after_error = coordinator.snapshot().unwrap().tool_calls;
+    assert!(after_error.iter().any(|tool| tool == &prior_read));
+    coordinator.dispatch_batch_with_worker(&batch, "repair-preface", &Allow, &worker, &config, "local-test-only").unwrap();
+    // A previous completed request spent its retry. The new request still gets
+    // its one repair opportunity; restarting cannot reset that allowance.
+    assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
+    assert_eq!(coordinator.snapshot().unwrap().retry.completion_attempts, 1);
+    assert_eq!(coordinator.snapshot().unwrap().retry.turn_attempts, 0);
+    drop(coordinator);
+    drop(db);
+    clock.advance(1000);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.dispatch_batch_with_worker(&batch, "repair-after-reopen", &Allow, &worker, &config, "local-test-only").unwrap();
+    let next_batch = coordinator.snapshot().unwrap().tool_calls.iter().find(|tool| tool.tool_call_id == "compute-corrected").unwrap().batch_id.clone();
+    coordinator.dispatch_tool("compute-corrected", "compute-fixed", |_, effect, _| {
+        let payload: Value = serde_json::from_str(&effect.payload_json).unwrap();
+        let result = crate::data_compute::execute(&inputs, &root.join("corrected-outputs"), &payload["input"], || false)?;
+        assert_eq!(result["result"]["count"], 2);
+        Ok((true, result))
+    }).unwrap();
+    coordinator.dispatch_batch_with_worker(&next_batch, "final", &Allow, &worker, &config, "local-test-only").unwrap();
+    let snapshot = coordinator.snapshot().unwrap();
+    assert_eq!(snapshot.state, "completed");
+    for original in after_error { assert!(snapshot.tool_calls.contains(&original)); }
+    assert!(!root.join("failed-outputs").exists());
+    let saved: Value = serde_json::from_slice(&std::fs::read(root.join("corrected-outputs/summary.json")).unwrap()).unwrap();
+    assert_eq!(saved, json!({"count":2}));
+    assert_eq!(std::fs::read_to_string(source).unwrap(), "id,value\nA,1\nB,2\n");
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 5);
+    for index in [2, 3, 4] {
+        let messages = requests[index]["messages"].as_array().unwrap();
+        assert!(messages.iter().any(|message| message["role"] == "tool" && message.to_string().contains("Syntax error")));
+    }
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let replayed: i64 = connection.query_row("SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='dispatch_tool' AND attempts<>1", [&run_id], |row| row.get(0)).unwrap();
+    assert_eq!(replayed, 0);
+    assert!(db.kernel_reconciliation_view(&coordinator.binding.conversation_id, &run_id).unwrap().items.is_empty());
+}
+
+#[test]
+fn settled_incomplete_answer_uses_one_request_retry_across_reopen_without_reexecuting_tools() {
     let clock = TestClock::new(1_000);
     let cancellation = CancellationRegistry::default();
     let (db, root, run_id) = fixture_with_retry_opt(&clock, "test-prompt", None, false, false, (0, 1));
@@ -1309,6 +1402,11 @@ fn settled_incomplete_answer_uses_one_turn_retry_without_reexecuting_tools() {
     assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
     assert_eq!(coordinator.snapshot().unwrap().tool_calls, tools);
     assert!(coordinator.dispatch_batch("worker-batch", "early", &Allow, |_, _, _| panic!("retry is not due")).is_err());
+    drop(coordinator);
+    drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().retry.completion_attempts, 1);
     clock.advance(1000);
     coordinator.dispatch_batch("worker-batch", "second", &Allow, |binding, frame, token| {
         assert!(frame.history.last().unwrap()["content"][0]["text"].as_str().unwrap().contains("Fox 续答提示"));

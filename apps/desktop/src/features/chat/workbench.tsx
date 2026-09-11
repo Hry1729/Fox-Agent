@@ -1799,6 +1799,7 @@ function toolActivity(tool: RuntimeToolStep) {
   const path = compactValue(input.path || input.file || input.directory || input.cwd)
   const query = compactValue(input.pattern || input.query || input.search || input.url)
   const subject = path || query
+  if (tool.isError) return `执行失败 ${tool.name}${subject ? ` · ${subject}` : ''}`
   const verb = tool.completed ? '已完成' : '正在调用'
 
   if (tool.name === 'ask_user_question') return tool.awaitingUser ? '等待你的回答' : 'Fox 正在向你提问'

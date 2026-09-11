@@ -852,8 +852,18 @@ impl Database {
                 let old_retry: crate::kernel::RetryState = serde_json::from_str(&old_retry).map_err(|_|kernel_err("invalid stored retry counters"))?;
                 let provider = failure.category == "provider_unavailable";
                 let terminal = cmd.run_state == crate::kernel::RunState::Failed;
+                let mut expected_retry = old_retry.clone();
+                if !terminal && !provider {
+                    let used = if old_retry.completion_effect_key.as_deref() == Some(effect_key) {
+                        old_retry.completion_attempts
+                    } else { 0 };
+                    expected_retry.completion_effect_key = Some(effect_key.to_owned());
+                    expected_retry.completion_attempts = used + 1;
+                }
                 if cmd.retry.provider_attempts != old_retry.provider_attempts + u32::from(provider && !terminal)
-                    || cmd.retry.turn_attempts != old_retry.turn_attempts + u32::from(!provider && !terminal)
+                    || cmd.retry.turn_attempts != old_retry.turn_attempts
+                    || cmd.retry.completion_effect_key != expected_retry.completion_effect_key
+                    || cmd.retry.completion_attempts != expected_retry.completion_attempts
                     || (!terminal && (cmd.retry.scheduled_at_wall_ms != Some(wall_now_ms)
                     || cmd.retry.due_wall_ms.is_none_or(|due| due < wall_now_ms.saturating_add(failure.retry_after_ms.unwrap_or(0) as i64))))
                     || (terminal && (cmd.retry.scheduled_at_wall_ms.is_some() || cmd.retry.due_wall_ms.is_some())) {
@@ -1030,6 +1040,8 @@ impl Database {
                 || cmd.retry.turn_max != frozen.turn_max_retries
                 || cmd.retry.provider_attempts > cmd.retry.provider_max
                 || cmd.retry.turn_attempts > cmd.retry.turn_max
+                || cmd.retry.completion_attempts > cmd.retry.turn_max
+                || (cmd.retry.completion_attempts > 0 && cmd.retry.completion_effect_key.is_none())
             {
                 return Err(kernel_err(format!(
                     "kernel frozen identity or retry policy conflict for {run_id}"

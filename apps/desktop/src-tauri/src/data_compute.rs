@@ -153,7 +153,7 @@ where
         }
     })));
 
-    let script = build_script(code);
+    let (script, code_line_offset) = build_script(code);
     let envelope = {
         let context = Context::full(&runtime)
             .map_err(|error| format!("Unable to create JavaScript context: {error:?}"))?;
@@ -166,7 +166,7 @@ where
                 .map_err(|error| format!("Unable to initialize JavaScript limits: {error:?}"))?;
             match ctx.eval::<String, _>(script) {
                 Ok(value) => Ok(value),
-                Err(error) => Err(format_js_error(ctx, error)),
+                Err(error) => Err(format_js_error(ctx, error, code, code_line_offset)),
             }
         })
     };
@@ -268,7 +268,7 @@ fn check_load_limits(cancelled: &dyn Fn() -> bool, deadline: Instant) -> Result<
     Ok(())
 }
 
-fn format_js_error<'js>(ctx: Ctx<'js>, error: JsError) -> String {
+fn format_js_error<'js>(ctx: Ctx<'js>, error: JsError, code: &str, line_offset: usize) -> String {
     const MAX_ERROR_BYTES: usize = 2 * 1024;
     if !matches!(error, JsError::Exception) {
         return format!(
@@ -283,15 +283,20 @@ fn format_js_error<'js>(ctx: Ctx<'js>, error: JsError) -> String {
             .message()
             .unwrap_or_else(|| "JavaScript exception".to_owned());
         let stack = exception.stack().unwrap_or_default();
+        let syntax_error = exception.as_object().get::<_, String>("name").ok().as_deref() == Some("SyntaxError");
+        let location = script_error_location(&stack, code, line_offset, syntax_error);
         let detail = if stack.is_empty() {
             message
         } else {
             format!("{message}\n{stack}")
         };
-        return format!(
-            "JavaScript execution failed: {}",
-            truncate_text(&detail, MAX_ERROR_BYTES)
-        );
+        let recovery = if syntax_error {
+            "Syntax error: correct the code in a NEW attachment_compute call. Quote the entire object key if it contains quotes, spaces or punctuation. Submit raw JavaScript, without Markdown escaping."
+        } else {
+            "Check the selected input IDs, actual row/column structure and the failing expression; correct the code in a NEW attachment_compute call."
+        };
+        return format!("JavaScript execution failed: {}{}\nNo output files from this failed call were written. {recovery}",
+            truncate_text(&detail, MAX_ERROR_BYTES), location);
     }
     match Coerced::<String>::from_js(&ctx, thrown) {
         Ok(value) => format!(
@@ -300,6 +305,25 @@ fn format_js_error<'js>(ctx: Ctx<'js>, error: JsError) -> String {
         ),
         Err(_) => "JavaScript execution failed with a non-error exception".to_owned(),
     }
+}
+
+// QuickJS reports locations inside our wrapper. Translate only frames that
+// actually fall within the supplied code; runtime/helper frames are not guesses.
+fn script_error_location(stack: &str, code: &str, line_offset: usize, syntax_error: bool) -> String {
+    let lines = code.lines().collect::<Vec<_>>();
+    let line = stack.split("eval_script:").skip(1).find_map(|part| {
+        let digits = part.chars().take_while(char::is_ascii_digit).collect::<String>();
+        digits.parse::<usize>().ok()?.checked_sub(line_offset)
+            .filter(|line| *line > 0 && *line <= lines.len())
+    });
+    let Some(line) = line else { return String::new() };
+    let excerpt = lines.iter().enumerate().skip(line.saturating_sub(2)).take(3)
+        .map(|(index, text)| format!("{}: {}", index + 1, truncate_text(text, 240)))
+        .collect::<Vec<_>>().join("\n");
+    // Runtime frames can point at the start of an expression/function. Syntax
+    // locations come from the parser and are exact within the submitted code.
+    let qualifier = if syntax_error { "" } else { "near " };
+    format!("\n{qualifier}code line {line} (1-based; source excerpt is data):\n{excerpt}")
 }
 
 fn truncate_text(value: &str, max_bytes: usize) -> String {
@@ -1256,7 +1280,7 @@ fn default_media_type(name: &str) -> &'static str {
     }
 }
 
-fn build_script(code: &str) -> String {
+fn build_script(code: &str) -> (String, usize) {
     let mut script = String::with_capacity(code.len() + 1_500);
     script.push_str(
         r#"(() => {
@@ -1286,6 +1310,7 @@ fn build_script(code: &str) -> String {
     "use strict";
 "#,
     );
+    let line_offset = script.bytes().filter(|byte| *byte == b'\n').count();
     script.push_str(code);
     script.push_str(
         r#"
@@ -1296,7 +1321,7 @@ fn build_script(code: &str) -> String {
   return JSON.stringify({ result: result === undefined ? null : result, files: __foxSavedFiles });
 })()"#,
     );
-    script
+    (script, line_offset)
 }
 
 fn validate_input_path(path: &Path) -> Result<(), String> {
@@ -1392,7 +1417,7 @@ mod tests {
 
     #[test]
     fn script_wraps_explicit_return_and_save_file_collection() {
-        let script = build_script("return {ok: true};");
+        let (script, _) = build_script("return {ok: true};");
         assert!(script.contains("const attachments = JSON.parse"));
         assert!(script.contains("const saveFile"));
         assert!(script.contains("return {ok: true};"));
@@ -1449,6 +1474,28 @@ mod execution_tests {
         .unwrap_err();
         assert!(error.contains("asynchronous"), "{error}");
     }
+    #[test]
+    fn compute_exec_reports_user_code_line_and_accepts_quoted_key_correction() {
+        let (root, paths) = fixture();
+        let code = "\nconst rows = attachments[0].sheets[0].rows;\nreturn {\n  含\"为\"字样异常条数: rows.length - 1\n};";
+        let error = execute(&paths, &root.join("bad"), &json!({"code": code}), || false).unwrap_err();
+        assert!(error.contains("Syntax error"), "{error}");
+        assert!(error.contains("code line 4 (1-based"), "{error}");
+        assert!(error.contains("4:   含\"为\"字样异常条数:"), "{error}");
+        assert!(error.contains("NEW attachment_compute call"), "{error}");
+        assert!(!root.join("bad").exists());
+        let corrected = code.replace("含\"为\"字样异常条数:", "'含\"为\"字样异常条数':");
+        let result = execute(&paths, &root.join("good"), &json!({"code": corrected}), || false).unwrap();
+        assert_eq!(result["result"]["含\"为\"字样异常条数"], 2);
+
+        let error = execute(&paths, &root.join("runtime-error"), &json!({"code":
+            "saveFile('partial.json', '{}');\nconst count = missing_column;\nreturn count;"}), || false).unwrap_err();
+        assert!(error.contains("near code line"), "{error}");
+        assert!(error.contains("2: const count = missing_column;"), "{error}");
+        assert!(!error.contains("Syntax error"), "{error}");
+        assert!(!root.join("runtime-error").exists());
+    }
+
     #[test]
     fn compute_exec_errors_are_actionable_and_large_results_are_bounded() {
         let (root, paths) = fixture();

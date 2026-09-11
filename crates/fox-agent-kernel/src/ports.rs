@@ -235,6 +235,13 @@ pub struct RetryState {
     pub provider_max: u32,
     pub turn_attempts: u32,
     pub turn_max: u32,
+    /// Incomplete model answers are retried per logical request, bounded by
+    /// turn_max. A new request requires a new tool batch; run/tool budgets still
+    /// bound the whole run. Kept separate from whole-turn and provider retries.
+    #[serde(default)]
+    pub completion_effect_key: Option<String>,
+    #[serde(default)]
+    pub completion_attempts: u32,
     /// Durable wall-clock anchor and due time for a scheduled whole-turn retry.
     /// Both are needed to survive restart and to fail closed on wall-clock rollback.
     #[serde(default)]
