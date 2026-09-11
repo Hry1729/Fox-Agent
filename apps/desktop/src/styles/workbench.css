@@ -3389,7 +3389,7 @@ button.fox-chat-project-row:disabled {
   flex: 1;
 }
 
-.fox-chain-of-thought-header > svg:last-child {
+.fox-chain-of-thought-header > svg:last-of-type {
   flex: 0 0 16px;
 }
 
@@ -3436,14 +3436,17 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-assistant-avatar.is-lg { width: 84px; height: 84px; flex-basis: 84px; margin: 0 auto 16px; }
 
 .fox-run-status-text {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+  position: relative;
+  display: inline-grid;
+  vertical-align: bottom;
+  max-width: 100%;
   min-width: 0;
   color: var(--fox-muted);
 }
 
-.fox-run-status-text > span:first-child {
+.fox-run-status-label,
+.fox-run-status-light {
+  grid-area: 1 / 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3452,25 +3455,35 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-run-status-text[data-active='true'] { color: var(--fox-text); }
 
-.fox-run-status-dots {
-  display: inline-flex;
-  flex: 0 0 19px;
-  align-items: center;
-  gap: 3px;
-  height: 12px;
+.fox-run-status-light {
+  display: none;
+  pointer-events: none;
 }
 
-.fox-run-status-dots i {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--fox-accent);
-  animation: foxRunStatusDot 1.2s ease-in-out infinite;
+@supports ((background-clip: text) or (-webkit-background-clip: text)) {
+  .fox-run-status-light {
+    display: block;
+    color: transparent;
+    background-image: linear-gradient(90deg, transparent 38%, #1677ff 46%, #56b7ff 50%, #1677ff 54%, transparent 62%);
+    background-size: 260% 100%;
+    background-repeat: no-repeat;
+    background-clip: text;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: foxRunStatusLight 2.4s linear infinite;
+  }
 }
 
-.fox-run-status-dots i:nth-child(2) { animation-delay: 150ms; }
-.fox-run-status-dots i:nth-child(3) { animation-delay: 300ms; }
-@keyframes foxRunStatusDot { 0%, 70%, 100% { opacity: .35; transform: translateY(1px); } 35% { opacity: 1; transform: translateY(-2px); } }
+@keyframes foxRunStatusLight {
+  0% { background-position: 100% 0; }
+  85%, 100% { background-position: 0% 0; }
+}
+
+[aria-hidden='true'] .fox-run-status-light { animation-play-state: paused; }
+
+@media (forced-colors: active) {
+  .fox-run-status-light { display: none; }
+}
 
 .fox-chain-of-thought-header > span > span {
   min-width: 0;
@@ -3611,6 +3624,8 @@ img[src='/avatars/fox-assistant.png'] {
   white-space: nowrap;
 }
 
+.fox-runtime-step-trigger > .fox-run-status-text { flex: 0 1 auto; }
+
 .fox-runtime-step-trigger > small {
   color: var(--fox-faint);
   font-size: 10px;
@@ -3618,6 +3633,8 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-runtime-step-trigger > svg:last-child {
+  flex: 0 0 16px;
+  margin-left: auto;
   color: var(--fox-faint);
   transition: transform .18s ease;
 }
@@ -10016,6 +10033,11 @@ img[src='/avatars/fox-assistant.png'] {
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
     transition-duration: 1ms !important;
+  }
+  /* Keep gentle running feedback without displacing the letters or controls. */
+  .fox-run-status-text[data-active='true'] .fox-run-status-light {
+    animation-duration: 4.8s !important;
+    animation-iteration-count: infinite !important;
   }
 }
 

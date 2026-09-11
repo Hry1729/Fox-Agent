@@ -20,7 +20,7 @@ export function KernelReconciliationPanel({ conversationId, runId, onResumed }: 
   const [drafts, setDrafts] = useState<Record<string, { decision: ReconciliationDecision | ''; note: string; tool: string; args: string }>>({})
   useEffect(() => {
     let current = true
-    setView(null); setOptions({}); setDrafts({}); setError(null); setRecoveryMode('read_only')
+    setView(null); setExpanded(false); setOptions({}); setDrafts({}); setError(null); setRecoveryMode('read_only')
     void desktopClient.reconciliationLoad({ conversationId, runId }).then(value => { if (current) setView(value) })
       .catch(() => { if (current) setError('核对记录暂时无法读取，请刷新重试。') })
     return () => { current = false }
@@ -38,8 +38,8 @@ export function KernelReconciliationPanel({ conversationId, runId, onResumed }: 
   if (!view && !error || view?.items.length === 0) return null
   return <section className="fox-reconciliation" aria-label="中断操作核对" aria-busy={busy}>
     <div className="fox-reconciliation-heading">
-      <div><strong>有执行结果需要核对</strong><p>先核对中断操作，再选择如何继续。</p></div>
-      <Button variant="outline" size="sm" onClick={() => setExpanded(value => !value)} aria-expanded={expanded} aria-controls={`reconciliation-${runId}`}>{expanded ? '收起' : '核对与恢复'}</Button>
+      <div><strong>{view ? '任务中断，部分操作结果待确认' : '恢复记录暂时无法读取'}</strong>{view && <p>核对中断操作后，再选择如何继续。</p>}</div>
+      {view && <Button variant="outline" size="sm" onClick={() => setExpanded(value => !value)} aria-expanded={expanded} aria-controls={`reconciliation-${runId}`}>{expanded ? '收起' : '核对与恢复'}</Button>}
     </div>
     {error && <p role="alert" className="fox-reconciliation-error">{error} <Button variant="ghost" size="sm" disabled={busy} onClick={() => void act(async () => { setView(await desktopClient.reconciliationLoad({ conversationId, runId })) })}>刷新</Button></p>}
     {expanded && view && <div id={`reconciliation-${runId}`} className="fox-reconciliation-body">

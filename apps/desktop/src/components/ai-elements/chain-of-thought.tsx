@@ -71,10 +71,10 @@ export const ChainOfThought = memo(
 
 export type ChainOfThoughtHeaderProps = ComponentProps<
   typeof CollapsibleTrigger
->;
+> & { trailing?: ReactNode };
 
 export const ChainOfThoughtHeader = memo(
-  ({ className, children, ...props }: ChainOfThoughtHeaderProps) => {
+  ({ className, children, trailing, ...props }: ChainOfThoughtHeaderProps) => {
     const { isOpen } = useChainOfThought();
 
     return (
@@ -95,6 +95,7 @@ export const ChainOfThoughtHeader = memo(
             isOpen ? "rotate-180" : "rotate-0"
           )}
         />
+        {trailing}
       </CollapsibleTrigger>
     );
   }

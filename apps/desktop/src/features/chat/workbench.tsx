@@ -1,5 +1,6 @@
 import { HtmlFilePreview } from './html-file-preview'
 import { KernelReconciliationPanel } from './kernel-reconciliation-panel'
+import { runtimeProcessActivity } from './runtime-process-activity'
 import { lazy, memo, Profiler, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { subscribeNotificationRefresh } from '../notification-subscriptions'
 import {
@@ -2044,17 +2045,17 @@ function RuntimeReasoningItem({ detail, running = false }: { detail: string; run
   )
 }
 
-function LiveReasoning({ detail }: { detail: string }) {
+function LiveReasoning({ detail, active }: { detail: string; active: boolean }) {
   const tail = detail.slice(-800)
   return (
     <div className="fox-live-reasoning" aria-label="深度思考">
-      <div className="fox-live-reasoning-head"><Brain size={14} /><span>深度思考</span><small>最近进度 · 展开查看全部</small></div>
+      <div className="fox-live-reasoning-head"><Brain size={14} /><RunStatusText text="深度思考" active={active} /><small>最近进度 · 展开查看全部</small></div>
       <div className="fox-live-reasoning-scroll">{tail}</div>
     </div>
   )
 }
 
-function RuntimeToolItem({ tool }: { tool: RuntimeToolStep }) {
+function RuntimeToolItem({ tool, active }: { tool: RuntimeToolStep; active: boolean }) {
   const ToolIcon = tool.isError
     ? AlertTriangle
     : tool.awaitingUser
@@ -2068,11 +2069,11 @@ function RuntimeToolItem({ tool }: { tool: RuntimeToolStep }) {
           : CircleDot
   return (
     <ChainOfThoughtStep icon={ToolIcon} label={
-      <RuntimeStepDetail label={toolActivity(tool)} active={!tool.completed}>
+      <RuntimeStepDetail label={toolActivity(tool)} active={active}>
         <AIToolInput className="fox-runtime-tool-detail" input={tool.input as never} />
         {tool.completed && <AIToolOutput className="fox-runtime-tool-detail" output={tool.output as never} errorText={tool.isError ? '工具执行失败' : undefined} />}
       </RuntimeStepDetail>
-    } status={tool.awaitingUser ? 'pending' : !tool.completed ? 'active' : 'complete'} />
+    } status={tool.awaitingUser ? 'pending' : active ? 'active' : 'complete'} />
   )
 }
 
@@ -2091,20 +2092,19 @@ function RuntimeStepDetail({ label, active = false, children }: { label: string;
   )
 }
 
-function RuntimeProcess({ events, process: preparedProcess, running, answerStarted = false }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; running: boolean; answerStarted?: boolean }) {
+function RuntimeProcess({ events, process: preparedProcess, running: runtimeRunning, answerStarted = false }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; running: boolean; answerStarted?: boolean }) {
   const [open, setOpen] = useState(false)
   const [visited, setVisited] = useState(false)
   const process = useMemo(() => preparedProcess ?? runtimeProcess(events), [events, preparedProcess])
-  const terminalEvent = [...events].reverse().find((item) => [
-    'run.completed', 'run.cancelled', 'run.failed', 'run.interrupted',
-  ].includes(item.eventType))
+  const activity = useMemo(() => runtimeProcessActivity(events, runtimeRunning, answerStarted), [events, runtimeRunning, answerStarted])
+  const { running, terminalEvent } = activity
   const hasLifecycle = running || Boolean(terminalEvent) || events.some((item) => (
     item.eventType === 'run.started' || item.eventType === 'message.started'
   ))
   const processStepCount = process.tools.length + (process.reasoning ? 1 : 0)
   const lifecycleOnly = processStepCount === 0 && hasLifecycle
   const stepCount = lifecycleOnly ? 1 : processStepCount
-  const activeTool = [...process.tools].reverse().find((tool) => !tool.completed)
+  const activeTool = [...process.tools].reverse().find((tool) => activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser)
   const showLiveReasoning = !open && running && Boolean(process.reasoning) && !answerStarted
   const lifecycleFailed = terminalEvent?.eventType === 'run.failed' || terminalEvent?.eventType === 'run.interrupted'
   const lifecycleCancelled = terminalEvent?.eventType === 'run.cancelled'
@@ -2134,23 +2134,22 @@ function RuntimeProcess({ events, process: preparedProcess, running, answerStart
   if (stepCount === 0 && !running) return null
   return (
     <ChainOfThought open={open} onOpenChange={(next) => { setOpen(next); if (next) setVisited(true) }} className="fox-chain-of-thought fox-runtime-process">
-      <ChainOfThoughtHeader className="fox-chain-of-thought-header">
+      <ChainOfThoughtHeader className="fox-chain-of-thought-header" trailing={<small className="fox-runtime-step-count" aria-label={`${stepCount} 个步骤`}>{stepCount}</small>}>
         <span className={`fox-runtime-process-summary ${running ? 'is-running' : ''}`}>
           <FoxAssistantAvatar />
-          <small className="fox-runtime-step-count" aria-label={`${stepCount} 个步骤`}>{stepCount}</small>
           <RunStatusText text={processTitle} active={running} />
         </span>
       </ChainOfThoughtHeader>
-      {showLiveReasoning && <LiveReasoning detail={process.reasoning} />}
+      {showLiveReasoning && <LiveReasoning detail={process.reasoning} active={activity.reasoning} />}
       {visited && <ChainOfThoughtContent forceMount className="fox-chain-of-thought-content fox-runtime-process-disclosure" aria-hidden={!open} inert={!open}>
         <div className="fox-runtime-process-clip"><div className="fox-runtime-process-scroll">
         {processStepCount > 0 ? <>
-          {process.reasoning && <RuntimeReasoningItem detail={process.reasoning} running={running && !activeTool} />}
-          {process.tools.map((tool) => <RuntimeToolItem key={tool.id} tool={tool} />)}
+          {process.reasoning && <RuntimeReasoningItem detail={process.reasoning} running={activity.reasoning} />}
+          {process.tools.map((tool) => <RuntimeToolItem key={tool.id} tool={tool} active={activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser} />)}
         </> : <ChainOfThoughtStep
           className={`fox-runtime-empty-step ${running ? 'is-running' : 'is-complete'}`}
           icon={running ? LoaderCircle : awaitingUser ? CircleHelp : lifecycleFailed ? AlertTriangle : Check}
-          label={lifecycleLabel}
+          label={<RunStatusText text={lifecycleLabel} active={running} />}
           status={running ? 'active' : awaitingUser ? 'pending' : 'complete'}
         />}
         </div></div>
@@ -2413,6 +2412,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
           return <div id={`fox-turn-${message.id}`} key={message.timelineKey} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onFork={onFork} /></div>
         })}
         {state === 'error' && <div className="fox-turn-anchor"><Message from="assistant" className="fox-message fox-assistant-message"><MessageContent className="fox-assistant-content"><ErrorPrompt onRetry={onRetry} error={runtimeError} errorDetails={runtimeErrorDetails} /></MessageContent></Message></div>}
+        {runtimeContext.recoveryPanel}
       </ConversationContent>
       <ConversationBottomDock plan={planRevision} />
     </Conversation>
@@ -2640,7 +2640,7 @@ type ComposerRuntimeContextValue = {
 
 type TimelineRuntimeContextValue = Pick<ComposerRuntimeContextValue,
   'knowledgeBindings' | 'onOpenSource' | 'assistantName' | 'runModel'
->
+> & { recoveryPanel?: ReactNode }
 
 const ComposerRuntimeContext = createContext<ComposerRuntimeContextValue>({ knowledgeBindings: [] })
 const TimelineRuntimeContext = createContext<TimelineRuntimeContextValue>({ knowledgeBindings: [] })
@@ -5116,12 +5116,23 @@ export function Workbench() {
     refreshKnowledgeChoices()
   })
   const handleKnowledgeToggle = useStableCallback((reference: KnowledgeReference, name: string) => toggleKnowledgeBinding(reference, name))
+  const recoveryConversationId = desktopConversation.detail?.conversation.id
+  const recoveryRunId = desktopConversation.enabled && desktopConversation.detail?.kernelSnapshot?.terminalWritten
+    && desktopConversation.detail.kernelSnapshot.runId === desktopConversation.detail.lastRun?.id
+    ? desktopConversation.detail.lastRun?.id : undefined
+  const handleRecoveryResumed = useStableCallback(async () => {
+    if (recoveryConversationId) await desktopConversation.openConversation(recoveryConversationId)
+  })
+  const recoveryPanel = useMemo(() => recoveryConversationId && recoveryRunId
+    ? <KernelReconciliationPanel key={recoveryRunId} conversationId={recoveryConversationId} runId={recoveryRunId} onResumed={handleRecoveryResumed} />
+    : null, [recoveryConversationId, recoveryRunId, handleRecoveryResumed])
   const timelineRuntimeContextValue = useMemo<TimelineRuntimeContextValue>(() => ({
     knowledgeBindings: desktopConversation.knowledgeBindings,
     assistantName: timelineAssistantName,
     runModel: timelineRunModel,
     onOpenSource: handleRuntimeOpenSource,
-  }), [desktopConversation.knowledgeBindings, handleRuntimeOpenSource, timelineAssistantName, timelineRunModel])
+    recoveryPanel,
+  }), [desktopConversation.knowledgeBindings, handleRuntimeOpenSource, timelineAssistantName, timelineRunModel, recoveryPanel])
   const composerRuntimeContextValue = useMemo<ComposerRuntimeContextValue>(() => ({
     ...timelineRuntimeContextValue,
     remoteKnowledgeBases: knowledge.items,
@@ -5318,7 +5329,7 @@ export function Workbench() {
           <TimelineRuntimeContext.Provider value={timelineRuntimeContextValue}>
           <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
           {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} usage={conversationUsage} contextWindow={modelService.service?.contextWindow ?? 0} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
-<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} /></Profiler>{desktopConversation.enabled && desktopConversation.detail?.kernelSnapshot?.terminalWritten && desktopConversation.detail.lastRun && desktopConversation.detail.kernelSnapshot.runId === desktopConversation.detail.lastRun.id && <KernelReconciliationPanel key={desktopConversation.detail.lastRun.id} conversationId={desktopConversation.detail.conversation.id} runId={desktopConversation.detail.lastRun.id} onResumed={() => desktopConversation.openConversation(desktopConversation.detail!.conversation.id)} />}<Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} suggestedPrompt={suggestedPrompt} chatState={chatState} centered={timelineEmpty} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={activeProject?.permissionMode ?? desktopConversation.detail?.conversation.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? desktopConversation.detail?.approvals ?? EMPTY_RUNTIME_APPROVALS : EMPTY_RUNTIME_APPROVALS} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onDeleteGoal={handleComposerDeleteGoal} onGoalRunningChange={handleComposerGoalRunningChange} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
+<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} /></Profiler><Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} suggestedPrompt={suggestedPrompt} chatState={chatState} centered={timelineEmpty} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={activeProject?.permissionMode ?? desktopConversation.detail?.conversation.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? desktopConversation.detail?.approvals ?? EMPTY_RUNTIME_APPROVALS : EMPTY_RUNTIME_APPROVALS} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onDeleteGoal={handleComposerDeleteGoal} onGoalRunningChange={handleComposerGoalRunningChange} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
           </ComposerRuntimeContext.Provider>
           </TimelineRuntimeContext.Provider>
         </section>
