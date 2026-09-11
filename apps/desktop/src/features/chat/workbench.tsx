@@ -248,6 +248,7 @@ import { WorkspaceShell } from '@/features/workspace/workspace-shell'
 import { LocalKnowledgeSidebarNavigation } from '@/features/local-knowledge/local-knowledge-sidebar'
 import { FOX_ASSISTANT_AVATAR, FoxAssistantAvatar, RunStatusText } from './components/FoxAssistantAvatar'
 import { ReasoningText } from './components/ReasoningText'
+import { NewConversationMascot } from './components/NewConversationMascot'
 import { GoalProgress } from './components/GoalProgress'
 import { ExpertActivationCard, ExpertBindingChip, type ExpertBindingView } from './components/ExpertBindingChip'
 import { expertErrorMessage, expertErrorPresentation, expertInteractionLocked, latestExpertToolAvailability, mergeExpertBindingsIntoTimeline, type ExpertToolAvailability } from './components/expert-binding-ui'
@@ -2435,7 +2436,7 @@ function Timeline({ empty, state, prompt, openingSuggestions, runtimeMessages, r
         <ConversationViewportState />
         <ConversationEmptyState className="fox-empty-conversation">
           <div className="fox-empty-heading">
-            <FoxAssistantAvatar size="lg" />
+            <NewConversationMascot />
             <div className="fox-empty-heading-copy"><h2>今天想一起做点什么？</h2><p>Fox 可以和你对话、处理本地文件，也可以从知识库中检索资料。</p></div>
           </div>
           <Suggestions className="fox-starter-suggestions">
