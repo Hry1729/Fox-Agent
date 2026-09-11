@@ -894,6 +894,30 @@ pub(crate) fn extract_office_text(bytes: &[u8], filename: &str) -> Result<Option
     parse_zip_based_text(bytes, kind).map(Some).map_err(|error| error.to_string())
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AttachmentSheetOutline {
+    pub name: String,
+    pub name_truncated: bool,
+    pub offset: usize,
+    pub preview: String,
+}
+
+/// The XLSX directory uses the same extraction pass and Unicode offsets as the
+/// paginated attachment reader. Other Office formats preserve their existing path.
+pub(crate) fn extract_office_text_with_outline(bytes: &[u8], filename: &str)
+    -> Result<(Option<String>, Vec<AttachmentSheetOutline>, Option<usize>), String>
+{
+    if Path::new(filename).extension().and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("xlsx"))
+    {
+        let archive = SafeZipArchive::new(bytes).map_err(|error| error.to_string())?;
+        let (text, sheets, count) = ooxml::xlsx_text_with_outline(&archive).map_err(|error| error.to_string())?;
+        return Ok((Some(text), sheets, Some(count)));
+    }
+    extract_office_text(bytes, filename).map(|text| (text, Vec::new(), None))
+}
+
 fn extract_legacy_xls(bytes: &[u8]) -> Result<String, String> {
     use calamine::{Reader, Xls};
     let mut workbook = Xls::new(std::io::Cursor::new(bytes))
@@ -2153,6 +2177,17 @@ mod tests {
         assert!(text.contains("E2: (no cached value)"));
         assert!(text.find("[Sheet: AGV统计]").unwrap() < text.find("[Sheet: 第二页]").unwrap());
         assert!(extract_office_text(bytes, "old.xls").is_err());
+        let (outlined, sheets, count) = extract_office_text_with_outline(bytes, "AGV.xlsx").unwrap();
+        assert_eq!(outlined.as_deref(), Some(text.as_str()));
+        assert_eq!(count, Some(2));
+        assert_eq!(sheets.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["AGV统计", "第二页"]);
+        for sheet in sheets {
+            let suffix = text.chars().skip(sheet.offset).collect::<String>();
+            assert!(suffix.starts_with(&format!("[Sheet: {}]", sheet.name)));
+            assert!(suffix.starts_with(&sheet.preview));
+            assert!(sheet.preview.chars().count() <= 400);
+            assert!(!sheet.name_truncated);
+        }
     }
 
     #[test]

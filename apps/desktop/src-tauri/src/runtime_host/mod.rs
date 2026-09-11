@@ -6636,7 +6636,8 @@ fn read_attachment_text(
         return Err("Attachment is not a readable file within the 5 MiB limit".to_owned());
     }
     let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
-    let text = if let Some(text) = crate::local_knowledge_import::extract_office_text(&bytes, &attachment.display_name)? {
+    let (office_text, sheets, sheet_count) = crate::local_knowledge_import::extract_office_text_with_outline(&bytes, &attachment.display_name)?;
+    let text = if let Some(text) = office_text {
         text
     } else if attachment_is_docx(&attachment.display_name, attachment.media_type.as_deref()) {
         extract_docx_text(&bytes)?
@@ -6663,6 +6664,9 @@ fn read_attachment_text(
         "nextOffset": page["nextOffset"],
         "totalCharacters": page["totalCharacters"],
         "hasMore": page["hasMore"],
+        "sheets": sheets,
+        "sheetCount": sheet_count,
+        "sheetDirectoryTruncated": sheet_count.is_some_and(|count| count > sheets.len()),
     }))
 }
 
@@ -10278,6 +10282,32 @@ mod attachment_tests {
         assert_eq!(recovered, text);
         assert!(super::attachment_text_page(&text, &json!({"offset":-1})).is_err());
         assert!(super::attachment_text_page(&text, &json!({"offset":9999999})).is_err());
+    }
+
+    #[test]
+    fn attachment_sheet_directory_jumps_to_unicode_sheet_without_scanning() {
+        let root = std::env::temp_dir().join(format!("fox-sheet-directory-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = Database::open(root.join("test.db")).unwrap();
+        let conversation = database.create_conversation(database.default_agent_id(), None, None, None).unwrap();
+        let file = root.join("AGV.xlsx");
+        let bytes = include_bytes!("../../tests/fixtures/office-reading.xlsx");
+        std::fs::write(&file, bytes).unwrap();
+        database.add_attachments(&[crate::database::AttachmentRecord {
+            id: "agv".into(), conversation_id: conversation.id.clone(), message_id: None,
+            display_name: "AGV.xlsx".into(), storage_path: file.to_string_lossy().into_owned(),
+            media_type: None, byte_size: bytes.len() as i64, sha256: None, status: "ready".into(), created_at: 0,
+        }]).unwrap();
+        let overview = super::read_attachment_text(&database, &root, &conversation.id, "agv", &json!({"limit": 1})).unwrap();
+        assert_eq!(overview["sheetCount"], 2);
+        assert_eq!(overview["sheetDirectoryTruncated"], false);
+        assert_eq!(overview["sheets"][1]["name"], "第二页");
+        let direct = super::read_attachment_text(&database, &root, &conversation.id, "agv", &json!({"offset":overview["sheets"][1]["offset"]})).unwrap();
+        assert!(direct["text"].as_str().unwrap().starts_with("[Sheet: 第二页]"));
+        assert!(super::read_attachment_text(&database, &root, "foreign", "agv", &json!({})).is_err());
+        assert!(serde_json::to_vec(&overview).unwrap().len() < super::MAX_PROTOCOL_LINE_BYTES / 2);
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -80,7 +80,6 @@ import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable, knowledgeR
 import { normalizeProjectPermission, selectProjectRoot, validPickedProjectFolder } from './project-access-dialog-state'
 import { filterKnowledgePickerItems, localKnowledgePickerState } from './knowledge-picker-state'
 import { Button } from '@/components/ui/button'
-import { ShinyText } from '@/components/effects/shiny-text'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -247,7 +246,8 @@ import type { KnowledgeSourceLocator, NavigateWorkspace, WorkspaceView } from '@
 import { captureManagementReturnRoutes, managementExitRoute, SETTINGS_WORKSPACE_VIEWS, type ManagementReturnRoutes } from '@/features/workspace/management-navigation'
 import { WorkspaceShell } from '@/features/workspace/workspace-shell'
 import { LocalKnowledgeSidebarNavigation } from '@/features/local-knowledge/local-knowledge-sidebar'
-import { idleMascots, mascotAt, mascotLibrary, workingMascots } from './mascot-library'
+import { FOX_ASSISTANT_AVATAR, FoxAssistantAvatar, RunStatusText } from './components/FoxAssistantAvatar'
+import { ReasoningText } from './components/ReasoningText'
 import { GoalProgress } from './components/GoalProgress'
 import { ExpertActivationCard, ExpertBindingChip, type ExpertBindingView } from './components/ExpertBindingChip'
 import { expertErrorMessage, expertErrorPresentation, expertInteractionLocked, latestExpertToolAvailability, mergeExpertBindingsIntoTimeline, type ExpertToolAvailability } from './components/expert-binding-ui'
@@ -256,7 +256,7 @@ import type { MessageResponseProps } from '@/components/ai-elements/message-resp
 import { normalizeAssistantMarkdown } from '@/features/conversations/model/assistant-presentation'
 import { UserProfileDialog, useUserProfile } from '@/features/profile/user-profile'
 import { childRunIsActive, childRunStatusLabel, formatDurationMs, isWebToolCall, latestConversationContextUsage, normalizeBrowserUrl, webActivitySummary, type ConversationUsage } from './sidebar-model'
-import { EMPTY_RUNTIME_ARTIFACTS, EMPTY_RUNTIME_EVENTS, groupRuntimeRecords, latestRunAssistantId, assistantDisplayContent } from './runtime-timeline-performance'
+import { EMPTY_RUNTIME_ARTIFACTS, EMPTY_RUNTIME_EVENTS, groupRuntimeRecords, latestRunAssistantId, groupAssistantContinuations } from './runtime-timeline-performance'
 import { approvalPresentation } from '../conversations/model/approval-presentation'
 
 const OnboardingPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.OnboardingPage })))
@@ -283,24 +283,7 @@ function MarkdownResponse({ children, ...props }: MessageResponseProps) {
   )
 }
 
-const mascotAssets = {
-  brand: '/mascot/fox/idle/fox_sit_nicely.png',
-  idle: '/mascot/fox/idle/fox_sit_nicely.png',
-  rest: '/mascot/fox/idle/fox_calm.png',
-  sleep: '/mascot/fox/idle/fox_sleep_on_moon.png',
-  work: '/mascot/fox/thinking/fox_think.png',
-  welcome: '/mascot/fox/status/fox_sayhi.png',
-  search: '/mascot/fox/thinking/fox_detective.png',
-  laptop: '/mascot/fox/tools/fox_use_computer.png',
-  wrench: '/mascot/fox/tools/fox_repair_hand_wrench.png',
-  write: '/mascot/fox/thinking/fox_write_notes.png',
-  files: '/mascot/fox/tools/fox_carry_files.png',
-  checklist: '/mascot/fox/tools/fox_complete_checklist.png',
-  cheer: '/mascot/fox/status/fox_celebrate.png',
-  offline: '/mascot/fox/status/fox_worried.png'
-} as const
 
-const mascot = mascotAssets.idle
 const layoutStorage = {
   sidebarCollapsed: 'fox.layout.sidebarCollapsed',
   sidebarWidth: 'fox.layout.sidebarWidth',
@@ -490,23 +473,6 @@ function IconButton({
     </Tooltip>
   )
 }
-function WorkMascot({ busy = false, size = 'sm' }: { busy?: boolean; size?: 'sm' | 'md' }) {
-  return (
-    <span className={`fox-work-mascot is-${size} ${busy ? 'is-busy' : ''}`} aria-hidden="true">
-      <span className="fox-work-current" />
-      <span className="fox-work-wave is-back" />
-      <span className="fox-work-track">
-        <span className="fox-work-body">
-          <img src={busy ? mascotAssets.work : mascot} alt="" />
-        </span>
-      </span>
-      <span className="fox-work-wave is-front" />
-      <span className="fox-work-foam" />
-      <span className="fox-work-bubbles" />
-    </span>
-  )
-}
-
 function globalSearchKindLabel(kind: GlobalSearchRecord['kind']): string {
   return ({
     conversation: '对话', project: '项目', agent: '专家', digital_colleague: '数字同事',
@@ -931,7 +897,7 @@ function WindowTitlebar({ leftSidebarCollapsed, onNewChat, onOpenProject, onSett
   return (
     <header className="fox-window-titlebar" data-tauri-drag-region>
       <div className="fox-window-product" data-tauri-drag-region>
-        <img src={mascotAssets.brand} alt="" />
+        <img src={FOX_ASSISTANT_AVATAR} alt="" />
         <strong>Fox</strong>
         <div className="fox-titlebar-sidebar-controls" aria-label="侧边栏控制">
           <button type="button" aria-label={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} title={leftSidebarCollapsed ? '展开左侧边栏' : '收起左侧边栏'} aria-pressed={!leftSidebarCollapsed} onClick={onToggleSidebar}><PanelLeft /></button>
@@ -1582,7 +1548,7 @@ function AssistantProcess({ running = false }: { running?: boolean }) {
   return (
     <ChainOfThought open={open} onOpenChange={setOpen} className="fox-chain-of-thought">
       <ChainOfThoughtHeader className="fox-chain-of-thought-header">
-        {running ? <ShinyText text="正在处理" speed={2.05} className="fox-runtime-status-text" /> : <span>工作过程（7 步）</span>}
+        {running ? <RunStatusText text="正在处理" /> : <span>工作过程（7 步）</span>}
         {!running && <small>· 思考 10 秒</small>}
       </ChainOfThoughtHeader>
       <ChainOfThoughtContent className="fox-chain-of-thought-content">
@@ -1633,7 +1599,7 @@ function ApprovalPrompt({ onApprove, onDeny }: { onApprove: () => void; onDeny: 
     <Confirmation approval={{ id: 'fox-write-file' }} state="approval-requested" className="fox-confirmation">
       <ConfirmationRequest>
         <div className="fox-confirmation-body">
-          <span className="fox-prompt-figure"><img src={mascotAssets.wrench} alt="" /></span>
+          <span className="fox-prompt-figure"><img src={FOX_ASSISTANT_AVATAR} alt="" /></span>
           <div><ConfirmationTitle>允许 Fox 修改本地文件？</ConfirmationTitle><p><code>apps/desktop/src/styles/workbench.css</code></p><small>Fox 将写入此工作区中的一个文件。你可以在 Changes 面板检查修改。</small></div>
         </div>
         <ConfirmationActions className="fox-confirmation-actions">
@@ -1692,7 +1658,7 @@ function DeniedPrompt() {
     <Confirmation approval={{ id: 'fox-write-file', approved: false }} state="approval-responded" className="fox-denied-confirmation">
       <ConfirmationRejected>
         <div className="fox-denied-prompt">
-          <img className="fox-inline-mascot" src={mascotAssets.cheer} alt="" />
+          <img className="fox-inline-mascot" src={FOX_ASSISTANT_AVATAR} alt="" />
           <span><strong>操作已取消</strong><small>Fox 没有修改任何本地文件。</small></span>
         </div>
       </ConfirmationRejected>
@@ -1737,7 +1703,7 @@ function ErrorPrompt({ onRetry, error, errorDetails }: { onRetry: () => void; er
   const presentation = errorPresentation(error, errorDetails)
   return (
     <div className="fox-error-prompt" role="alert">
-      <span className="fox-prompt-figure"><img src={mascotAssets.offline} alt="" /></span>
+      <span className="fox-prompt-figure"><img src={FOX_ASSISTANT_AVATAR} alt="" /></span>
       <div><strong>{presentation.title}</strong><p>{presentation.description}</p>{presentation.detail && <small>{presentation.detail}</small>}</div>
       {presentation.retryable !== false && <Button size="sm" variant="outline" onClick={onRetry}><RotateCcw size={14} />{presentation.retryLabel ?? '重试'}</Button>}
     </div>
@@ -1754,7 +1720,7 @@ function QuestionPrompt({ onAnswer }: { onAnswer: (answer: string) => void }) {
   return (
     <div className="fox-question-prompt">
       <div className="fox-question-heading">
-        <span className="fox-prompt-figure"><img src={mascotAssets.search} alt="" /></span>
+        <span className="fox-prompt-figure"><img src={FOX_ASSISTANT_AVATAR} alt="" /></span>
         <div><strong>你希望我怎样处理这些文件？</strong><p>确认执行方式后，Fox 会继续当前任务。</p></div>
       </div>
       <div className="fox-question-options">
@@ -2073,20 +2039,16 @@ const MemoizedRuntimeAssistantMessage = memo(RuntimeAssistantMessage, (previous,
 
 function RuntimeReasoningItem({ detail, running = false }: { detail: string; running?: boolean }) {
   return (
-    <ChainOfThoughtStep icon={Brain} label={<RuntimeStepDetail label="深度思考" active={running}><div className="fox-chain-detail fox-reasoning-card"><MarkdownResponse>{detail}</MarkdownResponse></div></RuntimeStepDetail>} status={running ? 'active' : 'complete'} />
+    <ChainOfThoughtStep icon={Brain} label={<RuntimeStepDetail label="深度思考" active={running}><ReasoningText text={detail} /></RuntimeStepDetail>} status={running ? 'active' : 'complete'} />
   )
 }
 
 function LiveReasoning({ detail }: { detail: string }) {
-  const scrollRef = useRef<HTMLDivElement | null>(null)
-  useEffect(() => {
-    const node = scrollRef.current
-    if (node) node.scrollTop = node.scrollHeight
-  }, [detail])
+  const tail = detail.slice(-800)
   return (
     <div className="fox-live-reasoning" aria-label="深度思考">
-      <div className="fox-live-reasoning-head"><Brain size={14} /><span>深度思考</span><small>进行中</small></div>
-      <div ref={scrollRef} className="fox-live-reasoning-scroll"><MarkdownResponse>{detail}</MarkdownResponse></div>
+      <div className="fox-live-reasoning-head"><Brain size={14} /><span>深度思考</span><small>最近进度 · 展开查看全部</small></div>
+      <div className="fox-live-reasoning-scroll">{tail}</div>
     </div>
   )
 }
@@ -2114,18 +2076,23 @@ function RuntimeToolItem({ tool }: { tool: RuntimeToolStep }) {
 }
 
 function RuntimeStepDetail({ label, active = false, children }: { label: string; active?: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(false)
+  const [visited, setVisited] = useState(false)
   return (
-    <Collapsible defaultOpen={false} className="fox-runtime-step-detail">
+    <Collapsible open={open} onOpenChange={(next) => { setOpen(next); if (next) setVisited(true) }} className="fox-runtime-step-detail">
       <CollapsibleTrigger className="fox-runtime-step-trigger">
-        {active ? <ShinyText text={label} speed={2.05} className="fox-runtime-step-shiny" /> : <span>{label}</span>}{active && <small>处理中</small>}<ChevronRight />
+        <RunStatusText text={label} active={active} /><ChevronRight />
       </CollapsibleTrigger>
-      <CollapsibleContent className="fox-runtime-step-content">{children}</CollapsibleContent>
+      {visited && <CollapsibleContent forceMount className="fox-runtime-step-content" aria-hidden={!open} inert={!open}>
+        <div className="fox-runtime-detail-clip"><div className="fox-runtime-detail-panel">{children}</div></div>
+      </CollapsibleContent>}
     </Collapsible>
   )
 }
 
 function RuntimeProcess({ events, process: preparedProcess, running, answerStarted = false }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; running: boolean; answerStarted?: boolean }) {
   const [open, setOpen] = useState(false)
+  const [visited, setVisited] = useState(false)
   const process = useMemo(() => preparedProcess ?? runtimeProcess(events), [events, preparedProcess])
   const terminalEvent = [...events].reverse().find((item) => [
     'run.completed', 'run.cancelled', 'run.failed', 'run.interrupted',
@@ -2137,7 +2104,7 @@ function RuntimeProcess({ events, process: preparedProcess, running, answerStart
   const lifecycleOnly = processStepCount === 0 && hasLifecycle
   const stepCount = lifecycleOnly ? 1 : processStepCount
   const activeTool = [...process.tools].reverse().find((tool) => !tool.completed)
-  const showLiveReasoning = running && Boolean(process.reasoning) && !answerStarted
+  const showLiveReasoning = !open && running && Boolean(process.reasoning) && !answerStarted
   const lifecycleFailed = terminalEvent?.eventType === 'run.failed' || terminalEvent?.eventType === 'run.interrupted'
   const lifecycleCancelled = terminalEvent?.eventType === 'run.cancelled'
   const awaitingUser = terminalEvent?.eventType === 'run.completed'
@@ -2165,18 +2132,19 @@ function RuntimeProcess({ events, process: preparedProcess, running, answerStart
 
   if (stepCount === 0 && !running) return null
   return (
-    <ChainOfThought open={open} onOpenChange={setOpen} className="fox-chain-of-thought fox-runtime-process">
+    <ChainOfThought open={open} onOpenChange={(next) => { setOpen(next); if (next) setVisited(true) }} className="fox-chain-of-thought fox-runtime-process">
       <ChainOfThoughtHeader className="fox-chain-of-thought-header">
         <span className={`fox-runtime-process-summary ${running ? 'is-running' : ''}`}>
-          <WorkMascot busy={running} />
+          <FoxAssistantAvatar />
           <small className="fox-runtime-step-count" aria-label={`${stepCount} 个步骤`}>{stepCount}</small>
-          {running ? <ShinyText text={processTitle} speed={2.05} className="fox-runtime-status-text" /> : <span>{processTitle}</span>}
+          <RunStatusText text={processTitle} active={running} />
         </span>
       </ChainOfThoughtHeader>
       {showLiveReasoning && <LiveReasoning detail={process.reasoning} />}
-      <ChainOfThoughtContent className="fox-chain-of-thought-content">
+      {visited && <ChainOfThoughtContent forceMount className="fox-chain-of-thought-content fox-runtime-process-disclosure" aria-hidden={!open} inert={!open}>
+        <div className="fox-runtime-process-clip"><div className="fox-runtime-process-scroll">
         {processStepCount > 0 ? <>
-          {process.reasoning && !showLiveReasoning && <RuntimeReasoningItem detail={process.reasoning} running={running && !activeTool} />}
+          {process.reasoning && <RuntimeReasoningItem detail={process.reasoning} running={running && !activeTool} />}
           {process.tools.map((tool) => <RuntimeToolItem key={tool.id} tool={tool} />)}
         </> : <ChainOfThoughtStep
           className={`fox-runtime-empty-step ${running ? 'is-running' : 'is-complete'}`}
@@ -2184,7 +2152,8 @@ function RuntimeProcess({ events, process: preparedProcess, running, answerStart
           label={lifecycleLabel}
           status={running ? 'active' : awaitingUser ? 'pending' : 'complete'}
         />}
-      </ChainOfThoughtContent>
+        </div></div>
+      </ChainOfThoughtContent>}
     </ChainOfThought>
   )
 }
@@ -2299,8 +2268,9 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
     }
     return visible
   }, [activeRunId, eventsByRunId, pendingMessage, runtimeRunning, storedMessages, streamingText])
-  const timelineEntries = useMemo(() => mergeExpertBindingsIntoTimeline(visibleMessages, expertBindings), [expertBindings, visibleMessages])
   const streamTargetId = useMemo(() => latestRunAssistantId(visibleMessages, activeRunId), [visibleMessages, activeRunId])
+  const groupedMessages = useMemo(() => groupAssistantContinuations(visibleMessages, streamTargetId, streamingText), [visibleMessages, streamTargetId, streamingText])
+  const timelineEntries = useMemo(() => mergeExpertBindingsIntoTimeline(groupedMessages, expertBindings), [expertBindings, groupedMessages])
   const latestUserMessageId = useMemo(() => {
     for (let index = visibleMessages.length - 1; index >= 0; index -= 1) {
       if (visibleMessages[index].role === 'user') return visibleMessages[index].id
@@ -2354,7 +2324,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
     <Conversation className="fox-conversation">
       <ConversationAutoScroll scrollKey={autoScrollKey} />
       <ConversationViewportState />
-      <ConversationTurnRail messages={visibleMessages} artifacts={artifacts} />
+      <ConversationTurnRail messages={groupedMessages} artifacts={artifacts} />
       <ConversationContent className="fox-conversation-content" scrollClassName="fox-conversation-scroll">
         {hasEarlierMessages && <div className="fox-history-loader"><Button variant="ghost" size="sm" disabled={loadingEarlierMessages} onClick={onLoadEarlierMessages}>{loadingEarlierMessages && <LoaderCircle className="animate-spin" />}加载更早消息</Button></div>}
         <div className="fox-thread-date"><span>今天</span></div>
@@ -2405,7 +2375,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
             </div>
           }
           const isCurrentRun = Boolean(activeRunId && message.runId === activeRunId)
-          const rawContent = assistantDisplayContent(message, streamTargetId, streamingText)
+          const rawContent = message.content
           const parsedCacheKey = `${message.id}:${rawContent}`
           let parsed = parsedContentCacheRef.current.get(parsedCacheKey)
           if (!parsed) {
@@ -2439,7 +2409,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
           const messageArtifacts = message.runId ? artifactsByRunId.get(message.runId) ?? EMPTY_RUNTIME_ARTIFACTS : EMPTY_RUNTIME_ARTIFACTS
           const eventModel = processEvents.find((item) => item.eventType === 'run.started' && typeof item.event.model === 'string')?.event.model as string | undefined
           const displayMessage = rawContent === message.content ? message : { ...message, content: rawContent }
-          return <div id={`fox-turn-${message.id}`} key={`assistant-turn-${message.id}`} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onFork={onFork} /></div>
+          return <div id={`fox-turn-${message.id}`} key={message.timelineKey} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onFork={onFork} /></div>
         })}
         {state === 'error' && <div className="fox-turn-anchor"><Message from="assistant" className="fox-message fox-assistant-message"><MessageContent className="fox-assistant-content"><ErrorPrompt onRetry={onRetry} error={runtimeError} errorDetails={runtimeErrorDetails} /></MessageContent></Message></div>}
       </ConversationContent>
@@ -2448,7 +2418,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
   )
 }
 
-function Timeline({ empty, state, prompt, mascotSrc, mascotActive = false, openingSuggestions, runtimeMessages, runtimeAttachments, runtimeArtifacts, expertBindings, agents, pendingMessage, runtimeEvents, runtimeRunId, runtimeRunModel, runtimeRunning = false, runtimeReply, runtimeError, runtimeErrorDetails, assistantName, planRevisions, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onApprove, onDeny, onRetry, onRerun, onFork, onAnswer, onStart, onOpenSource, onOpenArtifact, onViewExpert }: { empty: boolean; state: ChatState; prompt: string; mascotSrc?: string; mascotActive?: boolean; openingSuggestions?: string[]; runtimeMessages?: ConversationMessage[]; runtimeAttachments?: AttachmentRecord[]; runtimeArtifacts?: ArtifactRecord[]; expertBindings?: ExpertBindingView[]; agents?: AgentRecord[]; pendingMessage?: ConversationMessage | null; runtimeEvents?: RunEventRecord[]; runtimeRunId?: string; runtimeRunModel?: string; runtimeRunning?: boolean; runtimeReply?: string; runtimeError?: string | null; runtimeErrorDetails?: DesktopErrorDetails | null; assistantName?: string; planRevisions?: GoalProgressData['planRevisions']; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onApprove: () => void; onDeny: () => void; onRetry: () => void; onRerun: (messageId: string, prompt: string) => Promise<boolean>; onFork?: (messageId: string) => void; onAnswer: (answer: string) => void; onStart: (suggestion: string) => void; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onViewExpert?: (expertId: string) => void }) {
+function Timeline({ empty, state, prompt, openingSuggestions, runtimeMessages, runtimeAttachments, runtimeArtifacts, expertBindings, agents, pendingMessage, runtimeEvents, runtimeRunId, runtimeRunModel, runtimeRunning = false, runtimeReply, runtimeError, runtimeErrorDetails, assistantName, planRevisions, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onApprove, onDeny, onRetry, onRerun, onFork, onAnswer, onStart, onOpenSource, onOpenArtifact, onViewExpert }: { empty: boolean; state: ChatState; prompt: string; openingSuggestions?: string[]; runtimeMessages?: ConversationMessage[]; runtimeAttachments?: AttachmentRecord[]; runtimeArtifacts?: ArtifactRecord[]; expertBindings?: ExpertBindingView[]; agents?: AgentRecord[]; pendingMessage?: ConversationMessage | null; runtimeEvents?: RunEventRecord[]; runtimeRunId?: string; runtimeRunModel?: string; runtimeRunning?: boolean; runtimeReply?: string; runtimeError?: string | null; runtimeErrorDetails?: DesktopErrorDetails | null; assistantName?: string; planRevisions?: GoalProgressData['planRevisions']; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onApprove: () => void; onDeny: () => void; onRetry: () => void; onRerun: (messageId: string, prompt: string) => Promise<boolean>; onFork?: (messageId: string) => void; onAnswer: (answer: string) => void; onStart: (suggestion: string) => void; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onViewExpert?: (expertId: string) => void }) {
   const running = state === 'running'
   const latestPlanRevision = planRevisions?.reduce((latest, plan) => !latest || plan.revision > latest.revision ? plan : latest, undefined as GoalProgressData['planRevisions'][number] | undefined)
   const starterSuggestions = openingSuggestions?.map((item) => item.trim()).filter(Boolean).slice(0, 6)
@@ -2465,7 +2435,7 @@ function Timeline({ empty, state, prompt, mascotSrc, mascotActive = false, openi
         <ConversationViewportState />
         <ConversationEmptyState className="fox-empty-conversation">
           <div className="fox-empty-heading">
-            {mascotSrc && <div className={`fox-empty-mascot ${mascotActive ? 'is-active' : ''}`} aria-hidden="true"><img key={mascotSrc} src={mascotSrc} alt="" /></div>}
+            <FoxAssistantAvatar size="lg" />
             <div className="fox-empty-heading-copy"><h2>今天想一起做点什么？</h2><p>Fox 可以和你对话、处理本地文件，也可以从知识库中检索资料。</p></div>
           </div>
           <Suggestions className="fox-starter-suggestions">
@@ -2494,7 +2464,7 @@ function Timeline({ empty, state, prompt, mascotSrc, mascotActive = false, openi
           <MessageContent className="fox-assistant-content">
             {(state === 'running' || state === 'complete') && <AssistantProcess running={running} />}
             {state === 'question' ? null : state === 'error' ? <ErrorPrompt onRetry={onRetry} /> : state === 'denied' ? <DeniedPrompt /> : state === 'approval' ? null : running ? (
-              <div className="fox-live-response"><WorkMascot busy /><ShinyText text="正在连接知识库并整理结果" speed={2.05} className="fox-runtime-status-text" /><i><b /><b /><b /></i></div>
+              <div className="fox-live-response"><FoxAssistantAvatar /><RunStatusText text="正在连接知识库并整理结果" /><i><b /><b /><b /></i></div>
             ) : <>
               <div className="fox-answer-body">
                 <h2>Kun 的许可证</h2>
@@ -2802,7 +2772,7 @@ function GoalFloater({ chatState, data, onDelete, onRunningChange, onEvidenceCli
   )
 }
 
-function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, centered = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], usage, knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], mascotSrc, mascotActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onDeleteGoal, onGoalRunningChange, onEvidenceClick, onStatusChange, onCancel }: { resetKey: number; suggestedPrompt?: string; chatState: ChatState; showGoal?: boolean; centered?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; usage?: ConversationUsage; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; mascotSrc?: string; mascotActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onDeleteGoal?: (goalId: string) => Promise<boolean>; onGoalRunningChange?: (goalId: string, expectedVersion: number, running: boolean) => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
+function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, centered = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], usage, knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onDeleteGoal, onGoalRunningChange, onEvidenceClick, onStatusChange, onCancel }: { resetKey: number; suggestedPrompt?: string; chatState: ChatState; showGoal?: boolean; centered?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; usage?: ConversationUsage; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onDeleteGoal?: (goalId: string) => Promise<boolean>; onGoalRunningChange?: (goalId: string, expectedVersion: number, running: boolean) => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
   const runtimeContext = useContext(ComposerRuntimeContext)
   const resolveRuntimeApproval = onResolveApproval
   const activeQuestionRequest = questionRequest ?? runtimeContext.questionRequest
@@ -3051,7 +3021,6 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
     <div ref={composerRef} className={`fox-composer-wrap ${centered ? 'is-empty' : ''}`}>
       {(showGoal || goalProgressData) && <GoalFloater chatState={chatState} data={goalProgressData} onDelete={onDeleteGoal} onRunningChange={onGoalRunningChange} onEvidenceClick={onEvidenceClick} onResolveConfirmation={onResolveWorkModeConfirmation} onResolvePlanRevision={onResolvePlanRevision} onResolveWorkflowGate={onResolveWorkflowGate} />}
       <div ref={promptRef} className={`fox-prompt-shell ${decisionPending ? 'is-decision' : ''} ${approvalDecisionPending ? 'is-approval' : ''}`} onFocusCapture={() => setFocused(true)} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false) }}>
-        {mascotSrc && !decisionPending && !commandOpen && !mentionOpen && <div className={`fox-composer-mascot ${mascotActive ? 'is-active' : ''}`} aria-hidden="true"><img key={mascotSrc} src={mascotSrc} alt="" /></div>}
         {decisionPending ? <div className="fox-decision-card">
           {demoApprovalPending && onApprove && onDeny && <ApprovalPrompt onApprove={onApprove} onDeny={onDeny} />}
           {activeApproval && resolveRuntimeApproval && <div className="fox-decision-approval-list">
@@ -3784,7 +3753,7 @@ function BrowserPanel({ detail }: { detail: ConversationDetail | null }) {
       {activeTab === 'page'
         ? browserUrl
           ? <div className="fox-browser-frame-wrap"><WebPreviewBody key={`${browserUrl}:${frameVersion}`} className="fox-browser-frame" src={browserUrl} /><p><ShieldCheck size={12} />网页运行在隔离预览中；若网站拒绝嵌入，请点击右上角外部打开。</p></div>
-          : <div className="fox-browser-empty"><img className="fox-panel-mascot" src={mascotAssets.search} alt="" /><strong>输入网址即可手动预览</strong><span>这里不能代替 Agent 操作网页；真实联网调用与结果保留在“网络记录”中。</span></div>
+          : <div className="fox-browser-empty"><img className="fox-panel-mascot" src={FOX_ASSISTANT_AVATAR} alt="" /><strong>输入网址即可手动预览</strong><span>这里不能代替 Agent 操作网页；真实联网调用与结果保留在“网络记录”中。</span></div>
         : webCalls.length > 0
           ? <ScrollArea className="fox-browser-activity"><div>{webCalls.map((tool) => {
               const summary = webActivitySummary(tool)
@@ -3901,7 +3870,7 @@ function childAgentVisualQaRuns(): ChildRunRecord[] {
   ]
 }
 
-const childAgentAvatars = [mascotAssets.search, mascotAssets.laptop, mascotAssets.checklist, mascotAssets.wrench]
+const childAgentAvatars = [FOX_ASSISTANT_AVATAR, FOX_ASSISTANT_AVATAR, FOX_ASSISTANT_AVATAR, FOX_ASSISTANT_AVATAR]
 const collapsedChildAgentLimit = 10
 
 function ChildAgentPanel({ detail, onOpenChildAgent }: { detail: ConversationDetail | null; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void }) {
@@ -4397,8 +4366,6 @@ export function Workbench() {
   const [rightWidth, setRightWidth] = useState(() => childAgentVisualQaPanelWidth() ?? readStoredNumber(layoutStorage.rightWidth, 360, 280, 760))
   const [seenChangeCounts, setSeenChangeCounts] = useState<Record<string, number>>(readStoredSeenChanges)
   const [dark, setDark] = useState(() => typeof window !== 'undefined' && window.localStorage.getItem(layoutStorage.theme) === 'dark')
-  const [mascotIndex, setMascotIndex] = useState(0)
-  const [mascotCelebrating, setMascotCelebrating] = useState(false)
   const [compactLayout, setCompactLayout] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 1180px)').matches)
   const [compactRightOpen, setCompactRightOpen] = useState(false)
   const [emptyConversation, setEmptyConversation] = useState(false)
@@ -4438,8 +4405,6 @@ export function Workbench() {
     return () => window.removeEventListener(CONVERSATION_FORK_EVENT, handleFork)
   }, [desktopConversation.error, desktopConversation.forkConversation])
   const workflowTimer = useRef<number | null>(null)
-  const mascotTimer = useRef<number | null>(null)
-  const previousDesktopRunning = useRef(false)
   const desktopUserMessage = desktopConversation.detail ? latestMessage(desktopConversation.detail.messages, 'user') : undefined
   const desktopAssistantMessage = desktopConversation.detail ? latestMessage(desktopConversation.detail.messages, 'assistant') : undefined
   const desktopCurrentRunAssistantMessage = desktopConversation.detail?.lastRun
@@ -4497,15 +4462,6 @@ export function Workbench() {
     }
   }, [activeConversationId])
   const totalChangeCount = desktopConversation.detail?.toolCalls.filter((tool) => isChangeOrCommandTool(tool.toolName)).length ?? 0
-  const sidebarMascot = mascotCelebrating
-    ? mascotAt(mascotLibrary.success, mascotIndex, mascotAssets.cheer)
-    : desktopConversation.error
-      ? mascotAt(mascotLibrary.error, mascotIndex, mascotAssets.offline)
-      : chatState === 'question' || chatState === 'approval'
-        ? mascotAt(mascotLibrary.waiting, mascotIndex, mascotAssets.idle)
-       : desktopRunning
-         ? mascotAt(workingMascots, mascotIndex, mascotAssets.work)
-         : mascotAt(idleMascots, mascotIndex, mascotAssets.idle)
 
   const refreshKnowledgeChoices = useCallback(() => {
     setKnowledgeDialogError(null)
@@ -4561,34 +4517,6 @@ export function Workbench() {
     return () => { disposed = true; window.clearTimeout(timer) }
   }, [knowledgeDialogOpen, localKnowledgeBases])
   useEffect(() => {
-    if (mascotCelebrating) return
-    const mascotPool = desktopRunning ? workingMascots : idleMascots
-    const interval = window.setInterval(() => setMascotIndex((value) => {
-      const offset = 1 + Math.floor(Math.random() * Math.max(1, mascotPool.length - 1))
-      return (value + offset) % mascotPool.length
-    }), 10000)
-    return () => window.clearInterval(interval)
-  }, [desktopRunning, mascotCelebrating])
-  useEffect(() => {
-    const wasRunning = previousDesktopRunning.current
-    previousDesktopRunning.current = desktopRunning
-
-    if (desktopRunning) {
-      if (mascotTimer.current !== null) window.clearTimeout(mascotTimer.current)
-      mascotTimer.current = null
-      setMascotCelebrating(false)
-      return
-    }
-    if (!wasRunning || desktopConversation.error || desktopRunStatus !== 'completed') return
-
-    setMascotIndex(Math.floor(Math.random() * mascotLibrary.success.length))
-    setMascotCelebrating(true)
-    mascotTimer.current = window.setTimeout(() => {
-      setMascotCelebrating(false)
-      mascotTimer.current = null
-    }, 2600)
-  }, [desktopConversation.error, desktopRunning, desktopRunStatus])
-  useEffect(() => {
     const query = window.matchMedia('(max-width: 1180px)')
     const syncLayout = () => {
       setCompactLayout(query.matches)
@@ -4600,7 +4528,6 @@ export function Workbench() {
   }, [])
   useEffect(() => () => {
     if (workflowTimer.current !== null) window.clearTimeout(workflowTimer.current)
-    if (mascotTimer.current !== null) window.clearTimeout(mascotTimer.current)
   }, [])
   useEffect(() => {
     if (!desktopConversation.enabled) return
@@ -5376,7 +5303,7 @@ export function Workbench() {
     connectionType: yuxi.service.connectionType,
   } : null, [yuxi.service])
 
-  if (activeView === 'onboarding') return <Suspense fallback={<div className="fox-app-loading"><img src={mascotAssets.brand} alt="" /><p>Fox 正在准备引导页</p></div>}><OnboardingPage navigate={navigate} onExit={finishOnboarding} /></Suspense>
+  if (activeView === 'onboarding') return <Suspense fallback={<div className="fox-app-loading"><img src={FOX_ASSISTANT_AVATAR} alt="" /><p>Fox 正在准备引导页</p></div>}><OnboardingPage navigate={navigate} onExit={finishOnboarding} /></Suspense>
 
   return (
     <main className="fox-shell" style={shellStyle}>
@@ -5390,7 +5317,7 @@ export function Workbench() {
           <TimelineRuntimeContext.Provider value={timelineRuntimeContextValue}>
           <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
           {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} usage={conversationUsage} contextWindow={modelService.service?.contextWindow ?? 0} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
-<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} mascotSrc={sidebarMascot} mascotActive={desktopRunning || mascotCelebrating} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} /></Profiler>{desktopConversation.enabled && desktopConversation.detail?.kernelSnapshot?.terminalWritten && desktopConversation.detail.lastRun && desktopConversation.detail.kernelSnapshot.runId === desktopConversation.detail.lastRun.id && <KernelReconciliationPanel key={desktopConversation.detail.lastRun.id} conversationId={desktopConversation.detail.conversation.id} runId={desktopConversation.detail.lastRun.id} onResumed={() => desktopConversation.openConversation(desktopConversation.detail!.conversation.id)} />}<Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} suggestedPrompt={suggestedPrompt} chatState={chatState} centered={timelineEmpty} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={activeProject?.permissionMode ?? desktopConversation.detail?.conversation.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? desktopConversation.detail?.approvals ?? EMPTY_RUNTIME_APPROVALS : EMPTY_RUNTIME_APPROVALS} mascotSrc={timelineEmpty ? undefined : sidebarMascot} mascotActive={desktopRunning || mascotCelebrating} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onDeleteGoal={handleComposerDeleteGoal} onGoalRunningChange={handleComposerGoalRunningChange} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
+<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} /></Profiler>{desktopConversation.enabled && desktopConversation.detail?.kernelSnapshot?.terminalWritten && desktopConversation.detail.lastRun && desktopConversation.detail.kernelSnapshot.runId === desktopConversation.detail.lastRun.id && <KernelReconciliationPanel key={desktopConversation.detail.lastRun.id} conversationId={desktopConversation.detail.conversation.id} runId={desktopConversation.detail.lastRun.id} onResumed={() => desktopConversation.openConversation(desktopConversation.detail!.conversation.id)} />}<Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} suggestedPrompt={suggestedPrompt} chatState={chatState} centered={timelineEmpty} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={activeProject?.permissionMode ?? desktopConversation.detail?.conversation.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? desktopConversation.detail?.approvals ?? EMPTY_RUNTIME_APPROVALS : EMPTY_RUNTIME_APPROVALS} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onDeleteGoal={handleComposerDeleteGoal} onGoalRunningChange={handleComposerGoalRunningChange} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
           </ComposerRuntimeContext.Provider>
           </TimelineRuntimeContext.Provider>
         </section>

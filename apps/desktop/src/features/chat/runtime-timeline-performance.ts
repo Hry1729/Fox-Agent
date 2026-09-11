@@ -13,6 +13,51 @@ export function assistantDisplayContent(message: ConversationMessage, streamTarg
   return message.id === streamTargetId ? streamingText || message.content : message.content
 }
 
+export type RuntimeTimelineMessage = ConversationMessage & { timelineKey: string }
+
+/** A model continuation is part of its existing run, not another user-facing turn.
+ * Keep the first position and a stable React key, but the latest real message ID
+ * for feedback/fork actions. Never modify persisted messages or merge across users.
+ */
+export function groupAssistantContinuations(
+  messages: readonly ConversationMessage[],
+  streamTargetId?: string,
+  streamingText = '',
+): RuntimeTimelineMessage[] {
+  const result: RuntimeTimelineMessage[] = []
+  let userId = 'history'
+  let parts: string[] = []
+  const finishGroup = () => {
+    const last = result.at(-1)
+    if (last?.role === 'assistant') last.content = parts.join('\n\n')
+    parts = []
+  }
+  for (const message of messages) {
+    const previous = result.at(-1)
+    if (message.role !== 'assistant') {
+      finishGroup()
+      if (message.role === 'user') userId = message.id
+      result.push({ ...message, timelineKey: message.id })
+      continue
+    }
+    const content = assistantDisplayContent(message, streamTargetId, streamingText)
+    const sameRun = previous?.role === 'assistant' && Boolean(message.runId) && previous.runId === message.runId
+    if (!sameRun) finishGroup()
+    if (content.trim()) parts.push(content)
+    const grouped = {
+      ...message,
+      content: '',
+      createdAt: sameRun ? previous.createdAt : message.createdAt,
+      ordinal: sameRun ? previous.ordinal : message.ordinal,
+      timelineKey: sameRun ? previous.timelineKey : message.runId ? `assistant-run-${message.runId}-${userId}` : `assistant-${message.id}`,
+    }
+    if (sameRun) result[result.length - 1] = grouped
+    else result.push(grouped)
+  }
+  finishGroup()
+  return result
+}
+
 export const EMPTY_RUNTIME_EVENTS: RunEventRecord[] = []
 export const EMPTY_RUNTIME_ARTIFACTS: ArtifactRecord[] = []
 

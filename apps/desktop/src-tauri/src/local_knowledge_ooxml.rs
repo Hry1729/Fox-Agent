@@ -147,6 +147,10 @@ fn append_fragment(
 }
 
 pub(super) fn xlsx_text(archive: &SafeZipArchive<'_>) -> Result<String, ImportError> {
+    xlsx_text_with_outline(archive).map(|(text, _, _)| text)
+}
+
+pub(super) fn xlsx_text_with_outline(archive: &SafeZipArchive<'_>) -> Result<(String, Vec<super::AttachmentSheetOutline>, usize), ImportError> {
     let shared = archive
         .read_entry("xl/sharedStrings.xml")?
         .map(|xml| items(&xml, b"si"))
@@ -221,11 +225,17 @@ pub(super) fn xlsx_text(archive: &SafeZipArchive<'_>) -> Result<String, ImportEr
     }
     let mut output = String::new();
     append_text_section(&mut output, "Spreadsheet cell values (formulas use saved cached values, not recalculated; numeric cells retain raw stored values, including date serials).")?;
+    let sheet_count = sheets.len();
+    let mut outline = Vec::new();
+    let mut characters = output.chars().count();
     for (name, path) in sheets {
         let xml = archive
             .read_entry(&path)?
             .ok_or_else(|| parse_error("XLSX worksheet XML is missing"))?;
+        let previous_end = output.len();
         append_text_section(&mut output, &format!("[Sheet: {name}]"))?;
+        let header_start = previous_end + output[previous_end..].find('[').unwrap_or(0);
+        let offset = characters + output[previous_end..header_start].chars().count();
         for cell in items(&xml, b"c")? {
             let address = cell
                 .attributes
@@ -275,8 +285,19 @@ pub(super) fn xlsx_text(archive: &SafeZipArchive<'_>) -> Result<String, ImportEr
                 append_text_section(&mut output, &format!("{address}: {value}"))?;
             }
         }
+        // Derive the directory from the workbook manifest, never from cell text.
+        // Bound metadata independently of the extracted-text and ZIP limits.
+        if outline.len() < 64 {
+            outline.push(super::AttachmentSheetOutline {
+                name: name.chars().take(256).collect(),
+                name_truncated: name.chars().count() > 256,
+                offset,
+                preview: output[header_start..].chars().take(400).collect(),
+            });
+        }
+        characters += output[previous_end..].chars().count();
     }
-    Ok(output)
+    Ok((output, outline, sheet_count))
 }
 
 pub(super) fn pptx_text(archive: &SafeZipArchive<'_>) -> Result<String, ImportError> {

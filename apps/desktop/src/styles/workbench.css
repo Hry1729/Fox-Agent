@@ -2619,28 +2619,8 @@ button.fox-chat-project-row:disabled {
   text-align: left;
 }
 
-.fox-empty-mascot {
-  width: 100px;
-  height: 88px;
-  flex: 0 0 100px;
-  pointer-events: none;
-}
 
-.fox-empty-mascot img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  filter: drop-shadow(0 4px 7px color-mix(in oklch, var(--fox-text) 11%, transparent));
-  animation-name: foxSidebarMascot, foxMascotIn;
-  animation-duration: 4.8s, .45s;
-  animation-timing-function: ease-in-out, cubic-bezier(.18,.86,.28,1.24);
-  animation-iteration-count: infinite, 1;
-  animation-fill-mode: none, both;
-}
 
-.fox-empty-mascot.is-active img {
-  animation-duration: 1.8s, .3s;
-}
 
 .fox-empty-heading-copy {
   min-width: 0;
@@ -2723,11 +2703,10 @@ button.fox-chat-project-row:disabled {
   grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
-  border: 1px solid color-mix(in oklch, var(--fox-border) 82%, var(--fox-accent));
+  border: 1px solid var(--fox-border);
   border-radius: 13px;
-  background: color-mix(in oklch, var(--fox-card) 84%, var(--fox-accent) 3%);
+  background: var(--fox-card);
   padding: 10px 11px;
-  box-shadow: inset 0 1px 0 color-mix(in oklch, var(--fox-card) 88%, transparent);
 }
 
 .fox-expert-activation > .fox-expert-icon {
@@ -3404,41 +3383,71 @@ button.fox-chat-project-row:disabled {
 .fox-runtime-process-summary {
   position: relative;
   z-index: 5;
-  height: 23px;
+  min-height: 30px;
   display: inline-flex !important;
   align-items: center;
   gap: 7px !important;
   line-height: 20px;
 }
 
-.fox-runtime-status-text,
-.fox-runtime-step-shiny {
-  --shiny-text-color: color-mix(in oklch, var(--fox-muted) 70%, var(--fox-text));
-  --shiny-text-accent: color-mix(in oklch, var(--fox-accent) 88%, var(--fox-text));
-  --shiny-text-highlight: color-mix(in oklch, var(--fox-accent) 68%, white);
+.fox-assistant-avatar {
+  display: block;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  padding: 0;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: center;
 }
 
-.fox-runtime-step-shiny {
+img[src='/avatars/fox-assistant.png'] {
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: center;
+  padding: 0;
+  animation: none;
+}
+
+.fox-assistant-avatar.is-md { width: 36px; height: 36px; flex-basis: 36px; }
+.fox-assistant-avatar.is-lg { width: 84px; height: 84px; flex-basis: 84px; margin: 0 auto 16px; }
+
+.fox-run-status-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
-  flex: 1;
+  color: var(--fox-muted);
+}
+
+.fox-run-status-text > span:first-child {
+  min-width: 0;
   overflow: hidden;
-  font-size: 13px;
-  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.dark .fox-runtime-status-text,
-.dark .fox-runtime-step-shiny {
-  --shiny-text-color: color-mix(in oklch, var(--fox-muted) 66%, var(--fox-text));
-  --shiny-text-accent: color-mix(in oklch, var(--fox-accent) 46%, var(--fox-text));
-  --shiny-text-highlight: color-mix(in oklch, var(--fox-accent) 22%, white);
+.fox-run-status-text[data-active='true'] { color: var(--fox-text); }
+
+.fox-run-status-dots {
+  display: inline-flex;
+  flex: 0 0 19px;
+  align-items: center;
+  gap: 3px;
+  height: 12px;
 }
 
-.fox-runtime-process-summary .fox-work-mascot {
-  margin-right: 1px;
-  transform: translateY(2px);
+.fox-run-status-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--fox-accent);
+  animation: foxRunStatusDot 1.2s ease-in-out infinite;
 }
+
+.fox-run-status-dots i:nth-child(2) { animation-delay: 150ms; }
+.fox-run-status-dots i:nth-child(3) { animation-delay: 300ms; }
+@keyframes foxRunStatusDot { 0%, 70%, 100% { opacity: .35; transform: translateY(1px); } 35% { opacity: 1; transform: translateY(-2px); } }
 
 .fox-chain-of-thought-header > span > span {
   min-width: 0;
@@ -3518,6 +3527,11 @@ button.fox-chat-project-row:disabled {
   line-height: 1.62;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
 }
 
 .fox-live-reasoning-scroll > :last-child,
@@ -3591,15 +3605,90 @@ button.fox-chat-project-row:disabled {
 
 .fox-runtime-step-content {
   width: 100%;
-  max-height: 190px;
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition: grid-template-rows 160ms ease-out, opacity 160ms ease-out, visibility 160ms;
+}
+
+.fox-runtime-step-content[data-state='open'] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+}
+
+.fox-runtime-detail-clip { min-height: 0; overflow: hidden; }
+
+.fox-runtime-detail-panel {
+  max-height: 260px;
   overflow: auto;
   margin-top: 7px;
   border: 1px solid color-mix(in oklch, var(--fox-border) 86%, transparent);
   border-radius: 8px;
   background: color-mix(in oklch, var(--fox-card) 78%, var(--fox-panel));
   padding: 9px 11px;
-  overscroll-behavior: auto;
+  overscroll-behavior: contain;
 }
+
+.fox-reasoning-text pre {
+  margin: 0;
+  font: inherit;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.fox-reasoning-pagination {
+  position: sticky;
+  top: -9px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding-block: 5px 9px;
+  background: var(--fox-card);
+  font-size: 11px;
+}
+.fox-reasoning-pagination > span { margin-right: auto; }
+.fox-reasoning-pagination button { color: var(--fox-accent); cursor: pointer; }
+.fox-reasoning-pagination button:disabled { color: var(--fox-faint); cursor: default; }
+
+.fox-runtime-process-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  max-height: none;
+  overflow: hidden;
+  padding: 0;
+  margin: 0;
+  animation: none;
+  transition: grid-template-rows 180ms ease-out, opacity 180ms ease-out, visibility 180ms;
+}
+.fox-runtime-process-disclosure[data-state='open'] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+}
+@starting-style {
+  .fox-runtime-step-content[data-state='open'],
+  .fox-runtime-process-disclosure[data-state='open'] {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+}
+.fox-runtime-process-clip { min-height: 0; overflow: hidden; }
+.fox-runtime-process-scroll {
+  display: grid;
+  gap: 10px;
+  max-height: min(420px, 55vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 8px 0 8px 2px;
+}
+.fox-runtime-process-scroll > div { animation: none; }
+.fox-runtime-process-scroll > div > div:first-child { color: var(--fox-faint); }
 
 .fox-runtime-step-detail,
 .fox-runtime-step-detail > div {
@@ -3607,34 +3696,34 @@ button.fox-chat-project-row:disabled {
   min-width: 0;
 }
 
-.fox-chain-of-thought-content > div {
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div {
   gap: 9px;
   color: var(--fox-muted);
   font-size: 13px;
   line-height: 1.55;
 }
 
-.fox-chain-of-thought-content > div > div:first-child {
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div > div:first-child {
   margin-top: 2px;
   color: var(--fox-faint);
 }
 
-.fox-chain-of-thought-content > div > div:first-child > svg {
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div > div:first-child > svg {
   width: 15px;
   height: 15px;
 }
 
-.fox-chain-of-thought-content > div > div:first-child > div {
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div > div:first-child > div {
   top: 23px;
   background: color-mix(in oklch, var(--fox-border) 72%, transparent);
 }
 
-.fox-chain-of-thought-content > div > div:last-child {
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div > div:last-child {
   min-width: 0;
 }
 
-.fox-chain-of-thought-content > div > div:last-child > div:first-child,
-.fox-chain-of-thought-content > div > div:last-child > div:nth-child(2) {
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div > div:last-child > div:first-child,
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div > div:last-child > div:nth-child(2) {
   overflow-wrap: anywhere;
 }
 
@@ -4499,31 +4588,8 @@ button.fox-chat-project-row:disabled {
   bottom: 0;
 }
 
-.fox-composer-mascot {
-  position: absolute;
-  z-index: 18;
-  top: -62px;
-  right: 18px;
-  width: 70px;
-  height: 64px;
-  pointer-events: none;
-}
 
-.fox-composer-mascot img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  filter: drop-shadow(0 3px 5px color-mix(in oklch, var(--fox-text) 10%, transparent));
-  animation-name: foxSidebarMascot, foxMascotIn;
-  animation-duration: 4.8s, .45s;
-  animation-timing-function: ease-in-out, cubic-bezier(.18,.86,.28,1.24);
-  animation-iteration-count: infinite, 1;
-  animation-fill-mode: none, both;
-}
 
-.fox-composer-mascot.is-active img {
-  animation-duration: 1.8s, .3s;
-}
 
 .fox-slash-menu,
 .fox-mention-menu {
@@ -9749,93 +9815,8 @@ button.fox-chat-project-row:disabled {
   }
 }
 
-.fox-work-mascot {
-  position: relative;
-  width: 27px;
-  height: 20px;
-  display: inline-block;
-  flex: 0 0 27px;
-  overflow: visible;
-}
-
-.fox-work-mascot.is-md {
-  width: 36px;
-  height: 27px;
-  flex-basis: 36px;
-}
-
-.fox-work-track {
-  position: absolute;
-  inset: -2px -1px 1px;
-}
-
-.fox-work-mascot.is-busy .fox-work-track {
-  animation: foxMascotPath 2.06s ease-in-out infinite;
-}
-
-.fox-work-body {
-  width: 100%;
-  height: 100%;
-  display: block;
-  transform-origin: 50% 75%;
-}
-
-.fox-work-mascot.is-busy .fox-work-body {
-  animation: foxMascotBody 1.03s ease-in-out infinite alternate;
-}
-
-.fox-work-body img {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  filter: drop-shadow(0 2px 3px color-mix(in oklch, var(--fox-text) 13%, transparent));
-}
-
-.fox-work-wave {
-  position: absolute;
-  left: 1px;
-  right: 0;
-  bottom: 0;
-  height: 4px;
-  border-radius: 50%;
-  border-top: 1.5px solid color-mix(in oklch, var(--fox-accent) 54%, transparent);
-  opacity: .55;
-}
-
-.fox-work-wave.is-front {
-  bottom: -2px;
-  left: 7px;
-  opacity: .35;
-}
-
-.fox-work-foam,
-.fox-work-bubbles {
-  position: absolute;
-  right: -1px;
-  bottom: 0;
-  width: 3px;
-  height: 3px;
-  border: 1px solid var(--fox-accent);
-  border-radius: 50%;
-  opacity: 0;
-}
-
-.fox-work-mascot.is-busy .fox-work-foam,
-.fox-work-mascot.is-busy .fox-work-bubbles {
-  animation: foxWater 1.35s ease-out infinite;
-}
-
-.fox-work-mascot.is-busy .fox-work-bubbles {
-  right: 3px;
-  animation-delay: .42s;
-}
 
 @keyframes foxSpin { to { transform: rotate(360deg); } }
-@keyframes foxSidebarMascot { 0%, 100% { transform: translateY(0) rotate(-1deg); } 50% { transform: translateY(-4px) rotate(1deg); } }
-@keyframes foxMascotIn { from { opacity: 0; } to { opacity: 1; } }
-@keyframes foxMascotPath { 0%, 100% { transform: translate(-2px, 1px); } 50% { transform: translate(3px, -2px); } }
-@keyframes foxMascotBody { to { transform: rotate(4deg) scale(1.04); } }
-@keyframes foxWater { 0% { transform: translateX(-2px) scale(.75); opacity: 0; } 35% { opacity: .8; } 100% { transform: translateX(6px) scale(1.2); opacity: 0; } }
 @keyframes foxCaret { 50% { opacity: 0; } }
 @keyframes foxStatusPulse { 50% { opacity: .35; transform: scale(.8); } }
 @keyframes foxTyping { 0%, 70%, 100% { opacity: .25; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-2px); } }

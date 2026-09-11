@@ -773,7 +773,7 @@ impl Database {
                     "skills": [],
                     "knowledge": [],
                     "mcpServers": [],
-                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_attempt_start", "task_attempt_finish", "task_repair_start", "task_repair_escalate_start", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
+                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "attachment_compute", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_attempt_start", "task_attempt_finish", "task_repair_start", "task_repair_escalate_start", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
                 });
                 let (agent_kind, invocation_mode, visibility) = if *id == DEFAULT_AGENT_ID {
                     ("assistant", "primary", "chat_selector")
@@ -8279,6 +8279,28 @@ mod tests {
                 .count(),
             BUILTIN_AGENTS.len() + 17, // 20 adapted experts reuse 3 existing IDs.
         );
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn default_assistant_compute_permissions_survive_existing_database_upgrade() {
+        // Shared with the JS tool-selection test: exercise the default assistant
+        // whitelist as well as the expert whitelist, not an unrestricted null.
+        let expected: Value = serde_json::from_str(include_str!("../../../../../services/agent-runtime/test/fixtures/default-assistant-tools.json")).unwrap();
+        let (database, path) = test_database();
+        let agent = database.get_agent(DEFAULT_AGENT_ID).unwrap().unwrap();
+        assert_eq!(agent.package_manifest["allowedTools"], expected);
+        assert!(expected.as_array().unwrap().contains(&json!("attachment_compute")));
+        let mut old_manifest = agent.package_manifest;
+        old_manifest["allowedTools"].as_array_mut().unwrap().retain(|name| name != "attachment_compute");
+        database.with_connection(|connection| {
+            connection.execute("UPDATE agents SET package_manifest_json=?1 WHERE id=?2", params![old_manifest.to_string(), DEFAULT_AGENT_ID])?;
+            Ok(())
+        }).unwrap();
+        drop(database);
+        let reopened = Database::open(path.clone()).unwrap();
+        assert_eq!(reopened.get_agent(DEFAULT_AGENT_ID).unwrap().unwrap().package_manifest["allowedTools"], expected);
         drop(reopened);
         let _ = std::fs::remove_file(path);
     }
