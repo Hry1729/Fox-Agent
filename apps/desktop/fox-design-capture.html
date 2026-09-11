@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f5f6f8" />
+    <title>Fox</title>
+  <script src="https://mcp.figma.com/mcp/html-to-design/capture.js" async></script>
+  <script>
+    // F8 captures the current modal without clicking outside and dismissing it.
+    window.addEventListener('keydown', async (event) => {
+      if (event.key !== 'F8' || !window.figma?.captureForDesign) return;
+      const params = new URLSearchParams(location.hash.slice(1));
+      const captureId = params.get('figmacapture');
+      const endpoint = params.get('figmaendpoint');
+      if (!captureId || !endpoint) return;
+      event.preventDefault();
+      await window.figma.captureForDesign({ captureId, endpoint, selector: 'body' });
+    });
+  </script></head>
+  <body>
+    <div id="root">
+      <div class="fox-boot-shell" aria-label="Fox 正在启动">
+        <img src="/mascot/fox/idle/fox_sit_nicely.png" alt="" />
+        <strong>Fox</strong>
+        <span>正在准备工作区</span>
+      </div>
+    </div>
+    <style>
+      html, body, #root { width: 100%; height: 100%; margin: 0; }
+      body { overflow: hidden; background: #f5f6f8; font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif; }
+      .fox-boot-shell { width: 100%; height: 100%; display: grid; place-content: center; justify-items: center; gap: 7px; color: #172033; background: linear-gradient(145deg, #f5f6f8, #edf6ff); }
+      .fox-boot-shell img { width: 72px; height: 72px; object-fit: contain; animation: fox-boot-breathe 1.8s ease-in-out infinite; }
+      .fox-boot-shell strong { margin-top: 2px; font-size: 16px; letter-spacing: 0; }
+      .fox-boot-shell span { font-size: 12px; color: #718096; }
+      @keyframes fox-boot-breathe { 50% { transform: translateY(-3px); opacity: .84; } }
+      @media (prefers-reduced-motion: reduce) { .fox-boot-shell img { animation: none; } }
+    </style>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
