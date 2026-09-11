@@ -2,7 +2,7 @@
   "kind": "fox-offline-eval-manifest",
   "schemaVersion": 1,
   "id": "phase-0b-full-baseline",
-  "version": "2026-08-27.3",
+  "version": "2026-09-11.1",
   "description": "Phase 0B full deterministic baseline covering every current Runtime tool plus failure, permission, injection, completion, and recovery boundaries.",
   "scorerVersion": "fox-deterministic-contract-v2",
   "runPolicy": {
@@ -49,10 +49,10 @@
   ],
   "expectedCaseCounts": {
     "simple": 10,
-    "medium": 81,
+    "medium": 82,
     "complex": 25,
     "recovery": 5,
-    "total": 121
+    "total": 122
   },
   "cases": [
     { "suiteId": "model-adapter-matrix", "caseId": "minimax-m3-anthropic", "category": "simple" },
@@ -118,6 +118,7 @@
     { "suiteId": "runtime-tool-catalog", "caseId": "graph_readonly_node_cancel", "category": "medium" },
     { "suiteId": "runtime-tool-catalog", "caseId": "graph_readonly_accept", "category": "medium" },
     { "suiteId": "runtime-tool-catalog", "caseId": "read_attachment", "category": "medium" },
+    { "suiteId": "runtime-tool-catalog", "caseId": "attachment_compute", "category": "medium" },
     { "suiteId": "runtime-tool-catalog", "caseId": "write_file", "category": "medium" },
     { "suiteId": "runtime-tool-catalog", "caseId": "edit_file", "category": "medium" },
     { "suiteId": "runtime-tool-catalog", "caseId": "run_command", "category": "medium" },

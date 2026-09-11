@@ -9,6 +9,7 @@ import { describeKernelRun } from './pi-kernel-description.mjs'
 import { observeKernelModelTransport } from './pi-kernel-model-failure.mjs'
 import { prepareKernelCompaction, compactPiKernelContext, kernelCompactionResult } from './pi-kernel-compaction.mjs'
 import { CODEX_KERNEL_ADAPTER, runCodexKernelModel } from './codex-kernel-adapter.mjs'
+import { completionRequired, completionPreview, KernelIncompleteResponseError } from './kernel-completion.mjs'
 
 const nonempty = value => typeof value === 'string' && value.trim().length > 0
 
@@ -26,6 +27,7 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
   let modelFailure
   let nativeConfig
   let nativeModel
+  let requireCompletion = false
   const respond = (request, type, payload = {}) => write(createEnvelope('response', type, {
     requestId: request.id, runId: request.runId ?? null,
     conversationId: request.conversationId ?? null, runtimeSessionId: request.runtimeSessionId ?? null, payload,
@@ -43,6 +45,7 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
     const config = request.payload?.modelService
     const systemPrompt = request.payload?.systemPrompt
     const definitions = request.payload?.proposalTools
+    requireCompletion = completionRequired(systemPrompt)
     if (!nonempty(config?.modelId) || !nonempty(config?.baseUrl) || typeof systemPrompt !== 'string'
         || !Array.isArray(definitions)) throw new Error('Incomplete Host model/prompt/tool configuration')
     if (identity.engineId !== 'pi') {
@@ -117,6 +120,7 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
           // request consumes this process and must be reconciled by Host.
           const initial = request.type === 'kernel.start_initial'
           const prepared = initial ? prepareKernelInitialModel(request, identity) : prepareKernelBatchResume(request, identity)
+          prepared.requireCompletion = requireCompletion
           state = 'running'
           abort = new AbortController()
           const preview = request.payload.streamPreview === true ? payload => respond(request,'kernel.model_preview',payload) : undefined
@@ -129,13 +133,16 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
                 if (abort.signal.aborted || Buffer.byteLength(text, 'utf8') > 262144 || revision && now - lastPreviewAt < 100) return
                 lastPreviewAt = now
                 preview({ schemaVersion: 1, runId: prepared.runId, conversationId: request.conversationId, turnId: prepared.turnId,
-                  checkpointSeq: prepared.checkpointSeq, revision: ++revision, text })
+                  checkpointSeq: prepared.checkpointSeq, revision: ++revision, text: completionPreview(text, requireCompletion) })
               } : undefined,
             }).then(assistant => ({ idempotencyKey: prepared.idempotencyKey, checkpointSeq: prepared.checkpointSeq, response: prepareKernelModelResponse(assistant, prepared) }))
-          } else active = initial ? startPiKernelInitial(session, request, identity, abort.signal, preview) : resumePiKernelBatch(session, request, identity, abort.signal, preview)
+          } else active = initial ? startPiKernelInitial(session, request, identity, abort.signal, preview, requireCompletion) : resumePiKernelBatch(session, request, identity, abort.signal, preview, requireCompletion)
           try { respond(request, 'kernel.model_response', await active) }
           catch (error) {
-            const evidence = !abort.signal.aborted ? modelFailure?.(request) : null
+            const evidence = abort.signal.aborted ? null : error instanceof KernelIncompleteResponseError
+              ? { schemaVersion: 1, runId: request.runId, turnId: prepared.turnId, checkpointSeq: prepared.checkpointSeq,
+                  category: 'incomplete_response', httpStatus: null, retryAfterMs: null }
+              : modelFailure?.(request)
             if (!evidence) throw error
             respond(request, 'kernel.model_failure', evidence)
           }

@@ -4,6 +4,7 @@
 import { validateKernelControl } from './control-binding.mjs'
 import { sanitizeProviderHistory } from './runtime-session.mjs'
 import { RUNTIME_TOOL_CATALOG, validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
+import { finalizeKernelAnswer, completionPreview } from './kernel-completion.mjs'
 
 const knownTools = new Set(RUNTIME_TOOL_CATALOG.map(tool => tool.name))
 const deliveries = new WeakMap()
@@ -64,6 +65,7 @@ export function prepareKernelModelResponse(assistantMessage, prepared) {
     if (block?.type === 'toolCall') canonical(block.arguments)
   }
   assistantMessage = canonical(assistantMessage, true)
+  assistantMessage = finalizeKernelAnswer(assistantMessage, prepared.requireCompletion)
   const response = { schemaVersion: 1, runId: prepared.runId, turnId: prepared.turnId,
     ...(prepared.initial ? {} : { batchId: prepared.batchId }), checkpointSeq: prepared.checkpointSeq, assistantMessage }
   canonical(response)
@@ -198,12 +200,12 @@ export function prepareKernelInitialModel(request, identity) {
     idempotencyKey: frame.idempotencyKey, checkpointSeq: frame.checkpointSeq, initial: true }
 }
 
-export async function startPiKernelInitial(session, request, identity, signal, preview) {
-  return runPiKernelModel(session, request, prepareKernelInitialModel(request, identity), signal, preview)
+export async function startPiKernelInitial(session, request, identity, signal, preview, requireCompletion = false) {
+  return runPiKernelModel(session, request, { ...prepareKernelInitialModel(request, identity), requireCompletion }, signal, preview)
 }
 
-export async function resumePiKernelBatch(session, request, identity, signal, preview) {
-  return runPiKernelModel(session, request, prepareKernelBatchResume(request, identity), signal, preview)
+export async function resumePiKernelBatch(session, request, identity, signal, preview, requireCompletion = false) {
+  return runPiKernelModel(session, request, { ...prepareKernelBatchResume(request, identity), requireCompletion }, signal, preview)
 }
 
 export async function runPiKernelModel(session, request, prepared, signal, preview) {
@@ -246,7 +248,7 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
   unsubscribe = typeof session.agent.subscribe === 'function' ? session.agent.subscribe(event => {
     if (preview && !signal.aborted && !timedOut && ['message_update','message_end'].includes(event.type)
         && event.message?.role === 'assistant' && Array.isArray(event.message.content)) {
-      const text = event.message.content.filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join('')
+      const text = completionPreview(event.message.content.filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join(''), prepared.requireCompletion)
       const reasoning = event.message.content.filter(block => block?.type === 'thinking' && typeof block.thinking === 'string').map(block => block.thinking).join('\n\n')
       const now = performance.now()
       if ((text !== lastPreviewText || reasoning !== lastPreviewReasoning) && Buffer.byteLength(text,'utf8') <= 262_144 && Buffer.byteLength(reasoning,'utf8') <= 262_144

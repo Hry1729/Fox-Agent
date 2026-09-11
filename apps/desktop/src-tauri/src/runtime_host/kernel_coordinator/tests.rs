@@ -1204,6 +1204,35 @@ fn settled_provider_rejection(run_id: &str, turn_id: &str, checkpoint_seq: u64) 
 }
 
 #[test]
+fn settled_incomplete_answer_uses_one_turn_retry_without_reexecuting_tools() {
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, _, run_id) = fixture_with_retry_opt(&clock, "test-prompt", None, false, false, (0, 1));
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+    let tools = coordinator.snapshot().unwrap().tool_calls;
+    let reject = |binding: &RunControlBinding, frame: &fox_engine_protocol::KernelBatchResumeFrame, _: &kernel::CancellationToken| {
+        Err(format!("kernel.settled_model_failure:{}", json!({
+            "schemaVersion": 1, "runId": binding.run_id, "turnId": frame.turn_id,
+            "checkpointSeq": frame.checkpoint_seq, "category": "incomplete_response",
+            "httpStatus": null, "retryAfterMs": null,
+        })))
+    };
+    coordinator.dispatch_batch("worker-batch", "first", &Allow, reject).unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
+    assert_eq!(coordinator.snapshot().unwrap().tool_calls, tools);
+    assert!(coordinator.dispatch_batch("worker-batch", "early", &Allow, |_, _, _| panic!("retry is not due")).is_err());
+    clock.advance(1000);
+    let error = coordinator.dispatch_batch("worker-batch", "second", &Allow, reject).unwrap_err();
+    assert!(error.contains("budget exhausted"), "{error}");
+    assert_eq!(coordinator.snapshot().unwrap().tool_calls, tools);
+    assert!(coordinator.dispatch_batch("worker-batch", "third", &Allow, |_, _, _| panic!("only one retry is allowed")).is_err());
+    // The desktop pump makes a settled exhausted delivery terminally failed.
+    coordinator.fail("kernel.model_round_failed", "Model did not provide a final answer.").unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "failed");
+}
+
+#[test]
 fn settled_initial_retry_survives_reopen_and_honors_server_delay() {
     let config = worker_configuration();
     let clock = TestClock::new(1_000);

@@ -107,6 +107,10 @@ fn validate_model_message(message: &Value) -> Result<(), String> {
             || block["type"] == "thinking" && block["thinking"].is_string())) {
             return Err("invalid completed model response content".into());
         }
+        if !content.iter().any(|block| block["type"] == "text"
+            && block["text"].as_str().is_some_and(|text| !text.trim().is_empty())) {
+            return Err("completed model response has no public answer".into());
+        }
         Ok(())
 }
 
@@ -160,6 +164,12 @@ fn model_response_cannot_claim_completion_with_tools_or_unfinished_output() {
         assistant_message: serde_json::json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"done"}]}),
     };
     assert!(response.validate().is_ok());
+    for content in [serde_json::json!([]), serde_json::json!([{"type":"thinking","thinking":"I will analyze"}]),
+        serde_json::json!([{"type":"text","text":" \n\t"}])] {
+        let mut empty = response.clone();
+        empty.assistant_message["content"] = content;
+        assert!(empty.validate().is_err());
+    }
     response.assistant_message["stopReason"] = serde_json::json!("length");
     assert!(response.validate().is_err());
     response.assistant_message = serde_json::json!({"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"next","name":"read","arguments":{"path":"next.txt"}}]});

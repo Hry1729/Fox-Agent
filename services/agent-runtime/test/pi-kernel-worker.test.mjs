@@ -6,8 +6,61 @@ import { fileURLToPath } from 'node:url'
 import { createEnvelope } from '../src/protocol.mjs'
 import { createServer } from 'node:http'
 import { readFile } from 'node:fs/promises'
+import { KERNEL_COMPLETION_CONTRACT, completionRequired } from '../src/kernel-completion.mjs'
 
 const identity = { runId: 'run-k', conversationId: 'conversation-k', runtimeSessionId: 'session-k' }
+
+test('HTTP final-answer contract rejects premature stops and keeps explicit answers, blockers and tools', { timeout: 60000 }, async t => {
+  let current
+  const requests = []
+  const server = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk
+    const body = JSON.parse(raw); requests.push(body)
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    const deltas = current.tool ? [{ role: 'assistant', tool_calls: [{ index: 0, id: 'next-read', type: 'function',
+      function: { name: 'read', arguments: '{"path":"a.txt"}' } }] }]
+      : [{ role: 'assistant', reasoning_content: 'Provider thinking' }, ...current.text.split('').map(content => ({ content }))]
+    for (const delta of deltas) res.write(`data: ${JSON.stringify({ id: 'completion-test', object: 'chat.completion.chunk',
+      created: 1, model: 'kernel-http-test', choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`)
+    res.write(`data: ${JSON.stringify({ id: 'completion-test', object: 'chat.completion.chunk', created: 1, model: 'kernel-http-test',
+      choices: [{ index: 0, delta: {}, finish_reason: current.tool ? 'tool_calls' : 'stop' }] })}\n\n`)
+    res.end('data: [DONE]\n\n')
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { server.closeAllConnections(); server.close() })
+  for (const mode of ['initial', 'batch']) for (const item of [
+    { text: 'Let me thoroughly analyze the data from the spreadsheet to produce accurate statistics for the report.', incomplete: true },
+    { text: '', incomplete: true },
+    { text: '42\n<fox-final/>\n', answer: '42' },
+    { text: '请上传原始表格。\n<fox-final/>', answer: '请上传原始表格。' },
+    { tool: true },
+  ]) {
+    current = item
+    const child = await worker(t)
+    await child.request('kernel.initialize', initialization({ systemPrompt: KERNEL_COMPLETION_CONTRACT,
+      modelService: { apiType: 'openai-completions', modelId: 'kernel-http-test', apiKey: 'local-test-only',
+        baseUrl: `http://127.0.0.1:${server.address().port}/v1` } }))
+    const payload = mode === 'batch' ? resumePayload() : { controlBinding: resumePayload().controlBinding,
+      initialModel: { schemaVersion: 1, idempotencyKey: 'initial-model-delivery', checkpointSeq: 2,
+        input: { schemaVersion: 1, runId: identity.runId, turnId: 'turn-k', promptConfigHash: 'frozen-hash',
+          messages: [{ role: 'user', content: '完成表格分析和报告；缺少资料时说明。', timestamp: 1 }] } } }
+    payload.streamPreview = true
+    const before = requests.length
+    const command = mode === 'batch' ? 'kernel.resume_batch' : 'kernel.start_initial'
+    const result = await child.request(command, payload)
+    assert.equal(result.type, item.incomplete ? 'kernel.model_failure' : 'kernel.model_response')
+    assert.equal(requests.length, before + 1, 'worker must not start a hidden follow-up or retry')
+    assert.ok(requests.at(-1).messages.some(message => typeof message.content === 'string' && message.content.includes('Fox final-answer protocol v1')))
+    if (item.incomplete) assert.equal(result.payload.category, 'incomplete_response')
+    else if (item.tool) assert.equal(result.payload.response.assistantMessage.stopReason, 'toolUse')
+    else {
+      assert.equal(result.payload.response.assistantMessage.content.filter(block => block.type === 'text').map(block => block.text).join(''), item.answer)
+      assert.ok(child.events.filter(event => event.type === 'kernel.model_preview').every(event => !event.payload.text.includes('<fox-')))
+    }
+    assert.equal((await child.request(command, payload)).type, 'request_failed')
+    assert.equal(requests.length, before + 1)
+  }
+})
 
 for (const engine of ['deepseek_harness', 'codex']) {
   test(`isolated ${engine} worker supports native continuation and Host compaction`,
@@ -303,6 +356,7 @@ test('description mode returns scoped schemas and prompt without initializing a 
   assert.match(described.payload.systemPrompt, /bytes, not a character count/)
   assert.match(described.payload.systemPrompt, /Correct the actual JSON argument object in a NEW tool call/)
   assert.match(described.payload.systemPrompt, /not API quota or rate limiting/)
+  assert.equal(completionRequired(described.payload.systemPrompt), true)
   assert.ok(described.payload.proposalTools.every(tool => Object.keys(tool).sort().join(',') === 'description,name,parameters'))
   assert.equal((await child.request('kernel.initialize', initialization())).type, 'request_failed')
   assert.ok(child.events.every(event => event.kind === 'response'))
