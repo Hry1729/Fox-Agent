@@ -89,6 +89,7 @@ export const ChainOfThoughtHeader = memo(
         <span className="flex-1 text-left">
           {children ?? "Chain of Thought"}
         </span>
+        <span className="chain-of-thought-toggle">
         <ChevronDownIcon
           className={cn(
             "size-4 transition-transform",
@@ -96,6 +97,7 @@ export const ChainOfThoughtHeader = memo(
           )}
         />
         {trailing}
+        </span>
       </CollapsibleTrigger>
     );
   }

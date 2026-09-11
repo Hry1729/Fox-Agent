@@ -9,13 +9,15 @@ export interface AgentCardData extends AgentRecord { image: string; tools: numbe
 export interface KnowledgeCardData extends KnowledgeBaseRecord { types: string; progress: number; agents: number; recent: string; tone: string }
 
 function activateCard(event: KeyboardEvent, action: () => void) {
+  if (event.target !== event.currentTarget) return
   if (event.key !== 'Enter' && event.key !== ' ') return
   event.preventDefault()
   action()
 }
 
-export function AgentCard({ agent, onUse, onManage }: { agent: AgentCardData; onUse: () => void; onManage?: () => void }) {
+export function AgentCard({ agent, onUse, onManage, disabled = false, showAction = true }: { agent: AgentCardData; onUse: () => void; onManage?: () => void; disabled?: boolean; showAction?: boolean }) {
   const summon = () => {
+    if (disabled) return
     if (!agent.available) {
       toast.error('该专家暂不可用', { description: agent.runtimeType === 'yuxi' ? '请确认知识库服务已连接后再试' : '请稍后重试' })
       return
@@ -23,14 +25,14 @@ export function AgentCard({ agent, onUse, onManage }: { agent: AgentCardData; on
     onUse()
   }
   return (
-    <Card className={`fox-library-card fox-library-card--stacked-meta fox-shadcn-kb-card fox-shadcn-agent-card ${agent.available ? '' : 'is-unavailable'}`} onClick={summon} onKeyDown={(event) => activateCard(event, summon)} role="button" tabIndex={0} aria-label={`召唤${agent.name}`} aria-disabled={!agent.available}>
+    <Card className={`fox-library-card fox-library-card--stacked-meta fox-shadcn-kb-card fox-shadcn-agent-card ${agent.available ? '' : 'is-unavailable'}`} onClick={summon} onKeyDown={(event) => activateCard(event, summon)} role="button" tabIndex={0} aria-label={`召唤${agent.name}`} aria-disabled={disabled || !agent.available}>
       <CardHeader className="fox-shadcn-kb-head">
         <span className="fox-shadcn-kb-icon fox-shadcn-agent-icon"><img src={agent.image} alt="" /></span>
         <span className="fox-shadcn-kb-heading">
           <span className="fox-agent-name-row"><strong>{agent.name}</strong></span>
         </span>
       </CardHeader>
-      <Button className="fox-agent-summon" size="sm" disabled={!agent.available} onClick={(event) => { event.stopPropagation(); summon() }}>召唤</Button>
+      {showAction && <Button className="fox-agent-summon" size="sm" disabled={disabled || !agent.available} onClick={(event) => { event.stopPropagation(); summon() }}>召唤</Button>}
       {onManage && <Button className="fox-agent-manage" variant="ghost" size="icon" aria-label={`管理${agent.name}`} onClick={(event) => { event.stopPropagation(); onManage() }}><Settings2 /></Button>}
       <CardContent className="fox-shadcn-kb-content">
         <p className="fox-agent-description" title={agent.description}>{agent.description}</p>

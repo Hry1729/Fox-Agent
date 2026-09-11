@@ -1301,15 +1301,24 @@ impl RunController {
         }
         let (used, maximum) = if provider { (self.retry.provider_attempts, self.retry.provider_max) }
             else { (self.retry.turn_attempts, self.retry.turn_max) };
-        if used >= maximum {
-            return Err(KernelError::FailClosed(
-                "frozen model retry budget exhausted".into(),
-            ));
-        }
         let failure: serde_json::Value = serde_json::from_str(failure_json)
             .map_err(|_| KernelError::FailClosed("invalid model failure evidence".into()))?;
         self.suspend_running_clock(now_monotonic_ms);
         self.settle_model_request();
+        let mut effects = vec![self.append_event(
+            "engine.model_rejected",
+            serde_json::json!({ "effectKey": effect_key, "failure": failure }),
+        )];
+        if used >= maximum || delay_ms >= self.config.run_execution_budget_ms.saturating_sub(self.running_elapsed_ms) {
+            self.retry.model_dispatch_pending = false;
+            let (code, message) = if failure["category"] == "incomplete_response" {
+                ("kernel.model_incomplete", "模型未完成本轮答复，自动续答次数已用完。已完成的工具结果已保留；请发送“继续完成剩余工作”。")
+            } else {
+                ("kernel.model_retry_exhausted", "模型服务请求失败，自动重试已停止。已完成的工具结果已保留，请稍后继续。")
+            };
+            effects.extend(self.terminate(RunOutcome::Failed { code: code.into(), message: message.into() }));
+            return Ok(effects);
+        }
         self.state = RunState::RetryScheduled;
         self.retry.scheduled_at_wall_ms = Some(now_wall_ms);
         self.retry.due_wall_ms = Some(now_wall_ms.saturating_add(delay_ms));
@@ -1319,12 +1328,6 @@ impl RunController {
         } else {
             self.retry.turn_attempts += 1;
         }
-        let mut effects = vec![self.append_event(
-            "engine.model_rejected",
-            serde_json::json!({
-                "effectKey": effect_key, "failure": failure,
-            }),
-        )];
         effects.push(self.append_event(
             "run.retrying",
             serde_json::json!({

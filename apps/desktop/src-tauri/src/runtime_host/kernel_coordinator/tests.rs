@@ -1204,10 +1204,97 @@ fn settled_provider_rejection(run_id: &str, turn_id: &str, checkpoint_seq: u64) 
 }
 
 #[test]
+fn settled_incomplete_http_reply_continues_after_reopen_with_completed_tool_results() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(45);
+        while requests.len() < 2 {
+            let mut stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "model request was not received");
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("{error}"),
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0u8; 8192];
+            let (header_end, length) = loop {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0);
+                bytes.extend_from_slice(&buffer[..read]);
+                assert!(bytes.len() < 1_048_576);
+                if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                    let length: usize = headers.lines().find_map(|line| line.strip_prefix("content-length:")).unwrap().trim().parse().unwrap();
+                    assert!(length < 1_048_576);
+                    break (end + 4, length);
+                }
+            };
+            while bytes.len() < header_end + length {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0);
+                bytes.extend_from_slice(&buffer[..read]);
+            }
+            let body: Value = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+            let continued = body["messages"].to_string().contains("Fox 续答提示");
+            requests.push(body);
+            let text = if continued { "现有工具结果已核对。\n<fox-final/>" } else { "I have the workbook with 5 sheets. Let me analyze the data comprehensively." };
+            let chunks = [
+                json!({"id":"local-pilot-test","object":"chat.completion.chunk","created":1,"model":"kernel-http-test","choices":[{"index":0,"delta":{"role":"assistant","content":text},"finish_reason":null}]}),
+                json!({"id":"local-pilot-test","object":"chat.completion.chunk","created":1,"model":"kernel-http-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+            ];
+            let response = format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", chunks[0], chunks[1]);
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).unwrap();
+        }
+        requests
+    });
+    let prompt = std::process::Command::new("node").args(["--input-type=module", "-e", "import { KERNEL_COMPLETION_CONTRACT } from './services/agent-runtime/src/kernel-completion.mjs'; process.stdout.write(KERNEL_COMPLETION_CONTRACT)"])
+        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+        .output().unwrap();
+    assert!(prompt.status.success());
+    let mut config = worker_configuration();
+    config.system_prompt = String::from_utf8(prompt.stdout).unwrap();
+    config.model_service = json!({"apiType":"openai-completions","modelId":"kernel-http-test","baseUrl":format!("http://{address}/v1")});
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_retry_opt(&clock, &config.hash().unwrap(), Some(&config), false, false, (0, 1));
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+    let tools = coordinator.snapshot().unwrap().tool_calls;
+    coordinator.dispatch_batch_with_worker("worker-batch", "first-http", &Allow, &real_worker_command(), &config, "local-test-only").unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
+    drop(coordinator);
+    drop(db);
+    clock.advance(1000);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.tick().unwrap();
+    coordinator.dispatch_batch_with_worker("worker-batch", "second-http", &Allow, &real_worker_command(), &config, "local-test-only").unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "completed");
+    assert_eq!(coordinator.snapshot().unwrap().tool_calls, tools);
+    assert!(db.kernel_reconciliation_view(&coordinator.binding.conversation_id, &run_id).unwrap().items.is_empty());
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(!requests[0]["messages"].to_string().contains("Fox 续答提示"));
+    assert!(requests[1]["messages"].to_string().contains("Fox 续答提示"));
+    assert!(requests.iter().all(|request| request["messages"].as_array().unwrap().iter().any(|message| message["role"] == "tool")));
+}
+
+#[test]
 fn settled_incomplete_answer_uses_one_turn_retry_without_reexecuting_tools() {
     let clock = TestClock::new(1_000);
     let cancellation = CancellationRegistry::default();
-    let (db, _, run_id) = fixture_with_retry_opt(&clock, "test-prompt", None, false, false, (0, 1));
+    let (db, root, run_id) = fixture_with_retry_opt(&clock, "test-prompt", None, false, false, (0, 1));
     let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
     settle_worker_batch(&coordinator);
     let tools = coordinator.snapshot().unwrap().tool_calls;
@@ -1223,13 +1310,25 @@ fn settled_incomplete_answer_uses_one_turn_retry_without_reexecuting_tools() {
     assert_eq!(coordinator.snapshot().unwrap().tool_calls, tools);
     assert!(coordinator.dispatch_batch("worker-batch", "early", &Allow, |_, _, _| panic!("retry is not due")).is_err());
     clock.advance(1000);
-    let error = coordinator.dispatch_batch("worker-batch", "second", &Allow, reject).unwrap_err();
-    assert!(error.contains("budget exhausted"), "{error}");
+    coordinator.dispatch_batch("worker-batch", "second", &Allow, |binding, frame, token| {
+        assert!(frame.history.last().unwrap()["content"][0]["text"].as_str().unwrap().contains("Fox 续答提示"));
+        reject(binding, frame, token)
+    }).unwrap();
     assert_eq!(coordinator.snapshot().unwrap().tool_calls, tools);
     assert!(coordinator.dispatch_batch("worker-batch", "third", &Allow, |_, _, _| panic!("only one retry is allowed")).is_err());
-    // The desktop pump makes a settled exhausted delivery terminally failed.
-    coordinator.fail("kernel.model_round_failed", "Model did not provide a final answer.").unwrap();
     assert_eq!(coordinator.snapshot().unwrap().state, "failed");
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let (status, owner): (String, Option<String>) = connection.query_row("SELECT status,lease_owner FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key='deliver-batch:worker-batch'", [&run_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(status, "completed");
+    assert_eq!(owner, None);
+    let code: String = connection.query_row("SELECT json_extract(payload_json,'$.code') FROM kernel_events WHERE run_id=?1 AND event_type='run.failed'", [&run_id], |row| row.get(0)).unwrap();
+    assert_eq!(code, "kernel.model_incomplete");
+    assert!(db.kernel_reconciliation_view(&coordinator.binding.conversation_id, &run_id).unwrap().items.is_empty());
+    drop(coordinator);
+    let restarted_cancellation = CancellationRegistry::default();
+    let reopened = KernelCoordinator::reopen(&db, &clock, &run_id, &restarted_cancellation);
+    // All terminal facts and the settled model lease survive a restart.
+    assert!(reopened.is_ok());
 }
 
 #[test]
@@ -1303,10 +1402,10 @@ fn settled_model_retry_cancellation_and_frozen_budget_block_more_dispatch() {
             assert_eq!(coordinator.snapshot().unwrap().state, "cancelled");
         } else {
             clock.advance(2000);
-            let error = coordinator.dispatch_initial("last", &Allow, |binding, frame, _| {
+            coordinator.dispatch_initial("last", &Allow, |binding, frame, _| {
                 Err(settled_provider_rejection(&binding.run_id, &frame.input.turn_id, frame.checkpoint_seq))
-            }).unwrap_err();
-            assert!(error.contains("budget exhausted"), "{error}");
+            }).unwrap();
+            assert_eq!(coordinator.snapshot().unwrap().state, "failed");
             assert!(coordinator.dispatch_initial("extra", &Allow, |_, _, _| panic!("retry budget cannot be reset")).is_err());
         }
     }

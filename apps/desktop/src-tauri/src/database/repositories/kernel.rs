@@ -143,6 +143,21 @@ pub struct KernelRunRecovery {
 }
 
 impl Database {
+    /// Read only durable rejection evidence for this exact model effect. A
+    /// settled model retry never replays a completed tool or another batch.
+    pub(crate) fn kernel_model_retry_needs_completion(&self, run_id: &str, effect_key: &str) -> Result<bool, String> {
+        self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM kernel_events e JOIN kernel_runs r ON r.run_id=e.run_id
+                 WHERE e.run_id=?1 AND e.event_type='engine.model_rejected'
+                 AND json_extract(e.payload_json,'$.effectKey')=?2
+                 AND json_extract(e.payload_json,'$.failure.category')='incomplete_response'
+                 AND r.kernel_mode='authoritative')",
+                params![run_id, effect_key], |row| row.get(0),
+            )
+        })
+    }
+
     /// The checkpoint is an append-only event committed with the original tool
     /// proposal, so no new table or second-transaction crash window is needed.
     pub fn kernel_engine_batch_checkpoint(&self, run_id: &str, batch_id: &str) -> Result<Option<serde_json::Value>, String> {
@@ -784,10 +799,11 @@ impl Database {
 
     pub(crate) fn kernel_commit_model_retry(&self, run_id: &str, wall_now_ms: i64,
         cmd: &crate::kernel::KernelPersistCommand, effect_key: &str, owner: &str) -> Result<(), String> {
-        if owner.trim().is_empty() || cmd.run_state != crate::kernel::RunState::RetryScheduled
-            || !cmd.retry.model_dispatch_pending || cmd.model_request_since_wall_ms.is_some()
+        let terminal = cmd.run_state == crate::kernel::RunState::Failed;
+        if owner.trim().is_empty() || (!terminal && cmd.run_state != crate::kernel::RunState::RetryScheduled)
+            || cmd.retry.model_dispatch_pending == terminal || cmd.model_request_since_wall_ms.is_some()
             || cmd.events.len() != 2 || cmd.events[0].event_type != "engine.model_rejected"
-            || cmd.events[1].event_type != "run.retrying" || !cmd.outbox.is_empty() {
+            || cmd.events[1].event_type != if terminal { "run.failed" } else { "run.retrying" } || !cmd.outbox.is_empty() {
             return Err("invalid settled model retry decision".into());
         }
         self.kernel_commit_decision_with_dispatch_lease(run_id,wall_now_ms,cmd,None,None,None,None,Some((effect_key,owner)))
@@ -835,13 +851,20 @@ impl Database {
                 let old_retry: String = transaction.query_row("SELECT retry_state_json FROM kernel_runs WHERE run_id=?1",[run_id],|row|row.get(0))?;
                 let old_retry: crate::kernel::RetryState = serde_json::from_str(&old_retry).map_err(|_|kernel_err("invalid stored retry counters"))?;
                 let provider = failure.category == "provider_unavailable";
-                if cmd.retry.provider_attempts != old_retry.provider_attempts + u32::from(provider)
-                    || cmd.retry.turn_attempts != old_retry.turn_attempts + u32::from(!provider)
-                    || cmd.retry.scheduled_at_wall_ms != Some(wall_now_ms)
-                    || cmd.retry.due_wall_ms.is_none_or(|due| due < wall_now_ms.saturating_add(failure.retry_after_ms.unwrap_or(0) as i64)) {
+                let terminal = cmd.run_state == crate::kernel::RunState::Failed;
+                if cmd.retry.provider_attempts != old_retry.provider_attempts + u32::from(provider && !terminal)
+                    || cmd.retry.turn_attempts != old_retry.turn_attempts + u32::from(!provider && !terminal)
+                    || (!terminal && (cmd.retry.scheduled_at_wall_ms != Some(wall_now_ms)
+                    || cmd.retry.due_wall_ms.is_none_or(|due| due < wall_now_ms.saturating_add(failure.retry_after_ms.unwrap_or(0) as i64))))
+                    || (terminal && (cmd.retry.scheduled_at_wall_ms.is_some() || cmd.retry.due_wall_ms.is_some())) {
                     return Err(kernel_err("model retry counters or server delay were not honored"));
                 }
-                let changed = transaction.execute("UPDATE kernel_effect_outbox SET status='pending',lease_owner=NULL,leased_at=NULL,updated_at=?4
+                if terminal {
+                    let outcome: serde_json::Value = serde_json::from_str(&cmd.events[1].payload_json).map_err(|_|kernel_err("invalid model failure outcome"))?;
+                    let expected = if failure.category == "incomplete_response" { "kernel.model_incomplete" } else { "kernel.model_retry_exhausted" };
+                    if outcome["code"] != expected { return Err(kernel_err("invalid settled model failure code")); }
+                }
+                let changed = transaction.execute("UPDATE kernel_effect_outbox SET status=?6,completed_at=CASE WHEN ?6='completed' THEN ?4 ELSE NULL END,lease_owner=NULL,leased_at=NULL,updated_at=?4
                     WHERE run_id=?1 AND effect_key=?2 AND lease_owner=?3 AND status='leased'
                       AND effect_type IN ('initial_model','deliver_tool_batch')
                       AND EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state='running' AND r.model_request_since_wall_ms IS NOT NULL)
@@ -850,7 +873,7 @@ impl Database {
                         AND ((kernel_effect_outbox.effect_type='initial_model' AND e.event_type='engine.initial_dispatched')
                           OR (kernel_effect_outbox.effect_type='deliver_tool_batch' AND e.event_type='engine.batch_dispatched'
                               AND json_extract(e.payload_json,'$.batchId')=kernel_effect_outbox.batch_id)))",
-                    params![run_id,effect_key,owner,wall_now_ms,failure.checkpoint_seq+1])?;
+                    params![run_id,effect_key,owner,wall_now_ms,failure.checkpoint_seq+1,if terminal { "completed" } else { "pending" }])?;
                 if changed != 1 { return Err(kernel_err("model retry lost its settled dispatch lease or cancellation won")); }
             }
             if let Some((owner, response)) = initial_lease {

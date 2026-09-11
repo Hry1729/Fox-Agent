@@ -84,24 +84,28 @@ describe('composable conversation draft selections', () => {
     test(`preserves project, expert and mixed knowledge in order ${order}`, async () => {
       const h = harness()
       const references = [{ source: 'local', id: 'kb-local' }, { source: 'remote', id: 'kb-remote', connectionId: 'yuxi-primary' }]
+      const names = Object.fromEntries(references.map((reference, index) => [knowledgeReferenceKey(reference as any), index ? '远程制度库' : '本地经验库']))
       for (const step of order) {
         const state = h.render()
         if (step === 'p') state.selectProject('D:/work/project', 'read_only')
         if (step === 'e') expect((await state.createConversationForExpert('expert-a')).success).toBe(true)
-        if (step === 'k') expect(await state.setKnowledgeReferences(references, {})).toBe(true)
+        if (step === 'k') expect(await state.setKnowledgeReferences(references, names)).toBe(true)
       }
       const state = h.render()
       expect(state.draftProjectRoot).toBe('D:/work/project')
       expect(state.selectedExpertId).toBe('expert-a')
       expect(state.knowledgeReferences).toEqual(references)
+      expect(state.knowledgeReferenceNames).toEqual(names)
       expect(h.creates()).toBe(0)
       // A re-render caused by navigating a workspace page keeps the draft.
       expect(h.render().knowledgeReferences).toEqual(references)
+      expect(h.render().knowledgeReferenceNames).toEqual(names)
       await state.createConversation()
       const cleared = h.render()
       expect(cleared.draftProjectRoot).toBeNull()
       expect(cleared.selectedExpertId).toBeNull()
       expect(cleared.knowledgeReferences).toBeUndefined()
+      expect(cleared.knowledgeReferenceNames).toEqual({})
     })
   }
   test('sends the combined draft and knowledge names to the Host only on first message', async () => {

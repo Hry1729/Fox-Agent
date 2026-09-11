@@ -16,6 +16,7 @@ import { AgentCard, type AgentCardData } from '@/features/workspace/entity-card'
 import { WorkspacePage } from '@/features/workspace/page-shell'
 import type { NavigateWorkspace } from '@/features/workspace/types'
 import { useAgents } from './use-agents'
+import { asAgentCard as asCard } from './agent-card-data'
 import { expertCatalogAgents } from './agent-classification'
 import { useExpertIcons } from './use-expert-icons'
 import { DigitalColleagueManager } from './digital-colleague-manager'
@@ -23,33 +24,6 @@ import { useMcpServers } from '@/features/settings/use-mcp-servers'
 import { useSkills } from '@/features/settings/use-skills'
 import { useKnowledgeBases } from '@/features/knowledge/use-knowledge'
 import { knowledgeReferencesFromDeclaration, remoteKnowledgeReference, resolveExpertKnowledgeDeclaration, toPersistedExpertManifest } from './expert-knowledge'
-
-function asCard(agent: AgentRecord): AgentCardData {
-  const manifest = agent.packageManifest
-  let knowledgeCount = agent.resources.knowledges.length
-  if (agent.runtimeType === 'pi') {
-    try {
-      const declaration = resolveExpertKnowledgeDeclaration(manifest)
-      knowledgeCount = declaration.format === 'references'
-        ? declaration.references.length
-        : declaration.format === 'legacy_remote_ids'
-          ? declaration.ids.length
-          : 0
-    } catch {
-      knowledgeCount = 0
-    }
-  }
-  return {
-    ...agent,
-    image: agent.icon || (agent.runtimeType === 'pi' ? '/mascot/fox_magic.png' : '/mascot/fox_search.png'),
-    tools: agent.runtimeType === 'pi' && Array.isArray(manifest.allowedTools) ? manifest.allowedTools.length : agent.resources.tools.length,
-    knowledge: knowledgeCount,
-    mcps: agent.runtimeType === 'pi' && Array.isArray(manifest.mcpServers) ? manifest.mcpServers.length : agent.resources.mcps.length,
-    skills: agent.runtimeType === 'pi' && Array.isArray(manifest.skills) ? manifest.skills.length : agent.resources.skills.length,
-    recent: agent.runtimeType === 'pi' ? '本机' : '知识库',
-    active: agent.isDefault,
-  }
-}
 
 const fallbackAgent: AgentRecord = { id: 'fox-general', name: 'Fox 通用助手', description: 'Fox 默认通用专家', runtimeType: 'pi', defaultModel: 'configured-model', icon: null, category: 'general', openingSuggestions: [], systemPrompt: '', isBuiltin: true, packageVersion: '1.0.0', packageSource: 'builtin', packageId: null, packageHash: null, packageManifest: {}, capabilities: ['files', 'tools', 'reasoning'], resources: { tools: [{ id: 'files', name: '文件读写', description: '读取和处理已授权项目文件' }, { id: 'tools', name: '本地工具', description: '调用 Fox Runtime 提供的本地工具' }, { id: 'reasoning', name: '任务推理', description: '规划并执行多步骤任务' }], knowledges: [], mcps: [], skills: [] }, configurableItems: {}, isDefault: true, available: true }
 

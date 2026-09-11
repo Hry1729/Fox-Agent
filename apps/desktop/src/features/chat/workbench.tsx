@@ -1,7 +1,9 @@
+import { UserMessageAvatar, UserMessageBubble } from './components/UserMessageBubble'
+import { ExpertPickerDialog } from '@/features/agents/ExpertPickerDialog'
 import { HtmlFilePreview } from './html-file-preview'
 import { KernelReconciliationPanel } from './kernel-reconciliation-panel'
 import { runtimeProcessActivity } from './runtime-process-activity'
-import { lazy, memo, Profiler, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent, type ReactNode } from 'react'
+import { lazy, memo, Profiler, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction, type ChangeEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { subscribeNotificationRefresh } from '../notification-subscriptions'
 import {
   Activity,
@@ -256,7 +258,7 @@ import { expertErrorMessage, expertErrorPresentation, expertInteractionLocked, l
 import { useGoalProgress, type GoalProgressData } from './hooks/use-goal-progress'
 import type { MessageResponseProps } from '@/components/ai-elements/message-response'
 import { normalizeAssistantMarkdown } from '@/features/conversations/model/assistant-presentation'
-import { UserProfileDialog, useUserProfile } from '@/features/profile/user-profile'
+import { UserProfileDialog, useUserProfile, type UserProfile } from '@/features/profile/user-profile'
 import { childRunIsActive, childRunStatusLabel, formatDurationMs, isWebToolCall, latestConversationContextUsage, normalizeBrowserUrl, webActivitySummary, type ConversationUsage } from './sidebar-model'
 import { EMPTY_RUNTIME_ARTIFACTS, EMPTY_RUNTIME_EVENTS, groupRuntimeRecords, latestRunAssistantId, groupAssistantContinuations } from './runtime-timeline-performance'
 import { approvalPresentation } from '../conversations/model/approval-presentation'
@@ -1986,6 +1988,7 @@ function RuntimeAssistantMessage({ message, processEvents, running, artifacts, a
   return (
     <div className="fox-turn-anchor">
       <Message from="assistant" className="fox-message fox-assistant-message">
+        <FoxAssistantAvatar />
         <MessageContent className="fox-assistant-content">
           <RuntimeProcess events={processEvents} process={process} running={running} answerStarted={Boolean(parsed.answer)} />
           {parsed.answer && <div className="fox-answer-body"><MarkdownResponse className="fox-answer-response">{parsed.answer}</MarkdownResponse></div>}
@@ -2136,7 +2139,6 @@ function RuntimeProcess({ events, process: preparedProcess, running: runtimeRunn
     <ChainOfThought open={open} onOpenChange={(next) => { setOpen(next); if (next) setVisited(true) }} className="fox-chain-of-thought fox-runtime-process">
       <ChainOfThoughtHeader className="fox-chain-of-thought-header" trailing={<small className="fox-runtime-step-count" aria-label={`${stepCount} 个步骤`}>{stepCount}</small>}>
         <span className={`fox-runtime-process-summary ${running ? 'is-running' : ''}`}>
-          <FoxAssistantAvatar />
           <RunStatusText text={processTitle} active={running} />
         </span>
       </ChainOfThoughtHeader>
@@ -2340,6 +2342,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
             const editing = latest && editingMessageId === message.id
             return <div id={`fox-turn-${message.id}`} key={message.id} className="fox-turn-anchor" data-turn-message-id={message.id}>
               <Message from="user" className={`fox-message fox-user-message ${editing ? 'is-editing' : ''}`}>
+                {runtimeContext.userProfile && <UserMessageAvatar profile={runtimeContext.userProfile} />}
                 {editing ? <MessageContent className="fox-user-edit">
                   <textarea
                     autoFocus
@@ -2361,7 +2364,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
                       发送
                     </Button>
                   </div>
-                </MessageContent> : <MessageContent className="fox-user-bubble">{message.content}</MessageContent>}
+                </MessageContent> : <UserMessageBubble>{message.content}</UserMessageBubble>}
                 <SentMessageAttachments attachments={messageAttachments} />
                 {!editing && <div className="fox-user-meta">
                   <span>Fox · {message.status === 'completed' ? '已发送' : message.status === 'sending' ? '发送中' : message.status}</span>
@@ -2456,7 +2459,7 @@ function Timeline({ empty, state, prompt, openingSuggestions, runtimeMessages, r
         <div className="fox-thread-date"><span>今天</span></div>
         <div className="fox-turn-anchor">
         <Message from="user" className="fox-message fox-user-message">
-          <MessageContent className="fox-user-bubble">{prompt}</MessageContent>
+          <UserMessageBubble>{prompt}</UserMessageBubble>
           <div className="fox-user-meta"><span>DeepSeek V3.2 · 刚刚</span><span><MessageAction tooltip="复制"><Copy size={13} /></MessageAction><MessageAction tooltip="编辑"><FileEdit size={13} /></MessageAction></span></div>
         </Message>
         </div>
@@ -2570,17 +2573,17 @@ function ConversationTurnRail({ messages, artifacts }: { messages: ConversationM
   </nav>
 }
 
-function ComposerAttachmentPreview({ projectRoot, bindings = [], onProject, onKnowledge }: { projectRoot?: string | null; bindings?: KnowledgeBindingRecord[]; onProject?: () => void; onKnowledge?: () => void }) {
+function ComposerAttachmentPreview({ projectRoot, knowledgeChips = [], onProject, onKnowledge }: { projectRoot?: string | null; knowledgeChips?: Array<{ key: string; name: string }>; onProject?: () => void; onKnowledge?: () => void }) {
   const attachments = usePromptInputAttachments()
   const items: ReactNode[] = []
   if (projectRoot) items.push(<button type="button" key="project" className="is-authorized" onClick={onProject} title={projectRoot}><FolderOpen size={13} /><span>{projectRoot.split(/[\\/]/).filter(Boolean).at(-1)}</span><Check size={12} /></button>)
-  bindings.forEach((binding) => {
-    const label = binding.knowledgeBaseName || binding.knowledgeBaseId
-    items.push(<button type="button" key={`${binding.serviceConnectionId}:${binding.knowledgeBaseId}`} className="is-authorized is-knowledge" onClick={onKnowledge} title={label}><Library size={13} /><span>{label}</span><Check size={12} /></button>)
+  knowledgeChips.forEach((chip) => {
+    const label = chip.name
+    items.push(<button type="button" key={chip.key} className="is-authorized is-knowledge" onClick={onKnowledge} title={label}><Library size={13} /><span>{label}</span><Check size={12} /></button>)
   })
   attachments.files.forEach((file) => items.push(<Attachment key={file.id} data={file} onRemove={() => attachments.remove(file.id)}><AttachmentPreview /><AttachmentInfo /><AttachmentRemove label="移除附件" /></Attachment>))
   if (!items.length) return null
-  const labels = [...(projectRoot ? [projectRoot] : []), ...bindings.map((binding) => binding.knowledgeBaseName || binding.knowledgeBaseId), ...attachments.files.map((file) => file.filename || '附件')]
+  const labels = [...(projectRoot ? [projectRoot] : []), ...knowledgeChips.map((chip) => chip.name), ...attachments.files.map((file) => file.filename || '附件')]
   return (
     <Attachments variant="inline" className="fox-composer-attachments fox-composer-context fox-composer-selection-row">
       {items.slice(0, 3)}
@@ -2632,6 +2635,7 @@ type ComposerRuntimeContextValue = {
   remoteKnowledgeBases?: KnowledgeBaseRecord[]
   localKnowledgeBases?: LocalKnowledgeBaseDto[]
   knowledgeReferences?: KnowledgeReference[]
+  knowledgeReferenceNames?: Record<string, string>
   knowledgeLoading?: boolean
   knowledgeError?: string | null
   onKnowledgeMenuOpen?: () => void
@@ -2640,7 +2644,7 @@ type ComposerRuntimeContextValue = {
 
 type TimelineRuntimeContextValue = Pick<ComposerRuntimeContextValue,
   'knowledgeBindings' | 'onOpenSource' | 'assistantName' | 'runModel'
-> & { recoveryPanel?: ReactNode }
+> & { recoveryPanel?: ReactNode; userProfile?: UserProfile }
 
 const ComposerRuntimeContext = createContext<ComposerRuntimeContextValue>({ knowledgeBindings: [] })
 const TimelineRuntimeContext = createContext<TimelineRuntimeContextValue>({ knowledgeBindings: [] })
@@ -2773,7 +2777,7 @@ function GoalFloater({ chatState, data, onDelete, onRunningChange, onEvidenceCli
   )
 }
 
-function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, centered = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], usage, knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onDeleteGoal, onGoalRunningChange, onEvidenceClick, onStatusChange, onCancel }: { resetKey: number; suggestedPrompt?: string; chatState: ChatState; showGoal?: boolean; centered?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; usage?: ConversationUsage; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onDeleteGoal?: (goalId: string) => Promise<boolean>; onGoalRunningChange?: (goalId: string, expectedVersion: number, running: boolean) => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
+function Composer({ resetKey, draft, setDraft, chatState, showGoal = false, centered = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], usage, knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onDeleteGoal, onGoalRunningChange, onEvidenceClick, onStatusChange, onCancel }: { resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; showGoal?: boolean; centered?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; usage?: ConversationUsage; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onDeleteGoal?: (goalId: string) => Promise<boolean>; onGoalRunningChange?: (goalId: string, expectedVersion: number, running: boolean) => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
   const runtimeContext = useContext(ComposerRuntimeContext)
   const resolveRuntimeApproval = onResolveApproval
   const activeQuestionRequest = questionRequest ?? runtimeContext.questionRequest
@@ -2784,6 +2788,14 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
     ? runtimeContext.knowledgeReferences
     : enabledKnowledgeBindings.map(knowledgeReferenceFromLegacyBinding)
   const selectedKnowledgeReferenceKeys = new Set(configuredKnowledgeReferences.map(knowledgeReferenceKey))
+  const knowledgeChips = configuredKnowledgeReferences.map((reference) => ({
+    key: knowledgeReferenceKey(reference),
+    name: runtimeContext.knowledgeReferenceNames?.[knowledgeReferenceKey(reference)]
+      ?? (reference.source === 'local' ? runtimeContext.localKnowledgeBases?.find((item) => item.id === reference.id)?.name
+        : runtimeContext.remoteKnowledgeBases?.find((item) => item.id === reference.id)?.name)
+      ?? enabledKnowledgeBindings.find((binding) => knowledgeReferenceKey(knowledgeReferenceFromLegacyBinding(binding)) === knowledgeReferenceKey(reference))?.knowledgeBaseName
+      ?? reference.id,
+  }))
   const selectableAgents = chatSelectableAgents(agents)
   const openKnowledge = onKnowledge ?? runtimeContext.onKnowledge
   const [status, setStatus] = useState<'ready' | 'streaming'>('ready')
@@ -2805,7 +2817,6 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
     ? activeAgent.defaultModel
     : modelService?.modelId ?? (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) ?? '未配置模型'
   const [model, setModel] = useState(defaultModel)
-  const [draft, setDraft] = useState('')
   const [questionFreeform, setQuestionFreeform] = useState('')
   const [questionSelections, setQuestionSelections] = useState<Record<string, string[]>>({})
   const [questionOtherAnswers, setQuestionOtherAnswers] = useState<Record<string, string>>({})
@@ -2831,12 +2842,11 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
       submitTimer.current = null
     }
     setStatus('ready')
-    setDraft(suggestedPrompt ?? '')
     setCommandOpen(false)
     setCommandView('commands')
     setSelectedSlashCommand(null)
     setMentionOpen(false)
-  }, [resetKey, suggestedPrompt])
+  }, [resetKey])
 
   useEffect(() => {
     setModel(defaultModel)
@@ -3169,19 +3179,20 @@ function Composer({ resetKey, suggestedPrompt, chatState, showGoal = false, cent
           className={`fox-prompt-input ${focused ? 'is-focused' : ''}`}
         >
         <ComposerAttachmentCommandBridge openRef={attachmentDialogRef} />
-        <ComposerAttachmentPreview projectRoot={runtimeControlled ? projectRoot : undefined} bindings={runtimeControlled ? enabledKnowledgeBindings : []} onProject={onProject} onKnowledge={openKnowledge} />
+        <ComposerAttachmentPreview projectRoot={runtimeControlled ? projectRoot : undefined} knowledgeChips={runtimeControlled ? knowledgeChips : []} onProject={onProject} onKnowledge={openKnowledge} />
         <PromptInputBody>
           <PromptInputTextarea value={draft} disabled={questionSubmitting} spellCheck={spellcheckEnabled} onChange={onDraftChange} onKeyDown={onComposerKeyDown} className="fox-prompt-textarea" placeholder={activeQuestionRequest ? '补充你的答案，或直接选择上方选项' : '给 Fox 发消息，输入 / 查看命令，@ 引用文件…'} />
         </PromptInputBody>
         <PromptInputFooter className="fox-prompt-toolbar">
           <PromptInputTools className="fox-composer-tools">
             <PromptInputActionMenu>
-              <PromptInputActionMenuTrigger tooltip="添加内容"><Plus size={18} /></PromptInputActionMenuTrigger>
+              <PromptInputActionMenuTrigger tooltip="添加内容" aria-label="添加内容"><Plus size={18} /></PromptInputActionMenuTrigger>
               <PromptInputActionMenuContent className="fox-add-menu">
                 <PromptInputActionAddAttachments label="添加文件" />
                 {supportsImageInput && <PromptInputActionAddAttachments label="添加图片" />}
                 <PromptInputActionMenuItem disabled={!runtimeControlled} onSelect={() => onProject?.()}><FolderOpen />{projectRoot ? '更换项目' : '选择项目'}</PromptInputActionMenuItem>
-                <PromptInputActionMenuItem onSelect={openKnowledge}><Library />{enabledKnowledgeBindings.length ? `知识库（已选 ${enabledKnowledgeBindings.length}）` : '选择知识库'}</PromptInputActionMenuItem>
+                <PromptInputActionMenuItem disabled={!runtimeControlled || expertReadOnly} onSelect={onChangeExpert}><Sparkles />添加专家</PromptInputActionMenuItem>
+                <PromptInputActionMenuItem onSelect={openKnowledge}><Library />{knowledgeChips.length ? `知识库（已选 ${knowledgeChips.length}）` : '选择知识库'}</PromptInputActionMenuItem>
               </PromptInputActionMenuContent>
             </PromptInputActionMenu>
             <PromptInputActionMenu>
@@ -4334,6 +4345,7 @@ export function Workbench() {
   const desktopConversation = useDesktopConversation()
   const yuxi = useYuxiService()
   const yuxiUser = useYuxiUser(Boolean(yuxi.service?.credentialConfigured))
+  const { profile: userProfile } = useUserProfile({ name: yuxiUser.user?.username, avatar: yuxiUser.user?.avatar })
   const yuxiModels = useYuxiModels(Boolean(yuxi.service?.credentialConfigured))
   const modelService = useModelService()
   const agentResource = useAgents()
@@ -4384,8 +4396,9 @@ export function Workbench() {
   const [projects, setProjects] = useState<ProjectRecord[]>([])
   const [chatState, setChatState] = useState<ChatState>('complete')
   const [activePrompt, setActivePrompt] = useState('Kun 的协议是什么协议，我可以拿来二次开发并且企业内部使用吗？')
+  const [expertPickerOpen, setExpertPickerOpen] = useState(false)
   const [composerResetKey, setComposerResetKey] = useState(0)
-  const [suggestedPrompt, setSuggestedPrompt] = useState('')
+  const [composerDraft, setComposerDraft] = useState('')
   const [pendingUserMessage, setPendingUserMessage] = useState<ConversationMessage | null>(null)
   useEffect(() => {
     const handleFork = (event: Event) => {
@@ -4690,7 +4703,7 @@ export function Workbench() {
     if (!latestUser) return
     clearWorkflowTimer()
     setActivePrompt(latestUser.content)
-    setSuggestedPrompt('')
+    setComposerDraft('')
     setPendingUserMessage(null)
     setChatState('running')
     void desktopConversation
@@ -4707,7 +4720,7 @@ export function Workbench() {
     setChatState('complete')
     setPendingUserMessage(null)
     setEmptyConversation(!suggestion)
-    setSuggestedPrompt(suggestion)
+    setComposerDraft(suggestion)
     setComposerResetKey((value) => value + 1)
     setActiveEntityId(null)
     setActiveDocumentId(null)
@@ -4729,7 +4742,7 @@ export function Workbench() {
       setChatState('complete')
       setPendingUserMessage(null)
       setEmptyConversation(true)
-      setSuggestedPrompt('')
+      setComposerDraft('')
       setComposerResetKey((value) => value + 1)
       setActiveEntityId(null)
       setActiveDocumentId(null)
@@ -4960,6 +4973,47 @@ export function Workbench() {
     setProjectDeleteDialog(null)
     toast.success('项目已从 Fox 删除，本机文件夹未受影响')
   }
+  const selectExpert = useStableCallback(async (expertId: string): Promise<boolean> => {
+    if (expertReadOnly) return false
+    if (expertId === desktopConversation.selectedExpertId) return true
+    const targetAgent = agentResource.agents.find((agent) => agent.id === expertId)
+    if (!targetAgent) return false
+    let configuredKnowledgeReferences: KnowledgeReference[] = []
+    try {
+      const declaration = resolveExpertKnowledgeDeclaration(targetAgent.packageManifest)
+      if (declaration.format === 'references') {
+        configuredKnowledgeReferences = declaration.references
+      } else if (declaration.format === 'legacy_remote_ids') {
+        configuredKnowledgeReferences = declaration.ids.map((id) => ({
+          source: 'remote',
+          connectionId: 'yuxi',
+          id,
+        }))
+      }
+    } catch (cause) {
+      toast.error('专家知识库配置无效', { description: cause instanceof Error ? cause.message : String(cause) })
+      return false
+    }
+    const result = await desktopConversation.createConversationForExpert(targetAgent.id)
+    if (!result.success) {
+      toast.error(expertErrorMessage(result.error, '无法召唤这个专家'))
+      return false
+    }
+    if (configuredKnowledgeReferences.length) {
+      const references = [...(desktopConversation.knowledgeReferences ?? desktopConversation.knowledgeBindings.map(knowledgeReferenceFromLegacyBinding))]
+      for (const reference of configuredKnowledgeReferences) {
+        if (!references.some((item) => knowledgeReferenceKey(item) === knowledgeReferenceKey(reference))) references.push(reference)
+      }
+      const names = Object.fromEntries(references.map((reference) => [
+        knowledgeReferenceKey(reference),
+        desktopConversation.knowledgeReferenceNames[knowledgeReferenceKey(reference)] ?? (reference.source === 'local' ? localKnowledgeBases : knowledge.items).find((item) => item.id === reference.id)?.name ?? reference.id,
+      ]))
+      if (!await desktopConversation.setKnowledgeReferences(references, names)) {
+        toast.error('专家已启用，但知识库绑定失败')
+      }
+    }
+    return true
+  })
   const navigate: NavigateWorkspace = (view, entityId, context) => {
     if (view === 'onboarding' && activeView !== 'onboarding') {
       onboardingReturnRoute.current = { view: activeView, entityId: activeEntityId, documentId: activeDocumentId }
@@ -4969,43 +5023,7 @@ export function Workbench() {
       if (!targetAgent) return
       const targetKind = normalizeAgentClassification(targetAgent).agentKind
       if (targetKind === 'worker') return
-      if (targetKind === 'expert' && entityId !== desktopConversation.selectedExpertId) {
-        let configuredKnowledgeReferences: KnowledgeReference[] = []
-        try {
-          const declaration = resolveExpertKnowledgeDeclaration(targetAgent.packageManifest)
-          if (declaration.format === 'references') {
-            configuredKnowledgeReferences = declaration.references
-          } else if (declaration.format === 'legacy_remote_ids') {
-            configuredKnowledgeReferences = declaration.ids.map((id) => ({
-              source: 'remote',
-              connectionId: 'yuxi',
-              id,
-            }))
-          }
-        } catch (cause) {
-          toast.error('专家知识库配置无效', { description: cause instanceof Error ? cause.message : String(cause) })
-        }
-        void (async () => {
-          const result = await desktopConversation.createConversationForExpert(entityId)
-          if (!result.success) {
-            toast.error(expertErrorMessage(result.error, '无法召唤这个专家'))
-            return
-          }
-          if (configuredKnowledgeReferences.length) {
-            const references = [...(desktopConversation.knowledgeReferences ?? desktopConversation.knowledgeBindings.map(knowledgeReferenceFromLegacyBinding))]
-            for (const reference of configuredKnowledgeReferences) {
-              if (!references.some((item) => knowledgeReferenceKey(item) === knowledgeReferenceKey(reference))) references.push(reference)
-            }
-            const names = Object.fromEntries(references.map((reference) => [
-              knowledgeReferenceKey(reference),
-              knowledge.items.find((item) => item.id === reference.id)?.name ?? reference.id,
-            ]))
-            if (!await desktopConversation.setKnowledgeReferences(references, names)) {
-              toast.error('专家已启用，但知识库绑定失败')
-            }
-          }
-        })()
-      }
+      if (targetKind === 'expert') void selectExpert(entityId)
       if (targetKind === 'assistant' && entityId !== desktopConversation.detail?.conversation.agentId) {
         void desktopConversation.createConversationForAgent(entityId).then((created) => {
           if (!created) toast.error(desktopConversation.error ?? '无法切换这个助手')
@@ -5132,12 +5150,14 @@ export function Workbench() {
     runModel: timelineRunModel,
     onOpenSource: handleRuntimeOpenSource,
     recoveryPanel,
-  }), [desktopConversation.knowledgeBindings, handleRuntimeOpenSource, timelineAssistantName, timelineRunModel, recoveryPanel])
+    userProfile,
+  }), [desktopConversation.knowledgeBindings, handleRuntimeOpenSource, timelineAssistantName, timelineRunModel, recoveryPanel, userProfile.name, userProfile.avatar, userProfile.initial])
   const composerRuntimeContextValue = useMemo<ComposerRuntimeContextValue>(() => ({
     ...timelineRuntimeContextValue,
     remoteKnowledgeBases: knowledge.items,
     localKnowledgeBases,
     knowledgeReferences: desktopConversation.knowledgeReferences,
+    knowledgeReferenceNames: desktopConversation.knowledgeReferenceNames,
     knowledgeLoading: knowledge.loading || localKnowledgeLoading || knowledgeDialogBusy,
     knowledgeError: knowledgeDialogError ?? knowledge.error,
     onKnowledgeMenuOpen: refreshKnowledgeChoices,
@@ -5145,7 +5165,7 @@ export function Workbench() {
     questionRequest: runtimeQuestion,
     onSubmitQuestion: handleRuntimeSubmitQuestion,
     onKnowledge: handleKnowledgeOpen,
-  }), [desktopConversation.knowledgeReferences, handleKnowledgeOpen, handleKnowledgeToggle, handleRuntimeSubmitQuestion, knowledge.error, knowledge.items, knowledge.loading, knowledgeDialogBusy, knowledgeDialogError, localKnowledgeBases, localKnowledgeLoading, refreshKnowledgeChoices, runtimeQuestion, timelineRuntimeContextValue])
+  }), [desktopConversation.knowledgeReferences, desktopConversation.knowledgeReferenceNames, handleKnowledgeOpen, handleKnowledgeToggle, handleRuntimeSubmitQuestion, knowledge.error, knowledge.items, knowledge.loading, knowledgeDialogBusy, knowledgeDialogError, localKnowledgeBases, localKnowledgeLoading, refreshKnowledgeChoices, runtimeQuestion, timelineRuntimeContextValue])
   const handleTimelineLoadEarlierMessages = useStableCallback(() => {
     void desktopConversation.loadEarlierMessages()
   })
@@ -5160,7 +5180,7 @@ export function Workbench() {
   const handleTimelineRerun = useStableCallback(async (messageId: string, prompt: string) => {
     clearWorkflowTimer()
     setActivePrompt(prompt)
-    setSuggestedPrompt('')
+    setComposerDraft('')
     setPendingUserMessage(null)
     setEmptyConversation(false)
     setChatState('running')
@@ -5192,7 +5212,7 @@ export function Workbench() {
   const handleComposerViewExpert = useStableCallback(() => {
     if (activeExpert) navigate('agent-detail', activeExpert.id)
   })
-  const handleComposerChangeExpert = useStableCallback(() => navigate('agents'))
+  const handleComposerChangeExpert = useStableCallback(() => setExpertPickerOpen(true))
   const handleComposerRemoveExpert = useStableCallback(async () => {
     const result = await desktopConversation.removeExpert()
     if (!result.success) {
@@ -5204,7 +5224,7 @@ export function Workbench() {
   const handleComposerPromptCommit = useStableCallback((prompt: string) => {
     const now = Date.now()
     setActivePrompt(prompt)
-    setSuggestedPrompt('')
+    setComposerDraft('')
     setEmptyConversation(false)
     setChatState('running')
     setPendingUserMessage({
@@ -5223,7 +5243,7 @@ export function Workbench() {
   const handleComposerSubmitPrompt = useStableCallback(async (prompt: string, model?: string, submittedFiles?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => {
     clearWorkflowTimer()
     setActivePrompt(prompt)
-    setSuggestedPrompt('')
+    setComposerDraft('')
     setEmptyConversation(false)
     if (desktopConversation.enabled) {
       setChatState('running')
@@ -5326,10 +5346,11 @@ export function Workbench() {
         <div className="fox-content-card">
         <div className={`fox-content-surface ${rightPanelMaximized && showConversationRightSidebar && !rightSidebarCollapsed ? 'is-right-maximized' : ''}`}>
         <section className="fox-chat-pane">
+          <ExpertPickerDialog open={expertPickerOpen} onOpenChange={setExpertPickerOpen} agents={agentResource.agents} selectedExpertId={desktopConversation.selectedExpertId} readOnly={expertReadOnly} onSelect={selectExpert} />
           <TimelineRuntimeContext.Provider value={timelineRuntimeContextValue}>
           <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
           {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} usage={conversationUsage} contextWindow={modelService.service?.contextWindow ?? 0} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
-<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} /></Profiler><Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} suggestedPrompt={suggestedPrompt} chatState={chatState} centered={timelineEmpty} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={activeProject?.permissionMode ?? desktopConversation.detail?.conversation.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? desktopConversation.detail?.approvals ?? EMPTY_RUNTIME_APPROVALS : EMPTY_RUNTIME_APPROVALS} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onDeleteGoal={handleComposerDeleteGoal} onGoalRunningChange={handleComposerGoalRunningChange} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
+<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} /></Profiler><Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={activeProject?.permissionMode ?? desktopConversation.detail?.conversation.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? desktopConversation.detail?.approvals ?? EMPTY_RUNTIME_APPROVALS : EMPTY_RUNTIME_APPROVALS} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onDeleteGoal={handleComposerDeleteGoal} onGoalRunningChange={handleComposerGoalRunningChange} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
           </ComposerRuntimeContext.Provider>
           </TimelineRuntimeContext.Provider>
         </section>

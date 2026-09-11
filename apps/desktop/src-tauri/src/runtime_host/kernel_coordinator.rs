@@ -279,7 +279,7 @@ impl<'a> KernelCoordinator<'a> {
         if checkpoint.batch_id != batch_id {
             return Err("persisted engine checkpoint batch mismatch".into());
         }
-        let history = self.context_view(batch_id, &checkpoint.history)?;
+        let history = self.model_retry_context(batch_id, self.context_view(batch_id, &checkpoint.history)?)?;
         let frame = self.prepare_batch_resume(batch_id, history, checkpoint.assistant_message)?;
         if event["turnId"].as_str() != Some(frame.turn_id.as_str()) {
             return Err("persisted engine checkpoint turn mismatch".into());
@@ -491,20 +491,6 @@ impl<'a> KernelCoordinator<'a> {
                 let attempt = if provider { providers } else { turns };
                 let delay = (1_000_i64.saturating_mul(1_i64 << attempt.min(5)))
                     .max(failure.retry_after_ms.unwrap_or(0) as i64);
-                let elapsed = controller
-                    .shadow_checkpoint(now.monotonic_ms)
-                    .running_elapsed_ms;
-                if delay
-                    >= self
-                        .binding
-                        .budgets
-                        .run_execution_ms
-                        .saturating_sub(elapsed)
-                {
-                    return Err(KernelError::FailClosed(
-                        "model retry delay exceeds remaining Run budget".into(),
-                    ));
-                }
                 controller.schedule_model_retry(
                     now.monotonic_ms,
                     now.wall_ms,
@@ -531,7 +517,7 @@ impl<'a> KernelCoordinator<'a> {
         self.database
             .kernel_validate_resource_acquisition(&self.binding.run_id)?;
         let mut input = self.database.kernel_initial_input(&self.binding.run_id)?;
-        input.messages = self.context_view("initial", &input.messages)?;
+        input.messages = self.model_retry_context("initial", self.context_view("initial", &input.messages)?)?;
         let token = self.cancellation.run_token(&self.binding.run_id)?;
         token.check()?;
         let frame = {

@@ -51,6 +51,7 @@ interface DesktopConversationState {
   draftProjectRoot: string | null
   draftPermissionMode: ProjectRecord['permissionMode'] | null
   knowledgeReferences: KnowledgeReference[] | undefined
+  knowledgeReferenceNames: Record<string, string>
   selectProject: (projectRoot: string, permissionMode: ProjectRecord['permissionMode']) => void
   setKnowledgeReferences: (references: KnowledgeReference[], names: Record<string, string>) => Promise<boolean>
   knowledgeBindings: KnowledgeBindingRecord[]
@@ -1251,6 +1252,7 @@ export function useDesktopConversation(): DesktopConversationState {
     draftProjectRoot,
     draftPermissionMode,
     knowledgeReferences: detail?.knowledgeReferences ?? draftKnowledgeReferences,
+    knowledgeReferenceNames: detail ? currentDraft().knowledgeNames ?? {} : draftKnowledgeNames,
     selectProject,
     setKnowledgeReferences,
     knowledgeBindings: detail?.knowledgeBindings ?? draftKnowledgeBases.map((item) => ({
