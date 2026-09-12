@@ -24,19 +24,25 @@ export function observeKernelModelTransport(session, fetchImpl = globalThis.fetc
       return response
     },
   })
-  return request => {
-    const final = session.agent.state.messages.at(-1)
-    const frame = request.payload?.initialModel ?? request.payload?.batchResume
-    if (!frame) return null
-    const noOutput = final?.role === 'assistant' && !(final.content ?? []).some(block =>
-      block?.type === 'toolCall' || block?.text?.length || block?.thinking?.length)
-    const evidence = calls === 1 && rejection && noOutput && final.stopReason === 'error'
-      ? rejection
-      : final?.role === 'assistant' && final.stopReason === 'length'
-        && !(final.content ?? []).some(block => block?.type === 'toolCall')
-        ? { category: 'incomplete_response', httpStatus: null, retryAfterMs: null } : null
-    if (!evidence) return null
-    return { schemaVersion: 1, runId: request.runId, turnId: frame.input?.turnId ?? frame.turnId,
-      checkpointSeq: frame.checkpointSeq, ...evidence }
+  const noOutput = final => final?.role === 'assistant' && !(final.content ?? []).some(block =>
+    block?.type === 'toolCall' || block?.text?.length || block?.thinking?.length)
+  return {
+    /** Last provider transport rejection observed on this session. */
+    lastRejection: () => rejection,
+    fetchCallCount: () => calls,
+    /** Settled failure evidence for a single-round request frame. */
+    failureFor: request => {
+      const final = session.agent.state.messages.at(-1)
+      const frame = request.payload?.initialModel ?? request.payload?.batchResume
+      if (!frame) return null
+      const evidence = calls >= 1 && rejection && noOutput(final) && final.stopReason === 'error'
+        ? rejection
+        : final?.role === 'assistant' && final.stopReason === 'length'
+          && !(final.content ?? []).some(block => block?.type === 'toolCall')
+          ? { category: 'incomplete_response', httpStatus: null, retryAfterMs: null } : null
+      if (!evidence) return null
+      return { schemaVersion: 1, runId: request.runId, turnId: frame.input?.turnId ?? frame.turnId,
+        checkpointSeq: frame.checkpointSeq, ...evidence }
+    },
   }
 }

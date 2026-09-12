@@ -3427,6 +3427,18 @@
   padding-left: 14px;
 }
 
+/* Manage-page avatar fills the rounded rect edge to edge. */
+.fox-agent-manage-page .fox-agent-hero > span {
+  flex: none;
+}
+
+.fox-agent-manage-page .fox-agent-hero img {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  object-fit: cover;
+}
+
 .fox-agent-detail-layout .fox-detail-main::-webkit-scrollbar,
 .fox-agent-activity-panel::-webkit-scrollbar {
   display: none;
@@ -4211,12 +4223,12 @@
   align-items: flex-start;
   gap: 11px;
   padding: 13px 15px;
-  border-color: color-mix(in oklch, var(--fox-accent) 28%, var(--fox-border));
-  background: color-mix(in oklch, var(--fox-accent) 6%, var(--fox-card));
+  border-color: var(--fox-border);
+  background: var(--fox-panel);
   box-shadow: none;
 }
 
-.fox-memory-privacy-note > svg { flex: none; margin-top: 2px; color: var(--fox-accent); }
+.fox-memory-privacy-note > svg { flex: none; margin-top: 2px; color: var(--fox-muted); }
 .fox-memory-privacy-note p { display: grid; gap: 3px; margin: 0; }
 .fox-memory-privacy-note b { font-size: 13px; }
 .fox-memory-privacy-note span { color: var(--fox-muted); font-size: 12px; line-height: 1.55; }
@@ -5801,7 +5813,12 @@
 }
 
 /* Shared collection-card contract: local knowledge, experts and plugins use one scale. */
-.fox-agent-list-page .fox-shadcn-entity-grid,
+/* Expert cards flow into as many columns as fit at the default card width; fullscreen no longer stretches three cards. */
+.fox-agent-list-page .fox-shadcn-entity-grid {
+  grid-template-columns: repeat(auto-fill, minmax(258px, 1fr));
+  gap: var(--fox-space-xl);
+}
+
 .fox-knowledge-list-page .fox-knowledge-grid,
 .fox-local-kb-grid.fox-knowledge-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -5977,4 +5994,354 @@
   .fox-local-kb-grid.fox-knowledge-grid {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* ===== 专家详情只读弹窗 ===== */
+.fox-agent-view-dialog {
+  width: min(600px, calc(100vw - 48px));
+  max-width: 600px;
+  max-height: calc(100dvh - 24px);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  padding: 20px !important;
+  gap: 14px !important;
+}
+
+.fox-agent-view-dialog [data-slot='dialog-header'] {
+  gap: 0;
+}
+
+.fox-agent-view-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.fox-agent-view-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.fox-agent-view-avatar {
+  flex: none;
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--fox-accent-soft);
+}
+
+.fox-agent-view-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.fox-agent-view-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 18px !important;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.fox-agent-view-body {
+  min-height: 0;
+  display: grid;
+  gap: 14px;
+  overflow-y: auto;
+  padding: 2px 6px 2px 2px;
+}
+
+.fox-agent-view-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.fox-agent-view-body::-webkit-scrollbar-thumb {
+  background: var(--fox-border);
+  border-radius: 4px;
+}
+
+.fox-agent-view-description {
+  margin: 0;
+  color: var(--fox-text);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.fox-agent-view-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.fox-agent-view-meta > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--fox-border);
+  border-radius: 8px;
+  background: var(--fox-panel);
+}
+
+.fox-agent-view-meta small {
+  color: var(--fox-muted);
+  font-size: 11px;
+}
+
+.fox-agent-view-meta b {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-agent-view-tags {
+  display: grid;
+  gap: 8px;
+}
+
+.fox-agent-view-tags > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.fox-agent-view-block {
+  display: grid;
+  gap: 8px;
+}
+
+.fox-agent-view-tags > span,
+.fox-agent-view-block > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fox-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.fox-agent-view-block ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.fox-agent-view-block p {
+  max-height: 168px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--fox-border);
+  border-radius: 8px;
+  background: var(--fox-panel);
+  color: var(--fox-muted);
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.fox-agent-view-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  color: var(--fox-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.fox-agent-view-dialog [data-slot='dialog-footer'] > span {
+  flex: 1;
+}
+
+/* ===== 专家管理页 ===== */
+.fox-agent-manage-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-bottom: 48px;
+}
+
+.fox-agent-manage-hero {
+  margin-bottom: 4px;
+}
+
+.fox-agent-manage-hero h1 {
+  font-size: 22px;
+}
+
+.fox-agent-manage-hero p {
+  margin: 6px 0 4px;
+  color: var(--fox-muted);
+  font-size: 13px;
+}
+
+.fox-agent-manage-hero small {
+  color: var(--fox-faint);
+  font-size: 11px;
+}
+
+.fox-agent-manage-readonly {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--fox-border);
+  border-radius: 8px;
+  background: var(--fox-panel);
+  color: var(--fox-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.fox-agent-manage-readonly svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+.fox-agent-manage-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 0;
+  font-size: 16px !important;
+  font-weight: 700;
+}
+
+.fox-agent-manage-section-title svg {
+  width: 15px;
+  height: 15px;
+  color: var(--fox-accent);
+}
+
+.fox-agent-manage-section-desc {
+  margin: 0;
+  color: var(--fox-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* Page-level editor forms opt out of the dialog's fixed-height scroll areas. */
+.fox-agent-manage-fields {
+  height: auto;
+  overflow: visible;
+  padding: 0;
+}
+
+.fox-agent-manage-resources {
+  height: auto;
+  grid-template-rows: repeat(2, minmax(240px, auto));
+  overflow: visible;
+  padding: 0;
+}
+
+.fox-agent-manage-resources .fox-agent-editor-resource-list {
+  max-height: 320px;
+}
+
+.fox-agent-manage-versions {
+  height: auto;
+  display: block;
+  overflow: visible;
+  padding: 0;
+}
+
+.fox-agent-manage-versions > section {
+  padding: 14px;
+}
+
+.fox-agent-manage-versions h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.fox-agent-manage-versions h3 svg {
+  width: 14px;
+  height: 14px;
+  color: var(--fox-accent);
+}
+
+.fox-agent-manage-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--fox-border);
+}
+
+.fox-agent-manage-actions button {
+  height: 34px;
+  font-size: 13px;
+}
+
+.fox-agent-manage-actions-spacer {
+  flex: 1;
+}
+
+@media (max-width: 760px) {
+  .fox-agent-manage-resources {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+  }
+
+  .fox-agent-view-meta {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Editor forms are shared by the create dialog (fixed panel height) and the manage page (natural height). */
+.fox-agent-editor-dialog .fox-agent-manage-fields {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 2px 6px 2px 2px;
+}
+
+.fox-agent-editor-dialog .fox-agent-manage-resources {
+  height: var(--fox-agent-editor-panel-height);
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  padding: 2px 6px 2px 2px;
+}
+
+.fox-agent-manage-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 200px;
+  color: var(--fox-muted);
+  font-size: var(--fox-type-meta);
+}
+
+.fox-agent-manage-loading svg {
+  width: 18px;
+  height: 18px;
+}
+
+.fox-agent-manage-versions {
+  border: 1px solid var(--fox-border);
+  border-radius: 8px;
+  background: var(--fox-card);
+}
+
+.fox-agent-manage-versions .fox-agent-resource-list {
+  max-height: 280px;
+  overflow: auto;
+  padding: 4px 12px 8px;
 }

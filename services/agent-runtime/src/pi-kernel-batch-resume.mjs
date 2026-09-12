@@ -36,28 +36,6 @@ function preparePiReplayHistory(messages) {
     : message)
 }
 
-// Advertise schemas without installing a Resource executor. The public event
-// boundary below stops the disposable engine before argument preparation or
-// any tool callback. Even a broken boundary cannot execute a local resource.
-export function installKernelProposalTools(session, definitions) {
-  if (session?.isIdle !== true || !Array.isArray(session.agent?.state?.tools)
-      || session.agent.state.tools.length || typeof session.agent.subscribe !== 'function'
-      || typeof session.agent.abort !== 'function') fail('proposal tools require an empty idle public Pi adapter')
-  if (!Array.isArray(definitions) || definitions.length > 64) fail('invalid proposal tool definitions')
-  const names = new Set()
-  const tools = definitions.map(definition => {
-    if (!knownTools.has(definition?.name) || names.has(definition.name) || !nonempty(definition.description)
-        || !record(definition.parameters) || definition.parameters.type !== 'object') fail('invalid proposal tool schema')
-    names.add(definition.name)
-    const parameters = canonical(definition.parameters)
-    if (Buffer.byteLength(JSON.stringify(parameters), 'utf8') > 131_072) fail('proposal schema is too large')
-    return Object.freeze({ name: definition.name, label: definition.name, description: definition.description,
-      parameters, executionMode: 'parallel', execute: async () => { fail('proposal-only engine has no resource executor') } })
-  })
-  proposalToolsBySession.set(session, tools)
-  session.agent.state.tools = tools
-}
-
 export function prepareKernelModelResponse(assistantMessage, prepared) {
   // Pi uses undefined for absent optional metadata. Omit those object fields
   // as JSON transport does, but never repair non-JSON proposed arguments.
@@ -200,41 +178,38 @@ export function prepareKernelInitialModel(request, identity) {
     idempotencyKey: frame.idempotencyKey, checkpointSeq: frame.checkpointSeq, initial: true }
 }
 
-export async function startPiKernelInitial(session, request, identity, signal, preview, requireCompletion = false) {
-  return runPiKernelModel(session, request, { ...prepareKernelInitialModel(request, identity), requireCompletion }, signal, preview)
-}
-
-export async function resumePiKernelBatch(session, request, identity, signal, preview, requireCompletion = false) {
-  return runPiKernelModel(session, request, { ...prepareKernelBatchResume(request, identity), requireCompletion }, signal, preview)
-}
-
-export async function runPiKernelModel(session, request, prepared, signal, preview) {
+/**
+ * Single-round runner for the durable per-round transport (Host compaction and
+ * replacement-session initial/batch deliveries). The Run tool loop lives in
+ * pi-kernel-loop.mjs; this runner never executes tools, never seeds results
+ * and never continues after the one model round. A proposal stopReason is a
+ * normal output here: the Host approves and executes it in the next durable
+ * delivery.
+ */
+export async function runPiKernelModel(session, request, prepared, signal, preview, { allowProposals = false } = {}) {
   if (!session?.agent?.state || typeof session.agent.continue !== 'function' || typeof session.abort !== 'function') fail('missing public Pi session adapter')
   if (!signal || typeof signal.addEventListener !== 'function') fail('missing Host cancellation signal')
   if (signal.aborted) fail('Host cancelled the resume')
   if (session.isIdle !== true || session.state?.isStreaming || session.agent.signal) fail('session is already running')
-  const installed = proposalToolsBySession.get(session) ?? []
-  if (!Array.isArray(session.agent.state.tools) || session.agent.state.tools.length !== installed.length
-      || session.agent.state.tools.some((tool, index) => tool !== installed[index])) fail('replacement session must not retain executable local tools')
+  // Tool-free requests (Host compaction) cannot carry proposal schemas. A
+  // single-round delivery advertises strict schemas with proposal-only tools;
+  // their boundary (below) stops the engine before any execution.
+  if (!allowProposals && session.agent.state.tools?.length) fail('single-round requests cannot retain executable tools')
   const settings = session.settingsManager
   if (settings?.getRetryEnabled?.() !== false || settings?.getRetrySettings?.().maxRetries !== 0
       || settings?.getProviderRetrySettings?.().maxRetries !== 0 || settings?.getCompactionEnabled?.() !== false) {
     fail('replacement session retains autonomous retry or compaction policy')
   }
+  const deliveries = deliveriesBySession.get(session) ?? new Set()
   const key = JSON.stringify([request.runId, prepared.idempotencyKey])
-  const claimed = deliveries.get(session) ?? new Set()
-  if (claimed.has(key)) fail('batch delivery already claimed; reconcile instead of replaying')
+  if (deliveries.has(key)) fail('batch delivery already claimed; reconcile instead of replaying')
   if (session.agent.state.messages?.length || session.agent.hasQueuedMessages?.()) fail('resume requires an empty replacement session')
-  claimed.add(key)
-  deliveries.set(session, claimed)
+  deliveries.add(key)
+  deliveriesBySession.set(session, deliveries)
   let abortError
   let aborting
   let timedOut = false
-  // Keep the cancellation request observed, but still await the engine settling:
-  // a timeout must never make a live model request look safe to replay.
-  const abort = () => {
-    aborting ??= Promise.resolve().then(() => session.abort()).catch(error => { abortError = error })
-  }
+  const abort = () => { aborting ??= Promise.resolve().then(() => session.abort()).catch(error => { abortError = error }) }
   signal.addEventListener('abort', abort, { once: true })
   const timer = setTimeout(() => { timedOut = true; abort() }, request.payload.controlBinding.budgets.modelRequestMs)
   let proposed
@@ -245,29 +220,28 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
   let lastPreviewText = ''
   let lastPreviewReasoning = ''
   try {
-  unsubscribe = typeof session.agent.subscribe === 'function' ? session.agent.subscribe(event => {
-    if (preview && !signal.aborted && !timedOut && ['message_update','message_end'].includes(event.type)
-        && event.message?.role === 'assistant' && Array.isArray(event.message.content)) {
-      const text = completionPreview(event.message.content.filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join(''), prepared.requireCompletion)
-      const reasoning = event.message.content.filter(block => block?.type === 'thinking' && typeof block.thinking === 'string').map(block => block.thinking).join('\n\n')
-      const now = performance.now()
-      if ((text !== lastPreviewText || reasoning !== lastPreviewReasoning) && Buffer.byteLength(text,'utf8') <= 262_144 && Buffer.byteLength(reasoning,'utf8') <= 262_144
-          && (previewRevision===0 || now-lastPreviewAt>=100 || event.type==='message_end')) {
-        lastPreviewText = text
-        lastPreviewReasoning = reasoning
-        lastPreviewAt = now
-        preview({ schemaVersion:1,runId:request.runId,conversationId:request.conversationId,turnId:prepared.turnId,
-          checkpointSeq:prepared.checkpointSeq,revision:++previewRevision,text, ...(reasoning ? { reasoning } : {}) })
+    unsubscribe = typeof session.agent.subscribe === 'function' ? session.agent.subscribe(event => {
+      if (preview && !signal.aborted && !timedOut && ['message_update', 'message_end'].includes(event.type)
+          && event.message?.role === 'assistant' && Array.isArray(event.message.content)) {
+        const text = completionPreview(event.message.content.filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join(''), prepared.requireCompletion)
+        const reasoning = event.message.content.filter(block => block?.type === 'thinking' && typeof block.thinking === 'string').map(block => block.thinking).join('\n\n')
+        const now = performance.now()
+        if ((text !== lastPreviewText || reasoning !== lastPreviewReasoning) && Buffer.byteLength(text, 'utf8') <= 262_144 && Buffer.byteLength(reasoning, 'utf8') <= 262_144
+            && (previewRevision === 0 || now - lastPreviewAt >= 100 || event.type === 'message_end')) {
+          lastPreviewText = text; lastPreviewReasoning = reasoning; lastPreviewAt = now
+          preview({ schemaVersion: 1, runId: request.runId, conversationId: request.conversationId, turnId: prepared.turnId,
+            checkpointSeq: prepared.checkpointSeq, revision: ++previewRevision, text, ...(reasoning ? { reasoning } : {}) })
+        }
       }
-    }
-    if (event.type !== 'message_end' || event.message?.role !== 'assistant'
-        || event.message.stopReason !== 'toolUse' && !event.message.content?.some?.(block => block?.type === 'toolCall')) return
-    proposed = prepareKernelModelResponse(event.message, prepared)
-    // Throwing from this awaited public event prevents even tool preparation.
-    // Do not await session.abort() here: it waits on the same event listener.
-    session.agent.abort()
-    throw new Error(stopMarker)
-  }) : undefined
+      if (!allowProposals) return
+      if (event.type !== 'message_end' || event.message?.role !== 'assistant'
+          || event.message.stopReason !== 'toolUse' && !event.message.content?.some?.(block => block?.type === 'toolCall')) return
+      proposed = prepareKernelModelResponse(event.message, prepared)
+      // Throwing from this awaited public event prevents even tool preparation.
+      // Do not await session.abort() here: it waits on the same event listener.
+      session.agent.abort()
+      throw new Error(stopMarker)
+    }) : undefined
     // Pi 0.84's documented public state setter copies the message array.
     session.agent.state.messages = prepared.messages
     await session.agent.continue()
@@ -283,11 +257,12 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
     if (final?.role !== 'assistant' || final.stopReason !== 'stop') {
       fail(`model continuation has no completed response (${final?.stopReason ?? final?.role ?? 'missing'})`)
     }
-    const response = prepareKernelModelResponse(final, prepared)
-    return { idempotencyKey: prepared.idempotencyKey, checkpointSeq: prepared.checkpointSeq, response }
+    return { idempotencyKey: prepared.idempotencyKey, checkpointSeq: prepared.checkpointSeq, response: prepareKernelModelResponse(final, prepared) }
   } finally {
     clearTimeout(timer)
-    unsubscribe?.()
     signal.removeEventListener('abort', abort)
+    unsubscribe?.()
   }
 }
+
+const deliveriesBySession = new WeakMap()

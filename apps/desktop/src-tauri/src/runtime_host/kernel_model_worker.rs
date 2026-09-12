@@ -415,6 +415,9 @@ fn call_model(
     let mut initialization =
         serde_json::to_value(config).map_err(|_| "invalid Kernel configuration")?;
     initialization["modelService"]["apiKey"] = Value::String(api_key.into());
+    // The durable per-round transport requests one model delivery per process;
+    // the worker must not open the live round loop on this path.
+    initialization["execution"] = json!("once");
     let mut worker = Worker::spawn(runtime)?;
     let ready = worker.exchange(
         request("kernel.initialize", initialization),
@@ -425,6 +428,7 @@ fn call_model(
     if ready["singleUse"] != true
         || ready["resourceExecution"] != false
         || ready["automaticReplay"] != false
+        || ready["roundLoop"] != false
         || ready["adapterVersion"] != config.adapter_version()?
     {
         return Err("Kernel worker lacks isolated single-use capability".into());
@@ -486,6 +490,226 @@ pub(super) fn compact_context(
     response.validate_for(input)?;
     token.check()?;
     Ok(response)
+}
+
+/// One long-lived engine session for a single authoritative Run. The worker
+/// process drives the engine's own loop; every engine round output is sent to
+/// the Host as a `kernel.round_output` request and the Host answers with a
+/// durable directive. No engine tool ever executes locally.
+pub(super) struct LiveKernelSession {
+    worker: Worker,
+    session_id: String,
+}
+
+impl LiveKernelSession {
+    fn envelope(
+        request_type: &str,
+        payload: Value,
+        binding: &RunControlBinding,
+        session_id: &str,
+    ) -> Value {
+        json!({
+            "protocol": PROTOCOL_NAME, "version": PROTOCOL_VERSION, "kind": "request",
+            "id": uuid::Uuid::new_v4().to_string(), "timestamp": fox_engine_protocol::timestamp(), "type": request_type,
+            "runId": binding.run_id, "conversationId": binding.conversation_id, "runtimeSessionId": session_id, "payload": payload,
+        })
+    }
+
+    /// Spawn and initialize a loop-capable worker. Older runtimes that do not
+    /// advertise `roundLoop` are rejected so the caller can fall back to the
+    /// per-round transport.
+    pub(super) fn spawn(
+        runtime: &RuntimeCommand,
+        config: &KernelModelConfig,
+        api_key: &str,
+        binding: &RunControlBinding,
+        token: &CancellationToken,
+        deadline: Instant,
+    ) -> Result<Self, String> {
+        config.hash()?;
+        binding.validate()?;
+        if binding.engine_id != config.engine_id
+            || binding.authority != fox_engine_protocol::ExecutionAuthority::Authoritative
+            || config.execution_profile_id != binding.execution_profile_id
+        {
+            return Err("isolated Kernel model identity mismatch".into());
+        }
+        let session_id = format!("kernel-loop-{}", uuid::Uuid::new_v4());
+        let mut worker = Worker::spawn(runtime)?;
+        let mut initialization =
+            serde_json::to_value(config).map_err(|_| "invalid Kernel configuration")?;
+        initialization["modelService"]["apiKey"] = Value::String(api_key.into());
+        // The whole authoritative Run is driven through one live loop session.
+        initialization["execution"] = json!("loop");
+        let ready = worker.exchange(
+            Self::envelope("kernel.initialize", initialization, binding, &session_id),
+            "kernel.ready",
+            token,
+            deadline,
+        )?;
+        if ready["singleUse"] != true
+            || ready["resourceExecution"] != false
+            || ready["automaticReplay"] != false
+            || ready["roundLoop"] != true
+            || ready["adapterVersion"] != config.adapter_version()?
+        {
+            return Err("Kernel worker lacks the durable round-loop capability".into());
+        }
+        Ok(Self { worker, session_id })
+    }
+
+    /// Deliver one engine seed (initial or batch resume) and service round
+    /// outputs until the engine reports a final answer. `on_round` performs the
+    /// durable commit and batch execution for each output and returns the
+    /// directive payload. The returned payload is the final model response.
+    pub(super) fn run(
+        &mut self,
+        request_type: &str,
+        request_payload: Value,
+        binding: &RunControlBinding,
+        token: &CancellationToken,
+        deadline: Instant,
+        preview: Option<&PreviewSink>,
+        on_round: &mut dyn FnMut(
+            fox_engine_protocol::KernelRoundOutputFrame,
+        ) -> Result<fox_engine_protocol::KernelRoundDirective, String>,
+    ) -> Result<Value, String> {
+        token.check()?;
+        let request = Self::envelope(request_type, request_payload, binding, &self.session_id);
+        let mut bytes = serde_json::to_vec(&request).map_err(|_| "invalid Kernel request")?;
+        bytes.push(b'\n');
+        if bytes.len() > MAX_FRAME {
+            return Err("Kernel request exceeds frame limit".into());
+        }
+        let mut stdin = self.worker.stdin.take().ok_or("Kernel worker input unavailable")?;
+        let (sender, written) = mpsc::sync_channel(1);
+        self.worker.writer = Some(thread::spawn(move || {
+            let result = stdin
+                .write_all(&bytes)
+                .and_then(|_| stdin.flush())
+                .map_err(|_| "Kernel worker write failed");
+            let _ = sender.send((stdin, result));
+        }));
+        let (stdin, result) = wait(&written, token, deadline)?;
+        self.worker.stdin = Some(stdin);
+        if let Some(writer) = self.worker.writer.take() {
+            let _ = writer.join();
+        }
+        result?;
+        let mut revision = 0u64;
+        loop {
+            let response = wait(&self.worker.messages, token, deadline)??;
+            if response["protocol"] != PROTOCOL_NAME
+                || response["version"] != PROTOCOL_VERSION
+                || ["runId", "conversationId", "runtimeSessionId"]
+                    .iter()
+                    .any(|key| response[key] != request[key])
+            {
+                return Err(
+                    "Kernel worker response identity/type mismatch; reconcile delivery".into(),
+                );
+            }
+            if response["kind"] == "request" {
+                if response["type"] != "kernel.round_output" {
+                    return Err("unexpected Kernel worker request; reconcile delivery".into());
+                }
+                let frame: fox_engine_protocol::KernelRoundOutputFrame =
+                    serde_json::from_value(response["payload"].clone())
+                        .map_err(|_| "invalid Kernel round output frame")?;
+                frame.validate()?;
+                if frame.turn_id != binding_turn(request_type, &request) {
+                    return Err("Kernel round output belongs to another turn".into());
+                }
+                if response["runId"].as_str() != Some(binding.run_id.as_str()) {
+                    return Err("Kernel round output belongs to another run".into());
+                }
+                let directive = on_round(frame)?;
+                directive.validate()?;
+                let reply = json!({
+                    "protocol": PROTOCOL_NAME, "version": PROTOCOL_VERSION, "kind": "response",
+                    "type": "kernel.round_directive", "requestId": response["id"],
+                    "runId": response["runId"], "conversationId": response["conversationId"],
+                    "runtimeSessionId": response["runtimeSessionId"],
+                    "payload": serde_json::to_value(&directive).map_err(|_| "invalid directive")?,
+                });
+                let mut reply_bytes =
+                    serde_json::to_vec(&reply).map_err(|_| "invalid directive")?;
+                reply_bytes.push(b'\n');
+                if reply_bytes.len() > MAX_FRAME {
+                    return Err("Kernel directive exceeds frame limit".into());
+                }
+                let mut stdin =
+                    self.worker.stdin.take().ok_or("Kernel worker input unavailable")?;
+                let (sender, written) = mpsc::sync_channel(1);
+                self.worker.writer = Some(thread::spawn(move || {
+                    let result = stdin
+                        .write_all(&reply_bytes)
+                        .and_then(|_| stdin.flush())
+                        .map_err(|_| "Kernel worker write failed");
+                    let _ = sender.send((stdin, result));
+                }));
+                let (stdin, write_result) = wait(&written, token, deadline)?;
+                self.worker.stdin = Some(stdin);
+                if let Some(writer) = self.worker.writer.take() {
+                    let _ = writer.join();
+                }
+                write_result?;
+                continue;
+            }
+            if response["kind"] != "response" || response["requestId"] != request["id"] {
+                return Err(
+                    "Kernel worker response identity/type mismatch; reconcile delivery".into(),
+                );
+            }
+            if response["type"] == "kernel.model_preview" {
+                let Some(sink) = preview else {
+                    return Err("unexpected Kernel model preview".into());
+                };
+                let notice: fox_engine_protocol::KernelModelPreview =
+                    serde_json::from_value(response["payload"].clone())
+                        .map_err(|_| "invalid Kernel model preview")?;
+                notice.validate()?;
+                if notice.run_id != binding.run_id || notice.revision <= revision {
+                    return Err("Kernel model preview order mismatch".into());
+                }
+                revision = notice.revision;
+                token.check()?;
+                sink(&notice);
+                continue;
+            }
+            if response["type"] == "kernel.model_failure" {
+                let failure: fox_engine_protocol::KernelModelFailure =
+                    serde_json::from_value(response["payload"].clone())
+                        .map_err(|_| "invalid settled Kernel model failure")?;
+                failure.validate()?;
+                if failure.run_id != binding.run_id {
+                    return Err("Kernel failure belongs to another run".into());
+                }
+                return Err(format!(
+                    "{SETTLED_FAILURE_PREFIX}{}",
+                    serde_json::to_string(&failure).map_err(|_| "invalid failure")?
+                ));
+            }
+            if response["type"] != "kernel.model_response" {
+                return Err(
+                    "Kernel worker response identity/type mismatch; reconcile delivery".into(),
+                );
+            }
+            return Ok(response["payload"].clone());
+        }
+    }
+}
+
+fn binding_turn<'a>(request_type: &str, request: &'a Value) -> &'a str {
+    if request_type == "kernel.start_initial" {
+        request["payload"]["initialModel"]["input"]["turnId"]
+            .as_str()
+            .unwrap_or_default()
+    } else {
+        request["payload"]["batchResume"]["turnId"]
+            .as_str()
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,10 @@
 // Real public Pi session probe; each invocation is a fresh Node process.
+//
+// capture:        a real Pi session proposes read-a/read-b and is blocked at the
+//                 tool_call extension point, so no executor runs.
+// resume/resume-propose: a replacement single-round process seeds the Host's
+// durable history and settled results, publishes proposal-only schemas and runs
+// exactly one model round; it must never re-execute the original tools.
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,7 +13,8 @@ import {
   DefaultResourceLoader, SessionManager, SettingsManager, createFoxAgentSession,
   createFoxModelRuntime, registerFauxProvider, fauxAssistantMessage,
 } from '../../src/pi-adapter.mjs'
-import { installKernelProposalTools, resumePiKernelBatch } from '../../src/pi-kernel-batch-resume.mjs'
+import { installKernelProposalSchemas } from '../../src/pi-kernel-loop.mjs'
+import { prepareKernelBatchResume, runPiKernelModel } from '../../src/pi-kernel-batch-resume.mjs'
 
 let input = ''
 for await (const chunk of process.stdin) input += chunk
@@ -58,7 +65,9 @@ try {
     await prompting
     output = { messages, executions }
   } else {
-    if (mode === 'resume-propose') installKernelProposalTools(session, [{
+    // Proposal-only schemas are published to the model but never executed: the
+    // single-round boundary returns the proposal for the Host to approve.
+    installKernelProposalSchemas(session, [{
       name: 'read', description: 'Propose a Host-owned file read.', parameters: Type.Object({ path: Type.String() }),
     }])
     session.agent.subscribe(event => { if (event.type === 'tool_execution_start') toolExecutionStarts++ })
@@ -73,7 +82,9 @@ try {
       }
       return fauxAssistantMessage('durable batch consumed')
     }])
-    const resumed = await resumePiKernelBatch(session, request, identity, new AbortController().signal)
+    const prepared = prepareKernelBatchResume(request, identity)
+    prepared.requireCompletion = false
+    const resumed = await runPiKernelModel(session, request, prepared, new AbortController().signal, undefined, { allowProposals: true })
     output = { executions, toolExecutionStarts, providerRequests, consumed, response: resumed.response, answer: session.state.messages.at(-1)?.content?.find(block => block.type === 'text')?.text }
   }
   process.stdout.write(JSON.stringify(output))

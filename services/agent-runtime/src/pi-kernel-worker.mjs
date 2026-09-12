@@ -4,7 +4,8 @@ import {
 } from './pi-adapter.mjs'
 import { createEnvelope, validateEnvelope } from './protocol.mjs'
 import { resolveModelProfile, transportProvider } from './model-profile.mjs'
-import { installKernelProposalTools, prepareKernelBatchResume, resumePiKernelBatch, prepareKernelInitialModel, startPiKernelInitial, prepareKernelModelResponse } from './pi-kernel-batch-resume.mjs'
+import { prepareKernelBatchResume, prepareKernelInitialModel, prepareKernelModelResponse, runPiKernelModel } from './pi-kernel-batch-resume.mjs'
+import { installKernelHostTools, installKernelProposalSchemas, runPiKernelLoop } from './pi-kernel-loop.mjs'
 import { describeKernelRun } from './pi-kernel-description.mjs'
 import { observeKernelModelTransport } from './pi-kernel-model-failure.mjs'
 import { prepareKernelCompaction, compactPiKernelContext, kernelCompactionResult } from './pi-kernel-compaction.mjs'
@@ -28,11 +29,25 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
   let nativeConfig
   let nativeModel
   let requireCompletion = false
+  let liveLoop = false
+  let nextHostRequestId = 0
+  const pendingHostRequests = new Map()
+  const loopSettlement = { current: null }
   const respond = (request, type, payload = {}) => write(createEnvelope('response', type, {
     requestId: request.id, runId: request.runId ?? null,
     conversationId: request.conversationId ?? null, runtimeSessionId: request.runtimeSessionId ?? null, payload,
   }))
   const owns = request => identity && ['runId', 'conversationId', 'runtimeSessionId'].every(key => request[key] === identity[key])
+  // Durable round boundary: the Host owns proposals, approvals, execution and
+  // results; this worker never resolves a tool result by itself.
+  const requestHost = (type, payload) => new Promise((resolve, reject) => {
+    const id = `kernel-host-${++nextHostRequestId}`
+    pendingHostRequests.set(id, { resolve, reject })
+    write(createEnvelope('request', type, {
+      id, runId: identity?.runId ?? null, conversationId: identity?.conversationId ?? null,
+      runtimeSessionId: identity?.runtimeSessionId ?? null, payload,
+    }))
+  })
 
   async function initialize(request) {
     if (state !== 'fresh') throw new Error('Kernel worker is single-use and cannot be reinitialized')
@@ -46,6 +61,14 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
     const systemPrompt = request.payload?.systemPrompt
     const definitions = request.payload?.proposalTools
     requireCompletion = completionRequired(systemPrompt)
+    // The Host picks the execution shape explicitly: a whole-Run live loop that
+    // services round boundaries, or a single per-round delivery used by the
+    // durable retry/restart transport. Absent means single-round so an old Host
+    // and the replacement transport keep their exact one-response contract.
+    liveLoop = request.payload?.execution === 'loop'
+    if (request.payload?.execution !== undefined && !['loop', 'once'].includes(request.payload.execution)) {
+      throw new Error('Unsupported Kernel execution mode')
+    }
     if (!nonempty(config?.modelId) || !nonempty(config?.baseUrl) || typeof systemPrompt !== 'string'
         || !Array.isArray(definitions)) throw new Error('Incomplete Host model/prompt/tool configuration')
     if (identity.engineId !== 'pi') {
@@ -59,7 +82,7 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
       if (state !== 'initializing') throw new Error('Native engine initialization was cancelled')
       nativeConfig = structuredClone(request.payload)
       state = 'ready'
-      respond(request, 'kernel.ready', { singleUse: true, resourceExecution: false, automaticReplay: false, hostCompaction: true, adapterVersion })
+      respond(request, 'kernel.ready', { singleUse: true, resourceExecution: false, automaticReplay: false, hostCompaction: true, roundLoop: false, adapterVersion })
       return
     }
     const profile = resolveModelProfile(config)
@@ -87,17 +110,74 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
     await resourceLoader.reload()
     ;({ session } = await createFoxAgentSession({ cwd, agentDir: cwd, model, thinkingLevel: profile.thinkingLevel,
       tools: [], customTools: [], resourceLoader, sessionManager: SessionManager.inMemory(cwd), settingsManager, modelRuntime }))
-    installKernelProposalTools(session, definitions)
+    if (liveLoop) {
+      // The live loop installs replay executors and services round boundaries.
+      installKernelHostTools(session, definitions, {
+        settledFor: toolCallId => {
+          if (!loopSettlement.current?.has(toolCallId)) {
+            throw new Error('tool executed outside a settled Host batch')
+          }
+          return loopSettlement.current.get(toolCallId)
+        },
+      })
+    } else {
+      // Single-round replacement delivery: publish the strict schemas to the
+      // model with no executor, so a produced proposal is returned as output
+      // for the Host to approve instead of running inside this process.
+      installKernelProposalSchemas(session, definitions)
+    }
     modelFailure = observeKernelModelTransport(session)
     if (state !== 'initializing') throw new Error('Kernel initialization was cancelled')
     state = 'ready'
     respond(request, 'kernel.ready', { singleUse: true, resourceExecution: false, automaticReplay: false, hostCompaction: true,
-      adapterVersion: `pi-${PI_PACKAGE_VERSION}/fox-kernel-worker-v1` })
+      roundLoop: liveLoop, adapterVersion: `pi-${PI_PACKAGE_VERSION}/fox-kernel-worker-v1` })
+  }
+
+  function handleHostMessages(message) {
+    if (message.kind === 'response' && typeof message.requestId === 'string') {
+      const pending = pendingHostRequests.get(message.requestId)
+      if (pending) {
+        pendingHostRequests.delete(message.requestId)
+        if (message.type === 'request_failed') pending.reject(new Error('Host rejected the round boundary'))
+        else pending.resolve(message.payload)
+      }
+      return true
+    }
+    return false
+  }
+
+  async function runPiLoop(request, prepared) {
+    const preview = request.payload.streamPreview === true
+      ? payload => respond(request, 'kernel.model_preview', payload) : undefined
+    const observed = modelFailure
+    try {
+      return await runPiKernelLoop(session, request, prepared, {
+        signal: abort.signal, preview, requestHost, requireCompletion,
+        lastRejection: () => observed?.lastRejection?.() ?? null,
+        onSettled: settled => { loopSettlement.current = settled },
+      })
+    } catch (error) {
+      if (abort.signal.aborted) throw error
+      if (error?.evidence) throw error
+      const rejection = observed?.lastRejection?.() ?? null
+      const final = session?.agent?.state?.messages?.at(-1)
+      const evidence = error instanceof KernelIncompleteResponseError
+        ? { category: 'incomplete_response', httpStatus: null, retryAfterMs: null }
+        : final?.role === 'assistant' && final.stopReason === 'length' && rejection === null && !(final.content ?? []).some(block => block?.type === 'toolCall')
+          ? { category: 'incomplete_response', httpStatus: null, retryAfterMs: null }
+          : final?.role === 'assistant' && final.stopReason === 'error' && rejection
+            ? rejection : null
+      if (!evidence) throw error
+      throw Object.assign(new Error('Kernel model round failed'), { evidence: {
+        schemaVersion: 1, runId: request.runId, turnId: prepared.turnId,
+        checkpointSeq: prepared.checkpointSeq, ...evidence } })
+    }
   }
 
   async function handle(request) {
     let startedInitialization = false
     try {
+      if (handleHostMessages(request)) return
       const error = validateEnvelope(request)
       if (error) throw new Error(error)
       if (Buffer.byteLength(JSON.stringify(request), 'utf8') > 1_048_576) throw new Error('Kernel request exceeds protocol size limit')
@@ -123,26 +203,36 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
           prepared.requireCompletion = requireCompletion
           state = 'running'
           abort = new AbortController()
-          const preview = request.payload.streamPreview === true ? payload => respond(request,'kernel.model_preview',payload) : undefined
           if (nativeConfig) {
             let revision = 0
             let lastPreviewAt = 0
             active = nativeModel({ config: nativeConfig, messages: prepared.messages, apiKey: nativeConfig.modelService.apiKey, signal: abort.signal,
-              onPreview: preview ? text => {
+              onPreview: request.payload.streamPreview === true ? text => {
                 const now = performance.now()
                 if (abort.signal.aborted || Buffer.byteLength(text, 'utf8') > 262144 || revision && now - lastPreviewAt < 100) return
                 lastPreviewAt = now
-                preview({ schemaVersion: 1, runId: prepared.runId, conversationId: request.conversationId, turnId: prepared.turnId,
+                respond(request, 'kernel.model_preview', { schemaVersion: 1, runId: prepared.runId, conversationId: request.conversationId, turnId: prepared.turnId,
                   checkpointSeq: prepared.checkpointSeq, revision: ++revision, text: completionPreview(text, requireCompletion) })
               } : undefined,
             }).then(assistant => ({ idempotencyKey: prepared.idempotencyKey, checkpointSeq: prepared.checkpointSeq, response: prepareKernelModelResponse(assistant, prepared) }))
-          } else active = initial ? startPiKernelInitial(session, request, identity, abort.signal, preview, requireCompletion) : resumePiKernelBatch(session, request, identity, abort.signal, preview, requireCompletion)
+          } else if (liveLoop) {
+            active = runPiLoop(request, prepared)
+          } else {
+            // Single-round durable delivery (retry/restart transport): one
+            // model request, proposals returned as output, no continuation.
+            active = runPiKernelModel(session, request, prepared, abort.signal,
+              request.payload.streamPreview === true
+                ? payload => respond(request, 'kernel.model_preview', payload)
+                : undefined,
+              { allowProposals: true })
+          }
           try { respond(request, 'kernel.model_response', await active) }
           catch (error) {
-            const evidence = abort.signal.aborted ? null : error instanceof KernelIncompleteResponseError
-              ? { schemaVersion: 1, runId: request.runId, turnId: prepared.turnId, checkpointSeq: prepared.checkpointSeq,
-                  category: 'incomplete_response', httpStatus: null, retryAfterMs: null }
-              : modelFailure?.(request)
+            const evidence = abort.signal.aborted ? null : error?.evidence
+              ?? (error instanceof KernelIncompleteResponseError
+                ? { schemaVersion: 1, runId: request.runId, turnId: prepared.turnId, checkpointSeq: prepared.checkpointSeq,
+                    category: 'incomplete_response', httpStatus: null, retryAfterMs: null }
+                : modelFailure?.failureFor?.(request) ?? null)
             if (!evidence) throw error
             respond(request, 'kernel.model_failure', evidence)
           }
@@ -185,6 +275,7 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
       respond(request ?? {}, 'request_failed', { code: 'kernel.request_failed', message })
     }
   }
+
 
   async function close() {
     state = 'consumed'

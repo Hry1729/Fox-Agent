@@ -175,6 +175,34 @@ impl Database {
         })
     }
 
+    /// Count durable Host continuation decisions for the bounded stop-review.
+    /// Only committed decisions count; a crash before the next model round
+    /// fails closed on recovery instead of silently re-injecting.
+    pub fn kernel_count_continuations(&self, run_id: &str) -> Result<i64, String> {
+        self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*) FROM kernel_events e JOIN kernel_runs r ON r.run_id=e.run_id
+                 WHERE e.run_id=?1 AND e.event_type='engine.continuation_requested'
+                   AND r.kernel_mode='authoritative'",
+                params![run_id], |row| row.get(0),
+            )
+        })
+    }
+
+    /// Latest durable kernel event type, used to distinguish an interrupted
+    /// bounded continuation from an ordinary no-progress stop.
+    pub fn kernel_last_event_type(&self, run_id: &str) -> Result<Option<String>, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT event_type FROM kernel_events WHERE run_id=?1 ORDER BY seq DESC LIMIT 1",
+                    params![run_id],
+                    |row| row.get(0),
+                )
+                .optional()
+        })
+    }
+
     /// Create the durable kernel run row with its frozen configuration.
     pub fn kernel_create_run(
         &self,

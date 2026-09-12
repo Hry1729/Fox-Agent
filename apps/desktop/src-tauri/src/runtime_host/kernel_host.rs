@@ -207,7 +207,36 @@ pub(super) fn drive_with_actions(
         } else if let Some(effect) = next {
             match effect.kind {
                 OutboxEffectKind::InitialModel => {
-                    coordinator.dispatch_initial_with_worker(&owner, policy, runtime, api_key)
+                    let binding = database
+                        .run_control_binding(run_id)?
+                        .ok_or("authoritative Run has no frozen control binding")?;
+                    if binding.engine_id == "pi" {
+                        // Loop-capable engine session: the worker drives the
+                        // engine's own tool loop and the Host services each
+                        // round output durably. Old runtimes fall back to the
+                        // per-round transport.
+                        match coordinator.dispatch_initial_live(
+                            &owner,
+                            policy,
+                            runtime,
+                            api_key,
+                            &execute,
+                            &after_commit,
+                            &settle_children,
+                        ) {
+                            Err(error)
+                                if error
+                                    .contains("lacks the durable round-loop capability") =>
+                            {
+                                coordinator
+                                    .dispatch_initial_with_worker(&owner, policy, runtime, api_key)
+                            }
+                            other => other,
+                        }
+                    } else {
+                        coordinator
+                            .dispatch_initial_with_worker(&owner, policy, runtime, api_key)
+                    }
                 }
                 OutboxEffectKind::DeliverToolBatch => coordinator
                     .dispatch_stored_batch_with_worker(
@@ -235,6 +264,12 @@ pub(super) fn drive_with_actions(
         } else if snapshot.state == "waiting_approval" || snapshot.state == "retry_scheduled" {
             std::thread::sleep(Duration::from_millis(100));
             continue;
+        } else if database.kernel_last_event_type(run_id)?.as_deref() == Some("engine.continuation_requested") {
+            coordinator.fail(
+                "kernel.continuation_interrupted",
+                "停止前续答检查已发出，但引擎在下一轮输出前中断。原始历史与已完成的工具结果保持不变；为避免重复执行或重复请求，任务已停止，请重新发起新任务继续。",
+            )?;
+            continue;
         } else {
             coordinator.fail(
                 "kernel.no_progress",
@@ -243,6 +278,12 @@ pub(super) fn drive_with_actions(
             continue;
         };
         if let Err(error) = result {
+            if error == super::kernel_coordinator::live::LIVE_DETACHED {
+                // The live session detached after committing durable state.
+                // Pending deliveries, retries or terminal states below drive
+                // the recovery; nothing here may replay engine work.
+                continue;
+            }
             settle_children(true)?;
             // Prefer a durable UI cancellation over classifying the interrupted
             // worker as an engine error. The executor has already cleaned up.

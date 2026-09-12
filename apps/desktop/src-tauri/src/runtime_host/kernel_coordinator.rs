@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Mutex;
 
 mod compaction;
+pub(super) mod live;
 mod receipt;
 
 fn checkpoint_hash(value: &Value) -> String {
@@ -28,6 +29,8 @@ enum DecisionLease<'a> {
     Initial(&'a str),
     Tool(&'a str, &'a str),
     Batch(&'a str, &'a str),
+    /// Claim a settled batch's pending delivery and arm its model request.
+    BatchDispatch(&'a str, &'a str),
 }
 
 pub(crate) struct KernelCoordinator<'a> {
@@ -160,6 +163,15 @@ impl<'a> KernelCoordinator<'a> {
             }
             Some(DecisionLease::Batch(batch_id, owner)) => {
                 self.database.kernel_commit_batch_response(
+                    &self.binding.run_id,
+                    now.wall_ms,
+                    &command,
+                    batch_id,
+                    owner,
+                )?
+            }
+            Some(DecisionLease::BatchDispatch(batch_id, owner)) => {
+                self.database.kernel_commit_batch_dispatch(
                     &self.binding.run_id,
                     now.wall_ms,
                     &command,
@@ -330,9 +342,7 @@ impl<'a> KernelCoordinator<'a> {
         history: Vec<Value>,
         assistant_message: Value,
     ) -> Result<fox_engine_protocol::KernelBatchResumeFrame, String> {
-        use fox_engine_protocol::{
-            KernelBatchResumeFrame, KernelSettledToolResult, KernelSettledToolState,
-        };
+        use fox_engine_protocol::KernelBatchResumeFrame;
         self.tick()?;
         let guard = self
             .controller
@@ -361,8 +371,33 @@ impl<'a> KernelCoordinator<'a> {
         {
             return Err("durable batch delivery identity mismatch".into());
         }
+        let tools = self.project_settled_tools(&data, &snapshot, &batch.ordered)?;
+        let frame = KernelBatchResumeFrame {
+            schema_version: 1,
+            turn_id: data.turn_id,
+            batch_id: batch_id.into(),
+            idempotency_key: effect.idempotency_key.clone(),
+            checkpoint_seq: snapshot.last_event_seq,
+            history,
+            assistant_message,
+            tools,
+        };
+        frame.validate()?;
+        Ok(frame)
+    }
+
+    /// Durable result projection shared by the replacement-session resume frame
+    /// and live-session directives. Includes the execution receipt so the model
+    /// sees Host-confirmed approval and execution facts either way.
+    fn project_settled_tools(
+        &self,
+        data: &kernel::RehydratedRun,
+        snapshot: &kernel::KernelSnapshot,
+        ordered: &[String],
+    ) -> Result<Vec<fox_engine_protocol::KernelSettledToolResult>, String> {
+        use fox_engine_protocol::{KernelSettledToolResult, KernelSettledToolState};
         let mut tools = Vec::new();
-        for id in &batch.ordered {
+        for id in ordered {
             let tool = data
                 .tools
                 .iter()
@@ -386,8 +421,8 @@ impl<'a> KernelCoordinator<'a> {
             } else {
                 serde_json::json!({"content":[{"type":"text","text":raw.to_string()}]})
             };
-            let canonical_input: Value = serde_json::from_str(&tool.input_json)
-                .map_err(|error| error.to_string())?;
+            let canonical_input: Value =
+                serde_json::from_str(&tool.input_json).map_err(|error| error.to_string())?;
             let projected = snapshot.tool_calls.iter().find(|item| item.tool_call_id == *id)
                 .ok_or("missing durable tool approval projection")?;
             receipt::append_execution_receipt(
@@ -409,18 +444,7 @@ impl<'a> KernelCoordinator<'a> {
                 result,
             });
         }
-        let frame = KernelBatchResumeFrame {
-            schema_version: 1,
-            turn_id: data.turn_id,
-            batch_id: batch_id.into(),
-            idempotency_key: effect.idempotency_key.clone(),
-            checkpoint_seq: snapshot.last_event_seq,
-            history,
-            assistant_message,
-            tools,
-        };
-        frame.validate()?;
-        Ok(frame)
+        Ok(tools)
     }
 
     pub(super) fn dispatch_initial_with_worker(

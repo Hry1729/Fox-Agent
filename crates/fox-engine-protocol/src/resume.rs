@@ -307,6 +307,83 @@ pub struct KernelSettledToolResult {
     pub result: Value,
 }
 
+/// One engine round output from a live loop session: either a tool proposal or
+/// a completed answer. History, batch identity and the checkpoint cursor remain
+/// Host-owned and are never supplied or echoed by Node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelRoundOutputFrame {
+    pub schema_version: u32,
+    pub turn_id: String,
+    pub assistant_message: Value,
+}
+
+impl KernelRoundOutputFrame {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != 1 || self.turn_id.trim().is_empty() || self.turn_id.len() > 512
+            || serde_json::to_vec(self).map_err(|error| error.to_string())?.len() > 1_048_576 {
+            return Err("invalid Kernel round output frame".into());
+        }
+        validate_model_message(&self.assistant_message)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum KernelRoundDirectiveKind { Batch, Continuation, Final }
+
+/// Host decision after committing one engine round output. `Batch` hands the
+/// settled durable results of the proposed batch back to the live session;
+/// `Continuation` injects a bounded Host-authored review prompt; `Final` ends
+/// the loop. The engine never derives any of these itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelRoundDirective {
+    pub schema_version: u32,
+    pub kind: KernelRoundDirectiveKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<KernelSettledToolResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+}
+
+impl KernelRoundDirective {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != 1 {
+            return Err("invalid Kernel round directive".into());
+        }
+        let size = serde_json::to_vec(self).map_err(|error| error.to_string())?.len();
+        if size > 1_048_576 {
+            return Err("Kernel round directive exceeds the protocol size limit".into());
+        }
+        match self.kind {
+            KernelRoundDirectiveKind::Batch => {
+                if self.batch_id.as_deref().is_none_or(|id| id.trim().is_empty())
+                    || self.checkpoint_seq.is_none_or(|seq| seq == 0 || seq > 9_007_199_254_740_991)
+                    || self.tools.is_empty() || self.prompt.is_some() {
+                    return Err("invalid Kernel batch directive".into());
+                }
+            }
+            KernelRoundDirectiveKind::Continuation => {
+                if self.prompt.as_deref().is_none_or(|text| text.trim().is_empty() || text.len() > 16_384)
+                    || self.batch_id.is_some() || self.checkpoint_seq.is_some() || !self.tools.is_empty() {
+                    return Err("invalid Kernel continuation directive".into());
+                }
+            }
+            KernelRoundDirectiveKind::Final => {
+                if self.batch_id.is_some() || self.checkpoint_seq.is_some() || !self.tools.is_empty() || self.prompt.is_some() {
+                    return Err("invalid Kernel final directive".into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct KernelBatchResumeFrame {

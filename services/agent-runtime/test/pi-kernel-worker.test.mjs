@@ -11,32 +11,44 @@ import { KERNEL_COMPLETION_CONTRACT, completionRequired } from '../src/kernel-co
 const identity = { runId: 'run-k', conversationId: 'conversation-k', runtimeSessionId: 'session-k' }
 
 test('HTTP final-answer contract rejects premature stops and keeps explicit answers, blockers and tools', { timeout: 60000 }, async t => {
-  let current
+  let plan
   const requests = []
   const server = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk
     const body = JSON.parse(raw); requests.push(body)
+    const step = plan.responses[Math.min(requests.length - 1, plan.responses.length - 1)]
     res.writeHead(200, { 'content-type': 'text/event-stream' })
-    const deltas = current.tool ? [{ role: 'assistant', tool_calls: [{ index: 0, id: 'next-read', type: 'function',
+    const text = step.text ?? plan.text
+    const deltas = step.tool ? [{ role: 'assistant', tool_calls: [{ index: 0, id: 'next-read', type: 'function',
       function: { name: 'read', arguments: '{"path":"a.txt"}' } }] }]
-      : [{ role: 'assistant', reasoning_content: 'Provider thinking' }, ...current.text.split('').map(content => ({ content }))]
+      : [{ role: 'assistant', reasoning_content: 'Provider thinking' }, ...(text ?? '').split('').map(content => ({ content }))]
     for (const delta of deltas) res.write(`data: ${JSON.stringify({ id: 'completion-test', object: 'chat.completion.chunk',
       created: 1, model: 'kernel-http-test', choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`)
     res.write(`data: ${JSON.stringify({ id: 'completion-test', object: 'chat.completion.chunk', created: 1, model: 'kernel-http-test',
-      choices: [{ index: 0, delta: {}, finish_reason: current.tool ? 'tool_calls' : 'stop' }] })}\n\n`)
+      choices: [{ index: 0, delta: {}, finish_reason: step.tool ? 'tool_calls' : 'stop' }] })}\n\n`)
     res.end('data: [DONE]\n\n')
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(() => { server.closeAllConnections(); server.close() })
-  for (const mode of ['initial', 'batch']) for (const item of [
-    { text: 'Let me thoroughly analyze the data from the spreadsheet to produce accurate statistics for the report.', incomplete: true },
-    { text: '', incomplete: true },
-    { text: '42\n<fox-final/>\n', answer: '42' },
-    { text: '请上传原始表格。\n<fox-final/>', answer: '请上传原始表格。' },
-    { tool: true },
-  ]) {
-    current = item
-    const child = await worker(t)
+  const onRoundOutput = frame => {
+    if (frame.assistantMessage.stopReason === 'toolUse') {
+      return { schemaVersion: 1, kind: 'batch', batchId: 'host-batch-1', checkpointSeq: 9, tools: [
+        { toolCallId: 'next-read', tool: 'read', sourceOrder: 0, canonicalInput: { path: 'a.txt' },
+          state: 'completed', result: { content: [{ type: 'text', text: 'host file body' }] } }] }
+    }
+    return { schemaVersion: 1, kind: 'final' }
+  }
+  const cases = [
+    { text: 'Let me thoroughly analyze the data from the spreadsheet to produce accurate statistics for the report.', responses: [{}], incomplete: true },
+    { text: '', responses: [{}], incomplete: true },
+    { text: '42\n<fox-final/>\n', responses: [{}], answer: '42' },
+    { text: '请上传原始表格。\n<fox-final/>', responses: [{}], answer: '请上传原始表格。' },
+    { responses: [{ tool: true }, { text: '已完成统计。\n<fox-final/>' }], answer: '已完成统计。', toolRound: true },
+  ]
+  for (const mode of ['initial', 'batch']) for (const item of cases) {
+    plan = item
+    requests.length = 0
+    const child = await worker(t, ['--kernel-worker'], { onRoundOutput })
     await child.request('kernel.initialize', initialization({ systemPrompt: KERNEL_COMPLETION_CONTRACT,
       modelService: { apiType: 'openai-completions', modelId: 'kernel-http-test', apiKey: 'local-test-only',
         baseUrl: `http://127.0.0.1:${server.address().port}/v1` } }))
@@ -45,20 +57,24 @@ test('HTTP final-answer contract rejects premature stops and keeps explicit answ
         input: { schemaVersion: 1, runId: identity.runId, turnId: 'turn-k', promptConfigHash: 'frozen-hash',
           messages: [{ role: 'user', content: '完成表格分析和报告；缺少资料时说明。', timestamp: 1 }] } } }
     payload.streamPreview = true
-    const before = requests.length
     const command = mode === 'batch' ? 'kernel.resume_batch' : 'kernel.start_initial'
     const result = await child.request(command, payload)
     assert.equal(result.type, item.incomplete ? 'kernel.model_failure' : 'kernel.model_response')
-    assert.equal(requests.length, before + 1, 'worker must not start a hidden follow-up or retry')
-    assert.ok(requests.at(-1).messages.some(message => typeof message.content === 'string' && message.content.includes('Fox final-answer protocol v1')))
-    if (item.incomplete) assert.equal(result.payload.category, 'incomplete_response')
-    else if (item.tool) assert.equal(result.payload.response.assistantMessage.stopReason, 'toolUse')
-    else {
+    assert.equal(requests.length, item.responses.length, 'the engine loop only calls the model for planned rounds')
+    assert.ok(requests[0].messages.some(message => typeof message.content === 'string' && message.content.includes('Fox final-answer protocol v1')))
+    if (item.incomplete) {
+      assert.equal(result.payload.category, 'incomplete_response')
+      assert.equal(child.roundOutputs.length, 0, 'an incomplete stop never reaches the Host boundary')
+    } else if (item.toolRound) {
+      assert.equal(child.roundOutputs[0].assistantMessage.stopReason, 'toolUse')
+      assert.deepEqual(child.roundOutputs[0].assistantMessage.content.find(block => block.type === 'toolCall').arguments, { path: 'a.txt' })
+      assert.equal(result.payload.response.assistantMessage.content.filter(block => block.type === 'text').map(block => block.text).join(''), item.answer)
+      assert.ok(child.events.filter(event => event.type === 'kernel.model_preview').every(event => !event.payload.text.includes('<fox-')))
+    } else {
       assert.equal(result.payload.response.assistantMessage.content.filter(block => block.type === 'text').map(block => block.text).join(''), item.answer)
       assert.ok(child.events.filter(event => event.type === 'kernel.model_preview').every(event => !event.payload.text.includes('<fox-')))
     }
     assert.equal((await child.request(command, payload)).type, 'request_failed')
-    assert.equal(requests.length, before + 1)
   }
 })
 
@@ -180,14 +196,19 @@ test('streamed argument keys and corrective tool feedback survive real HTTP work
     res.writeHead(200, { 'content-type': 'text/event-stream' })
     const send = delta => res.write(`data: ${JSON.stringify({ id: `stream-${round}`, object: 'chat.completion.chunk',
       created: 1, model: 'kernel-http-test', choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`)
-    send({ role: 'assistant', tool_calls: [{ index: 0, id: `child-${round}`, type: 'function',
-      function: { name: 'child_run_start', arguments: '' } }] })
-    // Split inside both the misspelled and corrected key, not just between JSON values.
-    for (const part of JSON.stringify(inputs[round]).match(/.{1,3}/gu)) {
-      send({ tool_calls: [{ index: 0, function: { arguments: part } }] })
+    if (round >= 2) {
+      send({ role: 'assistant', content: '46' })
+      send({})
+    } else {
+      send({ role: 'assistant', tool_calls: [{ index: 0, id: `child-${round}`, type: 'function',
+        function: { name: 'child_run_start', arguments: '' } }] })
+      // Split inside both the misspelled and corrected key, not just between JSON values.
+      for (const part of JSON.stringify(inputs[round]).match(/.{1,3}/gu)) {
+        send({ tool_calls: [{ index: 0, function: { arguments: part } }] })
+      }
     }
     res.write(`data: ${JSON.stringify({ id: `stream-${round}`, object: 'chat.completion.chunk', created: 1,
-      model: 'kernel-http-test', choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`)
+      model: 'kernel-http-test', choices: [{ index: 0, delta: {}, finish_reason: round >= 2 ? 'stop' : 'tool_calls' }] })}\n\n`)
     res.end('data: [DONE]\n\n')
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -196,23 +217,23 @@ test('streamed argument keys and corrective tool feedback survive real HTTP work
     baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'local-test-only' },
     proposalTools: [{ name: 'child_run_start', description: 'Start a child with objective.', parameters: {
       type: 'object', properties: { objective: { type: 'string' }, mode: { type: 'string' } }, required: ['objective'], additionalProperties: false } }] })
-  let previous
-  for (let round = 0; round < 2; round++) {
-    const child = await worker(t)
-    assert.equal((await child.request('kernel.initialize', config)).type, 'kernel.ready')
-    const payload = resumePayload()
-    if (round === 1) {
-      payload.batchResume.assistantMessage = previous
-      payload.batchResume.tools = [{ toolCallId: 'child-0', tool: 'child_run_start', sourceOrder: 0,
-        canonicalInput: inputs[0], state: 'failed', result: { isError: true, content: [{ type: 'text', text: feedback }] } }]
-    }
-    const response = await child.request('kernel.resume_batch', payload)
-    assert.equal(response.type, 'kernel.model_response')
-    previous = response.payload.response.assistantMessage
-    assert.deepEqual(previous.content.find(block => block.type === 'toolCall').arguments, inputs[round])
-    assert.ok(child.events.every(event => event.kind === 'response'))
+  const onRoundOutput = frame => {
+    if (frame.assistantMessage.stopReason !== 'toolUse') return { schemaVersion: 1, kind: 'final' }
+    const round = child.roundOutputs.length - 1
+    return { schemaVersion: 1, kind: 'batch', batchId: `host-batch-${round}`, checkpointSeq: 20 + round, tools: [
+      { toolCallId: `child-${round}`, tool: 'child_run_start', sourceOrder: 0, canonicalInput: inputs[round],
+        state: round === 0 ? 'failed' : 'completed',
+        result: { content: [{ type: 'text', text: round === 0 ? feedback : 'child completed with 46' }] } }] }
   }
-  assert.equal(requests.length, 2)
+  const child = await worker(t, ['--kernel-worker'], { onRoundOutput })
+  assert.equal((await child.request('kernel.initialize', config)).type, 'kernel.ready')
+  const response = await child.request('kernel.resume_batch', resumePayload())
+  assert.equal(response.type, 'kernel.model_response')
+  assert.equal(child.roundOutputs.length, 3, 'two tool proposals and one final answer cross the Host boundary')
+  assert.deepEqual(child.roundOutputs[0].assistantMessage.content.find(block => block.type === 'toolCall').arguments, inputs[0])
+  assert.deepEqual(child.roundOutputs[1].assistantMessage.content.find(block => block.type === 'toolCall').arguments, inputs[1])
+  assert.equal(child.roundOutputs[2].assistantMessage.stopReason, 'stop')
+  assert.equal(requests.length, 3)
   const correctionRequest = requests[1]
   assert.equal(correctionRequest.messages.findLast(message => message.role === 'tool').content, feedback)
   assert.deepEqual(JSON.parse(correctionRequest.messages.findLast(message => message.tool_calls)?.tool_calls[0].function.arguments), inputs[0])
@@ -300,14 +321,16 @@ function resumePayload() {
         state: 'completed', result: { content: [{ type: 'text', text: 'persisted result' }] } }] } }
 }
 
-async function worker(t, args = ['--kernel-worker']) {
+async function worker(t, args = ['--kernel-worker'], { onRoundOutput } = {}) {
   const binary = process.env.FOX_KERNEL_WORKER_BINARY
   const child = spawn(binary ?? process.execPath, binary ? args : [fileURLToPath(new URL('../src/pi-runtime.mjs', import.meta.url)), ...args],
     { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
   const pending = new Map()
   const events = []
+  const roundOutputs = []
   let output = ''
   let stderr = ''
+  const answerRoundOutput = onRoundOutput ?? (frame => ({ schemaVersion: 1, kind: 'final' }))
   child.stderr.on('data', chunk => { stderr += chunk })
   child.stdout.on('data', chunk => {
     output += chunk
@@ -316,6 +339,21 @@ async function worker(t, args = ['--kernel-worker']) {
       const line = output.slice(0, end); output = output.slice(end + 1)
       const message = JSON.parse(line)
       events.push(message)
+      if (message.kind === 'request' && message.type === 'kernel.round_output') {
+        roundOutputs.push(message.payload)
+        const directive = answerRoundOutput(message.payload)
+        // Returning null simulates the Host rejecting the boundary (e.g. it
+        // observed cancellation before committing the terminal decision).
+        const reply = directive === null
+          ? createEnvelope('response', 'request_failed',
+              { requestId: message.id, runId: message.runId, conversationId: message.conversationId,
+                runtimeSessionId: message.runtimeSessionId, payload: { code: 'kernel.host_rejected', message: 'Host rejected the round boundary' } })
+          : createEnvelope('response', 'kernel.round_directive',
+              { requestId: message.id, runId: message.runId, conversationId: message.conversationId,
+                runtimeSessionId: message.runtimeSessionId, payload: directive })
+        child.stdin.write(`${JSON.stringify(reply)}\n`)
+        continue
+      }
       if (message.type === 'kernel.model_preview') continue
       pending.get(message.requestId)?.(message)
       pending.delete(message.requestId)
@@ -330,6 +368,11 @@ async function worker(t, args = ['--kernel-worker']) {
     assert.equal(stderr, '')
   })
   function request(type, payload = {}, fields = {}) {
+    // A Host that services round boundaries drives the live loop; other
+    // deliveries use the single-round transport (execution omitted => once).
+    if (type === 'kernel.initialize' && onRoundOutput && payload.execution === undefined) {
+      payload.execution = 'loop'
+    }
     const message = createEnvelope('request', type, { ...identity, payload, ...fields })
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => { pending.delete(message.id); reject(new Error(`No response for ${type}: ${stderr}`)) }, 20000)
@@ -337,7 +380,7 @@ async function worker(t, args = ['--kernel-worker']) {
       child.stdin.write(`${JSON.stringify(message)}\n`)
     })
   }
-  return { request, events }
+  return { request, events, roundOutputs }
 }
 
 test('description mode returns scoped schemas and prompt without initializing a model', { timeout: 30000 }, async t => {
@@ -356,10 +399,12 @@ test('description mode returns scoped schemas and prompt without initializing a 
   assert.match(described.payload.systemPrompt, /bytes, not a character count/)
   assert.match(described.payload.systemPrompt, /Correct the actual JSON argument object in a NEW tool call/)
   assert.match(described.payload.systemPrompt, /not API quota or rate limiting/)
-  assert.equal(completionRequired(described.payload.systemPrompt), true)
+  // New Kernel prompts no longer force a final-answer marker; the Host drives
+  // a bounded stop review instead. Old frozen prompts keep their contract.
+  assert.equal(completionRequired(described.payload.systemPrompt), false)
   assert.ok(described.payload.proposalTools.every(tool => Object.keys(tool).sort().join(',') === 'description,name,parameters'))
   assert.equal((await child.request('kernel.initialize', initialization())).type, 'request_failed')
-  assert.ok(child.events.every(event => event.kind === 'response'))
+  assert.ok(child.events.every(event => event.kind === 'response' || (event.kind === 'request' && event.type === 'kernel.round_output')))
 })
 
 test('initial model round uses frozen input and does not fabricate a tool batch', { timeout: 30000 }, async t => {
@@ -391,19 +436,65 @@ test('real isolated worker returns one model response and refuses replay or Lega
   assert.equal(result.payload.response.assistantMessage.content[0].text, 'durable batch consumed')
   assert.equal(result.payload.response.checkpointSeq, 8)
   assert.equal((await child.request('kernel.resume_batch', resumePayload())).type, 'request_failed')
-  assert.ok(child.events.every(event => event.kind === 'response'))
+  assert.ok(child.events.every(event => event.kind === 'response' || (event.kind === 'request' && event.type === 'kernel.round_output')))
 })
 
-test('real isolated worker proposes tools without executing them', { timeout: 30000 }, async t => {
-  const child = await worker(t)
+test('real isolated worker hands tool proposals to the Host and executes nothing locally', { timeout: 30000 }, async t => {
+  const child = await worker(t, ['--kernel-worker'], { onRoundOutput: frame => {
+    if (frame.assistantMessage.stopReason === 'toolUse') {
+      return { schemaVersion: 1, kind: 'batch', batchId: 'host-batch-1', checkpointSeq: 9, tools: [
+        { toolCallId: 'next-read', tool: 'read', sourceOrder: 0, canonicalInput: { path: 'must-not-open.txt' },
+          state: 'completed', result: { content: [{ type: 'text', text: 'Host-settled body only' }] } }] }
+    }
+    return { schemaVersion: 1, kind: 'final' }
+  } })
   const config = initialization()
-  config.modelService.fauxResponses = [{ content: [{ type: 'toolCall', id: 'next-read', name: 'read', arguments: { path: 'must-not-open.txt' } }], stopReason: 'toolUse' }]
+  config.modelService.fauxResponses = [
+    { content: [{ type: 'toolCall', id: 'next-read', name: 'read', arguments: { path: 'must-not-open.txt' } }], stopReason: 'toolUse' },
+    { content: [{ type: 'text', text: 'I reported the Host result only.' }], stopReason: 'stop' },
+  ]
   assert.equal((await child.request('kernel.initialize', config)).type, 'kernel.ready')
   const result = await child.request('kernel.resume_batch', resumePayload())
   assert.equal(result.type, 'kernel.model_response')
-  assert.equal(result.payload.response.assistantMessage.stopReason, 'toolUse')
-  assert.equal(result.payload.response.assistantMessage.content[0].arguments.path, 'must-not-open.txt')
-  assert.ok(child.events.every(event => event.kind === 'response'))
+  assert.equal(result.payload.response.assistantMessage.stopReason, 'stop')
+  assert.equal(child.roundOutputs[0].assistantMessage.content[0].arguments.path, 'must-not-open.txt')
+  assert.equal(child.roundOutputs.length, 2)
+  assert.ok(child.events.every(event => event.kind === 'response' || event.type === 'kernel.round_output'))
+})
+
+test('a Host rejection of the final round boundary wins over an apparent success', { timeout: 30000 }, async t => {
+  // The model produces an apparently complete answer, but the Host refuses the
+  // terminal commit (it observed cancellation/closed world before settling).
+  // The worker must surface a consumed failure, never a late success, and the
+  // durable decision stays with the Host.
+  const child = await worker(t, ['--kernel-worker'], { onRoundOutput: () => null })
+  const config = initialization()
+  config.modelService.fauxResponses = [{ content: [{ type: 'text', text: 'apparent final answer' }], stopReason: 'stop' }]
+  assert.equal((await child.request('kernel.initialize', config)).type, 'kernel.ready')
+  const result = await child.request('kernel.resume_batch', resumePayload())
+  assert.equal(result.type, 'request_failed')
+  assert.match(result.payload.message, /reconcile/i)
+  assert.equal(child.roundOutputs.length, 1)
+  // The process is consumed; no hidden retry can deliver the answer.
+  assert.equal((await child.request('kernel.resume_batch', resumePayload())).type, 'request_failed')
+})
+
+test('a malformed Host directive fails the live round closed without local execution', { timeout: 30000 }, async t => {
+  const child = await worker(t, ['--kernel-worker'], { onRoundOutput: frame =>
+    frame.assistantMessage.stopReason === 'toolUse'
+      ? { schemaVersion: 1, kind: 'batch', batchId: 'b1', checkpointSeq: 9, tools: [
+        { toolCallId: 'next-read', tool: 'read', sourceOrder: 0, canonicalInput: { path: 'a.txt' },
+          state: 'completed', result: { content: [{ type: 'text', text: 'settled' }] } }] }
+      : { schemaVersion: 1, kind: 'unexpected' } })
+  const config = initialization()
+  config.modelService.fauxResponses = [
+    { content: [{ type: 'toolCall', id: 'next-read', name: 'read', arguments: { path: 'a.txt' } }], stopReason: 'toolUse' },
+    { content: [{ type: 'text', text: 'done' }], stopReason: 'stop' },
+  ]
+  assert.equal((await child.request('kernel.initialize', config)).type, 'kernel.ready')
+  const result = await child.request('kernel.resume_batch', resumePayload())
+  assert.equal(result.type, 'request_failed')
+  assert.match(result.payload.message, /reconcile|rejected/)
 })
 
 test('wrong identity, authority and incomplete results cannot dispatch', { timeout: 30000 }, async t => {

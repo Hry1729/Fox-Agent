@@ -1,8 +1,9 @@
 import type { KeyboardEvent } from 'react'
-import { Database, Settings2 } from 'lucide-react'
+import { Database, Info } from 'lucide-react'
 import { notify as toast } from '@/features/notifications'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import type { AgentRecord, KnowledgeBaseRecord } from '@/features/conversations/model/types'
 
 export interface AgentCardData extends AgentRecord { image: string; tools: number; knowledge: number; mcps: number; skills: number; recent: string; active?: boolean }
@@ -15,7 +16,7 @@ function activateCard(event: KeyboardEvent, action: () => void) {
   action()
 }
 
-export function AgentCard({ agent, onUse, onManage, disabled = false, showAction = true }: { agent: AgentCardData; onUse: () => void; onManage?: () => void; disabled?: boolean; showAction?: boolean }) {
+export function AgentCard({ agent, onUse, onViewDetail, disabled = false, showAction = true }: { agent: AgentCardData; onUse: () => void; onViewDetail?: () => void; disabled?: boolean; showAction?: boolean }) {
   const summon = () => {
     if (disabled) return
     if (!agent.available) {
@@ -33,7 +34,12 @@ export function AgentCard({ agent, onUse, onManage, disabled = false, showAction
         </span>
       </CardHeader>
       {showAction && <Button className="fox-agent-summon" size="sm" disabled={disabled || !agent.available} onClick={(event) => { event.stopPropagation(); summon() }}>召唤</Button>}
-      {onManage && <Button className="fox-agent-manage" variant="ghost" size="icon" aria-label={`管理${agent.name}`} onClick={(event) => { event.stopPropagation(); onManage() }}><Settings2 /></Button>}
+      {onViewDetail && <Tooltip>
+        <TooltipTrigger asChild>
+          <Button className="fox-agent-manage" variant="ghost" size="icon" aria-label={`查看${agent.name}详情`} onClick={(event) => { event.stopPropagation(); onViewDetail() }}><Info /></Button>
+        </TooltipTrigger>
+        <TooltipContent side="top">详情</TooltipContent>
+      </Tooltip>}
       <CardContent className="fox-shadcn-kb-content">
         <p className="fox-agent-description" title={agent.description}>{agent.description}</p>
         <span className="fox-library-card-tags">

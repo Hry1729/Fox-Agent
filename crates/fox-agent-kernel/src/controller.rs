@@ -1867,6 +1867,54 @@ impl RunController {
         })))
     }
 
+    /// Durably record a Host continuation decision in the same transaction that
+    /// records the stop response it follows. The prompt is Host-authored and
+    /// bounded; it is not a tool result and never grants permission. The
+    /// continuation model round itself carries no delivery lease, so an engine
+    /// crash inside it fails closed instead of replaying a request.
+    pub fn note_continuation_request(&mut self, prompt: &str) -> Result<Effect, KernelError> {
+        if self.state != RunState::Running {
+            return Err(KernelError::FailClosed("continuation requires a running Run".into()));
+        }
+        if prompt.is_empty() || prompt.len() > 16_384 {
+            return Err(KernelError::FailClosed(
+                "continuation prompt exceeds the bounded size".into(),
+            ));
+        }
+        Ok(self.append_event(
+            "engine.continuation_requested",
+            serde_json::json!({"turnId": self.turn_id, "prompt": prompt}),
+        ))
+    }
+
+    /// Record the model output that answers a continuation round. The caller
+    /// decides the next step (batch proposal, another continuation, terminal)
+    /// in the same transaction. No model request is armed across a
+    /// continuation, so this never settles an in-flight marker.
+    pub fn record_continuation_model_response(
+        &mut self,
+        response_json: &str,
+    ) -> Result<Effect, KernelError> {
+        if self.state != RunState::Running || self.model_request_in_flight
+            || response_json.len() > 1_048_576
+        {
+            return Err(KernelError::FailClosed(
+                "continuation response requires an idle running Run".into(),
+            ));
+        }
+        let response: serde_json::Value = serde_json::from_str(response_json)
+            .map_err(|error| KernelError::FailClosed(error.to_string()))?;
+        if !response.is_object() {
+            return Err(KernelError::FailClosed(
+                "continuation response must be an object".into(),
+            ));
+        }
+        Ok(self.append_event(
+            "engine.continuation_response",
+            serde_json::json!({"turnId": self.turn_id, "response": response}),
+        ))
+    }
+
     /// Settle the in-flight model request (first output / tool batch / terminal).
     /// Disarms the model-request timeout; the tool-execution timeout governs
     /// any dispatched tools instead.

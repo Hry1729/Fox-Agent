@@ -533,6 +533,123 @@ export const SCHEMA_BUNDLE = {
       "title": "KernelModelResponse",
       "type": "object"
     },
+    "KernelRoundDirective": {
+      "$defs": {
+        "KernelRoundDirectiveKind": {
+          "enum": [
+            "batch",
+            "continuation",
+            "final"
+          ],
+          "type": "string"
+        },
+        "KernelSettledToolResult": {
+          "additionalProperties": false,
+          "properties": {
+            "canonicalInput": true,
+            "result": true,
+            "sourceOrder": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state": {
+              "$ref": "#/$defs/KernelSettledToolState"
+            },
+            "tool": {
+              "type": "string"
+            },
+            "toolCallId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "toolCallId",
+            "tool",
+            "canonicalInput",
+            "sourceOrder",
+            "state",
+            "result"
+          ],
+          "type": "object"
+        },
+        "KernelSettledToolState": {
+          "enum": [
+            "completed",
+            "failed"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "Host decision after committing one engine round output. `Batch` hands the\nsettled durable results of the proposed batch back to the live session;\n`Continuation` injects a bounded Host-authored review prompt; `Final` ends\nthe loop. The engine never derives any of these itself.",
+      "properties": {
+        "batchId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checkpointSeq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/KernelRoundDirectiveKind"
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tools": {
+          "items": {
+            "$ref": "#/$defs/KernelSettledToolResult"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "kind"
+      ],
+      "title": "KernelRoundDirective",
+      "type": "object"
+    },
+    "KernelRoundOutputFrame": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "One engine round output from a live loop session: either a tool proposal or\na completed answer. History, batch identity and the checkpoint cursor remain\nHost-owned and are never supplied or echoed by Node.",
+      "properties": {
+        "assistantMessage": true,
+        "schemaVersion": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "turnId",
+        "assistantMessage"
+      ],
+      "title": "KernelRoundOutputFrame",
+      "type": "object"
+    },
     "KernelRunSnapshot": {
       "$defs": {
         "KernelToolSnapshot": {

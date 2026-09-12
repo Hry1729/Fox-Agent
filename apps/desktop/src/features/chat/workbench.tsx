@@ -60,6 +60,7 @@ import {
   Search,
   Server,
   Settings,
+  Settings2,
   ShieldCheck,
   Sparkles,
   Square,
@@ -1173,7 +1174,8 @@ function Sidebar({
   }, [showSidebarUtilities])
   const agentSection = activeDocumentId ?? 'home'
   const agentContextItems = [
-    { section: 'home', label: '首页', icon: House },
+    { section: 'home', label: '基本设置', icon: House },
+    { section: 'resources', label: '能力配置', icon: Settings2 },
     { section: 'conversations', label: '对话任务', icon: ClipboardList },
     { section: 'memory', label: '记忆', icon: Brain },
     { section: 'skills', label: '技能', icon: WandSparkles },
