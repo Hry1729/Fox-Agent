@@ -2093,3 +2093,114 @@ fn kernel_real_model_previews_are_transient_until_the_response_transaction_commi
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM messages WHERE run_id=?1 AND role='assistant'",[&run_id],|row|row.get(0)).unwrap();
     assert_eq!(count,1);
 }
+
+// ---------------------------------------------------------------------------
+// Live native-loop integration (2026-09 loop review): executable-preface stop
+// review, read-only immediate completion, continuation final-answer projection.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn live_executable_preface_gets_one_bounded_review_then_projects_final_answer() {
+    // Round 1: bare preface with no tool call while an executable tool is
+    // frozen. Round 2 (continuation): the real final answer, also no tool call.
+    let (address, server) = start_http_model_fixture(vec![
+        json!({"role":"assistant","content":"I will now analyze the workbook."}),
+        json!({"role":"assistant","content":"统计完成，共 5 条记录。"}),
+    ]);
+    let mut config = worker_configuration();
+    config.system_prompt = "Use the durable history only.".into();
+    config.model_service = json!({"apiType":"openai-completions","modelId":"kernel-http-test","baseUrl":format!("http://{address}/v1")});
+    config.proposal_tools = vec![json!({"name":"attachment_compute","description":"Compute selected attachment data with JavaScript",
+        "parameters":{"type":"object","properties":{"code":{"type":"string"},"attachmentIds":{"type":"array","items":{"type":"string"}}},"required":["code"]}})];
+    let clock = TestClock::new(crate::database::now_ms());
+    let (db, root, run_id) =
+        fixture_with_retry_opt(&clock, &config.hash().unwrap(), Some(&config), true, true, (0, 1));
+    db.freeze_kernel_host_scope(&run_id, &crate::database::KernelHostScope {
+        schema_version: 1,
+        tool_names: ["attachment_compute".into()].into_iter().collect(),
+        mcp_server_hashes: Default::default(),
+        knowledge_reference_hashes: Default::default(),
+        knowledge_connection_hashes: Default::default(),
+        office_tools: Default::default(),
+        lifecycle_hooks: Vec::new(),
+    })
+    .unwrap();
+    super::super::kernel_host::drive(
+        super::super::kernel_host::acquire(&root, &run_id).unwrap(),
+        &db, &clock, &CancellationRegistry::default(), &run_id, &real_worker_command(), "local-test-only",
+        &Allow,
+        |_, _, _| panic!("a preface that calls no tool must not execute anything"),
+    )
+    .unwrap();
+    let snapshot = db.kernel_build_full_snapshot(&run_id).unwrap();
+    assert_eq!(snapshot.state, "completed");
+    assert!(snapshot.tool_calls.is_empty());
+    // Exactly one bounded continuation, and the reviewed answer is the visible final.
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1]["messages"].to_string().contains("Fox 续答检查"));
+    let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let (count, last): (i64, String) = conn.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(content),'') FROM messages WHERE run_id=?1 AND role='assistant' AND status='completed'",
+        [&run_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(count, 1, "the continuation final answer replaces/owns the visible answer");
+    assert_eq!(last, "统计完成，共 5 条记录。");
+}
+
+#[test]
+fn live_readonly_complete_answer_completes_without_review_round() {
+    let (address, server) = start_http_model_fixture(vec![
+        json!({"role":"assistant","content":"1+1 等于 2。"}),
+    ]);
+    let mut config = worker_configuration(); // read-only `read` tool only
+    config.system_prompt = "Answer directly.".into();
+    config.model_service = json!({"apiType":"openai-completions","modelId":"kernel-http-test","baseUrl":format!("http://{address}/v1")});
+    let clock = TestClock::new(crate::database::now_ms());
+    let (db, root, run_id) =
+        fixture_with_retry_opt(&clock, &config.hash().unwrap(), Some(&config), true, true, (0, 1));
+    freeze_host_scope(&db, &run_id);
+    super::super::kernel_host::drive(
+        super::super::kernel_host::acquire(&root, &run_id).unwrap(),
+        &db, &clock, &CancellationRegistry::default(), &run_id, &real_worker_command(), "local-test-only",
+        &Allow, |_, _, _| panic!("no execution"),
+    )
+    .unwrap();
+    assert_eq!(db.kernel_build_full_snapshot(&run_id).unwrap().state, "completed");
+    assert_eq!(server.join().unwrap().len(), 1, "a complete read-only answer is not re-reviewed");
+}
+
+#[test]
+fn live_remaining_budget_excludes_approval_wait() {
+    // A human approval legitimately parks the Run for longer than the
+    // remaining execution budget. The running clock is suspended, so the live
+    // transport deadline (recomputed from durable facts) must not expire while
+    // waiting, and an independent approval deadline still governs the wait.
+    let config = worker_configuration();
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, _root, run_id) =
+        fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), false, false);
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.propose_tools("batch", calls(), &Ask).unwrap();
+    let facts = coordinator.snapshot().unwrap();
+    assert_eq!(facts.state, "waiting_approval");
+    let approval_deadline = facts.approval_deadline_wall_ms;
+    assert!(approval_deadline.is_some());
+
+    // Advance well beyond the model-request window and a chunk of run time;
+    // while parked in approval the accumulated running time must not grow.
+    let before = coordinator.live_remaining_ms_for_test();
+    clock.advance(40_000);
+    coordinator.tick().unwrap(); // approval wait is governed by its own deadline
+    let parked = coordinator.snapshot().unwrap();
+    assert_eq!(parked.state, "waiting_approval", "approval wait must not be charged to execution");
+    assert_eq!(parked.running_elapsed_ms, 0, "running clock stays suspended during approval");
+    let after = coordinator.live_remaining_ms_for_test();
+    assert_eq!(before, after, "live execution deadline does not shrink across an approval wait");
+
+    // Resolving the last pending approval resumes the run; the remaining
+    // execution budget is still intact after the long wall wait.
+    coordinator.resolve_approval("read-a", kernel::ApprovalDecision::AllowOnce).unwrap();
+    coordinator.resolve_approval("read-b", kernel::ApprovalDecision::AllowOnce).unwrap();
+    assert!(coordinator.live_remaining_ms_for_test() > 0);
+}

@@ -10,6 +10,15 @@ pub struct CancellationToken {
 }
 
 impl CancellationToken {
+    /// A token that is never cancelled. Used only to bound a short, in-process
+    /// drain (e.g. reading the worker's final frame after the Host already
+    /// committed the terminal state) by deadline rather than cancellation.
+    pub fn uncancellable() -> Self {
+        CancellationToken {
+            run: Arc::new(AtomicBool::new(false)),
+            tool: Arc::new(AtomicBool::new(false)),
+        }
+    }
     pub fn is_cancelled(&self) -> bool {
         self.run.load(Ordering::Acquire) || self.tool.load(Ordering::Acquire)
     }

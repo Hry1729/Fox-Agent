@@ -190,6 +190,10 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
   deliveriesBySession.set(session, deliveries)
 
   let roundCursor = prepared.checkpointSeq
+  // Preview-attribution cursor for the current round. Tool/initial rounds use
+  // the durable checkpoint cursor; a continuation round uses the Host-provided
+  // previewSeq so its streamed message never reuses the previous round's id.
+  let previewCursor = prepared.checkpointSeq
   let pendingBatch = null
   let fatal = null
   let timedOut = false
@@ -206,6 +210,17 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
     roundTimer = setTimeout(() => { timedOut = true; session.agent.abort() }, budget)
   }
   const clearRoundTimer = () => { if (roundTimer) { clearTimeout(roundTimer); roundTimer = null } }
+  // Each model round owns an independent display message identity (cursor),
+  // while the revision cursor stays run-monotonic: the Host orders previews by
+  // a single increasing revision and de-duplicates the visible row by message
+  // id, so resetting the revision here would be rejected as an out-of-order
+  // preview on later rounds.
+  const resetPreviewRound = cursor => {
+    previewCursor = Number.isFinite(cursor) && cursor > 0 ? cursor : previewCursor
+    lastPreviewAt = 0
+    lastPreviewText = ''
+    lastPreviewReasoning = ''
+  }
   const abort = () => { try { session.agent.abort() } catch (error) { abortError ??= error } }
   signal.addEventListener('abort', abort, { once: true })
 
@@ -224,11 +239,12 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
         lastPreviewReasoning = reasoning
         lastPreviewAt = now
         preview({ schemaVersion: 1, runId: request.runId, conversationId: request.conversationId, turnId: prepared.turnId,
-          checkpointSeq: roundCursor, revision: ++previewRevision, text, ...(reasoning ? { reasoning } : {}) })
+          checkpointSeq: previewCursor, revision: ++previewRevision, text, ...(reasoning ? { reasoning } : {}) })
       }
     }
-    if (event.type === 'message_start' && event.message?.role === 'assistant') armRoundTimer()
     if (event.type !== 'message_end' || event.message?.role !== 'assistant') return
+    // The streamed round finished; the per-request deadline stops here so the
+    // Host round-trip and any approval/execution wait are never charged to it.
     clearRoundTimer()
     if (signal.aborted || timedOut) return
     const message = event.message
@@ -247,6 +263,7 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
         fail('Host returned a non-batch directive for a tool proposal')
       }
       roundCursor = directive.checkpointSeq
+      resetPreviewRound(directive.checkpointSeq)
       const settled = new Map()
       for (const item of directive.tools) settled.set(item.toolCallId, settledToolResult(item))
       pendingBatch = { batchId: directive.batchId, settled }
@@ -263,6 +280,14 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
     session.agent.state.messages = prepared.messages
     let final
     while (true) {
+      // Arm the per-round deadline before the provider request is issued, not
+      // on the first streamed assistant event: the time spent sending the
+      // request and waiting for response headers is part of the model round
+      // and must count against the frozen per-request budget. It is disarmed
+      // when the committed round output leaves for the Host (tool proposal
+      // listener) or once the stop answer settles below, so Host/approval waits
+      // are never charged to this timer.
+      armRoundTimer()
       await session.agent.continue()
       if (pendingBatch === 'awaiting') fail('batch settlement did not finish before the engine settled')
       if (abortError) fail(`engine cancellation failed: ${abortError.message ?? String(abortError)}`)
@@ -297,6 +322,10 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
         }
       }
       if (directive.kind === 'continuation' && nonempty(directive.prompt)) {
+        // Review round owns an independent preview identity so its streamed
+        // answer is attributed to the Host-provided cursor, never the prior
+        // tool round's message id.
+        resetPreviewRound(directive.previewSeq)
         session.agent.state.messages = [...session.agent.state.messages,
           { role: 'user', content: [{ type: 'text', text: directive.prompt }], timestamp: Date.now() }]
         continue

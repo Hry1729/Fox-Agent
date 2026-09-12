@@ -64,7 +64,7 @@ pub(super) fn project(
 
     let mut query = tx.prepare(
         "SELECT seq,payload_json,event_type FROM kernel_events WHERE run_id=?1 AND seq>?2
-        AND event_type IN ('engine.initial_response','engine.batch_response','context.compaction.result') ORDER BY seq",
+        AND event_type IN ('engine.initial_response','engine.batch_response','engine.continuation_response','context.compaction.result') ORDER BY seq",
     )?;
     let responses: Vec<(i64, String, String)> = query
         .query_map(params![run_id, previous_seq], |row| {
@@ -87,6 +87,20 @@ pub(super) fn project(
         let response = &payload["response"];
         if let Some(usage) = response["assistantMessage"].get("usage") {
             project_usage(tx, run_id, seq, usage, now)?;
+        }
+        // A stop-review continuation replaces the unbacked preface that
+        // triggered it: that earlier assistant text was an unfinished answer,
+        // not a result the user should keep. Supersede it so only the reviewed
+        // final answer remains visible (and reachable for child summaries).
+        if kind == "engine.continuation_response" {
+            tx.execute(
+                "UPDATE messages SET status='superseded', updated_at=?2
+                 WHERE id=(
+                    SELECT id FROM messages WHERE run_id=?1 AND role='assistant'
+                    AND status IN ('completed','streaming')
+                    ORDER BY ordinal DESC LIMIT 1)",
+                params![run_id, now],
+            )?;
         }
         let content = response["assistantMessage"]["content"]
             .as_array()

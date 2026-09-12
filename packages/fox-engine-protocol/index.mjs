@@ -602,6 +602,15 @@ export const SCHEMA_BUNDLE = {
         "kind": {
           "$ref": "#/$defs/KernelRoundDirectiveKind"
         },
+        "previewSeq": {
+          "description": "Preview-attribution cursor for a continuation round: the message id the\nengine must tag streamed previews with while answering the review.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "prompt": {
           "type": [
             "string",

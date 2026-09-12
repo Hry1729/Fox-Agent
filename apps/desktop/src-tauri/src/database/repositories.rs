@@ -6575,6 +6575,7 @@ fn query_message_page(
            SELECT id, conversation_id, run_id, role, kind, content, status, ordinal, created_at, updated_at
            FROM messages
            WHERE conversation_id = ?1 AND (?2 IS NULL OR ordinal < ?2)
+             AND status <> 'superseded'
            ORDER BY ordinal DESC LIMIT ?3
          ) ORDER BY ordinal ASC",
     )?;

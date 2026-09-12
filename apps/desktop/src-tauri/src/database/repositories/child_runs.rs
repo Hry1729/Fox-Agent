@@ -660,7 +660,7 @@ fn sync_child_terminal(
          SET status = (SELECT status FROM runs WHERE id = ?1),
              result_text = NULLIF((
                  SELECT substr(content, 1, 32000) FROM messages
-                 WHERE run_id = ?1 AND role = 'assistant'
+                 WHERE run_id = ?1 AND role = 'assistant' AND status='completed'
                  ORDER BY ordinal DESC LIMIT 1
              ), ''),
              tool_call_count = (SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1),

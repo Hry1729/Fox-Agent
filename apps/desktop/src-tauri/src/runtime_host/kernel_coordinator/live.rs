@@ -34,22 +34,51 @@ type AfterCommitFn<'a> = &'a dyn Fn(&str) -> Result<(), String>;
 type SettleChildrenFn<'a> = &'a dyn Fn(bool) -> Result<(), String>;
 
 impl KernelCoordinator<'_> {
+    /// Remaining whole-Run execution budget as a wall deadline. The running
+    /// clock excludes approval/execution waits, so this stays valid across a
+    /// long approval whereas a fixed Instant captured at dispatch would not.
     fn live_deadline(&self) -> Result<Instant, String> {
+        let remaining = self.live_remaining_ms()?;
+        Ok(Instant::now() + Duration::from_millis(remaining.max(1) as u64))
+    }
+
+    /// Remaining budget for the next blocking transport wait, in milliseconds.
+    /// This is the live-loop counterpart of the per-round formula: the minimum
+    /// of the remaining whole-Run execution budget and the active model-request
+    /// window. Recomputed before every worker wait so the bound tracks durable
+    /// Host facts (and naturally pauses across approvals). When no model
+    /// request is armed (a continuation round) only the Run budget applies.
+    fn live_remaining_ms(&self) -> Result<i64, String> {
         let now = self.clock.read();
         let facts = self
             .controller
             .lock()
             .map_err(|_| "Kernel coordinator lock poisoned")?
             .shadow_checkpoint(now.monotonic_ms);
-        let remaining = self
+        let run_remaining = self
             .binding
             .budgets
             .run_execution_ms
             .saturating_sub(facts.running_elapsed_ms);
-        if remaining <= 0 {
+        if run_remaining <= 0 {
             return Err("Kernel Run execution budget exhausted".into());
         }
-        Ok(Instant::now() + Duration::from_millis(remaining as u64))
+        let model_remaining = match facts.model_request_since_wall_ms {
+            Some(since) if now.wall_ms >= since => self
+                .binding
+                .budgets
+                .model_request_ms
+                .saturating_sub(now.wall_ms - since),
+            // Continuation round / no armed request: do not apply the
+            // per-request window; the worker's own round timer bounds the call.
+            _ => i64::MAX,
+        };
+        Ok(run_remaining.min(model_remaining))
+    }
+
+    /// Recomputed deadline source passed to the live worker transport.
+    fn live_deadline_for(&self) -> impl FnMut() -> Result<Instant, String> + '_ {
+        move || self.live_deadline()
     }
 
     fn processed_initial_input(&self) -> Result<Vec<Value>, String> {
@@ -304,12 +333,36 @@ impl KernelCoordinator<'_> {
         };
 
         // Continuation admission is decided from durable facts before the
-        // commit that records the decision: some tool ran in this Run, the
-        // bounded count has not been exhausted, and the Run is not cancelled.
-        let continuation_allowed = !tool_use
-            && !self.snapshot()?.tool_calls.is_empty()
-            && self.database.kernel_count_continuations(&self.binding.run_id)?
-                < CONTINUATION_LIMIT;
+        // commit that records the decision. A stop-without-proposal gets one
+        // bounded review when work is plausibly unfinished:
+        //  * at least one tool already ran (the model stopped after starting), or
+        //  * this is the first round of a Run frozen with an executable
+        //    (non-read-only) tool, but the model only produced an unbacked
+        //    "I will start" preface instead of invoking it.
+        // A genuinely complete no-tool answer to a read-only/conversational
+        // request completes immediately, so a plain question is never charged
+        // an extra model round. The executable-preface nudge fires once; the
+        // post-review stop is accepted as the final answer.
+        let continuation_allowed = if tool_use
+            || self.database.kernel_count_continuations(&self.binding.run_id)?
+                >= CONTINUATION_LIMIT
+        {
+            false
+        } else if !self.snapshot()?.tool_calls.is_empty() {
+            true
+        } else if !matches!(stage, Stage::Initial { .. }) {
+            false
+        } else {
+            self.database
+                .kernel_model_config(&self.binding.run_id)?
+                .proposal_tools
+                .iter()
+                .filter_map(|tool| tool["name"].as_str())
+                .any(|name| {
+                    fox_engine_protocol::canonical_runtime_tool_contract(name)
+                        .is_some_and(|(category, _, _)| category != "project-read")
+                })
+        };
 
         // The next checkpoint for a tool proposal, committed with the response.
         let next_checkpoint = if tool_use {
@@ -433,6 +486,7 @@ impl KernelCoordinator<'_> {
                 kind: fox_engine_protocol::KernelRoundDirectiveKind::Batch,
                 batch_id: Some(batch_id),
                 checkpoint_seq: Some(cursor),
+                preview_seq: None,
                 tools,
                 prompt: None,
             });
@@ -446,12 +500,23 @@ impl KernelCoordinator<'_> {
                 "content": [{"type": "text", "text": CONTINUATION_PROMPT}],
                 "timestamp": 0,
             }));
+            // The continuation-requested event is now the last durable event;
+            // streamed previews for the review round attribute to the message
+            // id just below it (the display store owns a row when
+            // last_event_seq == preview_seq + 1).
+            let last_seq = self
+                .controller
+                .lock()
+                .map_err(|_| "Kernel coordinator lock poisoned")?
+                .last_event_seq();
+            let preview_seq = last_seq.saturating_sub(1).max(1);
             *stage = Stage::Continuation { pre_history: next_pre };
             return Ok(fox_engine_protocol::KernelRoundDirective {
                 schema_version: 1,
                 kind: fox_engine_protocol::KernelRoundDirectiveKind::Continuation,
                 batch_id: None,
                 checkpoint_seq: None,
+                preview_seq: Some(preview_seq),
                 tools: Vec::new(),
                 prompt: Some(CONTINUATION_PROMPT.into()),
             });
@@ -462,6 +527,7 @@ impl KernelCoordinator<'_> {
             kind: fox_engine_protocol::KernelRoundDirectiveKind::Final,
             batch_id: None,
             checkpoint_seq: None,
+            preview_seq: None,
             tools: Vec::new(),
             prompt: None,
         })
@@ -549,13 +615,15 @@ impl KernelCoordinator<'_> {
                 settle_children,
             )
         };
-        let request_payload = json!({"controlBinding": self.binding, "initialModel": frame});
+        let request_payload =
+            json!({"controlBinding": self.binding, "initialModel": frame, "streamPreview": true});
+        let mut deadline_for = self.live_deadline_for();
         match session.run(
             "kernel.start_initial",
             request_payload,
             &self.binding,
             &token,
-            self.live_deadline()?,
+            &mut deadline_for,
             self.preview,
             &mut service,
         ) {
@@ -588,6 +656,14 @@ impl KernelCoordinator<'_> {
 
 fn kernel_state_is_terminal(state: &str) -> bool {
     matches!(state, "completed" | "failed" | "cancelled" | "budget_exhausted")
+}
+
+#[cfg(test)]
+impl<'a> KernelCoordinator<'a> {
+    /// Test accessor for the recomputed live execution budget.
+    pub(super) fn live_remaining_ms_for_test(&self) -> i64 {
+        self.live_remaining_ms().expect("live remaining budget")
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

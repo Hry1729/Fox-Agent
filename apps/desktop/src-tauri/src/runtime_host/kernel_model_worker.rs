@@ -106,11 +106,44 @@ fn wait<T>(
     token: &CancellationToken,
     deadline: Instant,
 ) -> Result<T, String> {
+    wait_opts(receiver, token, deadline, true)
+}
+
+/// Like [`wait`] but can ignore the cooperative cancel token while still
+/// honouring the deadline. Used to drain the worker's final `model_response`
+/// after the Host has already committed a terminal Run state inside an
+/// `on_round` callback: committing completion cancels the run scope, but the
+/// in-process worker still has to return the final frame it was asked for.
+fn wait_final<T>(
+    receiver: &Receiver<T>,
+    deadline: Instant,
+) -> Result<T, String> {
+    wait_opts(receiver, &fresh_token(), deadline, false)
+}
+
+fn fresh_token() -> CancellationToken {
+    CancellationToken::uncancellable()
+}
+
+fn wait_opts<T>(
+    receiver: &Receiver<T>,
+    token: &CancellationToken,
+    deadline: Instant,
+    honour_cancel: bool,
+) -> Result<T, String> {
     loop {
-        token.check()?;
-        let remaining = deadline.checked_duration_since(Instant::now()).ok_or("Kernel worker deadline exceeded; reconcile delivery")?;
+        if honour_cancel {
+            token.check()?;
+        }
+        let remaining = deadline.checked_duration_since(Instant::now())
+            .ok_or("Kernel worker deadline exceeded; reconcile delivery")?;
         match receiver.recv_timeout(remaining.min(Duration::from_millis(20))) {
-            Ok(value) => { token.check()?; return Ok(value); }
+            Ok(value) => {
+                if honour_cancel {
+                    token.check()?;
+                }
+                return Ok(value);
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err("Kernel worker disconnected; reconcile delivery".into())
@@ -567,14 +600,18 @@ impl LiveKernelSession {
         request_type: &str,
         request_payload: Value,
         binding: &RunControlBinding,
-        token: &CancellationToken,
-        deadline: Instant,
+        cancel: &CancellationToken,
+        // The remaining execution deadline is recomputed before every blocking
+        // wait from durable Host facts. Unlike a fixed Instant, this excludes
+        // approval/execution waits (the controller's running clock is suspended
+        // then) so a long approval cannot expire the transport deadline.
+        deadline_for: &mut dyn FnMut() -> Result<Instant, String>,
         preview: Option<&PreviewSink>,
         on_round: &mut dyn FnMut(
             fox_engine_protocol::KernelRoundOutputFrame,
         ) -> Result<fox_engine_protocol::KernelRoundDirective, String>,
     ) -> Result<Value, String> {
-        token.check()?;
+        cancel.check()?;
         let request = Self::envelope(request_type, request_payload, binding, &self.session_id);
         let mut bytes = serde_json::to_vec(&request).map_err(|_| "invalid Kernel request")?;
         bytes.push(b'\n');
@@ -590,15 +627,28 @@ impl LiveKernelSession {
                 .map_err(|_| "Kernel worker write failed");
             let _ = sender.send((stdin, result));
         }));
-        let (stdin, result) = wait(&written, token, deadline)?;
+        let (stdin, result) = wait(&written, cancel, deadline_for()?)?;
         self.worker.stdin = Some(stdin);
         if let Some(writer) = self.worker.writer.take() {
             let _ = writer.join();
         }
         result?;
         let mut revision = 0u64;
+        // Set once a Final directive has been handed to the worker. The Host
+        // commits the terminal state inside on_round, which cancels the run
+        // scope; the worker still owes us its final model_response, so after
+        // this point we drain by deadline instead of rejecting on run cancel.
+        let mut final_sent = false;
         loop {
-            let response = wait(&self.worker.messages, token, deadline)??;
+            let response = if final_sent {
+                // The Host decision is already terminal; only the in-process
+                // worker's final frame is outstanding. Bound that short drain
+                // independently so an exhausted Run budget cannot reject it.
+                let drain_deadline = Instant::now() + Duration::from_secs(10);
+                wait_final(&self.worker.messages, drain_deadline)??
+            } else {
+                wait(&self.worker.messages, cancel, deadline_for()?)??
+            };
             if response["protocol"] != PROTOCOL_NAME
                 || response["version"] != PROTOCOL_VERSION
                 || ["runId", "conversationId", "runtimeSessionId"]
@@ -625,10 +675,12 @@ impl LiveKernelSession {
                 }
                 let directive = on_round(frame)?;
                 directive.validate()?;
+                let is_final =
+                    directive.kind == fox_engine_protocol::KernelRoundDirectiveKind::Final;
                 let reply = json!({
                     "protocol": PROTOCOL_NAME, "version": PROTOCOL_VERSION, "kind": "response",
                     "type": "kernel.round_directive", "requestId": response["id"],
-                    "runId": response["runId"], "conversationId": response["conversationId"],
+                    "runId": response["runId"], "conversationId": response["conversation"],
                     "runtimeSessionId": response["runtimeSessionId"],
                     "payload": serde_json::to_value(&directive).map_err(|_| "invalid directive")?,
                 });
@@ -648,12 +700,15 @@ impl LiveKernelSession {
                         .map_err(|_| "Kernel worker write failed");
                     let _ = sender.send((stdin, result));
                 }));
-                let (stdin, write_result) = wait(&written, token, deadline)?;
+                // Writing the directive must still honour cancellation: the
+                // worker only drains its final response after Final is sent.
+                let (stdin, write_result) = wait(&written, cancel, deadline_for()?)?;
                 self.worker.stdin = Some(stdin);
                 if let Some(writer) = self.worker.writer.take() {
                     let _ = writer.join();
                 }
                 write_result?;
+                final_sent = is_final;
                 continue;
             }
             if response["kind"] != "response" || response["requestId"] != request["id"] {
@@ -673,7 +728,7 @@ impl LiveKernelSession {
                     return Err("Kernel model preview order mismatch".into());
                 }
                 revision = notice.revision;
-                token.check()?;
+                cancel.check()?;
                 sink(&notice);
                 continue;
             }

@@ -520,6 +520,42 @@ test('cancellation settles the model request and permanently consumes the proces
   assert.equal((await child.request('kernel.resume_batch', resumePayload())).type, 'request_failed')
 })
 
+test('live round deadline bounds the wait before the first response header', { timeout: 30000 }, async t => {
+  // The server accepts the request but withholds response headers (and thus
+  // the first assistant streaming event) far beyond the model round budget.
+  // The deadline is armed before the provider request is issued, so the round
+  // must fail inside the budget even though streaming never started.
+  let release
+  const held = new Promise(resolve => { release = resolve })
+  const server = createServer(async (req, res) => {
+    for await (const _ of req) {}
+    await held
+    if (res.writableEnded || res.destroyed) return
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.end('data: [DONE]\n\n')
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { release(); server.closeAllConnections?.(); server.close() })
+  const child = await worker(t, ['--kernel-worker'], { onRoundOutput: () => ({ schemaVersion: 1, kind: 'final' }) })
+  const config = initialization({
+    modelService: { apiType: 'openai-completions', modelId: 'slow-heads', baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'k' },
+  })
+  assert.equal((await child.request('kernel.initialize', config)).type, 'kernel.ready')
+  const payload = { controlBinding: { ...resumePayload().controlBinding, budgets: { ...resumePayload().controlBinding.budgets, modelRequestMs: 100 } } }
+  const start = performance.now()
+  const response = await child.request('kernel.start_initial', {
+    controlBinding: payload.controlBinding,
+    initialModel: { schemaVersion: 1, idempotencyKey: 'initial-model-delivery', checkpointSeq: 2,
+      input: { schemaVersion: 1, runId: identity.runId, turnId: 'slow-turn', promptConfigHash: 'h',
+        messages: [{ role: 'user', content: 'go', timestamp: 1 }] } },
+  })
+  const elapsed = performance.now() - start
+  assert.equal(response.type, 'request_failed')
+  assert.match(response.payload.message, /reconcile/)
+  assert.ok(elapsed < 1000, `deadline must fire near the 100ms budget, took ${elapsed}ms`)
+  assert.equal(child.roundOutputs.length, 0, 'no round output is committed when headers never arrive')
+})
+
 test('ordinary Legacy process rejects the isolated Kernel protocol', { timeout: 30000 }, async t => {
   const child = await worker(t, [])
   assert.equal((await child.request('kernel.initialize', initialization())).type, 'request_failed')

@@ -345,6 +345,10 @@ pub struct KernelRoundDirective {
     pub batch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_seq: Option<u64>,
+    /// Preview-attribution cursor for a continuation round: the message id the
+    /// engine must tag streamed previews with while answering the review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<KernelSettledToolResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -364,18 +368,22 @@ impl KernelRoundDirective {
             KernelRoundDirectiveKind::Batch => {
                 if self.batch_id.as_deref().is_none_or(|id| id.trim().is_empty())
                     || self.checkpoint_seq.is_none_or(|seq| seq == 0 || seq > 9_007_199_254_740_991)
-                    || self.tools.is_empty() || self.prompt.is_some() {
+                    || self.tools.is_empty() || self.prompt.is_some() || self.preview_seq.is_some() {
                     return Err("invalid Kernel batch directive".into());
                 }
             }
             KernelRoundDirectiveKind::Continuation => {
                 if self.prompt.as_deref().is_none_or(|text| text.trim().is_empty() || text.len() > 16_384)
-                    || self.batch_id.is_some() || self.checkpoint_seq.is_some() || !self.tools.is_empty() {
+                    || self.batch_id.is_some() || self.checkpoint_seq.is_some() || !self.tools.is_empty()
+                    || self.preview_seq.is_some_and(|seq| seq == 0 || seq > 9_007_199_254_740_991)
+                {
                     return Err("invalid Kernel continuation directive".into());
                 }
             }
             KernelRoundDirectiveKind::Final => {
-                if self.batch_id.is_some() || self.checkpoint_seq.is_some() || !self.tools.is_empty() || self.prompt.is_some() {
+                if self.batch_id.is_some() || self.checkpoint_seq.is_some() || !self.tools.is_empty()
+                    || self.prompt.is_some() || self.preview_seq.is_some()
+                {
                     return Err("invalid Kernel final directive".into());
                 }
             }
