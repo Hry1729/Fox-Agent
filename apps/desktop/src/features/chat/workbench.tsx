@@ -16,6 +16,7 @@ import {
   BookCopy,
   Bot,
   Brain,
+  Cable,
   Check,
   ChevronDown,
   ChevronUp,
@@ -23,6 +24,7 @@ import {
   CircleStop,
   ClipboardList,
   Copy,
+  Database,
   Eraser,
   ExternalLink,
   File,
@@ -60,7 +62,6 @@ import {
   Search,
   Server,
   Settings,
-  Settings2,
   ShieldCheck,
   Sparkles,
   Square,
@@ -1174,12 +1175,13 @@ function Sidebar({
   }, [showSidebarUtilities])
   const agentSection = activeDocumentId ?? 'home'
   const agentContextItems = [
-    { section: 'home', label: '基本设置', icon: House },
-    { section: 'resources', label: '能力配置', icon: Settings2 },
+    { section: 'home', label: '专家详情', icon: House },
+    { section: 'knowledge', label: '知识库', icon: Database },
+    { section: 'skills', label: '技能', icon: WandSparkles },
+    { section: 'mcp', label: '连接器', icon: Cable },
+    { section: 'tools', label: '工具', icon: Wrench },
     { section: 'conversations', label: '对话任务', icon: ClipboardList },
     { section: 'memory', label: '记忆', icon: Brain },
-    { section: 'skills', label: '技能', icon: WandSparkles },
-    { section: 'tools', label: '工具', icon: Wrench },
   ]
   const activeSettingsView: WorkspaceView = activeView === 'onboarding'
     ? 'settings'

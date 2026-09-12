@@ -6345,3 +6345,665 @@
   overflow: auto;
   padding: 4px 12px 8px;
 }
+
+/* ============================================================
+   专家管理 v2：独立能力卡片页 / 资料弹窗 / 淡蓝配色
+   ============================================================ */
+
+/* 专家相关页面统一的淡蓝色阶（亮色≈侧边栏淡蓝，暗色=深蓝） */
+.fox-agent-manage-page,
+.fox-agent-view-dialog,
+.fox-agent-profile-dialog,
+.fox-agent-prompt-dialog {
+  --fox-manage-tint: color-mix(in srgb, var(--fox-accent-soft) 52%, var(--fox-card));
+  --fox-manage-tint-strong: color-mix(in srgb, var(--fox-accent-soft) 68%, var(--fox-card));
+  --fox-manage-tint-border: color-mix(in srgb, var(--fox-accent) 22%, var(--fox-border));
+}
+
+/* ===== 基本设置：名称行编辑入口 ===== */
+.fox-agent-manage-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+
+.fox-agent-name-edit {
+  width: 28px;
+  height: 28px;
+  color: var(--fox-muted);
+}
+
+.fox-agent-name-edit:hover {
+  color: var(--fox-accent);
+  background: var(--fox-manage-tint, var(--fox-panel));
+}
+
+.fox-agent-manage-page .fox-agent-work-card {
+  margin-top: 0;
+}
+
+/* ===== 基本设置：专家提示词卡片 ===== */
+.fox-agent-prompt-card {
+  padding: 16px 18px;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.fox-agent-prompt-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.fox-agent-prompt-card > header h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.fox-agent-prompt-card > header h2 svg {
+  width: 15px;
+  height: 15px;
+  color: var(--fox-accent);
+}
+
+.fox-agent-prompt-card > p {
+  max-height: 220px;
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--fox-manage-tint-border, var(--fox-border));
+  border-radius: 8px;
+  background: var(--fox-manage-tint, var(--fox-panel));
+  color: var(--fox-muted);
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+
+.fox-agent-prompt-openings {
+  margin-top: 12px;
+}
+
+.fox-agent-prompt-openings > span {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--fox-muted);
+}
+
+.fox-agent-prompt-openings ul {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fox-agent-prompt-openings li {
+  padding: 8px 12px;
+  border: 1px solid var(--fox-manage-tint-border, var(--fox-border));
+  border-radius: 8px;
+  background: var(--fox-manage-tint, var(--fox-panel));
+  font-size: 12.5px;
+}
+
+/* ===== 基本设置：专家操作卡片 ===== */
+.fox-agent-manage-zone-card {
+  padding: 16px 18px;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.fox-agent-manage-zone-card > header h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.fox-agent-manage-zone-card > header h2 svg {
+  width: 15px;
+  height: 15px;
+  color: var(--fox-accent);
+}
+
+.fox-agent-manage-zone-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.fox-agent-manage-zone-danger {
+  color: var(--destructive);
+}
+
+.fox-agent-manage-zone-danger:hover {
+  border-color: color-mix(in srgb, var(--destructive) 45%, var(--fox-border));
+  background: color-mix(in srgb, var(--destructive) 8%, var(--fox-card));
+}
+
+.fox-agent-manage-zone-card .fox-agent-manage-versions {
+  margin-top: 14px;
+}
+
+/* ===== 编辑资料弹窗 ===== */
+.fox-agent-profile-dialog {
+  width: min(560px, calc(100vw - 48px));
+  max-width: 560px;
+  max-height: calc(100dvh - 24px);
+  overflow: hidden;
+  padding: 20px !important;
+  gap: 14px !important;
+}
+
+.fox-agent-profile-preview {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.fox-agent-profile-preview-avatar {
+  flex: none;
+  width: 52px;
+  height: 52px;
+  border-radius: 13px;
+  overflow: hidden;
+  background: var(--fox-accent-soft);
+}
+
+.fox-agent-profile-preview-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.fox-agent-profile-preview > span:last-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.fox-agent-profile-preview strong {
+  font-size: 15px;
+}
+
+.fox-agent-profile-preview small {
+  color: var(--fox-muted);
+  font-size: 12px;
+}
+
+.fox-agent-profile-icon-field {
+  display: grid;
+  gap: 8px;
+}
+
+.fox-agent-profile-icon-field > span {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.fox-agent-profile-icon-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 46px);
+  gap: 8px;
+  max-height: 150px;
+  padding: 3px;
+  overflow-y: auto;
+}
+
+.fox-agent-profile-icon-list button {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  padding: 3px;
+  border: 2px solid transparent;
+  border-radius: 11px;
+  background: var(--fox-manage-tint, var(--fox-panel));
+  transition: border-color 150ms ease, background-color 150ms ease, transform 150ms ease;
+}
+
+.fox-agent-profile-icon-list button:hover:not(:disabled) {
+  border-color: var(--fox-border-strong);
+  transform: translateY(-1px);
+}
+
+.fox-agent-profile-icon-list button.is-active {
+  border-color: var(--fox-accent);
+  background: var(--fox-accent-soft);
+}
+
+.fox-agent-profile-icon-list img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 7px;
+}
+
+.fox-agent-profile-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.fox-agent-profile-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fox-agent-profile-form label.is-wide {
+  grid-column: 1 / -1;
+}
+
+.fox-agent-profile-form label > span {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* ===== 提示词编辑弹窗 ===== */
+.fox-agent-prompt-dialog {
+  width: min(640px, calc(100vw - 48px));
+  max-width: 640px;
+  max-height: calc(100dvh - 24px);
+  overflow: hidden;
+  padding: 20px !important;
+  gap: 14px !important;
+}
+
+.fox-agent-prompt-form {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.fox-agent-prompt-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fox-agent-prompt-form label > span {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.fox-agent-prompt-dialog .fox-agent-prompt-input {
+  min-height: 220px;
+}
+
+.fox-agent-prompt-dialog .fox-agent-opening-input {
+  min-height: 96px;
+}
+
+/* ===== 独立能力卡片页 ===== */
+.fox-capability-page {
+  gap: 16px;
+}
+
+.fox-capability-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.fox-capability-head h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.fox-capability-head p {
+  margin: 4px 0 0;
+  color: var(--fox-muted);
+  font-size: 12px;
+}
+
+.fox-capability-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.fox-capability-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 220px;
+  padding: 0 10px;
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-control);
+  background: var(--fox-card);
+}
+
+.fox-capability-search svg {
+  flex: none;
+  color: var(--fox-muted);
+}
+
+.fox-capability-search input {
+  height: 32px;
+  border: 0;
+  background: transparent;
+  font-size: 13px;
+  outline: none;
+}
+
+.fox-capability-page .fox-agent-manage-readonly {
+  align-items: center;
+}
+
+.fox-capability-page .fox-agent-manage-readonly button {
+  margin-left: auto;
+}
+
+.fox-capability-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(252px, 1fr));
+  gap: var(--fox-space-xl);
+}
+
+.fox-cap-card {
+  position: relative;
+  min-height: 132px;
+  padding: 14px;
+  gap: 10px;
+  border-radius: var(--fox-radius-card) !important;
+  box-shadow: none !important;
+  transition: border-color 150ms ease, background-color 150ms ease;
+}
+
+.fox-cap-card:hover {
+  border-color: var(--fox-accent-border);
+}
+
+.fox-cap-card.is-error {
+  border-color: color-mix(in srgb, var(--destructive) 40%, var(--fox-border));
+}
+
+.fox-cap-switch {
+  position: absolute;
+  top: 13px;
+  right: 13px;
+  z-index: 2;
+}
+
+.fox-cap-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 52px 0 0 !important;
+}
+
+.fox-cap-icon {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--fox-accent);
+  background: var(--fox-manage-tint, var(--fox-accent-soft));
+}
+
+.fox-cap-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.fox-cap-heading {
+  min-width: 0;
+}
+
+.fox-cap-heading strong {
+  display: block;
+  overflow: hidden;
+  font-size: var(--fox-type-card-title);
+  line-height: 22px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-cap-content {
+  display: grid;
+  gap: 8px;
+  padding: 0 !important;
+}
+
+.fox-cap-content > p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--fox-muted);
+  font-size: var(--fox-type-meta);
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.fox-cap-card.is-error .fox-cap-content > p {
+  color: var(--destructive);
+}
+
+.fox-cap-empty {
+  padding: 48px 20px;
+  border: 1px dashed var(--fox-border);
+  border-radius: 10px;
+  color: var(--fox-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* ===== 淡蓝色统一：工作记录使用情况卡 ===== */
+.fox-agent-manage-page .fox-agent-work-metrics > div {
+  border: 1px solid var(--fox-manage-tint-border);
+  background: var(--fox-manage-tint);
+}
+
+.fox-agent-manage-page .fox-agent-activity-panel {
+  border: 1px solid var(--fox-manage-tint-border);
+  background: var(--fox-manage-tint);
+}
+
+.fox-agent-manage-page .fox-agent-work-head [data-slot='tabs-list'] {
+  background: var(--fox-manage-tint);
+}
+
+.fox-agent-manage-page .fox-agent-task-icon {
+  background: var(--fox-manage-tint-strong);
+  color: var(--fox-accent);
+}
+
+/* ===== 淡蓝色统一：只读提示与记忆治理提示卡 ===== */
+.fox-agent-manage-page .fox-agent-manage-readonly,
+.fox-agent-manage-page .fox-memory-privacy-note {
+  border-color: var(--fox-manage-tint-border);
+  background: var(--fox-manage-tint);
+}
+
+.fox-agent-manage-page .fox-memory-privacy-note > svg {
+  color: var(--fox-accent);
+}
+
+.fox-agent-manage-page .fox-memory-card blockquote {
+  background: var(--fox-manage-tint);
+}
+
+/* ===== 淡蓝色统一：专家详情弹窗内的信息块 ===== */
+.fox-agent-view-dialog .fox-agent-view-meta > span,
+.fox-agent-view-dialog .fox-agent-view-block p {
+  border-color: var(--fox-manage-tint-border);
+  background: var(--fox-manage-tint);
+}
+
+.fox-agent-view-dialog .fox-agent-view-avatar {
+  background: var(--fox-manage-tint-strong);
+}
+
+/* ===== 淡蓝色统一：能力卡片标签与图标底 ===== */
+.fox-cap-card .fox-library-card-tags > small {
+  border-color: var(--fox-manage-tint-border);
+  background: var(--fox-manage-tint);
+}
+
+/* ===== 暗色模式：淡蓝色阶在管理页内保持可读 ===== */
+.dark .fox-agent-manage-page,
+.dark .fox-agent-view-dialog,
+.dark .fox-agent-profile-dialog,
+.dark .fox-agent-prompt-dialog {
+  --fox-manage-tint: color-mix(in srgb, var(--fox-accent-soft) 42%, var(--fox-card));
+  --fox-manage-tint-strong: color-mix(in srgb, var(--fox-accent-soft) 60%, var(--fox-card));
+}
+
+@media (max-width: 760px) {
+  .fox-agent-profile-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fox-capability-search {
+    width: 100%;
+  }
+
+  .fox-capability-actions {
+    width: 100%;
+  }
+}
+
+.fox-agent-manage-page .fox-agent-manage-hero {
+  margin-bottom: 8px;
+  padding-left: 0;
+}
+
+.fox-agent-manage-page .fox-agent-manage-hero small {
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+
+/* ============================================================
+   专家详情 v3：更淡的蓝色、小卡片无边框、能力胶囊总览
+   ============================================================ */
+
+/* 淡蓝色阶整体调淡 */
+.fox-agent-manage-page,
+.fox-agent-view-dialog,
+.fox-agent-profile-dialog,
+.fox-agent-prompt-dialog {
+  --fox-manage-tint: color-mix(in srgb, var(--fox-accent-soft) 30%, var(--fox-card));
+  --fox-manage-tint-strong: color-mix(in srgb, var(--fox-accent-soft) 46%, var(--fox-card));
+}
+
+.dark .fox-agent-manage-page,
+.dark .fox-agent-view-dialog,
+.dark .fox-agent-profile-dialog,
+.dark .fox-agent-prompt-dialog {
+  --fox-manage-tint: color-mix(in srgb, var(--fox-accent-soft) 26%, var(--fox-card));
+  --fox-manage-tint-strong: color-mix(in srgb, var(--fox-accent-soft) 42%, var(--fox-card));
+}
+
+/* 小卡片只保留淡蓝底，不要边框 */
+.fox-agent-manage-page .fox-agent-work-metrics > div,
+.fox-agent-manage-page .fox-agent-activity-panel,
+.fox-agent-manage-page .fox-agent-manage-readonly,
+.fox-agent-manage-page .fox-memory-privacy-note,
+.fox-agent-prompt-card > p,
+.fox-agent-prompt-openings li,
+.fox-agent-view-dialog .fox-agent-view-meta > span,
+.fox-agent-view-dialog .fox-agent-view-block p,
+.fox-cap-card .fox-library-card-tags > small {
+  border: 0;
+}
+
+/* ===== 专家详情：能力与工具胶囊总览 ===== */
+.fox-agent-cap-overview {
+  padding: 16px 18px;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.fox-agent-cap-overview > header h2 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.fox-agent-cap-overview > header h2 svg {
+  width: 15px;
+  height: 15px;
+  color: var(--fox-accent);
+}
+
+.fox-agent-cap-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 12px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--fox-border);
+}
+
+.fox-agent-cap-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 2px;
+}
+
+.fox-agent-cap-row:first-of-type {
+  padding-top: 10px;
+}
+
+.fox-agent-cap-row-label {
+  padding-top: 4px;
+  color: var(--fox-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.fox-agent-cap-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+.fox-agent-cap-chip {
+  height: 25px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 11px;
+  border-radius: var(--fox-radius-pill);
+  background: var(--fox-manage-tint);
+  color: var(--fox-text);
+  font-size: 11.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.fox-agent-cap-empty {
+  color: var(--fox-faint);
+  font-size: 12px;
+  line-height: 25px;
+}
+
+/* 编辑资料入口始终可见但保持低调 */
+.fox-agent-name-edit {
+  color: var(--fox-muted);
+  opacity: 0.72;
+}
+
+.fox-agent-name-edit:hover {
+  opacity: 1;
+}
