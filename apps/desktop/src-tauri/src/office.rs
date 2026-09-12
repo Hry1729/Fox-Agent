@@ -18,6 +18,14 @@ pub const SERVER_ID: &str = "fox-office";
 pub const VERSION: &str = "1.0.147";
 const MAX_FILE: u64 = 64 * 1024 * 1024;
 const MAX_OUTPUT: usize = 4 * 1024 * 1024;
+/// Properties per bounded `office_help` catalog page.
+const HELP_PAGE_SIZE: usize = 40;
+/// Hard cap (UTF-8 bytes) for one shaped help response.
+const HELP_MAX_BYTES: usize = 24 * 1024;
+/// Short-hint cap for a property in catalog form; full detail is one more call.
+const HELP_HINT_CHARS: usize = 160;
+/// Cap for examples/aliases even in a single-property detail response.
+const HELP_DETAIL_MAX_BYTES: usize = 12 * 1024;
 static EXECUTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn release() -> Value {
@@ -82,7 +90,13 @@ pub fn tool_definitions() -> Vec<Value> {
     let file = json!({"type":"string", "description":"Office file path inside the current authorized project (.docx/.xlsx/.pptx)."});
     let output = json!({"type":"string", "description":"Output path inside the project. Use a new file; overwrite requires explicit true."});
     let mut tools = vec![
-        ("office_help", "Read Office format/property reference. No document access.", json!({"format":{"type":"string","enum":["docx","xlsx","pptx"]},"element":{"type":"string"}}), vec!["format"]),
+        ("office_help", "Read a BOUNDED Office format/property reference. No document access. With format only: list available elements. With format+element: a concise property catalog (name/type/ops/short hint). The catalog is paged; request property=<name> for one property's full definition (examples/aliases/readback), or page=<n> for the next catalog page. Do not assume a property exists without reading it. Always echo the returned continuation in the same request when more pages are offered.", json!({
+            "format":{"type":"string","enum":["docx","xlsx","pptx"]},
+            "element":{"type":"string","description":"Element name, e.g. chart/cell/paragraph. Omit for the element index."},
+            "property":{"type":"string","description":"Optional single property/alias name; returns only that property's full definition."},
+            "page":{"type":"integer","minimum":1,"description":"Catalog page number (1-based); defaults to 1."},
+            "pageSize":{"type":"integer","minimum":1,"maximum":60,"description":"Properties per catalog page; defaults to 40."}
+        }), vec!["format"]),
         ("office_read", "Read an Office document as text, outline, stats, or a structured node/query. No changes.", json!({"file":file,"mode":{"type":"string","enum":["text","outline","stats","get","query"]},"selector":{"type":"string"}}), vec!["file"]),
         ("office_create", "Create a DOCX/XLSX/PPTX, optionally copying an existing template. Returns a saved file.", json!({"output":output,"template":file,"overwrite":{"type":"boolean","default":false}}), vec!["output"]),
         ("office_edit", "Apply an atomic batch of add/set/remove to a COPY of a document. operations: [{command, path, type?, props?}]. Use office_help for element properties. Source is preserved unless output is the same path and overwrite=true. No shell/raw XML/plugins/network assets.", json!({"file":file,"output":output,"overwrite":{"type":"boolean","default":false},"operations":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["command","path"],"properties":{"command":{"type":"string","enum":["add","set","remove"]},"path":{"type":"string"},"type":{"type":"string"},"props":{"type":"object","additionalProperties":{"type":["string","number","boolean"]}}}}}}), vec!["file","output","operations"]),
@@ -106,6 +120,16 @@ pub struct PreparedOffice {
     render: bool,
     screenshot: bool,
     root: PathBuf,
+    /// Host-side shaping for `office_help` (the CLI always returns the full
+    /// reference; the Host bounds/pages it and never executes a document).
+    help: Option<HelpQuery>,
+}
+
+#[derive(Debug, Clone)]
+struct HelpQuery {
+    property: Option<String>,
+    page: usize,
+    page_size: usize,
 }
 
 fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -282,20 +306,41 @@ pub fn prepare(
         render: false,
         screenshot: false,
         root: PathBuf::new(),
+        help: None,
     };
     if tool == "office_help" {
         action.args = vec!["help".into(), string(input, "format")?.into()];
-        if let Some(element) = input["element"].as_str() {
-            if element.is_empty()
-                || !element
+        let mut element: Option<&str> = None;
+        if let Some(value) = input["element"].as_str() {
+            if value.is_empty()
+                || !value
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '-')
             {
                 return Err("无效的 Office 元素名称".into());
             }
-            action.args.push(element.into());
+            element = Some(value);
+            action.args.push(value.into());
         }
         action.args.push("--json".into());
+        // Property/page selectors are applied Host-side after parsing the full
+        // CLI reference; they are never passed as raw CLI flags.
+        if element.is_some() {
+            let property = input["property"]
+                .as_str()
+                .map(str::trim)
+                .filter(|value| {
+                    !value.is_empty()
+                        && value
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'))
+                })
+                .map(str::to_string);
+            let page = input["page"].as_u64().unwrap_or(1).clamp(1, 100_000) as usize;
+            let page_size = input["pageSize"].as_u64().unwrap_or(HELP_PAGE_SIZE as u64)
+                .clamp(1, 60) as usize;
+            action.help = Some(HelpQuery { property, page, page_size });
+        }
         return Ok(action);
     }
     action.root = Path::new(root.ok_or("请先为会话选择授权项目目录，再使用 Office 文件能力")?)
@@ -541,6 +586,183 @@ fn invoke(binary: &Path, args: &[String], cwd: Option<&Path>, cancellation: Opti
     Ok(stdout)
 }
 
+fn hint(value: &Value) -> String {
+    let mut hint = value
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .replace(['\r', '\n'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if hint.chars().count() > HELP_HINT_CHARS {
+        hint = hint.chars().take(HELP_HINT_CHARS).collect::<String>() + "…";
+    }
+    hint
+}
+
+fn ops(value: &Value) -> Vec<&'static str> {
+    [("add", "add"), ("set", "set"), ("get", "get")]
+        .into_iter()
+        .filter(|(key, _)| value.get(*key).and_then(Value::as_bool).unwrap_or(false))
+        .map(|(_, op)| op)
+        .collect()
+}
+
+/// Shape the OfficeCLI full reference JSON into a bounded, pageable catalog.
+/// Returns a JSON string the model can use directly. The full reference is
+/// never discarded: a specific property returns its complete definition, and
+/// catalog pages expose a stable continuation token.
+fn shape_help(stdout: &str, query: &HelpQuery) -> Result<String, String> {
+    let reference: Value = serde_json::from_str(stdout.trim())
+        .map_err(|_| "Office 组件返回了无法解析的说明".to_string())?;
+    let format = reference["format"].as_str().unwrap_or_default().to_string();
+    let element = reference["element"].as_str().unwrap_or_default().to_string();
+
+    // Element index response (no properties object): pass through a compact form.
+    let properties = match reference.get("properties").and_then(Value::as_object) {
+        Some(map) => map,
+        None => {
+            let mut compact = serde_json::Map::new();
+            for key in ["format", "element", "operations", "paths", "note"] {
+                if let Some(value) = reference.get(key) {
+                    compact.insert(key.to_string(), value.clone());
+                }
+            }
+            compact.insert(
+                "bounded".into(),
+                json!({"tool":"office_help","format":format,"note":"Use format+element for a paged property catalog; property=<name> for full definition."}),
+            );
+            return Ok(Value::Object(compact).to_string());
+        }
+    };
+
+    // Single-property detail: full definition for that name or one of its aliases.
+    if let Some(name) = &query.property {
+        let found = properties
+            .iter()
+            .find(|(key, value)| {
+                *key == name
+                    || value.get("aliases")
+                        .and_then(Value::as_array)
+                        .is_some_and(|aliases| aliases.iter().any(|a| a.as_str() == Some(name.as_str())))
+            })
+            .map(|(_, value)| value);
+        let Some(value) = found else {
+            return Ok(json!({
+                "format": format, "element": element, "property": name,
+                "found": false,
+                "availableProperties": properties.keys().take(HELP_PAGE_SIZE).cloned().collect::<Vec<_>>(),
+                "moreProperties": properties.len().saturating_sub(HELP_PAGE_SIZE),
+                "hint": "Unknown property for this element. Re-read the catalog page that lists it, then request property=<exact name>."
+            }).to_string());
+        };
+        let mut detail = serde_json::Map::new();
+        detail.insert("format".into(), json!(format));
+        detail.insert("element".into(), json!(element));
+        detail.insert("property".into(), json!(name));
+        detail.insert("found".into(), json!(true));
+        detail.insert("definition".into(), cap_detail_value(value)?);
+        return Ok(Value::Object(detail).to_string());
+    }
+
+    // Paged catalog: name/type/ops/short hint only.
+    let mut names: Vec<&String> = properties.keys().collect();
+    names.sort();
+    let total = names.len();
+    let page_size = query.page_size;
+    let page = query.page;
+    let start = (page.saturating_sub(1)).saturating_mul(page_size);
+    if start >= total && total > 0 {
+        return Ok(json!({
+            "format": format, "element": element, "page": page, "pageSize": page_size,
+            "totalProperties": total, "properties": [],
+            "hint": format!("Requested page {page} but there are only {} pages; request page 1..{}", total.div_ceil(page_size), total.div_ceil(page_size))
+        }).to_string());
+    }
+    let mut items = Vec::new();
+    for name in names.iter().skip(start).take(page_size) {
+        let value = &properties[*name];
+        items.push(json!({
+            "name": name,
+            "type": value.get("type").cloned().unwrap_or(Value::Null),
+            "ops": ops(value),
+            "hint": hint(value),
+        }));
+    }
+    let pages = total.div_ceil(page_size).max(1);
+    let has_next = page < pages;
+    let mut shaped = json!({
+        "format": format,
+        "element": element,
+        "page": page,
+        "pageSize": page_size,
+        "totalProperties": total,
+        "properties": items,
+        "complete": !has_next,
+    });
+    if has_next {
+        shaped["next"] = json!({
+            "tool": "office_help",
+            "arguments": { "format": format, "element": element, "page": page + 1, "pageSize": page_size },
+            "instruction": format!("This is page {page}/{pages}; {total} properties total. The next page MUST be requested with office_help(format={format}, element={element}, page={}) before using properties not listed on this page.", page + 1),
+        });
+    } else {
+        shaped["next"] = json!({
+            "tool": "office_help",
+            "instruction": format!("All {total} properties are listed. For any property you need full examples/aliases/readback for, call office_help(format={format}, element={element}, property=<name>) once per property; do not prefetch properties you will not use."),
+        });
+    }
+    let text = shaped.to_string();
+    if text.len() > HELP_MAX_BYTES {
+        // Keep the contract by shrinking the page automatically rather than truncating mid-JSON.
+        return Ok(json!({
+            "format": format, "element": element, "page": 1, "pageSize": page_size,
+            "totalProperties": total, "properties": items.into_iter().take(page_size / 2).collect::<Vec<_>>(),
+            "complete": false,
+            "budgetBytes": HELP_MAX_BYTES,
+            "next": { "tool": "office_help",
+                "arguments": { "format": format, "element": element, "page": 1, "pageSize": (page_size / 2).max(10) },
+                "instruction": "Catalog exceeded the single-response budget; re-read with the smaller pageSize and continue paging." },
+        }).to_string());
+    }
+    Ok(text)
+}
+
+/// Bound the verbose fields of one property definition while keeping type,
+/// operations and description intact. Examples/aliases are truncated, never
+/// silently dropped without a marker.
+fn cap_detail_value(value: &Value) -> Result<Value, String> {
+    let mut detail = serde_json::Map::new();
+    for (key, child) in value.as_object().ok_or("invalid property definition")? {
+        let mut kept = child.clone();
+        if matches!(key.as_str(), "examples" | "aliases") {
+            if let Some(array) = kept.as_array_mut() {
+                let mut bytes = 0usize;
+                let mut truncated = false;
+                array.retain(|item| {
+                    bytes += item.to_string().len();
+                    if bytes > HELP_DETAIL_MAX_BYTES {
+                        truncated = true;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if truncated {
+                    detail.insert(format!("{key}Truncated"), json!(true));
+                    detail.insert(
+                        format!("{key}More"),
+                        json!("additional values omitted to bound context; use the documented --prop syntax and validate the result"),
+                    );
+                }
+            }
+        }
+        detail.insert(key.clone(), kept);
+    }
+    Ok(Value::Object(detail))
+}
+
 pub fn execute(
     server: &McpServerRecord,
     tool: &str,
@@ -668,9 +890,17 @@ pub(crate) fn execute_with_cancellation(
                 fs::rename(temp, output).map_err(|e| e.to_string())?;
             }
         }
-        let mut content = vec![
-            json!({"type":"text","text":json!({"output":action.output,"result":stdout,"validation":validation,"saved":action.output.is_some(),"visualChecked":false}).to_string()}),
-        ];
+        // office_help executes no document and the CLI returns the full
+        // reference. Shape it Host-side into a bounded, pageable catalog so a
+        // single 115-property element cannot flood the model context, and
+        // avoid the result-as-escaped-JSON-string double wrapping.
+        let mut content = if let Some(query) = action.help.as_ref() {
+            vec![json!({"type":"text","text": shape_help(&stdout, query)?})]
+        } else {
+            vec![
+                json!({"type":"text","text":json!({"output":action.output,"result":stdout,"validation":validation,"saved":action.output.is_some(),"visualChecked":false}).to_string()}),
+            ]
+        };
         if action.screenshot {
             let bytes = fs::read(action.output.as_ref().expect("screenshot output"))
                 .map_err(|e| e.to_string())?;
@@ -691,6 +921,69 @@ pub(crate) fn execute_with_cancellation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chart_reference(props: usize) -> String {
+        let mut properties = serde_json::Map::new();
+        for index in 0..props {
+            properties.insert(
+                format!("prop{index}"),
+                json!({
+                    "type":"string",
+                    "aliases":[format!("prop{index}alias")],
+                    "add":true,"set":index%2==0,"get":index%3==0,
+                    "description": format!("Long verbose description for property {index} that explains every detail and would normally flood the model context with repeated guidance."),
+                    "examples":[format!("--prop prop{index}=Sheet1!A1"), format!("--prop prop{index}=Sheet1!B2")],
+                    "readback":"read value",
+                    "enforcement":"report"
+                }),
+            );
+        }
+        json!({
+            "$schema":"../_schema.json","element":"chart","format":"xlsx","parent":"/",
+            "operations":["add","set","get"],
+            "paths":["/chart[1]"],
+            "note":"test reference",
+            "properties": Value::Object(properties)
+        }).to_string()
+    }
+
+    #[test]
+    fn office_help_catalog_is_bounded_paged_and_keeps_working_metadata() {
+        let reference = chart_reference(115);
+        assert!(reference.len() > 40_000, "fixture must reproduce the 55KB flood");
+        let page1 = shape_help(&reference, &HelpQuery { property: None, page: 1, page_size: 40 }).unwrap();
+        let v: Value = serde_json::from_str(&page1).unwrap();
+        assert!(page1.len() < HELP_MAX_BYTES, "catalog page stays in budget, got {}", page1.len());
+        assert_eq!(v["totalProperties"], 115);
+        assert_eq!(v["properties"].as_array().unwrap().len(), 40);
+        assert_eq!(v["complete"], false);
+        assert!(v["next"]["instruction"].as_str().unwrap().contains("page=2"));
+        // Hint is short; verbose examples/aliases are not on a catalog page.
+        let hint = v["properties"][0]["hint"].as_str().unwrap();
+        assert!(hint.chars().count() <= HELP_HINT_CHARS + 1);
+        assert!(page1.find("--prop").is_none(), "no example CLI text on catalog page");
+        // Operational flags survive so the model knows what it can do.
+        assert!(v["properties"][0]["ops"].is_array());
+
+        let page3 = shape_help(&reference, &HelpQuery { property: None, page: 3, page_size: 40 }).unwrap();
+        let v3: Value = serde_json::from_str(&page3).unwrap();
+        assert_eq!(v3["properties"].as_array().unwrap().len(), 35);
+        assert_eq!(v3["complete"], true);
+
+        // Single-property detail returns full definition with examples.
+        let detail = shape_help(&reference, &HelpQuery { property: Some("prop7".into()), page: 1, page_size: 40 }).unwrap();
+        let d: Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(d["found"], true);
+        assert!(d["definition"]["examples"].is_array());
+        assert!(d["definition"]["description"].as_str().unwrap().contains("property 7"));
+
+        // Alias lookup works and unknown property is reported without flooding.
+        let by_alias = shape_help(&reference, &HelpQuery { property: Some("prop9alias".into()), page: 1, page_size: 40 }).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&by_alias).unwrap()["found"], true);
+        let missing = shape_help(&reference, &HelpQuery { property: Some("nope".into()), page: 1, page_size: 40 }).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&missing).unwrap()["found"], false);
+    }
+
     #[test]
     fn kernel_office_process_cancellation_reaps_owned_process() {
         use crate::kernel::CancellationPort;

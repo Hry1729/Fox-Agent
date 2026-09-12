@@ -42,6 +42,89 @@ pub(crate) fn history_limit(config: &KernelModelConfig, extra_bytes: usize) -> u
     (input.min(700_000) as usize).saturating_sub(extra_bytes)
 }
 
+/// Tools whose large output is re-readable reference material (help indexes,
+/// document reads/stats, data samples) rather than a one-shot fact. Their
+/// output may be replaced in the MODEL VIEW by a bounded excerpt the model can
+/// page back via the same tool. Execution/fact tools are never bounded.
+const BOUNDABLE_TOOLS: &[&str] = &[
+    "office_help",
+    "office_read",
+    "office_validate",
+    "read",
+    "read_attachment",
+    "attachment_pages",
+    "graph_read",
+    "read_only_graph_read",
+    "query_knowledge_graph",
+    "list_mcp_tools",
+    "call_mcp_tool",
+];
+
+/// Reference text kept verbatim in the model view per tool result (UTF-8
+/// bytes). The persisted result is never truncated; this is view-only.
+pub(crate) const TOOL_VIEW_HEAD_BYTES: usize = 6_000;
+const TOOL_VIEW_TAIL_BYTES: usize = 2_000;
+pub(crate) const TOOL_VIEW_MAX_BYTES: usize = 9_000;
+const RECEIPT_MARKER: &str = "FOX_EXECUTION_RECEIPT_V1";
+
+fn is_boundable(tool: &str) -> bool {
+    BOUNDABLE_TOOLS.contains(&tool)
+}
+
+/// Bound a tool result's model-visible content while the durable result stays
+/// complete. Receipt/approval/execution facts and error results are preserved;
+/// only large re-readable reference output is replaced with a head/tail
+/// excerpt and an explicit re-read instruction. Returns `Some(new_content)`
+/// when the value was bounded, `None` when it must pass through unchanged.
+pub(crate) fn bound_tool_result_content(
+    tool: &str,
+    is_error: bool,
+    content: &Value,
+) -> Option<Value> {
+    if is_error || !is_boundable(tool) {
+        return None;
+    }
+    let blocks = content.as_array()?;
+    let mut changed = false;
+    let mut new_blocks = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let is_text = block["type"].as_str() == Some("text");
+        let text = block["text"].as_str().unwrap_or_default();
+        if !is_text
+            || text.len() <= TOOL_VIEW_MAX_BYTES
+            || text.contains(RECEIPT_MARKER)
+        {
+            new_blocks.push(block.clone());
+            continue;
+        }
+        changed = true;
+        let head = bounded_prefix(text, TOOL_VIEW_HEAD_BYTES);
+        let tail = bounded_suffix(text, TOOL_VIEW_TAIL_BYTES);
+        let omitted = text.len().saturating_sub(head.len()).saturating_sub(tail.len());
+        let notice = format!(
+            "[Fox 已为本条工具结果建立有界视图：原文共 {} 字节，模型上下文中仅保留开头 {} 与结尾 {} 字节；完整结果已由 Host 完整持久化，不会丢失。需要中间被省略的精确内容时，用同一工具重新按需查询——office_help 用 property=<属性名> 或 page=<页码>，office_read/read 用更精确的 selector/范围或分页，不要凭被省略的内容编造字段。]\n",
+            text.len(), head.chars().count(), tail.chars().count()
+        );
+        let bounded = format!("{head}\n\n{notice}\n…[省略 {omitted} 字节]…\n{tail}");
+        new_blocks.push(serde_json::json!({"type":"text","text":bounded}));
+    }
+    if changed { Some(Value::Array(new_blocks)) } else { None }
+}
+
+/// Largest UTF-8-safe prefix no longer than `max` bytes.
+fn bounded_prefix(text: &str, max: usize) -> &str {
+    if text.len() <= max { return text; }
+    let mut end = max;
+    while end > 0 && !text.is_char_boundary(end) { end -= 1; }
+    &text[..end]
+}
+fn bounded_suffix(text: &str, max: usize) -> &str {
+    if text.len() <= max { return text; }
+    let mut start = text.len() - max;
+    while start < text.len() && !text.is_char_boundary(start) { start += 1; }
+    &text[start..]
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct CompactionPlan {
@@ -266,6 +349,31 @@ mod tests {
                 .into(),
             usage: json!({"input":100,"output":20}),
         }
+    }
+
+    #[test]
+    fn bounded_tool_view_keeps_errors_receipts_and_non_reference_tools() {
+        let big = "x".repeat(50_000);
+        let big_content = json!([{"type":"text","text":big}]);
+        // Re-readable reference tool is bounded.
+        let bounded = bound_tool_result_content("office_help", false, &big_content).unwrap();
+        let text = bounded[0]["text"].as_str().unwrap();
+        assert!(text.len() < big.len());
+        assert!(text.contains("有界视图"));
+        assert!(text.contains("office_help"));
+        // Still a valid toolResult text block.
+        assert_eq!(bounded[0]["type"], "text");
+        // Errors pass through verbatim so the model can correct them.
+        assert!(bound_tool_result_content("office_help", true, &big_content).is_none());
+        // Execution/fact tools are never bounded.
+        assert!(bound_tool_result_content("attachment_compute", false, &big_content).is_none());
+        assert!(bound_tool_result_content("write_file", false, &big_content).is_none());
+        // Receipt-bearing reference text is protected.
+        let receipt = json!([{"type":"text","text":format!("{big}\nFOX_EXECUTION_RECEIPT_V1 {{}}")}]);
+        assert!(bound_tool_result_content("read", false, &receipt).is_none());
+        // Small content is untouched.
+        let small = json!([{"type":"text","text":"short"}]);
+        assert!(bound_tool_result_content("office_help", false, &small).is_none());
     }
 
     #[test]

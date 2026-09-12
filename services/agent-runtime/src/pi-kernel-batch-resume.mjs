@@ -5,6 +5,7 @@ import { validateKernelControl } from './control-binding.mjs'
 import { sanitizeProviderHistory } from './runtime-session.mjs'
 import { RUNTIME_TOOL_CATALOG, validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
 import { finalizeKernelAnswer, completionPreview } from './kernel-completion.mjs'
+import { boundToolResultContent } from './tool-view.mjs'
 
 const knownTools = new Set(RUNTIME_TOOL_CATALOG.map(tool => tool.name))
 const deliveries = new WeakMap()
@@ -140,7 +141,10 @@ export function prepareKernelBatchResume(request, identity) {
     if (Object.hasOwn(item.result ?? {}, 'isError') && item.result.isError !== isError) fail('result contradicts durable terminal state')
     return {
       role: 'toolResult', toolCallId: call.id, toolName: call.name,
-      content: resultContent(item.result), details: {}, isError,
+      // Model-view bounding only; the durable item.result stays complete and
+      // errors/receipts pass through unchanged.
+      content: boundToolResultContent(call.name, { isError, content: resultContent(item.result) }),
+      details: {}, isError,
       timestamp: Number.isSafeInteger(assistant.timestamp) ? assistant.timestamp : 0,
     }
   })

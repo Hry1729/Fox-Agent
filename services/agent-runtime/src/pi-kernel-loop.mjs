@@ -6,6 +6,7 @@
 // replacement sessions are refused when they retain executable tools.
 import { RUNTIME_TOOL_CATALOG, validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
 import { finalizeKernelAnswer, completionPreview, KernelIncompleteResponseError } from './kernel-completion.mjs'
+import { boundToolResultContent } from './tool-view.mjs'
 
 const knownTools = new Set(RUNTIME_TOOL_CATALOG.map(tool => tool.name))
 const fail = message => { throw new Error(`Invalid Kernel engine loop: ${message}`) }
@@ -45,10 +46,14 @@ function settledToolResult(item) {
     || !record(item.result) || !Array.isArray(item.result.content)) {
     fail('invalid settled tool result directive')
   }
+  const isError = item.state === 'failed'
+  // Model-view bounding only: the durable item.result stays complete. Errors
+  // and receipt-bearing results always pass through unchanged.
+  const content = boundToolResultContent(item.tool, { isError, content: item.result.content })
   return {
-    content: item.result.content,
+    content,
     details: {},
-    isError: item.state === 'failed',
+    isError,
   }
 }
 

@@ -140,10 +140,21 @@ impl KernelCoordinator<'_> {
         tools
             .iter()
             .map(|tool| {
+                let is_error = tool.state == fox_engine_protocol::KernelSettledToolState::Failed;
+                // The durable result (tool.result) stays complete; only the
+                // content projected into the model context is bounded for
+                // re-readable reference tools. Errors and receipts pass through.
+                let content =
+                    crate::kernel_compaction::bound_tool_result_content(
+                        &tool.tool,
+                        is_error,
+                        &tool.result["content"],
+                    )
+                    .unwrap_or_else(|| tool.result["content"].clone());
                 serde_json::json!({
                     "role":"toolResult", "toolCallId":tool.tool_call_id, "toolName":tool.tool,
-                    "content":tool.result["content"], "details":{},
-                    "isError":tool.state == fox_engine_protocol::KernelSettledToolState::Failed,
+                    "content":content, "details":{},
+                    "isError":is_error,
                     "timestamp":assistant["timestamp"].as_i64().unwrap_or(0),
                 })
             })

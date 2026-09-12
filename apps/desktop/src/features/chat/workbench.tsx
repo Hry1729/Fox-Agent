@@ -1954,7 +1954,7 @@ function RuntimeArtifacts({ artifacts, onOpenArtifact }: { artifacts: ArtifactRe
   </section>
 }
 
-function RuntimeAssistantMessage({ message, processEvents, running, artifacts, assistantName, modelName, knowledgeBindings, onOpenSource, onOpenArtifact, onFork }: { message: ConversationMessage; processEvents: RunEventRecord[]; running: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onFork?: (messageId: string) => void }) {
+function RuntimeAssistantMessage({ message, processEvents, running, artifacts, assistantName, modelName, knowledgeBindings, onOpenSource, onOpenArtifact, onFork, failureReason }: { message: ConversationMessage; processEvents: RunEventRecord[]; running: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onFork?: (messageId: string) => void; failureReason?: { code: string; message: string } }) {
   const parsed = useMemo(() => splitAssistantContent(message.content ?? ''), [message.content])
   const process = useMemo(() => runtimeProcess(processEvents), [processEvents])
   const completed = !running && ['completed', 'interrupted', 'failed', 'cancelled'].includes(message.status)
@@ -2007,7 +2007,7 @@ function RuntimeAssistantMessage({ message, processEvents, running, artifacts, a
             <MessageAction tooltip="这条回答有帮助" className={feedback === 'positive' ? 'is-feedback-selected' : ''} aria-pressed={feedback === 'positive'} disabled={running || feedbackSaving} onClick={() => void submitPositiveFeedback()}><ThumbsUp size={14} /></MessageAction>
             <MessageAction tooltip="这条回答需要改进" className={feedback === 'negative' ? 'is-feedback-selected' : ''} aria-pressed={feedback === 'negative'} disabled={running || feedbackSaving} onClick={() => setFeedbackOpen(true)}><ThumbsDown size={14} /></MessageAction>
           </MessageActions>
-          <div className="fox-message-meta"><span>{assistantName}</span>{modelName && modelName !== assistantName && <span>{modelName}</span>}<span>{replyTime}</span>{!completed && <span className="fox-message-live-meta">处理中</span>}{message.status === 'interrupted' && <span>已中断 · 内容已保存</span>}</div>
+          <div className="fox-message-meta"><span>{assistantName}</span>{modelName && modelName !== assistantName && <span>{modelName}</span>}<span>{replyTime}</span>{!completed && <span className="fox-message-live-meta">处理中</span>}{message.status === 'interrupted' && <span>已中断 · 内容已保存</span>}{message.status === 'failed' && failureReason && <span className="fox-message-failure-meta" title={`错误码: ${failureReason.code}`}>运行失败 · {failureReason.message}</span>}</div>
         </div>
       </Message>
       <Dialog open={feedbackOpen} onOpenChange={setFeedbackOpen}>
@@ -2045,6 +2045,7 @@ const MemoizedRuntimeAssistantMessage = memo(RuntimeAssistantMessage, (previous,
   && previous.onOpenSource === next.onOpenSource
   && previous.onOpenArtifact === next.onOpenArtifact
   && previous.onFork === next.onFork
+  && previous.failureReason === next.failureReason
 ))
 
 function RuntimeReasoningItem({ detail, running = false }: { detail: string; running?: boolean }) {
@@ -2228,6 +2229,21 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
     const next = groupRuntimeRecords(events, eventGroupsRef.current)
     eventGroupsRef.current = next
     return next
+  }, [events])
+  const failureByRunId = useMemo(() => {
+    const failures = new Map<string, { code: string; message: string }>()
+    for (const event of events) {
+      if ((event.eventType === 'run.failed' || event.eventType === 'run.interrupted') && event.event && typeof event.event === 'object') {
+        const payload = event.event as { code?: string; message?: string }
+        if (payload.code || payload.message) {
+          failures.set(event.runId, {
+            code: payload.code ?? 'unknown',
+            message: payload.message ?? '运行失败',
+          })
+        }
+      }
+    }
+    return failures
   }, [events])
   const artifactsByRunId = useMemo(() => {
     const next = groupRuntimeRecords(artifacts, artifactGroupsRef.current)
@@ -2417,7 +2433,8 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
           const messageArtifacts = message.runId ? artifactsByRunId.get(message.runId) ?? EMPTY_RUNTIME_ARTIFACTS : EMPTY_RUNTIME_ARTIFACTS
           const eventModel = processEvents.find((item) => item.eventType === 'run.started' && typeof item.event.model === 'string')?.event.model as string | undefined
           const displayMessage = rawContent === message.content ? message : { ...message, content: rawContent }
-          return <div id={`fox-turn-${message.id}`} key={message.timelineKey} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onFork={onFork} /></div>
+          const failureReason = message.runId ? failureByRunId.get(message.runId) : undefined
+          return <div id={`fox-turn-${message.id}`} key={message.timelineKey} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onFork={onFork} failureReason={failureReason} /></div>
         })}
         {state === 'error' && <div className="fox-turn-anchor"><Message from="assistant" className="fox-message fox-assistant-message"><MessageContent className="fox-assistant-content"><ErrorPrompt onRetry={onRetry} error={runtimeError} errorDetails={runtimeErrorDetails} /></MessageContent></Message></div>}
         {runtimeContext.recoveryPanel}

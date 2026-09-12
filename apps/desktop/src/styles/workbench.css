@@ -4047,6 +4047,11 @@ img[src='/avatars/fox-assistant.png'] {
   color: var(--fox-accent);
 }
 
+.fox-message-failure-meta {
+  color: #E87171;
+  cursor: help;
+}
+
 .fox-message-actions button {
   color: var(--fox-faint);
 }
