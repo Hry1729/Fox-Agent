@@ -2101,23 +2101,40 @@ fn kernel_real_model_previews_are_transient_until_the_response_transaction_commi
 
 #[test]
 fn live_executable_preface_gets_one_bounded_review_then_projects_final_answer() {
-    // Round 1: bare preface with no tool call while an executable tool is
-    // frozen. Round 2 (continuation): the real final answer, also no tool call.
-    let (address, server) = start_http_model_fixture(vec![
-        json!({"role":"assistant","content":"I will now analyze the workbook."}),
-        json!({"role":"assistant","content":"统计完成，共 5 条记录。"}),
-    ]);
+    assert_live_continuation_projection(false);
+}
+
+#[test]
+fn live_two_reviews_preserve_streamed_message_identity_after_tool_results() {
+    assert_live_continuation_projection(true);
+}
+
+fn assert_live_continuation_projection(after_tool: bool) {
+    let mut replies = Vec::new();
+    if after_tool {
+        replies.push(json!({"role":"assistant","tool_calls":[{"index":0,"id":"live-read","type":"function",
+            "function":{"name":"read","arguments":"{\"path\":\"proof.txt\"}"}}]}));
+    }
+    replies.push(json!({"role":"assistant","content":"I will now analyze the workbook."}));
+    if after_tool {
+        replies.push(json!({"role":"assistant","content":"Checking the completed read."}));
+    }
+    replies.push(json!({"role":"assistant","content":"统计完成，共 5 条记录。","reasoning_content":"Checked the durable results."}));
+    let expected_rounds = replies.len();
+    let (address, server) = start_http_model_fixture(replies);
     let mut config = worker_configuration();
     config.system_prompt = "Use the durable history only.".into();
     config.model_service = json!({"apiType":"openai-completions","modelId":"kernel-http-test","baseUrl":format!("http://{address}/v1")});
-    config.proposal_tools = vec![json!({"name":"attachment_compute","description":"Compute selected attachment data with JavaScript",
-        "parameters":{"type":"object","properties":{"code":{"type":"string"},"attachmentIds":{"type":"array","items":{"type":"string"}}},"required":["code"]}})];
+    if !after_tool {
+        config.proposal_tools = vec![json!({"name":"attachment_compute","description":"Compute selected attachment data with JavaScript",
+            "parameters":{"type":"object","properties":{"code":{"type":"string"},"attachmentIds":{"type":"array","items":{"type":"string"}}},"required":["code"]}})];
+    }
     let clock = TestClock::new(crate::database::now_ms());
     let (db, root, run_id) =
         fixture_with_retry_opt(&clock, &config.hash().unwrap(), Some(&config), true, true, (0, 1));
     db.freeze_kernel_host_scope(&run_id, &crate::database::KernelHostScope {
         schema_version: 1,
-        tool_names: ["attachment_compute".into()].into_iter().collect(),
+        tool_names: config.proposal_tools.iter().map(|tool|tool["name"].as_str().unwrap().into()).collect(),
         mcp_server_hashes: Default::default(),
         knowledge_reference_hashes: Default::default(),
         knowledge_connection_hashes: Default::default(),
@@ -2125,26 +2142,74 @@ fn live_executable_preface_gets_one_bounded_review_then_projects_final_answer() 
         lifecycle_hooks: Vec::new(),
     })
     .unwrap();
-    super::super::kernel_host::drive(
-        super::super::kernel_host::acquire(&root, &run_id).unwrap(),
+    let previews = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let observed = previews.clone();
+    let display_db = Database::open(root.join("facts.db")).unwrap();
+    let sink = move |notice: &fox_engine_protocol::KernelModelPreview| {
+        assert!(display_db.save_kernel_model_display(notice).unwrap(), "live preview must own its durable cursor");
+        observed.lock().unwrap().push(notice.clone());
+    };
+    let executions = AtomicUsize::new(0);
+    super::super::kernel_host::drive_with_actions(
+        &super::super::kernel_host::acquire(&root, &run_id).unwrap(),
         &db, &clock, &CancellationRegistry::default(), &run_id, &real_worker_command(), "local-test-only",
         &Allow,
-        |_, _, _| panic!("a preface that calls no tool must not execute anything"),
+        |_, _, _| {
+            assert!(after_tool, "a preface cannot execute anything");
+            executions.fetch_add(1, Ordering::SeqCst);
+            Ok((true, json!({"content":[{"type":"text","text":"5 records"}]})))
+        }, |_| Ok(()), |_| Ok(()), &sink,
     )
     .unwrap();
     let snapshot = db.kernel_build_full_snapshot(&run_id).unwrap();
     assert_eq!(snapshot.state, "completed");
-    assert!(snapshot.tool_calls.is_empty());
-    // Exactly one bounded continuation, and the reviewed answer is the visible final.
+    assert_eq!(snapshot.tool_calls.len(), usize::from(after_tool));
+    assert_eq!(executions.load(Ordering::SeqCst), usize::from(after_tool));
     let requests = server.join().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert!(requests[1]["messages"].to_string().contains("Fox 续答检查"));
+    assert_eq!(requests.len(), expected_rounds);
+    assert!(requests.last().unwrap()["messages"].to_string().contains("Fox 续答检查"));
+    let final_preview = previews.lock().unwrap().last().cloned().expect("streamed final answer");
+    let conversation_id = db.run_control_binding(&run_id).unwrap().unwrap().conversation_id;
+    drop(sink);
+    drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    assert_eq!(db.kernel_build_full_snapshot(&run_id).unwrap().state, "completed");
     let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
     let (count, last): (i64, String) = conn.query_row(
-        "SELECT COUNT(*), COALESCE(MAX(content),'') FROM messages WHERE run_id=?1 AND role='assistant' AND status='completed'",
+        "SELECT COUNT(*), COALESCE(MAX(content),'') FROM messages WHERE run_id=?1 AND role='assistant' AND status='completed' AND content<>''",
         [&run_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
     assert_eq!(count, 1, "the continuation final answer replaces/owns the visible answer");
     assert_eq!(last, "统计完成，共 5 条记录。");
+    let final_id: String = conn.query_row("SELECT id FROM messages WHERE run_id=?1 AND content=?2 AND status='completed'",
+        rusqlite::params![run_id,last], |row| row.get(0)).unwrap();
+    assert_eq!(final_id, format!("kernel-message:{run_id}:{}", final_preview.checkpoint_seq));
+    assert_eq!(final_preview.conversation_id, conversation_id);
+    let streaming: i64 = conn.query_row("SELECT COUNT(*) FROM messages WHERE run_id=?1 AND status='streaming'",[&run_id],|row|row.get(0)).unwrap();
+    assert_eq!(streaming, 0);
+    let replaced: i64 = conn.query_row("SELECT COUNT(*) FROM messages WHERE run_id=?1 AND status='superseded'",[&run_id],|row|row.get(0)).unwrap();
+    assert_eq!(replaced, if after_tool { 2 } else { 1 });
+    let usage_rows: i64 = conn.query_row("SELECT COUNT(*) FROM run_events WHERE run_id=?1 AND event_type='usage.updated'",[&run_id],|row|row.get(0)).unwrap();
+    assert_eq!(usage_rows, expected_rounds as i64, "every model round contributes usage exactly once");
+    let reasoning: i64 = conn.query_row("SELECT COUNT(*) FROM run_events WHERE run_id=?1 AND id=?2",
+        rusqlite::params![run_id,format!("kernel-display:{run_id}:reasoning:{}",final_preview.checkpoint_seq)],|row|row.get(0)).unwrap();
+    assert_eq!(reasoning, 1, "preview and final reasoning update one event");
+}
+
+#[test]
+fn live_final_acknowledgement_survives_terminal_cancellation() {
+    let config = worker_configuration();
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let (db, _root, run_id) = fixture_with_start_opt(&clock,&config.hash().unwrap(),Some(&config),true,true);
+    freeze_host_scope(&db, &run_id);
+    let sink = |_: &fox_engine_protocol::KernelModelPreview| {};
+    let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap().with_preview(&sink);
+    // Assert the transport result directly: the outer drive loop may already
+    // see Completed even if a transport error interrupted the final exchange.
+    coordinator.dispatch_initial_live("live-final",&Allow,&real_worker_command(),"local-test-only",
+        &|_,_,_| panic!("no resources"), &|_|Ok(()), &|_|Ok(())).unwrap();
+    assert!(cancellation.run_token(&run_id).unwrap().is_cancelled());
+    assert_eq!(coordinator.snapshot().unwrap().state,"completed");
 }
 
 #[test]

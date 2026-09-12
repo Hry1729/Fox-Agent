@@ -106,7 +106,7 @@ fn wait<T>(
     token: &CancellationToken,
     deadline: Instant,
 ) -> Result<T, String> {
-    wait_opts(receiver, token, deadline, true)
+    wait_opts(receiver, Some(token), deadline)
 }
 
 /// Like [`wait`] but can ignore the cooperative cancel token while still
@@ -118,28 +118,23 @@ fn wait_final<T>(
     receiver: &Receiver<T>,
     deadline: Instant,
 ) -> Result<T, String> {
-    wait_opts(receiver, &fresh_token(), deadline, false)
-}
-
-fn fresh_token() -> CancellationToken {
-    CancellationToken::uncancellable()
+    wait_opts(receiver, None, deadline)
 }
 
 fn wait_opts<T>(
     receiver: &Receiver<T>,
-    token: &CancellationToken,
+    token: Option<&CancellationToken>,
     deadline: Instant,
-    honour_cancel: bool,
 ) -> Result<T, String> {
     loop {
-        if honour_cancel {
+        if let Some(token) = token {
             token.check()?;
         }
         let remaining = deadline.checked_duration_since(Instant::now())
             .ok_or("Kernel worker deadline exceeded; reconcile delivery")?;
         match receiver.recv_timeout(remaining.min(Duration::from_millis(20))) {
             Ok(value) => {
-                if honour_cancel {
+                if let Some(token) = token {
                     token.check()?;
                 }
                 return Ok(value);
@@ -634,17 +629,12 @@ impl LiveKernelSession {
         }
         result?;
         let mut revision = 0u64;
-        // Set once a Final directive has been handed to the worker. The Host
-        // commits the terminal state inside on_round, which cancels the run
-        // scope; the worker still owes us its final model_response, so after
-        // this point we drain by deadline instead of rejecting on run cancel.
-        let mut final_sent = false;
+        // Set once the Host commits Final, before writing its directive. The
+        // terminal commit cancels the Run token. One fixed deadline bounds
+        // both the Final write and its acknowledgement, with no further work.
+        let mut final_deadline = None;
         loop {
-            let response = if final_sent {
-                // The Host decision is already terminal; only the in-process
-                // worker's final frame is outstanding. Bound that short drain
-                // independently so an exhausted Run budget cannot reject it.
-                let drain_deadline = Instant::now() + Duration::from_secs(10);
+            let response = if let Some(drain_deadline) = final_deadline {
                 wait_final(&self.worker.messages, drain_deadline)??
             } else {
                 wait(&self.worker.messages, cancel, deadline_for()?)??
@@ -659,10 +649,20 @@ impl LiveKernelSession {
                     "Kernel worker response identity/type mismatch; reconcile delivery".into(),
                 );
             }
+            if final_deadline.is_some()
+                && (response["kind"] != "response"
+                    || response["type"] != "kernel.model_response"
+                    || response["requestId"] != request["id"])
+            {
+                return Err("unexpected Kernel message after Final; no further work admitted".into());
+            }
             if response["kind"] == "request" {
                 if response["type"] != "kernel.round_output" {
                     return Err("unexpected Kernel worker request; reconcile delivery".into());
                 }
+                let envelope: fox_engine_protocol::RuntimeEnvelope =
+                    serde_json::from_value(response.clone())
+                        .map_err(|_| "invalid Kernel round output envelope")?;
                 let frame: fox_engine_protocol::KernelRoundOutputFrame =
                     serde_json::from_value(response["payload"].clone())
                         .map_err(|_| "invalid Kernel round output frame")?;
@@ -677,13 +677,14 @@ impl LiveKernelSession {
                 directive.validate()?;
                 let is_final =
                     directive.kind == fox_engine_protocol::KernelRoundDirectiveKind::Final;
-                let reply = json!({
-                    "protocol": PROTOCOL_NAME, "version": PROTOCOL_VERSION, "kind": "response",
-                    "type": "kernel.round_directive", "requestId": response["id"],
-                    "runId": response["runId"], "conversationId": response["conversation"],
-                    "runtimeSessionId": response["runtimeSessionId"],
-                    "payload": serde_json::to_value(&directive).map_err(|_| "invalid directive")?,
-                });
+                if is_final {
+                    final_deadline = Some(Instant::now() + Duration::from_secs(10));
+                }
+                let reply = fox_engine_protocol::HostResponse::for_request(
+                    &envelope,
+                    "kernel.round_directive",
+                    serde_json::to_value(&directive).map_err(|_| "invalid directive")?,
+                );
                 let mut reply_bytes =
                     serde_json::to_vec(&reply).map_err(|_| "invalid directive")?;
                 reply_bytes.push(b'\n');
@@ -700,15 +701,16 @@ impl LiveKernelSession {
                         .map_err(|_| "Kernel worker write failed");
                     let _ = sender.send((stdin, result));
                 }));
-                // Writing the directive must still honour cancellation: the
-                // worker only drains its final response after Final is sent.
-                let (stdin, write_result) = wait(&written, cancel, deadline_for()?)?;
+                let (stdin, write_result) = if let Some(drain_deadline) = final_deadline {
+                    wait_final(&written, drain_deadline)?
+                } else {
+                    wait(&written, cancel, deadline_for()?)?
+                };
                 self.worker.stdin = Some(stdin);
                 if let Some(writer) = self.worker.writer.take() {
                     let _ = writer.join();
                 }
                 write_result?;
-                final_sent = is_final;
                 continue;
             }
             if response["kind"] != "response" || response["requestId"] != request["id"] {
@@ -846,5 +848,68 @@ mod tests {
         });
         assert!(start.elapsed() < Duration::from_secs(5));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn live_final_exchange_drains_only_the_acknowledgement_after_terminal_cancel() {
+        for late_round in [false, true] {
+            let source = r#"
+import {createInterface} from 'node:readline';
+let seed;
+const send = message => process.stdout.write(JSON.stringify(message)+'\n');
+const output = () => ({...seed,kind:'request',type:'kernel.round_output',id:'round',
+  payload:{schemaVersion:1,turnId:'t',assistantMessage:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'done'}]}}});
+createInterface({input:process.stdin}).on('line',line=>{
+  const message=JSON.parse(line);
+  if (!seed) {seed=message;send(output());return;}
+  if (message.type!=='kernel.round_directive' || message.conversationId!==seed.conversationId
+      || message.runId!==seed.runId || message.runtimeSessionId!==seed.runtimeSessionId
+      || message.requestId!=='round' || !message.id || !message.timestamp) {process.exit(2);}
+  setTimeout(()=>send(LATE_ROUND ? output() : {...seed,kind:'response',type:'kernel.model_response',
+    requestId:seed.id,payload:{acknowledged:true}}),30);
+});
+"#.replace("LATE_ROUND", if late_round { "true" } else { "false" });
+            let (root, runtime) = script(&source);
+            let binding: RunControlBinding = serde_json::from_value(json!({
+                "schemaVersion":1,"runId":"r","conversationId":"c","engineId":"pi",
+                "executionProfileId":"legacy","authority":"authoritative","readOnlyExecutor":"rust",
+                "permissionSnapshotId":"frozen-test","permission":{"mode":"read_only","projectRoot":null,"grants":[]},
+                "budgets":{"modelRequestMs":2000,"toolExecutionMs":2000,"runExecutionMs":10000,"approvalWaitMs":2000}
+            })).unwrap();
+            let registry = CancellationRegistry::default();
+            registry.register_run("r").unwrap();
+            let token = registry.run_token("r").unwrap();
+            let mut rounds = 0;
+            let mut on_round = |_: fox_engine_protocol::KernelRoundOutputFrame| {
+                rounds += 1;
+                registry.request_run_cancel("r"); // Same signal as a durable terminal commit.
+                Ok(fox_engine_protocol::KernelRoundDirective {
+                    schema_version:1,kind:fox_engine_protocol::KernelRoundDirectiveKind::Final,
+                    batch_id:None,checkpoint_seq:None,preview_seq:None,tools:Vec::new(),prompt:None,
+                })
+            };
+            let mut deadline_for = || {
+                assert!(!token.is_cancelled(), "terminal draining must not renew the Run deadline");
+                Ok(Instant::now()+Duration::from_secs(3))
+            };
+            let result = {
+                let mut session = LiveKernelSession { worker:Worker::spawn(&runtime).unwrap(),session_id:"s".into() };
+                session.run("kernel.start_initial",json!({"initialModel":{"input":{"turnId":"t"}}}),
+                    &binding,&token,&mut deadline_for,None,&mut on_round)
+            };
+            assert_eq!(rounds,1,"no callbacks may execute after Final");
+            if late_round { assert!(result.unwrap_err().contains("after Final")); }
+            else { assert_eq!(result.unwrap()["acknowledged"],true); }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn final_drain_wait_still_obeys_its_fixed_deadline() {
+        let (_sender, receiver) = mpsc::channel::<()>();
+        let deadline = Instant::now()+Duration::from_millis(30);
+        assert!(wait_final(&receiver,deadline).unwrap_err().contains("deadline"));
+        // Reusing an elapsed deadline must fail immediately, not renew it.
+        assert!(wait_final(&receiver,deadline).unwrap_err().contains("deadline"));
     }
 }

@@ -2,7 +2,8 @@ import {
   DefaultResourceLoader, SessionManager, SettingsManager, createFoxAgentSession,
   createFoxModelRuntime, fauxAssistantMessage, registerFauxProvider, PI_PACKAGE_VERSION,
 } from './pi-adapter.mjs'
-import { createEnvelope, validateEnvelope } from './protocol.mjs'
+import { createEnvelope, validateEnvelope, PROTOCOL_NAME, PROTOCOL_VERSION } from './protocol.mjs'
+import { validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
 import { resolveModelProfile, transportProvider } from './model-profile.mjs'
 import { prepareKernelBatchResume, prepareKernelInitialModel, prepareKernelModelResponse, runPiKernelModel } from './pi-kernel-batch-resume.mjs'
 import { installKernelHostTools, installKernelProposalSchemas, runPiKernelLoop } from './pi-kernel-loop.mjs'
@@ -134,16 +135,27 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
   }
 
   function handleHostMessages(message) {
-    if (message.kind === 'response' && typeof message.requestId === 'string') {
-      const pending = pendingHostRequests.get(message.requestId)
-      if (pending) {
-        pendingHostRequests.delete(message.requestId)
-        if (message.type === 'request_failed') pending.reject(new Error('Host rejected the round boundary'))
-        else pending.resolve(message.payload)
+    if (message?.kind !== 'response') return false
+    const pending = pendingHostRequests.get(message.requestId)
+    const valid = pending && state === 'running' && owns(message)
+      && message.protocol === PROTOCOL_NAME && message.version === PROTOCOL_VERSION
+      && Buffer.byteLength(JSON.stringify(message), 'utf8') <= 1_048_576
+      && validateWireValue('HostResponse', message).length === 0
+      && (message.type === 'request_failed' || message.type === 'kernel.round_directive'
+        && validateWireValue('KernelRoundDirective', message.payload).length === 0)
+    if (!valid) {
+      // A wrong correlation/identity cannot settle any round or leave the
+      // active loop waiting indefinitely for a replacement response.
+      for (const request of pendingHostRequests.values()) {
+        request.reject(new Error('Invalid Host round response identity or envelope'))
       }
-      return true
+      pendingHostRequests.clear()
+    } else {
+      pendingHostRequests.delete(message.requestId)
+      if (message.type === 'request_failed') pending.reject(new Error('Host rejected the round boundary'))
+      else pending.resolve(message.payload)
     }
-    return false
+    return true
   }
 
   async function runPiLoop(request, prepared) {

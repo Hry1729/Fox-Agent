@@ -326,6 +326,7 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
         // answer is attributed to the Host-provided cursor, never the prior
         // tool round's message id.
         resetPreviewRound(directive.previewSeq)
+        roundCursor = previewCursor
         session.agent.state.messages = [...session.agent.state.messages,
           { role: 'user', content: [{ type: 'text', text: directive.prompt }], timestamp: Date.now() }]
         continue

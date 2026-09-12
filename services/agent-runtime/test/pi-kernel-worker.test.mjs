@@ -321,7 +321,7 @@ function resumePayload() {
         state: 'completed', result: { content: [{ type: 'text', text: 'persisted result' }] } }] } }
 }
 
-async function worker(t, args = ['--kernel-worker'], { onRoundOutput } = {}) {
+async function worker(t, args = ['--kernel-worker'], { onRoundOutput, mapHostResponse = reply => reply } = {}) {
   const binary = process.env.FOX_KERNEL_WORKER_BINARY
   const child = spawn(binary ?? process.execPath, binary ? args : [fileURLToPath(new URL('../src/pi-runtime.mjs', import.meta.url)), ...args],
     { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
@@ -351,7 +351,7 @@ async function worker(t, args = ['--kernel-worker'], { onRoundOutput } = {}) {
           : createEnvelope('response', 'kernel.round_directive',
               { requestId: message.id, runId: message.runId, conversationId: message.conversationId,
                 runtimeSessionId: message.runtimeSessionId, payload: directive })
-        child.stdin.write(`${JSON.stringify(reply)}\n`)
+        child.stdin.write(`${JSON.stringify(mapHostResponse(reply))}\n`)
         continue
       }
       if (message.type === 'kernel.model_preview') continue
@@ -507,6 +507,42 @@ test('wrong identity, authority and incomplete results cannot dispatch', { timeo
   const incomplete = resumePayload(); incomplete.batchResume.tools = []
   assert.equal((await child.request('kernel.resume_batch', incomplete)).type, 'request_failed')
   assert.equal((await child.request('kernel.resume_batch', resumePayload())).type, 'kernel.model_response')
+})
+
+test('live Host replies require the pending request and full envelope identity', { timeout: 30000 }, async t => {
+  for (const [key, value] of [
+    ['conversationId', null], ['runId', 'foreign-run'], ['runtimeSessionId', 'foreign-session'],
+    ['requestId', 'foreign-request'], ['protocol', 'foreign-protocol'], ['version', 99],
+    ['type', 'kernel.ready'], ['id', undefined], ['timestamp', undefined],
+  ]) await t.test(key, async sub => {
+    const child = await worker(sub, ['--kernel-worker'], {
+      onRoundOutput: () => ({ schemaVersion: 1, kind: 'final' }),
+      mapHostResponse: reply => ({ ...reply, [key]: value }),
+    })
+    assert.equal((await child.request('kernel.initialize', initialization())).type, 'kernel.ready')
+    const result = await child.request('kernel.resume_batch', resumePayload())
+    assert.equal(result.type, 'request_failed')
+    assert.equal(child.roundOutputs.length, 1, 'a foreign reply cannot admit another round')
+    assert.equal((await child.request('kernel.resume_batch', resumePayload())).type, 'request_failed')
+  })
+})
+
+test('continuation previews and final acknowledgement share the Host cursor', { timeout: 30000 }, async t => {
+  let round = 0
+  const child = await worker(t, ['--kernel-worker'], { onRoundOutput: () => ++round === 1
+    ? { schemaVersion: 1, kind: 'continuation', prompt: 'Check remaining work.', previewSeq: 17 }
+    : { schemaVersion: 1, kind: 'final' } })
+  const config = initialization()
+  config.modelService.fauxResponses = ['I will begin.', 'The final answer.']
+  await child.request('kernel.initialize', config)
+  const payload = resumePayload(); payload.streamPreview = true
+  const result = await child.request('kernel.resume_batch', payload)
+  assert.equal(result.type, 'kernel.model_response')
+  const previews = child.events.filter(event => event.type === 'kernel.model_preview')
+  assert.equal(previews.at(-1).payload.checkpointSeq, 17)
+  assert.equal(result.payload.response.checkpointSeq, 17)
+  assert.equal(result.payload.response.assistantMessage.content[0].text, 'The final answer.')
+  assert.ok(previews.every((event, index) => index === 0 || event.payload.revision > previews[index - 1].payload.revision))
 })
 
 test('cancellation settles the model request and permanently consumes the process', { timeout: 30000 }, async t => {

@@ -88,18 +88,19 @@ pub(super) fn project(
         if let Some(usage) = response["assistantMessage"].get("usage") {
             project_usage(tx, run_id, seq, usage, now)?;
         }
-        // A stop-review continuation replaces the unbacked preface that
-        // triggered it: that earlier assistant text was an unfinished answer,
-        // not a result the user should keep. Supersede it so only the reviewed
-        // final answer remains visible (and reachable for child summaries).
+        // Supersede the durable response that prompted this continuation.
+        // The latest display row may already be this round's streamed preview;
+        // use the preceding model event's cursor, never display ordering.
         if kind == "engine.continuation_response" {
             tx.execute(
                 "UPDATE messages SET status='superseded', updated_at=?2
-                 WHERE id=(
-                    SELECT id FROM messages WHERE run_id=?1 AND role='assistant'
-                    AND status IN ('completed','streaming')
-                    ORDER BY ordinal DESC LIMIT 1)",
-                params![run_id, now],
+                 WHERE run_id=?1 AND role='assistant' AND status IN ('completed','streaming')
+                   AND id='kernel-message:'||?1||':'||(
+                    SELECT json_extract(payload_json,'$.response.checkpointSeq')
+                    FROM kernel_events WHERE run_id=?1 AND seq<?3
+                      AND event_type IN ('engine.initial_response','engine.batch_response','engine.continuation_response')
+                    ORDER BY seq DESC LIMIT 1)",
+                params![run_id, now, seq],
             )?;
         }
         let content = response["assistantMessage"]["content"]

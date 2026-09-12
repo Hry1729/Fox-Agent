@@ -22,7 +22,7 @@ pub(crate) const LIVE_DETACHED: &str = "kernel.live.detached";
 enum Stage {
     Initial { cursor: u64 },
     Batch { batch_id: String, cursor: u64 },
-    Continuation { pre_history: Vec<Value> },
+    Continuation { pre_history: Vec<Value>, cursor: u64 },
 }
 
 type ExecuteFn<'a> = &'a dyn Fn(
@@ -314,14 +314,10 @@ impl KernelCoordinator<'_> {
                     Some(batch_id.clone()),
                 )
             }
-            Stage::Continuation { pre_history } => {
+            Stage::Continuation { pre_history, cursor } => {
                 let response = serde_json::json!({
                     "schemaVersion": 1, "runId": self.binding.run_id, "turnId": frame.turn_id,
-                    "checkpointSeq": self
-                        .controller
-                        .lock()
-                        .map_err(|_| "Kernel coordinator lock poisoned")?
-                        .last_event_seq(),
+                    "checkpointSeq": cursor,
                     "assistantMessage": output,
                 });
                 (
@@ -510,7 +506,7 @@ impl KernelCoordinator<'_> {
                 .map_err(|_| "Kernel coordinator lock poisoned")?
                 .last_event_seq();
             let preview_seq = last_seq.saturating_sub(1).max(1);
-            *stage = Stage::Continuation { pre_history: next_pre };
+            *stage = Stage::Continuation { pre_history: next_pre, cursor: preview_seq };
             return Ok(fox_engine_protocol::KernelRoundDirective {
                 schema_version: 1,
                 kind: fox_engine_protocol::KernelRoundDirectiveKind::Continuation,
