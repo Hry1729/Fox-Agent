@@ -60,6 +60,15 @@ impl PreparedToolAction {
             | Self::RunCommand { preview, .. } => preview,
         }
     }
+
+    /// The file a write/edit will replace, used for Host-side version
+    /// capture. Commands have no single managed target.
+    pub fn target_path(&self) -> Option<&Path> {
+        match self {
+            Self::WriteFile { path, .. } | Self::EditFile { path, .. } => Some(path),
+            Self::RunCommand { .. } => None,
+        }
+    }
 }
 
 pub fn prepare(

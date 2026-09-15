@@ -867,6 +867,50 @@ fn parse_zip_based_text(
     Ok(text)
 }
 
+/// List the central-directory entry names of an OOXML/ZIP container without
+/// inflating anything. Used by deterministic verification (e.g. proving a
+/// generated workbook really carries a chart part) rather than trusting the
+/// writer's self-report.
+pub(crate) fn zip_entry_names(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let archive = SafeZipArchive::new(bytes).map_err(|error| error.to_string())?;
+    Ok(archive.entry_names().map(str::to_owned).collect())
+}
+
+/// Read one already-enumerated entry of an OOXML/ZIP container as UTF-8 text.
+///
+/// Deterministic verification uses this to inspect the real package (an OOXML
+/// part is XML, so text is the honest representation) instead of trusting a
+/// writer's summary. Pure and bounded: the bytes come from a file the caller
+/// already opened through an authorized handle.
+pub(crate) fn zip_entry_text(bytes: &[u8], name: &str) -> Result<Option<String>, String> {
+    let archive = SafeZipArchive::new(bytes).map_err(|error| error.to_string())?;
+    let entry = archive.read_entry(name).map_err(|error| error.to_string())?;
+    match entry {
+        Some(bytes) => Ok(Some(
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Every entry of an OOXML/ZIP container as `(name, bytes)`.
+///
+/// Used by deterministic verification to rewrite a real package without a
+/// compressor (for example to add one OOXML part to an existing workbook).
+pub(crate) fn zip_entries(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let archive = SafeZipArchive::new(bytes).map_err(|error| error.to_string())?;
+    let names = archive.entry_names().map(str::to_owned).collect::<Vec<_>>();
+    let mut entries = Vec::with_capacity(names.len());
+    for name in names {
+        let data = archive
+            .read_entry(&name)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("ZIP 条目 {name} 在读取时消失"))?;
+        entries.push((name, data));
+    }
+    Ok(entries)
+}
+
 /// Pure, bounded extraction from bytes already read through an authorized
 /// attachment/project handle. Never launches Office or follows external links.
 pub(crate) fn extract_office_text(bytes: &[u8], filename: &str) -> Result<Option<String>, String> {

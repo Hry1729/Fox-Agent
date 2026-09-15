@@ -120,6 +120,46 @@ export function createHostTools(requestHost) {
       execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'attachment_compute', params, requestHost, signal),
     },
     {
+      name: 'read_tool_result',
+      label: 'Read stored tool result',
+      description: 'Read bytes Fox already stored for a settled tool call in this Run, using the fox-result://<runId>/<toolCallId> reference printed in a bounded tool view. This never executes the original tool, so it cannot repeat a write: it only re-reads what Host recorded. Pass the reference and, to continue a previous read, offset=<the nextOffset you were given>; repeat until complete=true. The result is the stored text as the first content block, followed by a trailing `FOX_RESULT_CURSOR_V1 {…}` block carrying reference, offset, returnedBytes, nextOffset, complete, originalBytes, retrievable and truncated. Use that block\'s nextOffset to continue, and stop at complete=true. When retrievable is false or truncated is true, Host kept only a bounded preview, so the omitted bytes are NOT reachable from this reference and must not be guessed — get them another way instead.',
+      parameters: Type.Object({
+        reference: Type.String({ description: 'A fox-result://<runId>/<toolCallId> reference from this conversation.' }),
+        offset: Type.Optional(Type.Integer({ minimum: 0, description: 'Byte offset to start reading from; use the nextOffset returned by the previous read.' })),
+        limit: Type.Optional(Type.Integer({ minimum: 4, maximum: 65536, description: 'Maximum bytes to return in one read; minimum 4, default 16384, maximum 65536. Offsets and lengths count UTF-8 bytes.' })),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'read_tool_result', params, requestHost, signal),
+    },
+    {
+      name: 'skill_load',
+      label: 'Discover or load skill instructions',
+      description: 'Two modes. (1) Load: pass skillId (from the "Skill catalog" section, or from a catalog page you listed) and Fox returns that skill\'s full SKILL.md body as the first content block; details carries id, version, contentSha256, chars, bytes, requiredTools, missingTools and toolsAvailable. (2) Discover: pass no skillId — optionally query (substring over id/name/description), offset and limit (max 20) — and Fox returns one bounded page of the skills enabled for this Run: id, name, version, short description, size and dependency state, plus nextOffset to continue. Use discovery whenever a skill you need is not listed in the prompt: a tight budget can truncate both the catalog and the omission list, so an unlisted id must still be findable here. Loading a skill never grants a tool: if toolsAvailable is false, the required tool calls will be rejected by the frozen Run scope — say so instead of attempting them. Do not invent skillIds, do not pass scope or conversation fields, and do not reload a skill already present in full above.',
+      parameters: Type.Object({
+        skillId: Type.Optional(Type.String({
+          minLength: 1,
+          maxLength: 128,
+          pattern: '^[A-Za-z0-9_-]+$',
+          description: 'The id shown in parentheses in the Skill catalog line. Omit to list the catalog instead.',
+        })),
+        query: Type.Optional(Type.String({
+          maxLength: 64,
+          description: 'Discovery only: case-insensitive substring matched against skill id, name and description. Omit to page through everything.',
+        })),
+        offset: Type.Optional(Type.Integer({
+          minimum: 0,
+          description: 'Discovery only: how many matched entries to skip; pass the nextOffset from the previous page.',
+        })),
+        limit: Type.Optional(Type.Integer({
+          minimum: 1,
+          maximum: 20,
+          description: 'Discovery only: entries per page (1-20, default 20).',
+        })),
+      }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) =>
+        executeHostTool(toolCallId, 'skill_load', params, requestHost, signal),
+    },
+    {
       name: 'write_file',
       label: 'Write file',
       description: 'Create or replace a UTF-8 text file inside the authorized project. Call this tool for a real file write; describing a write in text does nothing. Fox may require user approval before the host writes it.',

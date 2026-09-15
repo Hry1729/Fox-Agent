@@ -22,6 +22,7 @@ fn host_tool_is_supported(tool: &str) -> bool {
     matches!(
         tool,
         "read_attachment"
+            | "read_tool_result"
             | "write_file"
             | "edit_file"
             | "run_command"

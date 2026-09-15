@@ -35,7 +35,7 @@ pub use controller::{
     dispatch_effect_key, dispatch_idempotency_key, persist_events, Effect, KernelPersistCommand,
     PersistApprovalResolution, PersistBatch, PersistEvent, PersistOutboxEffect, PersistTool,
     RehydratedBatch, RehydratedRun, RehydratedToolCall, RunController, INITIAL_MODEL_EFFECT_KEY,
-    INITIAL_MODEL_IDEMPOTENCY_KEY,
+    INITIAL_MODEL_IDEMPOTENCY_KEY, STEERING_COMPETITION,
 };
 pub use ports::{
     CancellationPort, Clock, ClockReading, CompactionState, EnginePort, EventStorePort,
@@ -123,6 +123,8 @@ fn test_config() -> RunFrozenConfig {
         execution_profile_id: "legacy".into(),
         prompt_config_hash: "prompt-hash".into(),
         model_request_timeout_ms: 120_000,
+        model_first_response_ms: 60_000,
+        model_idle_ms: 120_000,
         tool_execution_timeout_ms: 600_000,
         run_execution_budget_ms: 600_000,
         approval_wait_timeout_ms: 3_600_000,
@@ -784,6 +786,8 @@ mod tests {
         let clock = TestClock::new(0);
         let mut config = test_config();
         config.model_request_timeout_ms = 5_000;
+        config.model_first_response_ms = 5_000;
+        config.model_idle_ms = 5_000;
         let (mut c, _) = RunController::start("r", "t", config, &clock).unwrap();
         // Running with no tools in flight => waiting on the model.
         clock.advance(4_999);
@@ -799,6 +803,8 @@ mod tests {
         let clock = TestClock::new(0);
         let mut config = test_config();
         config.model_request_timeout_ms = 5_000;
+        config.model_first_response_ms = 5_000;
+        config.model_idle_ms = 5_000;
         config.approval_wait_timeout_ms = 60_000;
         let (mut c, _) = RunController::start("r", "t", config, &clock).unwrap();
         let policy = TestPolicy {
@@ -830,6 +836,8 @@ mod tests {
         let clock = TestClock::new(0);
         let mut config = test_config();
         config.model_request_timeout_ms = 5_000;
+        config.model_first_response_ms = 5_000;
+        config.model_idle_ms = 5_000;
         let (mut c, _) = RunController::start("r", "t", config, &clock).unwrap();
         clock.advance(10_000);
         // Cancel first (user), then the stale model timeout tick arrives.
@@ -846,6 +854,8 @@ mod tests {
         let clock = TestClock::new(0);
         let mut config = test_config();
         config.model_request_timeout_ms = 5_000;
+        config.model_first_response_ms = 5_000;
+        config.model_idle_ms = 5_000;
         let (mut c, _) = RunController::start("r", "t", config, &clock).unwrap();
         // The model responds (proposes a tool batch): the request settles.
         let policy = TestPolicy {
@@ -866,13 +876,14 @@ mod tests {
             )),
             "model timeout must not fire after the request settled"
         );
-        // A new explicit turn dispatch re-arms the request, which then times out.
+        // A new explicit turn dispatch re-arms the request, which then times out
+        // on the first-response bound (no output was ever observed).
         c.begin_model_request(clock.now_ms(), clock.now_ms());
         assert!(c.model_request_in_flight());
         clock.advance(6_000);
         let effects = c.tick(clock.now_ms(), clock.now_ms());
         assert!(effects.iter().any(|e| matches!(
-            e, Effect::AppendEvent { payload_json, .. } if payload_json.contains("model.request_timeout")
+            e, Effect::AppendEvent { payload_json, .. } if payload_json.contains("model.first_response_timeout")
         )));
     }
 
@@ -887,6 +898,8 @@ mod tests {
             config: {
                 let mut cfg = test_config();
                 cfg.model_request_timeout_ms = 5_000;
+                cfg.model_first_response_ms = 5_000;
+                cfg.model_idle_ms = 5_000;
                 cfg
             },
             state: RunState::Running,
@@ -912,10 +925,12 @@ mod tests {
             "in-flight request survives rehydrate"
         );
         // New process wall 7_000 => 6_000 elapsed against the persisted anchor
-        // (>= 5_000): the timeout fires despite the fresh monotonic domain.
+        // (>= 5_000): the backstop fires despite the fresh monotonic domain,
+        // classified by the first-response bound (no output was observed).
         let effects = c.tick(0, 7_000);
+        assert_eq!(c.state(), RunState::Failed);
         assert!(effects.iter().any(|e| matches!(
-            e, Effect::AppendEvent { payload_json, .. } if payload_json.contains("model.request_timeout")
+            e, Effect::AppendEvent { payload_json, .. } if payload_json.contains("model.first_response_timeout")
         )), "rehydrated model request must not reset to a fresh window");
     }
 
@@ -924,6 +939,8 @@ mod tests {
         let clock = TestClock::new(0);
         let mut config = test_config();
         config.model_request_timeout_ms = 5_000;
+        config.model_first_response_ms = 5_000;
+        config.model_idle_ms = 5_000;
         let (mut c, _) = RunController::start("r", "t", config, &clock).unwrap();
         assert!(
             c.model_request_in_flight(),
@@ -970,5 +987,177 @@ mod tests {
             !c.model_request_in_flight(),
             "terminal rehydrate must not resume a model request"
         );
+    }
+
+    #[test]
+    fn model_first_response_idle_and_total_timeouts_are_distinct_and_progress_aware() {
+        // The Host-side tick bound is a fail-closed backstop (no dispatch
+        // lease owner to reset); retry admission is the worker-evidence path.
+        // This test pins the three classified codes and the progress-aware
+        // ordering: first-response before idle before whole-round.
+        let clock = TestClock::new(0);
+        let mut config = test_config();
+        config.model_request_timeout_ms = 10_000;
+        config.model_first_response_ms = 2_000;
+        config.model_idle_ms = 3_000;
+        config.turn_max_retries = 5;
+        let (mut c, _) = RunController::start("r", "t", config, &clock).unwrap();
+        // Silent before the first-response bound.
+        clock.advance(1_999);
+        assert!(c.tick(clock.now_ms(), clock.now_ms()).is_empty());
+        // No output at all: the first-response bound fires first.
+        clock.advance(1);
+        let effects = c.tick(clock.now_ms(), clock.now_ms());
+        assert!(effects.iter().any(|e| matches!(
+            e, Effect::AppendEvent { payload_json, .. } if payload_json.contains("model.first_response_timeout")
+        )));
+        assert_eq!(c.state(), RunState::Failed);
+        // Progress observed: idleness is measured from the last progress and
+        // the idle bound fires before the whole-round bound.
+        let mut config = test_config();
+        config.model_request_timeout_ms = 10_000;
+        config.model_first_response_ms = 2_000;
+        config.model_idle_ms = 3_000;
+        let (mut c, _) = RunController::start("r2", "t", config, &clock).unwrap();
+        c.note_model_progress(clock.now_ms(), clock.now_ms());
+        clock.advance(2_999);
+        assert!(c.tick(clock.now_ms(), clock.now_ms()).is_empty());
+        clock.advance(1);
+        let effects = c.tick(clock.now_ms(), clock.now_ms());
+        assert!(effects.iter().any(|e| matches!(
+            e, Effect::AppendEvent { payload_json, .. } if payload_json.contains("model.idle_timeout")
+        )));
+        assert_eq!(c.state(), RunState::Failed);
+        // Fresh progress every second keeps every sub-round bound quiet until
+        // the whole-round backstop fires.
+        let mut config = test_config();
+        config.model_request_timeout_ms = 10_000;
+        config.model_first_response_ms = 2_000;
+        config.model_idle_ms = 3_000;
+        let (mut c, _) = RunController::start("r3", "t", config, &clock).unwrap();
+        for _ in 0..9 {
+            c.note_model_progress(clock.now_ms(), clock.now_ms());
+            clock.advance(1_000);
+            assert!(c.tick(clock.now_ms(), clock.now_ms()).is_empty());
+        }
+        clock.advance(1_000);
+        let effects = c.tick(clock.now_ms(), clock.now_ms());
+        assert!(effects.iter().any(|e| matches!(
+            e, Effect::AppendEvent { payload_json, .. } if payload_json.contains("model.request_timeout")
+        )));
+        assert_eq!(c.state(), RunState::Failed);
+    }
+
+    #[test]
+    fn model_timeout_retries_only_when_no_new_tool_is_in_flight() {
+        // The Host tick backstop fails closed even with an idle turn budget:
+        // only the coordinator's settled worker evidence may retry, because
+        // only it owns the dispatch lease needed to reset the delivery.
+        let clock = TestClock::new(0);
+        let mut config = test_config();
+        config.model_request_timeout_ms = 5_000;
+        config.model_first_response_ms = 5_000;
+        config.model_idle_ms = 5_000;
+        config.turn_max_retries = 1;
+        let (mut c, _) = RunController::start("r", "t", config, &clock).unwrap();
+        // A dispatched-but-unsettled tool makes the timeout fail closed: the
+        // Host must reconcile the uncertain execution instead of retrying.
+        let policy = TestPolicy {
+            allow: vec!["read"],
+            deny: vec![],
+        };
+        c.propose_tool_batch("b", vec![call("a", "read", 0)], &policy, 0, 0)
+            .unwrap();
+        // A follow-up model request is armed while the tool is still running.
+        c.begin_model_request(clock.now_ms(), clock.now_ms());
+        clock.advance(6_000);
+        let effects = c.tick(clock.now_ms(), clock.now_ms());
+        assert_eq!(c.state(), RunState::Failed);
+        // No output was ever observed, so the first-response bound fires; the
+        // point is that it fails closed instead of scheduling a retry.
+        assert!(effects.iter().any(|e| matches!(
+            e, Effect::AppendEvent { payload_json, .. } if payload_json.contains("model.first_response_timeout")
+        )));
+        // With nothing outstanding the same timeout still terminates (tick is
+        // a backstop); the retry path is exercised through the coordinator.
+        let clock = TestClock::new(0);
+        let mut config = test_config();
+        config.model_request_timeout_ms = 5_000;
+        config.model_first_response_ms = 5_000;
+        config.model_idle_ms = 5_000;
+        config.turn_max_retries = 1;
+        let (mut c, _) = RunController::start("r2", "t", config, &clock).unwrap();
+        clock.advance(5_000);
+        let _ = c.tick(clock.now_ms(), clock.now_ms());
+        assert_eq!(c.state(), RunState::Failed);
+        // The settled-failure retry path accepts model_timeout and spends the
+        // turn budget, then terminates on exhaustion.
+        let evidence = r#"{"schemaVersion":1,"runId":"r3","turnId":"t","checkpointSeq":7,"category":"model_timeout","httpStatus":null,"retryAfterMs":null,"telemetry":{"elapsedMs":120000,"idleElapsedMs":119000,"firstResponseMs":2000,"textBytes":449,"reasoningBytes":0,"toolParamBytes":82000}}"#;
+        let mut config = test_config();
+        config.model_request_timeout_ms = 120_000;
+        config.model_first_response_ms = 60_000;
+        config.model_idle_ms = 120_000;
+        config.turn_max_retries = 1;
+        let (mut c, _) = RunController::start("r3", "t", config, &clock).unwrap();
+        let effects = c
+            .schedule_model_retry(1_000, 1_000, "deliver-batch:b", evidence, false, 1_000)
+            .unwrap();
+        assert!(has_event(&effects, "run.retrying"));
+        assert_eq!(c.state(), RunState::RetryScheduled);
+        assert_eq!(c.shadow_checkpoint(0).retry.turn_attempts, 1);
+        clock.advance(1_000);
+        // The due retry resumes with model_dispatch_pending set: the Host
+        // claims the delivery and arms the request before the engine runs.
+        let _ = c.tick(clock.now_ms(), clock.now_ms()).len();
+        c.begin_model_request(clock.now_ms(), clock.now_ms());
+        let effects = c
+            .schedule_model_retry(2_000, 2_000, "deliver-batch:b", evidence, false, 1_000)
+            .unwrap();
+        assert_eq!(c.state(), RunState::Failed);
+        assert!(effects.iter().any(|e| matches!(
+            e, Effect::AppendEvent { payload_json, .. } if payload_json.contains("kernel.model_retry_exhausted")
+        )));
+    }
+
+    #[test]
+    fn model_progress_notes_are_ignored_without_an_in_flight_request() {
+        let clock = TestClock::new(0);
+        let (mut c, _) = RunController::start("r", "t", test_config(), &clock).unwrap();
+        c.settle_model_request();
+        c.note_model_progress(clock.now_ms(), clock.now_ms());
+        // Well under the run budget: with no request in flight nothing fires.
+        clock.advance(100_000);
+        assert!(c.tick(clock.now_ms(), clock.now_ms()).is_empty());
+    }
+
+    #[test]
+    fn legacy_short_frozen_config_rehydrates_without_widening_budget_or_identity() {
+        let mut stored = serde_json::to_value(test_config()).unwrap();
+        stored["model_request_timeout_ms"] = serde_json::json!(30_000);
+        stored.as_object_mut().unwrap().remove("model_first_response_ms");
+        stored.as_object_mut().unwrap().remove("model_idle_ms");
+        let config: RunFrozenConfig = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(config.model_request_timeout_ms,30_000);
+        assert_eq!(config.model_first_response_ms,30_000);
+        assert_eq!(config.model_idle_ms,30_000);
+        assert_eq!(config.permission_snapshot_id,test_config().permission_snapshot_id);
+        let clock = TestClock::new(0);
+        let (controller, _) = RunController::start("r","t",config,&clock).unwrap();
+        assert!(!controller.is_terminal());
+        stored["model_idle_ms"] = serde_json::json!(30_001);
+        let explicit: RunFrozenConfig = serde_json::from_value(stored.clone()).unwrap();
+        assert!(RunController::start("r","t",explicit,&clock).is_err());
+        stored["model_idle_ms"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<RunFrozenConfig>(stored).is_err());
+    }
+
+    #[test]
+    fn model_sub_round_budgets_above_the_whole_round_fail_closed() {
+        let mut config = test_config();
+        config.model_first_response_ms = config.model_request_timeout_ms + 1;
+        assert!(RunController::start("r", "t", config.clone(), &TestClock::new(0)).is_err());
+        config.model_first_response_ms = 60_000;
+        config.model_idle_ms = config.model_request_timeout_ms + 1;
+        assert!(RunController::start("r", "t", config, &TestClock::new(0)).is_err());
     }
 }

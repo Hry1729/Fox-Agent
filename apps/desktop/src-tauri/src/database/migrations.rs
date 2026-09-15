@@ -6258,6 +6258,239 @@ BEGIN
 END;
 "#;
 
+// Full tool results larger than the inline `result_json` cap are kept in this
+// sibling blob table instead of being discarded. The inline row keeps the
+// compact preview and gains `result_blob_sha256` (added by the column below)
+// so the model-facing copy is unchanged while every byte remains recoverable
+// through `tool_result_range`. Blob rows are content-addressed by sha256 and
+// immutable: two calls with identical large results share one row.
+const MIGRATION_63: &str = r#"
+ALTER TABLE kernel_effect_outbox RENAME TO kernel_effect_outbox_v62;
+CREATE TABLE kernel_effect_outbox (
+    run_id TEXT NOT NULL, effect_key TEXT NOT NULL,
+    effect_type TEXT NOT NULL CHECK(effect_type IN ('dispatch_tool','request_approval','cancel_engine_turn',
+        'cancel_tool_call','deliver_tool_batch','initial_model','continuation_model','publish_snapshot')),
+    idempotency_key TEXT NOT NULL, tool_call_id TEXT, batch_id TEXT, payload_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending','leased','completed','failed')),
+    attempts INTEGER NOT NULL DEFAULT 0, lease_owner TEXT, leased_at INTEGER, completed_at INTEGER,
+    last_error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id,effect_key)
+);
+INSERT INTO kernel_effect_outbox SELECT * FROM kernel_effect_outbox_v62;
+DROP TABLE kernel_effect_outbox_v62;
+CREATE INDEX idx_kernel_outbox_status ON kernel_effect_outbox(run_id,status);
+CREATE INDEX idx_kernel_outbox_due ON kernel_effect_outbox(status,created_at);
+CREATE UNIQUE INDEX idx_kernel_outbox_idem ON kernel_effect_outbox(run_id,idempotency_key);
+"#;
+
+/// v64 (2026-09-13 design supplements): skill activation audit, ordinary-task
+/// delivery checklist, persistent mid-run steering queue, managed file
+/// versions. Every table is additive; no historical migration is rewritten.
+const MIGRATION_64: &str = r#"
+CREATE TABLE IF NOT EXISTS skill_activations (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    conversation_id TEXT,
+    skill_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    source TEXT NOT NULL CHECK(source IN ('initial_prompt','on_demand')),
+    required_tools_json TEXT NOT NULL DEFAULT '[]',
+    missing_tools_json TEXT NOT NULL DEFAULT '[]',
+    tools_available INTEGER NOT NULL CHECK(tools_available IN (0,1)),
+    char_count INTEGER NOT NULL CHECK(char_count >= 0),
+    byte_count INTEGER NOT NULL CHECK(byte_count >= 0),
+    created_at INTEGER NOT NULL,
+    UNIQUE(run_id, skill_id, source, content_sha256)
+);
+CREATE TABLE IF NOT EXISTS delivery_checklist_items (
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    item_key TEXT NOT NULL,
+    target_path TEXT,
+    artifact_id TEXT,
+    display_name TEXT NOT NULL,
+    checks_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','passed','failed')),
+    finding_json TEXT,
+    checked_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id,item_key)
+);
+CREATE INDEX IF NOT EXISTS idx_delivery_items_run ON delivery_checklist_items(run_id,status);
+CREATE TABLE IF NOT EXISTS delivery_repair_rounds (
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    round INTEGER NOT NULL CHECK(round >= 1),
+    findings_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id,round)
+);
+CREATE TABLE IF NOT EXISTS run_steering_messages (
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL CHECK(seq >= 1),
+    message_id TEXT NOT NULL UNIQUE,
+    content TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'received' CHECK(status IN ('received','applied','cancelled')),
+    received_at INTEGER NOT NULL,
+    applied_at INTEGER,
+    applied_event_seq INTEGER,
+    applied_dispatch_key TEXT,
+    PRIMARY KEY(run_id,seq)
+);
+CREATE INDEX IF NOT EXISTS idx_run_steering_status ON run_steering_messages(run_id,status);
+CREATE TABLE IF NOT EXISTS managed_file_versions (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+    tool_call_id TEXT,
+    tool TEXT NOT NULL,
+    storage_path TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    version_no INTEGER NOT NULL CHECK(version_no >= 1),
+    change_kind TEXT NOT NULL CHECK(change_kind IN ('created','modified','restored')),
+    before_hash TEXT,
+    before_size INTEGER,
+    after_hash TEXT,
+    after_size INTEGER,
+    backup_path TEXT,
+    restored_from_id TEXT,
+    created_at INTEGER NOT NULL,
+    UNIQUE(storage_path, version_no)
+);
+CREATE INDEX IF NOT EXISTS idx_managed_file_versions_path ON managed_file_versions(storage_path, created_at);
+CREATE INDEX IF NOT EXISTS idx_managed_file_versions_run ON managed_file_versions(run_id);
+"#;
+
+/// v65 (2026-09-13 design supplements, item 4): mid-run steering gains the
+/// `delivered` state between `received` and `applied`: the model dispatch that
+/// carries a message is durably armed (its lease committed) before the worker
+/// answers, so a worker death after the directive leaves the message bound to
+/// the in-flight dispatch rather than lost or double applied. The v64 table
+/// is append-only data, so it is rebuilt with the widened CHECK constraint
+/// instead of editing the historical migration.
+const MIGRATION_65: &str = r#"
+CREATE TABLE run_steering_messages_v65 (
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL CHECK(seq >= 1),
+    message_id TEXT NOT NULL UNIQUE,
+    content TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'received' CHECK(status IN ('received','delivered','applied','cancelled')),
+    received_at INTEGER NOT NULL,
+    applied_at INTEGER,
+    applied_event_seq INTEGER,
+    applied_dispatch_key TEXT,
+    PRIMARY KEY(run_id,seq)
+);
+INSERT INTO run_steering_messages_v65
+    (run_id, seq, message_id, content, status, received_at, applied_at, applied_event_seq, applied_dispatch_key)
+SELECT run_id, seq, message_id, content, status, received_at, applied_at, applied_event_seq, applied_dispatch_key
+FROM run_steering_messages;
+DROP TABLE run_steering_messages;
+ALTER TABLE run_steering_messages_v65 RENAME TO run_steering_messages;
+CREATE INDEX IF NOT EXISTS idx_run_steering_status ON run_steering_messages(run_id,status);
+"#;
+
+/// v67 (2026-09-14 review repair N6): a restore that overwrites content the
+/// registry does not know about (a user edit made outside any recorded task)
+/// preserved those bytes as a safety backup but had no way to express them as a
+/// *content version*, so no version row could bring that content back. The
+/// `replaced` kind names exactly that: the content this restore replaced, kept
+/// as a first-class, selectable version.
+///
+/// SQLite cannot widen a CHECK constraint in place, so the table is rebuilt with
+/// the same shape and data (the v66 columns included). Nothing else changes, and
+/// the table keeps its append-only meaning.
+const MIGRATION_67: &str = r#"
+CREATE TABLE managed_file_versions_v67 (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    run_id TEXT REFERENCES runs(id) ON DELETE SET NULL,
+    tool_call_id TEXT,
+    tool TEXT NOT NULL,
+    storage_path TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    version_no INTEGER NOT NULL CHECK(version_no >= 1),
+    change_kind TEXT NOT NULL CHECK(change_kind IN ('created','modified','restored','replaced')),
+    before_hash TEXT,
+    before_size INTEGER,
+    after_hash TEXT,
+    after_size INTEGER,
+    backup_path TEXT,
+    after_backup_path TEXT,
+    restored_from_id TEXT,
+    source_kind TEXT NOT NULL DEFAULT 'legacy_unknown',
+    source_verified INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    UNIQUE(storage_path, version_no)
+);
+INSERT INTO managed_file_versions_v67
+    (id, conversation_id, run_id, tool_call_id, tool, storage_path, display_name, version_no,
+     change_kind, before_hash, before_size, after_hash, after_size, backup_path,
+     after_backup_path, restored_from_id, source_kind, source_verified, created_at)
+SELECT id, conversation_id, run_id, tool_call_id, tool, storage_path, display_name, version_no,
+       change_kind, before_hash, before_size, after_hash, after_size, backup_path,
+       after_backup_path, restored_from_id, source_kind, source_verified, created_at
+FROM managed_file_versions;
+DROP TABLE managed_file_versions;
+ALTER TABLE managed_file_versions_v67 RENAME TO managed_file_versions;
+CREATE INDEX IF NOT EXISTS idx_managed_file_versions_path ON managed_file_versions(storage_path, created_at);
+CREATE INDEX IF NOT EXISTS idx_managed_file_versions_run ON managed_file_versions(run_id);
+CREATE INDEX IF NOT EXISTS idx_managed_file_versions_verified
+    ON managed_file_versions(storage_path, version_no, source_verified);
+"#;
+
+/// v66 (2026-09-14 review repairs R1/R2/R6): records what a registered file
+/// version can actually restore and what produced it, and lets a delivery
+/// checklist item carry the structured, independently verifiable requirements
+/// the task text spelled out.
+///
+/// * `after_backup_path` — Host-owned byte snapshot of the content this row
+///   records, so selecting *this* version restores *this* content instead of
+///   the pre-write state. Rows written before this migration have no snapshot;
+///   they stay recoverable only when a later row's pre-write backup provably
+///   holds the same bytes (same storage path, matching hash and size).
+/// * `source_kind` / `source_verified` — provenance of the row. Only Host- and
+///   verified Office-connector writes are `verified=1`; a version whose facts
+///   arrived from an unverified origin is never restorable.
+/// * `delivery_checklist_items.requirements_json` — structured checks derived
+///   from the task text (required section count, required chart count, count
+///   or ratio consistency). Empty means "no structured requirement was stated",
+///   which the delivery report must show as 未核验 rather than as a pass.
+///
+/// The columns are added through the idempotent helper (not a raw
+/// `ALTER TABLE`) because upgrade fixtures apply later migrations on top of
+/// tables that an earlier fixture may already have rebuilt.
+const MIGRATION_66_COLUMNS: &[(&str, &str, &str)] = &[
+    ("managed_file_versions", "after_backup_path", "TEXT"),
+    (
+        "managed_file_versions",
+        "source_kind",
+        "TEXT NOT NULL DEFAULT 'legacy_unknown'",
+    ),
+    (
+        "managed_file_versions",
+        "source_verified",
+        "INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "delivery_checklist_items",
+        "requirements_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    ),
+];
+
+const MIGRATION_66_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_managed_file_versions_verified
+    ON managed_file_versions(storage_path, version_no, source_verified);
+"#;
+
+const MIGRATION_62: &str = r#"
+CREATE TABLE IF NOT EXISTS tool_call_result_blobs (
+    sha256 TEXT PRIMARY KEY,
+    body_json TEXT NOT NULL,
+    byte_size INTEGER NOT NULL CHECK(byte_size > 0),
+    created_at INTEGER NOT NULL
+);
+"#;
 const CONVERSATION_TOOL_PERMISSION_SCHEMA_VERSION: i64 = 23;
 const MIGRATION_61: &str = r#"
 DROP TRIGGER kernel_model_config_insert_guard;
@@ -6531,6 +6764,40 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     apply_migration(&transaction, 59, MIGRATION_59, now)?;
     apply_migration(&transaction, 60, MIGRATION_60, now)?;
     apply_migration(&transaction, 61, MIGRATION_61, now)?;
+    // The column add is idempotent via the helper so downgrade fixtures that
+    // recreate the table never see a duplicate-column failure on re-run.
+    let v62_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 62)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !v62_applied {
+        ensure_column_if_missing(&transaction, "tool_calls", "result_blob_sha256", "TEXT")?;
+        transaction.execute_batch(MIGRATION_62)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (62, ?1)",
+            [now],
+        )?;
+    }
+    apply_migration(&transaction, 63, MIGRATION_63, now)?;
+    apply_migration(&transaction, 64, MIGRATION_64, now)?;
+    apply_migration(&transaction, 65, MIGRATION_65, now)?;
+    let v66_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 66)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !v66_applied {
+        for (table, column, definition) in MIGRATION_66_COLUMNS {
+            ensure_column_if_missing(&transaction, table, column, definition)?;
+        }
+        transaction.execute_batch(MIGRATION_66_INDEXES)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (66, ?1)",
+            [now],
+        )?;
+    }
+    apply_migration(&transaction, 67, MIGRATION_67, now)?;
     transaction.commit()
 }
 

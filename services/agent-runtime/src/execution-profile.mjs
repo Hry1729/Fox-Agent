@@ -68,6 +68,7 @@ const READ_ONLY_SHADOW_TOOL_NAMES = new Set([
   'find',
   'grep',
   'read_attachment',
+  'read_tool_result',
   'sqlite_read',
   'structured_data',
   'tabular_data',

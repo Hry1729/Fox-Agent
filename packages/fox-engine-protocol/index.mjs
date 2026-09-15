@@ -103,6 +103,24 @@ export const SCHEMA_BUNDLE = {
             "failed"
           ],
           "type": "string"
+        },
+        "KernelSteeringNotice": {
+          "additionalProperties": false,
+          "description": "One additional user request attached to a round directive.",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "messageId": {
+              "description": "Stable idempotency id of the durable steering row.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "messageId",
+            "content"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -131,6 +149,13 @@ export const SCHEMA_BUNDLE = {
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "steering": {
+          "description": "Mid-run user requests bound to this (possibly retried) dispatch. The\nengine appends them as ordinary user messages *after* the settled tool\nresults, in seq order. Like the rest of this frame they carry no\nauthority, tools, or grants.",
+          "items": {
+            "$ref": "#/$defs/KernelSteeringNotice"
+          },
+          "type": "array"
         },
         "tools": {
           "items": {
@@ -309,6 +334,13 @@ export const SCHEMA_BUNDLE = {
           "minimum": 0,
           "type": "integer"
         },
+        "continuationKey": {
+          "description": "Present when a fresh worker restores a durably leased continuation input.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "idempotencyKey": {
           "type": "string"
         },
@@ -397,6 +429,52 @@ export const SCHEMA_BUNDLE = {
       "type": "object"
     },
     "KernelModelFailure": {
+      "$defs": {
+        "KernelModelTelemetry": {
+          "additionalProperties": false,
+          "description": "Byte/time counters for one failed model round. All values are worker-side\nobservations for diagnosis; Host timeout anchors remain authoritative.",
+          "properties": {
+            "elapsedMs": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "firstResponseMs": {
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "idleElapsedMs": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "reasoningBytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "textBytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "toolParamBytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "elapsedMs",
+            "idleElapsedMs",
+            "textBytes",
+            "reasoningBytes",
+            "toolParamBytes"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "description": "Sanitized evidence of a settled model failure, never a permission to retry.\nHost still owns retry admission, counters, delay, lease and cancellation.",
@@ -434,6 +512,17 @@ export const SCHEMA_BUNDLE = {
           "minimum": 0,
           "type": "integer"
         },
+        "telemetry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KernelModelTelemetry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Low-sensitivity progress telemetry captured by the worker when the\nround failed. Never contains credentials, model input, or complete\ntool arguments: only elapsed times and output byte counts, so Host can\ndistinguish slow generation from a stalled stream. Absent for old\nworkers and for non-timeout categories."
+        },
         "turnId": {
           "type": "string"
         }
@@ -460,6 +549,15 @@ export const SCHEMA_BUNDLE = {
         },
         "conversationId": {
           "type": "string"
+        },
+        "progressBytes": {
+          "description": "Cumulative output bytes observed by the worker this round, including\ntool-parameter bytes that never appear in `text`. Lets Host tell slow\ngeneration apart from a stalled stream without receiving the content.\nAbsent for old workers; display code must treat absence as unknown.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "reasoning": {
           "type": "string"
@@ -579,6 +677,24 @@ export const SCHEMA_BUNDLE = {
             "failed"
           ],
           "type": "string"
+        },
+        "KernelSteeringNotice": {
+          "additionalProperties": false,
+          "description": "One additional user request attached to a round directive.",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "messageId": {
+              "description": "Stable idempotency id of the durable steering row.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "messageId",
+            "content"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -621,6 +737,13 @@ export const SCHEMA_BUNDLE = {
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "steering": {
+          "description": "Mid-run user requests durably received before this round boundary.\nThe engine appends them as ordinary user messages after the settled\ntool results (batch) or review prompt (continuation); they never carry\nauthority, tools, or grants. Final directives never carry steering.",
+          "items": {
+            "$ref": "#/$defs/KernelSteeringNotice"
+          },
+          "type": "array"
         },
         "tools": {
           "items": {
@@ -871,7 +994,20 @@ export const SCHEMA_BUNDLE = {
               "format": "int64",
               "type": "integer"
             },
+            "modelFirstResponseMs": {
+              "default": 60000,
+              "description": "No output at all within this long after dispatch fails the round.\nOld bindings predate this field and deserialize to the default.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "modelIdleMs": {
+              "default": 120000,
+              "description": "No text/thinking/tool-parameter progress within this long fails the\nround, even if the whole-round bound has not been reached. Old bindings\npredate this field and deserialize to the default.",
+              "format": "int64",
+              "type": "integer"
+            },
             "modelRequestMs": {
+              "description": "Whole-round backstop for one model request, including slow-but-progressing\ngeneration. Stall detection is owned by the first-response/idle bounds\nbelow; this bound only caps total spend per round.",
               "format": "int64",
               "type": "integer"
             },
@@ -1195,6 +1331,18 @@ export const SCHEMA_BUNDLE = {
       "category": "attachment",
       "execution": "host",
       "name": "attachment_compute"
+    },
+    {
+      "approval": "none",
+      "category": "attachment",
+      "execution": "host",
+      "name": "read_tool_result"
+    },
+    {
+      "approval": "none",
+      "category": "skill",
+      "execution": "host",
+      "name": "skill_load"
     },
     {
       "approval": "policy",

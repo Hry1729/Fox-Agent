@@ -528,6 +528,8 @@ export interface ConversationDetail {
   knowledgeReferences?: KnowledgeReference[]
   expertBindings: ConversationExpertBinding[]
   lastRun: RunRecord | null
+  /** Persisted terminal state for runs referenced by the loaded messages. */
+  runs?: RunRecord[]
   hasEarlierMessages: boolean
   goals: GoalRecord[]
   tasks: WorkTaskRecord[]

@@ -34,7 +34,6 @@ fn scope_body(scope: &KernelHostScope) -> Result<String, String> {
         })
     };
     if scope.schema_version != 1
-        || scope.tool_names.len() > 64
         || scope
             .mcp_server_hashes
             .iter()

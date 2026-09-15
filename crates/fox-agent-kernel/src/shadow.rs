@@ -1093,6 +1093,8 @@ mod tests {
             execution_profile_id: "legacy".into(),
             prompt_config_hash: "prompt".into(),
             model_request_timeout_ms: 120_000,
+            model_first_response_ms: 60_000,
+            model_idle_ms: 120_000,
             tool_execution_timeout_ms: 600_000,
             run_execution_budget_ms: 1_800_000,
             approval_wait_timeout_ms: 3_600_000,

@@ -35,6 +35,12 @@ pub(super) const SUPPORTED_TOOLS: &[&str] = &[
     "memory_search",
     "memory_propose",
     "read_attachment",
+    // Reads bytes Host already stored for a settled call. No file is touched and
+    // no tool is executed, so it belongs in the read-only resource catalogue.
+    "read_tool_result",
+    // Returns the full text of an enabled skill omitted from the initial prompt.
+    // Instructions only; it never adds a tool to the frozen scope.
+    "skill_load",
 ];
 
 pub(super) fn supported_tools() -> Vec<&'static str> {
@@ -59,7 +65,12 @@ pub(super) fn is_knowledge(tool: &str) -> bool {
 pub(super) fn is_context_resource(tool: &str) -> bool {
     matches!(
         tool,
-        "memory_search" | "memory_propose" | "read_attachment" | "attachment_compute"
+        "memory_search"
+            | "memory_propose"
+            | "read_attachment"
+            | "attachment_compute"
+            | "read_tool_result"
+            | "skill_load"
     )
 }
 
@@ -379,6 +390,7 @@ impl GatewayPolicy {
         database: &Database,
         attachments_dir: &std::path::Path,
         sessions_dir: &std::path::Path,
+        skills_dir: &std::path::Path,
         tool: &str,
         input: &Value,
         token: &CancellationToken,
@@ -428,9 +440,60 @@ impl GatewayPolicy {
                 { let token = token.clone(); move || token.is_cancelled() },
             )?
             },
+            "read_tool_result" => {
+                let request = super::tool_result_read::prepare(input)?;
+                // The scope is the Run's own frozen binding. A Kernel context
+                // resource never asks the caller which conversation to read.
+                super::tool_result_read::execute(
+                    database,
+                    &self.binding.conversation_id,
+                    &request,
+                )?
+            }
+            "skill_load" => {
+                let request = super::skill_load::prepare(input)?;
+                // Enablement is resolved from the conversation's frozen
+                // assistant/expert bindings; availability is the frozen tool
+                // scope, so loading text can never grow the Run's authority.
+                let enabled =
+                    super::conversation_enabled_skill_ids(database, &self.binding.conversation_id)?;
+                let frozen_tools = self
+                    .scope
+                    .tool_names
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::HashSet<_>>();
+                super::skill_load::execute(
+                    database,
+                    skills_dir,
+                    &self.binding.conversation_id,
+                    &self.binding.run_id,
+                    &enabled,
+                    Some(&frozen_tools),
+                    &request,
+                    crate::database::now_ms(),
+                )?
+            }
             _ => return Err("unsupported Kernel context resource".into()),
         };
         token.check()?;
+        // `read_tool_result` already answers with a content block of pure stored
+        // bytes. Re-serialising that whole envelope into the text block would
+        // make ranges impossible to concatenate back into the original result,
+        // so it keeps its own shape and only the metadata becomes `details`.
+        // `skill_load` likewise returns its own content/details envelope (the
+        // audited skill text plus activation metadata).
+        if tool == "read_tool_result" {
+            let text = result["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            let details = result.get("details").cloned().unwrap_or_else(|| json!({}));
+            return Ok(json!({"content":[{"type":"text","text":text}],"details":details}));
+        }
+        if tool == "skill_load" {
+            return Ok(result);
+        }
         let content = result.to_string();
         let mut details = result;
         if tool == "read_attachment" {

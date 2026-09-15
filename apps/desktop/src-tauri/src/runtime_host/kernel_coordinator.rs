@@ -16,6 +16,32 @@ use std::sync::Mutex;
 mod compaction;
 pub(super) mod live;
 mod receipt;
+mod steering;
+
+/// Returned by a model transport when a terminal decision lost a race with a
+/// mid-run request that was accepted moments earlier.
+///
+/// It is a scheduling outcome, not an execution failure: the drive loop
+/// re-plans the Run from durable facts, where the freshly accepted row is
+/// visible and becomes an ordinary additional-input round. Reported as a plain
+/// error it would turn a normal user action into a task failure.
+pub(crate) const STEERING_REPLAN: &str = "kernel.steering_replan";
+
+/// Translate a lost terminal race into the re-plan signal.
+///
+/// The decision write-set rolled back, so nothing is committed and no engine
+/// work was consumed; re-entering the drive loop re-reads durable facts (where
+/// the freshly accepted request is still `received`) and plans an additional
+/// input round for it.
+/// Normalize a decision error: a lost terminal race becomes the re-plan signal,
+/// everything else is passed through unchanged.
+pub(crate) fn replan_or_error(error: String) -> String {
+    if error.starts_with(kernel::STEERING_COMPETITION) {
+        STEERING_REPLAN.to_string()
+    } else {
+        error
+    }
+}
 
 fn checkpoint_hash(value: &Value) -> String {
     format!(
@@ -27,6 +53,8 @@ fn checkpoint_hash(value: &Value) -> String {
 enum DecisionLease<'a> {
     ModelRetry(&'a str, &'a str),
     Initial(&'a str),
+    Continuation(&'a str, &'a str),
+    ContinuationDispatch(&'a str, &'a str),
     Tool(&'a str, &'a str),
     Batch(&'a str, &'a str),
     /// Claim a settled batch's pending delivery and arm its model request.
@@ -81,6 +109,8 @@ impl<'a> KernelCoordinator<'a> {
             || binding.execution_profile_id != config.execution_profile_id
             || binding.budgets.approval_wait_ms != config.approval_wait_timeout_ms
             || binding.budgets.model_request_ms != config.model_request_timeout_ms
+            || binding.budgets.model_first_response_ms != config.model_first_response_ms
+            || binding.budgets.model_idle_ms != config.model_idle_ms
             || binding.budgets.tool_execution_ms != config.tool_execution_timeout_ms
             || binding.budgets.run_execution_ms != config.run_execution_budget_ms
         {
@@ -118,6 +148,18 @@ impl<'a> KernelCoordinator<'a> {
         lease: Option<DecisionLease<'_>>,
         action: impl FnOnce(&mut RunController, ClockReading) -> Result<Vec<Effect>, KernelError>,
     ) -> Result<(), String> {
+        self.apply_decision(lease, action, None)
+    }
+
+    /// Same durable decision as [`Self::apply`], additionally transitioning
+    /// mid-run steering rows inside the same write-set (the round response
+    /// answers delivered rows; the directive built with it arms new ones).
+    fn apply_decision(
+        &self,
+        lease: Option<DecisionLease<'_>>,
+        action: impl FnOnce(&mut RunController, ClockReading) -> Result<Vec<Effect>, KernelError>,
+        steering: Option<&crate::database::SteeringDecision>,
+    ) -> Result<(), String> {
         // Re-read the immutable, hash-verified resource binding on each entry.
         if self
             .database
@@ -145,12 +187,17 @@ impl<'a> KernelCoordinator<'a> {
                     owner,
                 )?
             }
+            Some(DecisionLease::Continuation(effect_key, owner)) => self.database.kernel_commit_continuation_model(
+                &self.binding.run_id, now.wall_ms, &command, effect_key, owner, true, steering)?,
+            Some(DecisionLease::ContinuationDispatch(effect_key, owner)) => self.database.kernel_commit_continuation_model(
+                &self.binding.run_id, now.wall_ms, &command, effect_key, owner, false, None)?,
             Some(DecisionLease::Initial(owner)) => self.database.kernel_commit_initial_model(
                 &self.binding.run_id,
                 now.wall_ms,
                 &command,
                 owner,
                 true,
+                steering,
             )?,
             Some(DecisionLease::Tool(tool_call_id, owner)) => {
                 self.database.kernel_commit_tool_result(
@@ -168,6 +215,7 @@ impl<'a> KernelCoordinator<'a> {
                     &command,
                     batch_id,
                     owner,
+                    steering,
                 )?
             }
             Some(DecisionLease::BatchDispatch(batch_id, owner)) => {
@@ -199,9 +247,43 @@ impl<'a> KernelCoordinator<'a> {
     }
 
     pub(crate) fn tick(&self) -> Result<(), String> {
+        self.tick_budgets(false)
+    }
+
+    fn tick_settled_model(&self) -> Result<(), String> {
+        self.tick_budgets(true)
+    }
+
+    fn tick_budgets(&self, model_settled: bool) -> Result<(), String> {
+        // Fold pending worker-observed output progress into the controller so
+        // the first-response/idle bounds measure real output. The registry is
+        // consume-once: every preview counts exactly once, and ticks without
+        // fresh output grow idleness. The wall-anchored signal is bridged into
+        // the controller's monotonic domain by subtracting the observed idle
+        // span from the current monotonic reading (production clocks advance
+        // both domains together; unit tests drive note_model_progress
+        // directly and never depend on this conversion).
+        let progress = self
+            .database
+            .consume_kernel_model_progress(&self.binding.run_id);
         self.apply(None, |controller, now| {
-            Ok(controller.tick(now.monotonic_ms, now.wall_ms))
-        })
+            if let Some(progress_wall) = progress {
+                let idle = now.wall_ms.saturating_sub(progress_wall).max(0);
+                let mono = now.monotonic_ms.saturating_sub(idle).max(0);
+                controller.note_model_progress(mono, progress_wall);
+            }
+            Ok(if model_settled { controller.tick_settled_model(now.monotonic_ms, now.wall_ms) }
+               else { controller.tick(now.monotonic_ms, now.wall_ms) })
+        })?;
+        if self
+            .controller
+            .lock()
+            .map_err(|_| "Kernel coordinator lock poisoned")?
+            .is_terminal()
+        {
+            self.database.clear_kernel_model_progress(&self.binding.run_id);
+        }
+        Ok(())
     }
 
     pub(crate) fn propose_tools(
@@ -292,7 +374,16 @@ impl<'a> KernelCoordinator<'a> {
             return Err("persisted engine checkpoint batch mismatch".into());
         }
         let history = self.model_retry_context(batch_id, self.context_view(batch_id, &checkpoint.history)?)?;
-        let frame = self.prepare_batch_resume(batch_id, history, checkpoint.assistant_message)?;
+        // Replacement transport for a dead/compacting live session: re-collect
+        // every active steering row (new rows plus rows already delivered to
+        // the failed live attempt) under the batch delivery identity, so the
+        // rebuilt dispatch carries each row exactly once.
+        let steering_rows = self.database.deliver_steering_for_dispatch(
+            &self.binding.run_id,
+            &kernel::batch_delivery_idempotency_key(batch_id),
+        )?;
+        let notices = steering::steering_notices(&steering_rows);
+        let frame = self.prepare_batch_resume(batch_id, history, checkpoint.assistant_message, notices)?;
         if event["turnId"].as_str() != Some(frame.turn_id.as_str()) {
             return Err("persisted engine checkpoint turn mismatch".into());
         }
@@ -341,6 +432,7 @@ impl<'a> KernelCoordinator<'a> {
         batch_id: &str,
         history: Vec<Value>,
         assistant_message: Value,
+        steering: Vec<fox_engine_protocol::KernelSteeringNotice>,
     ) -> Result<fox_engine_protocol::KernelBatchResumeFrame, String> {
         use fox_engine_protocol::KernelBatchResumeFrame;
         self.tick()?;
@@ -381,6 +473,7 @@ impl<'a> KernelCoordinator<'a> {
             history,
             assistant_message,
             tools,
+            steering,
         };
         frame.validate()?;
         Ok(frame)
@@ -492,6 +585,14 @@ impl<'a> KernelCoordinator<'a> {
         })
     }
 
+    fn model_request_window_expired(&self) -> Result<bool, String> {
+        let now = self.clock.read();
+        let facts = self.controller.lock().map_err(|_| "Kernel coordinator lock poisoned")?
+            .shadow_checkpoint(now.monotonic_ms);
+        Ok(facts.model_request_since_wall_ms.is_some_and(|since|
+            now.wall_ms.saturating_sub(since) >= self.binding.budgets.model_request_ms))
+    }
+
     fn retry_settled_model(
         &self,
         effect_key: &str,
@@ -499,12 +600,28 @@ impl<'a> KernelCoordinator<'a> {
         cursor: u64,
         error: String,
     ) -> Result<(), String> {
-        let failure =
-            super::kernel_model_worker::settled_failure(&error).ok_or_else(|| error.clone())?;
+        // This is called only after the owning transport has dropped/reaped its
+        // worker. A missing terminal frame is recoverable while the same dispatch
+        // lease still owns the model request and every tool is already settled.
+        let failure = match super::kernel_model_worker::settled_failure(&error) {
+            Some(failure) => failure,
+            None if super::kernel_model_worker::is_reaped_transport_failure(&error) => {
+                let turn_id = self.controller.lock().map_err(|_| "Kernel coordinator lock poisoned")?
+                    .shadow_checkpoint(self.clock.now_monotonic_ms()).turn_id;
+                fox_engine_protocol::KernelModelFailure {
+                    schema_version: 1, run_id: self.binding.run_id.clone(), turn_id,
+                    checkpoint_seq: cursor, category: if error == "Kernel worker disconnected; reconcile delivery" || error == "Kernel worker write failed" {
+                        "model_transport_failure".into()
+                    } else { "model_timeout".into() }, http_status: None,
+                    retry_after_ms: None, telemetry: None,
+                }
+            }
+            None => return Err(error),
+        };
         if failure.run_id != self.binding.run_id || failure.checkpoint_seq != cursor {
             return Err("model failure belongs to another dispatch".into());
         }
-        self.tick()?;
+        self.tick_settled_model()?;
         self.cancellation.run_token(&self.binding.run_id)?.check()?;
         let failure_json = serde_json::to_string(&failure).map_err(|_| "invalid model failure")?;
         self.apply(
@@ -542,6 +659,15 @@ impl<'a> KernelCoordinator<'a> {
             .kernel_validate_resource_acquisition(&self.binding.run_id)?;
         let mut input = self.database.kernel_initial_input(&self.binding.run_id)?;
         input.messages = self.model_retry_context("initial", self.context_view("initial", &input.messages)?)?;
+        // Same steering boundary as the live transport: collect all active
+        // rows into this frozen initial dispatch before it is armed.
+        let steering_rows = self.database.deliver_steering_for_dispatch(
+            &self.binding.run_id,
+            kernel::INITIAL_MODEL_IDEMPOTENCY_KEY,
+        )?;
+        input
+            .messages
+            .extend(steering_rows.iter().map(steering::steering_user_message));
         let token = self.cancellation.run_token(&self.binding.run_id)?;
         token.check()?;
         let frame = {
@@ -561,6 +687,7 @@ impl<'a> KernelCoordinator<'a> {
                 schema_version: 1,
                 input,
                 idempotency_key: kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into(),
+                continuation_key: None,
                 checkpoint_seq: guard.last_event_seq(),
             };
             frame.validate()?;
@@ -575,6 +702,7 @@ impl<'a> KernelCoordinator<'a> {
                 &candidate.persist_command(&effects),
                 owner,
                 false,
+                None,
             )?;
             *guard = candidate;
             frame
@@ -595,7 +723,11 @@ impl<'a> KernelCoordinator<'a> {
         if response.run_id != self.binding.run_id || response.turn_id != frame.input.turn_id || response.checkpoint_seq != frame.checkpoint_seq {
             return Err("initial response belongs to another request".into());
         }
-        self.tick()?;
+        self.tick_settled_model()?;
+        if self.model_request_window_expired()? {
+            return self.retry_settled_model(kernel::INITIAL_MODEL_EFFECT_KEY, owner, frame.checkpoint_seq,
+                super::kernel_model_worker::MODEL_WINDOW_EXPIRED.into());
+        }
         token.check()?;
         let encoded = serde_json::to_string(&response).map_err(|_| "invalid initial response")?;
         let next = if response.assistant_message["stopReason"] == "toolUse" {
@@ -605,45 +737,106 @@ impl<'a> KernelCoordinator<'a> {
                     "initial-batch:{}:{}",
                     self.binding.run_id, frame.checkpoint_seq
                 ),
-                history: frame.input.messages,
-                assistant_message: response.assistant_message,
+                history: frame.input.messages.clone(),
+                assistant_message: response.assistant_message.clone(),
             };
             checkpoint.validate()?;
             Some(checkpoint)
         } else { None };
-        self.apply(Some(DecisionLease::Initial(owner)), |controller, now| {
-            let mut effects = vec![controller.record_initial_model_response(&encoded)?];
-            if let Some(checkpoint) = next {
-                let value = serde_json::to_value(&checkpoint).map_err(|_| KernelError::FailClosed("invalid initial checkpoint".into()))?;
-                let stored = serde_json::json!({"hash":checkpoint_hash(&value),"value":value});
-                let calls = checkpoint.assistant_message["content"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .filter(|block| block["type"] == "toolCall")
-                    .enumerate()
-                    .map(|(source_order, call)| ToolCallRequest {
-                        tool_call_id: call["id"].as_str().unwrap().into(),
-                        tool: call["name"].as_str().unwrap().into(),
-                        canonical_input_json: call["arguments"].to_string(),
-                        source_order,
-                    })
-                    .collect();
-                effects.extend(controller.propose_tool_batch(
-                    &checkpoint.batch_id,
-                    calls,
-                    policy,
-                    now.monotonic_ms,
-                    now.wall_ms,
-                )?);
-                effects.push(
-                    controller.checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?,
-                );
-            } else {
-                effects.extend(controller.terminate(kernel::RunOutcome::Completed));
+        // A non-tool stop may not abandon input the Host already accepted: when
+        // the user's additional request arrived while this round was frozen, the
+        // round is answered by its own `steering` lane instead of completing.
+        // The next request carries everything this round saw — the frozen
+        // initial history plus this assistant turn — never a rebuild from the
+        // Run's initial input, which would drop the work already done. The reply
+        // is appended by the helper, exactly once.
+        let steering_input = if next.is_none() {
+            steering::steering_followup_input(
+                &self.database,
+                &self.binding,
+                frame.input.messages.clone(),
+                response.assistant_message.clone(),
+            )?
+        } else {
+            None
+        };
+        // A request accepted between the queue read above and this write-set can
+        // make a **Final** decision refuse. The model result is still in hand and
+        // the write-set rolled back, so the safe recovery is to answer the new
+        // request in this round and commit again — never to fail the Run (or
+        // leave the model request leased) over a race the user cannot see.
+        //
+        // One retry is enough by construction: the re-planned decision arms a
+        // `steering` continuation, which is not terminal, so the guard that
+        // rejected the completion cannot apply to it.
+        let mut steering_input = steering_input;
+        let mut attempts = 0u8;
+        loop {
+            #[cfg(test)]
+            live::test_barrier::fire(&self.binding.run_id);
+            let outcome = self.apply(Some(DecisionLease::Initial(owner)), |controller, now| {
+                let mut effects = vec![controller.record_initial_model_response(&encoded)?];
+                if let Some(checkpoint) = next.clone() {
+                    let value = serde_json::to_value(&checkpoint).map_err(|_| KernelError::FailClosed("invalid initial checkpoint".into()))?;
+                    let stored = serde_json::json!({"hash":checkpoint_hash(&value),"value":value});
+                    let calls = checkpoint.assistant_message["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|block| block["type"] == "toolCall")
+                        .enumerate()
+                        .map(|(source_order, call)| ToolCallRequest {
+                            tool_call_id: call["id"].as_str().unwrap().into(),
+                            tool: call["name"].as_str().unwrap().into(),
+                            canonical_input_json: call["arguments"].to_string(),
+                            source_order,
+                        })
+                        .collect();
+                    effects.extend(controller.propose_tool_batch(
+                        &checkpoint.batch_id,
+                        calls,
+                        policy,
+                        now.monotonic_ms,
+                        now.wall_ms,
+                    )?);
+                    effects.push(
+                        controller.checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?,
+                    );
+                } else if let Some(input) = &steering_input {
+                    let stored = serde_json::to_string(input)
+                        .map_err(|error| KernelError::FailClosed(error.to_string()))?;
+                    effects.extend(
+                        controller.request_steering_followup(steering::STEERING_PROMPT, &stored)?,
+                    );
+                } else {
+                    effects.extend(controller.terminate(kernel::RunOutcome::Completed));
+                }
+                Ok(effects)
+            });
+            match outcome {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.starts_with(kernel::STEERING_COMPETITION)
+                        && attempts < live::STEERING_COMPETITION_ATTEMPTS =>
+                {
+                    attempts += 1;
+                    if steering_input.is_none() {
+                        steering_input = steering::steering_followup_input(
+                            &self.database,
+                            &self.binding,
+                            frame.input.messages.clone(),
+                            response.assistant_message.clone(),
+                        )?;
+                    }
+                    if steering_input.is_none() {
+                        // The queue emptied again (an explicit cancel raced us):
+                        // there is nothing to plan for, so this is a real refusal.
+                        return Err(replan_or_error(error));
+                    }
+                }
+                Err(error) => return Err(replan_or_error(error)),
             }
-            Ok(effects)
-        })
+        }
     }
 
     /// Only the durable snapshot can configure a formal worker dispatch.
@@ -757,68 +950,188 @@ impl<'a> KernelCoordinator<'a> {
             || response.batch_id != frame.batch_id || response.checkpoint_seq != frame.checkpoint_seq {
             return Err("model response belongs to another batch delivery".into());
         }
-        self.tick()?;
+        self.tick_settled_model()?;
+        if self.model_request_window_expired()? {
+            return self.retry_settled_model(&kernel::batch_delivery_effect_key(batch_id), owner, frame.checkpoint_seq,
+                super::kernel_model_worker::MODEL_WINDOW_EXPIRED.into());
+        }
         token.check()?;
         let response_json = serde_json::to_string(&response).map_err(|error| error.to_string())?;
         // Node supplies only the new assistant message. Preserve the original
         // history and reconstruct prior results exclusively from durable facts.
+        // The batch's own history is needed for both branches: the next tool
+        // proposal and the steering follow-up must see the same rounds.
+        let mut batch_history = frame.history.clone();
+        batch_history.push(frame.assistant_message.clone());
+        batch_history.extend(steering::settled_tool_result_messages(
+            &frame.tools,
+            &frame.assistant_message,
+        ));
         let next = if response.assistant_message["stopReason"] == "toolUse" {
-            let mut history = frame.history.clone();
-            history.push(frame.assistant_message.clone());
-            history.extend(frame.tools.iter().map(|tool| {
-                serde_json::json!({
-                    "role":"toolResult", "toolCallId":tool.tool_call_id, "toolName":tool.tool,
-                    "content":tool.result["content"], "details":{},
-                    "isError":tool.state == fox_engine_protocol::KernelSettledToolState::Failed,
-                    "timestamp":frame.assistant_message["timestamp"].as_i64().unwrap_or(0),
-                })
-            }));
             let checkpoint = fox_engine_protocol::KernelEngineBatchCheckpoint {
                 schema_version: 1, batch_id: format!("model-batch:{}:{}", self.binding.run_id, frame.checkpoint_seq),
-                history, assistant_message: response.assistant_message,
+                history: batch_history.clone(), assistant_message: response.assistant_message.clone(),
             };
             checkpoint.validate()?;
             Some(checkpoint)
         } else {
             None
         };
-        self.apply(
-            Some(DecisionLease::Batch(batch_id, owner)),
-            |controller, now| {
-                let mut effects =
-                    vec![controller.record_batch_model_response(batch_id, &response_json)?];
-                if let Some(checkpoint) = next {
-                    let value = serde_json::to_value(&checkpoint)
-                        .map_err(|error| KernelError::FailClosed(error.to_string()))?;
-                    let stored = serde_json::json!({"hash":checkpoint_hash(&value),"value":value});
-                    let calls = checkpoint.assistant_message["content"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .filter(|block| block["type"] == "toolCall")
-                        .enumerate()
-                        .map(|(source_order, call)| ToolCallRequest {
-                            tool_call_id: call["id"].as_str().unwrap().into(),
-                            tool: call["name"].as_str().unwrap().into(),
-                            canonical_input_json: call["arguments"].to_string(),
-                            source_order,
-                        })
-                        .collect();
-                    effects.extend(controller.propose_tool_batch(
-                        &checkpoint.batch_id,
-                        calls,
-                        policy,
-                        now.monotonic_ms,
-                        now.wall_ms,
-                    )?);
-                    effects.push(
-                        controller
-                            .checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?,
-                    );
-                } else {
-                    effects.extend(controller.terminate(kernel::RunOutcome::Completed));
+        // Same guarantee as the live round loop: accepted-but-unanswered user
+        // input is answered by its own lane before the Run may complete, and the
+        // follow-up round keeps the settled tool calls and results this round
+        // produced instead of restarting from the Run's initial input. The reply
+        // is appended by the helper, exactly once, after the batch history.
+        let steering_input = if next.is_none() {
+            steering::steering_followup_input(
+                &self.database,
+                &self.binding,
+                batch_history.clone(),
+                response.assistant_message.clone(),
+            )?
+        } else {
+            None
+        };
+        // Same recovery as the initial path: a Final decision that loses a race
+        // with a freshly accepted request is re-planned into its own steering
+        // round in this call, with the reply the Host already holds.
+        let mut steering_input = steering_input;
+        let mut attempts = 0u8;
+        loop {
+            #[cfg(test)]
+            live::test_barrier::fire(&self.binding.run_id);
+            let outcome = self.apply(
+                Some(DecisionLease::Batch(batch_id, owner)),
+                |controller, now| {
+                    let mut effects =
+                        vec![controller.record_batch_model_response(batch_id, &response_json)?];
+                    if let Some(checkpoint) = next.clone() {
+                        let value = serde_json::to_value(&checkpoint)
+                            .map_err(|error| KernelError::FailClosed(error.to_string()))?;
+                        let stored = serde_json::json!({"hash":checkpoint_hash(&value),"value":value});
+                        let calls = checkpoint.assistant_message["content"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|block| block["type"] == "toolCall")
+                            .enumerate()
+                            .map(|(source_order, call)| ToolCallRequest {
+                                tool_call_id: call["id"].as_str().unwrap().into(),
+                                tool: call["name"].as_str().unwrap().into(),
+                                canonical_input_json: call["arguments"].to_string(),
+                                source_order,
+                            })
+                            .collect();
+                        effects.extend(controller.propose_tool_batch(
+                            &checkpoint.batch_id,
+                            calls,
+                            policy,
+                            now.monotonic_ms,
+                            now.wall_ms,
+                        )?);
+                        effects.push(
+                            controller
+                                .checkpoint_tool_batch(&checkpoint.batch_id, &stored.to_string())?,
+                        );
+                    } else if let Some(input) = &steering_input {
+                        let stored = serde_json::to_string(input)
+                            .map_err(|error| KernelError::FailClosed(error.to_string()))?;
+                        effects.extend(controller.request_steering_followup(
+                            steering::STEERING_PROMPT,
+                            &stored,
+                        )?);
+                    } else {
+                        effects.extend(controller.terminate(kernel::RunOutcome::Completed));
+                    }
+                    Ok(effects)
+                },
+            );
+            match outcome {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if error.starts_with(kernel::STEERING_COMPETITION)
+                        && attempts < live::STEERING_COMPETITION_ATTEMPTS =>
+                {
+                    attempts += 1;
+                    if steering_input.is_none() {
+                        steering_input = steering::steering_followup_input(
+                            &self.database,
+                            &self.binding,
+                            batch_history.clone(),
+                            response.assistant_message.clone(),
+                        )?;
+                    }
+                    if steering_input.is_none() {
+                        return Err(replan_or_error(error));
+                    }
                 }
-                Ok(effects)
+                Err(error) => return Err(replan_or_error(error)),
+            }
+        }
+    }
+
+    /// Lease one durable dispatch and verify it still matches the approved
+    /// tool identity. `None` means the call is not dispatchable right now
+    /// (unknown tool, non-running/terminal state, or a lost pending CAS); the
+    /// caller retries through the durable loop instead of replaying it.
+    fn lease_dispatch_effect(
+        &self,
+        tool_call_id: &str,
+        owner: &str,
+    ) -> Result<Option<kernel::OutboxEffect>, String> {
+        let effect_key = kernel::dispatch_effect_key(tool_call_id);
+        let guard = self
+            .controller
+            .lock()
+            .map_err(|_| "Kernel coordinator lock poisoned")?;
+        let data = guard.shadow_checkpoint(self.clock.now_monotonic_ms());
+        let tool = data
+            .tools
+            .iter()
+            .find(|tool| tool.tool_call_id == tool_call_id)
+            .ok_or("unknown Kernel tool")?;
+        if data.state.is_terminal()
+            || data.state == kernel::RunState::Cancelling
+            || tool.state != kernel::ToolCallState::Running
+        {
+            return Ok(None);
+        }
+        let Some(effect) = self.database.kernel_outbox_lease_effect(
+            &self.binding.run_id,
+            &effect_key,
+            owner,
+        )?
+        else {
+            return Ok(None);
+        };
+        let payload: Value =
+            serde_json::from_str(&effect.payload_json).map_err(|error| error.to_string())?;
+        let expected_input: Value =
+            serde_json::from_str(&tool.input_json).map_err(|error| error.to_string())?;
+        if effect.kind != kernel::OutboxEffectKind::DispatchTool
+            || effect.tool_call_id.as_deref() != Some(tool_call_id)
+            || effect.idempotency_key != kernel::dispatch_idempotency_key(tool_call_id)
+            || payload.get("tool").and_then(Value::as_str) != Some(tool.tool.as_str())
+            || payload.get("input") != Some(&expected_input)
+        {
+            return Err("durable dispatch differs from the approved tool identity".into());
+        }
+        Ok(Some(effect))
+    }
+
+    /// Commit one certain tool result inside its own CAS-guarded decision.
+    fn settle_dispatch_result(
+        &self,
+        tool_call_id: &str,
+        owner: &str,
+        succeeded: bool,
+        result: &Value,
+    ) -> Result<(), String> {
+        self.tick()?;
+        self.apply(
+            Some(DecisionLease::Tool(tool_call_id, owner)),
+            |controller, _| {
+                controller.tool_settled(tool_call_id, succeeded, &result.to_string())
             },
         )
     }
@@ -838,57 +1151,125 @@ impl<'a> KernelCoordinator<'a> {
         ) -> Result<(bool, Value), String>,
     ) -> Result<bool, String> {
         self.tick()?;
-        let effect_key = kernel::dispatch_effect_key(tool_call_id);
-        let leased = {
-            let guard = self
-                .controller
-                .lock()
-                .map_err(|_| "Kernel coordinator lock poisoned")?;
-            let data = guard.shadow_checkpoint(self.clock.now_monotonic_ms());
-            let tool = data
-                .tools
-                .iter()
-                .find(|tool| tool.tool_call_id == tool_call_id)
-                .ok_or("unknown Kernel tool")?;
-            if data.state.is_terminal()
-                || data.state == kernel::RunState::Cancelling
-                || tool.state != kernel::ToolCallState::Running
-            {
-                return Ok(false);
-            }
-            let Some(effect) = self.database.kernel_outbox_lease_effect(
-                &self.binding.run_id,
-                &effect_key,
-                owner,
-            )?
-            else {
-                return Ok(false);
-            };
-            let payload: Value =
-                serde_json::from_str(&effect.payload_json).map_err(|error| error.to_string())?;
-            let expected_input: Value =
-                serde_json::from_str(&tool.input_json).map_err(|error| error.to_string())?;
-            if effect.kind != kernel::OutboxEffectKind::DispatchTool
-                || effect.tool_call_id.as_deref() != Some(tool_call_id)
-                || effect.idempotency_key != kernel::dispatch_idempotency_key(tool_call_id)
-                || payload.get("tool").and_then(Value::as_str) != Some(tool.tool.as_str())
-                || payload.get("input") != Some(&expected_input)
-            {
-                return Err("durable dispatch differs from the approved tool identity".into());
-            }
-            effect
+        let Some(leased) = self.lease_dispatch_effect(tool_call_id, owner)? else {
+            return Ok(false);
         };
         let token = self
             .cancellation
             .tool_token(&self.binding.run_id, tool_call_id)?;
         token.check()?;
         let (succeeded, result) = execute(&self.binding, &leased, &token)?;
-        self.tick()?;
-        self.apply(
-            Some(DecisionLease::Tool(tool_call_id, owner)),
-            |controller, _| controller.tool_settled(tool_call_id, succeeded, &result.to_string()),
-        )?;
+        self.settle_dispatch_result(tool_call_id, owner, succeeded, &result)?;
         Ok(true)
+    }
+
+    /// Run a Host-classified group of independent, read-only tool calls with
+    /// bounded concurrency, then settle every certain result in source order.
+    ///
+    /// Safety/durability shape:
+    ///  * each call acquires its own `pending → leased` CAS under its own
+    ///    idempotency key, so no call is executed twice and a crashed owner's
+    ///    lease is never stolen here;
+    ///  * worker threads touch only owned copies of the frozen binding, the
+    ///    leased effect and a per-tool cancellation token — never coordinator
+    ///    or database state. All lease/settle decisions stay on this thread;
+    ///  * each thread's result is persisted as its own decision in source
+    ///    order, regardless of which thread finished first;
+    ///  * an `Err`/panic means uncertain execution: that effect stays leased
+    ///    (never replayed), the other completed reads still settle, and the
+    ///    error propagates exactly as on the serial path so the live loop's
+    ///    leased-effect guard detaches the session;
+    ///  * cancellation is per tool (`tool_token`); a user cancel trips every
+    ///    in-flight token, and the pre-execution check prevents starting any
+    ///    remaining call.
+    pub(crate) fn dispatch_read_only_group(
+        &self,
+        effects: &[kernel::OutboxEffect],
+        owner: &str,
+        execute: &(dyn Fn(
+            &RunControlBinding,
+            &kernel::OutboxEffect,
+            &kernel::CancellationToken,
+        ) -> Result<(bool, Value), String>
+             + Sync),
+    ) -> Result<(), String> {
+        if effects.is_empty() {
+            return Ok(());
+        }
+        if effects.len() == 1 {
+            let tool_call_id = effects[0]
+                .tool_call_id
+                .clone()
+                .ok_or("missing dispatch tool identity")?;
+            return self
+                .dispatch_tool(&tool_call_id, owner, |binding, leased, token| {
+                    execute(binding, leased, token)
+                })
+                .map(|_| ());
+        }
+        self.tick()?;
+        // Lease phase: every chosen call gets its own durable CAS before any of
+        // them executes. A call that is no longer dispatchable ends the group;
+        // what was already leased still has to run (its lease cannot dangle).
+        let mut leased: Vec<(String, kernel::OutboxEffect, kernel::CancellationToken)> =
+            Vec::with_capacity(effects.len());
+        for effect in effects {
+            let tool_call_id = effect
+                .tool_call_id
+                .clone()
+                .ok_or("missing dispatch tool identity")?;
+            let Some(leased_effect) = self.lease_dispatch_effect(&tool_call_id, owner)? else {
+                break;
+            };
+            let token = self
+                .cancellation
+                .tool_token(&self.binding.run_id, &tool_call_id)?;
+            token.check()?;
+            leased.push((tool_call_id, leased_effect, token));
+        }
+        // Execution phase: owned per-thread copies keep the Send requirements
+        // independent of coordinator internals (the clock trait object etc.).
+        let jobs: Vec<(RunControlBinding, kernel::OutboxEffect, kernel::CancellationToken)> = leased
+            .iter()
+            .map(|(_tool_call_id, effect, token)| {
+                (self.binding.clone(), effect.clone(), token.clone())
+            })
+            .collect();
+        let outcomes: Vec<Result<(bool, Value), String>> = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(jobs.len());
+            for (binding, effect, token) in jobs {
+                handles.push(scope.spawn(move || execute(&binding, &effect, &token)));
+            }
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|_| {
+                        // A panicking reader has no durable result: treat it as
+                        // uncertain execution; the leased effect is not settled.
+                        Err("parallel read-only tool execution panicked without a durable result"
+                            .to_owned())
+                    })
+                })
+                .collect()
+        });
+        // Settlement phase: source order, one CAS-guarded decision per tool.
+        let mut uncertain: Option<String> = None;
+        for ((tool_call_id, _effect, _token), outcome) in leased.into_iter().zip(outcomes) {
+            match outcome {
+                Ok((succeeded, result)) => {
+                    self.settle_dispatch_result(&tool_call_id, owner, succeeded, &result)?;
+                }
+                Err(error) => {
+                    // This effect stays leased; keep the first failure to
+                    // propagate after the other certain results settle.
+                    uncertain.get_or_insert(error);
+                }
+            }
+        }
+        if let Some(error) = uncertain {
+            return Err(error);
+        }
+        Ok(())
     }
 }
 

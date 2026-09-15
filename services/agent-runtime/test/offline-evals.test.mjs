@@ -29,7 +29,7 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   const report = await runOfflineEvals()
   assert.equal(report.schemaVersion, 4)
   assert.equal(report.summary.suites, 9)
-  assert.equal(report.summary.total, 122)
+  assert.equal(report.summary.total, 124) // catalog grew with skill_load
   assert.equal(report.summary.failed, 0, JSON.stringify(report.suites.filter((suite) => suite.cases.some((item) => !item.passed)), null, 2))
   assert.equal(report.metadata.evaluatorVersion, 'fox-offline-evaluator-v8')
   const injectionCases = report.suites.find((suite) => suite.id === 'injection-boundary').cases
@@ -37,11 +37,11 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   assert.equal(injectionCases.every((item) => item.isolatedInHostWorkSnapshot && item.workSnapshotAuthorityCount === 1), true)
   assert.equal(injectionCases.some((item) => 'isolatedInWorkspaceContext' in item), false)
   assert.equal(report.baseline.manifest.id, 'phase-0b-full-baseline')
-  assert.equal(report.baseline.manifest.version, '2026-09-11.1')
-  assert.equal(report.baseline.summary.total, 122)
+  assert.equal(report.baseline.manifest.version, '2026-09-14.1') // skill_load added to the canonical tool catalog
+  assert.equal(report.baseline.summary.total, 124)
   assert.deepEqual(
     Object.fromEntries(Object.entries(report.baseline.summary.byCategory).map(([category, summary]) => [category, summary.total])),
-    { simple: 10, medium: 82, complex: 25, recovery: 5 },
+    { simple: 10, medium: 84, complex: 25, recovery: 5 },
   )
   const runtimeToolCatalog = report.suites.find((suite) => suite.id === 'runtime-tool-catalog')
   assert.equal(runtimeToolCatalog.cases.length, RUNTIME_TOOL_CATALOG.length)
@@ -119,8 +119,8 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
     { total: 6, passed: 6, failed: 0 },
   )
   assert.equal(report.metadata.datasetHash, '610af6adb505549587222e7410ac7003b46241b974174e2a96ccb01fddadf933')
-  assert.equal(report.metadata.manifestHash, '1efe5b7d473af3a7f9c398cd6cd96c846532f679dbfd8328ba95f12f3ae90a8b')
-  assert.equal(report.metadata.toolCatalogHash, '826a87409b9ace0a2151c62d7236fa930bb0ea6a41c6ef69ff6b347dc7e665e8')
+  assert.equal(report.metadata.manifestHash, 'f9e92313b963799b3959f0036ceebb9e2917f38a7334c88b69d82206c5f33a62') // manifest now includes the skill_load catalog case
+  assert.equal(report.metadata.toolCatalogHash, '475f570c6b00829e1db4cc358301dc9dd7d7e0fb1792614caeeca66c20c1ea8c') // skill_load added to RUNTIME_TOOL_CATALOG
   assert.match(report.metadata.modelConfigHash, /^[a-f0-9]{64}$/)
   assert.match(report.metadata.environmentHash, /^[a-f0-9]{64}$/)
   assert.match(report.metadata.stablePromptHash, /^[a-f0-9]{16,64}$/)
@@ -132,7 +132,8 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   assert.equal(report.metadata.promptCacheIdentity.toolCatalogHash, report.metadata.toolCatalogHash)
   assert.equal(report.metadata.promptCacheDiagnostics.read.eligible, true)
   assert.equal(report.metadata.promptCacheDiagnostics.write.eligible, false)
-  assert.equal(report.resultHash, 'f5ff4a41be67f2f1df45654a079451622db729224e5e0fe98c54a2431d7c6793')
+  // Cursor metadata is model-visible; complete refers only to stored bytes.
+  assert.equal(report.resultHash, 'acfae7dbb89f25cb0b0e26182c76de4b40cb897a8e51e49dbc949eac5520f193') // result identity follows toolCatalogHash
 })
 
 test('locks Graph review and final Acceptance schemas, profile boundary, and truthful completion Prompt', () => {

@@ -3,7 +3,7 @@ use crate::kernel_compaction::{self as context, CompactionPlan, CompactionResult
 
 impl KernelCoordinator<'_> {
     pub(super) fn model_retry_context(&self, target: &str, mut view: Vec<Value>) -> Result<Vec<Value>, String> {
-        let effect_key = if target == "initial" { "initial-model".to_string() } else { format!("deliver-batch:{target}") };
+        let effect_key = if target == "initial" { "initial-model".to_string() } else if target.starts_with("continuation:") { target.to_owned() } else { format!("deliver-batch:{target}") };
         if self.database.kernel_model_retry_needs_completion(&self.binding.run_id, &effect_key)? {
             // This fixed recovery instruction fits within the dispatch's 4096
             // reserved bytes. The durable source/compaction history is unchanged.
@@ -17,6 +17,7 @@ impl KernelCoordinator<'_> {
     }
 
     fn source_context(&self, target: &str) -> Result<Vec<Value>, String> {
+        if target.starts_with("continuation:") { return Ok(self.stored_continuation_input(target)?.messages); }
         if target == "initial" {
             return Ok(self
                 .database
@@ -77,10 +78,7 @@ impl KernelCoordinator<'_> {
         let config = self.database.kernel_model_config(&self.binding.run_id)?;
         let original = self.source_context(target)?;
         let view = self.context_view(target, &original)?;
-        let extra = extra_bytes
-            .saturating_add(config.system_prompt.len())
-            .saturating_add(context::bytes(&config.proposal_tools)?);
-        if context::bytes(&view)? <= context::history_limit(&config, extra) {
+        if context::context_within_budget(&config, &view, extra_bytes)? {
             return Ok(false);
         }
         let previous = self

@@ -1,6 +1,10 @@
 mod capability_tools;
 pub(crate) mod attachment_compute;
 mod continuation;
+pub(crate) mod managed_files;
+mod tool_result_read;
+mod skill_load;
+pub(crate) mod delivery;
 pub(crate) mod kernel_coordinator;
 mod kernel_model_worker;
 mod kernel_run_lock;
@@ -24,8 +28,9 @@ use crate::{
     database::{
         AgentRecord, ApprovalDecision, ApprovalRecord, AttachmentRecord, ChildRunBudget,
         ChildRunRecord, Database, EvaluationRunSummary, HostToolCallDisposition,
-        KnowledgeReference, MemoryProposalInput, PreparedDigitalColleagueTrigger, StartRunResult,
-        ToolCallRecord, MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
+        KnowledgeReference, MemoryProposalInput, PreparedDigitalColleagueTrigger,
+        SkillActivationRecord, StartRunResult, ToolCallRecord,
+        MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
     },
     local_knowledge::LocalKnowledgeStore,
 };
@@ -811,6 +816,9 @@ pub struct RuntimeHost {
     sessions_dir: PathBuf,
     attachments_dir: PathBuf,
     skills_dir: PathBuf,
+    /// Host-side backups of files before intercepted writes; restore reads
+    /// these. Lives outside project folders so backups never pollute repos.
+    managed_files_dir: PathBuf,
     yuxi_client: YuxiClient,
     child_hosts: Arc<Mutex<HashMap<String, RuntimeHost>>>,
     run_budget_override: Option<ChildRunBudget>,
@@ -944,6 +952,10 @@ impl RuntimeHost {
                 shadow: Arc::new(shadow_reconcile::ShadowReconciler::new(database.clone())),
             })),
             run_transition: Arc::new(Mutex::new(())),
+            managed_files_dir: sessions_dir
+                .parent()
+                .map(|base| base.join("managed-file-backups"))
+                .unwrap_or_else(|| sessions_dir.join("managed-file-backups")),
             sessions_dir,
             attachments_dir,
             skills_dir,
@@ -960,6 +972,10 @@ impl RuntimeHost {
         };
         host.reconcile_continuation_proposals();
         host
+    }
+
+    pub(crate) fn managed_files_dir(&self) -> &Path {
+        &self.managed_files_dir
     }
 
     fn reconcile_continuation_proposals(&self) {
@@ -1156,7 +1172,10 @@ impl RuntimeHost {
             "sessionResume": true,
             "toolApproval": true,
             "imageInput": image_input,
-            "steering": false,
+            // Host persists mid-run additions durably and consumes them at
+            // dispatch boundaries; a runtime that does not splice directive
+            // steering still receives them through frozen input messages.
+            "steering": true,
             "contextCompaction": true,
             "dynamicModelSwitch": false
         })
@@ -1297,6 +1316,8 @@ impl RuntimeHost {
             execution_profile_id: execution_profile_id.to_owned(),
             prompt_config_hash: prompt_config_hash.to_owned(),
             model_request_timeout_ms: budgets.model_request_ms,
+            model_first_response_ms: budgets.model_first_response_ms,
+            model_idle_ms: budgets.model_idle_ms,
             tool_execution_timeout_ms: budgets.tool_execution_ms,
             run_execution_budget_ms: budgets.run_execution_ms,
             approval_wait_timeout_ms: budgets.approval_wait_ms,
@@ -1841,13 +1862,38 @@ impl RuntimeHost {
             runtime_package_tool_scope(&assistant_package),
             expert_package.as_ref().and_then(runtime_package_tool_scope),
         );
-        let skill_prompt = crate::skills::enabled_skill_prompt_for_context(
+        // Units are Unicode characters (never UTF-8 bytes or tokens); the plan
+        // also keeps a full on-demand catalog so budget-skipped skills stay
+        // discoverable and loadable through `skill_load`.
+        let skill_plan = crate::skills::skill_prompt_plan(
             &self.skills_dir,
             &enabled_skills,
             available_skill_tools.as_ref(),
             text,
             8_000,
         )?;
+        // Audit exactly which skill content versions this Run's frozen first
+        // prompt contained. Failure to record the audit is a Host failure, not
+        // something the model can paper over.
+        for included in &skill_plan.included {
+            self.database.record_skill_activation(
+                &started.run.id,
+                Some(&started.run.conversation_id),
+                &SkillActivationRecord {
+                    skill_id: included.id.clone(),
+                    version: included.version.clone(),
+                    content_sha256: included.content_sha256.clone(),
+                    source: "initial_prompt".to_owned(),
+                    required_tools: included.required_tools.clone(),
+                    missing_tools: Vec::new(),
+                    tools_available: true,
+                    char_count: included.chars as i64,
+                    byte_count: included.bytes as i64,
+                    created_at: crate::database::now_ms(),
+                },
+            )?;
+        }
+        let skill_prompt = skill_plan.prompt;
         let expert_binding_payload = expert_binding.as_ref().map(|binding| {
             json!({
                 "bindingId": binding.id,
@@ -1863,7 +1909,7 @@ impl RuntimeHost {
             None if authority == fox_engine_protocol::ExecutionAuthority::Authoritative => {
                 let mut budgets = fox_engine_protocol::TimeBudgets::default();
                 if let Some(budget) = &self.run_budget_override {
-                    budgets.run_execution_ms = budgets.run_execution_ms.min(budget.max_duration_ms as i64);
+                    budgets.restrict_execution_ms(budget.max_duration_ms as i64);
                 }
                 self.database.freeze_kernel_run_control_for_engine(&started.run.id, execution_profile.id(), budgets, &crate::kernel_model_config::configured_engine()?)?
             }
@@ -1882,6 +1928,43 @@ impl RuntimeHost {
             || control_binding.conversation_id != started.run.conversation_id
             || control_binding.execution_profile_id != execution_profile.id() {
             return Err("Startup cannot replace the frozen Run engine/authority/profile/conversation".into());
+        }
+        // Ordinary user-facing tasks that explicitly promise files get a
+        // lightweight, artifact-bound delivery checklist. Questions, analysis
+        // and delegated child Runs seed nothing; the ledger is evaluated by
+        // the authoritative live loop (legacy per-round transport does not
+        // verify it, so it must not leave pending rows there).
+        if authority == fox_engine_protocol::ExecutionAuthority::Authoritative
+            && run_role == "user_facing_lead"
+        {
+            let mut delivery_seeds = delivery::expectations_from_task(text);
+            if !delivery_seeds.is_empty() {
+                // Structured demands the task states in a machine-decidable form
+                // are bound to the items that must satisfy them, so the stop gate
+                // verifies exactly what this task promised. Expectations that must
+                // be recomputed from source data are bound here, where the
+                // authorized project root is known: the file's bytes, its hash and
+                // the column's presence are Host facts, not task-text guesses.
+                let requirements = delivery::requirements_from_task(text)
+                    .into_iter()
+                    .map(|requirement| match control_binding.permission.project_root.as_deref() {
+                        Some(root) => {
+                            delivery::bind_source_distribution(std::path::Path::new(root), requirement)
+                        }
+                        None => requirement,
+                    })
+                    .collect::<Vec<_>>();
+                if !requirements.is_empty() {
+                    for seed in delivery_seeds.iter_mut() {
+                        delivery::attach_requirements(seed, &requirements);
+                    }
+                }
+                self.database.seed_delivery_checklist(
+                    &started.run.id,
+                    &delivery_seeds,
+                    crate::database::now_ms(),
+                )?;
+            }
         }
         let project_context = json!({
             "projectRoot": control_binding.permission.project_root,
@@ -2149,9 +2232,7 @@ impl RuntimeHost {
             if enforce_count_budget_override { inherited.permission.mode = fox_engine_protocol::PermissionMode::ReadOnly; }
             if graph_review_request_id.is_some() { inherited.execution_profile_id = GRAPH_REVIEWER_EXECUTION_PROFILE.into(); }
             inherited.permission_snapshot_id = Database::run_control_permission_hash(&inherited.permission)?;
-            inherited.budgets.run_execution_ms = inherited.budgets.run_execution_ms.min(child_run.budget.max_duration_ms);
-            inherited.budgets.tool_execution_ms = inherited.budgets.tool_execution_ms.min(inherited.budgets.run_execution_ms);
-            inherited.budgets.model_request_ms = inherited.budgets.model_request_ms.min(inherited.budgets.run_execution_ms);
+            inherited.budgets.restrict_execution_ms(child_run.budget.max_duration_ms);
             self.database.freeze_run_control(&inherited)?;
         }
         let mut child_host = RuntimeHost::new(
@@ -3771,6 +3852,19 @@ impl RuntimeHost {
                                 &stdin,
                                 envelope,
                             )
+                        } else if tool == "read_tool_result" {
+                            // Stored-result reader: no approval gate and no
+                            // side effects, so it does not need an AppHandle.
+                            handle_tool_result_read_request(&database, &stdin, envelope)
+                        } else if tool == "skill_load" {
+                            // On-demand skill text: read-only and audited, no
+                            // approval gate and no scope arguments from the model.
+                            handle_skill_load_request(
+                                &database,
+                                &child_runtime_host.skills_dir,
+                                &stdin,
+                                envelope,
+                            )
                         } else if capability_tools::is_capability_tool(tool) {
                             handle_capability_tool_request(
                                 &app, &database, &state, &stdin, envelope,
@@ -4407,6 +4501,280 @@ fn parse_runtime_ready_payload(payload: &Value) -> Result<(String, Option<String
         .map_err(|error| format!("runtime capability manifest is invalid: {error}"))?;
     protocol::validate_host_manifest(&manifest)?;
     Ok((runtime, runtime_version, capabilities))
+}
+
+/// The conversation a scoped read of this Run may touch.
+///
+/// Authorization is derived from Host's own persisted facts: the frozen
+/// `run_control_bindings` row when one exists, otherwise the Run's own row. A Run
+/// started before frozen bindings existed keeps exactly the scope it already had;
+/// nothing here rewrites or widens it.
+///
+/// The conversation claimed on the protocol envelope is checked against that
+/// answer rather than used as the answer, so a Runtime — or a model driving one —
+/// cannot hand over a different conversation's id to reach results it was not
+/// given.
+fn run_bound_conversation(
+    database: &Database,
+    run_id: &str,
+    claimed: Option<&str>,
+) -> Result<String, String> {
+    let conversation = match database.run_control_binding(run_id)? {
+        Some(binding) => binding.conversation_id,
+        // No frozen binding: fall back to the persisted Run row. This is the
+        // pre-binding fact and is reported, never overlaid with a new one.
+        None => database
+            .run_conversation(run_id)?
+            .ok_or_else(|| format!("Run '{run_id}' does not exist"))?,
+    };
+    if let Some(claimed) = claimed.map(str::trim).filter(|value| !value.is_empty()) {
+        if claimed != conversation {
+            return Err(format!(
+                "Run '{run_id}' is bound to a different conversation; stored results stay scoped to it"
+            ));
+        }
+    }
+    Ok(conversation)
+}
+
+/// Serve `read_tool_result`.
+///
+/// The tool only reads bytes Host already stored for a settled call, so there is
+/// no approval gate and no re-execution path: nothing it does can change a file
+/// or repeat a write. The read is still recorded as its own ToolCall so the trace
+/// shows what the model asked for.
+fn execute_tool_result_read_request(
+    database: &Database,
+    envelope: &RuntimeEnvelope,
+) -> Result<Value, String> {
+    let run_id = envelope
+        .run_id
+        .as_deref()
+        .ok_or_else(|| "read_tool_result request is missing runId".to_owned())?;
+    let payload = envelope
+        .payload
+        .as_ref()
+        .ok_or_else(|| "read_tool_result request is missing payload".to_owned())?;
+    let tool_call_id = payload
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "read_tool_result request is missing toolCallId".to_owned())?;
+    let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    let conversation_id =
+        run_bound_conversation(database, run_id, envelope.conversation_id.as_deref())?;
+    if let Some(response) = inspect_existing_host_tool_call(
+        database,
+        run_id,
+        tool_call_id,
+        "read_tool_result",
+        &input,
+    )? {
+        return Ok(response);
+    }
+    let hook_decision = crate::lifecycle_hooks::before_tool(
+        database,
+        run_id,
+        tool_call_id,
+        "read_tool_result",
+        &input,
+    )?;
+    if let Some(reason) = &hook_decision.blocked {
+        return Err(format!("[hook.blocked] {reason}"));
+    }
+    let request = tool_result_read::prepare(&input)?;
+    match create_fresh_host_tool_call(
+        database,
+        run_id,
+        tool_call_id,
+        "read_tool_result",
+        &input,
+        "running",
+        false,
+    )? {
+        HostToolCallExecution::Execute(record) => {
+            drop(record);
+            let outcome = tool_result_read::execute(database, &conversation_id, &request);
+            finalize_host_tool_execution(
+                database,
+                run_id,
+                tool_call_id,
+                "read_tool_result",
+                &input,
+                hook_decision.annotations,
+                outcome,
+            )
+        }
+        HostToolCallExecution::Replay(response) => Ok(response),
+    }
+}
+
+fn handle_tool_result_read_request(
+    database: &Database,
+    stdin: &Arc<Mutex<ChildStdin>>,
+    envelope: RuntimeEnvelope,
+) {
+    let response = execute_tool_result_read_request(database, &envelope)
+        .unwrap_or_else(|error| json!({ "isError": true, "error": error }));
+    let response_type = if response
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "tool.execute_failed"
+    } else {
+        "tool.execute_completed"
+    };
+    let response = HostResponse::for_request(&envelope, response_type, response);
+    if let Err(error) = write_protocol_message(stdin, &response) {
+        eprintln!("fox: failed to answer read_tool_result: {error}");
+    }
+}
+
+/// Resolve the skill ids enabled for a conversation exactly the way Run start
+/// does: assistant package plus the expert's frozen package snapshot, each
+/// filtered through its package scope and de-duplicated. Used by `skill_load`
+/// so on-demand enablement can never exceed the initial one.
+pub(super) fn conversation_enabled_skill_ids(
+    database: &Database,
+    conversation_id: &str,
+) -> Result<Vec<String>, String> {
+    let agent_id = database.conversation_agent_id(conversation_id)?;
+    let assistant = database
+        .get_agent(&agent_id)?
+        .ok_or_else(|| "conversation assistant was not found".to_owned())?;
+    let assistant_skills = database.enabled_agent_skills(&assistant.id)?;
+    let enabled_mcps = database
+        .list_mcp_servers()?
+        .into_iter()
+        .filter(|server| server.enabled)
+        .map(|server| server.id)
+        .collect::<Vec<_>>();
+    let bound_knowledge = database.conversation_knowledge_references(conversation_id)?;
+    let assistant_package =
+        runtime_agent_package(&assistant, &assistant_skills, &enabled_mcps, &bound_knowledge)?;
+    let expert_binding = database.current_conversation_expert_binding(conversation_id)?;
+    let effective_expert_skills = expert_binding
+        .as_ref()
+        .map(|binding| {
+            let skills = database.enabled_agent_skills(&binding.expert_id)?;
+            let package = runtime_expert_package(
+                &binding.package_snapshot,
+                &binding.package_hash,
+                &skills,
+                &enabled_mcps,
+                &bound_knowledge,
+            )?;
+            Ok::<Vec<String>, String>(package_string_list(&package, "enabledSkills"))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut seen = HashSet::new();
+    Ok(package_string_list(&assistant_package, "enabledSkills")
+        .into_iter()
+        .chain(effective_expert_skills)
+        .filter(|id| seen.insert(id.clone()))
+        .collect())
+}
+
+/// Serve `skill_load` on the legacy protocol: mirror the stored-result reader's
+/// durable trace, but never touch approvals (instructions are read-only data).
+fn execute_skill_load_request(
+    database: &Database,
+    skills_dir: &std::path::Path,
+    envelope: &RuntimeEnvelope,
+) -> Result<Value, String> {
+    let run_id = envelope
+        .run_id
+        .as_deref()
+        .ok_or_else(|| "skill_load request is missing runId".to_owned())?;
+    let payload = envelope
+        .payload
+        .as_ref()
+        .ok_or_else(|| "skill_load request is missing payload".to_owned())?;
+    let tool_call_id = payload
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "skill_load request is missing toolCallId".to_owned())?;
+    let input = payload.get("input").cloned().unwrap_or_else(|| json!({}));
+    let conversation_id =
+        run_bound_conversation(database, run_id, envelope.conversation_id.as_deref())?;
+    if let Some(response) = inspect_existing_host_tool_call(
+        database,
+        run_id,
+        tool_call_id,
+        "skill_load",
+        &input,
+    )? {
+        return Ok(response);
+    }
+    let hook_decision =
+        crate::lifecycle_hooks::before_tool(database, run_id, tool_call_id, "skill_load", &input)?;
+    if let Some(reason) = &hook_decision.blocked {
+        return Err(format!("[hook.blocked] {reason}"));
+    }
+    let request = skill_load::prepare(&input)?;
+    match create_fresh_host_tool_call(
+        database,
+        run_id,
+        tool_call_id,
+        "skill_load",
+        &input,
+        "running",
+        false,
+    )? {
+        HostToolCallExecution::Execute(record) => {
+            drop(record);
+            // The legacy path has no frozen scope: availability was validated
+            // structurally when the skill was scanned (unknown tools fail), and
+            // actual tool calls remain gated by legacy permissions.
+            let enabled = conversation_enabled_skill_ids(database, &conversation_id)?;
+            let outcome = skill_load::execute(
+                database,
+                skills_dir,
+                &conversation_id,
+                run_id,
+                &enabled,
+                None,
+                &request,
+                crate::database::now_ms(),
+            );
+            finalize_host_tool_execution(
+                database,
+                run_id,
+                tool_call_id,
+                "skill_load",
+                &input,
+                hook_decision.annotations,
+                outcome,
+            )
+        }
+        HostToolCallExecution::Replay(response) => Ok(response),
+    }
+}
+
+fn handle_skill_load_request(
+    database: &Database,
+    skills_dir: &std::path::Path,
+    stdin: &Arc<Mutex<ChildStdin>>,
+    envelope: RuntimeEnvelope,
+) {
+    let response = execute_skill_load_request(database, skills_dir, &envelope)
+        .unwrap_or_else(|error| json!({ "isError": true, "error": error }));
+    let response_type = if response
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        "tool.execute_failed"
+    } else {
+        "tool.execute_completed"
+    };
+    let response = HostResponse::for_request(&envelope, response_type, response);
+    if let Err(error) = write_protocol_message(stdin, &response) {
+        eprintln!("fox: failed to answer skill_load: {error}");
+    }
 }
 
 fn handle_host_tool_request(
@@ -6447,6 +6815,62 @@ fn execute_mcp_tool_request(
                         Some(health_started.elapsed().as_millis() as i64),
                         server.tool_count,
                     );
+                    // The Legacy transport reaches the built-in Office
+                    // connector through the same MCP wrapper as the Kernel one,
+                    // so a saved document becomes a user-restorable version
+                    // here too. Managed-file registration is decided from the
+                    // dispatch the Host actually made (wrapper identity + the
+                    // operation the Host itself prepared) and then re-verified
+                    // against the bytes on disk; a generic MCP result can never
+                    // create a restorable row, even with identical JSON.
+                    if managed_office && matches!(remote_tool, "office_create" | "office_edit") {
+                        let access = database.conversation_project_access(conversation_id)?;
+                        if let Some((root, permission)) = access.as_ref() {
+                            match crate::office::prepare(
+                                remote_tool,
+                                &arguments,
+                                Some(root.as_str()),
+                                permission,
+                            ) {
+                                Ok(prepared) => {
+                                    if let Some(target) = prepared.target_path() {
+                                        use tauri::Manager;
+                                        let verified =
+                                            crate::runtime_host::managed_files::VerifiedWriteTarget::new(
+                                                Path::new(root),
+                                                target,
+                                            );
+                                        let backups_dir = app
+                                            .state::<crate::app_state::AppState>()
+                                            .runtime_host
+                                            .managed_files_dir()
+                                            .to_path_buf();
+                                        if let Err(reason) =
+                                            crate::runtime_host::managed_files::record_office_write_from_result(
+                                                database,
+                                                &backups_dir,
+                                                conversation_id,
+                                                run_id,
+                                                Some(tool_call_id),
+                                                &verified,
+                                                remote_tool,
+                                                &result,
+                                            )
+                                        {
+                                            eprintln!(
+                                                "refused an unverified Office managed-file \
+                                                 declaration for {remote_tool} {tool_call_id}: {reason}"
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(reason) => eprintln!(
+                                    "managed-file registration skipped for {remote_tool} \
+                                     {tool_call_id}: {reason}"
+                                ),
+                            }
+                        }
+                    }
                     result
                 }
                 Err(error) => {
@@ -7721,6 +8145,8 @@ fn execute_host_tool_request(
     }
 
     let prepared = crate::tool_host::prepare(tool, &input, &project_root)?;
+    let mut managed_capture: Option<managed_files::BeforeCapture> = None;
+    let mut managed_backups: Option<std::path::PathBuf> = None;
     let permission_scope = host_permission_scope(tool, prepared.preview());
     let has_conversation_permission = match permission_scope.as_deref() {
         Some(scope) => {
@@ -7798,8 +8224,44 @@ fn execute_host_tool_request(
             claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
         }
 
+        if matches!(tool, "write_file" | "edit_file") {
+            if let Some(target) = prepared.target_path() {
+                use tauri::Manager;
+                managed_backups = Some(
+                    app.state::<crate::app_state::AppState>()
+                        .runtime_host
+                        .managed_files_dir()
+                        .to_path_buf(),
+                );
+                managed_capture = managed_files::capture_before(
+                    managed_backups.as_deref().expect("backup directory"),
+                    Path::new(&project_root),
+                    target,
+                )
+                .ok();
+            }
+        }
         crate::tool_host::execute_with_cancellation(prepared, Some(&cancellation))
     })();
+    if let (Ok(result), Some(capture), Some(backups_dir)) =
+        (&outcome, managed_capture, managed_backups.as_deref())
+    {
+        if result.get("isError").and_then(Value::as_bool) != Some(true) {
+            if let Err(error) = managed_files::record_after(
+                database,
+                backups_dir,
+                conversation_id,
+                run_id,
+                Some(tool_call_id),
+                tool,
+                capture,
+            ) {
+                eprintln!(
+                    "managed-file version registration failed after {tool} {tool_call_id}: {error}"
+                );
+            }
+        }
+    }
     finalize_host_tool_execution(
         database,
         run_id,

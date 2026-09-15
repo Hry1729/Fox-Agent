@@ -5,7 +5,9 @@ import { validateKernelControl } from './control-binding.mjs'
 import { sanitizeProviderHistory } from './runtime-session.mjs'
 import { RUNTIME_TOOL_CATALOG, validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
 import { finalizeKernelAnswer, completionPreview } from './kernel-completion.mjs'
-import { boundToolResultContent } from './tool-view.mjs'
+import { createRoundProgress, toolParamBytesOf } from './kernel-model-progress.mjs'
+import { modelToolResultContent, toolResultRef } from './tool-view.mjs'
+import { steeringNoticeText, validateSteeringNotices } from './steering-notice.mjs'
 
 const knownTools = new Set(RUNTIME_TOOL_CATALOG.map(tool => tool.name))
 const deliveries = new WeakMap()
@@ -142,15 +144,30 @@ export function prepareKernelBatchResume(request, identity) {
     return {
       role: 'toolResult', toolCallId: call.id, toolName: call.name,
       // Model-view bounding only; the durable item.result stays complete and
-      // errors/receipts pass through unchanged.
-      content: boundToolResultContent(call.name, { isError, content: resultContent(item.result) }),
+      // errors/receipts pass through unchanged. The bound view carries a stable
+      // reference to the persisted result (see toolResultRef).
+      content: modelToolResultContent(call.name, {
+        isError,
+        content: resultContent(item.result),
+        details: item.result?.details,
+        resultRef: toolResultRef(request.runId, call.id),
+      }),
       details: {}, isError,
       timestamp: Number.isSafeInteger(assistant.timestamp) ? assistant.timestamp : 0,
     }
   })
+  // Mid-run additions bound to this (possibly retried) dispatch: ordinary
+  // user text appended AFTER the settled results, matching the live-session
+  // directive ordering; they never carry tools, grants or authority.
+  const steering = validateSteeringNotices(frame.steering, fail)
+  const steeringMessages = steering.map(notice => ({
+    role: 'user',
+    content: [{ type: 'text', text: steeringNoticeText(notice.content) }],
+    timestamp: 0,
+  }))
   // All results were checked before the normal provider projection; no synthetic
   // recovery failures may be inserted to fill a missing result here.
-  const messages = preparePiReplayHistory([...frame.history, assistant, ...results])
+  const messages = preparePiReplayHistory([...frame.history, assistant, ...results, ...steeringMessages])
   return { messages, runId: request.runId, turnId: frame.turnId,
     idempotencyKey: frame.idempotencyKey, batchId: frame.batchId, checkpointSeq: frame.checkpointSeq }
 }
@@ -161,8 +178,13 @@ export function prepareKernelInitialModel(request, identity) {
   canonical(request)
   if (Buffer.byteLength(JSON.stringify(request), 'utf8') > 1_048_576) fail('initial frame is too large')
   const frame = request.payload?.initialModel
+  const continuationKey = frame?.continuationKey ?? undefined
+  if (continuationKey !== undefined && (typeof continuationKey !== 'string'
+      || !/^continuation:[1-9][0-9]*$/.test(continuationKey)
+      || !Number.isSafeInteger(Number(continuationKey.slice('continuation:'.length))))) fail('invalid continuation identity')
+  const expectedKey = continuationKey === undefined ? 'initial-model-delivery' : `continuation-delivery:${continuationKey}`
   if (validateWireValue('KernelInitialModelFrame', frame).length || frame.schemaVersion !== 1
-      || frame.idempotencyKey !== 'initial-model-delivery' || !Number.isSafeInteger(frame.checkpointSeq) || frame.checkpointSeq < 1) fail('invalid initial frame')
+      || frame.idempotencyKey !== expectedKey || !Number.isSafeInteger(frame.checkpointSeq) || frame.checkpointSeq < 1) fail('invalid initial frame')
   const input = frame.input
   if (input.schemaVersion !== 1 || input.runId !== request.runId || !nonempty(input.turnId) || !nonempty(input.promptConfigHash)
       || !input.messages.length || input.messages.at(-1)?.role !== 'user') fail('invalid initial input')
@@ -213,9 +235,22 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
   let abortError
   let aborting
   let timedOut = false
+  let timeoutKind = null
   const abort = () => { aborting ??= Promise.resolve().then(() => session.abort()).catch(error => { abortError = error }) }
   signal.addEventListener('abort', abort, { once: true })
-  const timer = setTimeout(() => { timedOut = true; abort() }, request.payload.controlBinding.budgets.modelRequestMs)
+  // Same first-response / idle / whole-round contract as the live loop: tool
+  // parameter bytes count as progress, and the breach kind plus byte-level
+  // telemetry travel with the timeout failure for Host retry admission.
+  const roundProgress = createRoundProgress({ budgets: request.payload.controlBinding.budgets })
+  const timer = setInterval(() => {
+    if (signal.aborted || timedOut) return
+    const breach = roundProgress.check()
+    if (breach === 'ok') return
+    timeoutKind = breach
+    timedOut = true
+    abort()
+  }, 250)
+  timer.unref?.()
   let proposed
   const stopMarker = `fox-kernel-proposal-boundary:${request.runId}:${prepared.idempotencyKey}`
   let unsubscribe
@@ -223,18 +258,30 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
   let lastPreviewAt = 0
   let lastPreviewText = ''
   let lastPreviewReasoning = ''
+  let lastPreviewToolBytes = 0
+  let lastProgressPreviewAt = 0
   try {
     unsubscribe = typeof session.agent.subscribe === 'function' ? session.agent.subscribe(event => {
-      if (preview && !signal.aborted && !timedOut && ['message_update', 'message_end'].includes(event.type)
-          && event.message?.role === 'assistant' && Array.isArray(event.message.content)) {
+      if (signal.aborted || timedOut || !['message_update', 'message_end'].includes(event.type)
+          || event.message?.role !== 'assistant' || !Array.isArray(event.message.content)) {
+        if (!allowProposals) return
+      } else {
         const text = completionPreview(event.message.content.filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join(''), prepared.requireCompletion)
         const reasoning = event.message.content.filter(block => block?.type === 'thinking' && typeof block.thinking === 'string').map(block => block.thinking).join('\n\n')
-        const now = performance.now()
-        if ((text !== lastPreviewText || reasoning !== lastPreviewReasoning) && Buffer.byteLength(text, 'utf8') <= 262_144 && Buffer.byteLength(reasoning, 'utf8') <= 262_144
-            && (previewRevision === 0 || now - lastPreviewAt >= 100 || event.type === 'message_end')) {
-          lastPreviewText = text; lastPreviewReasoning = reasoning; lastPreviewAt = now
-          preview({ schemaVersion: 1, runId: request.runId, conversationId: request.conversationId, turnId: prepared.turnId,
-            checkpointSeq: prepared.checkpointSeq, revision: ++previewRevision, text, ...(reasoning ? { reasoning } : {}) })
+        const toolBytes = toolParamBytesOf(event.message.content)
+        roundProgress.note({ text, reasoning, toolParamBytes: toolBytes })
+        if (preview) {
+          const now = performance.now()
+          const toolGrowth = toolBytes - lastPreviewToolBytes
+          const toolPreviewDue = toolGrowth !== 0 && (toolBytes === 0 || toolGrowth >= 16384 || now - lastProgressPreviewAt >= 1000)
+          if (((text !== lastPreviewText || reasoning !== lastPreviewReasoning) || toolPreviewDue) && Buffer.byteLength(text, 'utf8') <= 262_144 && Buffer.byteLength(reasoning, 'utf8') <= 262_144
+              && (previewRevision === 0 || now - lastPreviewAt >= 100 || event.type === 'message_end')) {
+            lastPreviewText = text; lastPreviewReasoning = reasoning; lastPreviewToolBytes = toolBytes; lastPreviewAt = now
+            if (toolPreviewDue) lastProgressPreviewAt = now
+            preview({ schemaVersion: 1, runId: request.runId, conversationId: request.conversationId, turnId: prepared.turnId,
+              checkpointSeq: prepared.checkpointSeq, revision: ++previewRevision, text, ...(reasoning ? { reasoning } : {}),
+              progressBytes: roundProgress.totalBytes() })
+          }
         }
       }
       if (!allowProposals) return
@@ -251,7 +298,17 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
     await session.agent.continue()
     if (aborting) await aborting
     if (abortError) fail(`engine cancellation failed: ${abortError.message ?? String(abortError)}`)
-    if (timedOut) fail('frozen model request deadline exceeded')
+    if (timedOut) {
+      const kind = timeoutKind && timeoutKind !== 'ok' ? timeoutKind : roundProgress.check()
+      const timeout = new Error(`Kernel batch resume exceeded its frozen time budget (${kind})`)
+      timeout.evidence = {
+        schemaVersion: 1, runId: request.runId, turnId: prepared.turnId,
+        checkpointSeq: prepared.checkpointSeq, category: 'model_timeout',
+        httpStatus: null, retryAfterMs: null,
+        telemetry: roundProgress.telemetry(),
+      }
+      throw timeout
+    }
     if (signal.aborted) fail('Host cancelled the resume')
     const final = session.agent.state.messages.at(-1)
     if (proposed) {
@@ -263,7 +320,7 @@ export async function runPiKernelModel(session, request, prepared, signal, previ
     }
     return { idempotencyKey: prepared.idempotencyKey, checkpointSeq: prepared.checkpointSeq, response: prepareKernelModelResponse(final, prepared) }
   } finally {
-    clearTimeout(timer)
+    clearInterval(timer)
     signal.removeEventListener('abort', abort)
     unsubscribe?.()
   }

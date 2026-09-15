@@ -21,7 +21,7 @@ fn terminal(state: &str) -> bool {
     )
 }
 
-fn resource_failure_result(tool: &str, error: &str) -> Value {
+pub(crate) fn resource_failure_result(tool: &str, error: &str) -> Value {
     // Reader errors describe only the authorized path operation (missing path,
     // nonexistent file, OS access failure, scope escape). Keep them actionable.
     // Other executors may return remote bodies or credentials; do not forward.
@@ -58,11 +58,14 @@ pub(super) fn drive(
     runtime: &RuntimeCommand,
     api_key: &str,
     policy: &dyn PolicyDecisionPort,
+    // Sync lets the live batch loop run Host-classified independent read-only
+    // calls concurrently; classification and leases stay Host-side.
     execute: impl Fn(
-        &RunControlBinding,
-        &kernel::OutboxEffect,
-        &kernel::CancellationToken,
-    ) -> Result<(bool, Value), String>,
+            &RunControlBinding,
+            &kernel::OutboxEffect,
+            &kernel::CancellationToken,
+        ) -> Result<(bool, Value), String>
+        + Sync,
 ) -> Result<(), String> {
     drive_with_actions(
         &ownership,
@@ -89,11 +92,14 @@ pub(super) fn drive_with_actions(
     runtime: &RuntimeCommand,
     api_key: &str,
     policy: &dyn PolicyDecisionPort,
+    // Sync: the live loop may fan out Host-classified independent read-only
+    // tool calls onto bounded worker threads.
     execute: impl Fn(
-        &RunControlBinding,
-        &kernel::OutboxEffect,
-        &kernel::CancellationToken,
-    ) -> Result<(bool, Value), String>,
+            &RunControlBinding,
+            &kernel::OutboxEffect,
+            &kernel::CancellationToken,
+        ) -> Result<(bool, Value), String>
+        + Sync,
     after_commit: impl Fn(&str) -> Result<(), String>,
     settle_children: impl Fn(bool) -> Result<(), String>,
     preview: &super::kernel_model_worker::PreviewSink,
@@ -184,6 +190,7 @@ pub(super) fn drive_with_actions(
                     effect.kind,
                     OutboxEffectKind::DispatchTool
                         | OutboxEffectKind::InitialModel
+                        | OutboxEffectKind::ContinuationModel
                         | OutboxEffectKind::DeliverToolBatch
                 )
         }) {
@@ -198,6 +205,7 @@ pub(super) fn drive_with_actions(
                 && matches!(
                     effect.kind,
                     OutboxEffectKind::InitialModel
+                        | OutboxEffectKind::ContinuationModel
                         | OutboxEffectKind::DispatchTool
                         | OutboxEffectKind::DeliverToolBatch
                 )
@@ -238,6 +246,8 @@ pub(super) fn drive_with_actions(
                             .dispatch_initial_with_worker(&owner, policy, runtime, api_key)
                     }
                 }
+                OutboxEffectKind::ContinuationModel => coordinator.dispatch_continuation_live(
+                    &effect.effect_key, &owner, policy, runtime, api_key, &execute, &after_commit, &settle_children),
                 OutboxEffectKind::DeliverToolBatch => coordinator
                     .dispatch_stored_batch_with_worker(
                         effect
@@ -278,10 +288,15 @@ pub(super) fn drive_with_actions(
             continue;
         };
         if let Err(error) = result {
-            if error == super::kernel_coordinator::live::LIVE_DETACHED {
-                // The live session detached after committing durable state.
-                // Pending deliveries, retries or terminal states below drive
-                // the recovery; nothing here may replay engine work.
+            if error == super::kernel_coordinator::live::LIVE_DETACHED
+                || error == super::kernel_coordinator::STEERING_REPLAN
+            {
+                // The transport detached after committing durable state, or a
+                // terminal decision lost a race with a freshly accepted
+                // additional request. Either way the next iteration re-reads
+                // durable facts (pending deliveries, retries, terminal states)
+                // and plans the safe next step; nothing here may replay engine
+                // work, and neither case is an execution failure.
                 continue;
             }
             settle_children(true)?;
@@ -364,6 +379,12 @@ fn initial_input(
     Ok(input)
 }
 
+/// The Host-verified managed write behind one frozen dispatch.
+///
+/// A managed write is identified from Host facts only: the real dispatch tool,
+/// the frozen connector identity and scope, and the target the Host itself
+/// admits for this dispatch — never from a tool result. The classification
+/// itself lives in [`super::managed_files`], where it is unit-tested directly.
 impl super::RuntimeHost {
     pub(super) fn stop_kernel_runs(&self) -> Result<(), String> {
         let active = {
@@ -600,6 +621,8 @@ impl super::RuntimeHost {
                 execution_profile_id: binding.execution_profile_id.clone(),
                 prompt_config_hash: hash.clone(),
                 model_request_timeout_ms: binding.budgets.model_request_ms,
+                model_first_response_ms: binding.budgets.model_first_response_ms,
+                model_idle_ms: binding.budgets.model_idle_ms,
                 tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
                 run_execution_budget_ms: binding.budgets.run_execution_ms,
                 approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
@@ -658,6 +681,14 @@ impl super::RuntimeHost {
         let preview = move |notice: &fox_engine_protocol::KernelModelPreview| {
             use tauri::Emitter;
             if display_database.save_kernel_model_display(notice).unwrap_or(false) {
+                // Accepted previews (including tool-parameter-only progress)
+                // feed the controller's idle bound via the volatile registry.
+                // Stale/foreign frames are ignored by the save above and never
+                // become progress.
+                display_database.note_kernel_model_progress(
+                    &notice.run_id,
+                    crate::database::now_ms(),
+                );
                 let _ = app.emit("fox://kernel-model-preview", notice);
             }
         };
@@ -701,6 +732,7 @@ impl super::RuntimeHost {
                         &self.database,
                         &self.attachments_dir,
                         &self.sessions_dir,
+                        &self.skills_dir,
                         tool,
                         &payload["input"],
                         token,
@@ -717,7 +749,29 @@ impl super::RuntimeHost {
                         token,
                     )
                 } else {
-                    policy.execute(&self.database, tool, &payload["input"], token)
+                    // A managed write is identified from Host facts only: the
+                    // real dispatch tool (including the frozen Office wrapper)
+                    // plus the target the Host itself admitted for this frozen
+                    // dispatch. The shared seam protects the current bytes before
+                    // the write and registers the resulting content version, so
+                    // the desktop Host and the real-task evaluation cannot drift
+                    // apart on what "a managed write" means.
+                    let outcome = super::managed_files::execute_with_managed_versions(
+                        super::managed_files::ManagedExecutionContext {
+                            database: &self.database,
+                            backups_dir: &self.managed_files_dir,
+                            conversation_id: &binding.conversation_id,
+                            run_id: &binding.run_id,
+                            project_root: binding.permission.project_root.as_deref(),
+                            permission_mode: binding.permission.mode.as_str(),
+                            scope: &policy.scope,
+                        },
+                        tool,
+                        &payload["input"],
+                        effect.tool_call_id.as_deref(),
+                        || policy.execute(&self.database, tool, &payload["input"], token),
+                    );
+                    outcome
                 };
                 match result {
                     Ok(result) => Ok((

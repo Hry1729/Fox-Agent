@@ -2923,6 +2923,329 @@ pub fn approval_resolve(
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSteeringEnqueueRequest {
+    pub conversation_id: String,
+    pub content: String,
+    /// Optional client-generated idempotency id; a UUIDv4 is generated when
+    /// absent. Re-submitting the same id returns the original row, never a copy.
+    pub message_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSteeringRecord {
+    pub seq: i64,
+    pub message_id: String,
+    pub content: String,
+    pub status: String,
+    pub received_at: i64,
+    pub applied_at: Option<i64>,
+    pub applied_event_seq: Option<i64>,
+    pub applied_dispatch_key: Option<String>,
+}
+
+/// The Run a steering listing belongs to, plus whether it can still accept
+/// input. History is read-only: the listing resolves a terminal Run for display
+/// but never widens which Runs may be enqueued to.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSteeringListResponse {
+    pub run_id: Option<String>,
+    pub run_state: Option<String>,
+    /// `true` only while the Run would still accept a new additional request.
+    pub accepts_steering: bool,
+    pub messages: Vec<RunSteeringRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSteeringEnqueueResponse {
+    pub run_id: String,
+    pub seq: i64,
+    pub message_id: String,
+    pub status: String,
+}
+
+/// Durably accept one additional user request for the conversation's active
+/// authoritative Run. The text is not executed, does not grant tools, and is
+/// spliced into model input only at the next safe dispatch boundary.
+#[tauri::command]
+pub fn run_steering_enqueue(
+    state: State<'_, AppState>,
+    request: RunSteeringEnqueueRequest,
+) -> ApiResponse<RunSteeringEnqueueResponse> {
+    let message_id = request
+        .message_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let run_id = match state
+        .database
+        .active_kernel_run_for_conversation(&request.conversation_id)
+    {
+        Ok(Some(run_id)) => run_id,
+        Ok(None) => {
+            return ApiResponse::failure(
+                "steering.no_active_run",
+                "当前没有可接收补充要求的运行中任务。",
+                false,
+            )
+        }
+        Err(error) => return ApiResponse::failure("steering.lookup_failed", error, true),
+    };
+    match state.database.enqueue_run_steering(
+        &run_id,
+        &message_id,
+        &request.content,
+        crate::database::now_ms(),
+    ) {
+        Ok(seq) => {
+            let status = state
+                .database
+                .run_steering_messages(&run_id)
+                .ok()
+                .and_then(|rows| rows.into_iter().find(|row| row.seq == seq))
+                .map(|row| row.status)
+                .unwrap_or_else(|| "received".to_string());
+            ApiResponse::success(RunSteeringEnqueueResponse {
+                run_id,
+                seq,
+                message_id,
+                status,
+            })
+        }
+        Err(error) => ApiResponse::failure("steering.enqueue_failed", error, false),
+    }
+}
+
+/// List every durable steering row of the conversation's relevant Run, in input
+/// order. The relevant Run is the conversation's active Run when one exists,
+/// otherwise its most recent authoritative Run — so a finished task, a failed
+/// task and a reopened application still let the user audit what happened to
+/// each additional request instead of showing nothing.
+///
+/// This command is read-only. Enqueueing stays bound to
+/// `run_steering_enqueue`, which resolves an *active* Run only.
+#[tauri::command]
+pub fn run_steering_list(
+    state: State<'_, AppState>,
+    conversation_id: String,
+) -> ApiResponse<RunSteeringListResponse> {
+    let active = match state
+        .database
+        .active_kernel_run_for_conversation(&conversation_id)
+    {
+        Ok(active) => active,
+        Err(error) => return ApiResponse::failure("steering.lookup_failed", error, true),
+    };
+    let (run_id, accepts_steering) = match active {
+        Some(run_id) => (Some(run_id), true),
+        None => match state
+            .database
+            .latest_kernel_run_for_conversation(&conversation_id)
+        {
+            Ok(Some((run_id, _state))) => (Some(run_id), false),
+            Ok(None) => (None, false),
+            Err(error) => return ApiResponse::failure("steering.lookup_failed", error, true),
+        },
+    };
+    let Some(run_id) = run_id else {
+        return ApiResponse::success(RunSteeringListResponse {
+            run_id: None,
+            run_state: None,
+            accepts_steering: false,
+            messages: Vec::new(),
+        });
+    };
+    let run_state = state
+        .database
+        .kernel_host_run_state(&run_id)
+        .ok()
+        .flatten();
+    match state.database.run_steering_messages(&run_id) {
+        Ok(rows) => ApiResponse::success(RunSteeringListResponse {
+            run_id: Some(run_id),
+            run_state,
+            accepts_steering,
+            messages: rows
+                .into_iter()
+                .map(|row| RunSteeringRecord {
+                    seq: row.seq,
+                    message_id: row.message_id,
+                    content: row.content,
+                    status: row.status,
+                    received_at: row.received_at,
+                    applied_at: row.applied_at,
+                    applied_event_seq: row.applied_event_seq,
+                    applied_dispatch_key: row.applied_dispatch_key,
+                })
+                .collect(),
+        }),
+        Err(error) => ApiResponse::failure("steering.list_failed", error, true),
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedFileVersionDto {
+    pub id: String,
+    pub run_id: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub tool: String,
+    pub storage_path: String,
+    pub display_name: String,
+    pub version_no: i64,
+    pub change_kind: String,
+    pub before_hash: Option<String>,
+    pub before_size: Option<i64>,
+    pub after_hash: Option<String>,
+    pub after_size: Option<i64>,
+    pub backup_path: Option<String>,
+    pub restored_from_id: Option<String>,
+    pub created_at: i64,
+    /// The registered before-write backup is still on disk.
+    pub backup_available: bool,
+    /// SHA-256 of the file as it currently exists on disk, if present.
+    pub current_hash: Option<String>,
+    /// Current bytes differ from the latest recorded version (an external
+    /// edit or another task touched the file), so restore needs force.
+    pub drifted: bool,
+    /// Size of the content this version records (`after_size`), whatever the
+    /// pre-write backup size happens to be. The panel shows this number next to
+    /// the version, so it must describe the content a restore would write.
+    pub restore_size: Option<i64>,
+    /// Whether this version's own bytes were verified and are still resolvable.
+    pub can_restore: bool,
+    /// Provenance of the row: `host_capture` | `office_connector` | `restore`
+    /// | `legacy_unknown`. Only verified sources are restorable.
+    pub source_kind: String,
+    /// Why this version cannot be restored, when it cannot. Explicit and
+    /// user-facing: an unavailable version is never silently hidden.
+    pub restore_blocker: Option<String>,
+}
+
+fn managed_version_dto(
+    database: &crate::database::Database,
+    row: crate::database::ManagedFileVersion,
+    latest_after_hash: Option<&str>,
+) -> ManagedFileVersionDto {
+    let backup_available = row
+        .backup_path
+        .as_deref()
+        .map(|path| std::path::Path::new(path).is_file())
+        .unwrap_or(false);
+    let current_hash = crate::runtime_host::managed_files::hash_file(std::path::Path::new(
+        &row.storage_path,
+    ))
+    .map(|(hash, _)| hash);
+    let drifted = match (&current_hash, latest_after_hash) {
+        (Some(current), Some(latest)) => current != latest,
+        (None, Some(_)) => true, // file deleted after the last recorded change
+        _ => false,
+    };
+    // Resolvability is computed with the same function every restore path uses,
+    // so the panel's promise and the restore's behaviour cannot disagree.
+    let restore_blocker = crate::runtime_host::managed_files::restore_blocker(database, &row);
+    let restore_size = row.recorded_size();
+    ManagedFileVersionDto {
+        id: row.id,
+        run_id: row.run_id,
+        tool_call_id: row.tool_call_id,
+        tool: row.tool,
+        storage_path: row.storage_path,
+        display_name: row.display_name,
+        version_no: row.version_no,
+        change_kind: row.change_kind,
+        before_hash: row.before_hash,
+        before_size: row.before_size,
+        after_hash: row.after_hash,
+        after_size: row.after_size,
+        backup_path: row.backup_path,
+        restored_from_id: row.restored_from_id,
+        created_at: row.created_at,
+        backup_available,
+        current_hash,
+        drifted,
+        restore_size,
+        can_restore: restore_blocker.is_none(),
+        source_kind: row.source.as_str().to_owned(),
+        restore_blocker,
+    }
+}
+
+/// List the append-only managed file versions of a conversation, newest last,
+/// optionally restricted to one storage path. Drift is computed Host-side
+/// against the bytes currently on disk.
+#[tauri::command]
+pub fn managed_file_versions_list(
+    state: State<'_, AppState>,
+    conversation_id: String,
+    storage_path: Option<String>,
+) -> ApiResponse<Vec<ManagedFileVersionDto>> {
+    match state
+        .database
+        .managed_file_versions(&conversation_id, storage_path.as_deref())
+    {
+        Ok(rows) => {
+            // Rows are ordered storage_path, version_no; the last row seen for
+            // each path carries the latest registered after_hash.
+            let mut latest: std::collections::HashMap<String, Option<String>> =
+                std::collections::HashMap::new();
+            for row in &rows {
+                latest.insert(row.storage_path.clone(), row.after_hash.clone());
+            }
+            ApiResponse::success(
+                rows.into_iter()
+                    .map(|row| {
+                        let latest_hash = latest
+                            .get(&row.storage_path)
+                            .and_then(|value| value.as_deref());
+                        managed_version_dto(&state.database, row, latest_hash)
+                    })
+                    .collect(),
+            )
+        }
+        Err(error) => ApiResponse::failure("managed_files.list_failed", error, true),
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedFileRestoreRequest {
+    pub conversation_id: String,
+    pub version_id: String,
+    /// Overwrite a file that changed outside the recorded task history. The
+    /// current bytes are still backed up before the overwrite.
+    pub force: Option<bool>,
+}
+
+/// Restore one registered version via a pure Host file copy. Never replays
+/// tools and never creates a Run; registers a new `restored` row instead.
+#[tauri::command]
+pub fn managed_file_restore(
+    state: State<'_, AppState>,
+    request: ManagedFileRestoreRequest,
+) -> ApiResponse<ManagedFileVersionDto> {
+    match crate::runtime_host::managed_files::restore_version(
+        &state.database,
+        state.runtime_host.managed_files_dir(),
+        &request.conversation_id,
+        &request.version_id,
+        request.force.unwrap_or(false),
+    ) {
+        Ok(row) => {
+            let latest = row.after_hash.clone();
+            ApiResponse::success(managed_version_dto(
+                &state.database,
+                row.clone(),
+                latest.as_deref().or(row.after_hash.as_deref()),
+            ))
+        }
+        Err(error) => ApiResponse::failure("managed_files.restore_failed", error, false),
+    }
+}
+
 #[tauri::command]
 pub fn plan_revision_resolve(
     app: AppHandle,

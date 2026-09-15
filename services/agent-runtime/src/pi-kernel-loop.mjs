@@ -6,7 +6,11 @@
 // replacement sessions are refused when they retain executable tools.
 import { RUNTIME_TOOL_CATALOG, validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
 import { finalizeKernelAnswer, completionPreview, KernelIncompleteResponseError } from './kernel-completion.mjs'
-import { boundToolResultContent } from './tool-view.mjs'
+import { createRoundProgress, toolParamBytesOf } from './kernel-model-progress.mjs'
+import { modelToolResultContent, toolResultRef } from './tool-view.mjs'
+import { steeringNoticeText, validateSteeringNotices } from './steering-notice.mjs'
+
+export { steeringNoticeText }
 
 const knownTools = new Set(RUNTIME_TOOL_CATALOG.map(tool => tool.name))
 const fail = message => { throw new Error(`Invalid Kernel engine loop: ${message}`) }
@@ -40,7 +44,7 @@ export function prepareRoundOutput(assistantMessage, { turnId, requireCompletion
 }
 
 /** Durable settled result projected into the Pi tool-result shape. */
-function settledToolResult(item) {
+function settledToolResult(item, runId = null) {
   if (!record(item) || !nonempty(item.toolCallId) || !nonempty(item.tool)
     || !knownTools.has(item.tool) || !['completed', 'failed'].includes(item.state)
     || !record(item.result) || !Array.isArray(item.result.content)) {
@@ -48,8 +52,15 @@ function settledToolResult(item) {
   }
   const isError = item.state === 'failed'
   // Model-view bounding only: the durable item.result stays complete. Errors
-  // and receipt-bearing results always pass through unchanged.
-  const content = boundToolResultContent(item.tool, { isError, content: item.result.content })
+  // and receipt-bearing results always pass through unchanged. The reference is
+  // what makes an omitted byte recoverable through `read_tool_result`, so it is
+  // attached on every settled result, not only on the batch path.
+  const content = modelToolResultContent(item.tool, {
+    isError,
+    content: item.result.content,
+    details: item.result.details,
+    resultRef: toolResultRef(runId, item.toolCallId),
+  })
   return {
     content,
     details: {},
@@ -71,6 +82,16 @@ function settledToolResult(item) {
  */
 const PERMISSIVE_TOOL_PARAMETERS = Object.freeze({ type: 'object' })
 
+// Exact names of Host-native tools the live Host scheduler may fan out as
+// independent read-only calls (see parallel_read_only_dispatch in
+// runtime_host/kernel_coordinator/live.rs). The flag below only unblocks
+// engine-side parallel invocation: the Host stays the sole authority on
+// independence, read-only-ness and conflict safety, it owns per-call leases
+// and source-order settlement, and writers/unknowns remain serial barriers.
+// Generic MCP tools are NEVER assumed read-only, so no mcp__* name appears
+// here; proposal-only schemas stay sequential as well.
+const HOST_PARALLEL_READ_ONLY_TOOLS = Object.freeze(new Set(['read', 'ls', 'find', 'grep', 'skill_load']))
+
 export function installKernelHostTools(session, definitions, { settledFor } = {}) {
   if (session?.isIdle !== true || !Array.isArray(session.agent?.state?.tools)
       || session.agent.state.tools.length || typeof session.agent.subscribe !== 'function'
@@ -82,7 +103,8 @@ export function installKernelHostTools(session, definitions, { settledFor } = {}
   const strictParameters = new Map([...strict].map(([name, value]) => [name, value.parameters]))
   const tools = [...strict.entries()].map(([name, { description }]) => Object.freeze({
     name, label: name, description,
-    parameters: PERMISSIVE_TOOL_PARAMETERS, executionMode: 'sequential',
+    parameters: PERMISSIVE_TOOL_PARAMETERS,
+    executionMode: HOST_PARALLEL_READ_ONLY_TOOLS.has(name) ? 'parallel' : 'sequential',
     execute: async toolCallId => {
       const settled = settledFor(toolCallId)
       if (!settled) fail(`tool ${name} has no settled Host result; the round output was not committed`)
@@ -98,11 +120,17 @@ export function installKernelHostTools(session, definitions, { settledFor } = {}
  * Validate the Host tool definitions.
  */
 export function kernelToolDefinitions(definitions) {
-  if (!Array.isArray(definitions) || definitions.length > 64) fail('invalid Host tool definitions')
+  return validateKernelToolCatalog(definitions, knownTools)
+}
+
+// Pure validation over a supplied registry. Production always binds this to the
+// protocol catalog above; registry size is independent of per-batch execution.
+export function validateKernelToolCatalog(definitions, registeredNames) {
+  if (!Array.isArray(definitions)) fail('invalid Host tool definitions')
   const names = new Set()
   const strictParameters = new Map()
   for (const definition of definitions) {
-    if (!knownTools.has(definition?.name) || names.has(definition.name) || !nonempty(definition.description)
+    if (!registeredNames.has(definition?.name) || names.has(definition.name) || !nonempty(definition.description)
         || !record(definition.parameters) || definition.parameters.type !== 'object') {
       fail('invalid Host tool schema')
     }
@@ -194,6 +222,42 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
   deliveries.add(claimKey)
   deliveriesBySession.set(session, deliveries)
 
+  // Mid-run user requests handed over in round directives. They are ordinary
+  // user text: they carry no tools, grants or authority. They are spliced into
+  // the transcript only when the NEXT provider request starts — i.e. after the
+  // settled tool results (batch) or the Host review prompt (continuation) — so
+  // the durable ordering the Host records matches the engine transcript.
+  let pendingSteering = []
+  // Ids already spliced into THIS session: a directive replay (or the same row
+  // riding a retried dispatch) must never duplicate the user message locally.
+  // Durable exactly-once application stays Host-side; this is transcript-side.
+  const seenSteeringIds = new Set()
+  const steeringMessage = notice => ({
+    role: 'user',
+    content: [{ type: 'text', text: steeringNoticeText(notice.content) }],
+    timestamp: Date.now(),
+  })
+  const queueSteering = notices => {
+    for (const notice of validateSteeringNotices(notices, fail)) {
+      if (seenSteeringIds.has(notice.messageId)) continue
+      seenSteeringIds.add(notice.messageId)
+      pendingSteering.push(steeringMessage(notice))
+    }
+  }
+  const projectedStream = session.agent.streamFunction
+  session.agent.streamFunction = (model, context, options) => {
+    if (pendingSteering.length) {
+      const additions = pendingSteering.splice(0)
+      const transcript = session.agent.state.messages
+      if (!Array.isArray(transcript)) fail('engine transcript unavailable for steering')
+      for (const message of additions) {
+        transcript.push(message)
+        if (Array.isArray(context?.messages) && context.messages !== transcript) context.messages.push(message)
+      }
+    }
+    return projectedStream.call(session.agent, model, context, options)
+  }
+
   let roundCursor = prepared.checkpointSeq
   // Preview-attribution cursor for the current round. Tool/initial rounds use
   // the durable checkpoint cursor; a continuation round uses the Host-provided
@@ -202,19 +266,38 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
   let pendingBatch = null
   let fatal = null
   let timedOut = false
+  let timeoutKind = null
   let abortError = null
   let previewRevision = 0
   let lastPreviewAt = 0
   let lastPreviewText = ''
   let lastPreviewReasoning = ''
+  let lastPreviewToolBytes = 0
+  let lastProgressPreviewAt = 0
+  // First-response / idle / whole-round bounds from the frozen Host binding.
+  // Text, thinking, AND tool-parameter bytes all count as progress, so long
+  // Office JSON generated as tool arguments never looks like a stalled stream.
+  // The Host controller enforces the same semantics from its own anchors; this
+  // worker-side enforcement stops the provider call promptly and reports which
+  // bound fired with byte-level telemetry.
+  const roundBudgets = request.payload?.controlBinding?.budgets
+  let roundProgress = createRoundProgress({ budgets: roundBudgets })
   let roundTimer = null
   const armRoundTimer = () => {
     clearRoundTimer()
-    const budget = Number(request.payload?.controlBinding?.budgets?.modelRequestMs)
-    if (!Number.isFinite(budget) || budget <= 0) return
-    roundTimer = setTimeout(() => { timedOut = true; session.agent.abort() }, budget)
+    // Each continuation round is a fresh provider request with fresh bounds.
+    roundProgress = createRoundProgress({ budgets: roundBudgets })
+    roundTimer = setInterval(() => {
+      if (signal.aborted || timedOut) return
+      const breach = roundProgress.check()
+      if (breach === 'ok') return
+      timeoutKind = breach
+      timedOut = true
+      session.agent.abort()
+    }, 250)
+    roundTimer.unref?.()
   }
-  const clearRoundTimer = () => { if (roundTimer) { clearTimeout(roundTimer); roundTimer = null } }
+  const clearRoundTimer = () => { if (roundTimer) { clearInterval(roundTimer); roundTimer = null } }
   // Each model round owns an independent display message identity (cursor),
   // while the revision cursor stays run-monotonic: the Host orders previews by
   // a single increasing revision and de-duplicates the visible row by message
@@ -230,21 +313,37 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
   signal.addEventListener('abort', abort, { once: true })
 
   const unsubscribe = session.agent.subscribe(async event => {
-    if (preview && !signal.aborted && !timedOut && ['message_update', 'message_end'].includes(event.type)
+    // Progress is tracked independently of display previews: the idle bound
+    // must see tool-parameter bytes even when the Host disabled streaming.
+    if (!signal.aborted && !timedOut && ['message_update', 'message_end'].includes(event.type)
         && event.message?.role === 'assistant' && Array.isArray(event.message.content)) {
       const text = completionPreview(event.message.content.filter(block => block?.type === 'text' && typeof block.text === 'string')
         .map(block => block.text).join(''), requireCompletion)
       const reasoning = event.message.content.filter(block => block?.type === 'thinking' && typeof block.thinking === 'string')
         .map(block => block.thinking).join('\n\n')
-      const now = performance.now()
-      if ((text !== lastPreviewText || reasoning !== lastPreviewReasoning)
-          && Buffer.byteLength(text, 'utf8') <= 262_144 && Buffer.byteLength(reasoning, 'utf8') <= 262_144
-          && (previewRevision === 0 || now - lastPreviewAt >= 100 || event.type === 'message_end')) {
-        lastPreviewText = text
-        lastPreviewReasoning = reasoning
-        lastPreviewAt = now
-        preview({ schemaVersion: 1, runId: request.runId, conversationId: request.conversationId, turnId: prepared.turnId,
-          checkpointSeq: previewCursor, revision: ++previewRevision, text, ...(reasoning ? { reasoning } : {}) })
+      const toolBytes = toolParamBytesOf(event.message.content)
+      roundProgress.note({ text, reasoning, toolParamBytes: toolBytes })
+      if (preview) {
+        const now = performance.now()
+        const toolGrowth = toolBytes - lastPreviewToolBytes
+        // Tool-parameter-only progress never appears in text/reasoning, but it
+        // must still reach the Host: it drives the controller's idle bound and
+        // lets operators tell slow generation apart from a stalled stream.
+        // Throttled harder than text previews (1s / 16KiB) to avoid preview spam
+        // during long argument generation.
+        const toolPreviewDue = toolGrowth !== 0 && (toolBytes === 0 || toolGrowth >= 16384 || now - lastProgressPreviewAt >= 1000)
+        if (((text !== lastPreviewText || reasoning !== lastPreviewReasoning) || toolPreviewDue)
+            && Buffer.byteLength(text, 'utf8') <= 262_144 && Buffer.byteLength(reasoning, 'utf8') <= 262_144
+            && (previewRevision === 0 || now - lastPreviewAt >= 100 || event.type === 'message_end')) {
+          lastPreviewText = text
+          lastPreviewReasoning = reasoning
+          lastPreviewToolBytes = toolBytes
+          lastPreviewAt = now
+          if (toolPreviewDue) lastProgressPreviewAt = now
+          preview({ schemaVersion: 1, runId: request.runId, conversationId: request.conversationId, turnId: prepared.turnId,
+            checkpointSeq: previewCursor, revision: ++previewRevision, text, ...(reasoning ? { reasoning } : {}),
+            progressBytes: roundProgress.totalBytes() })
+        }
       }
     }
     if (event.type !== 'message_end' || event.message?.role !== 'assistant') return
@@ -270,9 +369,12 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
       roundCursor = directive.checkpointSeq
       resetPreviewRound(directive.checkpointSeq)
       const settled = new Map()
-      for (const item of directive.tools) settled.set(item.toolCallId, settledToolResult(item))
+      for (const item of directive.tools) settled.set(item.toolCallId, settledToolResult(item, request.runId))
       pendingBatch = { batchId: directive.batchId, settled }
       hooks?.onSettled?.(settled)
+      // Appended to the transcript when the next model request starts, after
+      // the settled tool results — never into the frozen proposal round.
+      queueSteering(directive.steering)
     } catch (error) {
       pendingBatch = null
       fatal ??= error
@@ -297,7 +399,23 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
       if (pendingBatch === 'awaiting') fail('batch settlement did not finish before the engine settled')
       if (abortError) fail(`engine cancellation failed: ${abortError.message ?? String(abortError)}`)
       if (fatal) throw fatal
-      if (timedOut) fail('frozen model round deadline exceeded')
+      if (timedOut) {
+        // Categorized timeout evidence with byte-level telemetry: the Host
+        // admits a turn-budget retry only when the failed round dispatched no
+        // new tool, so no execution can be replayed. Telemetry carries sizes
+        // only, never content or credentials. The evidence object must match
+        // the KernelModelFailure protocol shape exactly (deny_unknown_fields);
+        // the bound kind travels in the message string for logs only.
+        const kind = timeoutKind && timeoutKind !== 'ok' ? timeoutKind : roundProgress.check()
+        const timeout = new Error(`Kernel model round exceeded its frozen time budget (${kind})`)
+        timeout.evidence = {
+          schemaVersion: 1, runId: request.runId, turnId: prepared.turnId,
+          checkpointSeq: roundCursor, category: 'model_timeout',
+          httpStatus: null, retryAfterMs: null,
+          telemetry: roundProgress.telemetry(),
+        }
+        throw timeout
+      }
       if (signal.aborted) fail('Host cancelled the run')
       final = session.agent.state.messages.at(-1)
       if (final?.role !== 'assistant' || final.stopReason !== 'stop') {
@@ -313,6 +431,9 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
       const directive = await requestHost('kernel.round_output', output)
       if (directive?.schemaVersion !== 1) fail('Host directive is not a valid round directive')
       if (directive.kind === 'final') {
+        if (Array.isArray(directive.steering) && directive.steering.length) {
+          fail('Host carried steering into a final directive')
+        }
         return {
           idempotencyKey: prepared.idempotencyKey ?? 'initial-model-delivery',
           checkpointSeq: roundCursor,
@@ -334,6 +455,8 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
         roundCursor = previewCursor
         session.agent.state.messages = [...session.agent.state.messages,
           { role: 'user', content: [{ type: 'text', text: directive.prompt }], timestamp: Date.now() }]
+        // Spliced after the review prompt at the next provider request.
+        queueSteering(directive.steering)
         continue
       }
       fail('unexpected Host directive for a completed round')

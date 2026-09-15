@@ -395,6 +395,76 @@ function normalizeExpertBinding(binding: ConversationExpertBinding): Conversatio
   }
 }
 
+/**
+ * One durable mid-run supplementary request ("运行中补充要求"). The text never
+ * grants tools and never rewrites a frozen request; the Host splices it into
+ * model input only at the next dispatch boundary.
+ * Status lifecycle: received → delivered → applied (cancelled terminal).
+ */
+export interface RunSteeringRecord {
+  seq: number
+  messageId: string
+  content: string
+  status: 'received' | 'delivered' | 'applied' | 'cancelled' | string
+  receivedAt: number
+  appliedAt: number | null
+  appliedEventSeq: number | null
+  appliedDispatchKey: string | null
+}
+
+export interface RunSteeringEnqueueResponse {
+  runId: string
+  seq: number
+  messageId: string
+  status: string
+}
+
+/**
+ * The Run a steering listing belongs to, plus whether that Run can still accept
+ * input. History is read-only: after a task ends (or the app reopens) the listing
+ * still resolves the conversation's most recent authoritative Run so the four
+ * states stay auditable, while `acceptsSteering` stays false and enqueueing
+ * remains bound to an active Run.
+ */
+export interface RunSteeringListResponse {
+  runId: string | null
+  runState: string | null
+  acceptsSteering: boolean
+  messages: RunSteeringRecord[]
+}
+
+export interface ManagedFileVersion {
+  id: string
+  runId: string | null
+  toolCallId: string | null
+  tool: string
+  storagePath: string
+  displayName: string
+  versionNo: number
+  changeKind: 'created' | 'modified' | 'restored' | string
+  beforeHash: string | null
+  beforeSize: number | null
+  afterHash: string | null
+  afterSize: number | null
+  backupPath: string | null
+  restoredFromId: string | null
+  createdAt: number
+  /// Registered before-write backup still exists on disk.
+  backupAvailable: boolean
+  /// Hash of the file currently on disk, if present.
+  currentHash: string | null
+  /// Current bytes differ from the latest recorded version.
+  drifted: boolean
+  /// Size of the content this version records: the bytes a restore would write.
+  restoreSize: number | null
+  /// True only when this version's own verified content still resolves.
+  canRestore: boolean
+  /// Provenance: host_capture | office_connector | restore | legacy_unknown.
+  sourceKind: string
+  /// Why this version cannot be restored, when it cannot.
+  restoreBlocker: string | null
+}
+
 export const desktopClient = {
   initialize: () => command<RuntimeInitialization>('runtime_initialize'),
   runtimeStatus: () => command<RuntimeStatus>('runtime_status'),
@@ -648,6 +718,21 @@ export const desktopClient = {
   resumeRun: (request: { conversationId: string; parentRunId: string; text: string; answers: Record<string, string | string[]> }) =>
     command<StartRunResult>('run_resume', request),
   cancelRun: (runId: string) => command<boolean>('run_cancel', { runId }),
+  // Durably accept a supplementary request for the conversation's active
+  // authoritative Run. Re-submitting an existing messageId is idempotent.
+  enqueueRunSteering: (conversationId: string, content: string, messageId?: string) =>
+    command<RunSteeringEnqueueResponse>('run_steering_enqueue', { conversationId, content, messageId }),
+  listRunSteering: (conversationId: string) =>
+    command<RunSteeringListResponse>('run_steering_list', { conversationId }),
+  // Append-only Host-managed file versions. Restore is a pure Host file copy
+  // against a registered backup; it never replays tools or creates Runs.
+  listManagedFileVersions: (conversationId: string, storagePath?: string) =>
+    command<ManagedFileVersion[]>('managed_file_versions_list', {
+      conversationId,
+      storagePath: storagePath ?? null,
+    }),
+  restoreManagedFileVersion: (conversationId: string, versionId: string, force = false) =>
+    command<ManagedFileVersion>('managed_file_restore', { conversationId, versionId, force }),
   reconciliationLoad: (request: ReconciliationRequest) => command<ReconciliationView>('kernel_reconciliation_load', request),
   reconciliationOptions: (request: ReconciliationRequest) => command<ReconciliationOptions>('kernel_reconciliation_options', request),
   reconciliationQuery: (request: ReconciliationRequest) => command<ReconciliationView>('kernel_reconciliation_query', request),

@@ -152,6 +152,7 @@ export function mergeConversationDetail(persisted: ConversationDetail, current: 
     ),
     hasEarlierMessages: persisted.hasEarlierMessages || current.hasEarlierMessages,
     lastRun,
+    runs: mergeRecords(persisted.runs ?? [], current.runs ?? [], (run) => run.id),
     // A0 Work Loop merge
     goals: mergeRecords(persisted.goals, current.goals, (goal) => goal.id),
     tasks: mergeRecords(persisted.tasks, current.tasks, (task) => task.id),

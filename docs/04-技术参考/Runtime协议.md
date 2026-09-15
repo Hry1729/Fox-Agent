@@ -178,8 +178,24 @@ Run 分派和终态还会触发 `before_run/after_run` 审计，但不会新增 
 | `code_check` | `check=auto\|lint\|typecheck`、`ecosystem?`、`cwd?` | `process / always` |
 | `format_code` | `mode=check\|write`、`ecosystem?`、`path?`、`cwd?` | `project-write / always` |
 | `tabular_data` | `operation=preview\|filter\|aggregate`、`data?` 或 `path?`、筛选/聚合参数 | `project-read / none` |
+| `read_tool_result` | `reference`（`fox-result://<runId>/<toolCallId>`）、`offset?`、`limit?` | `attachment / none` |
 
 网络、系统、数据库、进程和格式化工具由 Host 执行并进入 `tool_calls`；需要审批的调用同时进入 `approvals`。表中的 `git_read` 仅描述 Legacy/可写 Profile 的现有 Host 工具，`durable_v2_shadow` 与 `graph_readonly_preview` 不会注册或执行它。`web_search` 的 `auto` 模式优先使用已配置 Provider，没有配置时自动回退到无 Key 的 DuckDuckGo HTML 搜索，不得向普通用户要求注册额外搜索 API Key。`web_read` 只接受公开 HTTP/HTTPS 地址，逐跳重新解析并验证重定向；正文最大 2 MiB。`http_request` 只访问调用中列出的精确公网 Host，阻止私网、跨 Host 重定向和认证 Header，请求/响应分别限制为 1/10 MiB，最长 15 秒；认证 API 必须改用 Keyring-backed OpenAPI Connector。`system_info` 只输出 CPU、内存、磁盘、有限进程摘要和固定安全环境变量白名单。`sqlite_read` 只打开授权项目内文件，连接和 Statement 双重只读，最多 1000 行、100 列、2 MiB、5 秒。进程工具使用程序名与参数数组直接启动，不通过 Shell，输出最大 512 KiB，超时范围 1–600 秒；测试或静态检查返回非零码时，工具调用本身成功完成并在 `details.passed=false` 中报告检查失败。结构化和表格文件必须位于授权项目且最大 4 MiB，当前表格首版不支持 XLSX。
+
+`read_tool_result` 是有界模型视图的取回通道：它只按 `fox-result://<runId>/<toolCallId>` 引用读取 Host 已持久化的字节，
+**不重新执行原工具**，因此不会重复任何写入。读取范围始终由 Host 从 Run 冻结绑定派生——
+模型传入 `conversationId` / `conversation` / `authorizedConversationId` / `runId` / `toolCallId` 会被直接拒绝，
+跨会话引用也会被拒绝。返回 `content[0].text` 为纯存储字节（可逐段拼回原文），
+模型视图在其后追加一个 `FOX_RESULT_CURSOR_V1 {…}` 文本块，其中白名单公开
+`reference`、`offset`、`returnedBytes`、`nextOffset`、`complete`、`originalBytes`、`retrievable`、`truncated`
+——这些游标与完整性事实随 `content` 一起进入最终模型请求（Provider 投影只序列化 `content` 文本块、不读 `details`）；
+模型按 `nextOffset` 续读到 `complete=true`；该状态只表示已读完 Host 保存的字节。
+重复投影保留一个末尾游标块，原文片段和执行凭据保持原样。
+源结果持久化仍是 `{content, details}`，公开元数据仅追加到模型视图，不写回原始结果。
+`limit` 至少 4 字节（保证返回一个完整 UTF-8 码点）、上限 64 KiB；`offset` 越界或落在码点中间会被拒绝并在错误中给出最近合法边界，
+因此非终止游标严格前进，不会出现空内容配 `next=0` 的死循环。
+当原始结果超过存储上限（128 KiB）时 Host 只保留预览，此时 `retrievable=false` 且 `truncated=true`：
+视图不会省略内容，模型必须如实说明这些字节无法从该引用取回，不得重建或猜测。
 
 ### A5 Child Run 工具
 

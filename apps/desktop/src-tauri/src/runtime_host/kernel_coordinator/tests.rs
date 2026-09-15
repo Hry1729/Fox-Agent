@@ -1,3 +1,5 @@
+#[path = "limit_fix_tests.rs"]
+mod limit_fix_tests;
 use super::*;
 #[path = "reconciliation_tests.rs"]
 mod reconciliation_tests;
@@ -40,6 +42,20 @@ fn acceptance_task4_external_marker_survives_lost_result_without_duplicate_execu
 mod compaction_tests;
 #[path = "display_tests.rs"]
 mod display_tests;
+#[path = "tool_result_read_tests.rs"]
+mod tool_result_read_tests;
+#[path = "skill_load_tests.rs"]
+mod skill_load_tests;
+#[path = "delivery_live_tests.rs"]
+mod delivery_live_tests;
+#[path = "concurrency_tests.rs"]
+mod concurrency_tests;
+#[path = "steering_tests.rs"]
+mod steering_tests;
+#[path = "steering_live_tests.rs"]
+mod steering_live_tests;
+#[path = "real_eval_tests.rs"]
+mod real_eval_tests;
 use crate::kernel::{CancellationRegistry, PolicyDecision, TestClock};
 use fox_engine_protocol::{FrozenPermission, PermissionMode, ResourceExecutor, TimeBudgets};
 use serde_json::json;
@@ -97,6 +113,10 @@ fn fixture_with_retry_opt(clock: &TestClock, prompt_hash: &str, model: Option<&c
 }
 
 fn fixture_with_project_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32), has_project: bool) -> (Database, PathBuf, String) {
+    fixture_with_budgets_opt(clock, prompt_hash, model, initial, prepared, retries, has_project, TimeBudgets::default())
+}
+
+fn fixture_with_budgets_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32), has_project: bool, budgets: TimeBudgets) -> (Database, PathBuf, String) {
     let engine = model.map(|model| model.engine_id.as_str()).unwrap_or("pi");
     let root = std::env::temp_dir().join(format!("fox-coordinator-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
@@ -130,7 +150,7 @@ fn fixture_with_project_opt(clock: &TestClock, prompt_hash: &str, model: Option<
         read_only_executor: ResourceExecutor::Rust,
         permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
         permission,
-        budgets: TimeBudgets::default(),
+        budgets,
     };
     db.freeze_run_control(&binding).unwrap();
     let config = kernel::RunFrozenConfig {
@@ -142,6 +162,8 @@ fn fixture_with_project_opt(clock: &TestClock, prompt_hash: &str, model: Option<
         execution_profile_id: binding.execution_profile_id.clone(),
         prompt_config_hash: prompt_hash.into(),
         model_request_timeout_ms: binding.budgets.model_request_ms,
+        model_first_response_ms: binding.budgets.model_first_response_ms,
+        model_idle_ms: binding.budgets.model_idle_ms,
         tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
         run_execution_budget_ms: binding.budgets.run_execution_ms,
         approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
@@ -193,6 +215,145 @@ fn calls() -> Vec<ToolCallRequest> {
             source_order,
         })
         .collect()
+}
+
+fn timeout_failure(run_id: &str, turn_id: &str, checkpoint_seq: u64) -> String {
+    format!(
+        "kernel.settled_model_failure:{}",
+        json!({
+            "schemaVersion": 1, "runId": run_id, "turnId": turn_id,
+            "checkpointSeq": checkpoint_seq, "category": "model_timeout",
+            "httpStatus": null, "retryAfterMs": null,
+            "telemetry": {"elapsedMs": 121_000, "idleElapsedMs": 120_000,
+                "firstResponseMs": 2_000, "textBytes": 449,
+                "reasoningBytes": 0, "toolParamBytes": 82_000},
+        })
+    )
+}
+
+fn retry_reason(root: &std::path::Path, run_id: &str) -> String {
+    // Read-only inspection through a separate connection; never the live handle.
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    connection.query_row(
+        "SELECT payload_json FROM kernel_events WHERE run_id=?1 AND event_type='run.retrying' ORDER BY seq DESC LIMIT 1",
+        [run_id],
+        |row| row.get::<_, String>(0),
+    ).unwrap()
+}
+
+#[test]
+fn worker_model_timeout_retries_only_the_model_request_without_replaying_tools() {
+    let clock = TestClock::new(1000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_retry_opt(&clock, "timeout-prompt", None, false, false, (0, 1));
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+    let tools = coordinator.snapshot().unwrap().tool_calls;
+    // The real dispatch flow: the worker returns settled model_timeout
+    // evidence. Nothing outstanding was dispatched in the failed round, so
+    // the Host schedules a bounded retry that only re-issues the model
+    // request; no tool is executed here.
+    coordinator.dispatch_batch("worker-batch", "first", &Allow, |binding, frame, _| {
+        Err(timeout_failure(&binding.run_id, &frame.turn_id, frame.checkpoint_seq))
+    }).unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
+    assert_eq!(coordinator.snapshot().unwrap().tool_calls, tools);
+    assert_eq!(coordinator.snapshot().unwrap().retry.turn_attempts, 1);
+    // The retry is not due yet: an early claim is refused.
+    assert!(coordinator.dispatch_batch("worker-batch", "early", &Allow, |_, _, _| panic!("retry is not due")).is_err());
+    drop(coordinator);
+    drop(db);
+    clock.advance(2000);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.tick().unwrap();
+    // After resume the same batch completes without re-executing any tool.
+    coordinator.dispatch_batch("worker-batch", "second", &Allow, |binding, frame, _| {
+        Ok(fox_engine_protocol::KernelModelResponse {
+            schema_version: 1, run_id: binding.run_id.clone(), turn_id: frame.turn_id.clone(),
+            batch_id: frame.batch_id.clone(), checkpoint_seq: frame.checkpoint_seq,
+            assistant_message: json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"已恢复并完成。\n<fox-final/>"}]}),
+        })
+    }).unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "completed");
+    assert_eq!(coordinator.snapshot().unwrap().tool_calls, tools);
+}
+
+#[test]
+fn worker_model_timeout_with_an_unsettled_tool_fails_closed_without_retry() {
+    let clock = TestClock::new(1000);
+    let cancellation = CancellationRegistry::default();
+    let (db, _root, run_id) = fixture_with_retry_opt(&clock, "timeout-uncertain", None, false, false, (0, 1));
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.propose_tools("batch", calls(), &Allow).unwrap();
+    assert!(coordinator.snapshot().unwrap().tool_calls.iter().any(|tool| tool.state == "running"));
+    // The timeout evidence path refuses to retry while a tool is unsettled:
+    // the uncertain execution must be reconciled, never replayed.
+    assert!(coordinator.dispatch_batch("batch", "stalled", &Allow, |binding, frame, _| {
+        Err(timeout_failure(&binding.run_id, &frame.turn_id, frame.checkpoint_seq))
+    }).is_err());
+    // No retry was scheduled and the uncertain tool was left for reconciliation.
+    assert_eq!(coordinator.snapshot().unwrap().state, "running");
+    assert_eq!(coordinator.snapshot().unwrap().retry.turn_attempts, 0);
+}
+
+#[test]
+fn noted_worker_progress_arms_first_response_and_idle_is_bounded() {
+    let clock = TestClock::new(1000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_retry_opt(&clock, "progress-prompt", None, false, false, (0, 1));
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    // The request was armed at wall 1000. A preview at wall 2000 arms
+    // first-output; without it the first-response bound would fire at 61000.
+    db.note_kernel_model_progress(&run_id, 2000);
+    clock.advance(59_999);
+    coordinator.tick().unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "running");
+    // 119s of further silence stays under the 120s idle bound...
+    clock.advance(60_000);
+    coordinator.tick().unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "running");
+    // ...but the full idle span fails closed through the Host backstop (the
+    // retry path belongs to the settled worker-evidence flow).
+    clock.advance(1_001);
+    coordinator.tick().unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "failed");
+    let reason = rusqlite::Connection::open(root.join("facts.db")).unwrap().query_row(
+        "SELECT payload_json FROM kernel_events WHERE run_id=?1 AND event_type='run.failed' ORDER BY seq DESC LIMIT 1",
+        [&run_id], |row| row.get::<_, String>(0)).unwrap();
+    assert!(reason.contains("model.idle_timeout"));
+}
+
+#[test]
+fn silent_request_trips_first_response_before_the_whole_round_bound() {
+    let clock = TestClock::new(1000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run_id) = fixture_with_retry_opt(&clock, "silent-prompt", None, false, false, (0, 1));
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    // Default budgets: 300s whole-round / 60s first-response / 120s idle.
+    // No preview ever arrives: the first-response bound fires at 61s, long
+    // before the whole-round bound, and the backstop fails the run closed.
+    clock.advance(60_000);
+    coordinator.tick().unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "failed");
+    let reason = rusqlite::Connection::open(root.join("facts.db")).unwrap().query_row(
+        "SELECT payload_json FROM kernel_events WHERE run_id=?1 AND event_type='run.failed' ORDER BY seq DESC LIMIT 1",
+        [&run_id], |row| row.get::<_, String>(0)).unwrap();
+    assert!(reason.contains("model.first_response_timeout"));
+}
+
+#[test]
+fn model_progress_registry_is_consume_once_and_bounded() {
+    let clock = TestClock::new(1000);
+    let (db, _root, run_id) = fixture(&clock);
+    assert_eq!(db.consume_kernel_model_progress(&run_id), None);
+    db.note_kernel_model_progress(&run_id, 1500);
+    db.note_kernel_model_progress(&run_id, 1600);
+    assert_eq!(db.consume_kernel_model_progress(&run_id), Some(1600));
+    assert_eq!(db.consume_kernel_model_progress(&run_id), None);
+    db.note_kernel_model_progress(&run_id, 1700);
+    db.clear_kernel_model_progress(&run_id);
+    assert_eq!(db.consume_kernel_model_progress(&run_id), None);
 }
 
 #[test]
@@ -275,7 +436,7 @@ fn restart_approval_dispatches_real_reads_once_and_preserves_batch_order() {
         json!({"role":"assistant","stopReason":"toolUse","content":[
             {"type":"toolCall","id":"read-a","name":"read","arguments":{"path":"proof.txt"}},
             {"type":"toolCall","id":"read-b","name":"read","arguments":{"path":"proof.txt"}}
-        ]})).unwrap();
+        ]}), Vec::new()).unwrap();
     for item in &frame.tools {
         let text = item.result["content"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap();
         let receipt: Value = serde_json::from_str(text.strip_prefix("FOX_EXECUTION_RECEIPT_V1\n").unwrap()).unwrap();
@@ -900,8 +1061,7 @@ fn owning_host_recovery_never_replays_an_uncertain_model_request() {
     assert_eq!(db.kernel_build_full_snapshot(&run_id).unwrap().state, "failed");
 }
 
-fn settle_worker_batch(coordinator: &KernelCoordinator<'_>) {
-    coordinator.propose_engine_batch(fox_engine_protocol::KernelEngineBatchCheckpoint {
+pub(super) fn settle_worker_batch(coordinator: &KernelCoordinator<'_>) {    coordinator.propose_engine_batch(fox_engine_protocol::KernelEngineBatchCheckpoint {
         schema_version: 1, batch_id: "worker-batch".into(),
         history: vec![json!({"role":"user","content":"read the file"})],
         assistant_message: json!({"role":"assistant","stopReason":"toolUse","content":[
@@ -1012,9 +1172,14 @@ fn formal_worker_uses_remaining_run_budget_instead_of_a_fresh_full_window() {
     settle_worker_batch(&coordinator);
     clock.advance(1_800_000 - 1);
     let started = std::time::Instant::now();
-    let error = coordinator.dispatch_batch_with_worker("worker-batch", "worker", &Allow,
-        &real_worker_command(), &config, "test-key").unwrap_err();
-    assert!(error.contains("deadline"), "{error}");
+    coordinator.dispatch_batch_with_worker("worker-batch", "worker", &Allow,
+        &real_worker_command(), &config, "test-key").unwrap();
+    // Transport expiry is now settled durably, rather than escaping as a plain
+    // deadline string. There is neither enough remaining time nor retry budget.
+    let facts = db.kernel_rehydrate(&run_id).unwrap().unwrap();
+    assert_eq!(facts.state, kernel::RunState::Failed);
+    assert_eq!(facts.retry.turn_attempts, 0);
+    assert!(facts.tools.iter().all(|tool| tool.state == kernel::ToolCallState::Completed));
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     assert!(coordinator.prepare_stored_batch_resume("worker-batch").is_err());
     assert_ne!(db.kernel_rehydrate(&run_id).unwrap().unwrap().state, kernel::RunState::Completed);
@@ -1266,6 +1431,120 @@ fn completion_contract_for_test() -> String {
         .output().unwrap();
     assert!(prompt.status.success());
     String::from_utf8(prompt.stdout).unwrap()
+}
+
+#[test]
+fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_replay() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    // One server, two sequential connections (same frozen config/hash):
+    //  1. sends one chunk of partial tool-call JSON (as the AGV failure
+    //     produced long Office arguments), then stalls forever — only the
+    //     idle bound can classify this;
+    //  2. answers the retried request with a completed final answer.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let read_request = |stream: &mut std::net::TcpStream| {
+            let mut bytes = Vec::new();
+            let mut buffer = [0u8; 8192];
+            stream.set_nonblocking(false).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0);
+                bytes.extend_from_slice(&buffer[..read]);
+                if bytes.windows(4).position(|part| part == b"\r\n\r\n").is_some() {
+                    break;
+                }
+            }
+        };
+        let sse = |stream: &mut std::net::TcpStream, body: String| {
+            // One complete chunked response: data chunk + terminating chunk.
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n", body.len(), body).unwrap();
+        };
+        let sse_stall = |stream: &mut std::net::TcpStream, body: String| {
+            // A partial chunk with NO terminating chunk: the stream stays
+            // open, so only the worker's idle bound can classify the stall.
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n", body.len(), body).unwrap();
+        };
+
+        // Connection 1: partial tool arguments, then stall with no further bytes.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut first = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "stalled request was not received");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        read_request(&mut first);
+        let chunk = json!({"id":"agv-stall","object":"chat.completion.chunk","created":1,"model":"agv-stall","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"write-excel","type":"function","function":{"name":"read","arguments":"{\"path\":\"proof.t"}}]},"finish_reason":null}]});
+        sse_stall(&mut first, format!("data: {chunk}\n\n"));
+        // Stall past the 1.5s idle bound (the worker aborts on its own timer)
+        // but release early enough that the retried request still arrives
+        // inside its 1s first-response budget.
+        std::thread::sleep(Duration::from_millis(2_500));
+        drop(first);
+
+        // Connection 2: the retry completes normally.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut second = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "retried request was not received");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        read_request(&mut second);
+        let delta = json!({"role":"assistant","content":"继续完成剩余表格并交付。\n<fox-final/>"});
+        let chunks = [
+            json!({"id":"agv-retry","object":"chat.completion.chunk","created":1,"model":"agv-stall","choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
+            json!({"id":"agv-retry","object":"chat.completion.chunk","created":1,"model":"agv-stall","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+        ];
+        sse(&mut second, format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", chunks[0], chunks[1]));
+    });
+
+    let mut config = worker_configuration();
+    config.model_service = json!({"apiType":"openai-completions","modelId":"agv-stall","baseUrl":format!("http://{address}/v1")});
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let budgets = TimeBudgets {
+        model_request_ms: 15_000,
+        model_first_response_ms: 1_000,
+        model_idle_ms: 1_500,
+        ..TimeBudgets::default()
+    };
+    let (db, root, run_id) = fixture_with_budgets_opt(&clock, &config.hash().unwrap(), Some(&config), false, false, (0, 1), true, budgets);
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+    let tools = coordinator.snapshot().unwrap().tool_calls;
+    coordinator.dispatch_batch_with_worker("worker-batch", "agv-stall", &Allow, &real_worker_command(), &config, "local-test-only").unwrap();
+    let snapshot = coordinator.snapshot().unwrap();
+    assert_eq!(snapshot.state, "retry_scheduled", "idle timeout must schedule a retry, not fail the run");
+    assert_eq!(snapshot.tool_calls, tools, "completed tool results are kept; nothing is replayed");
+
+    // The single turn-budget retry resumes with the SAME frozen configuration
+    // and completes the run without re-executing any tool.
+    drop(coordinator);
+    drop(db);
+    clock.advance(2_000);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.tick().unwrap();
+    coordinator.dispatch_batch_with_worker("worker-batch", "agv-recovered", &Allow, &real_worker_command(), &config, "local-test-only").unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "completed");
+    assert_eq!(coordinator.snapshot().unwrap().tool_calls, tools);
+    server.join().unwrap();
 }
 
 #[test]
@@ -1861,8 +2140,14 @@ fn kernel_frozen_hooks_keep_block_and_approval_policy_and_transactional_audit() 
 #[test]
 fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
     let supported = super::super::kernel_gateway::supported_tools();
-    assert_eq!(supported.len(),65);
-    assert_eq!(supported.iter().collect::<std::collections::BTreeSet<_>>().len(),65);
+    // 67 = the frozen catalogue including `read_tool_result` (the reader that
+    // keeps a bounded model view's promise that omitted content is reachable)
+    // and `skill_load` (on-demand loading of catalog skills without growing
+    // the frozen scope).
+    assert_eq!(supported.len(),67);
+    assert_eq!(supported.iter().collect::<std::collections::BTreeSet<_>>().len(),67);
+    assert!(supported.iter().any(|tool| *tool == "read_tool_result"));
+    assert!(supported.iter().any(|tool| *tool == "skill_load"));
     let mut config = worker_configuration();
     config.model_service["maxOutputTokens"] = json!(1024);
     config.proposal_tools = ["child_agent_list","child_run_start","child_run_collect","child_run_cancel"].iter()
@@ -2050,13 +2335,13 @@ fn kernel_context_resources_preserve_conversation_scope_and_use_kernel_results()
     })).unwrap();
     for (tool,input) in inputs {
         coordinator.dispatch_tool(tool,"context-owner",|_,_,token| {
-            let result = policy.execute_context_resource(&db,&root,&root,tool,&input,token)?;
+            let result = policy.execute_context_resource(&db,&root,&root,&root,tool,&input,token)?;
             if tool=="read_attachment" {
                 let page: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
                 assert_eq!(page["text"],"durable coordinator 中文 😀");
                 assert_eq!(page["hasMore"],false);
                 assert!(result["details"].get("text").is_none(), "the raw text must not be duplicated in UI metadata");
-                assert!(policy.execute_context_resource(&db,&root,&root,tool,&json!({"attachmentId":"foreign-attachment"}),token).is_err());
+                assert!(policy.execute_context_resource(&db,&root,&root,&root,tool,&json!({"attachmentId":"foreign-attachment"}),token).is_err());
             }
             Ok((true,result))
         }).unwrap();

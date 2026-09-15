@@ -11,6 +11,14 @@
 use crate::state::ApprovalDecision;
 use serde::{Deserialize, Serialize};
 
+fn default_model_first_response_ms() -> i64 {
+    60_000
+}
+
+fn default_model_idle_ms() -> i64 {
+    120_000
+}
+
 /// Execution clock. Two distinct time domains, per the Kernel time model:
 ///
 /// * **monotonic** — in-process elapsed execution time. It never moves
@@ -50,7 +58,7 @@ pub trait CancellationPort: Send + Sync {
 /// Immutable facts frozen at run creation. A run never silently changes engine,
 /// mode, policy or profile mid-flight. Serialized verbatim into the durable run
 /// row so a rehydrated run freezes the exact same identities.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RunFrozenConfig {
     pub engine_id: String,
     pub kernel_mode: String,
@@ -68,6 +76,15 @@ pub struct RunFrozenConfig {
     /// controller enforces run execution, tool-execution and approval-wait budgets;
     /// model-request timeout still requires production adapter wiring.
     pub model_request_timeout_ms: i64,
+    /// No output at all within this long after dispatch fails the round.
+    /// Old frozen rows predate this field and rehydrate to the default.
+    #[serde(default = "default_model_first_response_ms")]
+    pub model_first_response_ms: i64,
+    /// No text/thinking/tool-parameter progress within this long fails the
+    /// round, even if the whole-round bound has not been reached. Old frozen
+    /// rows predate this field and rehydrate to the default.
+    #[serde(default = "default_model_idle_ms")]
+    pub model_idle_ms: i64,
     pub tool_execution_timeout_ms: i64,
     pub run_execution_budget_ms: i64,
     /// Approval wall-clock. The run execution budget is suspended while waiting.
@@ -75,6 +92,54 @@ pub struct RunFrozenConfig {
     /// Provider HTTP retry and whole-turn retry are independent policies.
     pub provider_max_retries: u32,
     pub turn_max_retries: u32,
+}
+
+// Missing stall budgets in older persisted records inherit a bound no larger
+// than their original total window. Explicit invalid values still fail validation.
+impl<'de> Deserialize<'de> for RunFrozenConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        fn present_budget<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+            i64::deserialize(d).map(Some)
+        }
+        #[derive(Deserialize)]
+        struct Stored {
+            engine_id: String,
+            kernel_mode: String,
+            capability_manifest_version: u32,
+            capability_manifest_hash: String,
+            permission_snapshot_id: String,
+            execution_profile_id: String,
+            prompt_config_hash: String,
+            model_request_timeout_ms: i64,
+            #[serde(default, deserialize_with = "present_budget")]
+            model_first_response_ms: Option<i64>,
+            #[serde(default, deserialize_with = "present_budget")]
+            model_idle_ms: Option<i64>,
+            tool_execution_timeout_ms: i64,
+            run_execution_budget_ms: i64,
+            approval_wait_timeout_ms: i64,
+            provider_max_retries: u32,
+            turn_max_retries: u32,
+        }
+        let stored = Stored::deserialize(deserializer)?;
+        Ok(Self {
+            engine_id: stored.engine_id,
+            kernel_mode: stored.kernel_mode,
+            capability_manifest_version: stored.capability_manifest_version,
+            capability_manifest_hash: stored.capability_manifest_hash,
+            permission_snapshot_id: stored.permission_snapshot_id,
+            execution_profile_id: stored.execution_profile_id,
+            prompt_config_hash: stored.prompt_config_hash,
+            model_request_timeout_ms: stored.model_request_timeout_ms,
+            model_first_response_ms: stored.model_first_response_ms.unwrap_or_else(|| default_model_first_response_ms().min(stored.model_request_timeout_ms)),
+            model_idle_ms: stored.model_idle_ms.unwrap_or_else(|| default_model_idle_ms().min(stored.model_request_timeout_ms)),
+            tool_execution_timeout_ms: stored.tool_execution_timeout_ms,
+            run_execution_budget_ms: stored.run_execution_budget_ms,
+            approval_wait_timeout_ms: stored.approval_wait_timeout_ms,
+            provider_max_retries: stored.provider_max_retries,
+            turn_max_retries: stored.turn_max_retries,
+        })
+    }
 }
 
 /// A single tool call proposed by the engine within a turn/batch.
@@ -146,6 +211,7 @@ pub trait SnapshotProjectionPort: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboxEffectKind {
     InitialModel,
+    ContinuationModel,
     DispatchTool,
     RequestApproval,
     CancelEngineTurn,
@@ -157,6 +223,7 @@ pub enum OutboxEffectKind {
 impl OutboxEffectKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            OutboxEffectKind::ContinuationModel => "continuation_model",
             OutboxEffectKind::InitialModel => "initial_model",
             OutboxEffectKind::DispatchTool => "dispatch_tool",
             OutboxEffectKind::RequestApproval => "request_approval",
@@ -169,6 +236,7 @@ impl OutboxEffectKind {
 
     pub fn parse(value: &str) -> Option<OutboxEffectKind> {
         match value {
+            "continuation_model" => Some(OutboxEffectKind::ContinuationModel),
             "initial_model" => Some(OutboxEffectKind::InitialModel),
             "dispatch_tool" => Some(OutboxEffectKind::DispatchTool),
             "request_approval" => Some(OutboxEffectKind::RequestApproval),

@@ -5,10 +5,73 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createEnvelope } from '../src/protocol.mjs'
 import { createServer } from 'node:http'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { KERNEL_COMPLETION_CONTRACT, completionRequired } from '../src/kernel-completion.mjs'
+import { startRangeProvider } from './fixtures/tool-result-range-provider.mjs'
+import { createHostTools } from '../src/host-tools.mjs'
 
 const identity = { runId: 'run-k', conversationId: 'conversation-k', runtimeSessionId: 'session-k' }
+
+test('real HTTP Kernel live and resumed loops choose every range from model-visible cursors', { timeout: 60000 }, async t => {
+  const source = Array.from({ length: 350 }, (_, index) => `记录${index}:中文数据😀及等待原因；`).join('\n')
+  const stored = Buffer.from(source)
+  const reference = 'fox-result://source-run/read-once'
+  const limit = 4096
+  const { name, description, parameters } = createHostTools(() => {}).find(tool => tool.name === 'read_tool_result')
+  for (const mode of ['initial', 'batch']) {
+    const provider = await startRangeProvider(reference, limit)
+    t.after(() => provider.close())
+    let reads = 0
+    const durableResults = []
+    function settle(call) {
+      assert.equal(call.name, 'read_tool_result', 'no source tool may be re-executed')
+      assert.equal(call.arguments.reference, reference)
+      const { offset, limit: size } = call.arguments
+      let end = Math.min(stored.length, offset + size)
+      while (end < stored.length && (stored[end] & 0xc0) === 0x80) end--
+      const result = { content: [{ type: 'text', text: stored.subarray(offset, end).toString('utf8') }],
+        details: { reference, offset, returnedBytes: end - offset, nextOffset: end < stored.length ? end : null,
+          complete: end === stored.length, originalBytes: stored.length, retrievable: true, truncated: false,
+          source: 'private Host diagnostic', runId: 'private-field' } }
+      durableResults.push({ result, before: JSON.stringify(result) })
+      reads++
+      return { toolCallId: call.id, tool: call.name, sourceOrder: 0, canonicalInput: call.arguments,
+        state: 'completed', result }
+    }
+    const child = await worker(t, ['--kernel-worker'], { onRoundOutput: frame => {
+      if (frame.assistantMessage.stopReason !== 'toolUse') return { schemaVersion: 1, kind: 'final' }
+      const call = frame.assistantMessage.content.find(block => block.type === 'toolCall')
+      return { schemaVersion: 1, kind: 'batch', batchId: `range-batch-${reads + 1}`, checkpointSeq: 20 + reads,
+        tools: [settle(call)] }
+    } })
+    const ready = await child.request('kernel.initialize', initialization({
+      proposalTools: [{ name, description, parameters }],
+      modelService: { apiType: 'openai-completions', modelId: 'range-provider', apiKey: 'local-test-only',
+        baseUrl: provider.baseUrl, contextWindow: 256000, maxOutputTokens: 512 },
+    }))
+    assert.equal(ready.type, 'kernel.ready')
+    const payload = resumePayload()
+    if (mode === 'initial') {
+      delete payload.batchResume
+      payload.initialModel = { schemaVersion: 1, idempotencyKey: 'initial-model-delivery', checkpointSeq: 2,
+        input: { schemaVersion: 1, runId: identity.runId, turnId: 'range-turn', promptConfigHash: 'range-frozen',
+          messages: [{ role: 'user', content: 'Read every stored byte using the returned cursor.', timestamp: 1 }] } }
+    } else {
+      const call = { type: 'toolCall', id: 'range-read-1', name, arguments: { reference, offset: 0, limit } }
+      payload.batchResume.assistantMessage.content = [call]
+      payload.batchResume.tools = [settle(call)]
+    }
+    const response = await child.request(mode === 'initial' ? 'kernel.start_initial' : 'kernel.resume_batch', payload)
+    const report = provider.report
+    assert.equal(response.type, 'kernel.model_response', JSON.stringify(response))
+    assert.ok(report?.pages.length >= 3, `${mode} must deliver at least three pages to HTTP`)
+    assert.equal(report.pages.length, reads)
+    assert.equal(report.sha256, createHash('sha256').update(stored).digest('hex'))
+    assert.ok(durableResults.every(({ result, before }) => JSON.stringify(result) === before))
+    if (process.env.FOX_RANGE_EVIDENCE_DIR) await writeFile(
+      `${process.env.FOX_RANGE_EVIDENCE_DIR}/kernel-${mode}-http.json`, JSON.stringify(report, null, 2))
+  }
+})
 
 test('HTTP final-answer contract rejects premature stops and keeps explicit answers, blockers and tools', { timeout: 60000 }, async t => {
   let plan
@@ -586,8 +649,10 @@ test('live round deadline bounds the wait before the first response header', { t
         messages: [{ role: 'user', content: 'go', timestamp: 1 }] } },
   })
   const elapsed = performance.now() - start
-  assert.equal(response.type, 'request_failed')
-  assert.match(response.payload.message, /reconcile/)
+  assert.equal(response.type, 'kernel.model_failure')
+  assert.equal(response.payload.category, 'model_timeout')
+  assert.ok(response.payload.telemetry, 'timeout evidence carries progress telemetry')
+  assert.equal(response.payload.telemetry.textBytes, 0, 'no output arrived before the first-response bound')
   assert.ok(elapsed < 1000, `deadline must fire near the 100ms budget, took ${elapsed}ms`)
   assert.equal(child.roundOutputs.length, 0, 'no round output is committed when headers never arrive')
 })
@@ -606,8 +671,8 @@ test('frozen model timeout consumes the worker without leaking input into diagno
   assert.equal((await child.request('kernel.initialize', config)).type, 'kernel.ready')
   const payload = resumePayload(); payload.controlBinding.budgets.modelRequestMs = 10
   const response = await child.request('kernel.resume_batch', payload)
-  assert.equal(response.type, 'request_failed')
-  assert.match(response.payload.message, /reconcile/)
+  assert.equal(response.type, 'kernel.model_failure')
+  assert.equal(response.payload.category, 'model_timeout')
   assert.doesNotMatch(JSON.stringify(child.events), /private-test-key|Private provider/)
   assert.equal((await child.request('kernel.resume_batch', resumePayload())).type, 'request_failed')
 })
@@ -639,10 +704,11 @@ test('opt-in model previews keep provider reasoning separate from answer text wi
   assert.equal(previews.at(-1).text,'可见的流式回复 😀，最终消息仍须由 Host 提交。')
   assert.equal(previews.at(-1).reasoning,'供应商提供的思考说明')
   for (let i=0;i<previews.length;i++) {
-    assert.ok(Object.keys(previews[i]).every(key=>['checkpointSeq','conversationId','reasoning','revision','runId','schemaVersion','text','turnId'].includes(key)))
+    assert.ok(Object.keys(previews[i]).every(key=>['checkpointSeq','conversationId','progressBytes','reasoning','revision','runId','schemaVersion','text','turnId'].includes(key)))
     assert.equal(previews[i].checkpointSeq,8)
     assert.equal(previews[i].runId,identity.runId)
     assert.ok(previews[i].revision>(previews[i-1]?.revision ?? 0))
     assert.doesNotMatch(previews[i].text,/供应商提供的思考说明/)
+    if (previews[i].progressBytes !== undefined) assert.ok(Number.isFinite(previews[i].progressBytes))
   }
 })

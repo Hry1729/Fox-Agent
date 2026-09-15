@@ -177,13 +177,49 @@ impl Database {
 
     /// Count durable Host continuation decisions for the bounded stop-review.
     /// Only committed decisions count; a crash before the next model round
-    /// fails closed on recovery instead of silently re-injecting.
+    /// fails closed on recovery instead of silently re-injecting. Business
+    /// delivery repairs ride the same transport but carry
+    /// `lane='delivery_repair'` and are counted separately by
+    /// [`Database::kernel_count_delivery_repairs`]; they never consume the
+    /// stop-review budget.
     pub fn kernel_count_continuations(&self, run_id: &str) -> Result<i64, String> {
         self.with_connection(|connection| {
             connection.query_row(
                 "SELECT COUNT(*) FROM kernel_events e JOIN kernel_runs r ON r.run_id=e.run_id
                  WHERE e.run_id=?1 AND e.event_type='engine.continuation_requested'
-                   AND r.kernel_mode='authoritative'",
+                   AND r.kernel_mode='authoritative'
+                   AND COALESCE(json_extract(e.payload_json,'$.lane'),'stop_review')='stop_review'",
+                params![run_id], |row| row.get(0),
+            )
+        })
+    }
+
+    /// Count durable bounded business-delivery repair decisions. Separate from
+    /// both the stop-review continuation counter and model-failure retries.
+    pub fn kernel_count_delivery_repairs(&self, run_id: &str) -> Result<i64, String> {
+        self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*) FROM kernel_events e JOIN kernel_runs r ON r.run_id=e.run_id
+                 WHERE e.run_id=?1 AND e.event_type='engine.continuation_requested'
+                   AND r.kernel_mode='authoritative'
+                   AND json_extract(e.payload_json,'$.lane')='delivery_repair'",
+                params![run_id], |row| row.get(0),
+            )
+        })
+    }
+
+    /// Count durable additional-user-input (`steering`) follow-ups. The Host
+    /// answers mid-run user additions on their own lane and their own bounded
+    /// counter: they are new user work and must never consume the stop-review
+    /// budget that exists to review the model's own stop. The bound exists so a
+    /// user cannot extend a Run without limit through the queue.
+    pub fn kernel_count_steering_followups(&self, run_id: &str) -> Result<i64, String> {
+        self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*) FROM kernel_events e JOIN kernel_runs r ON r.run_id=e.run_id
+                 WHERE e.run_id=?1 AND e.event_type='engine.continuation_requested'
+                   AND r.kernel_mode='authoritative'
+                   AND json_extract(e.payload_json,'$.lane')='steering'",
                 params![run_id], |row| row.get(0),
             )
         })
@@ -745,7 +781,7 @@ impl Database {
         wall_now_ms: i64,
         cmd: &crate::kernel::KernelPersistCommand,
     ) -> Result<(), String> {
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, None, None, None, None)
     }
 
     /// Commit a tool result only while this executor still owns its dispatch.
@@ -762,7 +798,7 @@ impl Database {
         if cmd.settled_dispatch_tool_call_ids.len() != 1 || cmd.settled_dispatch_tool_call_ids[0] != tool_call_id {
             return Err("kernel result must settle exactly its owned tool dispatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, Some((tool_call_id, lease_owner)), None, None, None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, Some((tool_call_id, lease_owner)), None, None, None, None, None, None)
     }
 
     /// Claim exactly one pending result delivery and persist its model deadline
@@ -781,13 +817,14 @@ impl Database {
             || payload["startedAt"].as_i64() != Some(wall_now_ms) {
             return Err("Kernel batch dispatch identity mismatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, Some((batch_id, lease_owner)), None, None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, Some((batch_id, lease_owner)), None, None, None, None, None)
     }
 
     /// The response, terminal/next-batch decision, and consumed delivery lease
     /// commit together. An uncertain or foreign worker cannot settle this lease.
     pub fn kernel_commit_batch_response(&self, run_id: &str, wall_now_ms: i64,
-        cmd: &crate::kernel::KernelPersistCommand, batch_id: &str, lease_owner: &str) -> Result<(), String> {
+        cmd: &crate::kernel::KernelPersistCommand, batch_id: &str, lease_owner: &str,
+        steering: Option<&super::SteeringDecision>) -> Result<(), String> {
         if batch_id.trim().is_empty() || lease_owner.trim().is_empty() || cmd.model_request_since_wall_ms.is_some() {
             return Err("invalid Kernel batch response decision".into());
         }
@@ -800,11 +837,12 @@ impl Database {
             || response.run_id != run_id || response.turn_id != cmd.turn_id {
             return Err("Kernel batch response identity mismatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, Some((batch_id, lease_owner)), None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, Some((batch_id, lease_owner)), None, None, None, steering)
     }
 
     pub(crate) fn kernel_commit_initial_model(&self, run_id: &str, wall_now_ms: i64,
-        cmd: &crate::kernel::KernelPersistCommand, owner: &str, response: bool) -> Result<(), String> {
+        cmd: &crate::kernel::KernelPersistCommand, owner: &str, response: bool,
+        steering: Option<&super::SteeringDecision>) -> Result<(), String> {
         if owner.trim().is_empty() { return Err("initial model lease owner is empty".into()); }
         if response {
             let events = cmd.events.iter().filter(|event| event.event_type == "engine.initial_response").collect::<Vec<_>>();
@@ -822,7 +860,53 @@ impl Database {
             if payload["turnId"] != cmd.turn_id || payload["idempotencyKey"] != crate::kernel::INITIAL_MODEL_IDEMPOTENCY_KEY
                 || payload["startedAt"].as_i64() != Some(wall_now_ms) { return Err("initial dispatch identity mismatch".into()); }
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, Some((owner, response)), None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, Some((owner, response)), None, None, steering)
+    }
+
+    pub(crate) fn kernel_continuation_input(&self, run_id: &str, effect_key: &str)
+        -> Result<fox_engine_protocol::KernelInitialModelInput, String> {
+        let body = self.with_connection(|connection| {
+            connection.query_row("SELECT o.payload_json FROM kernel_effect_outbox o
+                JOIN kernel_events e ON e.run_id=o.run_id AND e.event_type='engine.continuation_requested'
+                    AND e.payload_json=o.payload_json
+                WHERE o.run_id=?1 AND o.effect_key=?2 AND o.effect_type='continuation_model' AND o.status='pending'",
+                params![run_id,effect_key],|row|row.get::<_,String>(0))
+        })?;
+        let payload: serde_json::Value = serde_json::from_str(&body).map_err(|_| "invalid continuation payload")?;
+        let input: fox_engine_protocol::KernelInitialModelInput = serde_json::from_value(payload["input"].clone())
+            .map_err(|_| "invalid stored continuation input")?;
+        input.validate()?;
+        let original = self.kernel_initial_input(run_id)?;
+        if input.run_id != run_id || input.turn_id != original.turn_id
+            || input.prompt_config_hash != original.prompt_config_hash || payload["effectKey"] != effect_key {
+            return Err("continuation frozen input changed".into());
+        }
+        Ok(input)
+    }
+
+    pub(crate) fn kernel_commit_continuation_model(&self, run_id: &str, wall_now_ms: i64,
+        cmd: &crate::kernel::KernelPersistCommand, effect_key: &str, owner: &str, response: bool,
+        steering: Option<&super::SteeringDecision>) -> Result<(), String> {
+        let event_type = if response { "engine.continuation_response" } else { "engine.continuation_dispatched" };
+        let events = cmd.events.iter().filter(|event| event.event_type == event_type).collect::<Vec<_>>();
+        if owner.trim().is_empty() || events.len() != 1 || !effect_key.starts_with("continuation:")
+            || (!response && (cmd.events.len() != 1 || cmd.run_state != crate::kernel::RunState::Running
+                || cmd.model_request_since_wall_ms != Some(wall_now_ms)))
+            || (response && cmd.model_request_since_wall_ms.is_some()) {
+            return Err("invalid continuation lease decision".into());
+        }
+        let payload: serde_json::Value = serde_json::from_str(&events[0].payload_json).map_err(|_| "invalid continuation event")?;
+        if payload["turnId"] != cmd.turn_id { return Err("continuation turn changed".into()); }
+        if response {
+            let value: fox_engine_protocol::KernelInitialModelResponse = serde_json::from_value(payload["response"].clone())
+                .map_err(|_| "invalid continuation response")?;
+            value.validate()?;
+            if value.run_id != run_id || value.turn_id != cmd.turn_id { return Err("continuation response identity changed".into()); }
+        } else if payload["effectKey"] != effect_key || payload["startedAt"].as_i64() != Some(wall_now_ms) {
+            return Err("continuation dispatch identity changed".into());
+        }
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, None, None,
+            Some((effect_key, owner, response)), steering)
     }
 
     pub(crate) fn kernel_commit_model_retry(&self, run_id: &str, wall_now_ms: i64,
@@ -834,7 +918,7 @@ impl Database {
             || cmd.events[1].event_type != if terminal { "run.failed" } else { "run.retrying" } || !cmd.outbox.is_empty() {
             return Err("invalid settled model retry decision".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id,wall_now_ms,cmd,None,None,None,None,Some((effect_key,owner)))
+        self.kernel_commit_decision_with_dispatch_lease(run_id,wall_now_ms,cmd,None,None,None,None,Some((effect_key,owner)), None, None)
     }
 
     fn kernel_commit_decision_with_dispatch_lease(
@@ -847,6 +931,8 @@ impl Database {
         batch_response_lease: Option<(&str, &str)>,
         initial_lease: Option<(&str, bool)>,
         model_retry_lease: Option<(&str, &str)>,
+        continuation_lease: Option<(&str, &str, bool)>,
+        steering: Option<&super::SteeringDecision>,
     ) -> Result<(), String> {
         if !valid_run_state(cmd.run_state.as_str()) {
             return Err(format!(
@@ -879,17 +965,24 @@ impl Database {
                 let old_retry: String = transaction.query_row("SELECT retry_state_json FROM kernel_runs WHERE run_id=?1",[run_id],|row|row.get(0))?;
                 let old_retry: crate::kernel::RetryState = serde_json::from_str(&old_retry).map_err(|_|kernel_err("invalid stored retry counters"))?;
                 let provider = failure.category == "provider_unavailable";
+                let turn_failure = matches!(failure.category.as_str(), "model_timeout" | "model_transport_failure");
                 let terminal = cmd.run_state == crate::kernel::RunState::Failed;
                 let mut expected_retry = old_retry.clone();
                 if !terminal && !provider {
-                    let used = if old_retry.completion_effect_key.as_deref() == Some(effect_key) {
-                        old_retry.completion_attempts
-                    } else { 0 };
-                    expected_retry.completion_effect_key = Some(effect_key.to_owned());
-                    expected_retry.completion_attempts = used + 1;
+                    if turn_failure {
+                        // Timeout retries spend the turn budget, not the
+                        // completion budget.
+                        expected_retry.turn_attempts = old_retry.turn_attempts + 1;
+                    } else {
+                        let used = if old_retry.completion_effect_key.as_deref() == Some(effect_key) {
+                            old_retry.completion_attempts
+                        } else { 0 };
+                        expected_retry.completion_effect_key = Some(effect_key.to_owned());
+                        expected_retry.completion_attempts = used + 1;
+                    }
                 }
                 if cmd.retry.provider_attempts != old_retry.provider_attempts + u32::from(provider && !terminal)
-                    || cmd.retry.turn_attempts != old_retry.turn_attempts
+                    || cmd.retry.turn_attempts != expected_retry.turn_attempts
                     || cmd.retry.completion_effect_key != expected_retry.completion_effect_key
                     || cmd.retry.completion_attempts != expected_retry.completion_attempts
                     || (!terminal && (cmd.retry.scheduled_at_wall_ms != Some(wall_now_ms)
@@ -904,15 +997,39 @@ impl Database {
                 }
                 let changed = transaction.execute("UPDATE kernel_effect_outbox SET status=?6,completed_at=CASE WHEN ?6='completed' THEN ?4 ELSE NULL END,lease_owner=NULL,leased_at=NULL,updated_at=?4
                     WHERE run_id=?1 AND effect_key=?2 AND lease_owner=?3 AND status='leased'
-                      AND effect_type IN ('initial_model','deliver_tool_batch')
+                      AND effect_type IN ('initial_model','deliver_tool_batch','continuation_model')
                       AND EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state='running' AND r.model_request_since_wall_ms IS NOT NULL)
                       AND NOT EXISTS(SELECT 1 FROM kernel_host_commands c WHERE c.run_id=?1 AND c.kind='cancel')
                       AND EXISTS(SELECT 1 FROM kernel_events e WHERE e.run_id=?1 AND e.seq=?5
                         AND ((kernel_effect_outbox.effect_type='initial_model' AND e.event_type='engine.initial_dispatched')
-                          OR (kernel_effect_outbox.effect_type='deliver_tool_batch' AND e.event_type='engine.batch_dispatched'
+                          OR (kernel_effect_outbox.effect_type='continuation_model' AND e.event_type='engine.continuation_dispatched'
+                               AND json_extract(e.payload_json,'$.effectKey')=kernel_effect_outbox.effect_key)
+                           OR (kernel_effect_outbox.effect_type='deliver_tool_batch' AND e.event_type='engine.batch_dispatched'
                               AND json_extract(e.payload_json,'$.batchId')=kernel_effect_outbox.batch_id)))",
                     params![run_id,effect_key,owner,wall_now_ms,failure.checkpoint_seq+1,if terminal { "completed" } else { "pending" }])?;
                 if changed != 1 { return Err(kernel_err("model retry lost its settled dispatch lease or cancellation won")); }
+            }
+            if let Some((effect_key, owner, response)) = continuation_lease {
+                let changed = if response {
+                    let event = cmd.events.iter().find(|event| event.event_type == "engine.continuation_response").unwrap();
+                    let payload: serde_json::Value = serde_json::from_str(&event.payload_json).map_err(|_| kernel_err("invalid continuation response"))?;
+                    let cursor = payload["response"]["checkpointSeq"].as_u64().ok_or_else(|| kernel_err("missing continuation cursor"))?;
+                    transaction.execute("UPDATE kernel_effect_outbox SET status='completed',completed_at=?4,updated_at=?4,lease_owner=NULL
+                        WHERE run_id=?1 AND effect_key=?2 AND effect_type='continuation_model' AND status='leased' AND lease_owner=?3
+                        AND EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state='running' AND r.model_request_since_wall_ms IS NOT NULL)
+                        AND NOT EXISTS(SELECT 1 FROM kernel_host_commands c WHERE c.run_id=?1 AND c.kind='cancel')
+                        AND EXISTS(SELECT 1 FROM kernel_events e WHERE e.run_id=?1 AND e.seq=?5 AND e.event_type='engine.continuation_dispatched'
+                            AND json_extract(e.payload_json,'$.effectKey')=?2)", params![run_id,effect_key,owner,wall_now_ms,cursor+1])?
+                } else {
+                    transaction.execute("UPDATE kernel_effect_outbox SET status='leased',lease_owner=?3,leased_at=?4,updated_at=?4,attempts=attempts+1
+                        WHERE run_id=?1 AND effect_key=?2 AND effect_type='continuation_model' AND status='pending'
+                        AND idempotency_key=?5 AND json_extract(payload_json,'$.turnId')=?6
+                        AND EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state='running' AND r.model_request_since_wall_ms IS NULL)
+                        AND NOT EXISTS(SELECT 1 FROM kernel_host_commands c WHERE c.run_id=?1 AND c.kind='cancel')
+                        AND NOT EXISTS(SELECT 1 FROM kernel_tool_calls t WHERE t.run_id=?1 AND t.state NOT IN ('completed','failed','cancelled'))",
+                        params![run_id,effect_key,owner,wall_now_ms,format!("continuation-delivery:{effect_key}"),cmd.turn_id])?
+                };
+                if changed != 1 { return Err(kernel_err("continuation delivery lost its lease or cancellation won")); }
             }
             if let Some((owner, response)) = initial_lease {
                 let input = super::kernel_initial_input::read_input(&transaction, run_id)?;
@@ -1057,6 +1174,10 @@ impl Database {
                 serde_json::from_str(&frozen_config_json).map_err(|error| {
                     kernel_err(format!("invalid frozen config for {run_id}: {error}"))
                 })?;
+            // Terminal exhaustion commits turn_attempts == turn_max + 1 (the
+            // failed attempt that spent the budget); reject only greater values.
+            let terminal_retry_exhausted = cmd.run_state.is_terminal()
+                && cmd.retry.turn_attempts == cmd.retry.turn_max.saturating_add(1);
             if frozen.engine_id != engine_id
                 || frozen.kernel_mode != kernel_mode
                 || i64::from(frozen.capability_manifest_version) != capability_manifest_version
@@ -1067,7 +1188,7 @@ impl Database {
                 || cmd.retry.provider_max != frozen.provider_max_retries
                 || cmd.retry.turn_max != frozen.turn_max_retries
                 || cmd.retry.provider_attempts > cmd.retry.provider_max
-                || cmd.retry.turn_attempts > cmd.retry.turn_max
+                || (cmd.retry.turn_attempts > cmd.retry.turn_max && !terminal_retry_exhausted)
                 || cmd.retry.completion_attempts > cmd.retry.turn_max
                 || (cmd.retry.completion_attempts > 0 && cmd.retry.completion_effect_key.is_none())
             {
@@ -1512,6 +1633,19 @@ impl Database {
             // 5. Enqueue outbox effects with exact immutable replay checks.
             let mut seen_effect_keys = std::collections::BTreeSet::new();
             for effect in &cmd.outbox {
+                if effect.kind == crate::kernel::OutboxEffectKind::ContinuationModel {
+                    let payload: serde_json::Value = serde_json::from_str(&effect.payload_json).map_err(|_| kernel_err("invalid continuation input"))?;
+                    let input: fox_engine_protocol::KernelInitialModelInput = serde_json::from_value(payload["input"].clone()).map_err(|_| kernel_err("invalid continuation input"))?;
+                    input.validate().map_err(kernel_err)?;
+                    let prompt_hash: String = transaction.query_row("SELECT prompt_config_hash FROM kernel_runs WHERE run_id=?1", [run_id], |row| row.get(0))?;
+                    if input.run_id != run_id || input.turn_id != cmd.turn_id || input.prompt_config_hash != prompt_hash
+                        || payload["effectKey"] != effect.effect_key
+                        || effect.idempotency_key != format!("continuation-delivery:{}",effect.effect_key)
+                        || !cmd.events.iter().any(|event| event.event_type == "engine.continuation_requested" && event.payload_json == effect.payload_json) {
+                        return Err(kernel_err("continuation input has no matching durable decision"));
+                    }
+                }
+
                 if effect.effect_key.trim().is_empty()
                     || effect.idempotency_key.trim().is_empty()
                     || !seen_effect_keys.insert(effect.effect_key.clone())
@@ -1591,6 +1725,7 @@ impl Database {
                 let payload_value: serde_json::Value = serde_json::from_str(&effect.payload_json)
                     .map_err(|error| kernel_err(error.to_string()))?;
                 match effect.kind {
+                    crate::kernel::OutboxEffectKind::ContinuationModel => {},
                     crate::kernel::OutboxEffectKind::InitialModel => {
                         let input = super::kernel_initial_input::read_input(&transaction, run_id)?;
                         let hash: String = transaction.query_row("SELECT input_hash FROM kernel_initial_inputs WHERE run_id=?1", [run_id], |row| row.get(0))?;
@@ -1925,6 +2060,75 @@ impl Database {
             )?;
             if affected != 1 {
                 return Err(kernel_err(format!("kernel run disappeared during commit: {run_id}")));
+            }
+            // 8. Mid-run steering transitions ride the same decision write-set
+            //    so message status can never disagree with the dispatch/response
+            //    facts. Every response commit answers the rows delivered to the
+            //    in-flight dispatch (live loop or replacement transport); the
+            //    directive built with this decision arms the listed rows.
+            let is_response_commit = initial_lease.is_some_and(|(_, response)| response)
+                || continuation_lease.is_some_and(|(_, _, response)| response)
+                || batch_response_lease.is_some();
+            if is_response_commit {
+                super::apply_delivered_steering_in_tx(
+                    &transaction,
+                    run_id,
+                    wall_now_ms,
+                    final_last_seq,
+                )?;
+            }
+            if let Some(decision) = steering {
+                if decision.adopt_all_received {
+                    // Bind whatever is `received` right now, not only the rows the
+                    // caller had already seen: a request accepted inside the
+                    // decision window rides this dispatch instead of failing it.
+                    super::adopt_received_steering_in_tx(
+                        &transaction,
+                        run_id,
+                        &decision.dispatch_key,
+                        final_last_seq,
+                    )?;
+                } else if !decision.deliver_seqs.is_empty() {
+                    super::deliver_steering_in_tx(
+                        &transaction,
+                        run_id,
+                        &decision.deliver_seqs,
+                        &decision.dispatch_key,
+                        final_last_seq,
+                    )
+                    .map_err(kernel_err)?;
+                }
+            }
+            // Any open steering dies with a terminal Run, whatever path ended it
+            // (completion applies delivered rows first; cancel/fail cancels all).
+            if cmd.run_state.is_terminal() {
+                // Never drop input the user was told Fox had accepted. A
+                // *successful* completion may not abandon rows that were received
+                // but never handed to a model; the caller has to answer them
+                // (a `steering` lane follow-up) or the Run must end as something
+                // other than a clean completion. Explicit cancellation, failure
+                // and budget exhaustion keep their own explainable end state, so
+                // only `completed` can hit this guard.
+                if cmd.run_state == crate::kernel::RunState::Completed {
+                    let undelivered: i64 = transaction.query_row(
+                        "SELECT COUNT(*) FROM run_steering_messages
+                          WHERE run_id=?1 AND status='received'",
+                        params![run_id],
+                        |row| row.get(0),
+                    )?;
+                    if undelivered > 0 {
+                        // A scheduling condition, not an execution failure: this
+                        // decision write-set lost a race with a request accepted
+                        // moments earlier. The marker lets the transport re-plan
+                        // a safe steering round (or detach and re-plan from
+                        // durable facts) instead of failing the whole Run.
+                        return Err(kernel_err(format!(
+                            "{}{undelivered}",
+                            crate::kernel::STEERING_COMPETITION
+                        )));
+                    }
+                }
+                super::cancel_open_steering_in_tx(&transaction, run_id)?;
             }
             super::kernel_projection::project(&transaction, run_id, wall_now_ms, persisted_last_seq)?;
             transaction.commit()?;
@@ -3775,6 +3979,8 @@ mod tests {
             execution_profile_id: "legacy".into(),
             prompt_config_hash: "h".into(),
             model_request_timeout_ms: 120_000,
+            model_first_response_ms: 60_000,
+            model_idle_ms: 120_000,
             tool_execution_timeout_ms: 600_000,
             run_execution_budget_ms: 600_000,
             approval_wait_timeout_ms: 3_600_000,
@@ -4078,6 +4284,8 @@ mod tests {
             execution_profile_id: "legacy".into(),
             prompt_config_hash: "h".into(),
             model_request_timeout_ms: 120_000,
+            model_first_response_ms: 60_000,
+            model_idle_ms: 120_000,
             tool_execution_timeout_ms: 600_000,
             run_execution_budget_ms: 600_000,
             approval_wait_timeout_ms: 3_600_000,
@@ -5048,6 +5256,8 @@ mod tests {
             execution_profile_id: "legacy".into(),
             prompt_config_hash: "prompt-shadow".into(),
             model_request_timeout_ms: 120_000,
+            model_first_response_ms: 60_000,
+            model_idle_ms: 120_000,
             tool_execution_timeout_ms: 600_000,
             run_execution_budget_ms: 1_800_000,
             approval_wait_timeout_ms: 3_600_000,

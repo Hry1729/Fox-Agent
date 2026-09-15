@@ -1,3 +1,5 @@
+import { modelToolResultContent, RESULT_REF_TOOL } from './tool-view.mjs'
+
 export const FOX_TOOL_DEFINITION_VERSION = 1
 
 const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/
@@ -126,8 +128,14 @@ function jsonSafeToolDetails(result, serialized) {
   }
 }
 
-function normalizeFoxToolResultForPi(result) {
+function normalizeFoxToolResultForPi(toolName, result) {
   if (isPiToolResult(result)) {
+    // `read_tool_result` returns its range-cursor in `details`, which the
+    // provider projection drops. Surface the whitelisted navigation facts as a
+    // trailing text block so a multi-page Legacy read stays reachable.
+    if (result.isError !== true && toolName === RESULT_REF_TOOL) {
+      return { ...result, content: modelToolResultContent(toolName, result), details: result.details ?? {} }
+    }
     return result.details === undefined ? { ...result, details: {} } : result
   }
 
@@ -187,7 +195,7 @@ export function adaptFoxToolToPi(tool) {
     label: tool.label,
     description: tool.description,
     parameters: tool.parameters,
-    execute: async (...args) => normalizeFoxToolResultForPi(await tool.execute(...args)),
+    execute: async (...args) => normalizeFoxToolResultForPi(tool.name, await tool.execute(...args)),
     ...optionalFields,
   }
 }

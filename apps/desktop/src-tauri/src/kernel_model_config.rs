@@ -101,7 +101,8 @@ impl KernelModelConfig {
         if service.get("modelProfile").is_some_and(|value| !value.is_object()) {
             return Err("invalid Kernel model profile".into());
         }
-        if self.proposal_tools.len() > 64 { return Err("too many Kernel proposal tools".into()); }
+        // Definitions are bounded by the registered catalog and serialized
+        // configuration size, independently of the per-batch proposal limit.
         let mut names = std::collections::HashSet::new();
         for tool in &self.proposal_tools {
             let name = tool["name"].as_str().ok_or("missing Kernel proposal tool name")?;
@@ -126,6 +127,20 @@ mod tests {
         KernelModelConfig { engine_id: "pi".into(), native_adapter: None, execution_profile_id: "legacy".into(),
             model_service: json!({"apiType":"openai-completions","modelId":"test","baseUrl":"https://example.com/v1"}),
             system_prompt: "Host instructions".into(), proposal_tools: vec![] }
+    }
+
+    #[test]
+    fn all_registered_tools_fit_but_duplicates_unknown_names_and_oversized_config_do_not() {
+        let mut all = config();
+        all.proposal_tools = fox_engine_protocol::TOOL_CONTRACTS.iter().map(|tool|
+            json!({"name":tool.0,"description":"Registered Host tool","parameters":{"type":"object"}})).collect();
+        assert!(all.hash().is_ok());
+        let first = all.proposal_tools[0].clone();
+        all.proposal_tools.push(first);
+        assert!(all.hash().is_err());
+        all.proposal_tools.pop();
+        all.system_prompt = "x".repeat(1_048_576);
+        assert!(all.hash().is_err());
     }
 
     #[test]

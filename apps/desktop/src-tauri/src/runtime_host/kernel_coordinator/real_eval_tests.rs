@@ -1,0 +1,4381 @@
+//! Real-task evaluation entries: ONE synthetic regression and ONE real-model
+//! acceptance, kept strictly apart and never substituted for each other.
+//!
+//! Both entries drive the SAME chain production uses:
+//!
+//! ```text
+//! model endpoint (scripted local provider OR a real cloud model)
+//!   -> real Node `pi-runtime` Kernel worker
+//!   -> real KernelCoordinator live loop (leases, checkpoints, continuation)
+//!   -> real GatewayPolicy Host dispatch
+//!   -> real bundled OfficeCLI (`fox-office`) / real project readers
+//! ```
+//!
+//! Tiers, stated honestly:
+//!
+//! * `synthetic-provider` — `real_task_evaluation_through_host_kernel_runtime_and_real_tools`.
+//!   The entry always creates a scripted loopback HTTP/SSE provider
+//!   (`fox-real-eval-synthetic`, `http://127.0.0.1:<ephemeral>/v1`, api key
+//!   `local-eval-only`) and replays a fixed tool-call plan whose values are
+//!   derived from the CURRENT source workbook. It proves the KERNEL / tool
+//!   routing / GatewayPolicy / OfficeCLI chain and its independent checker — it
+//!   does NOT exercise a cloud model, and it may assert an exact model-round
+//!   count only because the plan is authored here.
+//! * `real-cloud-model` — `real_task_evaluation_cloud`. The model endpoint comes
+//!   from `FOX_EVAL_BASE_URL` / `FOX_EVAL_API_KEY` / `FOX_EVAL_MODEL`
+//!   (`FOX_EVAL_API_TYPE` optional). No local provider is invented, the model
+//!   decides its own tool calls and its own number of rounds, so the tier asserts
+//!   only artifacts plus structural invariants. Without those variables the
+//!   acceptance is recorded as 未执行 (`executed: false`, `notRunReason` names the
+//!   missing variables) and the entry FAILS — it never falls back to the
+//!   synthetic provider and never records a pass.
+//!
+//! Exact commands (run from `apps/desktop/src-tauri`):
+//!
+//! ```bash
+//! # synthetic regression (the fast contract layer is `cargo test --lib real_eval`)
+//! cargo test --lib real_task_evaluation_through_host_kernel_runtime_and_real_tools -- --ignored --nocapture
+//! # real cloud-model acceptance (real credentials required; otherwise 未执行 + failure)
+//! cargo test --lib real_task_evaluation_cloud -- --ignored --nocapture
+//! ```
+//!
+//! The loose legacy filter `cargo test --lib real_task_evaluation -- --ignored`
+//! selects BOTH entries now, so with no credentials it ends in the cloud entry's
+//! explicit 未执行 failure; prefer the exact names above.
+//!
+//! Every entry writes into its own directory under
+//! `output/claude-design-repair-20260915/eval/<tier>/` (or `FOX_EVAL_OUTPUT_ROOT`).
+//! Earlier rounds and the historical evidence stay untouched. The historical evidence
+//! directory `output/claude-design-impl-20260913/eval` is never written again.
+//!
+//! The non-ignored tests below are the fast contract layer (derivation, plan
+//! determinism, checker negative cases and the cloud not-run/identity contract)
+//! and need neither Node, OfficeCLI nor credentials.
+
+use super::*;
+use crate::runtime_host::{kernel_gateway, kernel_host, kernel_model_worker};
+use calamine::{open_workbook_auto_from_rs, Data as CellData, Reader};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io::{Cursor, Read, Write};
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+// ---------------------------------------------------------------------------
+// Fixed inputs, model configuration and output directory.
+// ---------------------------------------------------------------------------
+
+const SYNTHETIC_MODEL_ID: &str = "fox-real-eval-synthetic";
+/// Literal placeholder of the loopback scripted provider. It is NOT a
+/// credential: the synthetic listener accepts any bearer token.
+const EVAL_API_KEY: &str = "local-eval-only";
+
+/// This round's evidence root. One directory per round; earlier rounds (including
+/// `claude-design-repair-20260914`) and the historical
+/// `claude-design-impl-20260913` evidence stay exactly as they were produced.
+/// `FOX_EVAL_OUTPUT_ROOT` may point the entry at another round directory; the
+/// historical directory is refused either way.
+const EVAL_ROUND_DIR: &str = "output/claude-design-repair-20260915/eval";
+const EVAL_OUTPUT_ROOT_ENV: &str = "FOX_EVAL_OUTPUT_ROOT";
+const HISTORICAL_EVAL_DIR: &str = "output/claude-design-impl-20260913/eval";
+
+/// Real-model acceptance environment. Values are read here and NEVER written to
+/// a report — only presence, source variable and the base-URL host are.
+const CLOUD_ENV_BASE_URL: &str = "FOX_EVAL_BASE_URL";
+const CLOUD_ENV_API_KEY: &str = "FOX_EVAL_API_KEY";
+const CLOUD_ENV_MODEL: &str = "FOX_EVAL_MODEL";
+const CLOUD_ENV_API_TYPE: &str = "FOX_EVAL_API_TYPE";
+const CLOUD_DEFAULT_API_TYPE: &str = "openai-completions";
+/// API types the real tier accepts. `faux` (the scripted adapter) is refused on
+/// purpose so a "real cloud" run can never silently be a local fake.
+const CLOUD_API_TYPES: [&str; 3] = [
+    "openai-completions",
+    "openai-responses",
+    "anthropic-messages",
+];
+const SYNTHETIC_KEY_SOURCE: &str = "hardcoded loopback placeholder (not a credential)";
+const CLOUD_KEY_SOURCE: &str = "FOX_EVAL_API_KEY (value never recorded)";
+const DURABLE_ROUNDS_SOURCE: &str = "durable kernel model-response events";
+const PROVIDER_ROUNDS_SOURCE: &str = "loopback provider HTTP requests";
+/// Recorded instead of a result whenever an acceptance did not run at all.
+const NOT_RUN_MARKER: &str = "未执行";
+
+// ---------------------------------------------------------------------------
+// Acceptance modes. A mode fixes the tier name, the entry command, the output
+// directory and the model identity; the two modes share the tool contract and
+// the independent checker, and nothing may turn one into the other.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EvalMode {
+    /// Scripted loopback HTTP/SSE provider (`synthetic-provider` tier).
+    SyntheticProvider,
+    /// Real endpoint from `FOX_EVAL_*` (`real-cloud-model` tier).
+    RealCloudModel,
+}
+
+impl EvalMode {
+    const ALL: [EvalMode; 2] = [EvalMode::SyntheticProvider, EvalMode::RealCloudModel];
+
+    fn tier(self) -> &'static str {
+        match self {
+            Self::SyntheticProvider => "synthetic-provider",
+            Self::RealCloudModel => "real-cloud-model",
+        }
+    }
+
+    fn entry_command(self) -> &'static str {
+        match self {
+            Self::SyntheticProvider => {
+                "cargo test --lib real_task_evaluation_through_host_kernel_runtime_and_real_tools -- --ignored --nocapture"
+            }
+            Self::RealCloudModel => {
+                "cargo test --lib real_task_evaluation_cloud -- --ignored --nocapture"
+            }
+        }
+    }
+
+    fn report_name(self) -> &'static str {
+        "real-task-eval-report.json"
+    }
+
+    /// Each tier owns its own output directory, so no run can overwrite another
+    /// tier's — or the historical round's — evidence.
+    fn run_dir(self) -> std::path::PathBuf {
+        round_dir().join(self.tier())
+    }
+
+    fn artifact_dir(self, scenario: &str) -> std::path::PathBuf {
+        self.run_dir().join("artifacts").join(scenario)
+    }
+}
+
+/// Model identity as recorded in a report: API type, model id, base URL and its
+/// host. The API key is deliberately NOT part of this structure — a report
+/// records only whether a key was supplied and from which variable.
+#[derive(Clone, Debug, PartialEq)]
+struct ModelIdentity {
+    api_type: String,
+    model_id: String,
+    base_url: String,
+    base_url_host: String,
+    api_key_present: bool,
+    api_key_source: &'static str,
+    note: &'static str,
+}
+
+impl ModelIdentity {
+    fn base_url_host_of(url: &str) -> String {
+        match reqwest::Url::parse(url) {
+            Ok(parsed) => match (parsed.host_str(), parsed.port()) {
+                (Some(host), Some(port)) => format!("{host}:{port}"),
+                (Some(host), None) => host.to_owned(),
+                _ => String::from("<no-host>"),
+            },
+            Err(_) => String::from("<invalid-url>"),
+        }
+    }
+
+    fn from_model_service(
+        service: &Value,
+        api_key_present: bool,
+        api_key_source: &'static str,
+    ) -> Self {
+        let text = |key: &str| {
+            service
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let base_url = text("baseUrl");
+        Self {
+            api_type: text("apiType"),
+            model_id: text("modelId"),
+            base_url_host: Self::base_url_host_of(&base_url),
+            base_url,
+            api_key_present,
+            api_key_source,
+            note: "",
+        }
+    }
+
+    /// The synthetic tier's identity: a loopback listener whose port the OS
+    /// assigns per scenario.
+    fn synthetic_placeholder() -> Self {
+        Self {
+            note: "loopback listener on 127.0.0.1 with an OS-assigned port (per scenario); no external endpoint",
+            ..Self::from_model_service(
+                &synthetic_model_service(synthetic_placeholder_address()),
+                true,
+                SYNTHETIC_KEY_SOURCE,
+            )
+        }
+    }
+
+    /// Identity of a not-run acceptance: empty on purpose, so a report can never
+    /// imply a model that was never contacted.
+    fn not_configured(reason: &'static str) -> Self {
+        Self {
+            api_type: String::new(),
+            model_id: String::new(),
+            base_url: String::new(),
+            base_url_host: String::new(),
+            api_key_present: false,
+            api_key_source: "not read: the acceptance did not execute",
+            note: reason,
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "configured": !self.model_id.is_empty(),
+            "apiType": self.api_type,
+            "modelId": self.model_id,
+            "baseUrl": self.base_url,
+            "baseUrlHost": self.base_url_host,
+            "apiKeyPresent": self.api_key_present,
+            "apiKeySource": self.api_key_source,
+            "apiKeyRecorded": false,
+            "note": self.note,
+        })
+    }
+
+    /// Every field that differs from the Run's frozen model service, plus any
+    /// sign that a credential leaked into the frozen configuration.
+    fn mismatches(&self, service: &Value) -> Vec<String> {
+        let frozen = Self::from_model_service(service, self.api_key_present, self.api_key_source);
+        let mut problems = Vec::new();
+        if frozen.api_type != self.api_type {
+            problems.push(format!(
+                "apiType: entry={} frozen={}",
+                self.api_type, frozen.api_type
+            ));
+        }
+        if frozen.model_id != self.model_id {
+            problems.push(format!(
+                "modelId: entry={} frozen={}",
+                self.model_id, frozen.model_id
+            ));
+        }
+        if frozen.base_url != self.base_url {
+            problems.push(format!(
+                "baseUrl: entry={} frozen={}",
+                self.base_url, frozen.base_url
+            ));
+        }
+        if service
+            .as_object()
+            .is_some_and(|fields| fields.keys().any(|key| key_is_secret(key)))
+        {
+            problems.push(String::from("the frozen model service carries a credential field"));
+        }
+        problems
+    }
+}
+
+fn key_is_secret(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().replace('_', "").as_str(),
+        "apikey" | "authorization" | "credentials" | "accesstoken" | "password" | "secret"
+    )
+}
+
+/// Address used only as the documentation placeholder of the synthetic tier
+/// (port 0 = the OS assigns one per scenario).
+fn synthetic_placeholder_address() -> std::net::SocketAddr {
+    std::net::SocketAddr::from(([127, 0, 0, 1], 0))
+}
+
+/// The real tier's environment, resolved through an injected lookup so the fast
+/// contract tests can prove the not-run behaviour without any credential.
+struct CloudEnvironment {
+    api_type: String,
+    model_id: String,
+    base_url: String,
+    /// Never recorded anywhere; only passed to the live dispatch.
+    api_key: String,
+}
+
+impl std::fmt::Debug for CloudEnvironment {
+    /// Debug output is safe to print: the API key is never rendered.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CloudEnvironment")
+            .field("api_type", &self.api_type)
+            .field("model_id", &self.model_id)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<not recorded>")
+            .finish()
+    }
+}
+
+/// Why the real tier could not start: the offending variable names plus a
+/// human-readable reason per name.
+#[derive(Clone, Debug, PartialEq)]
+struct CloudEnvironmentError {
+    variables: Vec<&'static str>,
+    reasons: Vec<String>,
+}
+
+impl CloudEnvironmentError {
+    fn missing(variables: Vec<&'static str>) -> Self {
+        let reasons = variables
+            .iter()
+            .map(|name| format!("{name} 未设置 (not set)"))
+            .collect();
+        Self { variables, reasons }
+    }
+
+    fn invalid(variable: &'static str, reason: String) -> Self {
+        Self {
+            variables: vec![variable],
+            reasons: vec![format!("{variable} {reason}")],
+        }
+    }
+
+    /// The 未执行 statement recorded in the report and in the failure message.
+    fn summary(&self) -> String {
+        format!(
+            "{NOT_RUN_MARKER}: real-cloud-model acceptance did not run — {}",
+            self.reasons.join("; ")
+        )
+    }
+
+    fn variables_json(&self) -> Vec<String> {
+        self.variables.iter().map(|name| (*name).to_owned()).collect()
+    }
+}
+
+fn non_blank(raw: Option<String>) -> Option<String> {
+    raw.map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+impl CloudEnvironment {
+    /// Read the real environment. Absent or unusable values abort the tier.
+    fn read_from_process() -> Result<Self, CloudEnvironmentError> {
+        Self::resolve(|name| std::env::var(name).ok())
+    }
+
+    fn resolve(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, CloudEnvironmentError> {
+        let base_url = non_blank(lookup(CLOUD_ENV_BASE_URL));
+        let api_key = non_blank(lookup(CLOUD_ENV_API_KEY));
+        let model_id = non_blank(lookup(CLOUD_ENV_MODEL));
+        let api_type =
+            non_blank(lookup(CLOUD_ENV_API_TYPE)).unwrap_or_else(|| CLOUD_DEFAULT_API_TYPE.into());
+
+        let mut missing = Vec::new();
+        if base_url.is_none() {
+            missing.push(CLOUD_ENV_BASE_URL);
+        }
+        if api_key.is_none() {
+            missing.push(CLOUD_ENV_API_KEY);
+        }
+        if model_id.is_none() {
+            missing.push(CLOUD_ENV_MODEL);
+        }
+        if !missing.is_empty() {
+            return Err(CloudEnvironmentError::missing(missing));
+        }
+        let base_url = base_url.unwrap_or_default();
+        let api_key = api_key.unwrap_or_default();
+        let model_id = model_id.unwrap_or_default();
+
+        if !CLOUD_API_TYPES.contains(&api_type.as_str()) {
+            return Err(CloudEnvironmentError::invalid(
+                CLOUD_ENV_API_TYPE,
+                format!(
+                    "must be one of {CLOUD_API_TYPES:?}; the scripted `faux` adapter is refused in the real tier (got `{api_type}`)"
+                ),
+            ));
+        }
+        let parsed = reqwest::Url::parse(&base_url).map_err(|error| {
+            CloudEnvironmentError::invalid(
+                CLOUD_ENV_BASE_URL,
+                format!("is not an absolute URL: {error}"),
+            )
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(CloudEnvironmentError::invalid(
+                CLOUD_ENV_BASE_URL,
+                String::from("must be an absolute http(s) URL with a host"),
+            ));
+        }
+        if !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(CloudEnvironmentError::invalid(
+                CLOUD_ENV_BASE_URL,
+                String::from(
+                    "must not carry credentials, a query or a fragment (the frozen Kernel model config enforces the same rule)",
+                ),
+            ));
+        }
+        if model_id == SYNTHETIC_MODEL_ID {
+            return Err(CloudEnvironmentError::invalid(
+                CLOUD_ENV_MODEL,
+                format!("must not be the synthetic provider id `{SYNTHETIC_MODEL_ID}`"),
+            ));
+        }
+        Ok(Self {
+            api_type,
+            model_id,
+            base_url,
+            api_key,
+        })
+    }
+
+    /// The frozen model configuration of the real tier: only environment values,
+    /// and no credential (the key travels beside the config, as in production).
+    fn model_config(&self) -> kernel_model_worker::KernelModelConfig {
+        let mut config = worker_configuration();
+        config.model_service = json!({
+            "apiType": self.api_type,
+            "modelId": self.model_id,
+            "baseUrl": self.base_url,
+            "contextWindow": 256_000,
+            "maxOutputTokens": 8_192,
+        });
+        config.proposal_tools = eval_proposal_tools();
+        config
+    }
+
+    fn identity(&self) -> ModelIdentity {
+        ModelIdentity {
+            note: "endpoint supplied by FOX_EVAL_* environment variables; no local provider",
+            ..ModelIdentity::from_model_service(&self.model_config().model_service, true, CLOUD_KEY_SOURCE)
+        }
+    }
+
+    /// What the report may say about the environment: variable names and
+    /// resolved non-secret identity, never a value that is a credential.
+    fn report_json(&self) -> Value {
+        json!({
+            "required": [CLOUD_ENV_BASE_URL, CLOUD_ENV_API_KEY, CLOUD_ENV_MODEL],
+            "optional": [CLOUD_ENV_API_TYPE],
+            "apiTypeDefault": CLOUD_DEFAULT_API_TYPE,
+            "resolved": self.identity().to_json(),
+            "apiKeyRecorded": false,
+        })
+    }
+}
+
+const AGV_SOURCE_NAME: &str = "AGV长时间任务汇总统计表.xlsx";
+const AGV_DIST_NAME: &str = "AGV长时间任务统计分布.xlsx";
+// NOTE: the production delivery-seed heuristic treats `成` as a prose/name
+// boundary (`生成报告.xlsx`), so a deliverable literally named 分析成果.xlsx
+// would seed as `果.xlsx`. The indicator workbook therefore uses a name the
+// Host can bind exactly; its title sheet still says 分析成果.
+const AGV_SUMMARY_NAME: &str = "AGV长时间任务指标汇总.xlsx";
+const AGV_REPORT_NAME: &str = "AGV长时间任务分析报告.docx";
+const SHORT_DOC_NAME: &str = "会议纪要-评测.docx";
+const LARGE_RESULT_NAME: &str = "large-records.json";
+
+// The prompt deliberately avoids spelling out the SOURCE workbook's .xlsx
+// name (that would seed the input as a deliverable) and uses deliverable names
+// the production seeder can bind without CJK prose-boundary fragmentation.
+const AGV_TASK_PROMPT: &str = "请基于项目目录中的 AGV 源数据工作簿完成分析，\
+交付三个文件：AGV长时间任务统计分布.xlsx、AGV长时间任务指标汇总.xlsx、\
+AGV长时间任务分析报告.docx。";
+const SHORT_DOC_TASK_PROMPT: &str =
+    "请在项目中创建短文档：会议纪要-评测.docx，并完成一次短文档修改。";
+const LARGE_RESULT_TASK_PROMPT: &str =
+    "请读取项目中的大结果记录文件，用 read_tool_result 完整续读后给出汇总。";
+
+fn manifest_dir() -> &'static std::path::Path {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn repository_dir() -> std::path::PathBuf {
+    manifest_dir().join("../../..")
+}
+
+/// This round's evidence root (one directory per round).
+///
+/// `FOX_EVAL_OUTPUT_ROOT` may override the round directory; the historical
+/// evidence directory is refused even then, so no run can overwrite it.
+fn round_dir() -> std::path::PathBuf {
+    match std::env::var(EVAL_OUTPUT_ROOT_ENV) {
+        Ok(value) if !value.trim().is_empty() => {
+            let candidate = std::path::PathBuf::from(value.trim());
+            let candidate = if candidate.is_absolute() {
+                candidate
+            } else {
+                repository_dir().join(candidate)
+            };
+            if candidate.starts_with(historical_eval_dir()) {
+                panic!(
+                    "{EVAL_OUTPUT_ROOT_ENV} must not point at the historical evidence directory"
+                );
+            }
+            candidate
+        }
+        _ => repository_dir().join(EVAL_ROUND_DIR),
+    }
+}
+
+/// The previous round's evidence: read-only for this round, kept verbatim.
+fn historical_eval_dir() -> std::path::PathBuf {
+    repository_dir().join(HISTORICAL_EVAL_DIR)
+}
+
+fn source_workbook_path() -> std::path::PathBuf {
+    manifest_dir()
+        .join("../tests/execl-ceshi")
+        .join(AGV_SOURCE_NAME)
+}
+
+fn office_resources_dir() -> std::path::PathBuf {
+    manifest_dir().join("resources")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+// ---------------------------------------------------------------------------
+// Independent expectation derivation from the CURRENT source workbook.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct Expectations {
+    source_sha256: String,
+    /// Structural anchors: the workbook declares which sheet is the dedup
+    /// fact table and which is the cantilever exception list. Counts are
+    /// still derived, never taken from these labels.
+    dedup_sheet: String,
+    exception_sheet: Option<String>,
+    total: u64,
+    /// Ordered (label, count); canonical labels first, extras sorted.
+    task_counts: Vec<(String, u64)>,
+    status_counts: Vec<(String, u64)>,
+    wait_min: i64,
+    wait_max: i64,
+    wait_avg: f64,
+    /// (label, low inclusive, high inclusive, count) with fixed boundaries.
+    buckets: Vec<(String, i64, i64, u64)>,
+    exception_total: u64,
+    exception_tasks: Vec<(String, u64)>,
+}
+
+impl Expectations {
+    fn ratio_of(&self, count: u64) -> f64 {
+        round4(count as f64 / self.total as f64)
+    }
+}
+
+fn round4(value: f64) -> f64 {
+    (value * 10_000.0).round() / 10_000.0
+}
+
+fn round2(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
+/// Percent text written into documents, e.g. `59.1`.
+fn percent_text(ratio: f64) -> String {
+    format!("{:.1}", (ratio * 10_000.0).round() / 100.0)
+}
+
+fn cell_text(cell: &CellData) -> String {
+    match cell {
+        CellData::String(value) => value.trim().to_owned(),
+        CellData::Float(value) => {
+            if value.fract() == 0.0 {
+                format!("{}", *value as i64)
+            } else {
+                format!("{value}")
+            }
+        }
+        CellData::Bool(value) => value.to_string(),
+        CellData::DateTime(value) => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn cell_i64(cell: &CellData) -> Option<i64> {
+    match cell {
+        CellData::Float(value) if value.fract() == 0.0 => Some(*value as i64),
+        CellData::String(value) => value.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+/// Prefer canonical labels (卸船/装船, 重车/空车) first so table layout stays
+/// stable; any additional category the current source carries is still
+/// included, sorted, instead of being dropped or assumed absent.
+fn ordered_counts(counts: &BTreeMap<String, u64>, preferred: &[&str]) -> Vec<(String, u64)> {
+    let mut ordered: Vec<(String, u64)> = Vec::new();
+    for label in preferred {
+        if let Some(count) = counts.get(*label) {
+            ordered.push(((*label).to_owned(), *count));
+        }
+    }
+    for (label, count) in counts {
+        if !preferred.contains(&label.as_str()) {
+            ordered.push((label.clone(), *count));
+        }
+    }
+    ordered
+}
+
+fn derive_expectations(source_bytes: &[u8]) -> Result<Expectations, String> {
+    let mut workbook = open_workbook_auto_from_rs(Cursor::new(source_bytes))
+        .map_err(|error| format!("source workbook cannot open: {error:?}"))?;
+
+    // Pick sheets by their declared names AND headers, never by fixed
+    // position. Header matching alone is insufficient here: the 分列 raw
+    // sheet and the 8-column 非悬臂 sheet carry the same ORDERID/任务类型/
+    // 等待时长/AGV状态 headers but different row sets (2213 and 838). The
+    // 去重 sheet is the canonical fact table (927 rows in the current file);
+    // the 悬臂 sheet (7 columns, 超时原因 in G) is the cantilever exception
+    // list, distinct from 非悬臂.
+    let mut dedup_sheet: Option<String> = None;
+    let mut exception_sheet: Option<String> = None;
+    for name in workbook.sheet_names().to_owned() {
+        let Ok(range) = workbook.worksheet_range(&name) else {
+            continue;
+        };
+        let Some(header) = range.rows().next() else {
+            continue;
+        };
+        let headers: Vec<String> = header.iter().map(cell_text).collect();
+        let has = |wanted: &str| headers.iter().any(|value| value == wanted);
+        if dedup_sheet.is_none()
+            && name.contains("去重")
+            && has("ORDERID")
+            && has("任务类型")
+            && has("等待时长")
+            && has("AGV状态")
+        {
+            dedup_sheet = Some(name.clone());
+        }
+        if exception_sheet.is_none()
+            && name == "悬臂"
+            && headers.len() == 7
+            && headers.iter().any(|value| value == "超时原因")
+        {
+            exception_sheet = Some(name);
+        }
+    }
+    let dedup_sheet = dedup_sheet.ok_or("source has no 去重 sheet with the expected headers")?;
+
+    let range = workbook
+        .worksheet_range(&dedup_sheet)
+        .map_err(|error| format!("dedup sheet unreadable: {error:?}"))?;
+    let header: Vec<String> = range
+        .rows()
+        .next()
+        .map(|row| row.iter().map(cell_text).collect())
+        .unwrap_or_default();
+    let column_of = |wanted: &str| header.iter().position(|value| value == wanted);
+    let col_order = column_of("ORDERID").ok_or("missing ORDERID column")?;
+    let col_status = column_of("AGV状态").ok_or("missing AGV状态 column")?;
+    let col_task = column_of("任务类型").ok_or("missing 任务类型 column")?;
+    let col_wait = column_of("等待时长").ok_or("missing 等待时长 column")?;
+
+    let mut task_counts: BTreeMap<String, u64> = BTreeMap::new();
+    let mut status_counts: BTreeMap<String, u64> = BTreeMap::new();
+    let mut waits: Vec<i64> = Vec::new();
+    let mut total = 0u64;
+    for row in range.rows().skip(1) {
+        let order = row.get(col_order).map(cell_text).unwrap_or_default();
+        if order.is_empty() {
+            continue;
+        }
+        total += 1;
+        let task = row.get(col_task).map(cell_text).unwrap_or_default();
+        let status = row.get(col_status).map(cell_text).unwrap_or_default();
+        if !task.is_empty() {
+            *task_counts.entry(task).or_default() += 1;
+        }
+        if !status.is_empty() {
+            *status_counts.entry(status).or_default() += 1;
+        }
+        if let Some(wait) = row.get(col_wait).and_then(cell_i64) {
+            waits.push(wait);
+        }
+    }
+    if total == 0 {
+        return Err("source 去重 sheet has no records".into());
+    }
+    let wait_min = waits.iter().copied().min().unwrap_or(0);
+    let wait_max = waits.iter().copied().max().unwrap_or(0);
+    let wait_avg = round2(waits.iter().sum::<i64>() as f64 / waits.len() as f64);
+
+    // Fixed, data-independent boundaries.
+    let bucket_edges: [(&str, i64, i64); 4] = [
+        ("≤20分钟", 0, 20),
+        ("21-30分钟", 21, 30),
+        ("31-60分钟", 31, 60),
+        (">60分钟", 61, i64::MAX),
+    ];
+    let buckets = bucket_edges
+        .iter()
+        .map(|(label, low, high)| {
+            let count = waits
+                .iter()
+                .filter(|value| *value >= low && *value <= high)
+                .count() as u64;
+            ((*label).to_owned(), *low, *high, count)
+        })
+        .collect::<Vec<_>>();
+
+    let mut exception_total = 0u64;
+    let mut exception_tasks: BTreeMap<String, u64> = BTreeMap::new();
+    if let Some(name) = &exception_sheet {
+        let range = workbook
+            .worksheet_range(name)
+            .map_err(|error| format!("exception sheet unreadable: {error:?}"))?;
+        let header: Vec<String> = range
+            .rows()
+            .next()
+            .map(|row| row.iter().map(cell_text).collect())
+            .unwrap_or_default();
+        let col_order = header.iter().position(|value| value == "ORDERID");
+        let col_task = header.iter().position(|value| value == "任务类型");
+        for row in range.rows().skip(1) {
+            let has_order = col_order
+                .and_then(|index| row.get(index))
+                .map(|cell| !cell_text(cell).is_empty())
+                .unwrap_or(false);
+            if !has_order {
+                continue;
+            }
+            exception_total += 1;
+            if let Some(index) = col_task {
+                let task = cell_text(row.get(index).unwrap_or(&CellData::Empty));
+                if !task.is_empty() {
+                    *exception_tasks.entry(task).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    Ok(Expectations {
+        source_sha256: sha256_hex(source_bytes),
+        dedup_sheet,
+        exception_sheet,
+        total,
+        task_counts: ordered_counts(&task_counts, &["卸船", "装船"]),
+        status_counts: ordered_counts(&status_counts, &["重车", "空车"]),
+        wait_min,
+        wait_max,
+        wait_avg,
+        buckets,
+        exception_total,
+        exception_tasks: ordered_counts(&exception_tasks, &["卸船", "装船"]),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The deterministic model plan: scripted tool rounds whose VALUES come from
+// the independently derived expectations. Nothing here writes a deliverable;
+// every operation is handed to the real Host/Runtime/OfficeCLI chain.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, serde::Serialize)]
+enum Reply {
+    Tool {
+        id: String,
+        name: String,
+        arguments: Value,
+    },
+    Stop,
+}
+
+fn office_call(tool: &str, arguments: Value) -> Value {
+    json!({"serverId": crate::office::SERVER_ID, "tool": tool, "arguments": arguments})
+}
+
+fn set_cell(path: &str, value: Value) -> Value {
+    json!({"command":"set","path":path,"props":{"value":value}})
+}
+
+fn add_sheet(name: &str) -> Value {
+    json!({"command":"add","path":"/","type":"sheet","props":{"name":name}})
+}
+
+fn bar_chart(sheet: &str, first_data_row: usize, last_row: usize, anchor: &str) -> Value {
+    json!({"command":"add","path":format!("/{sheet}"),"type":"chart","props":{
+        "dataRange":format!("{sheet}!B{first_data_row}:B{last_row}"),
+        "categories":format!("{sheet}!A{first_data_row}:A{last_row}"),
+        "chartType":"bar","anchor":anchor}})
+}
+
+fn office_edit_same(file: &str, operations: Value) -> (String, Value) {
+    (
+        "call_mcp_tool".into(),
+        office_call(
+            "office_edit",
+            json!({"file":file,"output":file,"overwrite":true,"operations":operations}),
+        ),
+    )
+}
+
+/// Workbook 1: distribution workbook — task distribution, wait distribution and
+/// a real chart part.
+fn distribution_workbook_script(expected: &Expectations) -> Vec<(String, Value)> {
+    let mut ops = vec![
+        set_cell("/Sheet1/A1", json!("AGV 长时间等待任务统计分布（真实链路评测）")),
+        add_sheet("任务类型分布"),
+        set_cell("/任务类型分布/A1", json!("任务类型")),
+        set_cell("/任务类型分布/B1", json!("记录数")),
+        set_cell("/任务类型分布/C1", json!("占比")),
+    ];
+    let task_rows = expected.task_counts.len();
+    for (index, (name, count)) in expected.task_counts.iter().enumerate() {
+        let row = index + 2;
+        ops.push(set_cell(&format!("/任务类型分布/A{row}"), json!(name)));
+        ops.push(set_cell(&format!("/任务类型分布/B{row}"), json!(count)));
+        ops.push(set_cell(
+            &format!("/任务类型分布/C{row}"),
+            json!(expected.ratio_of(*count)),
+        ));
+    }
+    ops.push(bar_chart("任务类型分布", 2, task_rows + 1, "E2:N20"));
+    ops.push(add_sheet("等待时长分布"));
+    ops.push(set_cell("/等待时长分布/A1", json!("等待时长区间")));
+    ops.push(set_cell("/等待时长分布/B1", json!("记录数")));
+    ops.push(set_cell("/等待时长分布/C1", json!("占比")));
+    for (index, (label, _, _, count)) in expected.buckets.iter().enumerate() {
+        let row = index + 2;
+        ops.push(set_cell(&format!("/等待时长分布/A{row}"), json!(label)));
+        ops.push(set_cell(&format!("/等待时长分布/B{row}"), json!(count)));
+        ops.push(set_cell(
+            &format!("/等待时长分布/C{row}"),
+            json!(expected.ratio_of(*count)),
+        ));
+    }
+    vec![
+        (
+            "call_mcp_tool".into(),
+            office_call("office_create", json!({"output": AGV_DIST_NAME})),
+        ),
+        office_edit_same(AGV_DIST_NAME, json!(ops)),
+        (
+            "call_mcp_tool".into(),
+            office_call("office_validate", json!({"file": AGV_DIST_NAME})),
+        ),
+    ]
+}
+
+/// Workbook 2: indicator workbook — headline numbers plus the same task table.
+fn summary_workbook_script(expected: &Expectations) -> Vec<(String, Value)> {
+    let mut ops = vec![
+        set_cell("/Sheet1/A1", json!("AGV 长时间等待任务分析成果（真实链路评测）")),
+        add_sheet("总览指标"),
+        set_cell("/总览指标/A1", json!("指标")),
+        set_cell("/总览指标/B1", json!("数值")),
+    ];
+    let mut metrics: Vec<(String, Value)> = vec![("去重记录总数".into(), json!(expected.total))];
+    for (name, count) in &expected.task_counts {
+        metrics.push((format!("{name}记录数"), json!(count)));
+        metrics.push((format!("{name}占比"), json!(expected.ratio_of(*count))));
+    }
+    for (name, count) in &expected.status_counts {
+        metrics.push((format!("{name}记录数"), json!(count)));
+    }
+    metrics.push((String::from("最短等待时长(分钟)"), json!(expected.wait_min)));
+    metrics.push((String::from("最长等待时长(分钟)"), json!(expected.wait_max)));
+    metrics.push((String::from("平均等待时长(分钟)"), json!(expected.wait_avg)));
+    metrics.push((
+        String::from("异常记录数(悬臂)"),
+        json!(expected.exception_total),
+    ));
+    for (index, (label, value)) in metrics.iter().enumerate() {
+        let row = index + 2;
+        ops.push(set_cell(&format!("/总览指标/A{row}"), json!(label)));
+        ops.push(set_cell(&format!("/总览指标/B{row}"), value.clone()));
+    }
+    ops.push(add_sheet("任务类型分布"));
+    ops.push(set_cell("/任务类型分布/A1", json!("任务类型")));
+    ops.push(set_cell("/任务类型分布/B1", json!("记录数")));
+    ops.push(set_cell("/任务类型分布/C1", json!("占比")));
+    let task_rows = expected.task_counts.len();
+    for (index, (name, count)) in expected.task_counts.iter().enumerate() {
+        let row = index + 2;
+        ops.push(set_cell(&format!("/任务类型分布/A{row}"), json!(name)));
+        ops.push(set_cell(&format!("/任务类型分布/B{row}"), json!(count)));
+        ops.push(set_cell(
+            &format!("/任务类型分布/C{row}"),
+            json!(expected.ratio_of(*count)),
+        ));
+    }
+    ops.push(bar_chart("任务类型分布", 2, task_rows + 1, "E2:N20"));
+    vec![
+        (
+            "call_mcp_tool".into(),
+            office_call("office_create", json!({"output": AGV_SUMMARY_NAME})),
+        ),
+        office_edit_same(AGV_SUMMARY_NAME, json!(ops)),
+        (
+            "call_mcp_tool".into(),
+            office_call("office_validate", json!({"file": AGV_SUMMARY_NAME})),
+        ),
+    ]
+}
+
+/// Word report: fixed section structure with derived numbers and percentages.
+fn report_document_script(expected: &Expectations) -> Vec<(String, Value)> {
+    let paragraph = |text: &str| {
+        json!({"command":"add","path":"/body","type":"paragraph","props":{"text":text}})
+    };
+    let heading = |text: &str| {
+        json!({"command":"add","path":"/body","type":"paragraph",
+            "props":{"text":text,"style":"Heading1"}})
+    };
+    let mut ops = vec![
+        heading("AGV 长时间等待任务分析报告"),
+        heading("一、数据概览"),
+        paragraph(&format!(
+            "本次分析基于去重后的AGV长时间等待任务记录，共{}条；等待时长介于{}-{}分钟，平均约{}分钟。",
+            expected.total, expected.wait_min, expected.wait_max, expected.wait_avg
+        )),
+        heading("二、任务类型构成"),
+    ];
+    for (name, count) in &expected.task_counts {
+        ops.push(paragraph(&format!(
+            "{}{}条，占比{}%。",
+            name,
+            count,
+            percent_text(expected.ratio_of(*count))
+        )));
+    }
+    let status_summary = expected
+        .status_counts
+        .iter()
+        .map(|(name, count)| format!("{name}{count}条"))
+        .collect::<Vec<_>>()
+        .join("、");
+    ops.push(paragraph(&format!("按AGV状态，{status_summary}。")));
+    ops.push(heading("三、等待时长分布"));
+    let bucket_summary = expected
+        .buckets
+        .iter()
+        .map(|(label, _, _, count)| {
+            format!(
+                "{label}{count}条（{}%）",
+                percent_text(expected.ratio_of(*count))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("；");
+    ops.push(paragraph(&format!("{bucket_summary}。")));
+    ops.push(heading("四、异常与超时"));
+    let exception_summary = expected
+        .exception_tasks
+        .iter()
+        .map(|(name, count)| format!("{name}{count}条"))
+        .collect::<Vec<_>>()
+        .join("、");
+    ops.push(paragraph(&format!(
+        "悬臂异常记录共{}条，其中{}。",
+        expected.exception_total, exception_summary
+    )));
+    ops.push(heading("五、分析结论"));
+    ops.push(paragraph(
+        "等待集中在21至30分钟区间，应结合悬臂箱区调度与任务类型占比优化排队。",
+    ));
+    vec![
+        (
+            "call_mcp_tool".into(),
+            office_call("office_create", json!({"output": AGV_REPORT_NAME})),
+        ),
+        office_edit_same(AGV_REPORT_NAME, json!(ops)),
+        (
+            "call_mcp_tool".into(),
+            office_call("office_validate", json!({"file": AGV_REPORT_NAME})),
+        ),
+    ]
+}
+
+fn agv_script(expected: &Expectations) -> VecDeque<Reply> {
+    let mut rounds = VecDeque::new();
+    let mut push = |calls: Vec<(String, Value)>, offset: &mut usize| {
+        for (name, arguments) in calls {
+            rounds.push_back(Reply::Tool {
+                id: format!("agv-call-{offset}"),
+                name,
+                arguments,
+            });
+            *offset += 1;
+        }
+    };
+    let mut offset = 1usize;
+    push(distribution_workbook_script(expected), &mut offset);
+    push(summary_workbook_script(expected), &mut offset);
+    push(report_document_script(expected), &mut offset);
+    rounds.push_back(Reply::Stop);
+    rounds
+}
+
+// ---------------------------------------------------------------------------
+// Independent checker.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct CheckResults {
+    rows: Vec<(String, bool, String)>,
+}
+
+impl CheckResults {
+    fn check(&mut self, id: &str, passed: bool, detail: impl Into<String>) {
+        self.rows.push((id.into(), passed, detail.into()));
+    }
+
+    fn ok(&self) -> bool {
+        self.rows.iter().all(|(_, passed, _)| *passed)
+    }
+}
+
+fn workbook_rows(bytes: &[u8], sheet: &str) -> Result<Vec<Vec<String>>, String> {
+    let mut workbook = open_workbook_auto_from_rs(Cursor::new(bytes))
+        .map_err(|error| format!("{sheet}: workbook cannot open: {error:?}"))?;
+    let range = workbook
+        .worksheet_range(sheet)
+        .map_err(|error| format!("{sheet}: {error:?}"))?;
+    Ok(range
+        .rows()
+        .map(|row| row.iter().map(cell_text).collect())
+        .collect())
+}
+
+fn sheet_names_of(bytes: &[u8]) -> Result<Vec<String>, String> {
+    let workbook = open_workbook_auto_from_rs(Cursor::new(bytes))
+        .map_err(|error| format!("workbook cannot open: {error:?}"))?;
+    Ok(workbook.sheet_names().to_owned())
+}
+
+fn has_chart_part(bytes: &[u8]) -> Result<bool, String> {
+    // The pinned OfficeCLI packages chart XML under xl/drawings/charts/.
+    Ok(crate::local_knowledge_import::zip_entry_names(bytes)?
+        .iter()
+        .any(|name| {
+            (name.starts_with("xl/drawings/charts/chart")
+                || name.starts_with("xl/charts/chart"))
+                && name.ends_with(".xml")
+        }))
+}
+
+fn parse_number(value: &str) -> Option<f64> {
+    value
+        .trim()
+        .replace(['=', '，', ','], "")
+        .parse::<f64>()
+        .ok()
+}
+
+fn nearly(left: f64, right: f64, tolerance: f64) -> bool {
+    (left - right).abs() <= tolerance
+}
+
+/// Read a label/value sheet ("指标/数值" or table rows) into an ordered map.
+fn label_map(rows: &[Vec<String>]) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    for row in rows {
+        if let (Some(label), Some(value)) = (row.first(), row.get(1)) {
+            if !label.is_empty() {
+                map.insert(label.clone(), value.clone());
+            }
+        }
+    }
+    map
+}
+
+fn number_after(haystack: &str, marker: &str) -> Option<f64> {
+    let start = haystack.find(marker)? + marker.len();
+    let tail = &haystack[start..];
+    let end = tail
+        .find(|character: char| !character.is_ascii_digit() && character != '.')
+        .unwrap_or(tail.len());
+    if end == 0 {
+        return None;
+    }
+    tail[..end].parse::<f64>().ok()
+}
+
+fn percent_after(haystack: &str, marker: &str) -> Option<f64> {
+    Some(number_after(haystack, marker)? / 100.0)
+}
+
+/// Canonical metrics shared across deliverables.
+type MetricMap = BTreeMap<String, f64>;
+
+fn workbook_metrics(bytes: &[u8], expected: &Expectations) -> Result<MetricMap, String> {
+    let mut metrics = MetricMap::new();
+    // Distribution tables appear identically in both workbooks.
+    let rows = workbook_rows(bytes, "任务类型分布")?;
+    let table = label_map(&rows);
+    for (name, _count) in &expected.task_counts {
+        let stored_count = table
+            .get(name)
+            .and_then(|value| parse_number(value))
+            .ok_or_else(|| format!("missing task row {name}"))?;
+        metrics.insert(format!("task:{name}:count"), stored_count);
+        let row = rows
+            .iter()
+            .find(|row| row.first().is_some_and(|label| label == name))
+            .ok_or_else(|| format!("missing task ratio row {name}"))?;
+        let ratio = row
+            .get(2)
+            .and_then(|value| parse_number(value))
+            .ok_or_else(|| format!("missing task ratio {name}"))?;
+        metrics.insert(format!("task:{name}:ratio"), ratio);
+    }
+    Ok(metrics)
+}
+
+fn distribution_workbook_checks(
+    bytes: &[u8],
+    expected: &Expectations,
+    results: &mut CheckResults,
+) -> MetricMap {
+    let names = match sheet_names_of(bytes) {
+        Ok(names) => names,
+        Err(error) => {
+            results.check("dist:parseable", false, error);
+            return MetricMap::new();
+        }
+    };
+    results.check(
+        "dist:sheets",
+        names.contains(&"任务类型分布".to_owned())
+            && names.contains(&"等待时长分布".to_owned()),
+        format!("sheets={names:?}"),
+    );
+    let metrics = match workbook_metrics(bytes, expected) {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            results.check("dist:task-table", false, error);
+            MetricMap::new()
+        }
+    };
+    for (name, count) in &expected.task_counts {
+        let ok = metrics
+            .get(&format!("task:{name}:count"))
+            .is_some_and(|value| *value as u64 == *count);
+        results.check(
+            &format!("dist:task-count:{name}"),
+            ok,
+            format!("expected={count} stored={:?}", metrics.get(&format!("task:{name}:count"))),
+        );
+        let ok = metrics
+            .get(&format!("task:{name}:ratio"))
+            .is_some_and(|value| nearly(*value, expected.ratio_of(*count), 0.0005));
+        results.check(
+            &format!("dist:task-ratio:{name}"),
+            ok,
+            format!(
+                "expected={} stored={:?}",
+                expected.ratio_of(*count),
+                metrics.get(&format!("task:{name}:ratio"))
+            ),
+        );
+    }
+    let buckets = match workbook_rows(bytes, "等待时长分布") {
+        Ok(rows) => label_map(&rows),
+        Err(error) => {
+            results.check("dist:bucket-table", false, error);
+            BTreeMap::new()
+        }
+    };
+    let mut bucket_sum = 0u64;
+    for (label, _, _, count) in &expected.buckets {
+        let stored = buckets.get(label).and_then(|value| parse_number(value));
+        bucket_sum += stored.unwrap_or(0.0) as u64;
+        results.check(
+            &format!("dist:bucket:{label}"),
+            stored.is_some_and(|value| value as u64 == *count),
+            format!("expected={count} stored={stored:?}"),
+        );
+    }
+    results.check(
+        "dist:bucket-sum",
+        bucket_sum == expected.total,
+        format!("bucket sum {bucket_sum} vs total {}", expected.total),
+    );
+    match has_chart_part(bytes) {
+        Ok(present) => results.check(
+            "dist:chart-part",
+            present,
+            "xl/charts/chart*.xml in the OOXML package",
+        ),
+        Err(error) => results.check("dist:chart-part", false, error),
+    }
+    metrics
+}
+
+fn summary_workbook_checks(
+    bytes: &[u8],
+    expected: &Expectations,
+    results: &mut CheckResults,
+) -> MetricMap {
+    let rows = match workbook_rows(bytes, "总览指标") {
+        Ok(rows) => rows,
+        Err(error) => {
+            results.check("summary:overview-sheet", false, error);
+            return MetricMap::new();
+        }
+    };
+    let map = label_map(&rows);
+    let expect_number = |results: &mut CheckResults,
+                         id: &str,
+                         label: &str,
+                         wanted: f64,
+                         tolerance: f64| {
+        let stored = map.get(label).and_then(|value| parse_number(value));
+        results.check(
+            id,
+            stored.is_some_and(|value| nearly(value, wanted, tolerance)),
+            format!("{label}: expected={wanted} stored={stored:?}"),
+        );
+    };
+    expect_number(results, "summary:total", "去重记录总数", expected.total as f64, 0.0);
+    for (name, count) in &expected.task_counts {
+        expect_number(
+            results,
+            &format!("summary:task-count:{name}"),
+            &format!("{name}记录数"),
+            *count as f64,
+            0.0,
+        );
+        expect_number(
+            results,
+            &format!("summary:task-ratio:{name}"),
+            &format!("{name}占比"),
+            expected.ratio_of(*count),
+            0.0005,
+        );
+    }
+    for (name, count) in &expected.status_counts {
+        expect_number(
+            results,
+            &format!("summary:status:{name}"),
+            &format!("{name}记录数"),
+            *count as f64,
+            0.0,
+        );
+    }
+    expect_number(
+        results,
+        "summary:wait-min",
+        "最短等待时长(分钟)",
+        expected.wait_min as f64,
+        0.0,
+    );
+    expect_number(
+        results,
+        "summary:wait-max",
+        "最长等待时长(分钟)",
+        expected.wait_max as f64,
+        0.0,
+    );
+    expect_number(
+        results,
+        "summary:wait-avg",
+        "平均等待时长(分钟)",
+        expected.wait_avg,
+        0.01,
+    );
+    expect_number(
+        results,
+        "summary:exceptions",
+        "异常记录数(悬臂)",
+        expected.exception_total as f64,
+        0.0,
+    );
+    let metrics = match workbook_metrics(bytes, expected) {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            results.check("summary:task-table", false, error);
+            MetricMap::new()
+        }
+    };
+    match has_chart_part(bytes) {
+        Ok(present) => results.check(
+            "summary:chart-part",
+            present,
+            "xl/charts/chart*.xml in the OOXML package",
+        ),
+        Err(error) => results.check("summary:chart-part", false, error),
+    }
+    metrics
+}
+
+fn report_document_checks(
+    bytes: &[u8],
+    expected: &Expectations,
+    results: &mut CheckResults,
+) -> MetricMap {
+    let text = match crate::local_knowledge_import::extract_office_text(bytes, AGV_REPORT_NAME) {
+        Ok(Some(text)) => text,
+        Ok(None) => {
+            results.check(
+                "report:parseable",
+                false,
+                String::from("no document text"),
+            );
+            return MetricMap::new();
+        }
+        Err(error) => {
+            results.check("report:parseable", false, error);
+            return MetricMap::new();
+        }
+    };
+    let mut metrics = MetricMap::new();
+    for section in ["数据概览", "任务类型构成", "等待时长分布", "异常与超时", "分析结论"] {
+        results.check(
+            &format!("report:section:{section}"),
+            text.contains(section),
+            format!("heading containing {section}"),
+        );
+    }
+    if let Some(total) = number_after(&text, "共") {
+        results.check(
+            "report:total",
+            total as u64 == expected.total,
+            format!("expected={} stored={total}", expected.total),
+        );
+        metrics.insert("total".into(), total);
+    } else {
+        results.check("report:total", false, "no total after 共");
+    }
+    for (name, count) in &expected.task_counts {
+        let stored_count = number_after(&text, name.as_str());
+        results.check(
+            &format!("report:task-count:{name}"),
+            stored_count.is_some_and(|value| value as u64 == *count),
+            format!("expected={count} stored={stored_count:?}"),
+        );
+        let ratio = percent_after(&text, &format!("{name}{count}条，占比"));
+        results.check(
+            &format!("report:task-ratio:{name}"),
+            ratio.is_some_and(|value| nearly(value, expected.ratio_of(*count), 0.002)),
+            format!("expected={} stored={ratio:?}", expected.ratio_of(*count)),
+        );
+        if let Some(value) = stored_count {
+            metrics.insert(format!("task:{name}:count"), value);
+        }
+        if let Some(value) = ratio {
+            metrics.insert(format!("task:{name}:ratio"), value);
+        }
+    }
+    if let Some(avg) = number_after(&text, "平均约") {
+        results.check(
+            "report:wait-avg",
+            nearly(avg, expected.wait_avg, 0.05),
+            format!("expected={} stored={avg}", expected.wait_avg),
+        );
+    } else {
+        results.check("report:wait-avg", false, "no average after 平均约");
+    }
+    if let Some(total) = number_after(&text, "悬臂异常记录共") {
+        results.check(
+            "report:exceptions",
+            total as u64 == expected.exception_total,
+            format!("expected={} stored={total}", expected.exception_total),
+        );
+    } else {
+        results.check("report:exceptions", false, "no exception total");
+    }
+    metrics
+}
+
+/// Pure cross-document consistency core so the fast contract tests can feed it
+/// fabricated readings without producing any file.
+fn inconsistent_metrics(per_doc: &[(String, &MetricMap)], tolerance: f64) -> Vec<String> {
+    let mut keys: BTreeSet<&String> = BTreeSet::new();
+    for (_, metrics) in per_doc {
+        keys.extend(metrics.keys());
+    }
+    let mut failures = Vec::new();
+    for key in keys {
+        let values: Vec<(String, f64)> = per_doc
+            .iter()
+            .filter_map(|(name, metrics)| metrics.get(key).map(|value| (name.clone(), *value)))
+            .collect();
+        if values.len() < 2 {
+            continue;
+        }
+        let min = values
+            .iter()
+            .map(|(_, value)| *value)
+            .fold(f64::INFINITY, f64::min);
+        let max = values
+            .iter()
+            .map(|(_, value)| *value)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if max - min > tolerance {
+            failures.push(format!(
+                "{key}: {}",
+                values
+                    .iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    failures
+}
+
+// ---------------------------------------------------------------------------
+// Scripted synthetic OpenAI-compatible provider over real HTTP/SSE.
+// ---------------------------------------------------------------------------
+
+struct ProviderHandle {
+    address: std::net::SocketAddr,
+    join: Mutex<Option<std::thread::JoinHandle<Vec<Value>>>>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl Drop for ProviderHandle {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Spawn the scripted provider. `decide(request_index, current_request_body)`
+/// returns the next reply and whether to keep serving (`false` ends the
+/// script). When the Run ends before the script does, dropping the handle
+/// unblocks the server thread.
+fn spawn_provider(
+    mut decide: impl FnMut(usize, &str) -> (Reply, bool) + Send + 'static,
+) -> ProviderHandle {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = shutdown.clone();
+    let join = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        let mut index = 0usize;
+        loop {
+            // Wait for the next real request, polling shutdown so an early Run
+            // failure never leaves a detached thread with a live deadline.
+            let deadline = Instant::now() + Duration::from_secs(300);
+            let (mut stream, request, body_text) = loop {
+                if server_shutdown.load(Ordering::SeqCst) {
+                    return requests;
+                }
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "missing model request #{index}");
+                        std::thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => panic!("{error}"),
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+                stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+                let mut bytes = Vec::new();
+                let request = loop {
+                    let mut buffer = [0u8; 8192];
+                    let n = match stream.read(&mut buffer) {
+                        Ok(n) if n > 0 => n,
+                        _ => break None,
+                    };
+                    bytes.extend_from_slice(&buffer[..n]);
+                    assert!(bytes.len() < 8_388_608, "eval request #{index} exceeded 8 MiB");
+                    if let Some(end) = bytes.windows(4).position(|p| p == b"\r\n\r\n") {
+                        let headers =
+                            String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:"))
+                            .unwrap()
+                            .trim()
+                            .parse::<usize>()
+                            .unwrap();
+                        if bytes.len() >= end + 4 + length {
+                            let body = &bytes[end + 4..end + 4 + length];
+                            break serde_json::from_slice::<Value>(body).ok().map(|value| {
+                                (value, String::from_utf8_lossy(body).into_owned())
+                            });
+                        }
+                    }
+                };
+                // The Node worker may open a replacement idle socket; it is
+                // not another model request.
+                if let Some(pair) = request {
+                    break (stream, pair.0, pair.1);
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "only abandoned sockets for request #{index}"
+                );
+            };
+            requests.push(request);
+            let (reply, more) = decide(index, &body_text);
+
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            // One closure owns the stream borrow; the second SSE event of each
+            // round carries deterministic synthetic usage plus finish_reason.
+            let mut send_chunk = |id_suffix: &str, delta: Value, finish: Value| {
+                let mut delta = delta;
+                if !finish.is_null() {
+                    // Deterministic synthetic accounting, emitted on every round.
+                    let prompt_tokens = (body_text.len() / 4).max(1) as u64;
+                    delta["usage"] = json!({"prompt_tokens":prompt_tokens,"completion_tokens":32,
+                        "total_tokens":prompt_tokens + 32});
+                }
+                let body = format!(
+                    "data: {}\n\n",
+                    json!({"id":format!("eval-{index}{id_suffix}"),"object":"chat.completion.chunk","created":1,
+                        "model":SYNTHETIC_MODEL_ID,
+                        "choices":[{"index":0,"delta":delta,"finish_reason":finish}]})
+                );
+                write!(stream, "{:x}\r\n{}\r\n", body.len(), body).unwrap();
+            };
+            match &reply {
+                Reply::Tool { id, name, arguments } => {
+                    send_chunk(
+                        "",
+                        json!({"role":"assistant","tool_calls":[{"index":0,"id":id,"type":"function",
+                            "function":{"name":name,"arguments":arguments.to_string()}}]}),
+                        Value::Null,
+                    );
+                    send_chunk("-usage", json!({}), json!("tool_calls"));
+                }
+                Reply::Stop => {
+                    send_chunk(
+                        "",
+                        json!({"role":"assistant","content":"已按要求完成全部交付，并完成自检。"}),
+                        Value::Null,
+                    );
+                    send_chunk("-usage", json!({}), json!("stop"));
+                }
+            }
+            drop(send_chunk);
+            let done = "data: [DONE]\n\n";
+            write!(stream, "{:x}\r\n{}\r\n0\r\n\r\n", done.len(), done).unwrap();
+            index += 1;
+            if !more {
+                break;
+            }
+        }
+        requests
+    });
+    ProviderHandle {
+        address,
+        join: Mutex::new(Some(join)),
+        shutdown,
+    }
+}
+
+/// Fixed-script provider: if the Run unexpectedly asks more rounds than the
+/// plan (a repair or stop-review nudge), keep serving Stop instead of letting
+/// the request hit a dead listener; the exact-rounds check exposes the
+/// discrepancy. The accept loop exits when the ProviderHandle drops.
+fn scripted_provider(script: VecDeque<Reply>) -> ProviderHandle {
+    let replies = Mutex::new(script);
+    spawn_provider(move |_, _| match replies.lock().unwrap().pop_front() {
+        Some(reply) => (reply, true),
+        None => (Reply::Stop, true),
+    })
+}
+
+/// The large-result paging model: read the big file once, then walk
+/// `read_tool_result` ranges using the cursor the model received in history.
+fn paging_decide(_request_index: usize, body: &str) -> (Reply, bool) {
+    if !body.contains("fox-result://") {
+        return (
+            Reply::Tool {
+                id: "read-once".into(),
+                name: "read".into(),
+                arguments: json!({"path": LARGE_RESULT_NAME}),
+            },
+            true,
+        );
+    }
+    let reference = extract_result_reference(body).unwrap_or_default();
+    let pages_seen = body.matches("range-read-").count();
+    if pages_seen == 0 {
+        return (
+            Reply::Tool {
+                id: "range-read-1".into(),
+                name: "read_tool_result".into(),
+                arguments: json!({"reference":reference,"offset":0,"limit":7_000}),
+            },
+            true,
+        );
+    }
+    // The trailing model-view cursor block in the LAST range tool result is
+    // the navigation truth. Inner JSON is escaped in the request.
+    if let Some(true) = last_json_bool_after(body, "complete") {
+        return (Reply::Stop, true);
+    }
+    let offset = last_json_number_after(body, "nextOffset").unwrap_or(0);
+    let page = pages_seen + 1;
+    (
+        Reply::Tool {
+            id: format!("range-read-{page}"),
+            name: "read_tool_result".into(),
+            arguments: json!({"reference":reference,"offset":offset,"limit":7_000}),
+        },
+        true,
+    )
+}
+
+fn extract_result_reference(body: &str) -> Option<String> {
+    let start = body.find("fox-result://")?;
+    let rest = &body[start..];
+    let end = rest
+        .char_indices()
+        .find(|(_, character)| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '/' | '.' | ':'))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(rest.len());
+    Some(rest[..end].to_owned())
+}
+
+fn skip_cursor_separator(tail: &str) -> &str {
+    let mut rest = tail;
+    loop {
+        let trimmed = rest
+            .trim_start_matches(|character: char| character.is_whitespace())
+            .strip_prefix(['\\', '"'])
+            .unwrap_or(rest);
+        if trimmed == rest {
+            return rest;
+        }
+        rest = trimmed;
+    }
+}
+
+fn last_json_number_after(body: &str, key: &str) -> Option<u64> {
+    let positions: Vec<usize> = body.match_indices(key).map(|(index, _)| index).collect();
+    for position in positions.into_iter().rev() {
+        let tail = skip_cursor_separator(&body[position + key.len()..]);
+        let Some(tail) = tail.strip_prefix(':') else {
+            continue;
+        };
+        let tail = tail.trim_start_matches(|character: char| character.is_whitespace());
+        let digits: String = tail
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect();
+        if let Ok(value) = digits.parse::<u64>() {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn last_json_bool_after(body: &str, key: &str) -> Option<bool> {
+    let positions: Vec<usize> = body.match_indices(key).map(|(index, _)| index).collect();
+    for position in positions.into_iter().rev() {
+        let tail = skip_cursor_separator(&body[position + key.len()..]);
+        let Some(tail) = tail.strip_prefix(':') else {
+            continue;
+        };
+        let tail = tail.trim_start_matches(|character: char| character.is_whitespace());
+        if tail.starts_with("true") {
+            return Some(true);
+        }
+        if tail.starts_with("false") {
+            return Some(false);
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Real Host/Runtime execution through the frozen GatewayPolicy.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct EvalState {
+    last_tool: Option<String>,
+    last_error: Option<String>,
+}
+
+/// The frozen model service of the synthetic tier: a loopback HTTP/SSE provider
+/// whose port the OS assigns. Nothing here is a credential.
+fn synthetic_model_service(address: std::net::SocketAddr) -> Value {
+    json!({
+        "apiType":"openai-completions",
+        "modelId":SYNTHETIC_MODEL_ID,
+        "baseUrl":format!("http://{address}/v1"),
+        "contextWindow": 256_000,
+        "maxOutputTokens": 2_048,
+    })
+}
+
+/// Proposal tool contract shared by BOTH tiers, so the synthetic regression and
+/// the real acceptance propose through exactly the same tools.
+fn eval_proposal_tools() -> Vec<Value> {
+    vec![
+        json!({"name":"read","description":"Read a project file",
+            "parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}),
+        json!({"name":"read_tool_result","description":"Read a byte range of a stored tool result",
+            "parameters":{"type":"object","properties":{
+                "reference":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},
+                "required":["reference"]}}),
+        json!({"name":"call_mcp_tool","description":"Call a frozen MCP/Office tool",
+            "parameters":{"type":"object","properties":{
+                "serverId":{"type":"string"},"tool":{"type":"string"},
+                "arguments":{"type":"object","additionalProperties":true}},
+                "required":["serverId","tool","arguments"]}}),
+    ]
+}
+
+fn eval_model_config(address: std::net::SocketAddr) -> kernel_model_worker::KernelModelConfig {
+    let mut config = worker_configuration();
+    config.model_service = synthetic_model_service(address);
+    config.proposal_tools = eval_proposal_tools();
+    config
+}
+
+/// Prepared Run under an Allow-mode frozen binding (with the project-scoped
+/// Office grant) and the bundled Office connector registered, mirroring the
+/// production freeze order.
+fn prepare_eval_run(
+    scenario_root: &std::path::Path,
+    prompt: &str,
+    config: &kernel_model_worker::KernelModelConfig,
+    run_label: &str,
+) -> Result<(Database, String), (String, String)> {
+    let db = Database::open(scenario_root.join("facts.db"))
+        .map_err(|error| ("prepare:database".into(), error.to_string()))?;
+    crate::office::setup(&db, &office_resources_dir())
+        .map_err(|error| ("prepare:office-connector".into(), error))?;
+    let conversation = db
+        .create_conversation(db.default_agent_id(), None, scenario_root.to_str(), Some("allow"))
+        .map_err(|error| ("prepare:conversation".into(), error))?;
+    let run_id = db
+        .create_run(&conversation.id, run_label, None)
+        .map_err(|error| ("prepare:run".into(), error.to_string()))?
+        .run
+        .id;
+    let config_hash = config
+        .hash()
+        .map_err(|error| ("prepare:config".into(), error))?;
+    // No blanket grants: Office mutations carry approval="always" and are
+    // bound to their exact request (office-request scope hashes), so under
+    // production they wait for a per-request human decision. The real chain is
+    // therefore driven by an approval watcher that presses "allow once"
+    // through the same durable command queue the Tauri UI uses.
+    let permission = FrozenPermission {
+        mode: PermissionMode::Allow,
+        project_root: Some(scenario_root.to_string_lossy().into_owned()),
+        grants: vec![],
+    };
+    let binding = RunControlBinding {
+        schema_version: 1,
+        run_id: run_id.clone(),
+        conversation_id: conversation.id,
+        engine_id: "pi".into(),
+        execution_profile_id: "legacy".into(),
+        authority: ExecutionAuthority::Authoritative,
+        read_only_executor: ResourceExecutor::Rust,
+        permission_snapshot_id: Database::run_control_permission_hash(&permission)
+            .map_err(|error| ("prepare:permission".into(), error))?,
+        permission,
+        budgets: TimeBudgets::default(),
+    };
+    db.freeze_run_control(&binding)
+        .map_err(|error| ("prepare:freeze-binding".into(), error))?;
+    let frozen = kernel::RunFrozenConfig {
+        engine_id: "pi".into(),
+        kernel_mode: "authoritative".into(),
+        capability_manifest_version: 2,
+        capability_manifest_hash: "real-eval-manifest".into(),
+        permission_snapshot_id: binding.permission_snapshot_id.clone(),
+        execution_profile_id: binding.execution_profile_id.clone(),
+        prompt_config_hash: config_hash.clone(),
+        model_request_timeout_ms: binding.budgets.model_request_ms,
+        model_first_response_ms: binding.budgets.model_first_response_ms,
+        model_idle_ms: binding.budgets.model_idle_ms,
+        tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
+        run_execution_budget_ms: binding.budgets.run_execution_ms,
+        approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
+        provider_max_retries: 0,
+        turn_max_retries: 0,
+    };
+    db.kernel_create_run(
+        &run_id,
+        "pi",
+        "authoritative",
+        2,
+        &binding.permission_snapshot_id,
+        "legacy",
+        &config_hash,
+        &serde_json::to_string(&frozen)
+            .map_err(|error| ("prepare:config".into(), error.to_string()))?,
+    )
+    .map_err(|error| ("prepare:kernel-run".into(), error))?;
+    db.freeze_kernel_model_config(&run_id, config)
+        .map_err(|error| ("prepare:model-config".into(), error))?;
+    let initial = fox_engine_protocol::KernelInitialModelInput {
+        schema_version: 1,
+        run_id: run_id.clone(),
+        turn_id: "turn-1".into(),
+        prompt_config_hash: config_hash,
+        messages: vec![json!({"role":"user","content":prompt})],
+    };
+    db.freeze_kernel_initial_input(&initial)
+        .map_err(|error| ("prepare:initial-input".into(), error))?;
+    // No package manifest: the frozen scope includes every enabled connector
+    // (fox-office) and all six Office tools.
+    let scope = kernel_gateway::freeze_scope(&db, &binding, &json!({}), config)
+        .map_err(|error| ("prepare:scope".into(), error))?;
+    db.freeze_kernel_host_scope(&run_id, &scope)
+        .map_err(|error| ("prepare:scope".into(), error))?;
+    let seeds = crate::runtime_host::delivery::expectations_from_task(prompt);
+    db.seed_delivery_checklist(&run_id, &seeds, crate::database::now_ms())
+        .map_err(|error| ("prepare:checklist".into(), error))?;
+    Ok((db, run_id))
+}
+
+struct RunObservations {
+    state: String,
+    model_requests: usize,
+    /// Where `model_requests` was counted: the loopback provider's HTTP
+    /// requests (synthetic tier) or the Run's durable kernel model-response
+    /// events (real tier, where no local endpoint is involved).
+    model_requests_source: &'static str,
+    dispatch_error: Option<String>,
+    /// Per-request human approvals pressed through the durable command queue
+    /// (every mutating Office request carries approval="always").
+    approvals: u64,
+}
+
+/// The model side of one dispatch: the loopback provider of the synthetic tier,
+/// or nothing at all for the real tier (which talks to the cloud endpoint).
+struct ProviderSession {
+    shutdown: Arc<AtomicBool>,
+    join: Option<std::thread::JoinHandle<Vec<Value>>>,
+}
+
+impl ProviderSession {
+    /// Real tier: no local listener exists, so a "cloud" run can never degrade
+    /// into a scripted provider.
+    fn detached() -> Self {
+        Self {
+            shutdown: Arc::new(AtomicBool::new(false)),
+            join: None,
+        }
+    }
+
+    fn from_handle(handle: ProviderHandle) -> Self {
+        let shutdown = handle.shutdown.clone();
+        let join = handle.join.lock().unwrap().take();
+        Self { shutdown, join }
+    }
+}
+
+/// Stand-in for the human at the Tauri UI: watches the durable
+/// `kernel_approvals` queue on a separate connection and enqueues an
+/// `allow_once` command per request via the SAME production API the UI uses.
+/// It never fabricates grants or executes tools; the Kernel records the
+/// decision itself when it drains the queue.
+fn spawn_approval_watcher(root: &std::path::Path, run_id: &str) -> std::thread::JoinHandle<u64> {
+    let root = root.to_path_buf();
+    let run_id = run_id.to_owned();
+    std::thread::spawn(move || {
+        let writer = Database::open(root.join("facts.db")).unwrap();
+        let reader = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+        reader.busy_timeout(Duration::from_secs(5)).unwrap();
+        let mut approved: BTreeSet<String> = BTreeSet::new();
+        let deadline = Instant::now() + Duration::from_secs(900);
+        while Instant::now() < deadline {
+            let terminal = reader
+                .query_row(
+                    "SELECT COALESCE(k.state, legacy.status)
+                     FROM run_control_bindings b
+                     JOIN runs legacy ON legacy.id = b.run_id
+                     LEFT JOIN kernel_runs k ON k.run_id = b.run_id
+                     WHERE b.run_id = ?1",
+                    [&run_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .is_ok_and(|state| {
+                    matches!(
+                        state.as_str(),
+                        "completed" | "failed" | "cancelled" | "budget_exhausted"
+                    )
+                });
+            if terminal {
+                break;
+            }
+            let mut statement = reader
+                .prepare(
+                    "SELECT tool_call_id FROM kernel_approvals
+                     WHERE run_id = ?1 AND state = 'pending' ORDER BY rowid",
+                )
+                .unwrap();
+            let pending: Vec<String> = statement
+                .query_map([&run_id], |row| row.get::<_, String>(0))
+                .unwrap()
+                .flatten()
+                .collect();
+            drop(statement);
+            for id in pending {
+                if approved.contains(&id) {
+                    continue;
+                }
+                // The Kernel only accepts the command while the request is
+                // actionable; "not yet actionable" is retried on the next tick.
+                if matches!(
+                    writer.queue_kernel_host_command(&run_id, Some((&id, "allow_once"))),
+                    Ok(true)
+                ) {
+                    approved.insert(id);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        approved.len() as u64
+    })
+}
+
+/// Drive one prepared Run end to end with the REAL production tool routing:
+/// kernel_host.rs classifies context resources (`read_tool_result`) and sends
+/// everything else (`read`, `call_mcp_tool`) through the GatewayPolicy, whose
+/// `fox-office` branch executes the pinned OfficeCLI.
+///
+/// `session` is the model side of the dispatch: the loopback provider of the
+/// synthetic tier, or `ProviderSession::detached()` when a real endpoint is
+/// configured. `api_key` is passed here only, never into a config or a report.
+fn drive_real_run(
+    db: &Database,
+    root: &std::path::Path,
+    run_id: &str,
+    owner: &str,
+    session: ProviderSession,
+    api_key: &str,
+    state: Arc<Mutex<EvalState>>,
+) -> RunObservations {
+    let shutdown = session.shutdown.clone();
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let preview = |_: &fox_engine_protocol::KernelModelPreview| {};
+    // The human-at-UI stand-in starts approving before the first request
+    // reaches `waiting_approval`; it only writes to the durable command queue.
+    let approver = spawn_approval_watcher(root, run_id);
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, run_id, &cancellation)
+        .unwrap()
+        .with_preview(&preview);
+    let binding = db.run_control_binding(run_id).unwrap().unwrap();
+    let scope = db.kernel_host_scope(run_id).unwrap();
+    let policy = kernel_gateway::GatewayPolicy { binding, scope };
+    // The evaluation keeps its own isolated Host data directory (its own
+    // database, artifacts and managed-file snapshots), never the user's.
+    let managed_dir = root.join("managed-files");
+    let execute = |_: &RunControlBinding,
+                   effect: &kernel::OutboxEffect,
+                   token: &kernel::CancellationToken| {
+        let payload: Value = serde_json::from_str(&effect.payload_json)
+            .map_err(|_| "invalid frozen tool dispatch")?;
+        let tool = payload["tool"].as_str().ok_or("missing tool name")?;
+        {
+            state.lock().unwrap().last_tool = Some(tool.into());
+        }
+        let result = if kernel_gateway::is_context_resource(tool) {
+            policy.execute_context_resource(
+                db, root, root, root, tool, &payload["input"], token,
+            )
+        } else {
+            // Drive the SAME production execution seam the desktop Host uses, so
+            // a real Office save performed here is registered as a restorable
+            // content version exactly as it would be in the app. Calling the
+            // gateway directly would execute the write and register nothing.
+            crate::runtime_host::managed_files::execute_with_managed_versions(
+                crate::runtime_host::managed_files::ManagedExecutionContext {
+                    database: db,
+                    backups_dir: &managed_dir,
+                    conversation_id: &policy.binding.conversation_id,
+                    run_id: &policy.binding.run_id,
+                    project_root: policy.binding.permission.project_root.as_deref(),
+                    permission_mode: policy.binding.permission.mode.as_str(),
+                    scope: &policy.scope,
+                },
+                tool,
+                &payload["input"],
+                payload["toolCallId"].as_str(),
+                || policy.execute(db, tool, &payload["input"], token),
+            )
+        };
+        match result {
+            Ok(value) => Ok((
+                value.get("isError").and_then(Value::as_bool) != Some(true),
+                value,
+            )),
+            Err(error) => {
+                state.lock().unwrap().last_error = Some(error.clone());
+                // Mirrors the production executor: non-work/non-delegation
+                // failures while the Run is alive become ordinary tool-failure
+                // results; cancellation surfaces the error.
+                if token.check().is_ok() {
+                    Ok((
+                        false,
+                        kernel_host::resource_failure_result(tool, &error),
+                    ))
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    };
+    let dispatch_error = coordinator
+        .dispatch_initial_live(
+            owner,
+            &policy,
+            &real_worker_command(),
+            api_key,
+            &execute,
+            &|_| Ok(()),
+            &|_| Ok(()),
+        )
+        .err();
+    shutdown.store(true, Ordering::SeqCst);
+    let state = coordinator
+        .snapshot()
+        .map(|snapshot| snapshot.state)
+        .unwrap_or_else(|_| "unknown".into());
+    // The synthetic tier counts the loopback provider's real HTTP requests; the
+    // real tier counts the Run's durable model-response events instead, because
+    // it has no local endpoint to observe.
+    let (model_requests, model_requests_source) = match session.join {
+        Some(join) => (
+            join.join().expect("provider thread").len(),
+            PROVIDER_ROUNDS_SOURCE,
+        ),
+        None => (durable_model_rounds(root, run_id), DURABLE_ROUNDS_SOURCE),
+    };
+    let approvals = approver.join().unwrap();
+    RunObservations {
+        state,
+        model_requests,
+        model_requests_source,
+        dispatch_error,
+        approvals,
+    }
+}
+
+/// Durable count of model rounds for a Run, read straight from the kernel event
+/// stream (`run_id` is bound as a parameter, never interpolated). The event set
+/// is exactly the one `kernel_projection.rs` treats as the Run's model
+/// responses (initial / per-batch / continuation), so a rename there must be
+/// mirrored here — the real tier then fails loudly instead of passing silently.
+fn durable_model_rounds(root: &std::path::Path, run_id: &str) -> usize {
+    let Ok(connection) = rusqlite::Connection::open(root.join("facts.db")) else {
+        return 0;
+    };
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM kernel_events
+             WHERE run_id = ?1
+               AND event_type IN ('engine.initial_response','engine.batch_response','engine.continuation_response')",
+            [run_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count.max(0) as usize)
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// Report gathering
+// ---------------------------------------------------------------------------
+
+struct ScenarioOutcome {
+    id: &'static str,
+    title: &'static str,
+    /// Which tier produced this scenario; recorded in the scenario JSON so a
+    /// single scenario can never be mistaken for the other tier.
+    mode: EvalMode,
+    status: &'static str,
+    run_id: Option<String>,
+    duration_ms: u128,
+    model_requests: Option<usize>,
+    model_requests_source: &'static str,
+    failure_stage: Option<String>,
+    failure: Option<Value>,
+    checks: Vec<(String, bool, String)>,
+    delivery: Value,
+    usage: Value,
+    tool_executions: Value,
+    artifacts: Vec<String>,
+    /// (name, sha256, bytes) of every deliverable/artifact file, so a report
+    /// names the exact bytes it verified.
+    artifact_hashes: Vec<(String, String, u64)>,
+    source_sha256: Option<String>,
+}
+
+impl ScenarioOutcome {
+    fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "title": self.title,
+            "tier": self.mode.tier(),
+            "status": self.status,
+            "executed": true,
+            "runId": self.run_id,
+            "durationMs": self.duration_ms,
+            "modelRequests": self.model_requests,
+            "modelRequestsSource": self.model_requests_source,
+            "failureStage": self.failure_stage,
+            "failure": self.failure,
+            "checks": self.checks.iter().map(|(id, passed, detail)|
+                json!({"id":id,"passed":passed,"detail":detail})).collect::<Vec<_>>(),
+            "deliveryChecks": self.delivery,
+            "usage": self.usage,
+            "toolExecutions": self.tool_executions,
+            "artifacts": self.artifacts,
+            "artifactHashes": self.artifact_hashes.iter().map(|(name, sha256, bytes)|
+                json!({"name":name,"sha256":sha256,"bytes":bytes})).collect::<Vec<_>>(),
+            "sourceSha256": self.source_sha256,
+        })
+    }
+
+    fn with_duration(mut self, duration_ms: u128) -> Self {
+        self.duration_ms = duration_ms;
+        self
+    }
+}
+
+fn usage_report_for(root: &std::path::Path, run_id: &str) -> Value {
+    let connection = match rusqlite::Connection::open(root.join("facts.db")) {
+        Ok(connection) => connection,
+        Err(error) => return json!({"hostUsageRows":0,"error":error.to_string()}),
+    };
+    let mut statement = match connection.prepare(
+        "SELECT event_json FROM run_events WHERE run_id=?1 AND event_type='usage.updated' ORDER BY rowid",
+    ) {
+        Ok(statement) => statement,
+        Err(error) => return json!({"hostUsageRows":0,"error":error.to_string()}),
+    };
+    let rows = statement
+        .query_map([run_id], |row| row.get::<_, String>(0))
+        .unwrap();
+    let mut count = 0usize;
+    let mut events: Vec<Value> = Vec::new();
+    for row in rows {
+        if let Ok(json_text) = row {
+            if let Ok(value) = serde_json::from_str::<Value>(&json_text) {
+                events.push(value);
+                count += 1;
+            }
+        }
+    }
+    json!({"hostUsageRows":count,"events":events})
+}
+
+fn delivery_report(db: &Database, run_id: &str) -> Value {
+    match db.delivery_checklist(run_id) {
+        Ok(items) => json!(items
+            .iter()
+            .map(|item| json!({
+                "itemKey": item.item_key,
+                "targetPath": item.target_path,
+                "status": item.status,
+                "finding": item.finding,
+                "checkedAt": item.checked_at,
+            }))
+            .collect::<Vec<_>>()),
+        Err(error) => json!({"error": error}),
+    }
+}
+
+fn tool_execution_report(
+    db: &Database,
+    run_id: &str,
+) -> (Value, Vec<crate::database::ToolCallRecord>) {
+    let records = db.list_runtime_tool_calls_for_run(run_id).unwrap_or_default();
+    let value = json!(records
+        .iter()
+        .map(|record| json!({
+            "toolCallId": record.runtime_tool_call_id,
+            "tool": record.tool_name,
+            // The inner Office/MCP tool for `call_mcp_tool` rounds, so a report
+            // shows which frozen connector tool really ran.
+            "mcpTool": record.input.get("tool").and_then(Value::as_str),
+            "status": record.status,
+        }))
+        .collect::<Vec<_>>());
+    (value, records)
+}
+
+/// Office mutation rounds must wait for a per-request human decision; every
+/// other tool (`read`, `read_tool_result`, `office_validate`, `office_read`)
+/// must not. Read from the durable tool-call records, never from a plan.
+fn office_mutations<'a>(
+    records: &'a [crate::database::ToolCallRecord],
+) -> Vec<&'a crate::database::ToolCallRecord> {
+    records
+        .iter()
+        .filter(|record| {
+            record.tool_name == "call_mcp_tool"
+                && matches!(
+                    record.input.get("tool").and_then(Value::as_str),
+                    Some("office_create" | "office_edit")
+                )
+        })
+        .collect()
+}
+
+fn list_artifacts(root: &std::path::Path) -> Vec<String> {
+    let mut artifacts = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "facts.db" {
+                continue;
+            }
+            artifacts.push(name);
+        }
+    }
+    artifacts.sort();
+    artifacts
+}
+
+/// sha256 of every produced file (SQLite's own files are listed by name in
+/// `artifacts` but not hashed: they are runtime state, not deliverables).
+fn artifact_hashes(root: &std::path::Path) -> Vec<(String, String, u64)> {
+    let mut hashes = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if matches!(name.as_str(), "facts.db" | "facts.db-wal" | "facts.db-shm") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(entry.path()) else {
+                continue;
+            };
+            hashes.push((name, sha256_hex(&bytes), bytes.len() as u64));
+        }
+    }
+    hashes.sort_by(|left, right| left.0.cmp(&right.0));
+    hashes
+}
+
+fn fail_outcome(
+    mode: EvalMode,
+    id: &'static str,
+    title: &'static str,
+    stage: String,
+    detail: String,
+    run_id: Option<String>,
+    root: Option<&std::path::Path>,
+) -> ScenarioOutcome {
+    ScenarioOutcome {
+        id,
+        title,
+        mode,
+        status: "failed",
+        run_id: run_id.clone(),
+        duration_ms: 0,
+        model_requests: None,
+        model_requests_source: match mode {
+            EvalMode::SyntheticProvider => PROVIDER_ROUNDS_SOURCE,
+            EvalMode::RealCloudModel => DURABLE_ROUNDS_SOURCE,
+        },
+        failure_stage: Some(stage.clone()),
+        failure: Some(json!({"stage":stage,"error":detail})),
+        checks: vec![],
+        delivery: Value::Null,
+        usage: root
+            .map(|root| usage_report_for(root, run_id.as_deref().unwrap_or("-")))
+            .unwrap_or(Value::Null),
+        tool_executions: Value::Null,
+        artifacts: root.map(list_artifacts).unwrap_or_default(),
+        artifact_hashes: root.map(artifact_hashes).unwrap_or_default(),
+        source_sha256: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scenario A: AGV — two real Excel files and one real Word document.
+//
+// Two drivers share the SAME checks: the synthetic tier replays a plan we
+// authored, the real tier hands the very same prompt to a cloud model that
+// decides its own plan.
+// ---------------------------------------------------------------------------
+
+fn scenario_root(mode: EvalMode, scenario: &str) -> Result<std::path::PathBuf, String> {
+    let root = mode.artifact_dir(scenario);
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root)
+        .map_err(|error| error.to_string())
+        .map(|_| root)
+}
+
+/// Copy the CURRENT source workbook into the scenario root and derive the
+/// expectations from those exact bytes. Shared by both tiers so a real run is
+/// checked against the same, never hardcoded, numbers.
+fn stage_source_workbook(root: &std::path::Path) -> Result<(Vec<u8>, Expectations), String> {
+    let source_path = source_workbook_path();
+    let source_bytes = std::fs::read(&source_path)
+        .map_err(|error| format!("{}: {error}", source_path.display()))?;
+    std::fs::write(root.join(AGV_SOURCE_NAME), &source_bytes)
+        .map_err(|error| format!("source copy failed: {error}"))?;
+    let expected = derive_expectations(&source_bytes)?;
+    println!(
+        "EVAL-AGV expectations derived from current source: total={} tasks={:?} statuses={:?} waits={}..{} avg={} buckets={:?} exceptions={} sha256={}",
+        expected.total,
+        expected.task_counts,
+        expected.status_counts,
+        expected.wait_min,
+        expected.wait_max,
+        expected.wait_avg,
+        expected.buckets,
+        expected.exception_total,
+        expected.source_sha256,
+    );
+    Ok((source_bytes, expected))
+}
+
+/// Synthetic tier: scripted loopback provider, fixed plan, exact round count.
+fn run_agv_scenario() -> ScenarioOutcome {
+    let mode = EvalMode::SyntheticProvider;
+    let id = "agv-deliverables";
+    let title = "AGV：真实链路生成两份 Excel 与一份 Word";
+    let started = Instant::now();
+    let root = match scenario_root(mode, "agv") {
+        Ok(root) => root,
+        Err(error) => {
+            return fail_outcome(
+                mode,
+                id,
+                title,
+                "environment:output-dir".into(),
+                error,
+                None,
+                None,
+            )
+        }
+    };
+    let expected = match stage_source_workbook(&root) {
+        Ok((_bytes, expected)) => expected,
+        Err(error) => {
+            return fail_outcome(
+                mode,
+                id,
+                title,
+                "environment:source-workbook".into(),
+                error,
+                None,
+                Some(&root),
+            )
+        }
+    };
+    let script = agv_script(&expected);
+    let planned_rounds = script.len();
+    let handle = scripted_provider(script);
+    let config = eval_model_config(handle.address);
+    let (db, run_id) =
+        match prepare_eval_run(&root, AGV_TASK_PROMPT, &config, "real-task-eval") {
+            Ok(prepared) => prepared,
+            Err((stage, error)) => {
+                return fail_outcome(mode, id, title, stage, error, None, Some(&root));
+            }
+        };
+    let eval_state = Arc::new(Mutex::new(EvalState::default()));
+    let observations = drive_real_run(
+        &db,
+        &root,
+        &run_id,
+        "real-eval-agv",
+        ProviderSession::from_handle(handle),
+        EVAL_API_KEY,
+        eval_state.clone(),
+    );
+    run_agv_checks(
+        mode,
+        &ModelIdentity::synthetic_placeholder(),
+        &db,
+        &root,
+        &run_id,
+        &expected,
+        observations,
+        eval_state,
+        Some(planned_rounds),
+        started,
+    )
+}
+
+/// Real tier: the endpoint comes from `FOX_EVAL_*`, no local provider exists,
+/// and the model chooses its own tool calls and round count.
+fn run_agv_cloud_scenario(env: &CloudEnvironment, identity: &ModelIdentity) -> ScenarioOutcome {
+    let mode = EvalMode::RealCloudModel;
+    let id = "agv-deliverables-cloud";
+    let title = "AGV（真实云模型）：真实模型驱动同一链路生成两份 Excel 与一份 Word";
+    let started = Instant::now();
+    let root = match scenario_root(mode, "agv") {
+        Ok(root) => root,
+        Err(error) => {
+            return fail_outcome(
+                mode,
+                id,
+                title,
+                "environment:output-dir".into(),
+                error,
+                None,
+                None,
+            )
+        }
+    };
+    let expected = match stage_source_workbook(&root) {
+        Ok((_bytes, expected)) => expected,
+        Err(error) => {
+            return fail_outcome(
+                mode,
+                id,
+                title,
+                "environment:source-workbook".into(),
+                error,
+                None,
+                Some(&root),
+            )
+        }
+    };
+    let config = env.model_config();
+    let (db, run_id) =
+        match prepare_eval_run(&root, AGV_TASK_PROMPT, &config, "real-cloud-model-eval") {
+            Ok(prepared) => prepared,
+            Err((stage, error)) => {
+                return fail_outcome(mode, id, title, stage, error, None, Some(&root));
+            }
+        };
+    let eval_state = Arc::new(Mutex::new(EvalState::default()));
+    let observations = drive_real_run(
+        &db,
+        &root,
+        &run_id,
+        "real-eval-agv-cloud",
+        ProviderSession::detached(),
+        &env.api_key,
+        eval_state.clone(),
+    );
+    run_agv_checks(
+        mode,
+        identity,
+        &db,
+        &root,
+        &run_id,
+        &expected,
+        observations,
+        eval_state,
+        None,
+        started,
+    )
+}
+
+/// Invariants of the real tier: plan-independent and round-count independent.
+/// A real model decides its own tool calls and how many rounds it takes, so this
+/// layer asserts only that the model really ran, that the Run's frozen identity
+/// is exactly the environment-configured endpoint (never a local stand-in), and
+/// that every Office mutation was gated by its own per-request approval.
+fn real_tier_structural_checks(
+    observations: &RunObservations,
+    mutations: &[&crate::database::ToolCallRecord],
+    identity: &ModelIdentity,
+    frozen_service: &Value,
+    results: &mut CheckResults,
+) {
+    results.check(
+        "model:at-least-one-round",
+        observations.model_requests >= 1,
+        format!(
+            "rounds={} source={}",
+            observations.model_requests, observations.model_requests_source
+        ),
+    );
+    results.check(
+        "model:rounds-counted-durably",
+        observations.model_requests_source == DURABLE_ROUNDS_SOURCE,
+        format!("source={}", observations.model_requests_source),
+    );
+    let problems = identity.mismatches(frozen_service);
+    results.check(
+        "model:identity-is-environment-configured",
+        problems.is_empty(),
+        if problems.is_empty() {
+            format!(
+                "modelId={} host={} apiType={}",
+                identity.model_id, identity.base_url_host, identity.api_type
+            )
+        } else {
+            problems.join("; ")
+        },
+    );
+    results.check(
+        "model:not-the-synthetic-provider",
+        identity.model_id != SYNTHETIC_MODEL_ID
+            && !frozen_service.to_string().contains(SYNTHETIC_MODEL_ID),
+        format!("modelId={} frozen={frozen_service}", identity.model_id),
+    );
+    results.check(
+        "tools:office-mutations",
+        !mutations.is_empty(),
+        format!("mutating call_mcp_tool rounds={}", mutations.len()),
+    );
+    let unfinished: Vec<&str> = mutations
+        .iter()
+        .filter(|record| record.status != "completed")
+        .map(|record| record.runtime_tool_call_id.as_str())
+        .collect();
+    results.check(
+        "tools:mutations-completed",
+        unfinished.is_empty(),
+        format!("unfinished mutations={unfinished:?}"),
+    );
+    results.check(
+        "approvals:every-mutation-gated",
+        observations.approvals == mutations.len() as u64,
+        format!(
+            "allow_once decisions={} mutations={}",
+            observations.approvals,
+            mutations.len()
+        ),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+/// N1 helper: the managed-file versions this Run registered for the documents it
+/// really saved through the frozen Office connector.
+fn managed_office_versions(
+    db: &Database,
+    run_id: &str,
+    names: &[&str],
+) -> Vec<crate::database::ManagedFileVersion> {
+    let Ok(Some(binding)) = db.run_control_binding(run_id) else {
+        return Vec::new();
+    };
+    let Ok(rows) = db.managed_file_versions(&binding.conversation_id, None) else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .filter(|row| row.run_id.as_deref() == Some(run_id))
+        .filter(|row| matches!(row.tool.as_str(), "office_create" | "office_edit"))
+        .filter(|row| names.iter().any(|name| row.display_name.contains(name)))
+        .collect()
+}
+
+fn run_agv_checks(
+    mode: EvalMode,
+    identity: &ModelIdentity,
+    db: &Database,
+    root: &std::path::Path,
+    run_id: &str,
+    expected: &Expectations,
+    observations: RunObservations,
+    eval_state: Arc<Mutex<EvalState>>,
+    planned_rounds: Option<usize>,
+    started: Instant,
+) -> ScenarioOutcome {
+    let (id, title) = match mode {
+        EvalMode::SyntheticProvider => (
+            "agv-deliverables",
+            "AGV：真实链路生成两份 Excel 与一份 Word",
+        ),
+        EvalMode::RealCloudModel => (
+            "agv-deliverables-cloud",
+            "AGV（真实云模型）：真实模型驱动同一链路生成两份 Excel 与一份 Word",
+        ),
+    };
+    let mut checks = CheckResults::default();
+    checks.check(
+        "run:completed",
+        observations.state == "completed",
+        format!(
+            "state={} error={:?}",
+            observations.state, observations.dispatch_error
+        ),
+    );
+    match planned_rounds {
+        // The synthetic tier authored the plan, so its round count is a real
+        // assertion. The real tier must never assert one.
+        Some(planned_rounds) => checks.check(
+            "run:exact-model-rounds",
+            observations.model_requests == planned_rounds,
+            format!(
+                "planned={planned_rounds} observed={}",
+                observations.model_requests
+            ),
+        ),
+        None => {}
+    }
+
+    // Independent verification: reopen every deliverable with non-OfficeCLI parsers.
+    let mut metrics_per_doc: Vec<(String, MetricMap)> = Vec::new();
+    for (file, kind) in [
+        (AGV_DIST_NAME, "distribution"),
+        (AGV_SUMMARY_NAME, "summary"),
+        (AGV_REPORT_NAME, "report"),
+    ] {
+        let path = root.join(file);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                checks.check(
+                    &format!("{kind}:exists"),
+                    false,
+                    format!("{}: {error}", path.display()),
+                );
+                continue;
+            }
+        };
+        checks.check(
+            &format!("{kind}:exists"),
+            bytes.len() > 100,
+            format!("{} bytes", bytes.len()),
+        );
+        let metrics = match kind {
+            "distribution" => distribution_workbook_checks(&bytes, expected, &mut checks),
+            "summary" => summary_workbook_checks(&bytes, expected, &mut checks),
+            _ => report_document_checks(&bytes, expected, &mut checks),
+        };
+        if !metrics.is_empty() {
+            metrics_per_doc.push((kind.into(), metrics));
+        }
+    }
+    // Cross-document count/ratio consistency.
+    let borrowed: Vec<(String, &MetricMap)> = metrics_per_doc
+        .iter()
+        .map(|(name, metrics)| (name.clone(), metrics))
+        .collect();
+    for failure in inconsistent_metrics(&borrowed, 0.002) {
+        checks.check(&format!("cross:{failure}"), false, failure.clone());
+    }
+    checks.check(
+        "cross:all-three-documents",
+        borrowed.len() == 3,
+        format!("metrics compared across {} of 3 documents", borrowed.len()),
+    );
+
+    let (tool_executions, records) = tool_execution_report(db, run_id);
+    match mode {
+        EvalMode::SyntheticProvider => {
+            let office_calls = records
+                .iter()
+                .filter(|record| record.tool_name == "call_mcp_tool")
+                .count();
+            let failed_calls = records
+                .iter()
+                .filter(|record| record.status != "completed")
+                .count();
+            checks.check(
+                "tools:office-rounds",
+                office_calls >= 9,
+                format!("call_mcp_tool completed rounds={office_calls}"),
+            );
+            checks.check(
+                "tools:no-failed",
+                failed_calls == 0,
+                format!("non-completed calls={failed_calls}"),
+            );
+            // create + edit for each of the three documents = 6 per-request
+            // approvals; validate and reads never wait for approval.
+            checks.check(
+                "approvals:six-per-request-mutations",
+                observations.approvals == 6,
+                format!("allow_once decisions={}", observations.approvals),
+            );
+        }
+        EvalMode::RealCloudModel => {
+            let mutations = office_mutations(&records);
+            match db.kernel_model_config(run_id) {
+                Ok(frozen) => real_tier_structural_checks(
+                    &observations,
+                    &mutations,
+                    identity,
+                    &frozen.model_service,
+                    &mut checks,
+                ),
+                Err(error) => checks.check(
+                    "model:identity-is-environment-configured",
+                    false,
+                    format!("the Run's frozen model config is unreadable: {error}"),
+                ),
+            }
+        }
+    }
+
+    let delivery = delivery_report(db, run_id);
+    let passed = delivery.as_array().is_some_and(|items| {
+        items.len() == 3 && items.iter().all(|item| item["status"] == "passed")
+    });
+    checks.check(
+        "delivery:three-artifacts-passed",
+        passed,
+        delivery.to_string(),
+    );
+
+    // N1: every document this Run really saved through the frozen built-in
+    // Office connector must be registered as a user-restorable content version.
+    // The dispatch is the MCP wrapper (`call_mcp_tool` → `fox-office`), so the
+    // check also proves the wrapper is unwrapped to the real operation name.
+    let registered = managed_office_versions(
+        db,
+        run_id,
+        &[AGV_DIST_NAME, AGV_SUMMARY_NAME, AGV_REPORT_NAME],
+    );
+    checks.check(
+        "managed:office-writes-registered",
+        registered.len() >= 6,
+        format!(
+            "registered office versions={}, artifacts={}",
+            registered.len(),
+            registered
+                .iter()
+                .map(|row| format!("{}:{}", row.tool, row.display_name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
+    checks.check(
+        "managed:every-artifact-has-a-version",
+        [AGV_DIST_NAME, AGV_SUMMARY_NAME, AGV_REPORT_NAME]
+            .iter()
+            .all(|name| registered.iter().any(|row| row.display_name.contains(name))),
+        "each delivered document appears in the managed-file registry",
+    );
+    let mut restorable = 0usize;
+    let mut restore_failures: Vec<String> = Vec::new();
+    for row in &registered {
+        // The registry's own content snapshot must match the recorded hash, and
+        // restoring the row must produce exactly those bytes.
+        match crate::runtime_host::managed_files::resolve_restore_source(db, row) {
+            Ok(source) => {
+                restorable += 1;
+                if crate::runtime_host::managed_files::hash_file(&source.path)
+                    .map(|(hash, _)| hash)
+                    != row.after_hash.clone()
+                {
+                    restore_failures.push(format!("{}: snapshot hash mismatch", row.id));
+                }
+            }
+            Err(reason) => restore_failures.push(format!("{}: {reason}", row.id)),
+        }
+    }
+    checks.check(
+        "managed:every-version-restorable",
+        restorable == registered.len(),
+        format!(
+            "restorable={restorable}/{} failures={restore_failures:?}",
+            registered.len()
+        ),
+    );
+
+    let status = if checks.ok() && observations.state == "completed" {
+        "passed"
+    } else {
+        "failed"
+    };
+    let guard = eval_state.lock().unwrap();
+    ScenarioOutcome {
+        id,
+        title,
+        mode,
+        status,
+        run_id: Some(run_id.to_owned()),
+        duration_ms: started.elapsed().as_millis(),
+        model_requests: Some(observations.model_requests),
+        model_requests_source: observations.model_requests_source,
+        failure_stage: (status == "failed")
+            .then(|| {
+                guard
+                    .last_tool
+                    .clone()
+                    .unwrap_or_else(|| "post-run checks".into())
+            }),
+        failure: guard
+            .last_error
+            .clone()
+            .map(|error| json!({"lastError":error})),
+        checks: checks.rows,
+        delivery,
+        usage: usage_report_for(root, run_id),
+        tool_executions,
+        artifacts: list_artifacts(root),
+        artifact_hashes: artifact_hashes(root),
+        source_sha256: Some(expected.source_sha256.clone()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scenario B: short document create + modify.
+// ---------------------------------------------------------------------------
+
+fn short_doc_script() -> VecDeque<Reply> {
+    let paragraph = |text: &str| {
+        json!({"command":"add","path":"/body","type":"paragraph","props":{"text":text}})
+    };
+    let first = "会议时间：2026年9月13日；议题：AGV 等待时长复盘。";
+    let second = "【修订】补充结论：优先处理高频超时车道。";
+    VecDeque::from([
+        Reply::Tool {
+            id: "short-create".into(),
+            name: "call_mcp_tool".into(),
+            arguments: office_call("office_create", json!({"output": SHORT_DOC_NAME})),
+        },
+        Reply::Tool {
+            id: "short-edit-1".into(),
+            name: "call_mcp_tool".into(),
+            arguments: office_call(
+                "office_edit",
+                json!({"file":SHORT_DOC_NAME,"output":SHORT_DOC_NAME,"overwrite":true,
+                    "operations":[paragraph(first)]}),
+            ),
+        },
+        Reply::Tool {
+            id: "short-edit-2".into(),
+            name: "call_mcp_tool".into(),
+            arguments: office_call(
+                "office_edit",
+                json!({"file":SHORT_DOC_NAME,"output":SHORT_DOC_NAME,"overwrite":true,
+                    "operations":[
+                        {"command":"add","path":"/body","type":"paragraph",
+                         "props":{"text":"修订记录","style":"Heading1"}},
+                        paragraph(second)]}),
+            ),
+        },
+        Reply::Tool {
+            id: "short-read".into(),
+            name: "call_mcp_tool".into(),
+            arguments: office_call("office_read", json!({"file": SHORT_DOC_NAME})),
+        },
+        Reply::Stop,
+    ])
+}
+
+fn run_short_document_scenario() -> ScenarioOutcome {
+    let mode = EvalMode::SyntheticProvider;
+    let id = "short-document-edit";
+    let title = "短文档修改：创建、原地修改与备份";
+    let started = Instant::now();
+    let root = match scenario_root(mode, "short-document") {
+        Ok(root) => root,
+        Err(error) => {
+            return fail_outcome(
+                mode,
+                id,
+                title,
+                "environment:output-dir".into(),
+                error,
+                None,
+                None,
+            )
+        }
+    };
+    let script = short_doc_script();
+    let planned_rounds = script.len();
+    let handle = scripted_provider(script);
+    let config = eval_model_config(handle.address);
+    let (db, run_id) =
+        match prepare_eval_run(&root, SHORT_DOC_TASK_PROMPT, &config, "real-task-eval") {
+            Ok(prepared) => prepared,
+            Err((stage, error)) => {
+                return fail_outcome(mode, id, title, stage, error, None, Some(&root));
+            }
+        };
+    let eval_state = Arc::new(Mutex::new(EvalState::default()));
+    let observations = drive_real_run(
+        &db,
+        &root,
+        &run_id,
+        "real-eval-short",
+        ProviderSession::from_handle(handle),
+        EVAL_API_KEY,
+        eval_state.clone(),
+    );
+
+    let mut checks = CheckResults::default();
+    checks.check(
+        "run:completed",
+        observations.state == "completed",
+        format!(
+            "state={} error={:?}",
+            observations.state, observations.dispatch_error
+        ),
+    );
+    checks.check(
+        "run:exact-model-rounds",
+        observations.model_requests == planned_rounds,
+        format!("planned={planned_rounds} observed={}", observations.model_requests),
+    );
+    let doc_path = root.join(SHORT_DOC_NAME);
+    let bytes = match std::fs::read(&doc_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return fail_outcome(
+                mode,
+                id,
+                title,
+                "check:document-missing".into(),
+                error.to_string(),
+                Some(run_id),
+                Some(&root),
+            )
+            .with_duration(started.elapsed().as_millis());
+        }
+    };
+    let text = crate::local_knowledge_import::extract_office_text(&bytes, SHORT_DOC_NAME)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let first = "会议时间：2026年9月13日";
+    let second = "优先处理高频超时车道";
+    checks.check("doc:contains-original", text.contains(first), first);
+    checks.check("doc:contains-revision", text.contains(second), second);
+    if let (Some(first_at), Some(second_at)) = (text.find(first), text.find(second)) {
+        checks.check(
+            "doc:revision-order",
+            first_at < second_at,
+            "original paragraph precedes the revision",
+        );
+    } else {
+        checks.check("doc:revision-order", false, "markers missing");
+    }
+
+    // OfficeCLI keeps pre-overwrite versions; the pre-revision backup must not
+    // contain the revision yet.
+    let mut backups = Vec::new();
+    for entry in std::fs::read_dir(&root).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with(SHORT_DOC_NAME) && name.contains(".fox-backup-") {
+            backups.push(entry.path());
+        }
+    }
+    checks.check(
+        "backup:at-least-two",
+        backups.len() >= 2,
+        format!("backups={}", backups.len()),
+    );
+    let pre_revision_backup = backups.iter().any(|path| {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| {
+                crate::local_knowledge_import::extract_office_text(&bytes, SHORT_DOC_NAME)
+                    .ok()
+                    .flatten()
+            })
+            .is_some_and(|text| text.contains(first) && !text.contains(second))
+    });
+    checks.check(
+        "backup:pre-revision-content",
+        pre_revision_backup,
+        "one backup carries the original paragraph but not the revision",
+    );
+
+    let delivery = delivery_report(&db, &run_id);
+    let delivery_passed = delivery
+        .as_array()
+        .is_some_and(|items| items.len() == 1 && items[0]["status"] == "passed");
+    checks.check(
+        "delivery:one-passed",
+        delivery_passed,
+        delivery.to_string(),
+    );
+
+    let (tool_executions, records) = tool_execution_report(&db, &run_id);
+    let failed_calls = records
+        .iter()
+        .filter(|record| record.status != "completed")
+        .count();
+    checks.check(
+        "tools:no-failed",
+        failed_calls == 0,
+        format!("non-completed calls={failed_calls}"),
+    );
+    // create + two edits wait for a per-request decision; office_read does not.
+    checks.check(
+        "approvals:three-per-request-mutations",
+        observations.approvals == 3,
+        format!("allow_once decisions={}", observations.approvals),
+    );
+
+    let status = if checks.ok() && observations.state == "completed" {
+        "passed"
+    } else {
+        "failed"
+    };
+    let usage = usage_report_for(&root, &run_id);
+    let guard = eval_state.lock().unwrap();
+    ScenarioOutcome {
+        id,
+        title,
+        mode,
+        status,
+        run_id: Some(run_id),
+        duration_ms: started.elapsed().as_millis(),
+        model_requests: Some(observations.model_requests),
+        model_requests_source: observations.model_requests_source,
+        failure_stage: (status == "failed")
+            .then(|| {
+                guard
+                    .last_tool
+                    .clone()
+                    .unwrap_or_else(|| "post-run checks".into())
+            }),
+        failure: guard
+            .last_error
+            .clone()
+            .map(|error| json!({"lastError":error})),
+        checks: checks.rows,
+        delivery,
+        usage,
+        tool_executions,
+        artifacts: list_artifacts(&root),
+        artifact_hashes: artifact_hashes(&root),
+        source_sha256: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scenario C: large-result continuation read.
+// ---------------------------------------------------------------------------
+
+/// ~49 KiB JSON: over the 9 000-byte model-view bound (so the Host projects it
+/// with a retrievable `fox-result://` reference) but under the 128 KiB stored
+/// result cap, so every original byte is persisted and the range walk must
+/// rebuild the file byte-for-byte.
+fn large_result_text() -> String {
+    let records = (0..300)
+        .map(|index| {
+            json!({
+                "id": index,
+                "name": format!("row-{index:04}"),
+                "note": "中".repeat(40),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&json!({"records": records, "total": 300})).unwrap()
+}
+
+fn run_large_result_scenario() -> ScenarioOutcome {
+    let mode = EvalMode::SyntheticProvider;
+    let id = "large-result-continuation-read";
+    let title = "大结果续读：完整存储与 read_tool_result 多页续读";
+    let started = Instant::now();
+    let root = match scenario_root(mode, "large-result") {
+        Ok(root) => root,
+        Err(error) => {
+            return fail_outcome(
+                mode,
+                id,
+                title,
+                "environment:output-dir".into(),
+                error,
+                None,
+                None,
+            )
+        }
+    };
+    let text = large_result_text();
+    if let Err(error) = std::fs::write(root.join(LARGE_RESULT_NAME), &text) {
+        return fail_outcome(
+            mode,
+            id,
+            title,
+            "environment:large-input".into(),
+            error.to_string(),
+            None,
+            Some(&root),
+        );
+    }
+    let wanted_sha = sha256_hex(text.as_bytes());
+    let handle = spawn_provider(move |index, body| paging_decide(index, body));
+    let config = eval_model_config(handle.address);
+    let (db, run_id) =
+        match prepare_eval_run(&root, LARGE_RESULT_TASK_PROMPT, &config, "real-task-eval") {
+            Ok(prepared) => prepared,
+            Err((stage, error)) => {
+                return fail_outcome(mode, id, title, stage, error, None, Some(&root));
+            }
+        };
+    let eval_state = Arc::new(Mutex::new(EvalState::default()));
+    let observations = drive_real_run(
+        &db,
+        &root,
+        &run_id,
+        "real-eval-large",
+        ProviderSession::from_handle(handle),
+        EVAL_API_KEY,
+        eval_state.clone(),
+    );
+
+    let mut checks = CheckResults::default();
+    checks.check(
+        "run:completed",
+        observations.state == "completed",
+        format!(
+            "state={} error={:?}",
+            observations.state, observations.dispatch_error
+        ),
+    );
+    let records = db.list_runtime_tool_calls_for_run(&run_id).unwrap_or_default();
+    let original_reads = records
+        .iter()
+        .filter(|record| record.tool_name == "read" && record.runtime_tool_call_id == "read-once")
+        .count();
+    checks.check(
+        "read:executed-once",
+        original_reads == 1,
+        format!("read-once executions={original_reads}"),
+    );
+    let mut ranges: Vec<(usize, String)> = records
+        .iter()
+        .filter(|record| record.tool_name == "read_tool_result")
+        .map(|record| {
+            let page = record
+                .runtime_tool_call_id
+                .strip_prefix("range-read-")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            let fragment = record
+                .result
+                .as_ref()
+                .and_then(|result| result["content"][0]["text"].as_str())
+                .unwrap_or_default()
+                .to_owned();
+            (page, fragment)
+        })
+        .collect();
+    ranges.sort_by_key(|(page, _)| *page);
+    checks.check(
+        "ranges:multi-page",
+        ranges.len() >= 5,
+        format!("range pages={}", ranges.len()),
+    );
+    let rebuilt: String = ranges
+        .iter()
+        .map(|(_, fragment)| fragment.as_str())
+        .collect();
+    checks.check(
+        "ranges:rebuild-exact-bytes",
+        sha256_hex(rebuilt.as_bytes()) == wanted_sha,
+        format!(
+            "rebuilt={} bytes sha={} original={} bytes sha={}",
+            rebuilt.len(),
+            sha256_hex(rebuilt.as_bytes()),
+            text.len(),
+            wanted_sha
+        ),
+    );
+    let all_completed = records
+        .iter()
+        .filter(|record| matches!(record.tool_name.as_str(), "read" | "read_tool_result"))
+        .all(|record| record.status == "completed");
+    checks.check("ranges:all-completed", all_completed, "tool call statuses");
+    checks.check(
+        "model:multi-round",
+        observations.model_requests >= 6,
+        format!("model requests={}", observations.model_requests),
+    );
+    let delivery = delivery_report(&db, &run_id);
+    checks.check(
+        "delivery:no-checklist-for-read-task",
+        delivery.as_array().is_some_and(|items| items.is_empty()),
+        delivery.to_string(),
+    );
+    // Pure read scenario: nothing mutates, so no human approval is ever asked.
+    checks.check(
+        "approvals:none-for-reads",
+        observations.approvals == 0,
+        format!("allow_once decisions={}", observations.approvals),
+    );
+
+    let (tool_executions, _records) = tool_execution_report(&db, &run_id);
+    let status = if checks.ok() && observations.state == "completed" {
+        "passed"
+    } else {
+        "failed"
+    };
+    let usage = usage_report_for(&root, &run_id);
+    let guard = eval_state.lock().unwrap();
+    ScenarioOutcome {
+        id,
+        title,
+        mode,
+        status,
+        run_id: Some(run_id),
+        duration_ms: started.elapsed().as_millis(),
+        model_requests: Some(observations.model_requests),
+        model_requests_source: observations.model_requests_source,
+        failure_stage: (status == "failed")
+            .then(|| {
+                guard
+                    .last_tool
+                    .clone()
+                    .unwrap_or_else(|| "post-run checks".into())
+            }),
+        failure: guard
+            .last_error
+            .clone()
+            .map(|error| json!({"lastError":error})),
+        checks: checks.rows,
+        delivery,
+        usage,
+        tool_executions,
+        artifacts: vec![],
+        artifact_hashes: vec![(
+            LARGE_RESULT_NAME.into(),
+            wanted_sha.clone(),
+            text.len() as u64,
+        )],
+        source_sha256: Some(wanted_sha),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Report file
+// ---------------------------------------------------------------------------
+
+/// Environment block of a not-run real-tier report: variable NAMES and defaults
+/// only, never a value. Shared by the entry and its contract test so the
+/// recorded artifact is exactly what the entry writes.
+fn cloud_not_run_environment() -> Value {
+    json!({
+        "required": [CLOUD_ENV_BASE_URL, CLOUD_ENV_API_KEY, CLOUD_ENV_MODEL],
+        "optional": [CLOUD_ENV_API_TYPE],
+        "apiTypeDefault": CLOUD_DEFAULT_API_TYPE,
+        "resolved": Value::Null,
+        "apiKeyRecorded": false,
+    })
+}
+
+/// One acceptance report. `executed: false` means the tier did not run at all:
+/// then `not_run_reason` is present, the overall result is `not-run` (未执行) and
+/// the report can never read as a pass.
+struct ReportInput {
+    mode: EvalMode,
+    executed: bool,
+    not_run_reason: Option<String>,
+    /// Environment variable names an operator must fix before a retry.
+    missing_environment: Vec<String>,
+    identity: ModelIdentity,
+    report_run_id: String,
+    scenarios: Vec<ScenarioOutcome>,
+    /// Environment/mode description (variable names and non-secret identity).
+    environment: Value,
+}
+
+fn new_report_run_id(mode: EvalMode) -> String {
+    format!("{}-{}", mode.tier(), crate::database::now_ms())
+}
+
+/// Honest status of every tier this report knows about. Tiers other than the
+/// one that produced this report are explicitly `not-run-in-this-entry`.
+fn tiers_block(mode: EvalMode, executed: bool, not_run_reason: Option<&str>, overall: &str) -> Value {
+    let mut tiers = serde_json::Map::new();
+    for candidate in EvalMode::ALL {
+        let entry = if candidate != mode {
+            json!({
+                "status": "not-run-in-this-entry",
+                "marker": NOT_RUN_MARKER,
+                "entry": candidate.entry_command(),
+                "reason": "select this tier explicitly by running its own entry",
+            })
+        } else if !executed {
+            json!({
+                "status": "not-run",
+                "marker": NOT_RUN_MARKER,
+                "entry": candidate.entry_command(),
+                "reason": not_run_reason.unwrap_or("the acceptance did not execute"),
+            })
+        } else {
+            json!({
+                "status": if overall == "passed" { "verified-by-this-entry" } else { "failed-in-this-entry" },
+                "entry": candidate.entry_command(),
+                "chain": "model endpoint -> real pi-runtime worker -> KernelCoordinator live loop -> GatewayPolicy -> bundled OfficeCLI/readers",
+            })
+        };
+        tiers.insert(candidate.tier().into(), entry);
+    }
+    tiers.insert(
+        "gui".into(),
+        json!({
+            "status": "unverified",
+            "marker": NOT_RUN_MARKER,
+            "reason": "desktop UI presentation/interaction is not exercised by any cargo entry; GUI verification is separate and was NOT executed in this round.",
+        }),
+    );
+    tiers.insert(
+        "install".into(),
+        json!({
+            "status": "unverified",
+            "marker": NOT_RUN_MARKER,
+            "reason": "packaged installer/resource bundling is not exercised; the pinned resources/officecli binary is used in place. Install verification is separate and was NOT executed in this round.",
+        }),
+    );
+    Value::Object(tiers)
+}
+
+fn build_report(input: ReportInput) -> Value {
+    let ReportInput {
+        mode,
+        executed,
+        not_run_reason,
+        missing_environment,
+        identity,
+        report_run_id,
+        scenarios,
+        environment,
+    } = input;
+    let failed = scenarios
+        .iter()
+        .filter(|scenario| scenario.status != "passed")
+        .count();
+    // An "executed" report without a single scenario is not a pass either.
+    let overall = if !executed {
+        "not-run"
+    } else if scenarios.is_empty() || failed > 0 {
+        "failed"
+    } else {
+        "passed"
+    };
+    let duration_ms: u128 = scenarios.iter().map(|scenario| scenario.duration_ms).sum();
+    let usage_rows: u64 = scenarios
+        .iter()
+        .map(|scenario| {
+            scenario
+                .usage
+                .get("hostUsageRows")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        })
+        .sum();
+    let tool_total: usize = scenarios
+        .iter()
+        .map(|scenario| {
+            scenario
+                .tool_executions
+                .as_array()
+                .map(|rows| rows.len())
+                .unwrap_or(0)
+        })
+        .sum();
+    let artifact_hashes: Vec<Value> = scenarios
+        .iter()
+        .flat_map(|scenario| {
+            scenario.artifact_hashes.iter().map(move |(name, sha256, bytes)| {
+                json!({"scenario":scenario.id,"name":name,"sha256":sha256,"bytes":bytes})
+            })
+        })
+        .collect();
+    let source_sha256 = scenarios
+        .iter()
+        .find_map(|scenario| scenario.source_sha256.clone());
+    json!({
+        "schemaVersion": 2,
+        "generatedAtMs": crate::database::now_ms(),
+        "runId": report_run_id,
+        "entry": mode.entry_command(),
+        "mode": mode.tier(),
+        "tier": mode.tier(),
+        // Execution is explicit: a tier that did not run says so and says why.
+        "executed": executed,
+        "notRunReason": not_run_reason,
+        "missingEnvironment": missing_environment,
+        "overall": overall,
+        "durationMs": duration_ms,
+        "modelIdentity": identity.to_json(),
+        // The synthetic tier binds a loopback listener; the real tier never does.
+        "syntheticProviderSpawned": mode == EvalMode::SyntheticProvider && executed,
+        "environment": environment,
+        "tiers": tiers_block(mode, executed, not_run_reason.as_deref(), overall),
+        "fixedInputs": {
+            "agvSourcePath": source_workbook_path().to_string_lossy(),
+            "outputDir": mode.run_dir().to_string_lossy(),
+            "prompts": {
+                "agv": AGV_TASK_PROMPT,
+                "shortDocument": SHORT_DOC_TASK_PROMPT,
+                "largeResult": LARGE_RESULT_TASK_PROMPT,
+            },
+            // Credentials are never recorded; only presence and origin.
+            "credential": {
+                "apiKeyPresent": identity.api_key_present,
+                "apiKeyRecorded": false,
+                "apiKeySource": identity.api_key_source,
+            },
+        },
+        "sourceWorkbookSha256": source_sha256,
+        "artifactHashes": artifact_hashes,
+        "usage": {
+            "hostUsageRows": usage_rows,
+            "scenarios": scenarios.iter().map(|scenario|
+                json!({"id":scenario.id,"usage":scenario.usage})).collect::<Vec<_>>(),
+        },
+        "toolExecutions": {
+            "total": tool_total,
+            "scenarios": scenarios.iter().map(|scenario|
+                json!({"id":scenario.id,"toolExecutions":scenario.tool_executions})).collect::<Vec<_>>(),
+        },
+        "scenarios": scenarios.iter().map(ScenarioOutcome::to_json).collect::<Vec<_>>(),
+    })
+}
+
+/// Persist a report. Refuses to write a document that leaks the credential it
+/// was given, and refuses the historical evidence directory outright.
+fn write_report_file(
+    dir: &std::path::Path,
+    name: &str,
+    report: &Value,
+    secret: Option<&str>,
+) -> std::path::PathBuf {
+    match try_write_report(dir, name, report, secret) {
+        Ok(path) => path,
+        Err(error) => panic!("{error}"),
+    }
+}
+
+/// Fallible form, so an unwritable output directory cannot hide the real
+/// verdict (an entry still aborts with its own reason, e.g. 未执行).
+fn try_write_report(
+    dir: &std::path::Path,
+    name: &str,
+    report: &Value,
+    secret: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    let serialized = serde_json::to_string_pretty(report)
+        .map_err(|error| format!("the report does not serialize: {error}"))?;
+    if let Some(secret) = secret.filter(|secret| secret.trim().len() >= 4) {
+        if serialized.contains(secret) {
+            return Err(String::from("a report must never contain the API key"));
+        }
+    }
+    if dir.starts_with(historical_eval_dir()) {
+        return Err(format!(
+            "the historical evidence directory is read-only for this round: {}",
+            historical_eval_dir().display()
+        ));
+    }
+    std::fs::create_dir_all(dir).map_err(|error| {
+        format!(
+            "the report directory {} could not be created: {error}",
+            dir.display()
+        )
+    })?;
+    let path = dir.join(name);
+    std::fs::write(&path, serialized)
+        .map_err(|error| format!("the report {} could not be written: {error}", path.display()))?;
+    Ok(path)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+/// Fast contract layer: expectations are derived, not hardcoded.
+#[test]
+fn real_eval_derives_current_expectations_without_historical_constants() {
+    let bytes = std::fs::read(source_workbook_path()).unwrap();
+    let expected = derive_expectations(&bytes).unwrap();
+    assert_eq!(expected.dedup_sheet, "去重");
+    assert_eq!(expected.exception_sheet.as_deref(), Some("悬臂"));
+    assert!(expected.total > 0, "current source must have records");
+    let task_sum: u64 = expected.task_counts.iter().map(|(_, count)| *count).sum();
+    let status_sum: u64 = expected.status_counts.iter().map(|(_, count)| *count).sum();
+    let bucket_sum: u64 = expected.buckets.iter().map(|(_, _, _, count)| *count).sum();
+    assert_eq!(task_sum, expected.total, "task categories partition records");
+    assert_eq!(status_sum, expected.total, "AGV statuses partition records");
+    assert_eq!(bucket_sum, expected.total, "wait buckets partition records");
+    assert!(expected.wait_min <= expected.wait_max);
+    assert!(expected.wait_avg >= expected.wait_min as f64);
+    assert!(expected.wait_avg <= expected.wait_max as f64);
+    let ratio_sum: f64 = expected
+        .task_counts
+        .iter()
+        .map(|(_, count)| expected.ratio_of(*count))
+        .sum();
+    assert!(nearly(ratio_sum, 1.0, 0.001), "ratio sum {ratio_sum}");
+    assert_eq!(expected.source_sha256.len(), 64);
+    println!(
+        "real-eval current source: total={} tasks={:?} exceptions={} sha256={}",
+        expected.total,
+        expected.task_counts,
+        expected.exception_total,
+        expected.source_sha256
+    );
+
+    // The fixed prompts seed exactly the promised deliverables.
+    let agv_seeds = crate::runtime_host::delivery::expectations_from_task(AGV_TASK_PROMPT);
+    assert_eq!(agv_seeds.len(), 3, "{agv_seeds:?}");
+    let targets: BTreeSet<_> = agv_seeds
+        .iter()
+        .filter_map(|seed| seed.target_path.clone())
+        .collect();
+    assert!(targets.contains(AGV_DIST_NAME));
+    assert!(targets.contains(AGV_SUMMARY_NAME));
+    assert!(targets.contains(AGV_REPORT_NAME));
+    let short_seeds =
+        crate::runtime_host::delivery::expectations_from_task(SHORT_DOC_TASK_PROMPT);
+    assert_eq!(short_seeds.len(), 1, "{short_seeds:?}");
+    let large_seeds =
+        crate::runtime_host::delivery::expectations_from_task(LARGE_RESULT_TASK_PROMPT);
+    assert!(large_seeds.is_empty(), "{large_seeds:?}");
+}
+
+#[test]
+fn real_eval_plan_is_deterministic_and_carries_charts_sections_and_derived_values() {
+    let bytes = std::fs::read(source_workbook_path()).unwrap();
+    let expected = derive_expectations(&bytes).unwrap();
+    let first = serde_json::to_value(agv_script(&expected).iter().collect::<Vec<_>>()).unwrap();
+    let second = serde_json::to_value(agv_script(&expected).iter().collect::<Vec<_>>()).unwrap();
+    assert_eq!(first, second, "the synthetic plan must be reproducible");
+    let rendered = first.to_string();
+    assert!(rendered.contains("office_create"));
+    assert!(rendered.contains("office_validate"));
+    assert!(rendered.contains("\"bar\""));
+    assert!(rendered.contains("任务类型分布"));
+    assert!(rendered.contains("等待时长分布"));
+    for heading in ["数据概览", "任务类型构成", "等待时长分布", "异常与超时", "分析结论"] {
+        assert!(rendered.contains(heading), "missing report section {heading}");
+    }
+    // The derived total really drives the script, never a literal constant.
+    assert!(rendered.contains(&expected.total.to_string()));
+}
+
+#[test]
+fn real_eval_checker_flags_fabricated_cross_document_inconsistency() {
+    let mut good = MetricMap::new();
+    good.insert("task:卸船:count".into(), 548.0);
+    good.insert("task:卸船:ratio".into(), 0.5912);
+    good.insert("total".into(), 927.0);
+    let mut fabricated_count = good.clone();
+    fabricated_count.insert("task:卸船:count".into(), 600.0);
+    let mut fabricated_ratio = good.clone();
+    fabricated_ratio.insert("task:卸船:ratio".into(), 0.71);
+    let failures = inconsistent_metrics(
+        &[
+            ("dist".to_owned(), &good),
+            ("summary".to_owned(), &fabricated_count),
+            ("report".to_owned(), &good),
+        ],
+        0.002,
+    );
+    assert!(failures
+        .iter()
+        .any(|failure| failure.contains("task:卸船:count")));
+    let failures = inconsistent_metrics(
+        &[
+            ("dist".to_owned(), &good),
+            ("summary".to_owned(), &good),
+            ("report".to_owned(), &fabricated_ratio),
+        ],
+        0.002,
+    );
+    assert!(failures
+        .iter()
+        .any(|failure| failure.contains("task:卸船:ratio")));
+    assert!(
+        inconsistent_metrics(&[("a".to_owned(), &good), ("b".to_owned(), &good)], 0.002).is_empty()
+    );
+}
+
+#[test]
+fn real_eval_independent_zip_lister_opens_ooxml_package() {
+    let bytes = std::fs::read(manifest_dir().join("tests/fixtures/office-reading.xlsx")).unwrap();
+    let names = crate::local_knowledge_import::zip_entry_names(&bytes).unwrap();
+    assert!(names.iter().any(|name| name.starts_with("xl/worksheets/")));
+    assert!(
+        !has_chart_part(&bytes).unwrap(),
+        "the plain reading fixture has no chart"
+    );
+}
+
+#[test]
+fn real_eval_cursor_parsing_reads_escaped_model_view_blocks() {
+    // The tool result is embedded as an escaped JSON string inside the
+    // request body the provider receives.
+    let body = r#"{"messages":[{"role":"tool","content":"prefix {\"reference\":\"fox-result://run/read-once\",\"offset\":7000,\"returnedBytes\":7000,\"nextOffset\":14000,\"complete\":false} suffix"}]}"#;
+    assert_eq!(
+        extract_result_reference(body).as_deref(),
+        Some("fox-result://run/read-once")
+    );
+    assert_eq!(last_json_number_after(body, "nextOffset"), Some(14000));
+    assert_eq!(last_json_bool_after(body, "complete"), Some(false));
+    let done = r#"...nextOffset\":21000,\"complete\":true}"#;
+    assert_eq!(last_json_number_after(done, "nextOffset"), Some(21000));
+    assert_eq!(last_json_bool_after(done, "complete"), Some(true));
+}
+
+// ---------------------------------------------------------------------------
+// Contract layer for the two tiers. None of these tests needs Node, OfficeCLI
+// or a credential: they exercise the mode/identity/report contract directly,
+// including the empty-environment path the real entry hits.
+// ---------------------------------------------------------------------------
+
+fn contract_temp_dir(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("fox-r8-eval-{}-{label}", std::process::id()))
+}
+
+fn mutation_fixture(tool: &str, status: &str) -> crate::database::ToolCallRecord {
+    crate::database::ToolCallRecord {
+        id: format!("record-{tool}-{status}"),
+        runtime_tool_call_id: format!("call-{tool}"),
+        run_id: "run-fixture".into(),
+        conversation_id: "conversation-fixture".into(),
+        tool_name: "call_mcp_tool".into(),
+        input: json!({"serverId": crate::office::SERVER_ID, "tool": tool, "arguments": {}}),
+        status: status.into(),
+        result: None,
+        error_message: None,
+        execution_location: "host".into(),
+        requires_approval: true,
+        started_at: 0,
+        completed_at: None,
+        updated_at: 0,
+        trace_id: None,
+        span_id: None,
+    }
+}
+
+fn cloud_observations(rounds: usize) -> RunObservations {
+    RunObservations {
+        state: "completed".into(),
+        model_requests: rounds,
+        model_requests_source: DURABLE_ROUNDS_SOURCE,
+        dispatch_error: None,
+        approvals: 2,
+    }
+}
+
+fn scenario_fixture(mode: EvalMode, id: &'static str, status: &'static str) -> ScenarioOutcome {
+    ScenarioOutcome {
+        id,
+        title: "fixture",
+        mode,
+        status,
+        run_id: Some("run-fixture".into()),
+        duration_ms: 12,
+        model_requests: Some(3),
+        model_requests_source: DURABLE_ROUNDS_SOURCE,
+        failure_stage: None,
+        failure: None,
+        checks: vec![(
+            "run:completed".into(),
+            status == "passed",
+            "fixture".into(),
+        )],
+        delivery: json!([]),
+        usage: json!({"hostUsageRows":2,"events":[]}),
+        tool_executions: json!([{"toolCallId":"call-fixture","tool":"call_mcp_tool","status":"completed"}]),
+        artifacts: vec![],
+        artifact_hashes: vec![],
+        source_sha256: Some("a".repeat(64)),
+    }
+}
+
+fn cloud_identity_fixture() -> ModelIdentity {
+    ModelIdentity {
+        api_type: "openai-completions".into(),
+        model_id: "cloud-acceptance-model".into(),
+        base_url: "https://cloud.example.com/v1".into(),
+        base_url_host: "cloud.example.com".into(),
+        api_key_present: true,
+        api_key_source: CLOUD_KEY_SOURCE,
+        note: "fixture",
+    }
+}
+
+fn cloud_frozen_service_fixture() -> Value {
+    json!({
+        "apiType":"openai-completions",
+        "modelId":"cloud-acceptance-model",
+        "baseUrl":"https://cloud.example.com/v1",
+        "contextWindow":256_000,
+        "maxOutputTokens":8_192,
+    })
+}
+
+/// (a) With no credentials the real tier records 未执行 with the missing variable
+/// names and can never be mistaken for a pass or for the synthetic provider.
+#[test]
+fn real_eval_cloud_mode_reports_not_run_and_names_missing_environment() {
+    let error = CloudEnvironment::resolve(|_| None)
+        .expect_err("an absent environment must not resolve into a model endpoint");
+    assert_eq!(
+        error.variables,
+        vec![CLOUD_ENV_BASE_URL, CLOUD_ENV_API_KEY, CLOUD_ENV_MODEL]
+    );
+    let summary = error.summary();
+    assert!(summary.contains(NOT_RUN_MARKER), "{summary}");
+    for name in &error.variables {
+        assert!(summary.contains(name), "{summary} must name {name}");
+    }
+
+    let mode = EvalMode::RealCloudModel;
+    let report = build_report(ReportInput {
+        mode,
+        executed: false,
+        not_run_reason: Some(summary.clone()),
+        missing_environment: error.variables_json(),
+        identity: ModelIdentity::not_configured("the acceptance did not run"),
+        report_run_id: new_report_run_id(mode),
+        scenarios: vec![],
+        environment: cloud_not_run_environment(),
+    });
+    assert_eq!(report["tier"], "real-cloud-model");
+    assert_eq!(report["mode"], "real-cloud-model");
+    assert_eq!(report["executed"], false);
+    assert_eq!(report["overall"], "not-run");
+    assert_eq!(report["notRunReason"].as_str(), Some(summary.as_str()));
+    assert_eq!(
+        report["missingEnvironment"],
+        json!([CLOUD_ENV_BASE_URL, CLOUD_ENV_API_KEY, CLOUD_ENV_MODEL])
+    );
+    assert_eq!(report["syntheticProviderSpawned"], false);
+    assert_eq!(report["modelIdentity"]["configured"], false);
+    assert_eq!(report["modelIdentity"]["modelId"], "");
+    assert_eq!(report["modelIdentity"]["apiKeyPresent"], false);
+    assert_eq!(report["tiers"]["real-cloud-model"]["status"], "not-run");
+    assert_eq!(report["tiers"]["real-cloud-model"]["marker"], NOT_RUN_MARKER);
+    assert_eq!(
+        report["tiers"]["synthetic-provider"]["status"],
+        "not-run-in-this-entry"
+    );
+    assert_eq!(report["tiers"]["gui"]["status"], "unverified");
+    assert_eq!(report["tiers"]["install"]["status"], "unverified");
+    let rendered = serde_json::to_string(&report).unwrap();
+    assert!(
+        !rendered.contains(SYNTHETIC_MODEL_ID),
+        "a not-run cloud report must not present the synthetic provider as its model"
+    );
+    assert!(
+        !rendered.contains("127.0.0.1"),
+        "a not-run cloud report must not invent a local endpoint"
+    );
+
+    // The report really lands on disk with the same content. The file is left
+    // in place (the directory is named after this process) so the exact bytes
+    // this contract produced can be inspected or copied as evidence.
+    let dir = contract_temp_dir("not-run");
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = write_report_file(&dir, mode.report_name(), &report, None);
+    let written: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(written["executed"], false);
+    assert_eq!(written["overall"], "not-run");
+    assert_eq!(written["missingEnvironment"].as_array().unwrap().len(), 3);
+    println!(
+        "EVAL-CLOUD not-run report written to {} (executed=false, overall=not-run)",
+        path.display()
+    );
+}
+
+/// A partial environment names exactly what is missing, blank values count as
+/// missing, the scripted adapter is refused, and the key never reaches a config
+/// or a report.
+#[test]
+fn real_eval_cloud_environment_resolution_is_explicit_and_never_records_the_key() {
+    const SECRET: &str = "sk-contract-test-should-never-appear";
+    let full = |name: &str| -> Option<String> {
+        match name {
+            CLOUD_ENV_BASE_URL => Some("https://models.example.com/v1".into()),
+            CLOUD_ENV_API_KEY => Some(SECRET.into()),
+            CLOUD_ENV_MODEL => Some("gpt-contract-test".into()),
+            _ => None,
+        }
+    };
+    let env = CloudEnvironment::resolve(full).expect("a complete environment resolves");
+    assert_eq!(env.api_type, CLOUD_DEFAULT_API_TYPE, "FOX_EVAL_API_TYPE is optional");
+    let config = env.model_config();
+    assert_eq!(config.model_service["modelId"], "gpt-contract-test");
+    assert_eq!(config.model_service["baseUrl"], "https://models.example.com/v1");
+    assert!(
+        config.model_service.get("apiKey").is_none(),
+        "credentials stay out of the frozen model config"
+    );
+    assert!(
+        config.hash().is_ok(),
+        "the resolved cloud config must satisfy the production config contract"
+    );
+    assert_eq!(env.identity().base_url_host, "models.example.com");
+
+    // Partial: only the model id is set.
+    let error = CloudEnvironment::resolve(|name| {
+        (name == CLOUD_ENV_MODEL).then(|| "gpt-contract-test".to_owned())
+    })
+    .expect_err("a partial environment must not resolve");
+    assert_eq!(error.variables, vec![CLOUD_ENV_BASE_URL, CLOUD_ENV_API_KEY]);
+
+    // Blank is absent, not configured.
+    let error = CloudEnvironment::resolve(|name| match name {
+        CLOUD_ENV_API_KEY => Some("   ".into()),
+        CLOUD_ENV_BASE_URL => Some("https://models.example.com/v1".into()),
+        CLOUD_ENV_MODEL => Some("gpt-contract-test".into()),
+        _ => None,
+    })
+    .expect_err("a blank API key must not count as a credential");
+    assert_eq!(error.variables, vec![CLOUD_ENV_API_KEY]);
+
+    // The scripted adapter is refused in the real tier.
+    let error = CloudEnvironment::resolve(|name| match name {
+        CLOUD_ENV_BASE_URL => Some("https://models.example.com/v1".into()),
+        CLOUD_ENV_API_KEY => Some(SECRET.into()),
+        CLOUD_ENV_MODEL => Some("gpt-contract-test".into()),
+        CLOUD_ENV_API_TYPE => Some("faux".into()),
+        _ => None,
+    })
+    .expect_err("`faux` must never be accepted as a cloud API type");
+    assert_eq!(error.variables, vec![CLOUD_ENV_API_TYPE]);
+
+    // The synthetic provider id is refused as a "cloud" model id.
+    let error = CloudEnvironment::resolve(|name| match name {
+        CLOUD_ENV_BASE_URL => Some("https://models.example.com/v1".into()),
+        CLOUD_ENV_API_KEY => Some(SECRET.into()),
+        CLOUD_ENV_MODEL => Some(SYNTHETIC_MODEL_ID.into()),
+        _ => None,
+    })
+    .expect_err("the synthetic model id must never be accepted in the real tier");
+    assert_eq!(error.variables, vec![CLOUD_ENV_MODEL]);
+
+    // A URL carrying credentials is refused too.
+    let error = CloudEnvironment::resolve(|name| match name {
+        CLOUD_ENV_BASE_URL => Some("https://user:pass@models.example.com/v1".into()),
+        CLOUD_ENV_API_KEY => Some(SECRET.into()),
+        CLOUD_ENV_MODEL => Some("gpt-contract-test".into()),
+        _ => None,
+    })
+    .expect_err("a credential-bearing base URL must be refused");
+    assert_eq!(error.variables, vec![CLOUD_ENV_BASE_URL]);
+
+    // An executed report records identity (id + host) but never the key.
+    let report = build_report(ReportInput {
+        mode: EvalMode::RealCloudModel,
+        executed: true,
+        not_run_reason: None,
+        missing_environment: vec![],
+        identity: env.identity(),
+        report_run_id: new_report_run_id(EvalMode::RealCloudModel),
+        scenarios: vec![scenario_fixture(
+            EvalMode::RealCloudModel,
+            "agv-deliverables-cloud",
+            "passed",
+        )],
+        environment: env.report_json(),
+    });
+    assert_eq!(report["executed"], true);
+    assert_eq!(report["tier"], "real-cloud-model");
+    assert_eq!(report["modelIdentity"]["modelId"], "gpt-contract-test");
+    assert_eq!(report["modelIdentity"]["baseUrlHost"], "models.example.com");
+    assert_eq!(report["modelIdentity"]["apiKeyRecorded"], false);
+    assert_eq!(report["fixedInputs"]["credential"]["apiKeyRecorded"], false);
+    assert_eq!(report["syntheticProviderSpawned"], false);
+    let rendered = serde_json::to_string(&report).unwrap();
+    assert!(
+        !rendered.contains(SECRET),
+        "the API key must never reach a report"
+    );
+
+    // The writer itself refuses to persist a leaking document.
+    let dir = contract_temp_dir("redaction");
+    let _ = std::fs::remove_dir_all(&dir);
+    let leaky = json!({"fixedInputs": {"apiKey": SECRET}});
+    println!("EXPECTED PANIC (asserted by this test): writing a credential-bearing report");
+    let refused = std::panic::catch_unwind(|| {
+        write_report_file(&dir, "leak.json", &leaky, Some(SECRET))
+    })
+    .is_err();
+    assert!(refused, "write_report_file must refuse to persist a credential");
+    assert!(
+        !dir.join("leak.json").exists(),
+        "the refused report must not be written"
+    );
+    let _ = std::fs::remove_dir_all(contract_temp_dir("redaction"));
+}
+
+/// The real tier asserts artifacts and structural invariants only: it holds for
+/// any number of model rounds a real model chooses, and every check it makes is
+/// non-vacuous.
+#[test]
+fn real_eval_cloud_checks_are_plan_and_round_count_independent() {
+    let identity = cloud_identity_fixture();
+    let frozen = cloud_frozen_service_fixture();
+    let records = vec![
+        mutation_fixture("office_create", "completed"),
+        mutation_fixture("office_edit", "completed"),
+    ];
+    let borrowed: Vec<&crate::database::ToolCallRecord> = records.iter().collect();
+    for rounds in [1usize, 2, 5, 23] {
+        let mut results = CheckResults::default();
+        real_tier_structural_checks(
+            &cloud_observations(rounds),
+            &borrowed,
+            &identity,
+            &frozen,
+            &mut results,
+        );
+        assert!(results.ok(), "rounds={rounds}: {:?}", results.rows);
+        assert!(results
+            .rows
+            .iter()
+            .any(|(id, _, _)| id == "model:at-least-one-round"));
+        for (id, _, _) in &results.rows {
+            assert!(
+                !id.contains("exact-model-rounds") && !id.contains("planned"),
+                "{id} must not pin a model-authored plan"
+            );
+        }
+    }
+
+    // The layer is not vacuous: each invariant really fails on a violation.
+    let mut zero_rounds = CheckResults::default();
+    real_tier_structural_checks(&cloud_observations(0), &borrowed, &identity, &frozen, &mut zero_rounds);
+    assert!(!zero_rounds.ok(), "zero model rounds must fail");
+
+    let mut no_mutations = CheckResults::default();
+    real_tier_structural_checks(
+        &cloud_observations(4),
+        &[],
+        &identity,
+        &frozen,
+        &mut no_mutations,
+    );
+    assert!(!no_mutations.ok(), "no Office mutation must fail");
+
+    let unfinished = vec![mutation_fixture("office_create", "failed")];
+    let borrowed_unfinished: Vec<&crate::database::ToolCallRecord> = unfinished.iter().collect();
+    let mut failed_mutation = CheckResults::default();
+    real_tier_structural_checks(
+        &cloud_observations(4),
+        &borrowed_unfinished,
+        &identity,
+        &frozen,
+        &mut failed_mutation,
+    );
+    assert!(!failed_mutation.ok(), "an unfinished mutation must fail");
+
+    let mut wrong_approvals = cloud_observations(4);
+    wrong_approvals.approvals = 7;
+    let mut approvals = CheckResults::default();
+    real_tier_structural_checks(&wrong_approvals, &borrowed, &identity, &frozen, &mut approvals);
+    assert!(
+        !approvals.ok(),
+        "an ungated mutation must fail the approval invariant"
+    );
+
+    let stale = json!({
+        "apiType":"openai-completions",
+        "modelId":SYNTHETIC_MODEL_ID,
+        "baseUrl":"http://127.0.0.1:9/v1",
+        "contextWindow":256_000,
+        "maxOutputTokens":2_048,
+    });
+    let mut identity_mismatch = CheckResults::default();
+    real_tier_structural_checks(
+        &cloud_observations(4),
+        &borrowed,
+        &identity,
+        &stale,
+        &mut identity_mismatch,
+    );
+    assert!(
+        !identity_mismatch.ok(),
+        "a frozen identity that is not the environment endpoint must fail"
+    );
+
+    let mut wrong_source = cloud_observations(4);
+    wrong_source.model_requests_source = PROVIDER_ROUNDS_SOURCE;
+    let mut source = CheckResults::default();
+    real_tier_structural_checks(&wrong_source, &borrowed, &identity, &frozen, &mut source);
+    assert!(
+        !source.ok(),
+        "the real tier must count rounds durably, not from a loopback provider"
+    );
+
+    let mut keyed = frozen.clone();
+    keyed["apiKey"] = json!("should-never-be-here");
+    let mut leaked = CheckResults::default();
+    real_tier_structural_checks(&cloud_observations(4), &borrowed, &identity, &keyed, &mut leaked);
+    assert!(!leaked.ok(), "a credential inside the frozen config must fail");
+}
+
+/// (b) The report writer labels each tier and records identity + artifact hashes,
+/// and an executed report without a scenario is not a pass.
+#[test]
+fn real_eval_report_writer_records_tier_and_identity_for_both_modes() {
+    let mut synthetic = scenario_fixture(EvalMode::SyntheticProvider, "agv-deliverables", "passed");
+    synthetic.artifact_hashes = vec![("报表.xlsx".into(), sha256_hex(b"payload"), 7)];
+    let report = build_report(ReportInput {
+        mode: EvalMode::SyntheticProvider,
+        executed: true,
+        not_run_reason: None,
+        missing_environment: vec![],
+        identity: ModelIdentity::synthetic_placeholder(),
+        report_run_id: new_report_run_id(EvalMode::SyntheticProvider),
+        scenarios: vec![synthetic],
+        environment: json!({"provider":"scripted loopback HTTP/SSE provider"}),
+    });
+    assert_eq!(report["tier"], "synthetic-provider");
+    assert_eq!(report["mode"], "synthetic-provider");
+    assert_eq!(report["executed"], true);
+    assert_eq!(report["notRunReason"], Value::Null);
+    assert_eq!(report["overall"], "passed");
+    assert_eq!(report["syntheticProviderSpawned"], true);
+    assert_eq!(report["modelIdentity"]["modelId"], SYNTHETIC_MODEL_ID);
+    assert_eq!(report["modelIdentity"]["baseUrlHost"], "127.0.0.1:0");
+    assert_eq!(report["modelIdentity"]["apiKeyRecorded"], false);
+    assert_eq!(report["modelIdentity"]["apiKeyPresent"], true);
+    assert_eq!(report["scenarios"][0]["tier"], "synthetic-provider");
+    assert_eq!(report["scenarios"][0]["executed"], true);
+    assert_eq!(report["artifactHashes"][0]["name"], "报表.xlsx");
+    assert_eq!(report["artifactHashes"][0]["sha256"], sha256_hex(b"payload"));
+    assert_eq!(report["artifactHashes"][0]["bytes"], 7);
+    assert_eq!(report["artifactHashes"][0]["scenario"], "agv-deliverables");
+    assert_eq!(report["sourceWorkbookSha256"], "a".repeat(64));
+    assert_eq!(report["usage"]["hostUsageRows"], 2);
+    assert_eq!(report["toolExecutions"]["total"], 1);
+    assert_eq!(
+        report["tiers"]["synthetic-provider"]["status"],
+        "verified-by-this-entry"
+    );
+    assert_eq!(
+        report["tiers"]["real-cloud-model"]["status"],
+        "not-run-in-this-entry"
+    );
+
+    let cloud = build_report(ReportInput {
+        mode: EvalMode::RealCloudModel,
+        executed: true,
+        not_run_reason: None,
+        missing_environment: vec![],
+        identity: cloud_identity_fixture(),
+        report_run_id: new_report_run_id(EvalMode::RealCloudModel),
+        scenarios: vec![scenario_fixture(
+            EvalMode::RealCloudModel,
+            "agv-deliverables-cloud",
+            "failed",
+        )],
+        environment: json!({"required":[CLOUD_ENV_BASE_URL]}),
+    });
+    assert_eq!(cloud["tier"], "real-cloud-model");
+    assert_eq!(cloud["executed"], true);
+    assert_eq!(cloud["overall"], "failed");
+    assert_eq!(cloud["syntheticProviderSpawned"], false);
+    assert_eq!(cloud["modelIdentity"]["modelId"], "cloud-acceptance-model");
+    assert_eq!(cloud["modelIdentity"]["baseUrlHost"], "cloud.example.com");
+    assert_eq!(cloud["scenarios"][0]["tier"], "real-cloud-model");
+    assert_eq!(
+        cloud["tiers"]["real-cloud-model"]["status"],
+        "failed-in-this-entry"
+    );
+    assert_eq!(
+        cloud["tiers"]["synthetic-provider"]["status"],
+        "not-run-in-this-entry"
+    );
+
+    // An "executed" report with no scenario is never a pass.
+    let vacuous = build_report(ReportInput {
+        mode: EvalMode::RealCloudModel,
+        executed: true,
+        not_run_reason: None,
+        missing_environment: vec![],
+        identity: cloud_identity_fixture(),
+        report_run_id: new_report_run_id(EvalMode::RealCloudModel),
+        scenarios: vec![],
+        environment: json!({}),
+    });
+    assert_eq!(vacuous["overall"], "failed");
+}
+
+/// (2) Every entry owns a round-scoped, tier-scoped output directory; no entry
+/// can write the historical evidence or another tier's report.
+#[test]
+fn real_eval_entries_write_round_scoped_directories_only() {
+    let round = round_dir();
+    let historical = historical_eval_dir();
+    assert!(
+        round.ends_with(std::path::Path::new("output/claude-design-repair-20260915/eval"))
+            || std::env::var(EVAL_OUTPUT_ROOT_ENV).is_ok(),
+        "{}",
+        round.display()
+    );
+    assert_ne!(round, historical);
+    assert!(
+        !round.starts_with(&historical) && !historical.starts_with(&round),
+        "the round directory must be independent of the historical evidence"
+    );
+    for mode in EvalMode::ALL {
+        let dir = mode.run_dir();
+        let report = dir.join(mode.report_name());
+        assert!(dir.starts_with(&round), "{}", dir.display());
+        assert!(!dir.starts_with(&historical), "{}", dir.display());
+        assert!(!report.starts_with(&historical), "{}", report.display());
+        assert!(
+            mode.entry_command().contains("--ignored"),
+            "{:?} must stay an explicitly selected entry",
+            mode
+        );
+        assert_eq!(mode.report_name(), "real-task-eval-report.json");
+    }
+    assert_ne!(
+        EvalMode::SyntheticProvider.run_dir(),
+        EvalMode::RealCloudModel.run_dir(),
+        "tiers must not share an output directory"
+    );
+    assert_ne!(
+        EvalMode::SyntheticProvider.artifact_dir("agv"),
+        EvalMode::RealCloudModel.artifact_dir("agv"),
+        "tiers must not share a scenario directory"
+    );
+    assert_eq!(EvalMode::SyntheticProvider.tier(), "synthetic-provider");
+    assert_eq!(EvalMode::RealCloudModel.tier(), "real-cloud-model");
+    // The historical evidence file, if this checkout carries one, is untouched
+    // by this round's writers (they refuse that directory outright).
+    let historical_report = historical.join("real-task-eval-report.json");
+    println!("EXPECTED PANIC (asserted by this test): writing into the historical evidence directory");
+    let refused = std::panic::catch_unwind(|| {
+        write_report_file(&historical, "should-never-exist.json", &json!({}), None)
+    })
+    .is_err();
+    assert!(
+        refused,
+        "writing into the historical evidence directory must be refused"
+    );
+    assert!(
+        !historical.join("should-never-exist.json").exists(),
+        "the historical evidence directory must stay untouched"
+    );
+    if historical_report.exists() {
+        let previous: Value =
+            serde_json::from_str(&std::fs::read_to_string(&historical_report).unwrap()).unwrap();
+        assert_eq!(
+            previous["tier"], "synthetic-provider",
+            "the historical report is preserved as it was produced"
+        );
+    }
+}
+
+/// The repeatable synthetic regression (`synthetic-provider` tier). Requires
+/// Node + the pinned OfficeCLI. It does NOT contact any cloud model.
+#[test]
+#[ignore = "synthetic regression: requires the Node runtime and the pinned OfficeCLI sidecar (no cloud credentials used)"]
+fn real_task_evaluation_through_host_kernel_runtime_and_real_tools() {
+    let mode = EvalMode::SyntheticProvider;
+    let scenarios = vec![
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_agv_scenario)) {
+            Ok(outcome) => outcome,
+            Err(payload) => panic_outcome(
+                mode,
+                "agv-deliverables",
+                "AGV：真实链路生成两份 Excel 与一份 Word",
+                payload,
+            ),
+        },
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            run_short_document_scenario,
+        )) {
+            Ok(outcome) => outcome,
+            Err(payload) => panic_outcome(
+                mode,
+                "short-document-edit",
+                "短文档修改：创建、原地修改与备份",
+                payload,
+            ),
+        },
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            run_large_result_scenario,
+        )) {
+            Ok(outcome) => outcome,
+            Err(payload) => panic_outcome(
+                mode,
+                "large-result-continuation-read",
+                "大结果续读：完整存储与 read_tool_result 多页续读",
+                payload,
+            ),
+        },
+    ];
+    let report = build_report(ReportInput {
+        mode,
+        executed: true,
+        not_run_reason: None,
+        missing_environment: vec![],
+        identity: ModelIdentity::synthetic_placeholder(),
+        report_run_id: new_report_run_id(mode),
+        scenarios,
+        environment: json!({
+            "required": [],
+            "provider": "scripted loopback HTTP/SSE provider created by this entry",
+            "apiKeyRecorded": false,
+        }),
+    });
+    let report_path = write_report_file(mode.run_dir().as_path(), mode.report_name(), &report, None);
+    let scenarios = report["scenarios"].as_array().cloned().unwrap_or_default();
+    for scenario in &scenarios {
+        println!(
+            "EVAL {} {} in {}ms — {}",
+            scenario["id"],
+            scenario["status"],
+            scenario["durationMs"],
+            report_path.display()
+        );
+        for check in scenario["checks"].as_array().into_iter().flatten() {
+            println!(
+                "  [{}] {} — {}",
+                if check["passed"] == json!(true) { "PASS" } else { "FAIL" },
+                check["id"],
+                check["detail"]
+            );
+        }
+    }
+    let failed: Vec<&Value> = scenarios
+        .iter()
+        .filter(|scenario| scenario["status"] != json!("passed"))
+        .collect();
+    if failed.is_empty() {
+        return;
+    }
+    for scenario in &failed {
+        eprintln!(
+            "FAILED {} stage={:?} failure={:?}",
+            scenario["id"], scenario["failureStage"], scenario["failure"]
+        );
+    }
+    panic!(
+        "synthetic real-task evaluation failed; report at {}",
+        report_path.display()
+    );
+}
+
+/// Real cloud-model acceptance (`real-cloud-model` tier). Needs Node + the
+/// pinned OfficeCLI AND real credentials. Without credentials it writes a
+/// 未执行 report naming the missing variables and FAILS: it never falls back to
+/// the synthetic provider and never records a pass.
+#[test]
+#[ignore = "real cloud-model acceptance: requires FOX_EVAL_* credentials, the Node runtime and the pinned OfficeCLI sidecar"]
+fn real_task_evaluation_cloud() {
+    let mode = EvalMode::RealCloudModel;
+    let env = match CloudEnvironment::read_from_process() {
+        Ok(env) => env,
+        Err(error) => {
+            let reason = error.summary();
+            let report = build_report(ReportInput {
+                mode,
+                executed: false,
+                not_run_reason: Some(reason.clone()),
+                missing_environment: error.variables_json(),
+                identity: ModelIdentity::not_configured(
+                    "the acceptance did not run, so no model endpoint was contacted",
+                ),
+                report_run_id: new_report_run_id(mode),
+                scenarios: vec![],
+                environment: cloud_not_run_environment(),
+            });
+            let report_path = try_write_report(
+                mode.run_dir().as_path(),
+                mode.report_name(),
+                &report,
+                None,
+            );
+            let written = match report_path {
+                Ok(path) => format!("report at {}", path.display()),
+                Err(error) => format!("the {NOT_RUN_MARKER} report could not be written: {error}"),
+            };
+            panic!(
+                "{reason}; {written} (this entry never substitutes the synthetic provider)",
+            );
+        }
+    };
+    let identity = env.identity();
+    println!(
+        "EVAL-CLOUD endpoint modelId={} apiType={} host={} (key not recorded)",
+        identity.model_id, identity.api_type, identity.base_url_host
+    );
+    let scenario =
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_agv_cloud_scenario(&env, &identity)
+        })) {
+            Ok(outcome) => outcome,
+            Err(payload) => panic_outcome(
+                mode,
+                "agv-deliverables-cloud",
+                "AGV（真实云模型）：真实模型驱动同一链路生成两份 Excel 与一份 Word",
+                payload,
+            ),
+        };
+    let status = scenario.status;
+    let report = build_report(ReportInput {
+        mode,
+        executed: true,
+        not_run_reason: None,
+        missing_environment: vec![],
+        identity: identity.clone(),
+        report_run_id: new_report_run_id(mode),
+        scenarios: vec![scenario],
+        environment: env.report_json(),
+    });
+    let report_path = write_report_file(
+        mode.run_dir().as_path(),
+        mode.report_name(),
+        &report,
+        Some(&env.api_key),
+    );
+    for scenario in report["scenarios"].as_array().into_iter().flatten() {
+        println!(
+            "EVAL {} {} in {}ms — {}",
+            scenario["id"],
+            scenario["status"],
+            scenario["durationMs"],
+            report_path.display()
+        );
+        for check in scenario["checks"].as_array().into_iter().flatten() {
+            println!(
+                "  [{}] {} — {}",
+                if check["passed"] == json!(true) { "PASS" } else { "FAIL" },
+                check["id"],
+                check["detail"]
+            );
+        }
+    }
+    if status == "passed" {
+        return;
+    }
+    panic!(
+        "real-cloud-model acceptance failed; report at {}",
+        report_path.display()
+    );
+}
+
+fn panic_outcome(
+    mode: EvalMode,
+    id: &'static str,
+    title: &'static str,
+    payload: Box<dyn std::any::Any + Send>,
+) -> ScenarioOutcome {
+    let detail = payload
+        .downcast_ref::<&str>()
+        .map(|value| (*value).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic with unknown payload".into());
+    ScenarioOutcome {
+        id,
+        title,
+        mode,
+        status: "failed",
+        run_id: None,
+        duration_ms: 0,
+        model_requests: None,
+        model_requests_source: match mode {
+            EvalMode::SyntheticProvider => PROVIDER_ROUNDS_SOURCE,
+            EvalMode::RealCloudModel => DURABLE_ROUNDS_SOURCE,
+        },
+        failure_stage: Some("panic".into()),
+        failure: Some(json!({"error": detail})),
+        checks: vec![],
+        delivery: Value::Null,
+        usage: Value::Null,
+        tool_executions: Value::Null,
+        artifacts: vec![],
+        artifact_hashes: vec![],
+        source_sha256: None,
+    }
+}

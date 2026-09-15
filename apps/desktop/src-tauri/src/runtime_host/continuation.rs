@@ -65,6 +65,9 @@ const READ_ONLY_PROFILE_TOOLS: &[&str] = &[
     "find",
     "grep",
     "read_attachment",
+    // Ranges over results Host already stored for this conversation. Nothing is
+    // executed, so it is allowed wherever reading your own context is allowed.
+    "read_tool_result",
     "sqlite_read",
     "structured_data",
     "tabular_data",

@@ -14,6 +14,26 @@ pub struct KernelModelFailure {
     pub category: String,
     pub http_status: Option<u16>,
     pub retry_after_ms: Option<u64>,
+    /// Low-sensitivity progress telemetry captured by the worker when the
+    /// round failed. Never contains credentials, model input, or complete
+    /// tool arguments: only elapsed times and output byte counts, so Host can
+    /// distinguish slow generation from a stalled stream. Absent for old
+    /// workers and for non-timeout categories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<KernelModelTelemetry>,
+}
+
+/// Byte/time counters for one failed model round. All values are worker-side
+/// observations for diagnosis; Host timeout anchors remain authoritative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelModelTelemetry {
+    pub elapsed_ms: i64,
+    pub idle_elapsed_ms: i64,
+    pub first_response_ms: Option<i64>,
+    pub text_bytes: u64,
+    pub reasoning_bytes: u64,
+    pub tool_param_bytes: u64,
 }
 
 impl KernelModelFailure {
@@ -21,8 +41,22 @@ impl KernelModelFailure {
         let category_valid = match self.category.as_str() {
             "provider_unavailable" => self.http_status.is_some_and(|status| matches!(status, 429 | 500 | 502 | 503 | 504 | 529)),
             "incomplete_response" => self.http_status.is_none() && self.retry_after_ms.is_none(),
+            // Worker-side first-response/idle/whole-round timeout. Carries no
+            // HTTP semantics; retry admission additionally requires that no
+            // new tool was dispatched in the failed round (Host checks durable
+            // tool state, never this flag alone).
+            "model_timeout" | "model_transport_failure" => self.http_status.is_none() && self.retry_after_ms.is_none(),
             _ => false,
         };
+        if let Some(telemetry) = &self.telemetry {
+            if telemetry.elapsed_ms < 0 || telemetry.idle_elapsed_ms < 0
+                || telemetry.elapsed_ms > 86_400_000 || telemetry.idle_elapsed_ms > 86_400_000
+                || telemetry.first_response_ms.is_some_and(|value| value < 0 || value > 86_400_000)
+                || telemetry.text_bytes > 67_108_864 || telemetry.reasoning_bytes > 67_108_864
+                || telemetry.tool_param_bytes > 67_108_864 {
+                return Err("invalid Kernel model failure telemetry".into());
+            }
+        }
         if self.schema_version != 1 || !category_valid
             || [&self.run_id, &self.turn_id].iter().any(|id| id.trim().is_empty() || id.len() > 512)
             || self.checkpoint_seq == 0 || self.checkpoint_seq > 9_007_199_254_740_991
@@ -47,13 +81,20 @@ pub struct KernelModelPreview {
     pub text: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reasoning: String,
+    /// Cumulative output bytes observed by the worker this round, including
+    /// tool-parameter bytes that never appear in `text`. Lets Host tell slow
+    /// generation apart from a stalled stream without receiving the content.
+    /// Absent for old workers; display code must treat absence as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_bytes: Option<u64>,
 }
 
 impl KernelModelPreview {
     pub fn validate(&self) -> Result<(),String> {
         if self.schema_version!=1 || [&self.run_id,&self.conversation_id,&self.turn_id].iter()
             .any(|id|id.trim().is_empty() || id.len()>512) || self.checkpoint_seq==0 || self.checkpoint_seq>9_007_199_254_740_991
-            || self.revision==0 || self.revision>9_007_199_254_740_991 || self.text.len()>262_144 || self.reasoning.len()>262_144 {
+            || self.revision==0 || self.revision>9_007_199_254_740_991 || self.text.len()>262_144 || self.reasoning.len()>262_144
+            || self.progress_bytes.is_some_and(|bytes| bytes > 67_108_864) {
             return Err("invalid transient Kernel model preview".into());
         }
         Ok(())
@@ -121,12 +162,21 @@ pub struct KernelInitialModelFrame {
     pub input: KernelInitialModelInput,
     pub idempotency_key: String,
     pub checkpoint_seq: u64,
+    /// Present when a fresh worker restores a durably leased continuation input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_key: Option<String>,
 }
 
 impl KernelInitialModelFrame {
     pub fn validate(&self) -> Result<(), String> {
         self.input.validate()?;
-        if self.schema_version != 1 || self.idempotency_key != "initial-model-delivery"
+        let expected_key = match &self.continuation_key {
+            Some(key) if key.strip_prefix("continuation:").is_some_and(|seq|
+                seq.parse::<u64>().is_ok_and(|n| n > 0 && n <= 9_007_199_254_740_991 && n.to_string() == seq)) => format!("continuation-delivery:{key}"),
+            Some(_) => return Err("invalid continuation delivery identity".into()),
+            None => "initial-model-delivery".into(),
+        };
+        if self.schema_version != 1 || self.idempotency_key != expected_key
             || self.checkpoint_seq == 0 || self.checkpoint_seq > 9_007_199_254_740_991
             || serde_json::to_vec(self).map_err(|_| "invalid initial model frame")?.len() > 1_048_576 {
             return Err("invalid initial model delivery frame".into());
@@ -353,6 +403,33 @@ pub struct KernelRoundDirective {
     pub tools: Vec<KernelSettledToolResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// Mid-run user requests durably received before this round boundary.
+    /// The engine appends them as ordinary user messages after the settled
+    /// tool results (batch) or review prompt (continuation); they never carry
+    /// authority, tools, or grants. Final directives never carry steering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steering: Vec<KernelSteeringNotice>,
+}
+
+/// One additional user request attached to a round directive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct KernelSteeringNotice {
+    /// Stable idempotency id of the durable steering row.
+    pub message_id: String,
+    pub content: String,
+}
+
+impl KernelSteeringNotice {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.message_id.trim().is_empty() || self.message_id.len() > 128
+            || self.content.trim().is_empty()
+            || self.content.chars().count() > 8_000
+        {
+            return Err("invalid steering notice".into());
+        }
+        Ok(())
+    }
 }
 
 impl KernelRoundDirective {
@@ -383,9 +460,22 @@ impl KernelRoundDirective {
             KernelRoundDirectiveKind::Final => {
                 if self.batch_id.is_some() || self.checkpoint_seq.is_some() || !self.tools.is_empty()
                     || self.prompt.is_some() || self.preview_seq.is_some()
+                    || !self.steering.is_empty()
                 {
                     return Err("invalid Kernel final directive".into());
                 }
+            }
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut steering_bytes = 0usize;
+        for notice in &self.steering {
+            notice.validate()?;
+            if !seen.insert(notice.message_id.as_str()) {
+                return Err("duplicate steering notice in directive".into());
+            }
+            steering_bytes = steering_bytes.saturating_add(notice.content.len());
+            if steering_bytes > 64 * 1024 {
+                return Err("directive steering exceeds the bounded queue size".into());
             }
         }
         Ok(())
@@ -405,6 +495,12 @@ pub struct KernelBatchResumeFrame {
     /// Original proposal, including provider metadata needed by the engine adapter.
     pub assistant_message: Value,
     pub tools: Vec<KernelSettledToolResult>,
+    /// Mid-run user requests bound to this (possibly retried) dispatch. The
+    /// engine appends them as ordinary user messages *after* the settled tool
+    /// results, in seq order. Like the rest of this frame they carry no
+    /// authority, tools, or grants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steering: Vec<KernelSteeringNotice>,
 }
 
 impl KernelBatchResumeFrame {
@@ -443,8 +539,28 @@ impl KernelBatchResumeFrame {
             }
             validate_result_content(&item.result)?;
         }
+        validate_steering_notices(&self.steering)?;
         Ok(())
     }
+}
+
+/// Shared bounds for steering carried by any engine dispatch: each notice is
+/// individually valid, ids are unique, total bounded text stays inside the
+/// per-Run outstanding queue budget.
+pub(crate) fn validate_steering_notices(notices: &[KernelSteeringNotice]) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut total = 0usize;
+    for notice in notices {
+        notice.validate()?;
+        if !seen.insert(notice.message_id.as_str()) {
+            return Err("duplicate steering notice".into());
+        }
+        total = total.saturating_add(notice.content.len());
+        if total > 64 * 1024 {
+            return Err("steering exceeds the bounded queue size".into());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -495,6 +611,7 @@ mod tests {
                 tool_call_id: "read-1".into(), tool: "read".into(), canonical_input: json!({"path":"a.txt"}), source_order: 0,
                 state: KernelSettledToolState::Completed, result: json!({"content":[{"type":"text","text":"proof"}]}),
             }],
+            steering: vec![],
         };
         frame.validate().unwrap();
         let wire = serde_json::to_value(&frame).unwrap();
@@ -512,4 +629,30 @@ mod tests {
         unsettled["tools"][0]["state"] = json!("running");
         assert!(serde_json::from_value::<KernelBatchResumeFrame>(unsettled).is_err());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn restored_continuation_has_a_distinct_validated_delivery_identity() {
+    let mut frame = KernelInitialModelFrame {
+        schema_version: 1, idempotency_key: "initial-model-delivery".into(), checkpoint_seq: 2,
+        continuation_key: None,
+        input: KernelInitialModelInput { schema_version: 1, run_id: "r".into(), turn_id: "t".into(),
+            prompt_config_hash: "frozen".into(), messages: vec![serde_json::json!({"role":"user","content":"continue"})] },
+    };
+    frame.validate().unwrap();
+    frame.continuation_key = Some("continuation:1".into());
+    assert!(frame.validate().is_err(), "a continuation cannot reuse the initial delivery identity");
+    frame.idempotency_key = "continuation-delivery:continuation:1".into();
+    frame.validate().unwrap();
+    for key in ["continuation:0","continuation:01","continuation:9007199254740992","other:1"] {
+        frame.continuation_key = Some(key.into());
+        frame.idempotency_key = format!("continuation-delivery:{key}");
+        assert!(frame.validate().is_err());
+    }
+    let mut failure = KernelModelFailure { schema_version:1, run_id:"r".into(), turn_id:"t".into(), checkpoint_seq:2,
+        category:"model_transport_failure".into(), http_status:None, retry_after_ms:None, telemetry:None };
+    failure.validate().unwrap();
+    failure.http_status = Some(429);
+    assert!(failure.validate().is_err(), "transport loss must not forge provider rejection evidence");
 }

@@ -176,7 +176,8 @@ test('allows registry_v1 only through an exact hashed development support matrix
 test('pins stable_v1 Runtime prefix bytes and the knowledge-routing instruction hash', () => {
   const composed = composeRuntimePrompt({ turn: { date: '2026-08-27T00:00:00.000Z' } })
   assert.equal(composed.prompt.slice(0, composed.diagnostics.stableChars), FOX_RUNTIME_INSTRUCTIONS)
-  assert.equal(composed.stablePromptHash, '2c3c342551372d31')
+  // Cursor metadata is model-visible; complete refers only to stored bytes.
+  assert.equal(composed.stablePromptHash, '7f2a32c6f767a9ba')
 })
 
 test('separates stable-prefix and dynamic-tail cache identities', () => {

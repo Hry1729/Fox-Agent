@@ -4,6 +4,11 @@ fn prepared() -> RunController {
     let clock = TestClock::new(1000);
     let mut config = crate::test_config();
     config.kernel_mode = "authoritative".into();
+    // Keep the legacy single-bound timing for this compaction-deadline test:
+    // sub-round bounds equal to the whole-round bound preserve the old fire
+    // instant (validation requires first/idle <= total).
+    config.model_first_response_ms = config.model_request_timeout_ms;
+    config.model_idle_ms = config.model_request_timeout_ms;
     let (mut controller, _) =
         RunController::start_with_initial_input("r", "t", config, "hash", &clock).unwrap();
     controller

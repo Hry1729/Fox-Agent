@@ -771,6 +771,11 @@ async function handleRequest(request) {
           runtimeVersion: `0.1.0+pi-${PI_PACKAGE_VERSION}`,
           capabilities: createCapabilityManifest({
             imageInput: modelProfile.supportsImageInput,
+            // The kernel worker splices directive steering into the live
+            // transcript (pi-kernel-loop / pi-kernel-batch-resume); on the
+            // legacy path the Host delivers the same text through frozen input
+            // messages, so mid-run additions are supported on every path.
+            steering: true,
             tools: executionProfileCatalogTools(RUNTIME_TOOL_CATALOG, executionProfile),
           }),
           modelProfile: modelProfileSnapshot(modelProfile),

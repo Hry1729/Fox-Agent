@@ -350,4 +350,25 @@ impl Database {
         }
         Ok(Some(binding))
     }
+
+    /// The conversation a Run belongs to, read from Host's own persisted rows.
+    ///
+    /// Scoped readers use this to derive their authorization instead of trusting
+    /// a conversation id supplied by the caller. It reports what Host already
+    /// recorded — the frozen binding when one exists, otherwise the Run's own
+    /// row — and never rewrites either fact.
+    pub fn run_conversation(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<String>, String> {
+        self.with_connection(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT conversation_id FROM runs WHERE id = ?1",
+                    [run_id],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        })
+    }
 }

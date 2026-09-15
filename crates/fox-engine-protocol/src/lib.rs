@@ -246,6 +246,14 @@ pub const TOOL_CONTRACTS: &[(&str, &str, &str, &str)] = &[
     ("graph_readonly_run", "project-read", "runtime", "none"),
     ("read_attachment", "attachment", "host", "none"),
     ("attachment_compute", "attachment", "host", "none"),
+    // Reads bytes Host already stored for a settled call inside the Run's own
+    // conversation. Nothing is executed and no file is touched, so no approval
+    // level applies.
+    ("read_tool_result", "attachment", "host", "none"),
+    // On-demand loading of an enabled skill's full instructions. Read-only
+    // Host text; it never adds a tool to the Run's frozen scope. (Entries are
+    // name-addressed on the wire; order only anchors runtime registration.)
+    ("skill_load", "skill", "host", "none"),
     ("write_file", "project-write", "host", "policy"),
     ("edit_file", "project-write", "host", "policy"),
     ("run_command", "process", "host", "always"),

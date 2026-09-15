@@ -10,13 +10,15 @@ use super::{
     ModelServiceRecord, PendingWorkModeDispatch, PluginCatalogEntryRecord, PluginInstallStatus,
     PluginInstallationRecord, PluginKind, PluginOrigin, ProviderModelRecord,
     RecoverableExternalRunRecord, RunEventRecord, RunRecord, RuntimePromptMessage,
-    RuntimeSessionRecord, SaveAgentRequest, StartRunResult, ToolCallRecord, YuxiAgentRecord,
+    RuntimeSessionRecord, SaveAgentRequest, StartRunResult, ToolCallRecord, ToolResultRange,
+    YuxiAgentRecord,
     YuxiConnectionTest, YuxiServiceRecord,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -36,6 +38,20 @@ mod kernel;
 mod kernel_compaction;
 pub(crate) mod kernel_reconciliation;
 mod run_control;
+mod skill_activations;
+mod delivery_checks;
+mod run_steering;
+mod managed_files;
+pub(crate) use delivery_checks::{
+    DeliveryArtifactRow, DeliveryChecklistItem, DeliveryChecklistSeed, DeliveryRequirement,
+    RequirementKind,
+};
+pub(crate) use managed_files::{ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput};
+pub(crate) use run_steering::{
+    adopt_received_steering_in_tx, apply_delivered_steering_in_tx, cancel_open_steering_in_tx,
+    deliver_steering_in_tx, SteeringMessage, SteeringDecision, MAX_STEERING_FOLLOWUPS,
+};
+pub(crate) use skill_activations::SkillActivationRecord;
 mod kernel_model_config;
 mod kernel_initial_input;
 mod kernel_host;
@@ -116,7 +132,11 @@ const BUILTIN_AGENTS: &[(&str, &str, &str, &str)] = &[
     ),
 ];
 const INITIAL_HISTORY_MESSAGES: usize = 120;
-const MAX_STORED_TOOL_RESULT_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_STORED_TOOL_RESULT_BYTES: usize = 128 * 1024;
+/// Largest single response of `Database::tool_result_range`. A range read is
+/// paginated so a stored result can always be walked to its end without ever
+/// returning an unbounded blob.
+const MAX_TOOL_RESULT_RANGE_BYTES: usize = 64 * 1024;
 const KNOWLEDGE_PREVIEW_CACHE_LIMIT_KEY: &str = "knowledge_preview_cache_limit_bytes";
 const USER_PROFILE_KEY: &str = "user_profile";
 const AGENT_RECORD_COLUMNS: &str =
@@ -128,6 +148,12 @@ const AGENT_RECORD_COLUMNS: &str =
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
     kernel_changes: Arc<super::kernel_changes::KernelChanges>,
+    /// Volatile worker-observed model output progress: run_id -> wall_ms of the
+    /// last preview (text, thinking, or tool-parameter bytes). Never persisted:
+    /// a restart measures idleness conservatively from the persisted model
+    /// wall anchor until fresh progress arrives. Follows the KernelChanges
+    /// precedent (process-local hub on the shared Database handle).
+    model_progress: Arc<Mutex<BTreeMap<String, i64>>>,
 }
 
 fn require_legacy_run_writer(connection: &Connection, run_id: &str) -> rusqlite::Result<()> {
@@ -145,6 +171,7 @@ impl Database {
         let database = Self {
             connection: Arc::new(Mutex::new(connection)),
             kernel_changes: Arc::new(super::kernel_changes::KernelChanges::default()),
+            model_progress: Arc::new(Mutex::new(BTreeMap::new())),
         };
         database.seed_builtin_agents()?;
         database.seed_bundled_experts()?;
@@ -154,6 +181,38 @@ impl Database {
 
     pub(crate) fn subscribe_kernel_changes(&self) -> std::sync::mpsc::Receiver<()> {
         self.kernel_changes.subscribe()
+    }
+
+    /// Record worker-observed model output for a Run (volatile timing signal).
+    /// Called by the display preview path for every accepted preview, including
+    /// tool-parameter-only progress that never appears as visible text. Entries
+    /// are consumed once by the coordinator tick that advances the controller;
+    /// terminal runs drop their entry. Best-effort and bounded: never blocks,
+    /// never persists, never fails the caller.
+    pub(crate) fn note_kernel_model_progress(&self, run_id: &str, wall_ms: i64) {
+        if let Ok(mut guard) = self.model_progress.lock() {
+            while guard.len() >= 8192 {
+                // Fail-safe bound; progress is best-effort and runs are few.
+                guard.pop_first();
+            }
+            guard.insert(run_id.to_owned(), wall_ms);
+        }
+    }
+
+    /// Take the pending progress wall timestamp for a Run, if any. Consume-once
+    /// semantics: every preview is folded into the controller exactly once, so
+    /// repeated ticks without fresh output correctly grow idleness.
+    pub(crate) fn consume_kernel_model_progress(&self, run_id: &str) -> Option<i64> {
+        self.model_progress
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.remove(run_id))
+    }
+
+    pub(crate) fn clear_kernel_model_progress(&self, run_id: &str) {
+        if let Ok(mut guard) = self.model_progress.lock() {
+            guard.remove(run_id);
+        }
     }
 
     pub fn default_agent_id(&self) -> &'static str {
@@ -743,6 +802,20 @@ impl Database {
         })
     }
 
+    /// Test-only: read one integer with bound parameters. Lets a test assert on a
+    /// durable fact (an uncertain execution, a pending dispatch) that no product
+    /// accessor exposes, without reaching into the schema from production code.
+    #[cfg(test)]
+    pub(crate) fn query_count_raw(
+        &self,
+        sql: &str,
+        params: &[&dyn rusqlite::ToSql],
+    ) -> Result<i64, String> {
+        self.with_connection(|connection| {
+            connection.query_row(sql, params, |row| row.get::<_, i64>(0))
+        })
+    }
+
     fn seed_builtin_agents(&self) -> Result<(), String> {
         let now = now_ms();
         self.with_connection(|connection| {
@@ -773,7 +846,7 @@ impl Database {
                     "skills": [],
                     "knowledge": [],
                     "mcpServers": [],
-                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "attachment_compute", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_attempt_start", "task_attempt_finish", "task_repair_start", "task_repair_escalate_start", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
+                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "attachment_compute", "read_tool_result", "skill_load", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_attempt_start", "task_attempt_finish", "task_repair_start", "task_repair_escalate_start", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
                 });
                 let (agent_kind, invocation_mode, visibility) = if *id == DEFAULT_AGENT_ID {
                     ("assistant", "primary", "chat_selector")
@@ -943,6 +1016,8 @@ impl Database {
                 "find",
                 "grep",
                 "read_attachment",
+                "read_tool_result",
+                "skill_load",
                 "write_file",
                 "edit_file",
                 "run_command",
@@ -2049,6 +2124,11 @@ impl Database {
             let knowledge_bindings = query_knowledge_bindings(connection, id)?;
             let expert_bindings = query_conversation_expert_bindings(connection, id)?;
             let last_run = query_last_run(connection, id)?;
+            let run_ids = messages
+                .iter()
+                .filter_map(|message| message.run_id.clone())
+                .collect::<Vec<_>>();
+            let runs = query_runs_by_ids(connection, &run_ids)?;
             let has_earlier_messages = oldest_ordinal > 0 && connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id = ?1 AND ordinal < ?2)",
                 params![id, oldest_ordinal],
@@ -2065,6 +2145,7 @@ impl Database {
                 artifacts,
                 knowledge_bindings,
                 last_run,
+                runs,
                 has_earlier_messages,
                 goals: Vec::new(),
                 tasks: Vec::new(),
@@ -2097,6 +2178,83 @@ impl Database {
     }
 
     #[allow(clippy::type_complexity)]
+    /// Resolve a `fox-result://<runId>/<toolCallId>` reference to one byte range
+    /// of that settled tool call's stored result.
+    ///
+    /// Authorization is explicit and mandatory: the caller passes the
+    /// conversation it is already allowed to read, and the tool call's own
+    /// `conversation_id` must equal it, so a reference minted inside one
+    /// conversation can never be used to read another conversation's tool
+    /// output. This reads bytes Host already stored — it never executes a tool,
+    /// never re-derives a result, and never replays a write.
+    ///
+    /// The stored copy is capped at `MAX_STORED_TOOL_RESULT_BYTES`. Above that
+    /// the row holds a Fox preview, and the response reports `truncated: true`
+    /// with the true `original_bytes` instead of implying the omitted bytes are
+    /// obtainable from this reader.
+    /// `tool_result_range` and then a banner saying those bytes are all Host
+    /// kept, so the model can ask for them instead of guessing them.
+    pub fn tool_result_range(
+        &self,
+        reference: &str,
+        authorized_conversation_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<ToolResultRange, String> {
+        let (run_id, tool_call_id) =
+            crate::kernel_compaction::parse_tool_result_ref(reference)
+                .ok_or_else(|| "invalid tool result reference".to_owned())?;
+        let authorized = authorized_conversation_id.trim();
+        if authorized.is_empty() {
+            return Err("missing authorized conversation".to_owned());
+        }
+        let record = self.with_connection(|connection| {
+            Ok(query_tool_call(connection, &run_id, &tool_call_id).optional()?)
+        })?;
+        let record = record.ok_or_else(|| "no stored result for this reference".to_owned())?;
+        if record.conversation_id != authorized {
+            return Err("tool result is outside the authorized conversation".to_owned());
+        }
+        // When the full result was spilled to a blob, serve ranges from it: the
+        // inline preview is only the model-facing copy. Blob identity was
+        // verified at write time (content-addressed sha256), so a present blob
+        // is by construction the complete original.
+        let blob_body: Option<Value> = self.with_connection(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT b.body_json FROM tool_calls t
+                     JOIN tool_call_result_blobs b ON b.sha256 = t.result_blob_sha256
+                     WHERE t.run_id = ?1 AND t.runtime_tool_call_id = ?2
+                       AND t.result_blob_sha256 IS NOT NULL",
+                    params![record.run_id, record.runtime_tool_call_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|body| parse_json(&body)))
+        })?;
+        let serving = blob_body.as_ref().or(record.result.as_ref());
+        let (text, truncated, original_bytes) = stored_result_text(serving);
+        let (start, end, next_offset) = utf8_byte_range(&text, offset, limit)?;
+        Ok(ToolResultRange {
+            run_id: record.run_id,
+            tool_call_id: record.runtime_tool_call_id,
+            conversation_id: record.conversation_id,
+            tool_name: record.tool_name,
+            status: record.status,
+            truncated,
+            // True only when every byte of the original result is reachable from
+            // here — either the inline row was small enough to keep everything,
+            // or the full copy was spilled to the content-addressed blob table.
+            // An inline preview without a blob is still not retrievable.
+            retrievable: !truncated || blob_body.is_some(),
+            original_bytes,
+            offset: start,
+            returned_bytes: end.saturating_sub(start),
+            next_offset,
+            content: text.get(start..end).unwrap_or_default().to_owned(),
+        })
+    }
+
     pub fn load_conversation_trace_records(
         &self,
         conversation_id: &str,
@@ -3837,7 +3995,13 @@ impl Database {
         error_message: Option<&str>,
     ) -> Result<(), String> {
         let now = now_ms();
-        let compact_result = result.map(compact_tool_result);
+        let (compact_result, blob) = match result {
+            Some(value) => {
+                let (inline, blob) = split_tool_result(value);
+                (Some(inline), blob)
+            }
+            None => (None, None),
+        };
         let result_json = compact_result
             .as_ref()
             .map(serde_json::to_string)
@@ -3851,10 +4015,22 @@ impl Database {
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             require_legacy_run_writer(&transaction, run_id)?;
+            if let Some((sha, full, bytes)) = &blob {
+                // Content-addressed full copy: same payload may be shared, but
+                // its identity must match its hash.
+                transaction.execute(
+                    "INSERT INTO tool_call_result_blobs(sha256, body_json, byte_size, created_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(sha256) DO NOTHING",
+                    params![sha, full, bytes, now],
+                )?;
+            }
+            let blob_sha: Option<&str> = blob.as_ref().map(|(sha, _, _)| sha.as_str());
             let changed = transaction.execute(
                 "UPDATE tool_calls
                  SET status = ?3, result_json = ?4, error_message = ?5,
-                     completed_at = ?6, updated_at = ?6
+                     completed_at = ?6, updated_at = ?6,
+                     result_blob_sha256 = ?7
                  WHERE run_id = ?1 AND runtime_tool_call_id = ?2
                   AND execution_location = 'host'
                   AND (status = 'running' OR (status = 'pending' AND ?3 = 'failed'))
@@ -3868,7 +4044,8 @@ impl Database {
                     terminal_status,
                     result_json,
                     error_message,
-                    now
+                    now,
+                    blob_sha,
                 ],
             )?;
             if changed == 0 {
@@ -6695,6 +6872,124 @@ fn query_tool_calls_window(
     records
 }
 
+/// Text of a stored tool result, plus whether the row only holds a Fox preview
+/// and what the true original size was.
+fn stored_result_text(result: Option<&Value>) -> (String, bool, usize) {
+    match result {
+        Some(Value::Object(map)) if map.get("truncated").and_then(Value::as_bool) == Some(true) => {
+            let preview = map
+                .get("preview")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let original = map
+                .get("originalBytes")
+                .and_then(Value::as_u64)
+                .unwrap_or(preview.len() as u64) as usize;
+            (preview, true, original)
+        }
+        Some(Value::String(text)) => (text.clone(), false, text.len()),
+        Some(Value::Array(blocks)) => {
+            let joined = joined_tool_text_blocks(blocks);
+            let length = joined.len();
+            (joined, false, length)
+        }
+        // A settled tool result is usually `{"content":[{"type":"text",...}]}`.
+        // Joining its text blocks is the same projection the model-view binder
+        // works on, so a caller walking ranges reassembles exactly that text
+        // instead of a serialized-and-escaped copy of the envelope.
+        Some(Value::Object(map)) if map.get("content").and_then(Value::as_array).is_some() => {
+            let joined = joined_tool_text_blocks(
+                map.get("content")
+                    .and_then(Value::as_array)
+                    .map_or(&[] as &[Value], |blocks| blocks),
+            );
+            let length = joined.len();
+            (joined, false, length)
+        }
+        Some(other) => {
+            let text = other.to_string();
+            let length = text.len();
+            (text, false, length)
+        }
+        None => (String::new(), false, 0),
+    }
+}
+
+/// The text a range read is served from: every `text` block of a result content
+/// array, joined with a newline. Empty blocks contribute nothing extra.
+fn joined_tool_text_blocks(blocks: &[Value]) -> String {
+    blocks
+        .iter()
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Smallest range a caller may request.
+///
+/// UTF-8 encodes one code point in at most four bytes, so a limit at least this
+/// large always contains a whole code point past any valid start. That is what
+/// makes a non-terminal `next` strictly larger than its own `start`: a smaller
+/// limit could only be served by an empty slice, and a client walking `next`
+/// would loop forever on it. Such limits are rejected instead of quietly
+/// answered with nothing.
+const MIN_TOOL_RESULT_RANGE_BYTES: usize = 4;
+
+/// Clamp `[offset, offset + limit)` into `text` without splitting a UTF-8 code
+/// point, returning `(start, end, next)` where `next` continues past `end`.
+///
+/// Range contract — deliberately explicit rather than forgiving, because silent
+/// adjustment is what lets bytes go missing or get returned twice:
+///
+/// - `limit` below [`MIN_TOOL_RESULT_RANGE_BYTES`] is **rejected**.
+/// - `offset` past the end, or landing inside a code point, is **rejected**;
+///   the error names the nearest valid boundaries so callers can recover.
+/// - Everything else returns exactly `[offset, end)` with `end` on a code point
+///   boundary, so successive ranges neither drop nor repeat a byte, and `next`
+///   is either `None` (the result ended) or strictly greater than `offset`.
+fn utf8_byte_range(
+    text: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<(usize, usize, Option<usize>), String> {
+    let length = text.len();
+    if limit < MIN_TOOL_RESULT_RANGE_BYTES {
+        return Err(format!(
+            "tool result range limit must be at least {MIN_TOOL_RESULT_RANGE_BYTES} bytes so every UTF-8 code point is returned whole; got {limit}"
+        ));
+    }
+    let limit = limit.min(MAX_TOOL_RESULT_RANGE_BYTES);
+    if offset > length {
+        return Err(format!(
+            "tool result range offset {offset} is past the end of the stored result ({length} bytes)"
+        ));
+    }
+    if offset < length && !text.is_char_boundary(offset) {
+        let previous = (1..=3)
+            .map(|step| offset.saturating_sub(step))
+            .find(|index| text.is_char_boundary(*index))
+            .unwrap_or(0);
+        return Err(match (offset..=length).find(|index| text.is_char_boundary(*index)) {
+            Some(next) => format!(
+                "tool result range offset {offset} splits a UTF-8 code point; use {previous} or {next}"
+            ),
+            None => format!(
+                "tool result range offset {offset} splits a UTF-8 code point; use {previous}"
+            ),
+        });
+    }
+    // `offset` is a code point boundary and `limit >= MIN_TOOL_RESULT_RANGE_BYTES`,
+    // so the code point starting at `offset` ends at a boundary no more than four
+    // bytes later and inside the text: `end > offset` whenever the caller is not
+    // already at the end. A non-terminal cursor therefore always advances.
+    let mut end = offset.saturating_add(limit).min(length);
+    while end > offset && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    Ok((offset, end, (end < length).then_some(end)))
+}
+
 fn query_tool_call(
     connection: &Connection,
     run_id: &str,
@@ -7185,13 +7480,22 @@ fn project_tool_updated(
     let Some(runtime_tool_call_id) = payload.get("toolCallId").and_then(Value::as_str) else {
         return Ok(());
     };
-    let result_json = serde_json::to_string(&compact_tool_result(
-        payload.get("update").unwrap_or(&Value::Null),
-    ))
-    .unwrap_or_else(|_| "null".to_owned());
+    let (inline_result, blob) = split_tool_result(payload.get("update").unwrap_or(&Value::Null));
+    let result_json = serde_json::to_string(&inline_result)
+        .unwrap_or_else(|_| "null".to_owned());
     let incoming_tool_name = payload.get("tool").and_then(Value::as_str);
+    if let Some((sha, full, bytes)) = &blob {
+        transaction.execute(
+            "INSERT INTO tool_call_result_blobs(sha256, body_json, byte_size, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(sha256) DO NOTHING",
+            params![sha, full, bytes, now],
+        )?;
+    }
+    let blob_sha: Option<&str> = blob.as_ref().map(|(sha, _, _)| sha.as_str());
     let changed = transaction.execute(
-        "UPDATE tool_calls SET result_json = ?3, updated_at = ?4
+        "UPDATE tool_calls SET result_json = ?3, updated_at = ?4,
+             result_blob_sha256 = ?6
          WHERE run_id = ?1 AND runtime_tool_call_id = ?2
            AND execution_location = 'runtime' AND status = 'running'
            AND (?5 IS NULL OR tool_name = ?5)
@@ -7204,7 +7508,8 @@ fn project_tool_updated(
             runtime_tool_call_id,
             result_json,
             now,
-            incoming_tool_name
+            incoming_tool_name,
+            blob_sha,
         ],
     )?;
     if changed == 0 {
@@ -7237,20 +7542,28 @@ fn project_tool_completed(
     let Some(runtime_tool_call_id) = payload.get("toolCallId").and_then(Value::as_str) else {
         return Ok(());
     };
-    let result_json = serde_json::to_string(&compact_tool_result(
-        payload.get("result").unwrap_or(&Value::Null),
-    ))
-    .unwrap_or_else(|_| "null".to_owned());
+    let (inline_result, blob) = split_tool_result(payload.get("result").unwrap_or(&Value::Null));
+    let result_json = serde_json::to_string(&inline_result).unwrap_or_else(|_| "null".to_owned());
     let is_error = payload
         .get("isError")
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let incoming_tool_name = payload.get("tool").and_then(Value::as_str);
     let terminal_status = if is_error { "failed" } else { "completed" };
+    if let Some((sha, full, bytes)) = &blob {
+        transaction.execute(
+            "INSERT INTO tool_call_result_blobs(sha256, body_json, byte_size, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(sha256) DO NOTHING",
+            params![sha, full, bytes, now],
+        )?;
+    }
+    let blob_sha: Option<&str> = blob.as_ref().map(|(sha, _, _)| sha.as_str());
     let changed = transaction.execute(
         "UPDATE tool_calls
          SET status = ?3, result_json = ?4, completed_at = ?5, updated_at = ?5,
-             trace_id = COALESCE(trace_id, ?6), span_id = COALESCE(span_id, ?7)
+             trace_id = COALESCE(trace_id, ?6), span_id = COALESCE(span_id, ?7),
+             result_blob_sha256 = ?9
          WHERE run_id = ?1 AND runtime_tool_call_id = ?2
            AND execution_location = 'runtime' AND status = 'running'
            AND (?8 IS NULL OR tool_name = ?8)
@@ -7267,6 +7580,7 @@ fn project_tool_completed(
             trace_id,
             span_id,
             incoming_tool_name,
+            blob_sha,
         ],
     )?;
     if changed == 0 {
@@ -7790,8 +8104,31 @@ fn compact_tool_result(value: &Value) -> Value {
         "truncated": true,
         "originalBytes": serialized.len(),
         "preview": preview,
-        "message": "Large tool result was summarized by Fox. Use the referenced artifact or source path for the complete data."
+        "message": "Large tool result is stored by Fox; use read_tool_result with this call's reference to page through every byte."
     })
+}
+
+/// Split a settled tool result into its inline preview and, when it exceeds the
+/// inline cap, the content-addressed full copy kept in `tool_call_result_blobs`.
+/// Returns (inline_json, Option<(sha256, full_json, byte_size)>). The inline row
+/// gains no size change: the model-visible shape stays exactly the compact
+/// preview, while every byte of the original remains recoverable through
+/// `tool_result_range`. Serialization failures degrade to the old inline-only
+/// behavior instead of failing the completion.
+fn split_tool_result(value: &Value) -> (Value, Option<(String, String, usize)>) {
+    let inline = compact_tool_result(value);
+    if inline.get("truncated").and_then(Value::as_bool) != Some(true) {
+        return (inline, None);
+    }
+    let Ok(full) = serde_json::to_string(value) else {
+        return (inline, None);
+    };
+    let sha = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(full.as_bytes()))
+    );
+    let bytes = full.len();
+    (inline, Some((sha, full, bytes)))
 }
 
 fn query_last_run(connection: &Connection, id: &str) -> rusqlite::Result<Option<RunRecord>> {
@@ -7819,6 +8156,49 @@ fn query_last_run(connection: &Connection, id: &str) -> rusqlite::Result<Option<
             },
         )
         .optional()
+}
+
+/// Loads every run referenced by a set of loaded messages in a single query so
+/// the conversation read model can surface persisted terminal run state.
+fn query_runs_by_ids(
+    connection: &Connection,
+    run_ids: &[String],
+) -> rusqlite::Result<Vec<RunRecord>> {
+    if run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(run_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT id, conversation_id, runtime_session_id, status, model, started_at,
+                finished_at, error_code, error_message, last_seq, trace_id, root_span_id
+         FROM runs WHERE id IN ({placeholders})"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let records = statement
+        .query_map(
+            rusqlite::params_from_iter(run_ids.iter()),
+            |row| {
+                Ok(RunRecord {
+                    id: row.get(0)?,
+                    conversation_id: row.get(1)?,
+                    runtime_session_id: row.get(2)?,
+                    status: row.get(3)?,
+                    model: row.get(4)?,
+                    started_at: row.get(5)?,
+                    finished_at: row.get(6)?,
+                    error_code: row.get(7)?,
+                    error_message: row.get(8)?,
+                    last_seq: row.get(9)?,
+                    trace_id: row.get(10)?,
+                    root_span_id: row.get(11)?,
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(records)
 }
 
 fn query_pending_work_mode_dispatch(
@@ -12714,6 +13094,457 @@ mod tests {
         );
         assert!(database.delete_lifecycle_hook(&hook.id).unwrap());
         assert!(database.list_lifecycle_hooks().unwrap().is_empty());
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// Insert one settled tool call directly, so the range reader can be tested
+    /// against a real row without driving the whole runtime projection.
+    fn seed_settled_tool_call(
+        database: &Database,
+        conversation_id: &str,
+        run_id: &str,
+        call_id: &str,
+        tool_name: &str,
+        result: &Value,
+    ) {
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO tool_calls(
+                        id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
+                        status, result_json, execution_location, requires_approval, started_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, '{}', 'completed', ?6, 'runtime', 0, 1, 1)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        call_id,
+                        run_id,
+                        conversation_id,
+                        tool_name,
+                        serde_json::to_string(result).unwrap(),
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn tool_result_range_reads_every_stored_byte_under_conversation_authorization() {
+        let path = std::env::temp_dir().join(format!("fox-tool-result-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), Some("range"), None, None)
+            .unwrap();
+        let other = database
+            .create_conversation(database.default_agent_id(), Some("other"), None, None)
+            .unwrap();
+        let started = database.create_run(&conversation.id, "range", None).unwrap();
+        let text = "中文内容😀".repeat(20);
+        seed_settled_tool_call(
+            &database,
+            &conversation.id,
+            &started.run.id,
+            "call-1",
+            "read_attachment",
+            &json!([{"type":"text","text": text}]),
+        );
+        let reference = format!("fox-result://{}/call-1", started.run.id);
+
+        // Walk the whole stored result in small ranges and reassemble it.
+        let mut assembled = String::new();
+        let mut offset = 0usize;
+        loop {
+            let range = database
+                .tool_result_range(&reference, &conversation.id, offset, 7)
+                .unwrap();
+            assert_eq!(range.conversation_id, conversation.id);
+            assert_eq!(range.tool_name, "read_attachment");
+            assert!(!range.truncated);
+            assert_eq!(range.original_bytes, text.len());
+            assert!(
+                range.returned_bytes <= 7,
+                "a range read must respect its own limit"
+            );
+            assert!(
+                !range.content.contains('\u{FFFD}'),
+                "a range read must never split a multi-byte character"
+            );
+            assembled.push_str(&range.content);
+            match range.next_offset {
+                Some(next) => {
+                    assert!(next > offset, "next offset must make progress");
+                    offset = next;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(assembled, text, "every stored byte must be reachable");
+
+        // Authorization: a reference minted in one conversation cannot be read
+        // from another, and a missing authorized conversation is refused.
+        assert!(database
+            .tool_result_range(&reference, &other.id, 0, 64)
+            .is_err());
+        assert!(database.tool_result_range(&reference, "  ", 0, 64).is_err());
+        // Malformed or foreign references never resolve.
+        assert!(database
+            .tool_result_range("fox-result://only-a-run", &conversation.id, 0, 64)
+            .is_err());
+        assert!(database
+            .tool_result_range(
+                &format!("fox-result://{}/missing-call", started.run.id),
+                &conversation.id,
+                0,
+                64,
+            )
+            .is_err());
+
+        // Reading is a pure read: the stored row is untouched and a second read
+        // returns exactly the same bytes (no tool re-execution, no replay).
+        let row = database
+            .with_connection(|connection| {
+                Ok(query_tool_call(connection, &started.run.id, "call-1").unwrap())
+            })
+            .unwrap();
+        assert_eq!(row.status, "completed");
+        assert_eq!(
+            database
+                .tool_result_range(&reference, &conversation.id, 0, 64)
+                .unwrap()
+                .content,
+            database
+                .tool_result_range(&reference, &conversation.id, 0, 64)
+                .unwrap()
+                .content
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tool_result_range_reports_a_bounded_stored_preview_instead_of_claiming_full_text() {
+        let path = std::env::temp_dir().join(format!("fox-tool-result-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), Some("preview"), None, None)
+            .unwrap();
+        let started = database.create_run(&conversation.id, "preview", None).unwrap();
+        // Above MAX_STORED_TOOL_RESULT_BYTES the row holds a Fox preview, so the
+        // reader must say so instead of implying the full text is available.
+        let stored = json!({
+            "truncated": true,
+            "originalBytes": 200_000,
+            "preview": "p".repeat(8_000),
+            "message": "Large tool result was summarized by Fox."
+        });
+        seed_settled_tool_call(
+            &database,
+            &conversation.id,
+            &started.run.id,
+            "call-big",
+            "office_read",
+            &stored,
+        );
+        let range = database
+            .tool_result_range(
+                &format!("fox-result://{}/call-big", started.run.id),
+                &conversation.id,
+                0,
+                64_000,
+            )
+            .unwrap();
+        assert!(range.truncated, "a bounded stored copy must be reported as truncated");
+        assert!(
+            !range.retrievable,
+            "storage only kept a preview, so nothing beyond it is reachable from here"
+        );
+        assert_eq!(range.original_bytes, 200_000);
+        assert!(range.content.starts_with('p'));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn replacing_large_progress_clears_blob_pointer_for_small_empty_and_error_results() {
+        let database = Database::open(std::env::temp_dir().join(format!("fox-blob-replacement-{}.db", Uuid::new_v4()))).unwrap();
+        let conversation = database.create_conversation(database.default_agent_id(), Some("blob replacement"), None, None).unwrap();
+        let started = database.create_run(&conversation.id, "test", None).unwrap();
+        let big = json!({"content":[{"type":"text","text":"progress".repeat(30_000)}]});
+        for (index, (final_result, is_error, host)) in [
+            (json!({"content":[{"type":"text","text":"final-small"}]}), false, false),
+            (Value::Null, false, false),
+            (json!({"error":"final failure"}), true, false),
+            (json!({"content":[{"type":"text","text":"host-final"}]}), false, true),
+        ].into_iter().enumerate() {
+            let call = format!("replace-{index}");
+            database.with_connection(|connection| {
+                connection.execute("UPDATE runs SET status='running' WHERE id=?1", [&started.run.id])?;
+                connection.execute("INSERT INTO tool_calls(id,runtime_tool_call_id,run_id,conversation_id,tool_name,input_json,status,execution_location,requires_approval,started_at,updated_at)
+                    VALUES (?1,?2,?3,?4,'read','{}','running','runtime',0,1,1)",
+                    params![Uuid::new_v4().to_string(),call,started.run.id,conversation.id])?;
+                let tx = connection.transaction()?;
+                project_tool_updated(&tx, &started.run.id, &json!({"toolCallId":call,"tool":"read","update":big}), 2)?;
+                tx.commit()
+            }).unwrap();
+            let reference = format!("fox-result://{}/{call}",started.run.id);
+            assert!(database.tool_result_range(&reference,&conversation.id,0,4096).unwrap().content.starts_with("progress"));
+            if host {
+                database.with_connection(|connection| {
+                    connection.execute("UPDATE tool_calls SET execution_location='host' WHERE run_id=?1 AND runtime_tool_call_id=?2", params![started.run.id,call])?;
+                    Ok(())
+                }).unwrap();
+                database.complete_host_tool_call(&started.run.id,&call,Some(&final_result),is_error.then_some("failure")).unwrap();
+            } else {
+                database.with_connection(|connection| {
+                    let tx = connection.transaction()?;
+                    // The intermediate small update must clear the pointer too.
+                    project_tool_updated(&tx,&started.run.id,&json!({"toolCallId":call,"update":{"content":[{"type":"text","text":"small-progress"}]}}),3)?;
+                    let stale: Option<String> = tx.query_row("SELECT result_blob_sha256 FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id=?2",params![started.run.id,call],|row|row.get(0))?;
+                    assert!(stale.is_none());
+                    project_tool_updated(&tx,&started.run.id,&json!({"toolCallId":call,"update":big}),4)?;
+                    project_tool_completed(&tx,&started.run.id,&json!({"toolCallId":call,"result":final_result,"isError":is_error}),5,None,None)?;
+                    tx.commit()
+                }).unwrap();
+            }
+            let range = database.tool_result_range(&reference,&conversation.id,0,4096).unwrap();
+            let expected = final_result["content"][0]["text"].as_str().map(str::to_owned).unwrap_or_else(||final_result.to_string());
+            assert_eq!(range.content,expected);
+            database.with_connection(|connection| {
+                let pointer: Option<String> = connection.query_row("SELECT result_blob_sha256 FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id=?2",params![started.run.id,call],|row|row.get(0))?;
+                assert!(pointer.is_none());
+                let copies: i64 = connection.query_row("SELECT COUNT(*) FROM tool_call_result_blobs",[],|row|row.get(0))?;
+                assert_eq!(copies,1,"shared content-addressed blobs are preserved");
+                Ok(())
+            }).unwrap();
+        }
+    }
+
+    #[test]
+    fn large_result_is_spilled_to_blob_and_every_byte_stays_retrievable() {
+        let path = std::env::temp_dir().join(format!("fox-tool-blob-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), Some("blob"), None, None)
+            .unwrap();
+        let started = database.create_run(&conversation.id, "blob", None).unwrap();
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE runs SET status='running' WHERE id=?1",
+                    [&started.run.id],
+                )?;
+                connection.execute(
+                    "INSERT INTO tool_calls(
+                        id, runtime_tool_call_id, run_id, conversation_id, tool_name, input_json,
+                        status, execution_location, requires_approval, started_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, '{}', 'running', 'host', 0, 1, 1)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        "call-big",
+                        started.run.id,
+                        conversation.id,
+                        "office_read",
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        // > MAX_STORED_TOOL_RESULT_BYTES: must not be discarded.
+        let big_text = format!("{}{}", "数据".repeat(70_000), "tail-marker-终");
+        let result = json!({"content":[{"type":"text","text": big_text}]});
+        database
+            .complete_host_tool_call(&started.run.id, "call-big", Some(&result), None)
+            .unwrap();
+        // The inline row holds only the bounded preview.
+        let (inline, blob_sha): (String, Option<String>) = database
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT result_json, result_blob_sha256 FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id=?2",
+                    params![started.run.id, "call-big"],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        let inline: Value = serde_json::from_str(&inline).unwrap();
+        assert_eq!(inline["truncated"], true);
+        assert!(blob_sha.is_some(), "the full copy must be spilled to the blob table");
+        let blob: String = database
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT body_json FROM tool_call_result_blobs WHERE sha256=?1",
+                    [blob_sha.as_deref().unwrap()],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(blob.contains("tail-marker-终"), "blob keeps the full result");
+        // Range reading reassembles every byte and reports retrievable.
+        let reference = format!("fox-result://{}/call-big", started.run.id);
+        let first = database
+            .tool_result_range(&reference, &conversation.id, 0, 64_000)
+            .unwrap();
+        assert!(first.retrievable, "blob-backed results are fully retrievable");
+        // Served from the full blob: the range text itself is complete, so the
+        // reader does not mark truncation; only an inline preview without a
+        // blob reports truncated + not-retrievable (covered by the test above).
+        assert!(!first.truncated, "the blob serves the complete result text");
+        assert_eq!(first.original_bytes, big_text.len());
+        let mut assembled = String::new();
+        let mut offset = 0usize;
+        loop {
+            let range = database
+                .tool_result_range(&reference, &conversation.id, offset, 65_537)
+                .unwrap();
+            assembled.push_str(&range.content);
+            match range.next_offset {
+                Some(next) => {
+                    assert!(next > offset);
+                    offset = next;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(assembled, big_text, "every original byte must be reachable");
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tool_result_range_cursor_always_advances_and_never_splits_or_repeats_bytes() {
+        // The reported defect: fewer bytes than one code point used to come back
+        // as an empty slice with `next == start`, so a client walking `next`
+        // looped forever without ever reading anything.
+        for limit in [1usize, 2, 3] {
+            let error = utf8_byte_range("中A", 0, limit).unwrap_err();
+            assert!(error.contains("at least 4 bytes"), "limit {limit}: {error}");
+        }
+
+        // The smallest legal limit returns a whole code point, never a partial one.
+        let (start, end, next) = utf8_byte_range("中A", 0, MIN_TOOL_RESULT_RANGE_BYTES).unwrap();
+        assert_eq!(&"中A"[start..end], "中A");
+        assert_eq!(next, None, "the whole result fit in one range");
+
+        // A CJK code point followed by more characters: with the minimum legal
+        // limit the range stops after exactly one whole character and advances.
+        let (_, end, next) = utf8_byte_range("中文ABC", 0, MIN_TOOL_RESULT_RANGE_BYTES).unwrap();
+        assert_eq!(end, 3, "one CJK code point is what fits here");
+        assert_eq!(next, Some(3));
+
+        let text = "中文😀 mixed ASCII tail";
+        // An offset inside a code point is refused with usable neighbours
+        // instead of being nudged — nudging is how bytes get dropped or repeated.
+        for inside in 1..text.len() {
+            if text.is_char_boundary(inside) {
+                continue;
+            }
+            let error = utf8_byte_range(text, inside, 8).unwrap_err();
+            assert!(
+                error.contains("splits a UTF-8 code point"),
+                "offset {inside}: {error}"
+            );
+        }
+
+        // Walking the whole result with several legal limits reassembles the
+        // exact bytes: nothing missing, nothing repeated, nothing mangled, and
+        // every non-terminal cursor strictly advances.
+        for limit in [MIN_TOOL_RESULT_RANGE_BYTES, 5, 7, 12, 64] {
+            let mut rebuilt = String::new();
+            let mut offset = 0usize;
+            let mut steps = 0usize;
+            loop {
+                let (start, end, next) = utf8_byte_range(text, offset, limit).unwrap();
+                assert_eq!(start, offset, "a legal offset must never be moved");
+                assert!(end > start, "a remaining tail must return a non-empty range");
+                assert!(end - start <= limit, "the range must respect its own limit");
+                assert!(
+                    !text[start..end].contains('\u{FFFD}'),
+                    "a range must never split a multi-byte character"
+                );
+                rebuilt.push_str(&text[start..end]);
+                steps += 1;
+                assert!(steps < 10_000, "a legal walk must terminate");
+                match next {
+                    Some(next) => {
+                        assert!(next > offset, "a non-terminal cursor must advance");
+                        offset = next;
+                    }
+                    None => break,
+                }
+            }
+            assert_eq!(rebuilt, text, "limit {limit} must lose and repeat nothing");
+        }
+
+        // End of content, past the end, and a limit larger than the result.
+        let last = text.len();
+        assert_eq!(
+            utf8_byte_range(text, last, 32).unwrap(),
+            (last, last, None),
+            "reading at the end is empty and terminal"
+        );
+        let error = utf8_byte_range(text, last + 1, 32).unwrap_err();
+        assert!(error.contains("past the end"), "{error}");
+        let (_, end, next) = utf8_byte_range(text, 0, MAX_TOOL_RESULT_RANGE_BYTES).unwrap();
+        assert_eq!((end, next), (last, None));
+    }
+
+    #[test]
+    fn tool_result_range_surfaces_unservable_ranges_instead_of_returning_nothing() {
+        let path = std::env::temp_dir().join(format!("fox-tool-result-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), Some("boundary"), None, None)
+            .unwrap();
+        let started = database.create_run(&conversation.id, "boundary", None).unwrap();
+        seed_settled_tool_call(
+            &database,
+            &conversation.id,
+            &started.run.id,
+            "call-2",
+            "read_attachment",
+            &json!({"content":[{"type":"text","text":"中A"}]}),
+        );
+        let reference = format!("fox-result://{}/call-2", started.run.id);
+
+        // A settled tool result envelope is walked as its joined text blocks, so
+        // reassembling ranges gives back exactly what the model view was cut from.
+        let mut rebuilt = String::new();
+        let mut offset = 0usize;
+        loop {
+            let range = database
+                .tool_result_range(&reference, &conversation.id, offset, 4)
+                .unwrap();
+            assert!(!range.truncated);
+            assert!(range.retrievable);
+            rebuilt.push_str(&range.content);
+            match range.next_offset {
+                Some(next) => {
+                    assert!(next > offset);
+                    offset = next;
+                }
+                None => break,
+            }
+        }
+        assert_eq!(rebuilt, "中A");
+
+        // Ranges that cannot be served whole are errors, not empty answers.
+        for limit in [0usize, 1, 3] {
+            let error = database
+                .tool_result_range(&reference, &conversation.id, 0, limit)
+                .unwrap_err();
+            assert!(error.contains("at least 4 bytes"), "limit {limit}: {error}");
+        }
+        let error = database
+            .tool_result_range(&reference, &conversation.id, 1, 64)
+            .unwrap_err();
+        assert!(error.contains("splits a UTF-8 code point"), "{error}");
+        assert!(database
+            .tool_result_range(&reference, &conversation.id, 4096, 64)
+            .unwrap_err()
+            .contains("past the end"));
 
         drop(database);
         let _ = std::fs::remove_file(path);

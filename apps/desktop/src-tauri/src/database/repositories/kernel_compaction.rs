@@ -180,7 +180,8 @@ pub(super) fn validate_decision(
             ));
         }
         let ready: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM kernel_effect_outbox WHERE run_id=?1 AND status='pending'
-            AND ((?2='initial' AND effect_type='initial_model') OR (batch_id=?2 AND effect_type='deliver_tool_batch')))
+            AND ((?2='initial' AND effect_type='initial_model') OR (batch_id=?2 AND effect_type='deliver_tool_batch')
+                OR (effect_key=?2 AND effect_type='continuation_model')))
             AND NOT EXISTS(SELECT 1 FROM kernel_tool_calls WHERE run_id=?1 AND state NOT IN ('completed','failed','cancelled'))
             AND NOT EXISTS(SELECT 1 FROM kernel_effect_outbox WHERE run_id=?1 AND status='leased')",
             params![run_id,plan.target], |row| row.get(0))?;

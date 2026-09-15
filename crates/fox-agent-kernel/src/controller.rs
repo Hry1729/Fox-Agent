@@ -31,6 +31,8 @@ pub enum Effect {
     /// First model call, committed before any engine starts. Payload is a hash
     /// of Host-frozen input, never a reconstructed conversation.
     RequestInitialModel { input_hash: String },
+    /// A bounded Host continuation with immutable model input and its own lease.
+    RequestContinuationModel { effect_key: String, payload_json: String },
     /// Append a durable event (`(run_id, seq)` idempotent).
     AppendEvent {
         seq: u64,
@@ -108,6 +110,16 @@ pub fn batch_delivery_idempotency_key(batch_id: &str) -> String {
 
 pub const INITIAL_MODEL_EFFECT_KEY: &str = "initial-model";
 pub const INITIAL_MODEL_IDEMPOTENCY_KEY: &str = "initial-model-delivery";
+
+/// Prefix of the error a terminal decision returns when it loses a race with a
+/// mid-run request that was accepted moments earlier.
+///
+/// It describes a scheduling condition, not an execution failure: the
+/// transport must re-plan a safe additional-input round (or detach and re-plan
+/// from durable facts). The suffix carries how many rows were still open, for
+/// logs. Emitting it as a plain error string would let the Host classify a
+/// normal "the user added a request just now" as an engine failure.
+pub const STEERING_COMPETITION: &str = "kernel.steering_competition:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ToolCall {
@@ -204,6 +216,19 @@ pub struct RunController {
     /// crash/restart boundary; survives restart so the timeout is NOT reset to a
     /// full fresh window on each crash. None when no request is in flight.
     model_request_since_wall_ms: Option<i64>,
+    /// Monotonic instant of the first observed output (preview or settled
+    /// response) for the current request. None until progress arrives; drives
+    /// the first-response bound. Volatile: never persisted, re-anchored by the
+    /// next observed progress after rehydrate.
+    model_request_first_output_mono_ms: Option<i64>,
+    /// Monotonic instant of the last observed text/thinking/tool-parameter
+    /// progress for the current request. Volatile like the first-output
+    /// anchor; after rehydrate, idleness is measured conservatively from the
+    /// persisted wall anchor until fresh progress arrives.
+    model_request_last_progress_mono_ms: Option<i64>,
+    /// Wall instant of the last observed progress. Volatile; only used to keep
+    /// idleness conservative across a restart when no monotonic anchor exists.
+    model_request_last_progress_wall_ms: Option<i64>,
     tools: BTreeMap<String, ToolCall>,
     batches: Vec<ToolBatch>,
     terminal_written: bool,
@@ -281,6 +306,9 @@ impl RunController {
             model_request_in_flight: false,
             model_request_since_mono_ms: None,
             model_request_since_wall_ms: None,
+            model_request_first_output_mono_ms: None,
+            model_request_last_progress_mono_ms: None,
+            model_request_last_progress_wall_ms: None,
             tools: BTreeMap::new(),
             batches: Vec::new(),
             terminal_written: false,
@@ -419,10 +447,15 @@ impl RunController {
                 "rehydrated approval deadline must be positive".into(),
             ));
         }
+        // Terminal exhaustion commits turn_attempts == turn_max + 1 (the failed
+        // attempt that spent the budget); reject only greater values. The same
+        // boundary is mirrored in the persistence-layer commit guard.
+        let terminal_retry_exhausted = data.state.is_terminal()
+            && data.retry.turn_attempts == data.retry.turn_max.saturating_add(1);
         if data.retry.provider_max != data.config.provider_max_retries
             || data.retry.turn_max != data.config.turn_max_retries
             || data.retry.provider_attempts > data.retry.provider_max
-            || data.retry.turn_attempts > data.retry.turn_max
+            || (data.retry.turn_attempts > data.retry.turn_max && !terminal_retry_exhausted)
             || data.retry.completion_attempts > data.retry.turn_max
             || (data.retry.completion_attempts > 0 && data.retry.completion_effect_key.is_none())
         {
@@ -590,6 +623,12 @@ impl RunController {
             } else {
                 data.model_request_since_wall_ms
             },
+            // Progress anchors are volatile: after restart, idleness is
+            // measured conservatively from the persisted wall anchor until the
+            // first fresh progress arrives (a crash never grants extra idle).
+            model_request_first_output_mono_ms: None,
+            model_request_last_progress_mono_ms: None,
+            model_request_last_progress_wall_ms: None,
             tools,
             batches,
             terminal_written: data.terminal_written,
@@ -632,12 +671,29 @@ impl RunController {
             ));
         }
         if config.model_request_timeout_ms <= 0
+            || config.model_first_response_ms <= 0
+            || config.model_idle_ms <= 0
             || config.tool_execution_timeout_ms <= 0
             || config.run_execution_budget_ms <= 0
             || config.approval_wait_timeout_ms <= 0
         {
             return Err(KernelError::FailClosed(
                 "time budgets must be positive".into(),
+            ));
+        }
+        if config.model_request_timeout_ms > 86_400_000
+            || config.model_first_response_ms > 86_400_000
+            || config.model_idle_ms > 86_400_000
+        {
+            return Err(KernelError::FailClosed(
+                "model time budgets exceed the supported bound".into(),
+            ));
+        }
+        if config.model_first_response_ms > config.model_request_timeout_ms
+            || config.model_idle_ms > config.model_request_timeout_ms
+        {
+            return Err(KernelError::FailClosed(
+                "model first-response/idle budgets must not exceed the whole-round budget".into(),
             ));
         }
         Ok(())
@@ -1304,13 +1360,31 @@ impl RunController {
         let failure: serde_json::Value = serde_json::from_str(failure_json)
             .map_err(|_| KernelError::FailClosed("invalid model failure evidence".into()))?;
         let completion = failure["category"] == "incomplete_response";
-        if provider != (failure["category"] == "provider_unavailable") || (!provider && !completion) {
+        // model_timeout retries only the model request and is bounded by the
+        // turn budget, not the provider budget. The caller (Host) has already
+        // proven no tool was dispatched in the failed round.
+        let timeout = failure["category"] == "model_timeout";
+        let transport = failure["category"] == "model_transport_failure";
+        let turn_failure = timeout || transport;
+        if provider != (failure["category"] == "provider_unavailable")
+            || (!provider && !completion && !turn_failure)
+        {
             return Err(KernelError::FailClosed("model retry category mismatch".into()));
         }
-        let (used, maximum) = if provider { (self.retry.provider_attempts, self.retry.provider_max) }
-            else { (if self.retry.completion_effect_key.as_deref() == Some(effect_key) {
-                self.retry.completion_attempts
-            } else { 0 }, self.retry.turn_max) };
+        let (used, maximum) = if provider {
+            (self.retry.provider_attempts, self.retry.provider_max)
+        } else if turn_failure {
+            (self.retry.turn_attempts, self.retry.turn_max)
+        } else {
+            (
+                if self.retry.completion_effect_key.as_deref() == Some(effect_key) {
+                    self.retry.completion_attempts
+                } else {
+                    0
+                },
+                self.retry.turn_max,
+            )
+        };
         self.suspend_running_clock(now_monotonic_ms);
         self.settle_model_request();
         let mut effects = vec![self.append_event(
@@ -1321,6 +1395,8 @@ impl RunController {
             self.retry.model_dispatch_pending = false;
             let (code, message) = if failure["category"] == "incomplete_response" {
                 ("kernel.model_incomplete", "模型未完成本轮答复，自动续答次数已用完。已完成的工具结果已保留；请发送“继续完成剩余工作”。")
+            } else if timeout {
+                ("kernel.model_retry_exhausted", "模型请求多次超时（无首响应/流停滞/整轮超限），自动重试已停止。已完成的工具结果已保留；已执行的外部操作不会被重放，请检查后继续。")
             } else {
                 ("kernel.model_retry_exhausted", "模型服务请求失败，自动重试已停止。已完成的工具结果已保留，请稍后继续。")
             };
@@ -1333,6 +1409,8 @@ impl RunController {
         self.retry.model_dispatch_pending = true;
         if provider {
             self.retry.provider_attempts += 1;
+        } else if turn_failure {
+            self.retry.turn_attempts += 1;
         } else {
             self.retry.completion_effect_key = Some(effect_key.to_owned());
             self.retry.completion_attempts = used + 1;
@@ -1340,7 +1418,7 @@ impl RunController {
         effects.push(self.append_event(
             "run.retrying",
             serde_json::json!({
-                "kind": if provider { "provider" } else { "completion" }, "attempt": used + 1,
+                "kind": if provider { "provider" } else if timeout { "model_timeout" } else if transport { "model_transport_failure" } else { "completion" }, "attempt": used + 1,
                 "effectKey": effect_key,
                 "maxAttempts": maximum, "delayMs": delay_ms, "scheduledAtWallMs": now_wall_ms,
                 "dueWallMs": self.retry.due_wall_ms,
@@ -1564,6 +1642,17 @@ impl RunController {
     /// Periodic budget/timeout check. `monotonic_ms` drives in-process execution
     /// and tool timeouts; `wall_ms` drives the persistent approval deadline.
     pub fn tick(&mut self, monotonic_ms: i64, wall_ms: i64) -> Vec<Effect> {
+        self.tick_budgets(monotonic_ms, wall_ms, true)
+    }
+
+    /// The caller has received a settled frame or reaped the exclusively owned
+    /// worker. Continue enforcing Run/tool/approval clocks while its model outcome
+    /// is committed through the dispatch lease, rather than racing a second terminal.
+    pub fn tick_settled_model(&mut self, monotonic_ms: i64, wall_ms: i64) -> Vec<Effect> {
+        self.tick_budgets(monotonic_ms, wall_ms, false)
+    }
+
+    fn tick_budgets(&mut self, monotonic_ms: i64, wall_ms: i64, check_model: bool) -> Vec<Effect> {
         if matches!(self.state, RunState::Running | RunState::WaitingApproval) {
             // A recovered process has a fresh monotonic-clock domain. Anchor
             // every in-flight tool on its first tick so its timeout resumes
@@ -1731,26 +1820,63 @@ impl RunController {
             // timeout uses the persisted WALL anchor so a crash cannot reset it
             // to a fresh full window; within one process the monotonic anchor
             // measures the elapsed time.
-            if self.model_request_in_flight {
-                let elapsed = match self.model_request_since_mono_ms {
-                    // Same-process request: measure elapsed monotonic time.
+            if check_model && self.model_request_in_flight {
+                // Same-process request: monotonic anchors measure elapsed time.
+                // Rehydrated after a crash: monotonic anchors are gone; fall
+                // back to the persisted wall anchor elapsed time so the
+                // pre-crash wait still counts against every bound.
+                let total_elapsed = match self.model_request_since_mono_ms {
                     Some(since) => monotonic_ms.saturating_sub(since),
-                    // Rehydrated after a crash: monotonic anchor is gone; fall
-                    // back to the persisted wall anchor elapsed time so the
-                    // pre-crash wait still counts against the timeout.
                     None => self
                         .model_request_since_wall_ms
                         .map(|since| wall_ms.saturating_sub(since))
                         .unwrap_or(0),
                 };
-                if elapsed >= self.config.model_request_timeout_ms {
+                let has_output = self.model_request_first_output_mono_ms.is_some()
+                    || self.model_request_last_progress_wall_ms.is_some();
+                // Idleness is measured from the last observed progress; before
+                // any progress it equals the whole wait (conservative across
+                // restarts, where volatile progress anchors are None).
+                let idle_elapsed = match (
+                    self.model_request_last_progress_mono_ms,
+                    self.model_request_last_progress_wall_ms,
+                ) {
+                    (Some(since), _) => monotonic_ms.saturating_sub(since),
+                    (None, Some(since)) => wall_ms.saturating_sub(since),
+                    (None, None) => total_elapsed,
+                };
+                let first_elapsed = match self.model_request_first_output_mono_ms {
+                    Some(_) => 0,
+                    None => total_elapsed,
+                };
+                let breach = if !has_output
+                    && first_elapsed >= self.config.model_first_response_ms
+                {
+                    Some(("model.first_response_timeout",
+                        format!("Model produced no output within its {}ms first-response budget (waited {}ms).",
+                            self.config.model_first_response_ms, first_elapsed)))
+                } else if has_output && idle_elapsed >= self.config.model_idle_ms {
+                    Some(("model.idle_timeout",
+                        format!("Model produced no text, thinking, or tool-parameter progress for {}ms (idle budget {}ms, round elapsed {}ms).",
+                            idle_elapsed, self.config.model_idle_ms, total_elapsed)))
+                } else if total_elapsed >= self.config.model_request_timeout_ms {
+                    Some(("model.request_timeout",
+                        format!("Model request exceeded its {}ms whole-round timeout (elapsed {}ms, idle {}ms).",
+                            self.config.model_request_timeout_ms, total_elapsed, idle_elapsed)))
+                } else {
+                    None
+                };
+                if let Some((code, message)) = breach {
+                    // The Host-side bound is a backstop for a worker that can
+                    // no longer report (crash/lost stream). Without the
+                    // dispatch lease owner the delivery cannot be safely
+                    // reset, so this fails closed; the live retry path is
+                    // driven by the worker's own settled model_timeout
+                    // evidence through the coordinator.
                     self.settle_model_request();
                     return self.terminate(RunOutcome::Failed {
-                        code: "model.request_timeout".into(),
-                        message: format!(
-                            "Model request exceeded its {}ms timeout.",
-                            self.config.model_request_timeout_ms
-                        ),
+                        code: code.into(),
+                        message,
                     });
                 }
             }
@@ -1867,39 +1993,92 @@ impl RunController {
         })))
     }
 
-    /// Durably record a Host continuation decision in the same transaction that
-    /// records the stop response it follows. The prompt is Host-authored and
-    /// bounded; it is not a tool result and never grants permission. The
-    /// continuation model round itself carries no delivery lease, so an engine
-    /// crash inside it fails closed instead of replaying a request.
-    pub fn note_continuation_request(&mut self, prompt: &str) -> Result<Effect, KernelError> {
-        if self.state != RunState::Running {
-            return Err(KernelError::FailClosed("continuation requires a running Run".into()));
+    /// Commit a Host-authored continuation and its exact input with the preceding
+    /// response. Only the model view is stored; this never authorizes tool execution.
+    pub fn request_continuation(&mut self, prompt: &str, input_json: &str) -> Result<Vec<Effect>, KernelError> {
+        self.request_host_followup(prompt, input_json, None)
+    }
+
+    /// Same durable transport as [`RunController::request_continuation`], but the
+    /// event/outbox payload carries `lane:"delivery_repair"`. Host counters treat
+    /// the two lanes independently: business repair rounds never consume the
+    /// bounded stop-review budget, and neither lane authorizes tool execution.
+    pub fn request_delivery_repair(
+        &mut self,
+        prompt: &str,
+        input_json: &str,
+    ) -> Result<Vec<Effect>, KernelError> {
+        self.request_host_followup(prompt, input_json, Some("delivery_repair"))
+    }
+
+    /// Same durable transport as [`RunController::request_continuation`], but the
+    /// event/outbox payload carries `lane:"steering"`. This lane answers
+    /// additional user input that the Host accepted during the Run: it is new
+    /// user work, not a review of the model's own stop, so it must never consume
+    /// the bounded stop-review budget. It authorizes no tool execution either —
+    /// the frozen Run scope still decides what may run.
+    pub fn request_steering_followup(
+        &mut self,
+        prompt: &str,
+        input_json: &str,
+    ) -> Result<Vec<Effect>, KernelError> {
+        self.request_host_followup(prompt, input_json, Some("steering"))
+    }
+
+    fn request_host_followup(
+        &mut self,
+        prompt: &str,
+        input_json: &str,
+        lane: Option<&str>,
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Running || self.model_request_in_flight
+            || self.tools.values().any(|tool| !tool.state.is_terminal())
+            || prompt.is_empty() || prompt.len() > 16_384 || input_json.len() > 1_048_576 {
+            return Err(KernelError::FailClosed("invalid continuation input or unsettled execution".into()));
         }
-        if prompt.is_empty() || prompt.len() > 16_384 {
-            return Err(KernelError::FailClosed(
-                "continuation prompt exceeds the bounded size".into(),
-            ));
+        let input: serde_json::Value = serde_json::from_str(input_json)
+            .map_err(|error| KernelError::FailClosed(error.to_string()))?;
+        if input["runId"] != self.run_id || input["turnId"] != self.turn_id
+            || input["promptConfigHash"] != self.config.prompt_config_hash {
+            return Err(KernelError::FailClosed("continuation input identity changed".into()));
         }
-        Ok(self.append_event(
-            "engine.continuation_requested",
-            serde_json::json!({"turnId": self.turn_id, "prompt": prompt}),
-        ))
+        let effect_key = format!("continuation:{}", self.last_event_seq() + 1);
+        let mut payload = serde_json::json!({"turnId":self.turn_id,"effectKey":effect_key,
+            "prompt":prompt,"input":input});
+        if let Some(lane) = lane {
+            payload["lane"] = serde_json::Value::String(lane.to_owned());
+        }
+        let payload_json = payload.to_string();
+        let event = self.append_event("engine.continuation_requested",
+            serde_json::from_str(&payload_json).unwrap());
+        Ok(vec![event, Effect::RequestContinuationModel { effect_key, payload_json }])
+    }
+
+    pub fn begin_continuation_model_request(&mut self, effect_key: &str, monotonic_ms: i64, wall_ms: i64)
+        -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Running || self.model_request_in_flight
+            || self.tools.values().any(|tool| !tool.state.is_terminal())
+            || !effect_key.starts_with("continuation:") {
+            return Err(KernelError::FailClosed("continuation cannot dispatch with unresolved work".into()));
+        }
+        self.arm_model_request(monotonic_ms, wall_ms);
+        Ok(vec![self.append_event("engine.continuation_dispatched", serde_json::json!({
+            "turnId":self.turn_id,"effectKey":effect_key,"startedAt":wall_ms,
+        }))])
     }
 
     /// Record the model output that answers a continuation round. The caller
     /// decides the next step (batch proposal, another continuation, terminal)
-    /// in the same transaction. No model request is armed across a
-    /// continuation, so this never settles an in-flight marker.
+    /// in the same transaction, settling only its exclusively leased model request.
     pub fn record_continuation_model_response(
         &mut self,
         response_json: &str,
     ) -> Result<Effect, KernelError> {
-        if self.state != RunState::Running || self.model_request_in_flight
+        if self.state != RunState::Running || !self.model_request_in_flight
             || response_json.len() > 1_048_576
         {
             return Err(KernelError::FailClosed(
-                "continuation response requires an idle running Run".into(),
+                "continuation response requires an active model request".into(),
             ));
         }
         let response: serde_json::Value = serde_json::from_str(response_json)
@@ -1909,6 +2088,7 @@ impl RunController {
                 "continuation response must be an object".into(),
             ));
         }
+        self.settle_model_request();
         Ok(self.append_event(
             "engine.continuation_response",
             serde_json::json!({"turnId": self.turn_id, "response": response}),
@@ -1922,10 +2102,30 @@ impl RunController {
         self.model_request_in_flight = false;
         self.model_request_since_mono_ms = None;
         self.model_request_since_wall_ms = None;
+        self.model_request_first_output_mono_ms = None;
+        self.model_request_last_progress_mono_ms = None;
+        self.model_request_last_progress_wall_ms = None;
     }
 
     pub fn model_request_in_flight(&self) -> bool {
         self.model_request_in_flight
+    }
+
+    /// Record worker-observed output progress (streaming preview, settled
+    /// tool-parameter bytes, or any Host-verified model output) for the
+    /// in-flight request. Drives the first-response/idle bounds; a no-op when
+    /// no request is in flight. Volatile: never persisted, so a restart
+    /// conservatively measures idleness from the persisted wall anchor until
+    /// fresh progress arrives. Host must only call this for output that
+    /// belongs to the current dispatch (previews are revision/cursor-gated).
+    pub fn note_model_progress(&mut self, monotonic_ms: i64, wall_ms: i64) {
+        if !self.model_request_in_flight {
+            return;
+        }
+        self.model_request_first_output_mono_ms
+            .get_or_insert(monotonic_ms);
+        self.model_request_last_progress_mono_ms = Some(monotonic_ms);
+        self.model_request_last_progress_wall_ms = Some(wall_ms);
     }
 
     fn arm_model_request(&mut self, monotonic_ms: i64, wall_ms: i64) {
@@ -1933,6 +2133,9 @@ impl RunController {
         self.model_request_in_flight = true;
         self.model_request_since_mono_ms = Some(monotonic_ms);
         self.model_request_since_wall_ms = Some(wall_ms);
+        self.model_request_first_output_mono_ms = None;
+        self.model_request_last_progress_mono_ms = None;
+        self.model_request_last_progress_wall_ms = None;
     }
 
     fn suspend_running_clock(&mut self, now_monotonic_ms: i64) {
@@ -2080,6 +2283,11 @@ impl RunController {
         let mut settled_dispatch_tool_call_ids = Vec::new();
         for effect in effects {
             match effect {
+                Effect::RequestContinuationModel { effect_key, payload_json } => outbox.push(PersistOutboxEffect {
+                    effect_key: effect_key.clone(), kind: crate::ports::OutboxEffectKind::ContinuationModel,
+                    idempotency_key: format!("continuation-delivery:{effect_key}"), tool_call_id: None,
+                    batch_id: None, payload_json: payload_json.clone(),
+                }),
                 Effect::RequestInitialModel { input_hash } => outbox.push(PersistOutboxEffect {
                     effect_key: INITIAL_MODEL_EFFECT_KEY.into(), kind: crate::ports::OutboxEffectKind::InitialModel,
                     idempotency_key: INITIAL_MODEL_IDEMPOTENCY_KEY.into(), tool_call_id: None, batch_id: None,

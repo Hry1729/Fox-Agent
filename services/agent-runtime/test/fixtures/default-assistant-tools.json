@@ -5,6 +5,8 @@
   "grep",
   "read_attachment",
   "attachment_compute",
+  "read_tool_result",
+  "skill_load",
   "write_file",
   "edit_file",
   "run_command",

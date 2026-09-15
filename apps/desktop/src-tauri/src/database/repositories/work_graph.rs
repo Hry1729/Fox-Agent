@@ -6668,7 +6668,7 @@ mod tests {
             engine_id:"pi".into(),kernel_mode:"authoritative".into(),capability_manifest_version:2,
             capability_manifest_hash:"repair-fixture".into(),permission_snapshot_id:binding.permission_snapshot_id.clone(),
             execution_profile_id:"durable_v2".into(),prompt_config_hash:"repair-fixture".into(),
-            model_request_timeout_ms:binding.budgets.model_request_ms,tool_execution_timeout_ms:binding.budgets.tool_execution_ms,
+            model_request_timeout_ms:binding.budgets.model_request_ms,model_first_response_ms:binding.budgets.model_first_response_ms,model_idle_ms:binding.budgets.model_idle_ms,tool_execution_timeout_ms:binding.budgets.tool_execution_ms,
             run_execution_budget_ms:binding.budgets.run_execution_ms,approval_wait_timeout_ms:binding.budgets.approval_wait_ms,
             provider_max_retries:0,turn_max_retries:0,
         };

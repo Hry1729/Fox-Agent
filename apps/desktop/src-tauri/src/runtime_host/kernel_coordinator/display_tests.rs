@@ -120,12 +120,13 @@ fn kernel_reads_project_root_and_office_attachments_through_frozen_gateway() {
                             &db,
                             &root,
                             &root,
+                            &root,
                             tool,
                             &json!({"attachmentId":"foreign"}),
                             token
                         )
                         .is_err());
-                    policy.execute_context_resource(&db, &root, &root, tool, &payload["input"], token)?
+                    policy.execute_context_resource(&db, &root, &root, &root, tool, &payload["input"], token)?
                 } else {
                     policy.execute(&db, tool, &payload["input"], token)?
                 };
@@ -213,7 +214,8 @@ fn approved_html_write_and_streamed_answer_remain_available_after_cancel() {
                     checkpoint_seq: frame.checkpoint_seq,
                     revision: 1,
                     text: "页面已生成，接下来说明使用方法…".into(),
-                    reasoning: String::new()
+                    reasoning: String::new(),
+                    progress_bytes: None,
                 })
                 .unwrap());
             Err("cancel during streamed explanation".into())
@@ -266,6 +268,7 @@ fn received_display_survives_cancel_failure_and_database_reopen_without_settling
                     revision: 1,
                     text: "已经输出的中文内容 😀".into(),
                     reasoning: "供应商返回的思考说明".into(),
+                    progress_bytes: Some(128),
                 };
                 let before = coordinator.snapshot().unwrap();
                 assert!(db.save_kernel_model_display(&notice).unwrap());
@@ -336,7 +339,7 @@ fn final_response_replaces_partial_and_projects_tool_process_without_duplicate_u
         .unwrap()
         .conversation_id;
     coordinator.dispatch_initial("owner",&Allow,|_,frame,_| {
-        db.save_kernel_model_display(&fox_engine_protocol::KernelModelPreview {schema_version:1,run_id:run.clone(),conversation_id:conversation.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,revision:1,text:"long provisional answer".into(),reasoning:"partial reasoning".into()}).unwrap();
+        db.save_kernel_model_display(&fox_engine_protocol::KernelModelPreview {schema_version:1,run_id:run.clone(),conversation_id:conversation.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,revision:1,text:"long provisional answer".into(),reasoning:"partial reasoning".into(),progress_bytes:None}).unwrap();
         Ok(fox_engine_protocol::KernelInitialModelResponse {schema_version:1,run_id:run.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
             assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[{"type":"thinking","thinking":"final reasoning"},{"type":"text","text":"short"},{"type":"toolCall","id":"read-a","name":"read","arguments":{"path":"proof.txt"}}],"usage":{"input":10,"output":2,"totalTokens":12}})})
     }).unwrap();
@@ -413,9 +416,9 @@ fn exercise_projectless_compute(source: Option<&std::path::Path>, code: &str) ->
     coordinator.dispatch_initial("compute-model",&policy,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"compute","name":"attachment_compute","arguments":input}]})})).unwrap();
     let mut actual=Value::Null;
     coordinator.dispatch_tool("compute","compute-owner",|_,effect,token|{
-        assert!(policy.execute_context_resource(&db,&root,&root,"attachment_compute",&json!({"attachmentIds":["foreign"],"code":"return 1;"}),token).is_err());
+        assert!(policy.execute_context_resource(&db,&root,&root,&root,"attachment_compute",&json!({"attachmentIds":["foreign"],"code":"return 1;"}),token).is_err());
         let payload:Value=serde_json::from_str(&effect.payload_json).unwrap();
-        let result=policy.execute_context_resource(&db,&root,&root,"attachment_compute",&payload["input"],token)?;
+        let result=policy.execute_context_resource(&db,&root,&root,&root,"attachment_compute",&payload["input"],token)?;
         assert!(serde_json::to_vec(&result).unwrap().len()<256*1024);
         actual=result["details"]["result"].clone();
         Ok((true,result))
@@ -441,9 +444,9 @@ fn exercise_projectless_compute(source: Option<&std::path::Path>, code: &str) ->
     })).unwrap();
     coordinator.dispatch_tool("readback","readback-owner",|_,effect,token|{
         let input:Value=serde_json::from_str(&effect.payload_json).unwrap();
-        let reread=policy.execute_context_resource(&db,&root,&root,"attachment_compute",&input["input"],token)?;
+        let reread=policy.execute_context_resource(&db,&root,&root,&root,"attachment_compute",&input["input"],token)?;
         assert_eq!(reread["details"]["result"],actual,"a later tool call must reread the saved file");
-        assert!(policy.execute_context_resource(&db,&root,&root,"attachment_compute",&json!({"artifactIds":["foreign-artifact"],"code":"return 1;"}),token).is_err());
+        assert!(policy.execute_context_resource(&db,&root,&root,&root,"attachment_compute",&json!({"artifactIds":["foreign-artifact"],"code":"return 1;"}),token).is_err());
         Ok((true,reread))
     }).unwrap();
     assert_eq!(std::fs::read(file).unwrap(),original,"source attachment must remain unchanged");

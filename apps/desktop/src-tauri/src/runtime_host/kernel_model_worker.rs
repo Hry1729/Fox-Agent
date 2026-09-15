@@ -15,12 +15,23 @@ use std::{
 };
 
 const MAX_FRAME: usize = 1_048_576;
+/// Transport-only time for the worker to report its already expired model round.
+/// Late model output is rejected by Host; this does not extend generation budget.
+pub(super) const MODEL_SETTLE_GRACE_MS: i64 = 1_000;
+pub(super) const MODEL_WINDOW_EXPIRED: &str = "Kernel model window expired before response commit";
 
 #[cfg(windows)]
 #[path = "kernel_model_worker_job.rs"]
 mod worker_job;
 
 const SETTLED_FAILURE_PREFIX: &str = "kernel.settled_model_failure:";
+/// These errors originate in the owned transport. Only retry after its Worker
+/// has been dropped (including process reaping); protocol/identity errors stay fatal.
+pub(super) fn is_reaped_transport_failure(error: &str) -> bool {
+    matches!(error, MODEL_WINDOW_EXPIRED | "Kernel worker deadline exceeded; reconcile delivery"
+        | "Kernel worker disconnected; reconcile delivery" | "Kernel worker write failed")
+}
+
 pub(super) fn settled_failure(error: &str) -> Option<fox_engine_protocol::KernelModelFailure> {
     let evidence: fox_engine_protocol::KernelModelFailure = serde_json::from_str(error.strip_prefix(SETTLED_FAILURE_PREFIX)?).ok()?;
     evidence.validate().ok()?;
@@ -737,7 +748,7 @@ impl LiveKernelSession {
             if response["type"] == "kernel.model_failure" {
                 let failure: fox_engine_protocol::KernelModelFailure =
                     serde_json::from_value(response["payload"].clone())
-                        .map_err(|_| "invalid settled Kernel model failure")?;
+                        .map_err(|error| format!("invalid settled Kernel model failure: {error}"))?;
                 failure.validate()?;
                 if failure.run_id != binding.run_id {
                     return Err("Kernel failure belongs to another run".into());
@@ -886,6 +897,7 @@ createInterface({input:process.stdin}).on('line',line=>{
                 Ok(fox_engine_protocol::KernelRoundDirective {
                     schema_version:1,kind:fox_engine_protocol::KernelRoundDirectiveKind::Final,
                     batch_id:None,checkpoint_seq:None,preview_seq:None,tools:Vec::new(),prompt:None,
+                    steering:Vec::new(),
                 })
             };
             let mut deadline_for = || {

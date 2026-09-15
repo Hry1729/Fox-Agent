@@ -43,8 +43,22 @@ mod tests {
         child.stdin.as_mut().unwrap().write_all(b"start\n").unwrap();
         let mut pid = String::new();
         BufReader::new(child.stdout.take().unwrap()).read_line(&mut pid).unwrap();
+        // Node colorizes `console.log(number)` when FORCE_COLOR is set, so the
+        // PID line may carry ANSI SGR escape sequences even on a pipe; strip
+        // them before parsing.
+        let mut cleaned = String::with_capacity(pid.len());
+        let mut rest = pid.as_str();
+        while let Some(start) = rest.find('\u{1b}') {
+            cleaned.push_str(&rest[..start]);
+            rest = &rest[start + 1..];
+            if let Some(terminator) = rest.find('m') {
+                rest = &rest[terminator + 1..];
+            }
+        }
+        cleaned.push_str(rest);
+        let pid: u32 = cleaned.trim().parse().unwrap();
         unsafe {
-            let descendant = OpenProcess(PROCESS_SYNCHRONIZE, false, pid.trim().parse().unwrap()).unwrap();
+            let descendant = OpenProcess(PROCESS_SYNCHRONIZE, false, pid).unwrap();
             drop(job);
             assert_eq!(WaitForSingleObject(descendant, 5000), WAIT_OBJECT_0);
             let _ = CloseHandle(descendant);

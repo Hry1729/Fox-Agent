@@ -1036,6 +1036,9 @@ pub struct ConversationDetail {
     pub artifacts: Vec<ArtifactRecord>,
     pub knowledge_bindings: Vec<KnowledgeBindingRecord>,
     pub last_run: Option<RunRecord>,
+    /// Terminal state of every run referenced by the loaded messages. Exposes
+    /// failure/cancellation facts that the message status column does not carry.
+    pub runs: Vec<RunRecord>,
     pub has_earlier_messages: bool,
     pub goals: Vec<GoalRecord>,
     pub tasks: Vec<WorkTaskRecord>,
@@ -1320,6 +1323,35 @@ pub struct ToolCallRecord {
     pub updated_at: i64,
     pub trace_id: Option<String>,
     pub span_id: Option<String>,
+}
+
+/// One authorized byte range of a settled tool call's stored result, resolved
+/// from a `fox-result://<runId>/<toolCallId>` reference. Produced only after the
+/// caller proves it is authorized for the owning conversation.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResultRange {
+    pub run_id: String,
+    pub tool_call_id: String,
+    pub conversation_id: String,
+    pub tool_name: String,
+    pub status: String,
+    /// True when the stored copy is a Fox preview rather than the full result,
+    /// because the original exceeded `MAX_STORED_TOOL_RESULT_BYTES`.
+    pub truncated: bool,
+    /// True only while Host still holds every byte of the original result, so
+    /// every byte omitted from a bounded model view can be recovered here.
+    /// `false` means this reader can serve the preview and nothing beyond it,
+    /// and callers must say so instead of implying the rest is reachable.
+    pub retrievable: bool,
+    /// Size of the original result, not of the stored copy.
+    pub original_bytes: usize,
+    pub offset: usize,
+    pub returned_bytes: usize,
+    /// Offset to pass back to continue reading, or `None` when this range
+    /// reaches the end of what Host stored.
+    pub next_offset: Option<usize>,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

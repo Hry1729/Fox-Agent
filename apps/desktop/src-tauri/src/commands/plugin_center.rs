@@ -602,7 +602,7 @@ fn default_category(kind: &PluginKind) -> &'static str {
 
 fn builtin_tool_category(tool: &str) -> &'static str {
     match tool {
-        "read" | "ls" | "find" | "grep" | "read_attachment" => "文件与办公",
+        "read" | "ls" | "find" | "grep" | "read_attachment" | "read_tool_result" => "文件与办公",
         "write_file" | "edit_file" | "run_command" | "git_read" | "test_run" | "code_check"
         | "format_code" => "开发工具",
         "web_search" | "web_read" | "http_request" => "网络与检索",
@@ -611,7 +611,7 @@ fn builtin_tool_category(tool: &str) -> &'static str {
         "child_agent_list" | "child_run_start" | "child_run_collect" | "child_run_cancel" => {
             "Agent 编排"
         }
-        "memory_search" | "memory_propose" => "记忆与上下文",
+        "memory_search" | "memory_propose" | "skill_load" => "记忆与上下文",
         "list_knowledge_bases"
         | "search_knowledge"
         | "read_knowledge_document"
@@ -628,6 +628,8 @@ fn builtin_tool_description(tool: &str) -> &'static str {
         "find" => "按名称或路径模式查找项目文件，快速定位目标资源。",
         "grep" => "在项目文件中搜索文本或正则表达式，定位代码与配置引用。",
         "read_attachment" => "分页读取对话中的文本、DOCX、XLS/XLSX 或 PPT/PPTX 附件。表格公式使用已保存的结果。",
+        "read_tool_result" => "按 fox-result:// 引用只读重取 Fox 已保存的工具结果范围，便于接续读取被截断的会议内结果；不重新执行任何工具。",
+        "attachment_compute" => "在沙箱中对显式选择的附件运行有界 JavaScript 计算，并将结果保存为可复用的会话产物。",
         "write_file" => "在授权项目内创建或覆盖文本文件，并遵循当前写入权限。",
         "edit_file" => "精确替换文件中的指定文本片段，生成可审查的修改。",
         "run_command" => "在授权项目目录运行非交互命令，每次执行都需要明确批准。",
@@ -648,6 +650,7 @@ fn builtin_tool_description(tool: &str) -> &'static str {
         "child_run_start" => "按普通 Worker 或一次性专家咨询模式启动隔离 Child Run。",
         "child_run_collect" => "收集直属 Child Run 的状态、有限结果、用量与错误。",
         "child_run_cancel" => "取消当前父 Run 拥有的一个活动 Child Run。",
+        "skill_load" => "按技能目录中的 ID 加载当前任务已启用技能的完整说明；仅返回只读文本，不会为 Run 新增任何工具授权。",
         "memory_search" => "按当前 Agent 与项目作用域检索已确认且启用的受治理记忆。",
         "memory_propose" => "基于当前 Run 的明确证据提交候选记忆，等待用户治理。",
         "list_knowledge_bases" => "列出当前可访问的本地与远程知识库。",
@@ -738,11 +741,31 @@ mod tests {
             .iter()
             .map(|card| card.description.as_str())
             .collect::<BTreeSet<_>>();
-        assert_eq!(tool_descriptions.len(), tool_cards.len());
+        assert_eq!(
+            tool_descriptions.len(),
+            tool_cards.len(),
+            "duplicate builtin tool description: {:?}",
+            {
+                let mut counts = std::collections::BTreeMap::new();
+                for card in &tool_cards {
+                    *counts.entry(card.description.as_str()).or_insert(0usize) += 1;
+                }
+                counts
+                    .into_iter()
+                    .filter(|(_, count)| *count > 1)
+                    .collect::<Vec<_>>()
+            }
+        );
         assert!(tool_cards.iter().all(|card| {
             card.description != "Fox 内建工具，由 Host 统一执行和授权。"
                 && card.description != "此工具尚未提供功能说明。"
-        }));
+        }), "builtin tool missing description: {:?}",
+            tool_cards
+                .iter()
+                .filter(|card| card.description == "Fox 内建工具，由 Host 统一执行和授权。"
+                    || card.description == "此工具尚未提供功能说明。")
+                .map(|card| card.name.as_str())
+                .collect::<Vec<_>>());
         let _ = fs::remove_dir_all(skills);
         drop(database);
         let _ = fs::remove_file(database_path);

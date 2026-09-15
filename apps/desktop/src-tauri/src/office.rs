@@ -125,6 +125,17 @@ pub struct PreparedOffice {
     help: Option<HelpQuery>,
 }
 
+impl PreparedOffice {
+    /// The verified write target: the canonical in-project output path this
+    /// preparation admitted, or `None` for a non-mutating operation.
+    ///
+    /// The Host uses this — never a connector-declared path — when it decides
+    /// whether a saved document may become a user-restorable version.
+    pub fn target_path(&self) -> Option<&Path> {
+        self.output.as_deref()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct HelpQuery {
     property: Option<String>,
@@ -763,6 +774,24 @@ fn cap_detail_value(value: &Value) -> Result<Value, String> {
     Ok(Value::Object(detail))
 }
 
+/// SHA-256 and byte size of a document, used for the Host-managed version
+/// record attached to office_create/office_edit results.
+fn hash_file_meta(path: &Path) -> Option<(String, i64)> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut total: i64 = 0;
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total = total.saturating_add(n as i64);
+    }
+    Some((format!("{:x}", hasher.finalize()), total))
+}
+
 pub fn execute(
     server: &McpServerRecord,
     tool: &str,
@@ -813,6 +842,9 @@ pub(crate) fn execute_with_cancellation(
         }
         temporary = Some(path);
     }
+    // Version metadata for intercepted document writes, surfaced to the
+    // Host as details.foxManagedFile (the Host registers the durable row).
+    let mut managed_meta: Option<Value> = None;
     let result = (|| {
         let args = action
             .args
@@ -873,19 +905,64 @@ pub(crate) fn execute_with_cancellation(
                     .to_string_lossy(),
                 false,
             )?;
-            if output.exists() {
-                if !action.overwrite {
-                    return Err("Office 输出在执行期间出现，已保留原文件".into());
+            if matches!(tool, "office_edit" | "office_create") {
+                if output.exists() {
+                    if !action.overwrite {
+                        return Err("Office 输出在执行期间出现，已保留原文件".into());
+                    }
+                    let before = hash_file_meta(output);
+                    let backup = output.with_file_name(format!(
+                        "{}.fox-backup-{}",
+                        output.file_name().unwrap_or_default().to_string_lossy(),
+                        uuid::Uuid::new_v4()
+                    ));
+                    fs::copy(output, &backup).map_err(|e| format!("Office 备份失败: {e}"))?;
+                    fs::copy(temp, output).map_err(|e| {
+                        format!("Office 写入失败，原文件备份位于 {}: {e}", backup.display())
+                    })?;
+                    if let Some((after_hash, after_size)) = hash_file_meta(output) {
+                        let storage_path = output.canonicalize().unwrap_or_else(|_| output.to_path_buf());
+                        let display_name = root
+                            .map(Path::new)
+                            .and_then(|base| storage_path.strip_prefix(base).ok())
+                            .map(|relative| relative.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| storage_path.to_string_lossy().into_owned());
+                        managed_meta = Some(json!({
+                            "tool": tool,
+                            "storagePath": storage_path.to_string_lossy(),
+                            "displayName": display_name,
+                            "changeKind": "modified",
+                            "beforeHash": before.as_ref().map(|(hash, _)| hash.clone()),
+                            "beforeSize": before.map(|(_, size)| size),
+                            "afterHash": after_hash,
+                            "afterSize": after_size,
+                            "backupPath": backup.to_string_lossy(),
+                        }));
+                    }
+                } else {
+                    fs::rename(temp, output).map_err(|e| e.to_string())?;
+                    if let Some((after_hash, after_size)) = hash_file_meta(output) {
+                        let storage_path = output.canonicalize().unwrap_or_else(|_| output.to_path_buf());
+                        let display_name = root
+                            .map(Path::new)
+                            .and_then(|base| storage_path.strip_prefix(base).ok())
+                            .map(|relative| relative.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| storage_path.to_string_lossy().into_owned());
+                        managed_meta = Some(json!({
+                            "tool": tool,
+                            "storagePath": storage_path.to_string_lossy(),
+                            "displayName": display_name,
+                            "changeKind": "created",
+                            "beforeHash": Value::Null,
+                            "beforeSize": Value::Null,
+                            "afterHash": after_hash,
+                            "afterSize": after_size,
+                            "backupPath": Value::Null,
+                        }));
+                    }
                 }
-                let backup = output.with_file_name(format!(
-                    "{}.fox-backup-{}",
-                    output.file_name().unwrap_or_default().to_string_lossy(),
-                    uuid::Uuid::new_v4()
-                ));
-                fs::copy(output, &backup).map_err(|e| format!("Office 备份失败: {e}"))?;
-                fs::copy(temp, output).map_err(|e| {
-                    format!("Office 写入失败，原文件备份位于 {}: {e}", backup.display())
-                })?;
+            } else if output.exists() {
+                fs::copy(temp, output).map_err(|e| format!("Office 写入失败: {e}"))?;
             } else {
                 fs::rename(temp, output).map_err(|e| e.to_string())?;
             }
@@ -908,7 +985,18 @@ pub(crate) fn execute_with_cancellation(
                 content.push(json!({"type":"image","mimeType":"image/png","data":base64::engine::general_purpose::STANDARD.encode(bytes)}));
             }
         }
-        Ok(json!({"content":content,"isError":false}))
+        let mut envelope = serde_json::Map::new();
+        envelope.insert("content".into(), json!(content));
+        envelope.insert("isError".into(), json!(false));
+        if let Some(meta) = managed_meta.take() {
+            // Consumed by the Host Kernel dispatch for durable version
+            // registration; also visible to the model as plain metadata.
+            envelope.insert(
+                "details".into(),
+                json!({ "foxManagedFile": meta }),
+            );
+        }
+        Ok(Value::Object(envelope))
     })();
     if let Some(temp) = temporary {
         if temp.is_file() {
