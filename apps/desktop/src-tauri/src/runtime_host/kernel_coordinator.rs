@@ -113,6 +113,7 @@ impl<'a> KernelCoordinator<'a> {
             || binding.budgets.model_idle_ms != config.model_idle_ms
             || binding.budgets.tool_execution_ms != config.tool_execution_timeout_ms
             || binding.budgets.run_execution_ms != config.run_execution_budget_ms
+            || binding.budgets.run_execution_limited != config.run_execution_limited
         {
             return Err(
                 "Kernel and resource control bindings disagree; no authority fallback is allowed"
@@ -534,6 +535,7 @@ impl<'a> KernelCoordinator<'a> {
                 source_order: u32::try_from(tool.source_order)
                     .map_err(|error| error.to_string())?,
                 state,
+                storage: serde_json::to_value(self.database.tool_result_storage(&self.binding.run_id, id).unwrap_or_default()).ok(),
                 result,
             });
         }
@@ -562,16 +564,10 @@ impl<'a> KernelCoordinator<'a> {
             if now.wall_ms < since {
                 return Err("initial model clock moved backwards".into());
             }
-            let remaining = binding
-                .budgets
-                .run_execution_ms
-                .saturating_sub(facts.running_elapsed_ms)
-                .min(
-                    binding
-                        .budgets
-                        .model_request_ms
-                        .saturating_sub(now.wall_ms.saturating_sub(since)),
-                );
+            let remaining = binding.budgets.limit_operation_ms(
+                binding.budgets.model_request_ms.saturating_sub(now.wall_ms.saturating_sub(since)),
+                facts.running_elapsed_ms,
+            );
             super::kernel_model_worker::deliver_initial_with_preview(
                 runtime,
                 &config,
@@ -875,16 +871,10 @@ impl<'a> KernelCoordinator<'a> {
             if now.wall_ms < since {
                 return Err("Kernel model clock moved backwards".into());
             }
-            let remaining = binding
-                .budgets
-                .run_execution_ms
-                .saturating_sub(facts.running_elapsed_ms)
-                .min(
-                    binding
-                        .budgets
-                        .model_request_ms
-                        .saturating_sub(now.wall_ms.saturating_sub(since)),
-                );
+            let remaining = binding.budgets.limit_operation_ms(
+                binding.budgets.model_request_ms.saturating_sub(now.wall_ms.saturating_sub(since)),
+                facts.running_elapsed_ms,
+            );
             super::kernel_model_worker::deliver_with_preview(
                 runtime,
                 config,
@@ -964,6 +954,7 @@ impl<'a> KernelCoordinator<'a> {
         let mut batch_history = frame.history.clone();
         batch_history.push(frame.assistant_message.clone());
         batch_history.extend(steering::settled_tool_result_messages(
+            &self.binding.run_id,
             &frame.tools,
             &frame.assistant_message,
         ));

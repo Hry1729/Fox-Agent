@@ -5,6 +5,7 @@ import { prepareKernelBatchResume } from '../src/pi-kernel-batch-resume.mjs'
 import {
   RESULT_REF_TOOL,
   READ_RESULT_CURSOR_MARKER,
+  boundToolText,
   modelToolResultContent,
   readToolResultNavigationView,
   toolResultRef,
@@ -129,6 +130,123 @@ test('batch resume: the cursor reaches the final model request and drives a >=3 
   assert.ok(page >= 3, `expected at least 3 pages, got ${page}`)
   assert.equal(sha256(fragments.join('')), sha256(source), 'reconstructed hash must equal the source')
   assert.equal(fragments.join(''), source)
+})
+
+test('stored results above every old size threshold are bounded and rebuild byte-exactly by paging', async () => {
+  // ABC review R4 acceptance: 140,000 B (>128 KiB), 200,000 B, and >1 MiB.
+  // Retrievability comes from the Host's storage fact, not from a size guess;
+  // the model view is bounded, the durable bytes rebuild with an identical
+  // SHA-256 through read_tool_result paging, and the source tool executes once.
+  const pageLimit = 64 * 1024 // Host range-read maximum per page (CONTRACTS §5)
+  for (const size of [140_000, 200_000, 1_600_000]) {
+    let executions = 0
+    const unit = '记录😀 data 中 '
+    const source = (() => {
+      let text = ''
+      while (Buffer.byteLength(text, 'utf8') < size) text += unit
+      return text
+    })()
+    const totalBytes = Buffer.byteLength(source, 'utf8')
+    assert.ok(totalBytes >= size, `fixture ${size}: must exceed the requested size`)
+
+    // The source tool runs exactly once; its complete result was stored by Host.
+    const sourceTool = defineFoxTool({
+      name: 'read',
+      label: 'Read file',
+      description: 'read a file',
+      parameters: { type: 'object' },
+      execute: () => {
+        executions += 1
+        return source
+      },
+    }, { source: 'fox-host', execution: 'host', trusted: true })
+    const reference = toolResultRef('source-run', 'read-once')
+    const raw = await sourceTool.execute('read-once', { path: 'big.txt' })
+    const storage = { stored: true, storedBytes: totalBytes, retrievableBytes: totalBytes }
+    const view = boundToolText('read', { text: raw, resultRef: reference, storage })
+    assert.ok(view !== null, `fixture ${totalBytes}: a stored result must be projected`)
+    assert.ok(Buffer.byteLength(view, 'utf8') <= 9_000,
+      `fixture ${totalBytes}: bounded view must stay in budget, got ${Buffer.byteLength(view, 'utf8')}`)
+    assert.ok(view.includes(reference), 'the view names the stable reference')
+    assert.ok(view.includes(RESULT_REF_TOOL), 'the view names the read-back tool')
+    assert.equal(executions, 1)
+
+    // Page the durable bytes back through read_tool_result and rebuild.
+    let offset = 0
+    let pages = 0
+    const fragments = []
+    let history = [{ role: 'user', content: [{ type: 'text', text: 'read the stored result back' }] }]
+    while (true) {
+      pages += 1
+      assert.ok(pages < 200, `fixture ${totalBytes}: paging must terminate`)
+      const callId = `size-${totalBytes}-page-${pages}`
+      const hostResult = hostRead(source, reference, offset, pageLimit)
+      const assistant = {
+        role: 'assistant', stopReason: 'toolUse', timestamp: pages + 1,
+        content: [{ type: 'toolCall', id: callId, name: RESULT_REF_TOOL, arguments: { reference, offset, limit: pageLimit } }],
+      }
+      const frame = {
+        schemaVersion: 1, turnId: 'turn-1', batchId: `batch-${totalBytes}-${pages}`,
+        idempotencyKey: `tool-batch-delivery:batch-${totalBytes}-${pages}`, checkpointSeq: 8 + pages,
+        history,
+        assistantMessage: assistant,
+        tools: [{
+          toolCallId: callId, tool: RESULT_REF_TOOL, sourceOrder: 0,
+          canonicalInput: { reference, offset, limit: pageLimit }, state: 'completed', result: hostResult,
+        }],
+      }
+      const prepared = prepareKernelBatchResume(
+        { ...identity, payload: { controlBinding: controlBinding(), batchResume: frame } }, identity)
+      const wire = convertMessages(model, { messages: prepared.messages }, {})
+      const toolMsg = wire.filter((message) => message.role === 'tool').at(-1)
+      const nav = parseCursor(toolMsg.content)
+      assert.ok(nav, `fixture ${totalBytes} page ${pages}: cursor must reach the model request`)
+      assert.equal(nav.retrievable, true)
+      fragments.push(Buffer.from(toolMsg.content).subarray(0, nav.returnedBytes).toString('utf8'))
+      // The resumed history carries the cursor (what the model actually keeps
+      // for a stored result), not the full page — a durable 64 KiB page per
+      // round would push the frame over its own 1 MiB bound.
+      history = [...history, assistant, {
+        role: 'toolResult',
+        toolCallId: callId,
+        toolName: RESULT_REF_TOOL,
+        isError: false,
+        content: [{ type: 'text', text: `${READ_RESULT_CURSOR_MARKER} ${JSON.stringify(nav)}` }],
+      }]
+      if (nav.complete) break
+      assert.ok(nav.nextOffset > offset, `fixture ${totalBytes} page ${pages}: cursor must advance`)
+      offset = nav.nextOffset
+    }
+    assert.equal(fragments.join(''), source, `fixture ${totalBytes}: paging must rebuild the exact text`)
+    assert.equal(sha256(fragments.join('')), sha256(source),
+      `fixture ${totalBytes}: rebuilt SHA-256 must equal the stored source`)
+    // read_tool_result paging never re-executes the source tool.
+    assert.equal(executions, 1, `fixture ${totalBytes}: the source tool must execute exactly once`)
+  }
+})
+
+test('without the storage fact the same oversized results are never dropped or promised', () => {
+  // The rejected counterexample: a 200,000-byte result must not be reduced by
+  // guessing, and must not claim read-back it cannot prove.
+  const source = '资料😀'.repeat(50_000) // 400,000 bytes
+  const reference = toolResultRef('source-run', 'read-once')
+  assert.equal(boundToolText('read', { text: source, resultRef: reference }), source)
+  assert.equal(boundToolText('read', {
+    text: source,
+    resultRef: reference,
+    storage: { stored: false, failureReason: 'blob_write_failed' },
+  }), source)
+  assert.equal(boundToolText('read', {
+    text: source,
+    resultRef: reference,
+    storage: { stored: true, storedBytes: 131_072, retrievableBytes: 131_072 },
+  }), source)
+})
+
+test('a receipt-bearing oversized result is never reshaped', () => {
+  const receipt = `FOX_EXECUTION_RECEIPT_V1 {"tool":"write_file","executionState":"completed"}\n`
+  const source = receipt + 'payload '.repeat(30_000)
+  assert.equal(boundToolText('read', { text: source, resultRef: toolResultRef('r', 'c') }), null)
 })
 
 test('live settled projection: the fragment stays first and the cursor reaches the provider request', () => {

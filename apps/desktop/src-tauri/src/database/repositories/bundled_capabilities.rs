@@ -123,7 +123,7 @@ fn refresh_compute_bindings(tx: &rusqlite::Transaction<'_>, expert_id: &str, ver
                 // Upgrade idle conversations to the newly installed bundled capability.
                 // Keep historical binding snapshots and all in-flight runs immutable.
                 let mut query=tx.prepare("SELECT b.id FROM conversation_expert_bindings b WHERE b.expert_id=?1 AND b.state='active'
-                    AND b.expert_version IN ('1.0.0','1.1.0') AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.conversation_id=b.conversation_id
+                    AND b.expert_version IN ('1.0.0','1.1.0','1.2.0') AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.conversation_id=b.conversation_id
                     AND r.status IN ('queued','running','waiting_approval'))")?;
                 let bindings=query.query_map([expert_id],|row|row.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
                 drop(query);
@@ -219,11 +219,12 @@ mod compute_upgrade_tests {
         std::fs::create_dir(&root).unwrap();
         let db=Database::open(root.join("test.db")).unwrap();
         let agent=db.get_agent("fox-data-analyst").unwrap().unwrap();
+        let installed_version=agent.package_version.clone();
         let mut old=agent.package_manifest;
         old["allowedTools"].as_array_mut().unwrap().retain(|tool|tool!="attachment_compute");
         db.with_connection(|c| {
             c.execute("UPDATE agents SET package_version='1.1.0',package_manifest_json=?1,icon='custom-avatar.png' WHERE id='fox-data-analyst'",[old.to_string()])?;
-            c.execute("UPDATE expert_package_versions SET version='1.1.0' WHERE expert_id='fox-data-analyst' AND version='1.2.0'",[])?;
+            c.execute("UPDATE expert_package_versions SET version='1.1.0' WHERE expert_id='fox-data-analyst' AND version=?1",[&installed_version])?;
             c.execute("UPDATE agent_runtime_config SET value_json='[\"custom-skill\"]',source='user' WHERE agent_id='fox-data-analyst' AND config_key='skills.enabled'",[])?;
             Ok(())
         }).unwrap();
@@ -235,7 +236,11 @@ mod compute_upgrade_tests {
         assert!(db.conversation_has_active_run(&running.id).unwrap());
         db.seed_bundled_experts().unwrap();
         let idle_after=db.current_conversation_expert_binding(&idle.id).unwrap().unwrap();
-        assert_eq!(idle_after.expert_version,"1.2.0");
+        assert_eq!(idle_after.expert_version,installed_version);
+        for name in ["compute_job_start","compute_job_status","compute_job_cancel","compute_job_result"] {
+            assert!(idle_after.package_snapshot["packageManifest"]["allowedTools"].as_array().unwrap().contains(&json!(name)));
+        }
+        assert!(idle_after.package_snapshot["packageManifest"]["officeTools"].as_array().unwrap().contains(&json!("office_import_data")));
         assert_ne!(idle_after.id,idle_before.id);
         assert!(idle_after.package_snapshot["packageManifest"]["allowedTools"].as_array().unwrap().iter().any(|tool|tool=="attachment_compute"));
         assert_eq!(db.current_conversation_expert_binding(&running.id).unwrap().unwrap().package_snapshot,active_before.package_snapshot);

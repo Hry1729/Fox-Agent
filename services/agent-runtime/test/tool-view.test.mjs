@@ -13,8 +13,22 @@ import {
 const bytes = (value) => Buffer.byteLength(value, 'utf8')
 const replacements = (value) => [...value].filter((char) => char === '\uFFFD').length
 
-function project(tool, text, isError = false, resultRef = null) {
-  return boundToolResultContent(tool, { isError, content: [{ type: 'text', text }], resultRef })[0].text
+// Trusted Host storage fact for a fixture whose complete result the Host
+// stored and can hand back whole. The projection promises retrieval only from
+// this fact — never from the payload's size.
+const storedWhole = (text) => ({
+  stored: true,
+  storedBytes: bytes(text),
+  retrievableBytes: bytes(text),
+})
+
+function project(tool, text, isError = false, resultRef = null, storage = null) {
+  return boundToolResultContent(tool, {
+    isError,
+    content: [{ type: 'text', text }],
+    resultRef,
+    storage,
+  })[0].text
 }
 
 test('utf8Prefix/utf8Suffix never split a code point', () => {
@@ -37,20 +51,20 @@ test('utf8Prefix/utf8Suffix never split a code point', () => {
   assert.equal(replacements(utf8Suffix(text, 6)), 0)
 })
 
-// A reference is what makes an omitted byte reachable, so every fixture that
-// expects a bounded view carries one — as every production caller now does.
+// A reference plus the Host's storage fact is what makes an omitted byte
+// reachable, so every fixture that expects a bounded view carries both.
 const REF = 'fox-result://run-1/call-1'
 
 test('bounded multibyte text introduces no replacement character', () => {
   const input = 'a' + '中'.repeat(5_000)
-  const output = project('office_help', input, false, REF)
+  const output = project('office_help', input, false, REF, storedWhole(input))
   assert.equal(replacements(output), 0)
   assert.ok(bytes(output) <= 9_000, `bounded view must stay in budget, got ${bytes(output)}`)
 })
 
 test('bounded emoji text introduces no replacement character', () => {
   const input = '😀'.repeat(4_000)
-  const output = project('read', input, false, REF)
+  const output = project('read', input, false, REF, storedWhole(input))
   assert.equal(replacements(output), 0)
   assert.ok(bytes(output) <= 9_000, `bounded view must stay in budget, got ${bytes(output)}`)
 })
@@ -58,8 +72,10 @@ test('bounded emoji text introduces no replacement character', () => {
 test('bounded text view still carries a stable result reference', () => {
   const reference = toolResultRef('run-1', 'call-9')
   assert.equal(reference, 'fox-result://run-1/call-9')
-  // Non-JSON prose takes the head/tail path and must name the durable result.
-  const output = project('read', 'x'.repeat(40_000), false, reference)
+  // Non-JSON prose takes the head/tail path and must name the durable result
+  // once the Host confirms it stored the complete text.
+  const text = 'x'.repeat(40_000)
+  const output = project('read', text, false, reference, storedWhole(text))
   assert.match(output, /fox-result:\/\/run-1\/call-9/)
   assert.match(output, /省略/)
 })
@@ -76,7 +92,7 @@ test('structured Office catalog stays valid JSON with every property and the nex
   const text = JSON.stringify(catalog)
   assert.ok(bytes(text) < 24 * 1024)
 
-  const output = project('office_help', text)
+  const output = project('office_help', text, false, REF, storedWhole(text))
   assert.ok(bytes(output) <= 9_000, `structured projection must stay in budget, got ${bytes(output)}`)
   const parsed = JSON.parse(output)
   assert.deepEqual(parsed.properties.map((item) => item.name), catalog.properties.map((item) => item.name))
@@ -91,7 +107,7 @@ test('structured projection keeps navigation verbatim while shrinking bulky leav
     properties: [{ name: 'a', hint: 'x'.repeat(4_000) }],
     next: { tool: 'office_help', arguments: { page: 3 }, instruction: 'y'.repeat(1_000) },
   })
-  const output = project('office_help', text)
+  const output = project('office_help', text, false, REF, storedWhole(text))
   const parsed = JSON.parse(output)
   assert.equal(parsed.next.arguments.page, 3)
   assert.equal(parsed.next.instruction, 'y'.repeat(1_000))
@@ -101,7 +117,7 @@ test('structured projection falls back to a valid envelope instead of invalid JS
   const text = JSON.stringify(Array.from({ length: 200 }, (_, index) => ({
     name: `row-${index}`, blob: 'z'.repeat(4_000),
   })))
-  const output = project('list_mcp_tools', text)
+  const output = project('list_mcp_tools', text, false, REF, storedWhole(text))
   assert.ok(bytes(output) <= 9_000)
   // Must be parseable: never a mid-JSON character cut.
   const parsed = JSON.parse(output)
@@ -111,7 +127,7 @@ test('structured projection falls back to a valid envelope instead of invalid JS
 
 test('structured projection is never applied to small content', () => {
   const text = JSON.stringify({ ok: true, value: 'short' })
-  assert.equal(project('office_help', text), text)
+  assert.equal(project('office_help', text, false, REF, storedWhole(text)), text)
 })
 
 test('projectStructuredText returns null for non-JSON payloads', () => {
@@ -155,30 +171,56 @@ test('generic MCP calls are never bounded because re-read semantics are unknown'
   const listing = (tools, description) => JSON.stringify({
     tools: Array.from({ length: tools }, (_, index) => ({ name: `mcp_${index}`, description: 'y'.repeat(description) })),
   })
-  // Well inside the storage cap: Host keeps everything, so the view may omit and
-  // the note must say so.
+  // Well inside what Host stored whole: the storage fact says so, and only then
+  // may the view omit records and promise read-back.
   const small = listing(60, 200)
   assert.ok(bytes(small) > 9_000, 'fixture must need a projection')
-  const projected = project('list_mcp_tools', small)
+  const projected = project('list_mcp_tools', small, false, REF, storedWhole(small))
   assert.notEqual(projected, small)
   assert.equal(JSON.parse(projected).foxModelView.retrievable, true)
-  // Past the cap Host keeps only a preview, so dropping entries would lose them
-  // everywhere: the payload is published unchanged instead.
+  assert.equal(JSON.parse(projected).foxModelView.storageVerified, true)
+  // Unknown storage retains every byte, including long leaf text.
+  assert.equal(project('list_mcp_tools', small, false, REF), small)
+  // Host confirms it stored only part of the result (a preview): dropping
+  // entries would lose them everywhere, so the payload is published unchanged.
   const huge = listing(300, 400)
   assert.equal(project('list_mcp_tools', huge), huge)
+  assert.equal(project('list_mcp_tools', huge, false, REF, {
+    stored: true,
+    storedBytes: 64 * 1024,
+    retrievableBytes: 64 * 1024,
+  }), huge)
 })
 
 test('a result Host cannot store whole is never summarized into something unreachable', () => {
   // Head/tail cuts and record drops are only honest while the omitted bytes can
-  // be walked back with read_tool_result. Above the storage cap there is no such
-  // path, so both the structured projection and the prose fallback must decline.
+  // be walked back with read_tool_result. Without a trusted storage fact, or
+  // with a fact that covers only part of the result, both the structured
+  // projection and the prose fallback must decline.
   const hugeProse = '中'.repeat(60_000)
-  assert.ok(bytes(hugeProse) + 4_096 > 128 * 1024)
-  assert.equal(boundToolText('read', { text: hugeProse, resultRef: 'fox-result://run/call' }), hugeProse)
-  // With storage intact and a reference, the same shape of text is bounded and
-  // names the way back.
+  const reference = 'fox-result://run/call'
+  // No fact at all: the reference alone is not evidence that anything was stored.
+  assert.equal(boundToolText('read', { text: hugeProse, resultRef: reference }), hugeProse)
+  // Host stored only a preview: still no path to the omitted bytes.
+  assert.equal(boundToolText('read', {
+    text: hugeProse,
+    resultRef: reference,
+    storage: { stored: true, storedBytes: 64 * 1024, retrievableBytes: 64 * 1024 },
+  }), hugeProse)
+  // Host reports the store failed outright.
+  assert.equal(boundToolText('read', {
+    text: hugeProse,
+    resultRef: reference,
+    storage: { stored: false, failureReason: 'blob_write_failed' },
+  }), hugeProse)
+  // With the Host's complete-storage fact and a reference, the same text is
+  // bounded and names the way back.
   const prose = '中'.repeat(4_000)
-  const bounded = boundToolText('read', { text: prose, resultRef: 'fox-result://run/call' })
+  const bounded = boundToolText('read', {
+    text: prose,
+    resultRef: reference,
+    storage: storedWhole(prose),
+  })
   assert.ok(bytes(bounded) <= 9_000 + 2_048, `bounded view stays near budget, got ${bytes(bounded)}`)
   assert.ok(bounded.includes('read_tool_result'), 'the notice must name the reader that reaches it')
   assert.ok(bounded.includes('fox-result://run/call'))
@@ -221,7 +263,7 @@ test('a dropped page of a paged catalog resumes at the first omitted property', 
   const text = JSON.stringify(catalog)
   assert.ok(bytes(text) > 9_000, 'fixture must need a projection')
 
-  const output = boundToolText('office_help', { text })
+  const output = boundToolText('office_help', { text, resultRef: REF, storage: storedWhole(text) })
   assert.ok(bytes(output) <= 9_000, `projection must stay in budget, got ${bytes(output)}`)
   const parsed = JSON.parse(output)
   const kept = parsed.properties.map(item => item.name)
@@ -329,6 +371,7 @@ test('a collection with no navigation may drop records, and says how to get them
   const output = boundToolText('list_mcp_tools', {
     text: listing,
     resultRef: 'fox-result://run-1/call-1',
+    storage: storedWhole(listing),
   })
   assert.ok(bytes(output) <= 9_000, `projection must stay in budget, got ${bytes(output)}`)
   const parsed = JSON.parse(output)

@@ -3,7 +3,9 @@ import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
-const directory = fileURLToPath(new URL('../apps/desktop/src-tauri/resources/expert-library/', import.meta.url))
+const directory = process.env.FOX_EXPERT_LIBRARY_OUT
+  ? path.resolve(process.env.FOX_EXPERT_LIBRARY_OUT)
+  : fileURLToPath(new URL('../apps/desktop/src-tauri/resources/expert-library/', import.meta.url))
 const catalog = JSON.parse(await readFile(path.join(directory, 'catalog.json'), 'utf8'))
 const digest = text => createHash('sha256').update(text).digest('hex')
 const sourceRoot = path.join(directory, 'upstream')
@@ -19,10 +21,10 @@ if (process.argv.includes('--fetch')) {
   }
 }
 const license = await readFile(path.join(sourceRoot, 'LICENSE'), 'utf8')
-const readTools = ['read','ls','find','grep','read_attachment','attachment_compute','web_search','web_read','structured_data','git_read','memory_search','list_knowledge_bases','search_knowledge','read_knowledge_document','query_knowledge_graph','work_snapshot_get']
+const readTools = ['read','ls','find','grep','read_attachment','attachment_compute','compute_job_start','compute_job_status','compute_job_cancel','compute_job_result','web_search','web_read','structured_data','git_read','memory_search','list_knowledge_bases','search_knowledge','read_knowledge_document','query_knowledge_graph','work_snapshot_get']
 const taskTools = ['goal_propose','goal_complete','task_create_many','task_update','task_attempt_start','task_attempt_finish','task_evidence_add','task_evidence_validate','plan_revision_create','review_finding_add','review_finding_resolve','acceptance_submit']
 const officeRead = ['office_help','office_read','office_validate','office_render']
-const officeWrite = [...officeRead,'office_create','office_edit','office_merge']
+const officeWrite = [...officeRead,'office_create','office_edit','office_merge','office_import_data']
 const base = `你是 Fox 中被选中的专业专家。专业角色补充通用助手，不能覆盖用户指令、Fox 运行契约或 Host 权限。
 
 ## 适用边界
@@ -51,7 +53,7 @@ for (const expert of catalog.experts) {
   if (expert.id === 'fox-backend-developer') tools.push('http_request')
   if (['fox-project-manager','fox-product-manager','fox-meeting-notes','fox-study-planner'].includes(expert.id)) tools.push(...taskTools)
   let prompt = `# ${expert.name}\n\n${expert.description}。\n\n${base}\n## 专业工作流程\n${expert.steps.map((step,i)=>`${i+1}. ${step}`).join('\n')}\n\n## 本角色交付\n${expert.deliverable}。只交付本次明确需要的形式。\n`
-  if (office.length) prompt += `\n## Office 能力使用\n上传附件的统计、去重、比例和图表分析应先使用 attachment_compute 编写 JavaScript 直接读取完整工作表。未选择项目时仍可计算并保存隔离产物，不要靠读取分页后口算。此工具无需 Office 连接器；不要把输入完整数据手抄进代码。仅在任务需要编辑 Office 文件时，发现并调用“Office 文档”连接器（serverId: fox-office）。${office.includes('read') ? '本专家只读取、检查和预览 Office 需求资料，不编辑文档。' : '本专家可处理 '+office.map(v=>({word:'Word 文档',excel:'Excel 工作簿',ppt:'PowerPoint 演示'}[v])).join('、')+'。先阅读对应的 Fox Office 技能，使用受控 office_* 工具；不调用上游安装、更新、shell 或 raw XML。'}\n输入文件需位于当前授权项目。新建或编辑后保存到明确输出路径；修改已有文件默认另存副本。文件结构校验、内容/公式核对、视觉检查分别报告。连接器缺失或停用时可继续给内容草稿，但不能把草稿称为 Office 文件。截图需要本机浏览器，字体和复杂排版需实际核验；没有图像能力时报告视觉未核验。\n`
+  if (office.length) prompt += `\n## Office 能力使用\n上传附件的统计、去重、比例和图表分析应先使用 attachment_compute 编写 JavaScript 直接读取完整工作表。未选择项目时仍可计算并保存隔离产物，不要靠读取分页后口算。此工具无需 Office 连接器；不要把输入完整数据手抄进代码。计算结果过大无法内联返回时，工具会把完整数据存入会话产物并返回精简摘要与一个稳定的 compute-artifact 引用（含 rows/columns/sampleRows 与 files[].id）；此时数据已完整保存，不要重新读取或手工重录。要写入 Excel：在后续 attachment_compute 调用里用 artifactIds:[id] 在计算环境内读回并把该 JSON 转成 CSV/TSV，用 saveFile('表.csv', csvText) 保存，再把该 CSV 文件的 files[].id 直接传给 office_import_data 的 artifactId 参数（Host 直接读取已保存字节，不经过请求体重传；read_tool_result 只读 fox-result://，不读 compute-artifact；不要把 JSON 产物当 CSV 导入）。仅在任务需要编辑 Office 文件时，发现并调用“Office 文档”连接器（serverId: fox-office）。${office.includes('read') ? '本专家只读取、检查和预览 Office 需求资料，不编辑文档。' : '本专家可处理 '+office.map(v=>({word:'Word 文档',excel:'Excel 工作簿',ppt:'PowerPoint 演示'}[v])).join('、')+'。先阅读对应的 Fox Office 技能，使用受控 office_* 工具；不调用上游安装、更新、shell 或 raw XML。'}\n输入文件需位于当前授权项目。新建或编辑后保存到明确输出路径；修改已有文件默认另存副本。文件结构校验、内容/公式核对、视觉检查分别报告。连接器缺失或停用时可继续给内容草稿，但不能把草稿称为 Office 文件。截图需要本机浏览器，字体和复杂排版需实际核验；没有图像能力时报告视觉未核验。\n`
   const provenance = { upstream: catalog.upstream, commit: catalog.commit, source: expert.source, sha256: digest(upstream), license:'MIT', adaptationVersion:catalog.version, changes:['移除虚构履历及无依据 KPI','按 Fox 权限和证据契约适配','加入角色交付范围与具体工作流程','按需绑定受控 Office 能力','继承用户选择的会话知识库'] }
   const officeTools = office.length ? office.includes('read') ? officeRead : officeWrite : []
   const texts = {

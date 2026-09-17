@@ -354,22 +354,9 @@ impl Database {
         run_id: &str,
         scope: &KernelHostScope,
     ) -> Result<(), String> {
-        let body = scope_body(scope)?;
         self.with_connection(|connection| {
             let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let model = read_model_config(&tx, run_id)?;
-            let names: BTreeSet<String> = model.proposal_tools.iter()
-                .filter_map(|tool| tool["name"].as_str().map(str::to_owned)).collect();
-            if names != scope.tool_names { return Err(invalid("Kernel scope differs from model tool catalog")); }
-            let existing: Option<(String,String)> = tx.query_row(
-                "SELECT scope_json,scope_hash FROM kernel_host_runs WHERE run_id=?1", [run_id],
-                |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
-            if let Some((stored, stored_hash)) = existing {
-                if stored != body || stored_hash != hash(&body) { return Err(invalid("immutable Kernel Host scope conflict")); }
-            } else {
-                tx.execute("INSERT INTO kernel_host_runs(run_id,scope_json,scope_hash,created_at) VALUES(?1,?2,?3,?4)",
-                    params![run_id,body,hash(&body),now_ms()])?;
-            }
+            freeze_host_scope_in_tx(&tx, run_id, scope)?;
             tx.commit()
         })
     }
@@ -407,7 +394,7 @@ impl Database {
             let mut query = connection.prepare("SELECT b.run_id FROM run_control_bindings b JOIN runs legacy ON legacy.id=b.run_id
                 LEFT JOIN kernel_runs r ON r.run_id=b.run_id WHERE b.authority='authoritative'
                 AND legacy.status NOT IN ('completed','failed','cancelled','interrupted')
-                AND (r.state IS NULL OR r.state NOT IN ('completed','failed','cancelled','budget_exhausted')) ORDER BY b.created_at,b.run_id")?;
+                AND (r.state IS NULL OR r.state NOT IN ('completed','failed','cancelled','budget_exhausted','approval_expired')) ORDER BY b.created_at,b.run_id")?;
             let rows = query.query_map([], |row| row.get(0))?.collect();
             rows
         })
@@ -503,7 +490,7 @@ impl Database {
         self.with_connection(|connection| {
             let changed = connection.execute("UPDATE kernel_host_commands SET status='completed',completed_at=?3
                 WHERE run_id=?1 AND command_seq=?2 AND (
-                    EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state IN ('completed','failed','cancelled','budget_exhausted'))
+                    EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state IN ('completed','failed','cancelled','budget_exhausted','approval_expired'))
                     OR (kind='cancel' AND EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state='cancelling'))
                     OR (kind='approval' AND EXISTS(SELECT 1 FROM kernel_approvals a WHERE a.run_id=?1
                         AND a.tool_call_id=kernel_host_commands.tool_call_id
@@ -513,4 +500,22 @@ impl Database {
             Ok(())
         })
     }
+}
+
+pub(super) fn freeze_host_scope_in_tx(tx: &rusqlite::Transaction<'_>, run_id: &str, scope: &KernelHostScope) -> rusqlite::Result<()> {
+        let body = scope_body(scope).map_err(invalid)?;
+            let model = read_model_config(&tx, run_id)?;
+            let names: BTreeSet<String> = model.proposal_tools.iter()
+                .filter_map(|tool| tool["name"].as_str().map(str::to_owned)).collect();
+            if names != scope.tool_names { return Err(invalid("Kernel scope differs from model tool catalog")); }
+            let existing: Option<(String,String)> = tx.query_row(
+                "SELECT scope_json,scope_hash FROM kernel_host_runs WHERE run_id=?1", [run_id],
+                |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+            if let Some((stored, stored_hash)) = existing {
+                if stored != body || stored_hash != hash(&body) { return Err(invalid("immutable Kernel Host scope conflict")); }
+            } else {
+                tx.execute("INSERT INTO kernel_host_runs(run_id,scope_json,scope_hash,created_at) VALUES(?1,?2,?3,?4)",
+                    params![run_id,body,hash(&body),now_ms()])?;
+            }
+    Ok(())
 }

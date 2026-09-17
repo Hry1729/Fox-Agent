@@ -444,7 +444,7 @@ fn live_scheduler_fans_readers_out_and_never_overlaps_the_following_write() {
                 "function":{"name":"write_file","arguments":r#"{"path":"out.txt","content":"x"}"#}}
         ]}),
         json!({"role":"assistant","content":"I will now analyze the files."}),
-        json!({"role":"assistant","content":"Checking the completed reads."}),
+        json!({"role":"assistant","content":"I will check the completed reads."}),
         json!({"role":"assistant","content":"任务全部完成。"}),
     ];
     let (address, server) = start_http_model_fixture(replies);

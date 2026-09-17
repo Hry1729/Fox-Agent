@@ -2,9 +2,20 @@
 //! No mutable history table, credential snapshot or separate commit window.
 use super::Database;
 use crate::kernel::{CompactionState, KernelPersistCommand, RunState};
-use crate::kernel_compaction::{CompactionPlan, CompactionResult};
-use rusqlite::{params, Transaction};
+use crate::kernel_compaction::{
+    self as context, CompactionPlan, CompactionResult, UsageCalibrationData,
+};
+use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+
+/// Mirror of `checkpoint_hash` in kernel_coordinator.rs (A-owned): sha256 of
+/// the compact JSON form. Reconstructed views are only used for estimation,
+/// never fed back into durable state.
+fn checkpoint_hash_mirror(value: &Value) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(value.to_string().as_bytes())))
+}
 
 fn invalid(message: impl Into<String>) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
@@ -48,6 +59,161 @@ impl Database {
             }
             tx.commit()?;
             Ok(plan)
+        })
+    }
+
+    /// Reconstruct the exact model view of each completed initial/batch model
+    /// round and pair its estimated tokens with the provider usage the round
+    /// reported (#11). Cached input counts at full occupancy
+    /// (`input + cacheRead + cacheWrite`): a cache-read token still sits in
+    /// the context window, so no billing discount is applied. Continuation
+    /// rounds are skipped (their stored input is the continuation's own);
+    /// rounds whose view can no longer be re-derived exactly are poisoned
+    /// and skipped instead of guessed.
+    pub(crate) fn kernel_usage_calibration(
+        &self,
+        run_id: &str,
+    ) -> Result<UsageCalibrationData, String> {
+        self.with_connection(|connection| {
+            let tx = connection.transaction()?;
+            let config = super::kernel_model_config::read_model_config(&tx, run_id)?;
+            // A batch-only run (stored batch resume without an initial model
+            // request) has no initial input row; calibration simply starts
+            // from the batch checkpoints instead of failing the dispatch.
+            let initial_json: Option<String> = tx
+                .query_row(
+                    "SELECT input_json FROM kernel_initial_inputs WHERE run_id=?1",
+                    [run_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let mut views: HashMap<String, Vec<Value>> = HashMap::new();
+            if let Some(body) = initial_json {
+                let initial: Value = serde_json::from_str(&body)
+                    .map_err(|_| invalid("invalid Kernel initial input"))?;
+                views.insert(
+                    "initial".to_string(),
+                    initial["messages"].as_array().cloned().unwrap_or_default(),
+                );
+            }
+            let mut plans: HashMap<String, CompactionPlan> = HashMap::new();
+            let mut poisoned: HashSet<String> = HashSet::new();
+            let mut pairs: Vec<(usize, usize)> = Vec::new();
+            let mut latest_usage: Option<u64> = None;
+            let rows = {
+                let mut query = tx.prepare(
+                    "SELECT seq,event_type,payload_json FROM kernel_events WHERE run_id=?1
+                     AND event_type IN ('engine.initial_response','engine.batch_response',
+                       'engine.batch_checkpoint','context.compaction.prepared','context.compaction.result')
+                     ORDER BY seq",
+                )?;
+                let rows = query
+                    .query_map(params![run_id], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                rows
+            };
+            for (_seq, kind, body) in rows {
+                let payload: Value = match serde_json::from_str(&body) {
+                    Ok(payload) => payload,
+                    Err(_) => continue,
+                };
+                match kind.as_str() {
+                    "engine.batch_checkpoint" => {
+                        let value = &payload["checkpoint"]["value"];
+                        if payload["checkpoint"]["hash"].as_str()
+                            != Some(checkpoint_hash_mirror(value).as_str())
+                        {
+                            continue;
+                        }
+                        if let Ok(checkpoint) =
+                            serde_json::from_value::<fox_engine_protocol::KernelEngineBatchCheckpoint>(
+                                value.clone(),
+                            )
+                        {
+                            if checkpoint.validate().is_ok() {
+                                views.insert(checkpoint.batch_id.clone(), checkpoint.history);
+                            }
+                        }
+                    }
+                    "context.compaction.prepared" => {
+                        if let Ok(plan) =
+                            serde_json::from_value::<CompactionPlan>(payload["plan"].clone())
+                        {
+                            if plan.validate().is_ok() && plan.request.run_id == run_id {
+                                plans.insert(plan.request.compaction_id.clone(), plan);
+                            }
+                        }
+                    }
+                    "context.compaction.result" => {
+                        let Some(id) = payload["id"].as_str() else { continue };
+                        let Some(plan) = plans.get(id).cloned() else { continue };
+                        let Ok(result) =
+                            serde_json::from_value::<CompactionResult>(payload["result"].clone())
+                        else {
+                            continue;
+                        };
+                        let target = plan.target.clone();
+                        if poisoned.contains(&target) {
+                            continue;
+                        }
+                        match views.get(&target) {
+                            Some(current) if *current == plan.source => {
+                                match result.view(&plan) {
+                                    Ok(view) => {
+                                        views.insert(target, view);
+                                    }
+                                    Err(_) => {
+                                        poisoned.insert(target);
+                                    }
+                                }
+                            }
+                            _ => {
+                                poisoned.insert(target);
+                            }
+                        }
+                    }
+                    "engine.initial_response" | "engine.batch_response" => {
+                        let usage = &payload["response"]["assistantMessage"]["usage"];
+                        let component = |key: &str| {
+                            usage
+                                .get(key)
+                                .and_then(Value::as_u64)
+                                .filter(|value| *value <= super::MAX_RUNTIME_USAGE_COUNTER as u64)
+                        };
+                        let actual = match (component("input"), component("cacheRead"), component("cacheWrite")) {
+                            (input, cache_read, cache_write) => input
+                                .unwrap_or(0)
+                                .saturating_add(cache_read.unwrap_or(0))
+                                .saturating_add(cache_write.unwrap_or(0)),
+                        };
+                        if actual == 0 {
+                            continue;
+                        }
+                        latest_usage = Some(actual);
+                        let target = if kind == "engine.initial_response" {
+                            "initial"
+                        } else {
+                            payload["batchId"].as_str().unwrap_or("")
+                        };
+                        if poisoned.contains(target) {
+                            continue;
+                        }
+                        if let Some(view) = views.get(target) {
+                            if let Ok(estimated) = context::estimate_components_tokens(&config, view) {
+                                pairs.push((estimated, actual as usize));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            tx.commit()?;
+            Ok(UsageCalibrationData {
+                calibration: context::calibration_from_pairs(&pairs),
+                latest_usage_input_tokens: latest_usage,
+            })
         })
     }
 
@@ -252,4 +418,20 @@ pub(super) fn validate_decision(
         }
     }
     Ok(())
+}
+
+impl Database {
+    pub(crate) fn kernel_context_budget_stopped(&self, run_id:&str, reason:&str)->Result<(),String> {
+        self.with_connection(|c| {c.execute("UPDATE kernel_context_budget_reports SET report_json=json_set(report_json,'$.triggerReason',?2),updated_at=?3 WHERE run_id=?1",params![run_id,reason,crate::database::now_ms()])?;Ok(())})
+    }
+    pub(crate) fn kernel_store_context_budget(&self, run_id: &str, report: &context::ContextBudgetReport) -> Result<(),String> {
+        let body=serde_json::to_string(report).map_err(|e| e.to_string())?;
+        self.with_connection(|c| {c.execute("INSERT INTO kernel_context_budget_reports(run_id,report_json,updated_at) VALUES(?1,?2,?3) ON CONFLICT(run_id) DO UPDATE SET report_json=excluded.report_json,updated_at=excluded.updated_at",params![run_id,body,report.updated_at])?;Ok(())})
+    }
+    pub(crate) fn kernel_context_budget(&self, conversation: &str, run_id: &str) -> Result<Option<Value>,String> {
+        self.with_connection(|c| {
+            let body:Option<String>=c.query_row("SELECT b.report_json FROM kernel_context_budget_reports b JOIN runs r ON r.id=b.run_id WHERE b.run_id=?1 AND r.conversation_id=?2",params![run_id,conversation],|r|r.get(0)).optional()?;
+            body.map(|v|serde_json::from_str(&v).map_err(|_|invalid("invalid budget report"))).transpose()
+        })
+    }
 }

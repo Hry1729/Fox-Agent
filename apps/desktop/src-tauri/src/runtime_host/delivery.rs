@@ -257,6 +257,17 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
         }
     }
     hits.sort_by_key(|(dot, _, _)| *dot);
+    // Pass 1: every mention the syntax accepts, kept with its position. The role
+    // of a mention can only be judged where it stands, so collection and
+    // classification stay apart.
+    struct Mention {
+        name_start: usize,
+        name: String,
+        /// Case-folded, separator-normalized identity of the named file.
+        path_key: String,
+        kind: ArtifactKind,
+    }
+    let mut mentions: Vec<Mention> = Vec::new();
     let mut claimed_ranges: Vec<(usize, usize)> = Vec::new();
     for (dot, end, extension) in hits {
         let Some(kind) = ArtifactKind::from_extension(extension) else {
@@ -317,15 +328,42 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
             continue;
         }
         claimed_ranges.push((name_start, end));
-        let key = format!("file:{}", name.replace(['/', '\\'], "_").to_lowercase());
+        mentions.push(Mention {
+            name_start,
+            name: name.to_owned(),
+            path_key: name.replace(['/', '\\'], "_").to_lowercase(),
+            kind,
+        });
+    }
+
+    // Pass 2: merge the uses a path is named for.
+    //
+    // A file the task introduces as *input to read* is not something Fox was
+    // asked to produce: "读取 AGV源数据.xlsx，按…统计…生成 分布.xlsx" promises one
+    // artifact, not two. Without this, the source workbook became a checklist
+    // item that can never be satisfied (it exists but was not written by this
+    // Run), so the Run would demand a repair for a file the user never asked
+    // for. The exclusion is per path and per mention: a later "保存同一文件" is
+    // an explicit deliverable demand, and reading a file first does not cancel
+    // it — editing an existing document in place is an ordinary task.
+    let written: BTreeSet<String> = mentions
+        .iter()
+        .filter(|mention| mention_is_output(text, mention.name_start))
+        .map(|mention| mention.path_key.clone())
+        .collect();
+    for mention in mentions {
+        if !written.contains(&mention.path_key) && mention_is_input(text, mention.name_start) {
+            continue;
+        }
+        let kind = mention.kind;
         push(
             &mut seeds,
             &mut used_keys,
             DeliveryChecklistSeed {
-                item_key: key,
-                target_path: Some(name.replace('\\', "/")),
+                item_key: format!("file:{}", mention.path_key),
+                target_path: Some(mention.name.replace('\\', "/")),
                 artifact_id: None,
-                display_name: name.to_owned(),
+                display_name: mention.name,
                 checks: kind
                     .planned_checks()
                     .iter()
@@ -495,7 +533,13 @@ pub(crate) fn evaluate_stop(
         return Ok(DeliveryStop::NoChecklist);
     }
     let root = project_root.map(PathBuf::from);
-    let started_at = database.run_created_at(run_id)?;
+    let started_at = database.with_connection(|c| {
+        c.query_row("WITH RECURSIVE chain(run_id,depth) AS (
+          SELECT ?1,0 UNION ALL SELECT k.continued_from_run_id,chain.depth+1
+          FROM kernel_runs k JOIN chain ON k.run_id=chain.run_id
+          WHERE k.continued_from_run_id IS NOT NULL AND chain.depth<100)
+          SELECT MIN(r.created_at) FROM runs r JOIN chain ON chain.run_id=r.id",[run_id],|r|r.get::<_,i64>(0))
+    })?;
     // Structured demands the task text states in a machine-decidable form. When
     // it states none, every content demand it made is reported as unverified
     // rather than assumed satisfied by "the file opens".
@@ -519,6 +563,7 @@ pub(crate) fn evaluate_stop(
             root.as_deref(),
             &candidates,
             &mut assigned,
+            started_at,
         )?);
     }
     apply_delivery_requirements(run_id, &checklist, &requirements, root.as_deref(), &mut verdicts)?;
@@ -689,6 +734,7 @@ fn verify_item(
     root: Option<&Path>,
     candidates: &[Candidate],
     assigned: &mut BTreeSet<String>,
+    started_at: i64,
 ) -> Result<ItemVerdict, String> {
     // Pathless slots carry their expected extension in the key
     // (`slot:xlsx:1`); explicit items carry it in the target path.
@@ -707,24 +753,41 @@ fn verify_item(
 
     // A previously bound slot keeps verifying the exact same file even when
     // newer files appear during later repair rounds.
+    let mut untouched_target: Option<PathBuf> = None;
     let bound = if let Some(target) = item.target_path.as_deref() {
         let path = resolve_under_root(root, target)?;
         candidates
             .iter()
-            .find(|candidate| candidate.path == path)
+            .find(|candidate| candidate.path == path
+                && (candidate.source == "artifact"
+                    || (candidate.modified_ms != i64::MAX && candidate.modified_ms >= started_at)))
             .cloned()
             .or_else(|| {
-                if path.is_file() {
-                    Some(Candidate {
-                        path,
-                        artifact_id: item.artifact_id.clone(),
-                        artifact_sha: None,
-                        source: "declared",
-                        modified_ms: 0,
-                    })
-                } else {
-                    None
+                if !path.is_file() {
+                    return None;
                 }
+                // Nothing in this Run's verified artifacts covers the target, so
+                // timestamps can establish freshness, not a content diff. Do
+                // not apply the broad scan's five-second discovery tolerance
+                // to a named target: it would accept a just-uploaded input as
+                // a completed in-place edit before this Run wrote anything.
+                let modified_ms = path
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(modified_ms_since_epoch)
+                    .unwrap_or(i64::MAX);
+                if modified_ms == i64::MAX || modified_ms < started_at {
+                    untouched_target = Some(path.clone());
+                    return None;
+                }
+                Some(Candidate {
+                    path,
+                    artifact_id: item.artifact_id.clone(),
+                    artifact_sha: None,
+                    source: "declared",
+                    modified_ms,
+                })
             })
     } else {
         bind_pathless_slot(kind, candidates, assigned)
@@ -747,7 +810,10 @@ fn verify_item(
     }
 
     let Some(candidate) = bound else {
-        return Ok(missing_verdict(item));
+        return Ok(match untouched_target {
+            Some(path) => untouched_verdict(item, &path),
+            None => missing_verdict(item),
+        });
     };
 
     let mut checks = serde_json::Map::new();
@@ -885,6 +951,33 @@ fn missing_verdict(item: &DeliveryChecklistItem) -> ItemVerdict {
         passed: false,
         finding_json: finding.to_string(),
         bound_path: None,
+    }
+}
+
+/// A named target without evidence of a fresh write. A timestamp is not a
+/// content comparison, so do not claim the bytes are known to be unchanged.
+fn untouched_verdict(item: &DeliveryChecklistItem, path: &Path) -> ItemVerdict {
+    let finding = json!({
+        "itemKey": item.item_key,
+        "displayName": item.display_name,
+        "boundPath": path.to_string_lossy(),
+        "source": "untouched",
+        "reason": format!(
+            "交付项「{}」缺少本次任务写入更新的证据：\
+             仅凭文件存在不能算作交付，请完成要求的修改并保存该文件",
+            item.display_name
+        ),
+        "checks": {
+            "exists": "passed",
+            "updatedByRun": {"state": "failed", "reason": "mtime 早于 Run 开始时间或不可读取"}
+        },
+        "stats": Value::Null,
+    });
+    ItemVerdict {
+        item_key: item.item_key.clone(),
+        passed: false,
+        finding_json: finding.to_string(),
+        bound_path: Some(path.to_path_buf()),
     }
 }
 
@@ -1348,6 +1441,16 @@ const SOURCE_INPUT_VERBS: &[&str] = &[
     "分析", "解析",
 ];
 
+/// Verbs that introduce a file as the **target to write**. A file can be both:
+/// "读取 report.docx，修改内容并保存 report.docx" names one path twice, and the
+/// second mention is a save request.
+const TARGET_OUTPUT_VERBS: &[&str] = &[
+    "保存", "另存", "存入", "存成", "写入", "写到", "覆盖", "更新", "修改", "编辑", "改写",
+    "填充", "追加", "导出", "输出", "生成", "创建", "新建", "制作", "整理成", "汇总成",
+    "save", "write", "append", "overwrite", "update", "modify", "edit", "export",
+    "generate", "create", "produce",
+];
+
 /// What the task asks to compute from source data, as a requirement.
 ///
 /// Two outcomes only, both explicit:
@@ -1392,10 +1495,46 @@ pub(crate) fn source_statistics_demand(text: &str) -> Option<DeliveryRequirement
 }
 
 /// True when the task asks for computed statistics rather than a plain artifact.
+///
+/// Two sources of false demand are excluded: a *file name* that merely contains
+/// such a word ("统计分布.xlsx" is an artifact name, not an instruction), and a
+/// bare "统计"/"汇总" used as a noun ("统计结果" as a section title) which has to
+/// be followed by what is being computed.
 fn asks_for_statistics(text: &str) -> bool {
-    ["统计", "汇总", "分布", "占比", "比例", "频次"]
+    let mut prose = text.to_owned();
+    for seed in expectations_from_task(text) {
+        if let Some(name) = seed.target_path {
+            prose = prose.replace(name.as_str(), " ");
+        }
+    }
+    if ["占比", "比例", "分布", "频次"]
         .iter()
-        .any(|marker| text.contains(marker))
+        .any(|marker| prose.contains(marker))
+    {
+        return true;
+    }
+    const COMPUTED: [&str; 10] = [
+        "数量", "个数", "条数", "占比", "比例", "分布", "频次", "平均", "合计", "总计",
+    ];
+    let mut from = 0;
+    while let Some(relative) = prose[from..].find("统计") {
+        let at = from + relative + "统计".len();
+        from = at;
+        let tail: String = prose[at..].chars().take(6).collect();
+        if COMPUTED.iter().any(|word| tail.contains(word)) {
+            return true;
+        }
+    }
+    let mut from = 0;
+    while let Some(relative) = prose[from..].find("汇总") {
+        let at = from + relative + "汇总".len();
+        from = at;
+        let tail: String = prose[at..].chars().take(6).collect();
+        if COMPUTED.iter().any(|word| tail.contains(word)) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The source file candidates and aggregation column the task names.
@@ -1442,11 +1581,12 @@ fn source_statistics_binding(text: &str) -> Option<(Vec<String>, Option<String>)
                 let bare = name.rsplit(['/', '\\']).next().unwrap_or(name).to_lowercase();
                 // A file the task asks Fox to *produce* is a deliverable, not a
                 // source — but the same name can also be introduced as input
-                // ("读取 X" vs "生成 X"), so the verb in front of it decides for
-                // the conservative reading. The maximal reading is offered too:
-                // Chinese file names may contain the characters prose uses, and
-                // only a name that exists on disk is ever bound.
-                if strict_reading && !introduced_as_input(text, name) {
+                // ("读取 X" vs "生成 X"), so the verb in front of **this**
+                // occurrence decides for the conservative reading. The maximal
+                // reading is offered too: Chinese file names may contain the
+                // characters prose uses, and only a name that exists on disk is
+                // ever bound.
+                if strict_reading && !mention_is_input(text, end - name.len()) {
                     if deliverables.iter().any(|deliverable| deliverable == &bare) {
                         continue;
                     }
@@ -1547,21 +1687,45 @@ fn is_source_name_character(character: char) -> bool {
         )
 }
 
-/// True when the token in front of `name` introduces it as input to read.
-fn introduced_as_input(text: &str, name: &str) -> bool {
-    let Some(start) = text.find(name) else {
-        return false;
-    };
-    let tail = text[..start].trim_end();
-    let tail = tail
+/// The verb that introduces **this** mention of a file name, judged from the
+/// characters directly in front of it. Locating the name with `text.find(name)`
+/// cannot answer the question: a task that reads one file and saves it back
+/// names the same path twice, and only the first occurrence is an input.
+fn mention_verb(text: &str, name_start: usize, verbs: &[&str]) -> bool {
+    let tail = text[..name_start].trim_end();
+    let window = tail
         .char_indices()
         .rev()
-        .take(6)
+        .take(10)
         .map(|(index, _)| index)
         .last()
         .map(|index| &tail[index..])
         .unwrap_or(tail);
-    SOURCE_INPUT_VERBS.iter().any(|verb| tail.ends_with(verb))
+    verbs.iter().any(|verb| {
+        let Some(before) = window.strip_suffix(verb) else {
+            return false;
+        };
+        // An ASCII verb must start at a word boundary: "reserve x.docx" is not
+        // a save request, and "united x.xlsx" is not a create request.
+        !verb
+            .chars()
+            .next()
+            .is_some_and(|value| value.is_ascii_alphanumeric())
+            || !matches!(
+                before.chars().next_back(),
+                Some(value) if value.is_ascii_alphanumeric()
+            )
+    })
+}
+
+/// True when **this** mention introduces the name as input to read.
+fn mention_is_input(text: &str, name_start: usize) -> bool {
+    mention_verb(text, name_start, SOURCE_INPUT_VERBS)
+}
+
+/// True when **this** mention asks for the name to be written.
+fn mention_is_output(text: &str, name_start: usize) -> bool {
+    mention_verb(text, name_start, TARGET_OUTPUT_VERBS)
 }
 
 /// Bind a `SourceDistribution` requirement to a real file under the project
@@ -2925,9 +3089,36 @@ pub(crate) fn item_requirements(
 /// Scope the task's requirements to one checklist item for storage. Only the
 /// requirements this item can actually satisfy are attached, so the gate never
 /// checks a chart demand against a Word document.
+/// Attach requirements to **every** seed of a checklist.
+///
+/// Cross-artifact requirements (a stated ratio, a statistic recomputed from the
+/// task's source data) are stored on the FIRST seed only: the gate reports them
+/// once against every bound artifact, and storing them per item would repeat the
+/// finding for each deliverable.
+pub(crate) fn attach_requirements_to_seeds(
+    seeds: &mut [StoredChecklistSeed],
+    requirements: &[DeliveryRequirement],
+) {
+    let carrier = seeds.first().map(|seed| seed.item_key.clone());
+    for seed in seeds.iter_mut() {
+        let include_cross = carrier.as_deref() == Some(seed.item_key.as_str());
+        attach_requirements_with(seed, requirements, include_cross);
+    }
+}
+
 pub(crate) fn attach_requirements(
     seed: &mut StoredChecklistSeed,
     requirements: &[DeliveryRequirement],
+) {
+    // A single-seed caller has no other item that could own a cross requirement,
+    // so this seed carries them too.
+    attach_requirements_with(seed, requirements, true);
+}
+
+fn attach_requirements_with(
+    seed: &mut StoredChecklistSeed,
+    requirements: &[DeliveryRequirement],
+    include_cross: bool,
 ) {
     let kind = seed
         .target_path
@@ -2941,7 +3132,14 @@ pub(crate) fn attach_requirements(
         })
         .and_then(ArtifactKind::from_extension)
         .unwrap_or(ArtifactKind::Other);
-    seed.requirements = item_requirements(requirements, &seed.item_key, kind)
+    let mut scoped = item_requirements(requirements, &seed.item_key, kind);
+    if include_cross {
+        // Without this the requirement never reached storage, so the production
+        // gate could not check it at all — the demand was verified only by unit
+        // tests that called the checker directly.
+        scoped.extend(cross_artifact_requirements(requirements));
+    }
+    seed.requirements = scoped
         .iter()
         .map(|requirement| StoredRequirement {
             item_key: requirement.item_key.clone(),
@@ -3707,6 +3905,43 @@ mod tests {
         path
     }
 
+    /// A delivered workbook whose first column carries the given statement
+    /// lines, so a cross-artifact statistic can be stated by a *spreadsheet*
+    /// (the gate reads bound artifacts, not loose text files).
+    fn statement_workbook(lines: &[&str]) -> Vec<u8> {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/office-reading.xlsx");
+        let base = std::fs::read(&fixture).expect("test fixture workbook");
+        let mut entries =
+            crate::local_knowledge_import::zip_entries(&base).expect("fixture package");
+        let index = entries
+            .iter()
+            .position(|(name, _)| name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml"))
+            .expect("fixture has a worksheet part");
+        let sheet = String::from_utf8_lossy(&entries[index].1).into_owned();
+        let start = sheet.find("<sheetData").expect("worksheet sheetData");
+        let end =
+            sheet.find("</sheetData>").expect("worksheet sheetData end") + "</sheetData>".len();
+        let escape = |value: &str| {
+            value
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+        };
+        let mut rows = String::from("<sheetData>");
+        for (position, line) in lines.iter().enumerate() {
+            let row = position + 1;
+            rows.push_str(&format!(
+                r#"<row r="{row}"><c r="A{row}" t="inlineStr"><is><t>{}</t></is></c></row>"#,
+                escape(line)
+            ));
+        }
+        rows.push_str("</sheetData>");
+        let rebuilt = format!("{}{}{}", &sheet[..start], rows, &sheet[end..]);
+        entries[index].1 = rebuilt.into_bytes();
+        stored_zip(&entries)
+    }
+
     /// A source workbook with a real header row and records.
     ///
     /// Built by taking a real xlsx fixture (so the container is exactly what a
@@ -4250,7 +4485,7 @@ mod tests {
 
         // A statistics demand the task does not make bindable is reported
         // unverified, with the demand text, instead of disappearing.
-        let vague = requirements_from_task("请统计任务情况，生成 分布.xlsx。");
+        let vague = requirements_from_task("请统计各任务类型的数量与占比，生成 分布.xlsx。");
         let unbound = vague
             .iter()
             .find(|requirement| {
@@ -4318,6 +4553,237 @@ mod tests {
         );
         // The missing artifact itself is still a failure, so the run repairs.
         assert!(!items[0].passed);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// F3 through the **production gate** (`evaluate_stop`), not a direct call to
+    /// the checker: a statistic bound to the source data the task names is
+    /// recomputed and compared, and a demand that cannot be bound is reported
+    /// unverified instead of passing.
+    #[test]
+    fn the_production_gate_recomputes_source_statistics_and_flags_unbound_demands() {
+        let root = std::env::temp_dir().join(format!(
+            "fox-delivery-source-gate-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let (db, run_id) = conversation_run(&root);
+        // The source workbook the task names, plus a deliverable that states the
+        // distribution as the source implies it (3/1 of 4 records).
+        let (source_bytes, _sheet) = source_workbook("任务类型", &["卸船", "装船", "装船", "装船"]);
+        std::fs::write(root.join("AGV源数据.xlsx"), &source_bytes).unwrap();
+        let task = "请读取 AGV源数据.xlsx，按 任务类型 列统计数量与占比，生成 统计分布.xlsx。";
+        let mut seeds = expectations_from_task(task);
+        assert_eq!(seeds.len(), 1, "one deliverable is promised");
+        let requirements = requirements_from_task(task)
+            .into_iter()
+            .map(|requirement| bind_source_distribution(&root, requirement))
+            .collect::<Vec<_>>();
+        assert!(
+            requirements
+                .iter()
+                .any(|requirement| matches!(requirement.kind, RequirementKind::SourceDistribution { .. })),
+            "the named source and column must bind a statistic: {requirements:?}"
+        );
+        for seed in seeds.iter_mut() {
+            attach_requirements(seed, &requirements);
+        }
+        db.seed_delivery_checklist(&run_id, &seeds, now_ms()).unwrap();
+
+        // An artifact stating the numbers the source implies passes the gate.
+        std::fs::write(
+            root.join("统计分布.xlsx"),
+            statement_workbook(&[
+                "总计 4 条",
+                "卸船 1 条，占比 25.0%",
+                "装船 3 条，占比 75.0%",
+            ]),
+        )
+        .unwrap();
+        let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
+        let item = &stop.items()[0];
+        let finding: Value = serde_json::from_str(&item.finding_json).unwrap();
+        let entries = finding["requirements"].as_array().cloned().unwrap_or_default();
+        let source_entry = entries
+            .iter()
+            .find(|entry| entry["check"] == json!("source_distribution"))
+            .expect("the statistic must be reported by the gate");
+        assert_eq!(
+            source_entry["state"],
+            json!("passed"),
+            "the recomputed numbers must pass: {entries:?}"
+        );
+
+        // The source record changes; the artifact still states the old numbers,
+        // so the gate must now fail the item with a reason naming the source.
+        let (changed, _) = source_workbook("任务类型", &["卸船", "卸船", "卸船", "装船"]);
+        std::fs::write(root.join("AGV源数据.xlsx"), &changed).unwrap();
+        std::fs::write(
+            root.join("统计分布.xlsx"),
+            statement_workbook(&[
+                "总计 4 条",
+                "卸船 1 条，占比 25.0%",
+                "装船 3 条，占比 75.0%",
+            ]),
+        )
+        .unwrap();
+        let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
+        let item = &stop.items()[0];
+        assert!(!item.passed, "stale numbers must fail the gate");
+        let finding: Value = serde_json::from_str(&item.finding_json).unwrap();
+        let entries = finding["requirements"].as_array().cloned().unwrap_or_default();
+        let source_entry = entries
+            .iter()
+            .find(|entry| entry["check"] == json!("source_distribution"))
+            .expect("the statistic must be reported");
+        assert_eq!(source_entry["state"], json!("failed"));
+        let reason = source_entry["reason"].as_str().unwrap_or_default();
+        assert!(reason.contains("源数据"), "{reason}");
+        assert!(reason.contains("已变化"), "the drift must be stated: {reason}");
+
+        // A statistics demand the task does not make bindable is reported
+        // unverified: visible, and never counted as a pass.
+        let vague_root = root.join("vague");
+        std::fs::create_dir_all(&vague_root).unwrap();
+        let (vague_db, vague_run) = conversation_run(&vague_root);
+        let vague_task = "请统计各任务类型的数量与占比，生成 统计结果.xlsx。";
+        let mut vague_seeds = expectations_from_task(vague_task);
+        assert_eq!(vague_seeds.len(), 1);
+        let vague_requirements = requirements_from_task(vague_task)
+            .into_iter()
+            .map(|requirement| bind_source_distribution(&vague_root, requirement))
+            .collect::<Vec<_>>();
+        for seed in vague_seeds.iter_mut() {
+            attach_requirements(seed, &vague_requirements);
+        }
+        vague_db
+            .seed_delivery_checklist(&vague_run, &vague_seeds, now_ms())
+            .unwrap();
+        std::fs::write(
+            vague_root.join("统计结果.xlsx"),
+            std::fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/office-reading.xlsx"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let stop = evaluate_stop(&vague_db, Some(vague_root.to_str().unwrap()), &vague_run).unwrap();
+        let item = &stop.items()[0];
+        let finding: Value = serde_json::from_str(&item.finding_json).unwrap();
+        let entries = finding["requirements"].as_array().cloned().unwrap_or_default();
+        let entry = entries
+            .iter()
+            .find(|entry| entry["check"] == json!("source_statistics"))
+            .expect("an unbound statistic must still be reported");
+        assert_eq!(entry["state"], json!("unverified"), "{entries:?}");
+        assert!(
+            item.passed,
+            "an unverifiable demand must not fail an otherwise complete deliverable"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// C1: one path can be named twice with two roles — read first, saved after.
+    /// Deciding the role of every mention from where the name *first* appears in
+    /// the whole text dropped the save demand, so the promised document never
+    /// reached the checklist at all.
+    #[test]
+    fn a_file_read_and_then_saved_back_stays_an_explicit_deliverable() {
+        let seeds = expectations_from_task("读取 report.docx，修改内容并保存 report.docx。");
+        let paths: Vec<_> = seeds
+            .iter()
+            .filter_map(|seed| seed.target_path.clone())
+            .collect();
+        assert_eq!(paths, vec!["report.docx".to_string()], "{seeds:?}");
+        assert_eq!(seeds[0].item_key, "file:report.docx");
+    }
+
+    /// Editing an existing document in place is an ordinary task; the input and
+    /// the output are the same path and it is still owed back.
+    #[test]
+    fn editing_an_existing_document_in_place_promises_that_document_once() {
+        let seeds = expectations_from_task("打开 会议纪要.docx，把第二段改短后保存 会议纪要.docx。");
+        let paths: Vec<_> = seeds
+            .iter()
+            .filter_map(|seed| seed.target_path.clone())
+            .collect();
+        assert_eq!(paths, vec!["会议纪要.docx".to_string()], "{seeds:?}");
+    }
+
+    /// The original purpose of the input gate survives: a source file and a
+    /// separate output file are still one promise, not two.
+    #[test]
+    fn a_distinct_source_and_target_stay_one_source_and_one_deliverable() {
+        let seeds = expectations_from_task("读取 AGV源数据.xlsx，按状态列统计后生成 分布.xlsx。");
+        let paths: Vec<_> = seeds
+            .iter()
+            .filter_map(|seed| seed.target_path.clone())
+            .collect();
+        assert_eq!(paths, vec!["分布.xlsx".to_string()], "{seeds:?}");
+    }
+
+    /// A task that only reads promises no file: it must seed nothing even when
+    /// the document it reads is named with an extension.
+    #[test]
+    fn a_read_only_task_seeds_no_delivery_target() {
+        assert!(
+            expectations_from_task("读取 report.docx 并总结它的要点。").is_empty(),
+            "{:?}",
+            expectations_from_task("读取 report.docx 并总结它的要点。")
+        );
+    }
+
+    /// C1 through the **production gate**: a named target that already existed
+    /// when the Run started, and that this Run never rewrote, cannot be declared
+    /// delivered because the bytes happen to be on disk.
+    #[test]
+    fn the_production_gate_refuses_a_named_target_this_run_never_rewrote() {
+        use std::io::Write;
+        use std::time::SystemTime;
+
+        let root = std::env::temp_dir().join(format!(
+            "fox-delivery-untouched-target-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let task = "读取 台账.xlsx，按状态列更新内容后保存 台账.xlsx。";
+        let seeds = expectations_from_task(task);
+        assert_eq!(seeds.len(), 1, "the saved-back file is the promise");
+        assert_eq!(seeds[0].target_path.as_deref(), Some("台账.xlsx"));
+
+        let (db, run_id) = conversation_run(&root);
+        db.seed_delivery_checklist(&run_id, &seeds, now_ms()).unwrap();
+        let (source_bytes, _) = source_workbook("任务类型", &["卸船", "装船", "装船", "装船"]);
+
+        let target = root.join("台账.xlsx");
+        // Test both an old input and one uploaded only a second before the
+        // Run. The latter used to slip through the scan's five-second window.
+        std::fs::write(&target, &source_bytes).unwrap();
+        for age_ms in [60_000, 1_000] {
+            let stale = SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(
+                (db.run_created_at(&run_id).unwrap() - age_ms) as u64);
+            let file = std::fs::OpenOptions::new().write(true).open(&target).unwrap();
+            file.set_modified(stale).unwrap();
+            drop(file);
+            let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
+            let item = &stop.items()[0];
+            assert!(!item.passed, "an untouched file is not a delivery (age {age_ms}ms): {item:?}");
+            let finding: Value = serde_json::from_str(&item.finding_json).unwrap();
+            assert_eq!(finding["source"], json!("untouched"), "{finding}");
+            assert!(finding["reason"].as_str().unwrap_or_default().contains("缺少本次任务写入更新的证据"), "{finding}");
+        }
+
+        // The Run really writes the document back: the same gate now passes it.
+        let mut file = std::fs::File::create(&target).unwrap();
+        file.write_all(&source_bytes).unwrap();
+        file.flush().unwrap();
+        drop(file);
+        let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
+        assert!(
+            stop.items()[0].passed,
+            "a rewritten target is delivered: {:?}",
+            stop.items()[0]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

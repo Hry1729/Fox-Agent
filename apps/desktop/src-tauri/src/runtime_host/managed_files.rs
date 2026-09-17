@@ -214,7 +214,7 @@ pub(crate) enum ManagedWrite {
 /// * that connector is in the Run's *frozen* scope (its definition hash was
 ///   frozen at Run creation, so a swapped connector cannot register);
 /// * the inner operation is authorized by the frozen scope as well;
-/// * only the two document-mutating operations produce versions.
+/// * only the document-mutating operations produce versions.
 ///
 /// A generic MCP server never reaches the `Some` branch, even when its result
 /// carries byte-identical `foxManagedFile` JSON.
@@ -238,7 +238,7 @@ pub(crate) fn frozen_office_operation<'a>(
     if !scope.office_tools.contains(inner) {
         return None;
     }
-    if !matches!(inner, "office_create" | "office_edit") {
+    if !matches!(inner, "office_create" | "office_edit" | "office_import_data") {
         return None;
     }
     Some((
@@ -256,6 +256,7 @@ pub(crate) fn verified_managed_write(
     scope: &crate::database::KernelHostScope,
     tool: &str,
     input: &serde_json::Value,
+    context: Option<&ManagedExecutionContext<'_>>,
 ) -> Option<ManagedWrite> {
     let root_string = root.to_string_lossy().into_owned();
     match tool {
@@ -273,11 +274,21 @@ pub(crate) fn verified_managed_write(
             let (inner_tool, arguments) = frozen_office_operation(scope, tool, input)?;
             // The Host re-runs the admission the gateway will run, so the target
             // used for registration is the one this dispatch was approved for.
-            let target = crate::office::prepare(
+            // The same artifact context is used so an artifactId import is
+            // admitted here exactly as the executor will admit it.
+            let office_context = context.and_then(|context| {
+                Some(crate::office::OfficeCallContext {
+                    database: context.database,
+                    sessions_dir: context.sessions_dir?,
+                    conversation_id: context.conversation_id,
+                })
+            });
+            let target = crate::office::prepare_with_context(
                 &inner_tool,
                 arguments,
                 Some(&root_string),
                 permission_mode,
+                office_context.as_ref(),
             )
             .ok()?
             .target_path()?
@@ -351,6 +362,9 @@ pub(crate) struct ManagedExecutionContext<'a> {
     pub project_root: Option<&'a str>,
     pub permission_mode: &'a str,
     pub scope: &'a crate::database::KernelHostScope,
+    /// The Host's session store, used to resolve compute-artifact references in
+    /// the managed-write pre-flight. `None` in unit tests.
+    pub sessions_dir: Option<&'a Path>,
 }
 
 /// Run one Host dispatch with managed-file bookkeeping around it.
@@ -373,13 +387,14 @@ pub(crate) fn execute_with_managed_versions<F>(
 where
     F: FnOnce() -> Result<serde_json::Value, String>,
 {
-    let managed = context.project_root.and_then(|root| {
+    let managed = context.project_root.and_then(|_| {
         verified_managed_write(
-            Path::new(root),
+            Path::new(context.project_root.unwrap_or_default()),
             context.permission_mode,
             context.scope,
             tool,
             input,
+            Some(&context),
         )
     });
     let capture = match &managed {
@@ -771,8 +786,8 @@ pub(crate) fn verify_office_write(
             "connector declared tool {declared_tool:?} but the Host dispatched {tool:?}"
         ));
     }
-    if !matches!(tool, "office_create" | "office_edit") {
-        return Err("only office_create/office_edit produce managed versions".into());
+    if !matches!(tool, "office_create" | "office_edit" | "office_import_data") {
+        return Err("only office_create/office_edit/office_import_data produce managed versions".into());
     }
     let declared_path = string("storagePath").unwrap_or_default();
     let declared_path = PathBuf::from(declared_path);
@@ -974,6 +989,7 @@ mod tests {
             project_root: Some(root.as_str()),
             permission_mode: "allow",
             scope: &scope,
+            sessions_dir: None,
         };
 
         // A managed Host write goes through the seam: the callback runs and a
@@ -1446,7 +1462,7 @@ mod tests {
 
         // office_create: no source document.
         let create = office_wrapper_input(crate::office::SERVER_ID, "office_create", "报告-新建.docx");
-        match verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &create)
+        match verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &create, None)
             .expect("a frozen office_create is a managed write")
         {
             ManagedWrite::Office { inner_tool, verified } => {
@@ -1467,7 +1483,7 @@ mod tests {
                 "operations": [{"command": "set", "path": "/body/p[1]", "props": {"text": "新"}}],
             },
         });
-        match verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &edit) {
+        match verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &edit, None) {
             Some(ManagedWrite::Office { inner_tool, verified }) => {
                 assert_eq!(inner_tool, "office_edit");
                 assert!(verified.storage_path.ends_with("报告-编辑.docx"));
@@ -1488,7 +1504,7 @@ mod tests {
         // An ordinary MCP server with a document-shaped tool.
         let generic = office_wrapper_input("some-remote-mcp", "office_create", "报告.docx");
         assert!(frozen_office_operation(&scope, "call_mcp_tool", &generic).is_none());
-        assert!(verified_managed_write(&root, "allow", &scope, "call_mcp_tool", &generic).is_none());
+        assert!(verified_managed_write(&root, "allow", &scope, "call_mcp_tool", &generic, None).is_none());
 
         // The built-in connector id, but not part of the Run's frozen scope.
         let unfrozen = crate::database::KernelHostScope {
@@ -1515,7 +1531,7 @@ mod tests {
         // The wrapper is required: a bare inner name is not a managed write
         // either, because no production dispatch uses that shape.
         let bare = serde_json::json!({"output": "报告.docx"});
-        assert!(verified_managed_write(&root, "allow", &scope, "office_create", &bare).is_none());
+        assert!(verified_managed_write(&root, "allow", &scope, "office_create", &bare, None).is_none());
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1526,7 +1542,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let scope = frozen_office_scope(&[]);
         let input = serde_json::json!({"path": "notes.txt", "content": "hello"});
-        match verified_managed_write(&root, "allow", &scope, "write_file", &input)
+        match verified_managed_write(&root, "allow", &scope, "write_file", &input, None)
             .expect("write_file remains a managed write")
         {
             ManagedWrite::HostFile { verified, .. } => {
@@ -1546,7 +1562,7 @@ mod tests {
         let scope = frozen_office_scope(&["office_create", "office_edit"]);
         let output = "报告.docx";
         let input = office_wrapper_input(crate::office::SERVER_ID, "office_create", output);
-        let managed = verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &input)
+        let managed = verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &input, None)
             .expect("frozen office create");
         let (inner_tool, verified) = match managed {
             ManagedWrite::Office { inner_tool, verified } => (inner_tool, verified),
@@ -1606,7 +1622,7 @@ mod tests {
         let harness = Harness::new();
         let scope = frozen_office_scope(&["office_create"]);
         let input = office_wrapper_input(crate::office::SERVER_ID, "office_create", "报告.docx");
-        let verified = match verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &input)
+        let verified = match verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &input, None)
             .expect("frozen office create")
         {
             ManagedWrite::Office { verified, .. } => verified,
@@ -1670,5 +1686,568 @@ mod tests {
             &serde_json::json!({"content": [], "isError": false}),
         )
         .is_err());
+    }
+
+    /// The data-block import is a first-class managed write: recognized from
+    /// the same frozen wrapper, registered under its own operation name, and
+    /// restorable byte-for-byte through the shared version chain.
+    #[test]
+    fn a_verified_import_data_write_registers_and_restores() {
+        let harness = Harness::new();
+        let scope = frozen_office_scope(&["office_import_data"]);
+        let input = serde_json::json!({
+            "serverId": crate::office::SERVER_ID,
+            "tool": "office_import_data",
+            "arguments": {"output": "汇总.xlsx", "sheet": "数据", "data": "name,value\nalpha,1"},
+        });
+        let managed = verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &input, None)
+            .expect("frozen office import");
+        let (inner_tool, verified) = match managed {
+            ManagedWrite::Office { inner_tool, verified } => (inner_tool, verified),
+            other => panic!("expected an Office write, got {other:?}"),
+        };
+        assert_eq!(inner_tool, "office_import_data");
+        let target = PathBuf::from(&verified.storage_path);
+        fs::write(&target, "workbook after the import").unwrap();
+        let (after_hash, after_size) = hash_file(&target).unwrap();
+        harness.seed_run("run-1");
+        let result = serde_json::json!({
+            "content": [{"type": "text", "text": "imported"}],
+            "isError": false,
+            "details": {"foxManagedFile": {
+                "tool": "office_import_data",
+                "storagePath": target.canonicalize().unwrap().to_string_lossy(),
+                "displayName": "汇总.xlsx",
+                "changeKind": "created",
+                "beforeHash": serde_json::Value::Null,
+                "beforeSize": serde_json::Value::Null,
+                "afterHash": after_hash,
+                "afterSize": after_size,
+                "backupPath": serde_json::Value::Null,
+            }},
+        });
+        record_office_write_from_result(
+            &harness.db,
+            &harness.backups,
+            &harness.conversation,
+            "run-1",
+            Some("call-import"),
+            &verified,
+            &inner_tool,
+            &result,
+        )
+        .expect("a consistent import declaration registers");
+        let rows = harness.versions(Some(&target));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tool, "office_import_data");
+        fs::write(&target, "overwritten later").unwrap();
+        harness.restore(&rows[0].id, true).expect("restore the imported workbook");
+        assert_eq!(contents_of(&target), "workbook after the import");
+    }
+
+    /// The Legacy transport shares the same verify/registration seam: an
+    /// import-by-artifact reference is admitted (artifact resolved against the
+    /// frozen conversation) and the completed import registers a restorable
+    /// version. This mirrors `runtime_host::mod.rs`'s precheck +
+    /// `record_office_write_from_result` for `office_import_data`.
+    #[test]
+    fn legacy_artifact_import_is_verified_and_registered_for_restore() {
+        let harness = Harness::new();
+        let scope = frozen_office_scope(&["office_import_data"]);
+        let sessions_dir = harness.root.join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        // Seed a saved compute CSV artifact for this exact conversation.
+        let outputs = crate::runtime_host::attachment_compute::safe_workspace(
+            &sessions_dir,
+            &harness.conversation,
+            "run-legacy-artifact",
+        )
+        .unwrap()
+        .join("outputs");
+        fs::create_dir_all(&outputs).unwrap();
+        let csv = "name,value\nalpha,1\nbeta,2\n";
+        let artifact_path = outputs.join("saved.csv");
+        fs::write(&artifact_path, csv.as_bytes()).unwrap();
+        let artifact_path_string = artifact_path.to_string_lossy().into_owned();
+        let artifact_id =
+            crate::database::Database::computed_artifact_id(&artifact_path_string);
+        harness
+            .db
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO artifacts(id,conversation_id,run_id,display_name,artifact_type,storage_path,media_type,byte_size,sha256,status,created_at,updated_at)
+                     VALUES(?1,?2,NULL,'saved.csv','created_file',?3,'text/csv',?4,?5,'ready',?6,?6)",
+                    rusqlite::params![
+                        artifact_id,
+                        harness.conversation,
+                        artifact_path_string,
+                        csv.len() as i64,
+                        hex::encode(sha2::Sha256::digest(csv.as_bytes())),
+                        now_ms(),
+                    ],
+                )
+            })
+            .unwrap();
+
+        let root_string = harness.root.to_string_lossy().into_owned();
+        let context = ManagedExecutionContext {
+            database: &harness.db,
+            backups_dir: &harness.backups,
+            conversation_id: &harness.conversation,
+            run_id: "run-legacy",
+            project_root: Some(root_string.as_str()),
+            permission_mode: "allow",
+            scope: &scope,
+            sessions_dir: Some(&sessions_dir),
+        };
+        let input = serde_json::json!({
+            "serverId": crate::office::SERVER_ID,
+            "tool": "office_import_data",
+            "arguments": {"output": "汇总.xlsx", "sheet": "Sheet1", "artifactId": artifact_id},
+        });
+        let managed = verified_managed_write(
+            &harness.root,
+            "allow",
+            &scope,
+            "call_mcp_tool",
+            &input,
+            Some(&context),
+        )
+        .expect("an artifactId import is admitted through the shared seam");
+        let (inner_tool, verified) = match managed {
+            ManagedWrite::Office { inner_tool, verified } => (inner_tool, verified),
+            other => panic!("expected an Office write, got {other:?}"),
+        };
+        assert_eq!(inner_tool, "office_import_data");
+        let target = PathBuf::from(&verified.storage_path);
+        fs::write(&target, "workbook written from the saved artifact").unwrap();
+        let (after_hash, after_size) = hash_file(&target).unwrap();
+        harness.seed_run("run-legacy");
+        let result = serde_json::json!({
+            "content": [{"type": "text", "text": "imported by artifact"}],
+            "isError": false,
+            "details": {"foxManagedFile": {
+                "tool": "office_import_data",
+                "storagePath": target.canonicalize().unwrap().to_string_lossy(),
+                "displayName": "汇总.xlsx",
+                "changeKind": "created",
+                "beforeHash": serde_json::Value::Null,
+                "beforeSize": serde_json::Value::Null,
+                "afterHash": after_hash,
+                "afterSize": after_size,
+                "backupPath": serde_json::Value::Null,
+            }},
+        });
+        record_office_write_from_result(
+            &harness.db,
+            &harness.backups,
+            &harness.conversation,
+            "run-legacy",
+            Some("call-artifact-import"),
+            &verified,
+            &inner_tool,
+            &result,
+        )
+        .expect("a Legacy artifact import registers a version");
+        let rows = harness.versions(Some(&target));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tool, "office_import_data");
+        fs::write(&target, "overwritten after import").unwrap();
+        harness
+            .restore(&rows[0].id, true)
+            .expect("the imported workbook version is restorable");
+        assert_eq!(contents_of(&target), "workbook written from the saved artifact");
+    }
+
+    /// An import dispatch outside the frozen operation set is not even
+    /// recognized as a managed write: new capabilities need a new frozen scope.
+    #[test]
+    fn an_import_outside_the_frozen_scope_is_not_a_managed_write() {
+        let harness = Harness::new();
+        let scope = frozen_office_scope(&["office_create", "office_edit"]);
+        let input = serde_json::json!({
+            "serverId": crate::office::SERVER_ID,
+            "tool": "office_import_data",
+            "arguments": {"output": "汇总.xlsx", "sheet": "数据", "data": "a\n1"},
+        });
+        assert!(verified_managed_write(&harness.root, "allow", &scope, "call_mcp_tool", &input, None).is_none());
+    }
+
+    /// FULL Legacy production chain against the REAL pinned OfficeCLI — no mock
+    /// workbook, no hand-built success envelope. The workbook on disk and the
+    /// `foxManagedFile` declaration are both produced by the real CLI; the Host
+    /// independently re-hashes the bytes and registers a restorable version.
+    ///
+    /// Sequence, each step the exact production call `runtime_host/mod.rs`
+    /// (`execute_mcp_tool_request`) makes for the Legacy transport:
+    /// 1. pre-check `office::prepare_with_context` resolves the saved artifact
+    ///    (the same Host authorization runs before a human is asked);
+    /// 2. under `ask` permission a mutating import requires approval; a recorded
+    ///    conversation grant (the exact row a resolved approval writes) clears
+    ///    it without another prompt; read-only is refused;
+    /// 3. `office::execute_with_cancellation` runs the pinned CLI by reference
+    ///    (the full CSV never enters the arguments);
+    /// 4. `record_office_write_from_result` verifies the genuine CLI declaration
+    ///    against the bytes on disk and registers a source-verified version;
+    /// 5. after an out-of-band change, `restore_version` brings back the exact
+    ///    CLI-produced workbook byte-for-byte.
+    /// Cross-session, tampered, dual-payload and foreign-conversation-restore
+    /// requests are all refused without writing.
+    #[test]
+    #[ignore = "requires the pinned OfficeCLI binary; run explicitly for integration verification"]
+    fn real_legacy_chain_precheck_approval_execute_register_restore() {
+        use crate::office::OfficeCallContext;
+
+        let root = std::env::temp_dir()
+            .join(format!("fox-legacy-chain-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let root_string = root.to_string_lossy().into_owned();
+        let db = Database::open(root.join("legacy-chain.db")).unwrap();
+        crate::office::setup(
+            &db,
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources"),
+        )
+        .unwrap();
+        let server = db.get_mcp_server(crate::office::SERVER_ID).unwrap().unwrap();
+        let sessions = root.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        // A real project conversation in `ask` mode: mutations need approval.
+        let conversation = db
+            .create_conversation(db.default_agent_id(), None, Some(&root_string), Some("ask"))
+            .unwrap()
+            .id;
+        let run = db.create_run(&conversation, "legacy-chain", None).unwrap().run.id;
+
+        // A genuinely saved AGV-scale compute artifact (~100 KB, 927 rows).
+        let outputs = crate::runtime_host::attachment_compute::safe_workspace(
+            &sessions,
+            &conversation,
+            &run,
+        )
+        .unwrap()
+        .join("outputs");
+        fs::create_dir_all(&outputs).unwrap();
+        const ROW_COUNT: usize = 927;
+        let mut csv = String::from("id,tag,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10\n");
+        for index in 0..ROW_COUNT {
+            csv.push_str(&format!("{index},agv-task-{index:05}-zone-{:02}", index % 24));
+            for _ in 0..10 {
+                csv.push_str(&format!(",{}", 10_000 + index));
+            }
+            csv.push('\n');
+        }
+        assert!(csv.len() > 64 * 1024, "fixture must exceed the inline result limit");
+        let artifact_path = outputs.join("saved.csv");
+        fs::write(&artifact_path, csv.as_bytes()).unwrap();
+        let artifact_path_string = artifact_path.to_string_lossy().into_owned();
+        let artifact_id = Database::computed_artifact_id(&artifact_path_string);
+        db.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO artifacts(id,conversation_id,run_id,display_name,artifact_type,storage_path,media_type,byte_size,sha256,status,created_at,updated_at)
+                 VALUES(?1,?2,?3,'saved.csv','created_file',?4,'text/csv',?5,?6,'ready',?7,?7)",
+                rusqlite::params![
+                    &artifact_id,
+                    &conversation,
+                    &run,
+                    &artifact_path_string,
+                    csv.len() as i64,
+                    hex::encode(sha2::Sha256::digest(csv.as_bytes())),
+                    now_ms(),
+                ],
+            )
+        })
+        .unwrap();
+
+        let context = OfficeCallContext {
+            database: &db,
+            sessions_dir: &sessions,
+            conversation_id: &conversation,
+        };
+        let arguments = serde_json::json!({
+            "output": "legacy-chain.xlsx",
+            "sheet": "Sheet1",
+            "createSheet": false,
+            "artifactId": artifact_id,
+        });
+        let wrapper = serde_json::json!({
+            "serverId": crate::office::SERVER_ID,
+            "tool": "office_import_data",
+            "arguments": arguments,
+        });
+
+        // --- 1) Pre-check resolves the artifact BEFORE anyone is asked ------
+        let (access_root, access_mode) = db
+            .conversation_project_access(&conversation)
+            .unwrap()
+            .expect("conversation carries a project root and permission mode");
+        assert_eq!(access_mode, "ask");
+        let prepared = crate::office::prepare_with_context(
+            "office_import_data",
+            &arguments,
+            Some(&access_root),
+            &access_mode,
+            Some(&context),
+        )
+        .expect("the Legacy pre-check resolves this conversation's artifact");
+        assert!(prepared.mutates, "an import into a new file is a mutation");
+        // This is the admitted write target, captured BEFORE execution exactly
+        // as the Legacy host does: after a create the output already exists.
+        let pre_execution_target = prepared
+            .target_path()
+            .expect("the pre-execution prepare admits a write target")
+            .to_path_buf();
+        // The Host streams the saved bytes to stdin; the model's arguments
+        // carry only the id — no body, no source path on the command line.
+        assert_eq!(prepared.stdin_payload().expect("resolved payload"), csv);
+        assert!(wrapper.to_string().contains(artifact_id.as_str()));
+        assert!(!wrapper.to_string().contains("agv-task-00500"), "the data body must not be re-copied through the request");
+
+        // read-only is a hard refusal in pre-check, before any write.
+        let read_only_error = crate::office::prepare_with_context(
+            "office_import_data",
+            &serde_json::json!({"output":"ro.xlsx","sheet":"Sheet1","createSheet":false,"artifactId":artifact_id}),
+            Some(&access_root),
+            "read_only",
+            Some(&context),
+        )
+        .expect_err("a mutating import is refused under read-only permission");
+        assert!(!root.join("ro.xlsx").exists(), "read-only refusal writes nothing: {read_only_error}");
+
+        // --- 2) Permission / human approval -------------------------------
+        let office_access = db.conversation_project_access(&conversation).unwrap();
+        let scope = super::super::permission_scope_hash(
+            "office-project-request",
+            serde_json::json!({"access": office_access, "input": wrapper})
+                .to_string()
+                .as_bytes(),
+        );
+        let granted_before = db
+            .conversation_tool_permission_granted(&conversation, "call_mcp_tool", &scope)
+            .unwrap();
+        assert!(!granted_before, "under ask mode a fresh mutation is not pre-authorised");
+        // The exact write a resolved "allow for this conversation" approval
+        // performs (database/repositories.rs resolve_tool_approval).
+        db.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO conversation_tool_permissions(conversation_id, tool_name, scope_key, granted_at)
+                 VALUES (?1, 'call_mcp_tool', ?2, ?3)
+                 ON CONFLICT(conversation_id, tool_name, scope_key)
+                 DO UPDATE SET granted_at = excluded.granted_at",
+                rusqlite::params![&conversation, &scope, now_ms()],
+            )
+        })
+        .unwrap();
+        let granted_after = db
+            .conversation_tool_permission_granted(&conversation, "call_mcp_tool", &scope)
+            .unwrap();
+        assert!(granted_after, "the recorded conversation grant authorises this dispatch");
+
+        // --- 3) REAL pinned-CLI execution by reference --------------------
+        let result = crate::office::execute_with_cancellation(
+            &server,
+            "office_import_data",
+            &arguments,
+            Some(&access_root),
+            &access_mode,
+            None,
+            std::time::Duration::from_secs(180),
+            Some(&context),
+        )
+        .expect("the pinned OfficeCLI imports the saved artifact");
+        // The declaration is the genuine CLI envelope, not a test construct.
+        let declaration = &result["details"]["foxManagedFile"];
+        assert_eq!(declaration["tool"], "office_import_data");
+        let target_path = root.join("legacy-chain.xlsx");
+        assert!(target_path.is_file(), "the real CLI produced the workbook");
+        let genuine_bytes = fs::read(&target_path).unwrap();
+        let (genuine_hash, _genuine_size) =
+            hash_file(&target_path).expect("the CLI-written workbook is readable");
+
+        // --- 4) Host registration verifies genuine bytes on disk ----------
+        // The Host registers against the target captured before execution
+        // (the file now exists, so a post-execution prepare would refuse it).
+        // `record_office_write_from_result` independently re-hashes the bytes
+        // the real CLI actually left on disk and checks the genuine envelope.
+        let verified_target = VerifiedWriteTarget::new(
+            std::path::Path::new(&access_root),
+            &pre_execution_target,
+        );
+        let backups = root.join("managed-versions");
+        record_office_write_from_result(
+            &db,
+            &backups,
+            &conversation,
+            &run,
+            Some("call-legacy-chain"),
+            &verified_target,
+            "office_import_data",
+            &result,
+        )
+        .expect("the Host registers the genuine CLI write after re-verifying disk");
+        let target_string = verified_target.storage_path.clone();
+        let mut versions = db
+            .managed_file_versions(&conversation, Some(&target_string))
+            .expect("versions are listed for the workbook");
+        assert!(!versions.is_empty(), "a restorable version was registered");
+        let first = versions.remove(0);
+        assert_eq!(first.tool, "office_import_data");
+        assert!(first.source_verified, "the version's bytes were Host-verified");
+        assert_eq!(first.after_hash.as_deref(), Some(genuine_hash.as_str()));
+
+        // --- 5) Version recovery returns the exact CLI-produced bytes -----
+        fs::write(&target_path, b"changed outside the recorded task history").unwrap();
+        restore_version(&db, &backups, &conversation, &first.id, true)
+            .expect("the imported workbook version is restorable");
+        let restored_bytes = fs::read(&target_path).unwrap();
+        assert_eq!(restored_bytes, genuine_bytes, "restore is byte-for-byte");
+        assert_eq!(
+            hash_file(&target_path).unwrap().0,
+            genuine_hash,
+            "restored content hash matches the registered version"
+        );
+
+        // A foreign conversation may not restore this conversation's version.
+        let other_conversation = db
+            .create_conversation(db.default_agent_id(), None, None, None)
+            .unwrap()
+            .id;
+        let foreign_restore = restore_version(&db, &backups, &other_conversation, &first.id, true);
+        assert!(foreign_restore.is_err(), "cross-conversation restore must be refused: {foreign_restore:?}");
+        assert!(
+            foreign_restore.unwrap_err().contains("another conversation"),
+            "cross-conversation restore must name the ownership boundary"
+        );
+
+        // --- 5b) Overwrite import registers a second restorable version ---
+        // The real AGV flow creates a workbook then re-imports a revised table
+        // with overwrite=true. A SECOND, smaller CSV artifact makes the two
+        // versions genuinely different, so each registered version restores
+        // distinct CLI-produced bytes through the production restore path.
+        let csv2_path = outputs.join("revised.csv");
+        let mut csv2 = String::from("id,name,v\n");
+        for index in 0..300u32 {
+            csv2.push_str(&format!("{index},task-{index},{}\n", 20_000 + index));
+        }
+        fs::write(&csv2_path, csv2.as_bytes()).unwrap();
+        let id2 = Database::computed_artifact_id(csv2_path.to_string_lossy().as_ref());
+        db.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO artifacts(id,conversation_id,run_id,display_name,artifact_type,storage_path,media_type,byte_size,sha256,status,created_at,updated_at)
+                 VALUES(?1,?2,?3,'revised.csv','created_file',?4,'text/csv',?5,?6,'ready',?7,?7)",
+                rusqlite::params![
+                    &id2,
+                    &conversation,
+                    &run,
+                    csv2_path.to_string_lossy().as_ref(),
+                    csv2.len() as i64,
+                    hex::encode(Sha256::digest(csv2.as_bytes())),
+                    now_ms(),
+                ],
+            )
+        })
+        .unwrap();
+        let args2 = serde_json::json!({
+            "file": "legacy-chain.xlsx",
+            "output": "legacy-chain.xlsx",
+            "overwrite": true,
+            "sheet": "Sheet1",
+            "createSheet": false,
+            "startCell": "A1",
+            "artifactId": id2,
+        });
+        let prepared2 = crate::office::prepare_with_context(
+            "office_import_data",
+            &args2,
+            Some(&access_root),
+            &access_mode,
+            Some(&context),
+        )
+        .expect("an overwrite of the existing workbook is admitted pre-execution");
+        let target2 = prepared2
+            .target_path()
+            .expect("overwrite admits the existing target")
+            .to_path_buf();
+        assert_eq!(target2, pre_execution_target, "create and overwrite share one target");
+        let result2 = crate::office::execute_with_cancellation(
+            &server,
+            "office_import_data",
+            &args2,
+            Some(&access_root),
+            &access_mode,
+            None,
+            std::time::Duration::from_secs(180),
+            Some(&context),
+        )
+        .expect("the pinned CLI overwrites the workbook from the second artifact");
+        let genuine2_bytes = fs::read(&target_path).unwrap();
+        assert_ne!(genuine2_bytes, genuine_bytes, "the revised import changes the file");
+        let verified2 = VerifiedWriteTarget::new(std::path::Path::new(&access_root), &target2);
+        record_office_write_from_result(
+            &db, &backups, &conversation, &run, Some("call-legacy-chain-v2"),
+            &verified2, "office_import_data", &result2,
+        )
+        .expect("the overwrite is registered as a second managed version");
+        let mut import_versions: Vec<ManagedFileVersion> = db
+            .managed_file_versions(&conversation, Some(&verified2.storage_path))
+            .unwrap()
+            .into_iter()
+            .filter(|v| v.tool == "office_import_data")
+            .collect();
+        import_versions.sort_by_key(|v| v.version_no);
+        assert_eq!(import_versions.len(), 2, "created + modified versions are both registered");
+        assert!(import_versions.iter().all(|v| v.source_verified), "both versions Host-verified");
+        let (v1, v2) = (&import_versions[0], &import_versions[1]);
+        assert_ne!(v1.after_hash, v2.after_hash, "the two versions hold different content");
+        // Restore the older created version, then the revised one: each returns
+        // exactly the bytes its own CLI import wrote.
+        restore_version(&db, &backups, &conversation, &v1.id, true)
+            .expect("the created version restores");
+        assert_eq!(fs::read(&target_path).unwrap(), genuine_bytes, "v1 restore");
+        restore_version(&db, &backups, &conversation, &v2.id, true)
+            .expect("the modified version restores");
+        assert_eq!(fs::read(&target_path).unwrap(), genuine2_bytes, "v2 restore");
+
+        // --- Rejections never write --------------------------------------
+        // Tampered saved bytes (checksum mismatch) are refused at pre-check.
+        fs::write(&artifact_path, b"id,tag\n0,tampered\n").unwrap();
+        let tampered = crate::office::prepare_with_context(
+            "office_import_data",
+            &serde_json::json!({"output":"tamper.xlsx","sheet":"Sheet1","createSheet":false,"artifactId":artifact_id}),
+            Some(&access_root),
+            &access_mode,
+            Some(&context),
+        )
+        .expect_err("a tampered artifact is refused");
+        assert!(tampered.contains("校验失败"), "{tampered}");
+        assert!(!root.join("tamper.xlsx").exists());
+        // A reference from a different conversation never resolves.
+        let foreign_context = OfficeCallContext {
+            database: &db,
+            sessions_dir: &sessions,
+            conversation_id: &other_conversation,
+        };
+        let cross = crate::office::prepare_with_context(
+            "office_import_data",
+            &serde_json::json!({"output":"cross.xlsx","sheet":"Sheet1","createSheet":false,"artifactId":artifact_id}),
+            Some(&access_root),
+            &access_mode,
+            Some(&foreign_context),
+        )
+        .expect_err("a cross-conversation artifact id is refused");
+        assert!(cross.contains("不存在"), "{cross}");
+        assert!(!root.join("cross.xlsx").exists());
+        // data + artifactId together are mutually exclusive.
+        let dual = crate::office::prepare_with_context(
+            "office_import_data",
+            &serde_json::json!({"output":"dual.xlsx","sheet":"Sheet1","createSheet":false,"artifactId":artifact_id,"data":"a,b\n1,2"}),
+            Some(&access_root),
+            &access_mode,
+            Some(&context),
+        )
+        .expect_err("dual payloads are refused");
+        assert!(dual.contains("只能使用"), "{dual}");
+        assert!(!root.join("dual.xlsx").exists());
+
+        println!("real Legacy chain artifacts: {}", root.display());
     }
 }

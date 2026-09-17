@@ -1,10 +1,16 @@
-import { modelToolResultContent, RESULT_REF_TOOL } from './tool-view.mjs'
+import { boundToolText, modelToolResultContent, toolResultRef, RECEIPT_MARKER, RESULT_REF_TOOL } from './tool-view.mjs'
 
 export const FOX_TOOL_DEFINITION_VERSION = 1
 
 const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/
 const EXECUTION_MODES = new Set(['runtime', 'host'])
 const TOOL_EXECUTION_MODES = new Set(['sequential', 'parallel'])
+// Results at or below this many JS characters pass through unchanged (their
+// JSON stays intact). Above it the model view is produced by the SAME
+// projection the kernel path uses (tool-view.mjs): structure-aware, UTF-8
+// code-point safe, with `next` and stable references preserved — never a
+// mid-JSON character cut, and never a retrieval promise without the Host's
+// trusted storage fact.
 const MAX_MODEL_VISIBLE_RESULT_CHARS = 120_000
 const PI_COMPATIBLE_OPTIONAL_FIELDS = [
   'promptSnippet',
@@ -128,7 +134,20 @@ function jsonSafeToolDetails(result, serialized) {
   }
 }
 
-function normalizeFoxToolResultForPi(toolName, result) {
+/**
+ * Normalize one settled Fox tool result into the Pi model view.
+ *
+ * Two invariants (ABC review R4/R5):
+ *   1. A structured payload is never character-cut. If the unified projection
+ *      declines to shape it, the payload is published **intact** — an invalid
+ *      JSON fragment would hide records with no way back, and claiming Host
+ *      stored them without a trusted fact would be a false promise.
+ *   2. Retrieval is promised only from the Host's trusted storage fact
+ *      (`viewContext.storage`), never from the result's size, never from a
+ *      reference alone, and never from metadata the tool result declares
+ *      about itself.
+ */
+export function normalizeFoxToolResultForPi(toolName, result, viewContext = {}) {
   if (isPiToolResult(result)) {
     // `read_tool_result` returns its range-cursor in `details`, which the
     // provider projection drops. Surface the whitelisted navigation facts as a
@@ -140,15 +159,45 @@ function normalizeFoxToolResultForPi(toolName, result) {
   }
 
   const serialized = stringifyToolResult(result)
-  const outputTruncated = serialized.length > MAX_MODEL_VISIBLE_RESULT_CHARS
-  const text = outputTruncated
-    ? `${serialized.slice(0, MAX_MODEL_VISIBLE_RESULT_CHARS)}\n[Tool result truncated]`
-    : serialized
+  if (serialized.length <= MAX_MODEL_VISIBLE_RESULT_CHARS) {
+    return {
+      content: [{ type: 'text', text: serialized }],
+      details: { structuredResult: jsonSafeToolDetails(result, serialized), outputTruncated: false },
+    }
+  }
+  // An execution receipt is evidence and is never reshaped, however large.
+  if (serialized.includes(RECEIPT_MARKER)) {
+    return {
+      content: [{ type: 'text', text: serialized }],
+      details: { outputTruncated: false },
+    }
+  }
+  // Oversized: project with the same rules as the kernel path. `boundToolText`
+  // keeps JSON valid, preserves `next`, and returns the original text when no
+  // honest bounded view exists — in which case nothing is omitted at all.
+  // The storage fact is the Host's; the adapter never trusts a `details.storage`
+  // that the tool result declared about itself.
+  const reference = toolResultRef(viewContext.runId, viewContext.toolCallId)
+  const projected = boundToolText(toolName, {
+    text: serialized,
+    resultRef: reference,
+    storage: viewContext.storage ?? null,
+  })
+  if (projected !== null) {
+    return {
+      content: [{ type: 'text', text: projected }],
+      details: { outputTruncated: projected !== serialized, unifiedView: true },
+    }
+  }
+  // The unified projection declined (not re-readable reference material, or no
+  // honest bounded view): publish the payload intact. There is no structure
+  // damage and no retrieval promise to retract.
   return {
-    content: [{ type: 'text', text }],
+    content: [{ type: 'text', text: serialized }],
     details: {
-      ...(outputTruncated ? {} : { structuredResult: jsonSafeToolDetails(result, serialized) }),
-      outputTruncated,
+      structuredResult: jsonSafeToolDetails(result, serialized),
+      outputTruncated: false,
+      projectionDeclined: true,
     },
   }
 }
@@ -180,7 +229,7 @@ export function defineFoxTools(definitions, metadata) {
   return tools
 }
 
-export function adaptFoxToolToPi(tool) {
+export function adaptFoxToolToPi(tool, viewContext = {}) {
   validateToolShape(tool)
   if (tool.fox?.schemaVersion !== FOX_TOOL_DEFINITION_VERSION) {
     throw adapterError('tool_adapter.unsupported_schema', `Tool ${tool.name} does not use Fox tool schema v${FOX_TOOL_DEFINITION_VERSION}.`)
@@ -195,17 +244,32 @@ export function adaptFoxToolToPi(tool) {
     label: tool.label,
     description: tool.description,
     parameters: tool.parameters,
-    execute: async (...args) => normalizeFoxToolResultForPi(tool.name, await tool.execute(...args)),
+    // viewContext.runId lets the unified model-view projection mint the stable
+    // `fox-result://` reference for oversized results. Retrieval is promised
+    // only when `viewContext.storageFor` (the Host's trusted storage fact for
+    // this settled call) says the complete result was stored; without that fact
+    // the view keeps every byte and promises nothing.
+    execute: async (toolCallId, ...rest) => {
+      const result = await tool.execute(toolCallId, ...rest)
+      const storage = typeof viewContext.storageFor === 'function'
+        ? viewContext.storageFor(toolCallId, result)
+        : (viewContext.storage ?? null)
+      return normalizeFoxToolResultForPi(tool.name, result, {
+        runId: viewContext.runId,
+        toolCallId,
+        storage,
+      })
+    },
     ...optionalFields,
   }
 }
 
-export function adaptFoxToolsToPi(tools) {
+export function adaptFoxToolsToPi(tools, viewContext = {}) {
   if (!Array.isArray(tools)) {
     throw adapterError('tool_adapter.invalid_collection', 'Fox tools must be an array.')
   }
   ensureUniqueNames(tools)
-  return tools.map(adaptFoxToolToPi)
+  return tools.map((tool) => adaptFoxToolToPi(tool, viewContext))
 }
 
 export function adaptPiToolToFox(piTool, {

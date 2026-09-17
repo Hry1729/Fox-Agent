@@ -17,17 +17,23 @@ pub(super) fn project(
     let Some(conversation) = conversation else {
         return Ok(());
     };
+    // The approval window elapsed with no human decision. The legacy status
+    // vocabulary has no "paused", so the honest projection is 'interrupted': the
+    // work stopped and is offered again, it is not a failed verdict and must not
+    // silently render as still running.
     tx.execute("UPDATE runs SET
         status=(SELECT CASE r.state WHEN 'created' THEN 'queued' WHEN 'completed' THEN 'completed'
-            WHEN 'cancelled' THEN 'cancelled' WHEN 'failed' THEN 'failed' WHEN 'budget_exhausted' THEN 'failed' ELSE 'running' END
+            WHEN 'cancelled' THEN 'cancelled' WHEN 'failed' THEN 'failed' WHEN 'budget_exhausted' THEN 'failed'
+            WHEN 'approval_expired' THEN 'interrupted'
+            ELSE 'running' END
             FROM kernel_runs r WHERE r.run_id=?1),
         started_at=COALESCE(started_at,?2),
         finished_at=(SELECT terminal_at FROM kernel_runs WHERE run_id=?1),
         last_seq=(SELECT last_event_seq FROM kernel_runs WHERE run_id=?1),
         error_code=(SELECT json_extract(payload_json,'$.code') FROM kernel_events
-            WHERE run_id=?1 AND event_type IN ('run.failed','run.budget_exhausted') ORDER BY seq DESC LIMIT 1),
+            WHERE run_id=?1 AND event_type IN ('run.failed','run.budget_exhausted','run.approval_expired') ORDER BY seq DESC LIMIT 1),
         error_message=(SELECT json_extract(payload_json,'$.message') FROM kernel_events
-            WHERE run_id=?1 AND event_type IN ('run.failed','run.budget_exhausted') ORDER BY seq DESC LIMIT 1)
+            WHERE run_id=?1 AND event_type IN ('run.failed','run.budget_exhausted','run.approval_expired') ORDER BY seq DESC LIMIT 1)
         WHERE id=?1", params![run_id,now])?;
 
     tx.execute("INSERT INTO tool_calls(id,runtime_tool_call_id,run_id,conversation_id,tool_name,input_json,status,
@@ -139,7 +145,7 @@ pub(super) fn project(
     // Child/colleague terminal summaries must observe the messages and usage
     // above in this same commit, never an earlier partially projected response.
     let mut events = tx.prepare("SELECT event_type,payload_json FROM kernel_events WHERE run_id=?1 AND seq>?2
-        AND event_type IN ('run.started','run.completed','run.cancelled','run.failed','run.budget_exhausted') ORDER BY seq")?;
+        AND event_type IN ('run.started','run.completed','run.cancelled','run.failed','run.budget_exhausted','run.approval_expired') ORDER BY seq")?;
     let events = events
         .query_map(params![run_id, previous_seq], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -150,6 +156,10 @@ pub(super) fn project(
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         let kind = if kind == "run.budget_exhausted" {
             "run.failed"
+        } else if kind == "run.approval_expired" {
+            // A pause of the work, not a verdict about it. Downstream owners see
+            // an interrupted turn so the user can continue instead of restarting.
+            "run.interrupted"
         } else {
             kind.as_str()
         };
@@ -157,7 +167,10 @@ pub(super) fn project(
         super::digital_colleagues::project_digital_colleague_event(
             tx, run_id, kind, &payload, now,
         )?;
-        if matches!(kind, "run.completed" | "run.cancelled" | "run.failed") {
+        if matches!(
+            kind,
+            "run.completed" | "run.cancelled" | "run.failed" | "run.interrupted"
+        ) {
             let mut display_payload=payload.clone();
             display_payload["type"]=json!(kind);
             super::kernel_display::event(tx,run_id,"terminal",&display_payload,now)?;

@@ -43,9 +43,12 @@
 //! selects BOTH entries now, so with no credentials it ends in the cloud entry's
 //! explicit 未执行 failure; prefer the exact names above.
 //!
-//! Every entry writes into its own directory under
-//! `output/claude-design-repair-20260915/eval/<tier>/` (or `FOX_EVAL_OUTPUT_ROOT`).
-//! Earlier rounds and the historical evidence stay untouched. The historical evidence
+//! Every entry writes into its own evaluation directory under
+//! `output/claude-design-repair-20260915/eval/<tier>/evaluations/<evaluation id>/`
+//! (or `FOX_EVAL_OUTPUT_ROOT`): report, scenario databases, snapshots and
+//! artifacts of one evaluation are siblings, and a repeated evaluation reserves
+//! a new directory instead of deleting or reusing the previous one. Earlier
+//! rounds and the historical evidence stay untouched; the historical evidence
 //! directory `output/claude-design-impl-20260913/eval` is never written again.
 //!
 //! The non-ignored tests below are the fast contract layer (derivation, plan
@@ -99,6 +102,271 @@ const CLOUD_API_TYPES: [&str; 3] = [
 const SYNTHETIC_KEY_SOURCE: &str = "hardcoded loopback placeholder (not a credential)";
 const CLOUD_KEY_SOURCE: &str = "FOX_EVAL_API_KEY (value never recorded)";
 const DURABLE_ROUNDS_SOURCE: &str = "durable kernel model-response events";
+
+// ---------------------------------------------------------------------------
+// Phase trace and bounded watchdog for the real-chain entries.
+//
+// The synthetic entry runs a real Node worker and the pinned OfficeCLI, so a
+// stall can come from a build lock, evaluation initialisation, the database, the
+// worker handshake or the sidecar. A long unobserved wait tells nobody which one
+// it was, so every step reports a phase, the current phase is printed whenever it
+// changes, and a watchdog prints the stuck phase periodically and then ends the
+// isolated evaluation at a bound instead of hanging forever. The parent test
+// supervises that process; no watchdog may exit the shared test binary.
+//
+// The watchdog is a **guard**, started by both entries (synthetic and real
+// cloud), and it stops when the evaluation it guards ends. A deadline that fires
+// after the evaluation finished would kill the whole test binary and take
+// unrelated tests down with it, which is a worse outcome than the stall it
+// reports.
+// ---------------------------------------------------------------------------
+
+/// Deadline for one real-chain entry, in seconds (`FOX_EVAL_DEADLINE_SECS`).
+const EVAL_DEADLINE_ENV: &str = "FOX_EVAL_DEADLINE_SECS";
+const EVAL_DEADLINE_DEFAULT_SECS: u64 = 900;
+/// How often the watchdog reports the phase it is still stuck in.
+const EVAL_WATCHDOG_TICK: Duration = Duration::from_secs(15);
+/// The watchdog checks for its own cancellation this often, so a finished
+/// evaluation is not held by the tick.
+const EVAL_WATCHDOG_SLICE: Duration = Duration::from_millis(50);
+
+/// What the watchdog decided when its wait ended.
+#[derive(Debug, PartialEq, Eq)]
+enum WatchdogAction {
+    /// Still inside the deadline: the same phase is held long enough to be
+    /// worth a line, and that line is the only observable a stall gets.
+    Report { phase: String, held_secs: u64 },
+    /// Emit the last diagnostics; the external supervisor owns termination.
+    Terminate { phase: String, held_secs: u64 },
+}
+
+fn watchdog_action(
+    now: Instant,
+    started: Instant,
+    deadline: Duration,
+    phase: &str,
+    held_secs: u64,
+) -> WatchdogAction {
+    let elapsed = now.saturating_duration_since(started);
+    if elapsed >= deadline {
+        return WatchdogAction::Terminate {
+            phase: phase.to_owned(),
+            held_secs,
+        };
+    }
+    WatchdogAction::Report {
+        phase: phase.to_owned(),
+        held_secs,
+    }
+}
+
+/// The watchdog of one real-chain entry. Dropping it — on a pass, a failure or a
+/// panic — stops the thread, so an evaluation that already finished can never
+/// end the test process later on and take an unrelated test with it.
+struct EvalWatchdog {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for EvalWatchdog {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            // The thread returns within one slice of seeing the flag.
+            let _ = thread.join();
+        }
+    }
+}
+
+fn eval_deadline_from_environment() -> Duration {
+    Duration::from_secs(
+        std::env::var(EVAL_DEADLINE_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(EVAL_DEADLINE_DEFAULT_SECS),
+    )
+}
+
+fn eval_trace_start() -> EvalWatchdog {
+    eval_trace_start_with(eval_deadline_from_environment())
+}
+
+fn eval_trace_start_with(deadline: Duration) -> EvalWatchdog {
+    let started = Instant::now();
+    let stop = Arc::new(AtomicBool::new(false));
+    let watching = stop.clone();
+    let thread = std::thread::spawn(move || {
+        loop {
+            // Wait for the next report, but never past the deadline.
+            let remaining = deadline.saturating_sub(started.elapsed());
+            let wait_for = remaining.min(EVAL_WATCHDOG_TICK);
+            let mut slept = Duration::ZERO;
+            while slept < wait_for {
+                if watching.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(EVAL_WATCHDOG_SLICE.min(wait_for - slept));
+                slept += EVAL_WATCHDOG_SLICE;
+            }
+            if watching.load(Ordering::SeqCst) {
+                return;
+            }
+            let (phase, held) = eval_current_phase();
+            let elapsed = started.elapsed();
+            match watchdog_action(Instant::now(), started, deadline, &phase, held) {
+                WatchdogAction::Report { phase, held_secs } => eprintln!(
+                    "[eval-watchdog] t={}s phase={phase} held={held_secs}s deadline={}s",
+                    elapsed.as_secs(),
+                    deadline.as_secs()
+                ),
+                WatchdogAction::Terminate { phase, held_secs } => {
+                    eprintln!(
+                        "[eval-watchdog] DEADLINE: still in phase '{phase}' after {held_secs}s \
+                         (total {}s); the isolated-process supervisor will stop this evaluation \
+                         instead of waiting without evidence",
+                        elapsed.as_secs()
+                    );
+                    for line in eval_phase_history() {
+                        eprintln!("[eval-watchdog] {line}");
+                    }
+                    let _ = std::io::Write::flush(&mut std::io::stderr());
+                    return;
+                }
+            }
+        }
+    });
+    EvalWatchdog {
+        stop,
+        thread: Some(thread),
+    }
+}
+
+const EVAL_CHILD_TEST: &str = "FOX_EVAL_CHILD_TEST";
+
+fn evaluation_test_name(name: &str) -> String {
+    // libtest names omit the crate prefix present in module_path!().
+    let module = module_path!().split_once("::").unwrap().1;
+    format!("{module}::{name}")
+}
+
+struct EvaluationChild(std::process::Child);
+
+impl Drop for EvaluationChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        // Only this owned test process and its descendants are terminated.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &self.0.id().to_string(), "/T", "/F"])
+                .creation_flags(0x08000000)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn run_evaluation_process(
+    name: &str,
+    deadline: Duration,
+    extra_environment: &[(&str, &str)],
+) -> Result<std::process::ExitStatus, String> {
+    let test_name = evaluation_test_name(name);
+    let mut command = std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+    command.args(["--exact", &test_name, "--include-ignored", "--nocapture", "--test-threads=1"])
+        .env(EVAL_CHILD_TEST, &test_name)
+        .envs(extra_environment.iter().copied())
+        .stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let mut child = EvaluationChild(command.spawn().map_err(|e| e.to_string())?);
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.0.try_wait().map_err(|e| e.to_string())? {
+            return Ok(status);
+        }
+        if started.elapsed() >= deadline {
+            eprintln!("[eval-supervisor] DEADLINE entry={name} pid={} elapsedMs={} (phase trace above; existing evidence retained)",
+                child.0.id(), started.elapsed().as_millis());
+            return Err(format!("isolated evaluation {name} exceeded its deadline"));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Parent entries run only the named evaluation in a child process. A stalled
+/// native tool can then be killed without ending unrelated libtest work.
+fn supervise_evaluation(name: &str) -> bool {
+    if std::env::var(EVAL_CHILD_TEST).ok().as_deref() == Some(evaluation_test_name(name).as_str()) {
+        return false;
+    }
+    let status = run_evaluation_process(name, eval_deadline_from_environment(), &[])
+        .unwrap_or_else(|error| panic!("{error}"));
+    assert!(status.success(), "isolated evaluation {name} failed: {status}");
+    true
+}
+
+struct EvalPhaseState {
+    phase: String,
+    entered: Instant,
+    /// Every phase this process entered, so a deadline names the whole path.
+    history: Vec<(String, u64)>,
+}
+
+fn eval_phase_cell() -> &'static Mutex<EvalPhaseState> {
+    static STATE: std::sync::OnceLock<Mutex<EvalPhaseState>> = std::sync::OnceLock::new();
+    STATE.get_or_init(|| {
+        Mutex::new(EvalPhaseState {
+            phase: "start".to_owned(),
+            entered: Instant::now(),
+            history: Vec::new(),
+        })
+    })
+}
+
+/// Record and print the phase the entry is entering.
+fn eval_phase(name: &str) {
+    let mut state = match eval_phase_cell().lock() {
+        Ok(state) => state,
+        Err(_) => return,
+    };
+    let held = state.entered.elapsed().as_secs();
+    let previous = state.phase.clone();
+    state.history.push((previous, held));
+    state.phase = name.to_owned();
+    state.entered = Instant::now();
+    eprintln!("[eval-phase] {name} (previous held {held}s)");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
+fn eval_current_phase() -> (String, u64) {
+    match eval_phase_cell().lock() {
+        Ok(state) => (state.phase.clone(), state.entered.elapsed().as_secs()),
+        Err(_) => ("<poisoned>".to_owned(), 0),
+    }
+}
+
+/// `phase held Xs` for every phase entered so far, oldest first.
+fn eval_phase_history() -> Vec<String> {
+    match eval_phase_cell().lock() {
+        Ok(state) => state
+            .history
+            .iter()
+            .map(|(phase, held)| format!("phase={phase} held={held}s"))
+            .collect(),
+        Err(_) => vec!["<poisoned>".to_owned()],
+    }
+}
 const PROVIDER_ROUNDS_SOURCE: &str = "loopback provider HTTP requests";
 /// Recorded instead of a result whenever an acceptance did not run at all.
 const NOT_RUN_MARKER: &str = "未执行";
@@ -148,9 +416,60 @@ impl EvalMode {
         round_dir().join(self.tier())
     }
 
-    fn artifact_dir(self, scenario: &str) -> std::path::PathBuf {
-        self.run_dir().join("artifacts").join(scenario)
+    /// One directory per **evaluation**, under the tier: a repeated run adds
+    /// evidence instead of replacing the previous run's.
+    fn evaluation_dir(self) -> std::path::PathBuf {
+        self.run_dir().join("evaluations").join(evaluation_id())
     }
+
+    fn artifact_dir(self, scenario: &str) -> std::path::PathBuf {
+        self.evaluation_dir().join("artifacts").join(scenario)
+    }
+}
+
+/// Identifies this process's evaluation: sortable, and distinct from every other
+/// invocation's (a parallel run gets its own copy of every directory).
+fn evaluation_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_secs())
+            .unwrap_or(0);
+        let random: String = uuid::Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(8)
+            .collect();
+        format!("{seconds}-{random}")
+    })
+}
+
+/// Create one directory that no earlier evaluation owns.
+///
+/// `create_dir` is the exclusion: a path that already exists is *evidence from
+/// another run*, so it is never deleted, never truncated and never reused as a
+/// silent fallback. Callers that must not collide (parallel evaluations) get a
+/// distinct path from the same call.
+fn reserve_directory(base: &std::path::Path, name: &str) -> Result<std::path::PathBuf, String> {
+    std::fs::create_dir_all(base).map_err(|error| format!("{base:?}: {error}"))?;
+    for attempt in 0..64u32 {
+        let candidate = if attempt == 0 {
+            base.join(name)
+        } else {
+            base.join(format!("{name}-retry{attempt}"))
+        };
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("{candidate:?}: {error}")),
+        }
+    }
+    Err(format!(
+        "every directory under {base:?} named '{name}*' already holds evidence from an \
+         earlier evaluation; refusing to reuse or delete it"
+    ))
 }
 
 /// Model identity as recorded in a report: API type, model id, base URL and its
@@ -1741,22 +2060,32 @@ fn eval_model_config(address: std::net::SocketAddr) -> kernel_model_worker::Kern
     config
 }
 
-/// Prepared Run under an Allow-mode frozen binding (with the project-scoped
-/// Office grant) and the bundled Office connector registered, mirroring the
-/// production freeze order.
+/// Prepared Run under a frozen binding of the caller's permission mode (with the
+/// project-scoped Office grant) and the bundled Office connector registered,
+/// mirroring the production freeze order.
 fn prepare_eval_run(
     scenario_root: &std::path::Path,
     prompt: &str,
     config: &kernel_model_worker::KernelModelConfig,
     run_label: &str,
+    permission_mode: PermissionMode,
 ) -> Result<(Database, String), (String, String)> {
+    eval_phase("prepare:database");
     let db = Database::open(scenario_root.join("facts.db"))
         .map_err(|error| ("prepare:database".into(), error.to_string()))?;
+    eval_phase("prepare:office-connector");
     crate::office::setup(&db, &office_resources_dir())
         .map_err(|error| ("prepare:office-connector".into(), error))?;
+    eval_phase("prepare:conversation");
     let conversation = db
-        .create_conversation(db.default_agent_id(), None, scenario_root.to_str(), Some("allow"))
+        .create_conversation(
+            db.default_agent_id(),
+            None,
+            scenario_root.to_str(),
+            Some(permission_mode.as_str()),
+        )
         .map_err(|error| ("prepare:conversation".into(), error))?;
+    eval_phase("prepare:run");
     let run_id = db
         .create_run(&conversation.id, run_label, None)
         .map_err(|error| ("prepare:run".into(), error.to_string()))?
@@ -1771,7 +2100,7 @@ fn prepare_eval_run(
     // therefore driven by an approval watcher that presses "allow once"
     // through the same durable command queue the Tauri UI uses.
     let permission = FrozenPermission {
-        mode: PermissionMode::Allow,
+        mode: permission_mode,
         project_root: Some(scenario_root.to_string_lossy().into_owned()),
         grants: vec![],
     };
@@ -1803,6 +2132,7 @@ fn prepare_eval_run(
         model_idle_ms: binding.budgets.model_idle_ms,
         tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
         run_execution_budget_ms: binding.budgets.run_execution_ms,
+        run_execution_limited: binding.budgets.run_execution_limited,
         approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
         provider_max_retries: 0,
         turn_max_retries: 0,
@@ -1836,7 +2166,17 @@ fn prepare_eval_run(
         .map_err(|error| ("prepare:scope".into(), error))?;
     db.freeze_kernel_host_scope(&run_id, &scope)
         .map_err(|error| ("prepare:scope".into(), error))?;
-    let seeds = crate::runtime_host::delivery::expectations_from_task(prompt);
+    let mut seeds = crate::runtime_host::delivery::expectations_from_task(prompt);
+    // Bind the task's structured demands exactly as the production start does,
+    // including the cross-artifact ones (a stated ratio, a statistic recomputed
+    // from the source data this Run names).
+    let requirements = crate::runtime_host::delivery::requirements_from_task(prompt)
+        .into_iter()
+        .map(|requirement| {
+            crate::runtime_host::delivery::bind_source_distribution(scenario_root, requirement)
+        })
+        .collect::<Vec<_>>();
+    crate::runtime_host::delivery::attach_requirements_to_seeds(&mut seeds, &requirements);
     db.seed_delivery_checklist(&run_id, &seeds, crate::database::now_ms())
         .map_err(|error| ("prepare:checklist".into(), error))?;
     Ok((db, run_id))
@@ -1857,9 +2197,16 @@ struct RunObservations {
 
 /// The model side of one dispatch: the loopback provider of the synthetic tier,
 /// or nothing at all for the real tier (which talks to the cloud endpoint).
+///
+/// The session **owns** the provider handle for the whole dispatch. Dropping a
+/// handle shuts the scripted provider down, so copying the shutdown flag and join
+/// handle out of it (and letting the handle drop) killed the listener before the
+/// worker could connect — every real-chain scenario then failed with
+/// `ECONNREFUSED` and a `model_transport_failure`, which looked like a worker or
+/// sidecar problem instead of a harness one.
 struct ProviderSession {
+    handle: Option<ProviderHandle>,
     shutdown: Arc<AtomicBool>,
-    join: Option<std::thread::JoinHandle<Vec<Value>>>,
 }
 
 impl ProviderSession {
@@ -1867,15 +2214,23 @@ impl ProviderSession {
     /// into a scripted provider.
     fn detached() -> Self {
         Self {
+            handle: None,
             shutdown: Arc::new(AtomicBool::new(false)),
-            join: None,
         }
     }
 
     fn from_handle(handle: ProviderHandle) -> Self {
         let shutdown = handle.shutdown.clone();
-        let join = handle.join.lock().unwrap().take();
-        Self { shutdown, join }
+        Self {
+            handle: Some(handle),
+            shutdown,
+        }
+    }
+
+    /// The provider thread's own handle, taken once the dispatch is over.
+    fn take_join(&self) -> Option<std::thread::JoinHandle<Vec<Value>>> {
+        let handle = self.handle.as_ref()?;
+        handle.join.lock().ok()?.take()
     }
 }
 
@@ -1884,7 +2239,11 @@ impl ProviderSession {
 /// `allow_once` command per request via the SAME production API the UI uses.
 /// It never fabricates grants or executes tools; the Kernel records the
 /// decision itself when it drains the queue.
-fn spawn_approval_watcher(root: &std::path::Path, run_id: &str) -> std::thread::JoinHandle<u64> {
+fn spawn_approval_watcher(
+    root: &std::path::Path,
+    run_id: &str,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<u64> {
     let root = root.to_path_buf();
     let run_id = run_id.to_owned();
     std::thread::spawn(move || {
@@ -1893,7 +2252,7 @@ fn spawn_approval_watcher(root: &std::path::Path, run_id: &str) -> std::thread::
         reader.busy_timeout(Duration::from_secs(5)).unwrap();
         let mut approved: BTreeSet<String> = BTreeSet::new();
         let deadline = Instant::now() + Duration::from_secs(900);
-        while Instant::now() < deadline {
+        while Instant::now() < deadline && !stop.load(Ordering::SeqCst) {
             let terminal = reader
                 .query_row(
                     "SELECT COALESCE(k.state, legacy.status)
@@ -1908,6 +2267,7 @@ fn spawn_approval_watcher(root: &std::path::Path, run_id: &str) -> std::thread::
                     matches!(
                         state.as_str(),
                         "completed" | "failed" | "cancelled" | "budget_exhausted"
+                            | "approval_expired"
                     )
                 });
             if terminal {
@@ -1931,14 +2291,20 @@ fn spawn_approval_watcher(root: &std::path::Path, run_id: &str) -> std::thread::
                 }
                 // The Kernel only accepts the command while the request is
                 // actionable; "not yet actionable" is retried on the next tick.
-                if matches!(
-                    writer.queue_kernel_host_command(&run_id, Some((&id, "allow_once"))),
-                    Ok(true)
-                ) {
-                    approved.insert(id);
+                // A busy/locked database is likewise retried, never surfaced: this
+                // watcher is a *second writer* standing in for the UI, and it must
+                // not turn its own contention into a Run failure.
+                match writer.queue_kernel_host_command(&run_id, Some((&id, "allow_once"))) {
+                    Ok(true) => {
+                        approved.insert(id);
+                    }
+                    Ok(false) => {}
+                    Err(_) => {}
                 }
             }
-            std::thread::sleep(Duration::from_millis(50));
+            // Human-paced, not a write storm: polling faster than a person can
+            // click only adds contention with the coordinator's own writes.
+            std::thread::sleep(Duration::from_millis(150));
         }
         approved.len() as u64
     })
@@ -1962,18 +2328,22 @@ fn drive_real_run(
     state: Arc<Mutex<EvalState>>,
 ) -> RunObservations {
     let shutdown = session.shutdown.clone();
+    // The approval watcher is a stand-in for the human at the UI: it must stop as
+    // soon as this scenario is done, otherwise a Run that never reached a terminal
+    // state would hold the entry for its full deadline with nothing to show.
+    let watcher_stop = Arc::new(AtomicBool::new(false));
     let clock = TestClock::new(crate::database::now_ms());
     let cancellation = CancellationRegistry::default();
     let preview = |_: &fox_engine_protocol::KernelModelPreview| {};
     // The human-at-UI stand-in starts approving before the first request
     // reaches `waiting_approval`; it only writes to the durable command queue.
-    let approver = spawn_approval_watcher(root, run_id);
+    let approver = spawn_approval_watcher(root, run_id, watcher_stop.clone());
     let coordinator = KernelCoordinator::start_prepared(&db, &clock, run_id, &cancellation)
         .unwrap()
         .with_preview(&preview);
     let binding = db.run_control_binding(run_id).unwrap().unwrap();
     let scope = db.kernel_host_scope(run_id).unwrap();
-    let policy = kernel_gateway::GatewayPolicy { binding, scope };
+    let policy = kernel_gateway::GatewayPolicy { binding, scope, database: None, sessions_dir: None };
     // The evaluation keeps its own isolated Host data directory (its own
     // database, artifacts and managed-file snapshots), never the user's.
     let managed_dir = root.join("managed-files");
@@ -1986,6 +2356,9 @@ fn drive_real_run(
         {
             state.lock().unwrap().last_tool = Some(tool.into());
         }
+        // Every real tool call is a phase: an Office round that never returns is
+        // then attributable to the tool (sidecar) rather than to the worker.
+        eval_phase(&format!("tool:{tool}"));
         let result = if kernel_gateway::is_context_resource(tool) {
             policy.execute_context_resource(
                 db, root, root, root, tool, &payload["input"], token,
@@ -2004,10 +2377,14 @@ fn drive_real_run(
                     project_root: policy.binding.permission.project_root.as_deref(),
                     permission_mode: policy.binding.permission.mode.as_str(),
                     scope: &policy.scope,
+                    sessions_dir: None,
                 },
                 tool,
                 &payload["input"],
-                payload["toolCallId"].as_str(),
+                // Production identifies the call by the durable effect, not by a
+                // payload key; using the same source keeps the evaluation's
+                // registration rows as traceable as the app's.
+                effect.tool_call_id.as_deref(),
                 || policy.execute(db, tool, &payload["input"], token),
             )
         };
@@ -2032,6 +2409,7 @@ fn drive_real_run(
             }
         }
     };
+    eval_phase("drive:worker-dispatch");
     let dispatch_error = coordinator
         .dispatch_initial_live(
             owner,
@@ -2043,7 +2421,15 @@ fn drive_real_run(
             &|_| Ok(()),
         )
         .err();
+    eval_phase("drive:after-dispatch");
+    if let Some(error) = &dispatch_error {
+        // Printed immediately: the entry must not carry a fast dispatch failure
+        // all the way to the report before anybody can see why it failed.
+        eprintln!("[eval] dispatch_error: {error}");
+    }
     shutdown.store(true, Ordering::SeqCst);
+    watcher_stop.store(true, Ordering::SeqCst);
+    eval_phase("post:snapshot");
     let state = coordinator
         .snapshot()
         .map(|snapshot| snapshot.state)
@@ -2051,14 +2437,17 @@ fn drive_real_run(
     // The synthetic tier counts the loopback provider's real HTTP requests; the
     // real tier counts the Run's durable model-response events instead, because
     // it has no local endpoint to observe.
-    let (model_requests, model_requests_source) = match session.join {
+    eval_phase("post:provider-join");
+    let (model_requests, model_requests_source) = match session.take_join() {
         Some(join) => (
             join.join().expect("provider thread").len(),
             PROVIDER_ROUNDS_SOURCE,
         ),
         None => (durable_model_rounds(root, run_id), DURABLE_ROUNDS_SOURCE),
     };
+    eval_phase("post:approver-join");
     let approvals = approver.join().unwrap();
+    eval_phase("post:observations");
     RunObservations {
         state,
         model_requests,
@@ -2308,11 +2697,11 @@ fn fail_outcome(
 // ---------------------------------------------------------------------------
 
 fn scenario_root(mode: EvalMode, scenario: &str) -> Result<std::path::PathBuf, String> {
-    let root = mode.artifact_dir(scenario);
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root)
-        .map_err(|error| error.to_string())
-        .map(|_| root)
+    // This evaluation's own namespace, and an exclusive `create_dir` on top: the
+    // previous evaluation's database, snapshots and documents stay exactly where
+    // they were, and a directory that already exists is never reused as if it
+    // were empty.
+    reserve_directory(&mode.evaluation_dir().join("artifacts"), scenario)
 }
 
 /// Copy the CURRENT source workbook into the scenario root and derive the
@@ -2346,6 +2735,7 @@ fn run_agv_scenario() -> ScenarioOutcome {
     let id = "agv-deliverables";
     let title = "AGV：真实链路生成两份 Excel 与一份 Word";
     let started = Instant::now();
+    eval_phase("agv:scenario-root");
     let root = match scenario_root(mode, "agv") {
         Ok(root) => root,
         Err(error) => {
@@ -2360,6 +2750,7 @@ fn run_agv_scenario() -> ScenarioOutcome {
             )
         }
     };
+    eval_phase("agv:stage-source-workbook");
     let expected = match stage_source_workbook(&root) {
         Ok((_bytes, expected)) => expected,
         Err(error) => {
@@ -2374,18 +2765,27 @@ fn run_agv_scenario() -> ScenarioOutcome {
             )
         }
     };
+    eval_phase("agv:scripted-provider");
     let script = agv_script(&expected);
     let planned_rounds = script.len();
     let handle = scripted_provider(script);
     let config = eval_model_config(handle.address);
+    eval_phase("agv:prepare-run");
     let (db, run_id) =
-        match prepare_eval_run(&root, AGV_TASK_PROMPT, &config, "real-task-eval") {
+        match prepare_eval_run(
+            &root,
+            AGV_TASK_PROMPT,
+            &config,
+            "real-task-eval",
+            PermissionMode::Allow,
+        ) {
             Ok(prepared) => prepared,
             Err((stage, error)) => {
                 return fail_outcome(mode, id, title, stage, error, None, Some(&root));
             }
         };
     let eval_state = Arc::new(Mutex::new(EvalState::default()));
+    eval_phase("agv:drive-run");
     let observations = drive_real_run(
         &db,
         &root,
@@ -2416,6 +2816,7 @@ fn run_agv_cloud_scenario(env: &CloudEnvironment, identity: &ModelIdentity) -> S
     let id = "agv-deliverables-cloud";
     let title = "AGV（真实云模型）：真实模型驱动同一链路生成两份 Excel 与一份 Word";
     let started = Instant::now();
+    eval_phase("agv-cloud:scenario-root");
     let root = match scenario_root(mode, "agv") {
         Ok(root) => root,
         Err(error) => {
@@ -2430,6 +2831,7 @@ fn run_agv_cloud_scenario(env: &CloudEnvironment, identity: &ModelIdentity) -> S
             )
         }
     };
+    eval_phase("agv-cloud:stage-source-workbook");
     let expected = match stage_source_workbook(&root) {
         Ok((_bytes, expected)) => expected,
         Err(error) => {
@@ -2444,15 +2846,23 @@ fn run_agv_cloud_scenario(env: &CloudEnvironment, identity: &ModelIdentity) -> S
             )
         }
     };
+    eval_phase("agv-cloud:prepare-run");
     let config = env.model_config();
     let (db, run_id) =
-        match prepare_eval_run(&root, AGV_TASK_PROMPT, &config, "real-cloud-model-eval") {
+        match prepare_eval_run(
+            &root,
+            AGV_TASK_PROMPT,
+            &config,
+            "real-cloud-model-eval",
+            PermissionMode::Allow,
+        ) {
             Ok(prepared) => prepared,
             Err((stage, error)) => {
                 return fail_outcome(mode, id, title, stage, error, None, Some(&root));
             }
         };
     let eval_state = Arc::new(Mutex::new(EvalState::default()));
+    eval_phase("agv-cloud:drive-run");
     let observations = drive_real_run(
         &db,
         &root,
@@ -2565,6 +2975,583 @@ fn managed_office_versions(
         .filter(|row| matches!(row.tool.as_str(), "office_create" | "office_edit"))
         .filter(|row| names.iter().any(|name| row.display_name.contains(name)))
         .collect()
+}
+
+/// What the positive chain cannot prove: what must **not** become a managed
+/// version. No row is ever fabricated here: the checks assert absence, plus the
+/// absence of any file a rejected write would have produced.
+///
+/// Layers, stated per check so a reader never mistakes one for another:
+/// * `office-gate:*` on the Run's own `GatewayPolicy` — the production
+///   permission/dispatch entry `kernel_host.rs` uses, so a refusal is the
+///   gateway's decision rather than a test callback's. This proves admission and
+///   the absence of any side effect, because the gateway refuses in `validate`
+///   before the Office executor exists.
+/// * A dispatch after the Run went terminal is refused for want of an active
+///   Kernel owner (recorded as its own check). That fence bounds the gateway:
+///   the two cases that must **really reach** the pinned OfficeCLI therefore run
+///   the same executor the gateway's `fox-office` branch calls
+///   (`office::execute_with_cancellation`) inside the shared registration seam,
+///   and say so in their detail.
+/// * `office-gate:real-read-only-office-produced-no-version` is read from the
+///   live Run's own durable tool records, which is the only place a real
+///   read-only Office call actually happened.
+/// * `managed:generic-mcp-declaration-not-registered@seam` is the shared
+///   registration seam alone. It needs a second enabled connector, which a Run
+///   cannot have without changing its frozen scope; what it proves is that a
+///   result-shaped declaration never registers by itself, not what a live
+///   generic connector would do.
+fn managed_office_gate_checks(
+    mode: EvalMode,
+    db: &Database,
+    root: &std::path::Path,
+    run_id: &str,
+    records: &[crate::database::ToolCallRecord],
+    registered_versions: usize,
+    checks: &mut CheckResults,
+) {
+    use crate::runtime_host::managed_files::{
+        execute_with_managed_versions, ManagedExecutionContext,
+    };
+    let Ok(Some(binding)) = db.run_control_binding(run_id) else {
+        checks.check("managed:negatives-setup", false, "no control binding");
+        return;
+    };
+    let Ok(scope) = db.kernel_host_scope(run_id) else {
+        checks.check("managed:negatives-setup", false, "no frozen scope");
+        return;
+    };
+    // This Run's real gateway, and a token that is never cancelled: a refusal
+    // below must be attributable to the gate, never to a cancelled Run.
+    let policy = kernel_gateway::GatewayPolicy {
+        binding: binding.clone(),
+        scope: scope.clone(),
+
+        database: None,
+        sessions_dir: None,
+    };
+    let registry = CancellationRegistry::default();
+    if registry.register_run(run_id).is_err() {
+        checks.check("managed:negatives-setup", false, "no cancellation scope");
+        return;
+    }
+    let Ok(token) = registry.run_token(run_id) else {
+        checks.check("managed:negatives-setup", false, "no run token");
+        return;
+    };
+    let managed_dir = root.join("managed-files");
+    let context = ManagedExecutionContext {
+        database: db,
+        backups_dir: &managed_dir,
+        conversation_id: &binding.conversation_id,
+        run_id,
+        project_root: binding.permission.project_root.as_deref(),
+        permission_mode: binding.permission.mode.as_str(),
+        scope: &scope,
+        sessions_dir: None,
+    };
+    let count = || {
+        db.managed_file_versions(&binding.conversation_id, None)
+            .map(|rows| rows.len())
+            .unwrap_or(usize::MAX)
+    };
+    let before = count();
+    let write = |name: &str, body: &[u8]| {
+        let path = root.join(name);
+        std::fs::write(&path, body).expect("a gate case seeds its own input file");
+    };
+
+    // One dispatch through the production seam, counting gateway entries.
+    let executions = std::cell::Cell::new(0u64);
+    let dispatch = |context: &ManagedExecutionContext<'_>,
+                    tool: &str,
+                    input: &Value,
+                    tool_call_id: &str| {
+        executions.set(executions.get() + 1);
+        execute_with_managed_versions(*context, tool, input, Some(tool_call_id), || {
+            policy.execute(db, tool, input, &token)
+        })
+    };
+
+    // 1. A connector this Run never froze is outside the production scope. The
+    //    gateway refuses before dispatching anything, so the real Office
+    //    executor never runs: no document appears and no version is registered.
+    let executor_before = crate::office::executor_entries_for_test();
+    let unfrozen = dispatch(
+        &context,
+        "call_mcp_tool",
+        &json!({"serverId": "not-a-frozen-connector", "tool": "office_create",
+            "arguments": {"output": "neg-unfrozen.docx"}}),
+        "gate-unfrozen",
+    );
+    let executor_calls = crate::office::executor_entries_for_test() - executor_before;
+    let unfrozen_file = root.join("neg-unfrozen.docx").exists();
+    checks.check(
+        "office-gate:unfrozen-connector-refused",
+        matches!(unfrozen.as_ref(), Err(error) if error.contains("outside the frozen scope"))
+            && executor_calls == 0 && !unfrozen_file
+            && count() == before,
+        format!(
+            "gatewayError={:?} executorCalls={executor_calls} targetFileExists={unfrozen_file} gatewayDispatches={} \
+             versionsBefore={before} versionsAfter={}",
+            unfrozen.as_ref().err(),
+            executions.get(),
+            count(),
+        ),
+    );
+
+    // 2. An Office operation the frozen scope does not authorize: same connector,
+    //    same project root, operation outside the frozen catalog.
+    let executor_before = crate::office::executor_entries_for_test();
+    let unauthorized = dispatch(
+        &context,
+        "call_mcp_tool",
+        &json!({"serverId": crate::office::SERVER_ID, "tool": "office_drop_document",
+            "arguments": {"output": "neg-unauthorized-op.docx"}}),
+        "gate-unauthorized-op",
+    );
+    let executor_calls = crate::office::executor_entries_for_test() - executor_before;
+    let unauthorized_file = root.join("neg-unauthorized-op.docx").exists();
+    let after_unauthorized = count();
+    checks.check(
+        "office-gate:unauthorized-office-operation-refused",
+        matches!(unauthorized.as_ref(), Err(error) if error.contains("Office operation is outside frozen scope"))
+            && executor_calls == 0 && !unauthorized_file
+            && after_unauthorized == before,
+        format!(
+            "gatewayError={:?} executorCalls={executor_calls} targetFileExists={unauthorized_file} versionsBefore={before} \
+             versionsAfter={after_unauthorized} (the scope gate runs before any OfficeCLI execution)",
+            unauthorized.as_ref().err(),
+        ),
+    );
+
+    // 3. A Run frozen **read-only** may not mutate a document even through the
+    //    authorized connector: the production permission gate refuses the real
+    //    office_create, and the target document is never written.
+    match prepare_read_only_gate_run(mode) {
+        Ok(readonly) => {
+            let executor_before = crate::office::executor_entries_for_test();
+            let refused = readonly.dispatch(
+                "call_mcp_tool",
+                &json!({"serverId": crate::office::SERVER_ID, "tool": "office_create",
+                    "arguments": {"output": "neg-readonly.docx"}}),
+                "gate-readonly-create",
+            );
+            let executor_calls = crate::office::executor_entries_for_test() - executor_before;
+            let written = readonly.root.join("neg-readonly.docx").exists();
+            let after = readonly.count();
+            checks.check(
+                "office-gate:read-only-project-refuses-office-write",
+                matches!(refused.as_ref(), Err(error) if error.contains("只读"))
+                    && executor_calls == 0 && !written
+                    && after == readonly.before,
+                format!(
+                    "gatewayError={:?} executorCalls={executor_calls} targetFileExists={written} versionsBefore={} versionsAfter={}",
+                    refused.as_ref().err(),
+                    readonly.before,
+                    after,
+                ),
+            );
+        }
+        Err(error) => checks.check(
+            "office-gate:read-only-project-refuses-office-write",
+            false,
+            format!("could not prepare the read-only Run: {error}"),
+        ),
+    }
+
+    // 4. The ownership fence, recorded because it bounds every case below: a
+    //    dispatch through the Run's gateway after the Run went terminal is
+    //    refused for want of an active Kernel owner, so a post-run dispatch can
+    //    prove admission but cannot reach the sidecar.
+    let fenced = dispatch(
+        &context,
+        "call_mcp_tool",
+        &json!({"serverId": crate::office::SERVER_ID, "tool": "office_read",
+            "arguments": {"file": AGV_REPORT_NAME}}),
+        "gate-after-terminal",
+    );
+    checks.check(
+        "office-gate:terminal-run-dispatch-needs-an-active-owner",
+        matches!(fenced.as_ref(), Err(error) if error.contains("active Kernel owner"))
+            && count() == before,
+        format!(
+            "gatewayError={:?} versionsBefore={before} versionsAfter={} \
+             (the sidecar is never reached once the Run is terminal)",
+            fenced.as_ref().err(),
+            count(),
+        ),
+    );
+
+    // 5. A real read-only Office operation must not produce a write version.
+    //    Proven from the live Run's own durable records: the Run really called
+    //    non-mutating Office operations through the production gateway, and the
+    //    registry holds exactly one version per mutation and none per read.
+    fn inner_tool(record: &crate::database::ToolCallRecord) -> &str {
+        record
+            .input
+            .get("tool")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+    }
+    let mutating: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            record.tool_name == "call_mcp_tool"
+                && matches!(inner_tool(record), "office_create" | "office_edit")
+        })
+        .collect();
+    let reading: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            record.tool_name == "call_mcp_tool"
+                && matches!(
+                    inner_tool(record),
+                    "office_read" | "office_validate" | "office_help"
+                )
+        })
+        .collect();
+    checks.check(
+        "office-gate:real-read-only-office-produced-no-version",
+        !mutating.is_empty() && reading.len() >= 1 && registered_versions == mutating.len(),
+        format!(
+            "liveRunMutations={} liveRunReads={:?} registeredVersions={registered_versions} \
+             (one version per real write, none for any read)",
+            mutating.len(),
+            reading.iter().map(|record| inner_tool(record)).collect::<Vec<_>>(),
+        ),
+    );
+
+    // 6. A real Office write that fails: the pinned OfficeCLI runs against a
+    //    document it cannot open, the failure is reported as it happened, the
+    //    target's bytes are untouched, and nothing is registered as a success.
+    //    Layer: the real executor `office::execute_with_cancellation` — the very
+    //    call the gateway's fox-office branch makes — inside the shared
+    //    registration seam; it is not a test callback pretending to be Office.
+    let broken = b"not a document at all, and no OfficeCLI can open this";
+    write("neg-broken.docx", broken);
+    let before_bytes = sha256_hex(broken);
+    let arguments = json!({"file": "neg-broken.docx", "output": "neg-broken.docx",
+        "overwrite": true,
+        "operations": [{"command": "add", "path": "/body", "type": "paragraph",
+            "props": {"text": "a write that cannot succeed"}}]});
+    let wrapper = json!({"serverId": crate::office::SERVER_ID, "tool": "office_edit",
+        "arguments": arguments.clone()});
+    let server = db.get_mcp_server(crate::office::SERVER_ID).ok().flatten();
+    let executor_before = crate::office::executor_entries_for_test();
+    let failed = execute_with_managed_versions(
+        context,
+        "call_mcp_tool",
+        &wrapper,
+        Some("gate-failed-write"),
+        || match &server {
+            Some(server) => crate::office::execute_with_cancellation(
+                server,
+                "office_edit",
+                &arguments,
+                Some(root.to_str().unwrap_or_default()),
+                binding.permission.mode.as_str(),
+                Some(&token),
+                Duration::from_secs(120),
+                None,
+            ),
+            None => Err("the built-in Office connector is not registered".into()),
+        },
+    );
+    let executor_calls = crate::office::executor_entries_for_test() - executor_before;
+    let after_bytes = std::fs::read(root.join("neg-broken.docx"))
+        .map(|bytes| sha256_hex(&bytes))
+        .unwrap_or_default();
+    let reported_failure = match &failed {
+        Err(_) => true,
+        Ok(value) => value.get("isError").and_then(Value::as_bool) == Some(true),
+    };
+    checks.check(
+        "office-gate:real-failed-office-write-not-registered",
+        executor_calls == 1 && reported_failure && after_bytes == before_bytes && count() == before,
+        format!(
+            "layer=real-OfficeCLI-executor+shared-registration-seam executorCalls={executor_calls} dispatchFailed={reported_failure} \
+             bytesUnchanged={after_bytes} (expected {before_bytes}) versionsBefore={before} \
+             versionsAfter={} result={:?}",
+            count(),
+            failed.as_ref().err().cloned().or_else(|| failed.as_ref().ok().map(|value| {
+                value.to_string().chars().take(240).collect::<String>()
+            })),
+        ),
+    );
+
+    // 7. `@seam` layer: an ordinary MCP connector whose result carries a
+    //    byte-identical `foxManagedFile` declaration. The seam decides from Host
+    //    facts, so a declaration is data, not authority. See the doc comment for
+    //    why this one case cannot go through the gateway.
+    let mut seam_executed = false;
+    let generic = execute_with_managed_versions(
+        context,
+        "call_mcp_tool",
+        &json!({"serverId": "other-connector", "tool": "office_create",
+            "arguments": {"output": "neg-generic.docx"}}),
+        Some("neg-generic"),
+        || {
+            seam_executed = true;
+            write("neg-generic.docx", b"generic connector output");
+            Ok(json!({"details": {"foxManagedFile": {
+                "path": "neg-generic.docx",
+                "operation": "office_create",
+                "bytes": 24
+            }}}))
+        },
+    );
+    let after_generic = count();
+    checks.check(
+        "managed:generic-mcp-declaration-not-registered@seam",
+        seam_executed && generic.is_ok() && after_generic == before,
+        format!(
+            "layer=shared-registration-seam executed={seam_executed} \
+             versionsBefore={before} versionsAfter={after_generic} \
+             (declaration is data, not authority; not a production gateway test)",
+        ),
+    );
+}
+
+/// One Run frozen **read-only**, used only to ask its real gateway what it does
+/// with a document-mutating Office call. It never runs a model round, so its
+/// model service is the loopback placeholder; everything that is tested here is
+/// the frozen permission and the dispatch behind it.
+struct ReadOnlyGateRun {
+    db: Database,
+    root: std::path::PathBuf,
+    managed_dir: std::path::PathBuf,
+    conversation_id: String,
+    run_id: String,
+    before: usize,
+}
+
+impl ReadOnlyGateRun {
+    fn count(&self) -> usize {
+        self.db
+            .managed_file_versions(&self.conversation_id, None)
+            .map(|rows| rows.len())
+            .unwrap_or(usize::MAX)
+    }
+
+    /// The same wiring `kernel_host.rs` gives the desktop Host: the Run's own
+    /// frozen `GatewayPolicy` inside the shared managed-file registration seam.
+    fn dispatch(&self, tool: &str, input: &Value, tool_call_id: &str) -> Result<Value, String> {
+        use crate::runtime_host::managed_files::{
+            execute_with_managed_versions, ManagedExecutionContext,
+        };
+        let binding = self
+            .db
+            .run_control_binding(&self.run_id)?
+            .ok_or("read-only gate Run has no control binding")?;
+        let scope = self.db.kernel_host_scope(&self.run_id)?;
+        let policy = kernel_gateway::GatewayPolicy { binding, scope, database: None, sessions_dir: None };
+        let registry = CancellationRegistry::default();
+        registry.register_run(&self.run_id)?;
+        let token = registry.run_token(&self.run_id)?;
+        execute_with_managed_versions(
+            ManagedExecutionContext {
+                database: &self.db,
+                backups_dir: &self.managed_dir,
+                conversation_id: &self.conversation_id,
+                run_id: &self.run_id,
+                project_root: Some(self.root.to_str().unwrap_or_default()),
+                permission_mode: PermissionMode::ReadOnly.as_str(),
+                scope: &policy.scope,
+                sessions_dir: None,
+            },
+            tool,
+            input,
+            Some(tool_call_id),
+            || policy.execute(&self.db, tool, input, &token),
+        )
+    }
+}
+
+fn prepare_read_only_gate_run(mode: EvalMode) -> Result<ReadOnlyGateRun, String> {
+    let root = reserve_directory(&mode.evaluation_dir().join("artifacts"), "gate-readonly")?;
+    let config = eval_model_config(synthetic_placeholder_address());
+    let task = "请只读取现有台账并说明其中有多少条记录。";
+    let (db, run_id) = prepare_eval_run(
+        &root,
+        task,
+        &config,
+        "real-eval-gate-readonly",
+        PermissionMode::ReadOnly,
+    )
+    .map_err(|(stage, error)| format!("{stage}: {error}"))?;
+    let conversation_id = db
+        .run_control_binding(&run_id)?
+        .ok_or("read-only gate Run has no control binding")?
+        .conversation_id;
+    let before = db
+        .managed_file_versions(&conversation_id, None)
+        .map_err(|error| error.to_string())?
+        .len();
+    Ok(ReadOnlyGateRun {
+        managed_dir: root.join("managed-files"),
+        db,
+        root,
+        conversation_id,
+        run_id,
+        before,
+    })
+}
+
+/// Does every row's registered content really exist and hash to what the row
+/// claims? Returns `(verified, failures)`; a row is verified **only** when both
+/// the snapshot resolves and its bytes match, so a hash failure can never be
+/// counted as a restorable version.
+fn restore_source_audit(
+    db: &Database,
+    rows: &[crate::database::ManagedFileVersion],
+) -> (usize, Vec<String>) {
+    use crate::runtime_host::managed_files::{hash_file, resolve_restore_source};
+    let mut verified = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    for row in rows {
+        match resolve_restore_source(db, row) {
+            Ok(source) => {
+                let actual = hash_file(&source.path).map(|(hash, _)| hash);
+                if actual.as_deref() == row.after_hash.as_deref() {
+                    verified += 1;
+                } else {
+                    failures.push(format!(
+                        "{}: snapshot {} hashes to {actual:?}, row claims {:?}",
+                        row.id,
+                        source.path.display(),
+                        row.after_hash
+                    ));
+                }
+            }
+            Err(reason) => failures.push(format!("{}: {reason}", row.id)),
+        }
+    }
+    (verified, failures)
+}
+
+/// The recovery the registry is for, through the **production restore entry**:
+/// `managed_files::restore_version`, the only implementation behind the
+/// `managed_file_restore` command the UI calls. No tool is replayed, no model is
+/// asked, and no script copies the file — the restore itself writes the target,
+/// and the target is then read back from disk.
+fn restored_version_evidence(
+    db: &Database,
+    root: &std::path::Path,
+    run_id: &str,
+    registered: &[crate::database::ManagedFileVersion],
+    checks: &mut CheckResults,
+) {
+    use crate::runtime_host::managed_files::restore_version;
+    const ID: &str = "managed:restore-selected-version-actually-written";
+    let Ok(Some(binding)) = db.run_control_binding(run_id) else {
+        checks.check(ID, false, "no control binding");
+        return;
+    };
+    // An older version of a document that has at least two: restoring a file's
+    // newest version onto itself would prove nothing.
+    let Some(older) = registered.iter().find(|row| {
+        registered
+            .iter()
+            .any(|other| other.storage_path == row.storage_path && other.version_no > row.version_no)
+    }) else {
+        checks.check(ID, false, "no document has two registered versions to restore between");
+        return;
+    };
+    let latest = registered
+        .iter()
+        .filter(|row| row.storage_path == older.storage_path)
+        .max_by_key(|row| row.version_no)
+        .expect("the group has a newest row");
+    let target = std::path::PathBuf::from(&older.storage_path);
+    let backups_dir = root.join("managed-files");
+    let Some((current_hash, current_size)) =
+        crate::runtime_host::managed_files::hash_file(&target)
+    else {
+        checks.check(ID, false, format!("{} is unreadable before the restore", target.display()));
+        return;
+    };
+    let Some(older_hash) = older.after_hash.as_deref() else {
+        checks.check(ID, false, format!("version {} records no content hash", older.id));
+        return;
+    };
+    let outcome = restore_version(db, &backups_dir, &binding.conversation_id, &older.id, false);
+    let restored = match outcome {
+        Ok(row) => row,
+        Err(error) => {
+            checks.check(
+                ID,
+                false,
+                format!("production restore of {} failed: {error}", older.id),
+            );
+            return;
+        }
+    };
+    // 1. The file on disk now holds exactly the selected version's bytes.
+    let (after_hash, after_size) = crate::runtime_host::managed_files::hash_file(&target)
+        .unwrap_or_else(|| ("<unreadable>".to_owned(), 0));
+    let bytes_match = after_hash == older_hash && Some(after_size) == older.after_size;
+    // 2. The restore is itself an auditable version, pointing at what it chose.
+    let row_is_correct = restored.change_kind == "restored"
+        && restored.tool == "restore"
+        && restored.restored_from_id.as_deref() == Some(older.id.as_str())
+        && restored.after_hash.as_deref() == Some(older_hash)
+        && restored.before_hash.as_deref() == Some(current_hash.as_str());
+    // 3. What the restore overwrote is still reachable: the `replaced` row that
+    //    precedes it carries those exact bytes and resolves to a real snapshot.
+    let replaced = db
+        .managed_file_versions(&binding.conversation_id, None)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|row| {
+            row.storage_path == older.storage_path
+                && row.change_kind == "replaced"
+                && row.after_hash.as_deref() == Some(current_hash.as_str())
+        });
+    let replaced_recoverable = replaced
+        .as_ref()
+        .is_some_and(|row| restore_source_audit(db, std::slice::from_ref(row)).0 == 1);
+    checks.check(
+        ID,
+        bytes_match && row_is_correct && replaced_recoverable,
+        format!(
+            "target={} selectedVersion={}@v{} selectedHash={older_hash} \
+             targetHashAfterRestore={after_hash} sizeBefore={current_size} sizeAfter={after_size} \
+             bytesMatch={bytes_match} restoredRow={{id:{},kind:{},from:{:?},hash:{:?},before:{:?}}} \
+             replacedContentRecoverable={replaced_recoverable} \
+             [layer: real OfficeCLI content + production restore function; not the UI command]",
+            target.display(),
+            older.id,
+            older.version_no,
+            restored.id,
+            restored.change_kind,
+            restored.restored_from_id,
+            restored.after_hash,
+            restored.before_hash,
+        ),
+    );
+    // Leave the delivered document holding the content the Run finished with, so
+    // this check cannot be what made the later artifact hashes look right.
+    match restore_version(db, &backups_dir, &binding.conversation_id, &latest.id, false) {
+        Ok(_) => {
+            let (hash, _) = crate::runtime_host::managed_files::hash_file(&target)
+                .unwrap_or_else(|| ("<unreadable>".to_owned(), 0));
+            checks.check(
+                "managed:latest-version-restored-back-after-audit",
+                Some(hash.as_str()) == latest.after_hash.as_deref(),
+                format!(
+                    "target={} expected={:?} actual={hash}",
+                    target.display(),
+                    latest.after_hash,
+                ),
+            );
+        }
+        Err(error) => checks.check(
+            "managed:latest-version-restored-back-after-audit",
+            false,
+            format!("restoring the latest version back failed: {error}"),
+        ),
+    }
 }
 
 fn run_agv_checks(
@@ -2746,31 +3733,30 @@ fn run_agv_checks(
             .all(|name| registered.iter().any(|row| row.display_name.contains(name))),
         "each delivered document appears in the managed-file registry",
     );
-    let mut restorable = 0usize;
-    let mut restore_failures: Vec<String> = Vec::new();
-    for row in &registered {
-        // The registry's own content snapshot must match the recorded hash, and
-        // restoring the row must produce exactly those bytes.
-        match crate::runtime_host::managed_files::resolve_restore_source(db, row) {
-            Ok(source) => {
-                restorable += 1;
-                if crate::runtime_host::managed_files::hash_file(&source.path)
-                    .map(|(hash, _)| hash)
-                    != row.after_hash.clone()
-                {
-                    restore_failures.push(format!("{}: snapshot hash mismatch", row.id));
-                }
-            }
-            Err(reason) => restore_failures.push(format!("{}: {reason}", row.id)),
-        }
-    }
+    // Every registered version's own content snapshot must resolve *and* hash to
+    // what that row claims. A mismatch fails the check; it is not a line in a
+    // log next to a pass.
+    let (restorable, restore_failures) = restore_source_audit(db, &registered);
     checks.check(
         "managed:every-version-restorable",
-        restorable == registered.len(),
+        restorable == registered.len() && restore_failures.is_empty(),
         format!(
             "restorable={restorable}/{} failures={restore_failures:?}",
             registered.len()
         ),
+    );
+    // A registry nobody can restore from is a ledger, not a feature. Restore one
+    // real version through the production entry and read the file back.
+    restored_version_evidence(db, root, run_id, &registered, &mut checks);
+    // The chain above proves what *does* register; these prove what must not.
+    managed_office_gate_checks(
+        mode,
+        db,
+        root,
+        run_id,
+        &records,
+        registered.len(),
+        &mut checks,
     );
 
     let status = if checks.ok() && observations.state == "completed" {
@@ -2879,7 +3865,13 @@ fn run_short_document_scenario() -> ScenarioOutcome {
     let handle = scripted_provider(script);
     let config = eval_model_config(handle.address);
     let (db, run_id) =
-        match prepare_eval_run(&root, SHORT_DOC_TASK_PROMPT, &config, "real-task-eval") {
+        match prepare_eval_run(
+            &root,
+            SHORT_DOC_TASK_PROMPT,
+            &config,
+            "real-task-eval",
+            PermissionMode::Allow,
+        ) {
             Ok(prepared) => prepared,
             Err((stage, error)) => {
                 return fail_outcome(mode, id, title, stage, error, None, Some(&root));
@@ -3094,7 +4086,13 @@ fn run_large_result_scenario() -> ScenarioOutcome {
     let handle = spawn_provider(move |index, body| paging_decide(index, body));
     let config = eval_model_config(handle.address);
     let (db, run_id) =
-        match prepare_eval_run(&root, LARGE_RESULT_TASK_PROMPT, &config, "real-task-eval") {
+        match prepare_eval_run(
+            &root,
+            LARGE_RESULT_TASK_PROMPT,
+            &config,
+            "real-task-eval",
+            PermissionMode::Allow,
+        ) {
             Ok(prepared) => prepared,
             Err((stage, error)) => {
                 return fail_outcome(mode, id, title, stage, error, None, Some(&root));
@@ -3393,7 +4391,8 @@ fn build_report(input: ReportInput) -> Value {
         "tiers": tiers_block(mode, executed, not_run_reason.as_deref(), overall),
         "fixedInputs": {
             "agvSourcePath": source_workbook_path().to_string_lossy(),
-            "outputDir": mode.run_dir().to_string_lossy(),
+            "outputDir": mode.evaluation_dir().to_string_lossy(),
+            "evaluationId": evaluation_id(),
             "prompts": {
                 "agv": AGV_TASK_PROMPT,
                 "shortDocument": SHORT_DOC_TASK_PROMPT,
@@ -4110,6 +5109,24 @@ fn real_eval_entries_write_round_scoped_directories_only() {
         assert!(dir.starts_with(&round), "{}", dir.display());
         assert!(!dir.starts_with(&historical), "{}", dir.display());
         assert!(!report.starts_with(&historical), "{}", report.display());
+        // (2b) One evaluation owns a directory of its own, inside its tier: its
+        // report, scenario databases, snapshots and artifacts are siblings, and
+        // no evaluation writes into the tier directory that holds them.
+        let evaluation = mode.evaluation_dir();
+        assert!(evaluation.starts_with(&dir), "{}", evaluation.display());
+        assert_ne!(evaluation, dir);
+        assert!(!evaluation.starts_with(&historical), "{}", evaluation.display());
+        assert!(!evaluation.join(mode.report_name()).starts_with(&historical));
+        assert!(
+            mode.artifact_dir("agv").starts_with(&evaluation),
+            "a scenario's artifacts live inside its own evaluation: {:?}",
+            mode.artifact_dir("agv")
+        );
+        let id = evaluation_id();
+        assert!(
+            !id.is_empty() && id.contains('-'),
+            "unexpected evaluation id {id}"
+        );
         assert!(
             mode.entry_command().contains("--ignored"),
             "{:?} must stay an explicitly selected entry",
@@ -4117,6 +5134,11 @@ fn real_eval_entries_write_round_scoped_directories_only() {
         );
         assert_eq!(mode.report_name(), "real-task-eval-report.json");
     }
+    assert_ne!(
+        EvalMode::SyntheticProvider.evaluation_dir(),
+        EvalMode::RealCloudModel.evaluation_dir(),
+        "tiers must not share an evaluation directory"
+    );
     assert_ne!(
         EvalMode::SyntheticProvider.run_dir(),
         EvalMode::RealCloudModel.run_dir(),
@@ -4155,12 +5177,257 @@ fn real_eval_entries_write_round_scoped_directories_only() {
     }
 }
 
+/// C3: an evaluation that has finished must not be able to end the test process
+/// later on. The guard is dropped with the entry — on a pass, a failure or a
+/// panic — and the thread stops within one slice of that.
+#[test]
+fn the_watchdog_ends_with_the_evaluation_not_with_the_test_process() {
+    // A deadline of a few hundred milliseconds: were the watchdog still alive
+    // after the evaluation, this very process would be terminated here and every
+    // other test in the same binary would die with it.
+    let watchdog = eval_trace_start_with(Duration::from_millis(400));
+    eval_phase("watchdog:evaluation-finished");
+    drop(watchdog);
+    std::thread::sleep(Duration::from_millis(1_600));
+    let (phase, held) = eval_current_phase();
+    assert!(
+        phase.starts_with("watchdog:"),
+        "the process is still running and kept its phase: {phase}"
+    );
+    assert!(held < 30, "the phase clock is not stuck: {held}s");
+
+    // The decision itself, both ways: a stall past the deadline is the only
+    // thing that may end a process, and inside the deadline it only reports.
+    let started = Instant::now();
+    assert_eq!(
+        watchdog_action(
+            started + Duration::from_secs(10),
+            started,
+            Duration::from_secs(1),
+            "prepare:database",
+            9
+        ),
+        WatchdogAction::Terminate {
+            phase: "prepare:database".to_owned(),
+            held_secs: 9
+        }
+    );
+    assert_eq!(
+        watchdog_action(
+            started + Duration::from_millis(500),
+            started,
+            Duration::from_secs(60),
+            "prepare:database",
+            9
+        ),
+        WatchdogAction::Report {
+            phase: "prepare:database".to_owned(),
+            held_secs: 9
+        }
+    );
+    // A stall reports every phase it went through, not just the last one: the
+    // history records each phase when the entry leaves it, and the phase still
+    // being held is the current one.
+    eval_phase("watchdog:history-a");
+    eval_phase("watchdog:history-b");
+    let history = eval_phase_history();
+    assert!(
+        history.iter().any(|line| line.contains("watchdog:history-a")),
+        "{history:?}"
+    );
+    let (current, _) = eval_current_phase();
+    assert_eq!(current, "watchdog:history-b", "{history:?}");
+    assert!(
+        history.iter().any(|line| line.contains("watchdog:evaluation-finished")),
+        "the finished evaluation's phase must still be on the trail: {history:?}"
+    );
+}
+
+/// C4: a repeated evaluation of the same scenario reserves its own directory.
+/// Nothing is deleted, nothing is reused, and an old directory the operating
+/// system will not give up cannot pull a new evaluation into it.
+#[test]
+fn evaluation_supervisor_child_fixture() {
+    if std::env::var(EVAL_CHILD_TEST).ok().as_deref()
+        != Some(evaluation_test_name("evaluation_supervisor_child_fixture").as_str()) {
+        return;
+    }
+    let phase = std::env::var("FOX_EVAL_SUPERVISION_CASE").unwrap();
+    let _watchdog = eval_trace_start_with(Duration::from_millis(100));
+    eval_phase(&format!("{phase}:intentional-stall"));
+    let marker = std::env::var("FOX_EVAL_SUPERVISION_MARKER").unwrap();
+    std::fs::write(marker, &phase).unwrap();
+    if phase == "completed" { return; }
+    loop { std::thread::sleep(Duration::from_millis(50)); }
+}
+
+#[test]
+fn evaluation_deadlines_kill_only_the_owned_process_and_keep_evidence() {
+    let marker = std::env::temp_dir().join(format!("fox-eval-supervisor-{}.txt", uuid::Uuid::new_v4()));
+    let marker_text = marker.to_str().unwrap();
+    for tier in ["synthetic-provider", "real-cloud-model"] {
+        let result = run_evaluation_process("evaluation_supervisor_child_fixture", Duration::from_secs(3), &[
+            ("FOX_EVAL_SUPERVISION_CASE", tier), ("FOX_EVAL_SUPERVISION_MARKER", marker_text),
+        ]);
+        assert!(result.unwrap_err().contains("exceeded its deadline"));
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), tier,
+            "completed evidence survives timeout; the shared test process remains alive");
+    }
+    // Following work still completes after both timed-out processes were reaped.
+    let status = run_evaluation_process("evaluation_supervisor_child_fixture", Duration::from_secs(10), &[
+        ("FOX_EVAL_SUPERVISION_CASE", "completed"), ("FOX_EVAL_SUPERVISION_MARKER", marker_text),
+    ]).unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "completed");
+    std::fs::remove_file(marker).unwrap();
+}
+
+#[test]
+fn a_scenario_directory_is_reserved_exclusively_and_old_evidence_survives() {
+    let base = std::env::temp_dir().join(format!(
+        "fox-eval-reserve-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&base).unwrap();
+    let first = reserve_directory(&base, "agv").unwrap();
+    // Hold a file inside it open: on Windows that makes the directory
+    // undeletable, which is the condition a "clean up first" design breaks on.
+    let _lock = std::fs::File::create(first.join("facts.db")).unwrap();
+    std::fs::write(first.join("分布.xlsx"), b"evaluation-1 bytes").unwrap();
+    std::fs::write(first.join("real-task-eval-report.json"), b"{\"run\":1}").unwrap();
+    let before = artifact_hashes(&first);
+    assert_eq!(before.len(), 2, "{before:?}");
+
+    for _ in 0..3 {
+        let next = reserve_directory(&base, "agv").unwrap();
+        assert_ne!(next, first, "an existing directory is never reused");
+        assert!(
+            std::fs::read_dir(&next).map(|mut entries| entries.next().is_none()).unwrap_or(false),
+            "a fresh evaluation starts with no artifacts at all: {next:?}"
+        );
+        // The old evaluation's artifacts cannot leak into the new one's checks:
+        // they are not in this directory, and nothing copied them.
+        assert!(!next.join("分布.xlsx").exists());
+        assert_eq!(artifact_hashes(&first), before, "the earlier evidence changed");
+    }
+
+    // Two evaluations at once reserve different directories too.
+    let threads: Vec<_> = (0..4)
+        .map(|_| {
+            let base = base.clone();
+            std::thread::spawn(move || reserve_directory(&base, "agv"))
+        })
+        .collect();
+    let mut taken = BTreeSet::new();
+    for thread in threads {
+        let path = thread.join().unwrap().unwrap();
+        let shown = path.display().to_string();
+        assert!(taken.insert(path), "two evaluations shared {shown}");
+    }
+    assert_eq!(artifact_hashes(&first), before, "the earlier evidence changed");
+    let _ = std::fs::remove_dir_all(base);
+}
+
+/// C5: the registry audit must be able to fail. A snapshot whose bytes are not
+/// what its row recorded is a failure, not a restorable version — otherwise
+/// `restorable=6/6` says nothing about whether anybody can get their file back.
+#[test]
+fn the_restore_audit_fails_when_a_snapshot_does_not_match_its_row() {
+    use crate::runtime_host::managed_files::{hash_file, record_office_write, OfficeWriteDetails};
+    let root = std::env::temp_dir().join(format!(
+        "fox-eval-restore-audit-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let conversation = db
+        .create_conversation(
+            db.default_agent_id(),
+            None,
+            Some(root.to_str().unwrap()),
+            Some("allow"),
+        )
+        .unwrap();
+    let run_id = db.create_run(&conversation.id, "restore-audit", None).unwrap().run.id;
+    let backups = root.join("managed-files");
+    std::fs::create_dir_all(&backups).unwrap();
+    let target = root.join("纪要.docx");
+    let storage_path = target.to_string_lossy().into_owned();
+
+    let register = |version: usize| {
+        std::fs::write(
+            &target,
+            format!("document content generation {version}").as_bytes(),
+        )
+        .unwrap();
+        let (after_hash, after_size) = hash_file(&target).unwrap();
+        let snapshot = backups.join(format!("snapshot-v{version}"));
+        std::fs::write(&snapshot, std::fs::read(&target).unwrap()).unwrap();
+        record_office_write(
+            &db,
+            &conversation.id,
+            &run_id,
+            Some(&format!("tc-{version}")),
+            &OfficeWriteDetails {
+                tool: "office_create",
+                storage_path: &storage_path,
+                display_name: "纪要.docx",
+                change_kind: "created",
+                before_hash: None,
+                before_size: None,
+                after_hash: &after_hash,
+                after_size,
+                backup_path: None,
+                after_backup_path: Some(&snapshot.to_string_lossy()),
+            },
+        )
+        .unwrap()
+    };
+    let v1 = register(1);
+    let v2 = register(2);
+    let rows = || {
+        db.managed_file_versions(&conversation.id, None)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.run_id.as_deref() == Some(run_id.as_str()))
+            .collect::<Vec<_>>()
+    };
+
+    // Positive control: intact snapshots audit clean.
+    let (verified, failures) = restore_source_audit(&db, &rows());
+    assert_eq!(failures, Vec::<String>::new(), "{failures:?}");
+    assert_eq!(verified, 2);
+
+    // The failure sample: version 2's snapshot no longer holds its bytes.
+    let tampered = backups.join("snapshot-v2");
+    std::fs::write(&tampered, b"someone replaced these bytes").unwrap();
+    let (verified, failures) = restore_source_audit(&db, &rows());
+    assert_eq!(verified, 1, "a tampered snapshot was still counted: {failures:?}");
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(failures[0].contains("不一致"), "{failures:?}");
+    assert!(failures[0].contains(&v2), "the wrong row was blamed: {failures:?}");
+    assert!(!failures[0].contains(&v1), "the wrong row was blamed: {failures:?}");
+    // The exact boolean the acceptance uses must be false — a count match alone
+    // is what used to let this pass.
+    let all = rows();
+    assert!(
+        !(verified == all.len() && failures.is_empty()),
+        "the audit still declared a pass after tampering"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// The repeatable synthetic regression (`synthetic-provider` tier). Requires
 /// Node + the pinned OfficeCLI. It does NOT contact any cloud model.
 #[test]
 #[ignore = "synthetic regression: requires the Node runtime and the pinned OfficeCLI sidecar (no cloud credentials used)"]
 fn real_task_evaluation_through_host_kernel_runtime_and_real_tools() {
+    if supervise_evaluation("real_task_evaluation_through_host_kernel_runtime_and_real_tools") { return; }
     let mode = EvalMode::SyntheticProvider;
+    // Phase trace + bounded watchdog: a stall must name its stage and end at a
+    // deadline instead of waiting unobserved (see the trace section above).
+    let _watchdog = eval_trace_start();
+    eval_phase("synthetic:start");
     let scenarios = vec![
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_agv_scenario)) {
             Ok(outcome) => outcome,
@@ -4208,7 +5475,12 @@ fn real_task_evaluation_through_host_kernel_runtime_and_real_tools() {
             "apiKeyRecorded": false,
         }),
     });
-    let report_path = write_report_file(mode.run_dir().as_path(), mode.report_name(), &report, None);
+    let report_path = write_report_file(
+        mode.evaluation_dir().as_path(),
+        mode.report_name(),
+        &report,
+        None,
+    );
     let scenarios = report["scenarios"].as_array().cloned().unwrap_or_default();
     for scenario in &scenarios {
         println!(
@@ -4253,7 +5525,13 @@ fn real_task_evaluation_through_host_kernel_runtime_and_real_tools() {
 #[test]
 #[ignore = "real cloud-model acceptance: requires FOX_EVAL_* credentials, the Node runtime and the pinned OfficeCLI sidecar"]
 fn real_task_evaluation_cloud() {
+    if supervise_evaluation("real_task_evaluation_cloud") { return; }
     let mode = EvalMode::RealCloudModel;
+    // The same guard the synthetic tier gets: phases recorded from the first
+    // statement, a deadline that stops with the evaluation, and a bounded end
+    // for a cloud round that never returns.
+    let _watchdog = eval_trace_start();
+    eval_phase("cloud:start");
     let env = match CloudEnvironment::read_from_process() {
         Ok(env) => env,
         Err(error) => {
@@ -4271,7 +5549,7 @@ fn real_task_evaluation_cloud() {
                 environment: cloud_not_run_environment(),
             });
             let report_path = try_write_report(
-                mode.run_dir().as_path(),
+                mode.evaluation_dir().as_path(),
                 mode.report_name(),
                 &report,
                 None,
@@ -4314,7 +5592,7 @@ fn real_task_evaluation_cloud() {
         environment: env.report_json(),
     });
     let report_path = write_report_file(
-        mode.run_dir().as_path(),
+        mode.evaluation_dir().as_path(),
         mode.report_name(),
         &report,
         Some(&env.api_key),

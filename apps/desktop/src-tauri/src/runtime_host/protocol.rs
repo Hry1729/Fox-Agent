@@ -21,7 +21,7 @@ pub fn validate_host_manifest(manifest: &RuntimeCapabilityManifest) -> Result<()
 fn host_tool_is_supported(tool: &str) -> bool {
     matches!(
         tool,
-        "read_attachment"
+        "attachment_compute" | "skill_load" | "compute_job_start" | "compute_job_status" | "compute_job_cancel" | "compute_job_result" | "read_attachment"
             | "read_tool_result"
             | "write_file"
             | "edit_file"
@@ -87,6 +87,15 @@ mod tests {
         .expect("deserialize capability manifest");
         manifest.validate().expect("valid manifest");
         assert!(manifest.work_loop_enabled());
+    }
+
+    #[test]
+    fn every_canonical_host_tool_has_a_registered_handler() {
+        let missing: Vec<_> = fox_engine_protocol::TOOL_CONTRACTS.iter()
+            .filter(|(name, _, execution, _)| *execution == "host" && !host_tool_is_supported(name))
+            .map(|(name, _, _, _)| *name).collect();
+        assert!(missing.is_empty(), "canonical Host tools missing handlers: {missing:?}");
+        assert!(!host_tool_is_supported("invented_host_tool"));
     }
 
     #[test]

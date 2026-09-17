@@ -36,7 +36,17 @@ mod expert_workflows;
 mod graph_lead;
 mod kernel;
 mod kernel_compaction;
+pub(crate) mod kernel_authorization;
+pub(crate) mod kernel_continuation;
+pub(crate) mod kernel_jobs;
+mod kernel_job_execution;
 pub(crate) mod kernel_reconciliation;
+pub(crate) use kernel_authorization::{
+    AdditionalGrant, GrantRegistration, GrantScopeKind, GrantSkipReason,
+};
+pub(crate) use kernel_continuation::{run_budget_for_tier, BudgetTier, ContinuableRun, ContinuationRequest};
+pub(crate) use kernel_continuation::{PreparedContinuation, VerifiedContinuationPermission};
+pub(crate) use kernel_jobs::{JobSnapshot, JobStartOutcome, JobStartRequest, JobState};
 mod run_control;
 mod skill_activations;
 mod delivery_checks;
@@ -781,7 +791,10 @@ impl Database {
         })
     }
 
-    fn with_connection<T>(
+    /// Raw connection access for repository code. Crate-visible so tests in
+    /// sibling modules can seed durable facts without inventing a production
+    /// entry point; it grants no authority the caller did not already have.
+    pub(crate) fn with_connection<T>(
         &self,
         operation: impl FnOnce(&mut Connection) -> Result<T, rusqlite::Error>,
     ) -> Result<T, String> {
@@ -846,7 +859,7 @@ impl Database {
                     "skills": [],
                     "knowledge": [],
                     "mcpServers": [],
-                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "attachment_compute", "read_tool_result", "skill_load", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_attempt_start", "task_attempt_finish", "task_repair_start", "task_repair_escalate_start", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
+                    "allowedTools": ["read", "ls", "find", "grep", "read_attachment", "attachment_compute", "compute_job_start", "compute_job_status", "compute_job_cancel", "compute_job_result", "read_tool_result", "skill_load", "write_file", "edit_file", "run_command", "web_search", "web_read", "http_request", "system_info", "sqlite_read", "structured_data", "git_read", "test_run", "code_check", "format_code", "tabular_data", "child_agent_list", "child_run_start", "child_run_collect", "child_run_cancel", "memory_search", "memory_propose", "list_knowledge_bases", "search_knowledge", "read_knowledge_document", "query_knowledge_graph", "list_mcp_tools", "call_mcp_tool", "work_snapshot_get", "goal_propose", "goal_complete", "task_create_many", "task_update", "task_attempt_start", "task_attempt_finish", "task_repair_start", "task_repair_escalate_start", "task_evidence_add", "task_evidence_validate", "plan_revision_create", "review_finding_add", "review_finding_resolve", "acceptance_submit", "workflow_snapshot_get", "workflow_start", "workflow_stage_start", "workflow_stage_complete", "workflow_stage_fail", "workflow_cancel"]
                 });
                 let (agent_kind, invocation_mode, visibility) = if *id == DEFAULT_AGENT_ID {
                     ("assistant", "primary", "chat_selector")
@@ -2253,6 +2266,26 @@ impl Database {
             next_offset,
             content: text.get(start..end).unwrap_or_default().to_owned(),
         })
+    }
+
+    /// Derived exclusively from the persisted Host row and its range reader.
+    /// Tool-supplied fields never authorize model-view omission.
+    pub(crate) fn tool_result_storage(
+        &self, run_id: &str, tool_call_id: &str,
+    ) -> Result<crate::kernel_compaction::ToolResultStorage, String> {
+        let record = self.with_connection(|connection| {
+            Ok(query_tool_call(connection, run_id, tool_call_id).optional()?)
+        })?.ok_or("tool result has not been stored")?;
+        if record.status != "completed" || record.result.is_none() {
+            return Ok(crate::kernel_compaction::ToolResultStorage::unknown());
+        }
+        let reference = crate::kernel_compaction::tool_result_ref(run_id, tool_call_id)
+            .ok_or("invalid stored tool identity")?;
+        let range = self.tool_result_range(&reference, &record.conversation_id, 0, 4)?;
+        if !range.retrievable || range.truncated {
+            return Ok(crate::kernel_compaction::ToolResultStorage::unknown());
+        }
+        Ok(crate::kernel_compaction::ToolResultStorage::whole(range.original_bytes))
     }
 
     pub fn load_conversation_trace_records(

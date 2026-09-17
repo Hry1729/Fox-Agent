@@ -46,6 +46,17 @@ test('frozen prompt control rejects identity, schema, policy and budget drift', 
   assert.throws(() => validatePromptControl(request, 'legacy'), /disagrees/)
 })
 
+test('continuous policy is accepted without relaxing permissions or per-request bounds', () => {
+  const request = requestFixture()
+  request.payload.controlBinding.budgets.runExecutionLimited = false
+  assert.deepEqual(validatePromptControl(request, 'legacy'), { projectRoot: null, permissionMode: 'ask' })
+  request.payload.controlBinding.budgets.modelRequestMs = 0
+  assert.throws(() => validatePromptControl(request, 'legacy'), /budgets/)
+  request.payload.controlBinding.budgets.modelRequestMs = 120000
+  request.payload.controlBinding.permission.mode = 'allow'
+  assert.throws(() => validatePromptControl(request, 'legacy'), /hash mismatch/)
+})
+
 test('frozen permission hashing uses Rust field order rather than wire property order', () => {
   const request = requestFixture()
   request.payload.controlBinding.permission = { grants: [], projectRoot: null, mode: 'ask' }

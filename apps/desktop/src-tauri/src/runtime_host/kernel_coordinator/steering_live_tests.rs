@@ -372,6 +372,151 @@ fn a_request_accepted_inside_the_live_decision_window_is_answered_and_applied() 
     );
 }
 
+/// F1 at a **tool** boundary: the request arrives inside the decision window of
+/// the round that proposed a tool, so the retried decision arms a batch directive
+/// carrying it. The tool must execute exactly once (the raced round's proposal is
+/// settled, not replayed) and the request must still end `applied`.
+#[test]
+fn a_request_accepted_inside_a_tool_batch_window_executes_the_tool_once() {
+    let (address, server) = steering_provider(vec![
+        ("tool", "read-once"),
+        ("I will analyze the tool result.", "stop-1"),
+        ("I will finish the review.", "stop-2"),
+        ("final stop", "stop-3"),
+    ]);
+    let SteeringLive { db, root, run_id } = steering_live_fixture(address);
+    std::fs::write(root.join("proof.txt"), "proof").unwrap();
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let preview = |_: &fox_engine_protocol::KernelModelPreview| {};
+    let coordinator =
+        KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation)
+            .unwrap()
+            .with_preview(&preview);
+    let db_barrier = db.clone();
+    let run_barrier = run_id.clone();
+    super::live::test_barrier::install(
+        &run_id,
+        Box::new(move || {
+            db_barrier
+                .enqueue_run_steering(
+                    &run_barrier,
+                    "batch-window-row",
+                    "同时在报告里补一句风险提示",
+                    crate::database::now_ms(),
+                )
+                .expect("the Host accepts a request while the Run is active");
+        }),
+    );
+    let executions = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen_executions = Arc::clone(&executions);
+    let execute = move |_: &RunControlBinding,
+                        effect: &kernel::OutboxEffect,
+                        _: &kernel::CancellationToken| {
+        seen_executions
+            .lock()
+            .unwrap()
+            .push(effect.tool_call_id.clone().unwrap_or_default());
+        Ok((
+            true,
+            json!({"content":[{"type":"text","text":"proof.txt: proof"}]}),
+        ))
+    };
+    coordinator
+        .dispatch_initial_live(
+            "batch-window",
+            &Allow,
+            &real_worker_command(),
+            "local-test-only",
+            &execute,
+            &|_| Ok(()),
+            &|_| Ok(()),
+        )
+        .expect("the raced batch round must be re-planned, not failed");
+
+    if coordinator.snapshot().unwrap().state != "completed" {
+        // Diagnostic: on failure the durable events say which decision gave up.
+        if let Ok(connection) = rusqlite::Connection::open(root.join("facts.db")) {
+            let mut statement = connection
+                .prepare("SELECT seq, event_type, substr(payload_json,1,300) FROM kernel_events WHERE run_id=?1 ORDER BY seq")
+                .unwrap();
+            for row in statement
+                .query_map([&run_id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap()
+                .flatten()
+            {
+                eprintln!("[batch-window] {} {} {}", row.0, row.1, row.2);
+            }
+        }
+    }
+    assert_eq!(
+        coordinator.snapshot().unwrap().state,
+        "completed",
+        "the raced tool round must finish normally"
+    );
+    // No replay: the model proposed one tool call and it ran exactly once.
+    let executed = executions.lock().unwrap().clone();
+    assert_eq!(
+        executed,
+        vec!["read-once".to_owned()],
+        "a completed tool must never be re-executed by the recovery path"
+    );
+    let rows = db.run_steering_messages(&run_id).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, "applied", "{rows:?}");
+    // The request was adopted into the tool-batch round the raced decision armed,
+    // so the model saw it in that round and no extra lane round was needed.
+    assert_eq!(
+        db.kernel_count_steering_followups(&run_id).unwrap(),
+        0,
+        "a request adopted by the batch directive must not also spawn a lane round"
+    );
+    // No uncertain execution was recorded for the raced dispatch.
+    let uncertain = db
+        .query_count_raw(
+            "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type=?2",
+            &[&run_id, &"kernel.uncertain_execution"],
+        )
+        .unwrap();
+    assert_eq!(uncertain, 0);
+    let requests = server.join().unwrap();
+    assert_eq!(
+        requests.len(),
+        4,
+        "tool round, batch round, review round, final round"
+    );
+    // The accepted request reached the model in the **tool-batch round** the raced
+    // decision armed: that request already carries the notice wrapper it is
+    // delivered under, and it is the first request in which it appears — the
+    // request did not wait for a separate lane round.
+    let bodies = requests
+        .iter()
+        .map(|request| request.to_string())
+        .collect::<Vec<_>>();
+    let first_with_request = bodies
+        .iter()
+        .position(|body| body.contains("补一句风险提示"))
+        .expect("the accepted request must reach a model round");
+    assert_eq!(
+        first_with_request, 1,
+        "the request must ride the tool-batch round, not a later round"
+    );
+    assert!(
+        bodies[first_with_request].contains("补充要求"),
+        "the request must arrive in its user-facing notice wrapper"
+    );
+    assert!(
+        !bodies[first_with_request].contains("Fox 续答检查"),
+        "the request must not ride the stop-review prompt"
+    );
+}
+
 /// Without any mid-run input the live loop behaves exactly as before: one
 /// request, no steering lane round, a clean completion.
 #[test]

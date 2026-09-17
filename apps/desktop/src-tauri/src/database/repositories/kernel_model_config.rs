@@ -17,24 +17,10 @@ impl Database {
         run_id: &str,
         config: &KernelModelConfig,
     ) -> Result<(), String> {
-        let hash = config.hash()?;
-        let adapter_version = config.adapter_version()?;
-        let encoded =
-            serde_json::to_string(config).map_err(|_| "invalid Kernel model configuration")?;
         self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let existing: Option<(i64, String, String, String)> = transaction.query_row(
-                "SELECT schema_version,adapter_version,config_json,config_hash FROM kernel_model_configs WHERE run_id=?1",
-                [run_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
-            if let Some((version, adapter, body, stored_hash)) = existing {
-                if version != 1 || adapter != adapter_version || body != encoded || stored_hash != hash {
-                    return Err(invalid("immutable Kernel model configuration conflict"));
-                }
-            } else {
-                transaction.execute("INSERT INTO kernel_model_configs(run_id,schema_version,adapter_version,config_json,config_hash,created_at)
-                    VALUES(?1,1,?2,?3,?4,?5)", params![run_id,adapter_version,encoded,hash,now_ms()])?;
-            }
-            transaction.commit()
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            freeze_model_config_in_tx(&tx, run_id, config)?;
+            tx.commit()
         })
     }
 
@@ -106,4 +92,23 @@ pub(super) fn read_model_config(
         ));
     }
     Ok(config)
+}
+
+pub(super) fn freeze_model_config_in_tx(transaction: &rusqlite::Transaction<'_>, run_id: &str, config: &KernelModelConfig) -> rusqlite::Result<()> {
+        let hash = config.hash().map_err(invalid)?;
+        let adapter_version = config.adapter_version().map_err(invalid)?;
+        let encoded =
+            serde_json::to_string(config).map_err(|_| invalid("invalid Kernel model configuration"))?;
+            let existing: Option<(i64, String, String, String)> = transaction.query_row(
+                "SELECT schema_version,adapter_version,config_json,config_hash FROM kernel_model_configs WHERE run_id=?1",
+                [run_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
+            if let Some((version, adapter, body, stored_hash)) = existing {
+                if version != 1 || adapter != adapter_version || body != encoded || stored_hash != hash {
+                    return Err(invalid("immutable Kernel model configuration conflict"));
+                }
+            } else {
+                transaction.execute("INSERT INTO kernel_model_configs(run_id,schema_version,adapter_version,config_json,config_hash,created_at)
+                    VALUES(?1,1,?2,?3,?4,?5)", params![run_id,adapter_version,encoded,hash,now_ms()])?;
+            }
+    Ok(())
 }

@@ -1,6 +1,6 @@
 // Generated from fox-engine-protocol Rust DTOs. Do not edit; run node scripts/generate-engine-protocol.mjs.
 export type HostResponse = { "conversationId"?: (string | null); "id": string; "kind": string; "payload": unknown; "protocol": string; "requestId": string; "runId"?: (string | null); "runtimeSessionId"?: (string | null); "timestamp": string; "type": string; "version": number; }
-export type KernelSettledToolResult = { "canonicalInput": unknown; "result": unknown; "sourceOrder": number; "state": KernelSettledToolState; "tool": string; "toolCallId": string; }
+export type KernelSettledToolResult = { "canonicalInput": unknown; "result": unknown; "sourceOrder": number; "state": KernelSettledToolState; "storage"?: unknown; "tool": string; "toolCallId": string; }
 export type KernelSettledToolState = "completed" | "failed"
 export type KernelSteeringNotice = { "content": string; "messageId": string; }
 export type KernelBatchResumeFrame = { "assistantMessage": unknown; "batchId": string; "checkpointSeq": number; "history": Array<unknown>; "idempotencyKey": string; "schemaVersion": number; "steering"?: Array<KernelSteeringNotice>; "tools": Array<KernelSettledToolResult>; "turnId": string; }
@@ -25,7 +25,7 @@ export type FrozenPermission = { "grants": Array<PermissionGrant>; "mode": Permi
 export type PermissionGrant = { "scope": string; "tool": string; }
 export type PermissionMode = "ask" | "read_only" | "allow"
 export type ResourceExecutor = "runtime" | "rust"
-export type TimeBudgets = { "approvalWaitMs": number; "modelFirstResponseMs"?: number; "modelIdleMs"?: number; "modelRequestMs": number; "runExecutionMs": number; "toolExecutionMs": number; }
+export type TimeBudgets = { "approvalWaitMs": number; "modelFirstResponseMs"?: number; "modelIdleMs"?: number; "modelRequestMs": number; "runExecutionLimited"?: boolean; "runExecutionMs": number; "toolExecutionMs": number; }
 export type RunControlBinding = { "authority": ExecutionAuthority; "budgets": TimeBudgets; "conversationId": string; "engineId": string; "executionProfileId": string; "permission": FrozenPermission; "permissionSnapshotId": string; "readOnlyExecutor": ResourceExecutor; "runId": string; "schemaVersion": number; }
 export type RuntimeToolCapability = { "approval": string; "category": string; "execution": string; "name": string; }
 export type RuntimeCapabilityManifest = { "cancellation": boolean; "contextCompaction": boolean; "dynamicModelSwitch": boolean; "imageInput": boolean; "manifestVersion": number; "reasoning": boolean; "sessionResume": boolean; "steering": boolean; "streamingText": boolean; "toolApproval": boolean; "tools": Array<RuntimeToolCapability>; "workLoop"?: boolean; }

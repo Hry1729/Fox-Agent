@@ -235,12 +235,17 @@ test('keeps every structured Host result visible when one model turn calls multi
   })
 })
 
-test('stops a run that repeats the same tool input while allowing unrestricted distinct tool counts', async (context) => {
+test('applies bounded correction on consecutive no-progress calls and never re-executes them', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-tool-budget-'))
   context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
   context.after(() => runtime.close())
 
+  // The model proposes the identical search every turn. With the legacy
+  // maxIdenticalToolCalls:1 override (now the no-progress streak limit), the
+  // first repeat still executes once (its outcome could have changed); every
+  // later proposal is refused without executing, and only a model that keeps
+  // ignoring the correction stops the run.
   const initialize = runtime.send('initialize', {
     payload: {
       modelService: {
@@ -249,13 +254,10 @@ test('stops a run that repeats the same tool input while allowing unrestricted d
         apiType: 'faux',
         contextWindow: 4096,
         maxOutputTokens: 512,
-        fauxResponses: [{
-          content: [
-            { type: 'toolCall', id: 'budget-call-1', name: 'child_agent_list', arguments: {} },
-            { type: 'toolCall', id: 'budget-call-2', name: 'child_agent_list', arguments: {} },
-          ],
+        fauxResponses: Array.from({ length: 6 }, (_, index) => ({
+          content: [{ type: 'toolCall', id: `stuck-${index + 1}`, name: 'search_knowledge', arguments: { query: 'same query' } }],
           stopReason: 'toolUse',
-        }],
+        })),
       },
     },
   })
@@ -276,23 +278,47 @@ test('stops a run that repeats the same tool input while allowing unrestricted d
     runtimeSessionId,
     runId,
     payload: {
-      text: 'Call both tools.',
-      messages: [{ role: 'user', content: 'Call both tools.' }],
+      text: 'Keep searching the same thing.',
+      messages: [{ role: 'user', content: 'Keep searching the same thing.' }],
       runBudget: { maxIdenticalToolCalls: 1 },
     },
   })
 
+  // The initial call and its first repeat both execute (the repeat's outcome
+  // could legitimately have changed); after it returns the identical result,
+  // every later proposal must be refused without a Host execution.
+  for (const callId of ['stuck-1', 'stuck-2']) {
+    const execute = await runtime.waitFor((message) => message.kind === 'request'
+      && message.type === 'tool.execute' && message.runId === runId && message.payload?.toolCallId === callId)
+    runtime.respond(execute, 'tool.execute_completed', {
+      isError: false,
+      result: { items: [{ documentId: 'doc-1', content: 'same evidence' }] },
+    })
+  }
+
   const failure = await runtime.waitFor((message) => (
     message.runId === runId && message.payload?.type === 'run.failed'
   ))
-  assert.equal(failure.payload.code, 'runtime.repeated_tool_call')
+  assert.equal(failure.payload.code, 'runtime.no_progress')
+  // Corrections refuse re-execution: no repeated side effects or quota spend
+  // after the first repeat settled with an identical result.
+  const executions = runtime.messages.filter((message) => message.kind === 'request'
+    && message.type === 'tool.execute' && message.runId === runId && message.payload?.tool === 'search_knowledge')
+  assert.equal(executions.length, 2)
+  // The bounded correction surfaced as a tool-level error with guidance
+  // before the run stopped, not as an immediate run failure.
+  const session = JSON.parse(await readFile(join(directory, 'session.json'), 'utf8'))
+  const correction = session.messages.find((message) => message.role === 'toolResult'
+    && message.toolName === 'search_knowledge' && message.content?.[0]?.text?.includes('有界纠偏'))
+  assert.ok(correction, 'a tool-level no-progress correction is recorded')
+  assert.ok(correction.content[0].text.includes('没有新进展'))
   await new Promise((resolve) => setTimeout(resolve, 50))
   assert.equal(runtime.messages.some((message) => (
     message.runId === runId && message.payload?.type === 'run.completed'
   )), false)
 })
 
-test('stops runaway web-search reformulation before it exhausts provider tokens', async (context) => {
+test('a 7th productive web search is allowed; only no-evidence repeats are corrected', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-web-search-budget-'))
   context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
@@ -306,15 +332,18 @@ test('stops runaway web-search reformulation before it exhausts provider tokens'
         apiType: 'faux',
         contextWindow: 4096,
         maxOutputTokens: 512,
-        fauxResponses: [{
-          content: Array.from({ length: 7 }, (_, index) => ({
-            type: 'toolCall',
-            id: `web-search-${index + 1}`,
-            name: 'web_search',
-            arguments: { query: `distinct query ${index + 1}` },
-          })),
-          stopReason: 'toolUse',
-        }],
+        fauxResponses: [
+          {
+            content: Array.from({ length: 7 }, (_, index) => ({
+              type: 'toolCall',
+              id: `web-search-${index + 1}`,
+              name: 'web_search',
+              arguments: { query: `distinct query ${index + 1}` },
+            })),
+            stopReason: 'toolUse',
+          },
+          'Seven distinct searches completed and the evidence is enough.',
+        ],
       },
     },
   })
@@ -335,15 +364,325 @@ test('stops runaway web-search reformulation before it exhausts provider tokens'
     runtimeSessionId,
     runId,
     payload: {
-      text: 'Keep reformulating the same search.',
-      messages: [{ role: 'user', content: 'Keep reformulating the same search.' }],
+      text: 'Research this thoroughly.',
+      messages: [{ role: 'user', content: 'Research this thoroughly.' }],
     },
   })
 
-  const failure = await runtime.waitFor((message) => (
+  // There is no fixed per-run search count anymore: all seven distinct
+  // queries execute and the run completes normally.
+  for (let index = 1; index <= 7; index += 1) {
+    const request = await runtime.waitFor((message) => message.kind === 'request'
+      && message.type === 'tool.execute' && message.runId === runId
+      && message.payload?.toolCallId === `web-search-${index}`)
+    runtime.respond(request, 'tool.execute_completed', {
+      isError: false,
+      result: { results: [{ title: `evidence ${index}`, url: `https://example.com/${index}` }] },
+    })
+  }
+  await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
+  assert.equal(runtime.messages.some((message) => (
     message.runId === runId && message.payload?.type === 'run.failed'
-  ))
-  assert.equal(failure.payload.code, 'runtime.web_search_budget_exceeded')
+  )), false)
+})
+
+test('polling with changing results and read-after-write continue past the old fixed count', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-polling-progress-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const runtime = startRuntime()
+  context.after(() => runtime.close())
+
+  // Same input every turn, but the result keeps changing (state advanced,
+  // e.g. a file rewritten between reads): every call is real progress and
+  // must execute, well beyond the old cross-run count of 4.
+  const initialize = runtime.send('initialize', {
+    payload: {
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+        fauxResponses: [
+          ...Array.from({ length: 5 }, (_, index) => ({
+            content: [{ type: 'toolCall', id: `poll-${index + 1}`, name: 'search_knowledge', arguments: { query: 'status' } }],
+            stopReason: 'toolUse',
+          })),
+          'State kept changing; polling is done.',
+        ],
+      },
+    },
+  })
+  await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+
+  const runtimeSessionId = 'pi-polling-session'
+  const conversationId = 'pi-polling-conversation'
+  const create = runtime.send('create_session', {
+    conversationId,
+    runtimeSessionId,
+    payload: { sessionPath: join(directory, 'session.json') },
+  })
+  await runtime.waitFor((message) => message.requestId === create.id && message.type === 'session_created')
+
+  const runId = 'pi-polling-run'
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId,
+    runId,
+    payload: {
+      text: 'Watch the status until it settles.',
+      messages: [{ role: 'user', content: 'Watch the status until it settles.' }],
+    },
+  })
+
+  for (let index = 1; index <= 5; index += 1) {
+    const request = await runtime.waitFor((message) => message.kind === 'request'
+      && message.type === 'tool.execute' && message.runId === runId
+      && message.payload?.toolCallId === `poll-${index}`)
+    runtime.respond(request, 'tool.execute_completed', {
+      isError: false,
+      result: { items: [{ documentId: 'doc-1', content: `state revision ${index}` }] },
+    })
+  }
+  await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
+  const executions = runtime.messages.filter((message) => message.kind === 'request'
+    && message.type === 'tool.execute' && message.runId === runId && message.payload?.tool === 'search_knowledge')
+  assert.equal(executions.length, 5)
+})
+
+test('real progress from a wait-semantic tool disarms the no-progress ladder for re-reads', async (context) => {
+  // ABC R6 reproduction: identical reads reach the streak bound, then a
+  // productive wait-semantic tool (code_check whose outcome changed), then the
+  // same read again. The productive result must clear the streak and the
+  // correction ladder so the next read executes and observes the new state.
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-progress-after-wait-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const runtime = startRuntime()
+  context.after(() => runtime.close())
+
+  const initialize = runtime.send('initialize', {
+    payload: {
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+        fauxResponses: [
+          ...Array.from({ length: 4 }, (_, index) => ({
+            content: [{ type: 'toolCall', id: `read-${index + 1}`, name: 'search_knowledge', arguments: { query: 'file' } }],
+            stopReason: 'toolUse',
+          })),
+          { content: [{ type: 'toolCall', id: 'wait-0', name: 'workflow_snapshot_get', arguments: {} }], stopReason: 'toolUse' },
+          { content: [{ type: 'toolCall', id: 'wait-1', name: 'workflow_snapshot_get', arguments: {} }], stopReason: 'toolUse' },
+          { content: [{ type: 'toolCall', id: 'read-5', name: 'search_knowledge', arguments: { query: 'file' } }], stopReason: 'toolUse' },
+          'Done.',
+        ],
+      },
+    },
+  })
+  await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+
+  const sessionId = 'pi-progress-after-wait'
+  const conversationId = 'pi-progress-after-wait-conv'
+  const create = runtime.send('create_session', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    payload: { sessionPath: join(directory, 'session.json') },
+  })
+  await runtime.waitFor((message) => message.requestId === create.id && message.type === 'session_created')
+
+  const runId = 'pi-progress-after-wait-run'
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    runId,
+    payload: {
+      text: 'Read repeatedly, then check, then read again.',
+      messages: [{ role: 'user', content: 'Read repeatedly, then check, then read again.' }],
+      runBudget: { maxIdenticalToolCalls: 3 },
+    },
+  })
+
+  const respond = async (callId, payload) => {
+    const request = await runtime.waitFor((message) => message.kind === 'request'
+      && message.type === 'tool.execute' && message.runId === runId && message.payload?.toolCallId === callId)
+    runtime.respond(request, 'tool.execute_completed', payload)
+  }
+
+  // Four identical reads: the first is a first sight, the next three reach
+  // the streak bound (3) — the run is now armed for a correction.
+  for (let index = 1; index <= 4; index += 1) {
+    await respond(`read-${index}`, { isError: false, result: { items: [{ documentId: 'doc-1', content: 'old evidence' }] } })
+  }
+  // A wait-semantic tool whose outcome changes: this is real progress and
+  // must clear the read streak and the correction ladder.
+  await respond('wait-0', { isError: false, result: { workflow: { id: 'w-1', status: 'running' } } })
+  await respond('wait-1', { isError: false, result: { workflow: { id: 'w-1', status: 'completed' } } })
+  // The fifth read MUST execute (real progress cleared the ladder) and the
+  // harness reports the new state the check produced.
+  await respond('read-5', { isError: false, result: { items: [{ documentId: 'doc-1', content: 'new evidence after state change' }] } })
+
+  await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
+  const searchExecutions = runtime.messages.filter((message) => message.kind === 'request'
+    && message.type === 'tool.execute' && message.runId === runId && message.payload?.tool === 'search_knowledge')
+  assert.equal(searchExecutions.length, 5, 'all five reads must execute')
+  const session = JSON.parse(await readFile(join(directory, 'session.json'), 'utf8'))
+  const finalRead = [...session.messages].reverse().find((message) => message.role === 'toolResult'
+    && message.toolName === 'search_knowledge')
+  assert.ok(finalRead.content[0].text.includes('new evidence after state change'))
+  assert.equal(runtime.messages.filter((message) => message.runId === runId && message.payload?.type === 'run.failed').length, 0)
+})
+
+test('a stuck loop after real progress is still bounded and idle polls cannot dodge it', async (context) => {
+  // ABC R6 (continued): real progress resets the ladder once, but a new
+  // stuck loop re-arms it from zero; idle wait-semantic polls inserted in
+  // between must NOT clear the streak (otherwise a model could dodge the
+  // bound by interleaving empty polls).
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-stuck-rearm-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const runtime = startRuntime()
+  context.after(() => runtime.close())
+
+  const initialize = runtime.send('initialize', {
+    payload: {
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+        fauxResponses: [
+          { content: [{ type: 'toolCall', id: 'step-1', name: 'search_knowledge', arguments: { query: 'a' } }], stopReason: 'toolUse' },
+          ...Array.from({ length: 4 }, (_, index) => ({
+            content: [{ type: 'toolCall', id: `poll-${index + 1}`, name: 'workflow_snapshot_get', arguments: {} }],
+            stopReason: 'toolUse',
+          })),
+          ...Array.from({ length: 8 }, (_, index) => ({
+            content: [{ type: 'toolCall', id: `read-a-${index + 1}`, name: 'search_knowledge', arguments: { query: 'a' } }],
+            stopReason: 'toolUse',
+          })),
+          'Done.',
+        ],
+      },
+    },
+  })
+  await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+
+  const conversationId = 'pi-stuck-rearm-conv'
+  const sessionId = 'pi-stuck-rearm-session'
+  const create = runtime.send('create_session', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    payload: { sessionPath: join(directory, 'session.json') },
+  })
+  await runtime.waitFor((message) => message.requestId === create.id && message.type === 'session_created')
+
+  const runId = 'pi-stuck-rearm-run'
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId: sessionId,
+    runId,
+    payload: {
+      text: 'Do useful work, then get stuck.',
+      messages: [{ role: 'user', content: 'Do useful work, then get stuck.' }],
+      runBudget: { maxIdenticalToolCalls: 3 },
+    },
+  })
+
+  const respond = async (callId, payload) => {
+    const request = await runtime.waitFor((message) => message.kind === 'request'
+      && message.type === 'tool.execute' && message.runId === runId && message.payload?.toolCallId === callId)
+    runtime.respond(request, 'tool.execute_completed', payload)
+  }
+
+  await respond('step-1', { isError: false, result: { items: [{ documentId: 'd', content: 'first sight' }] } })
+  // Four identical idle polls: waiting tools never fire the correction, and
+  // an unchanged wait result must not clear the read streak either. They do
+  // not arm the ladder by themselves (they are exempt).
+  for (let index = 1; index <= 4; index += 1) {
+    await respond(`poll-${index}`, { isError: false, result: { workflow: { id: 'w-1', status: 'running' } } })
+  }
+  // read-a-1 changes the outcome for query 'a' (real progress, ladder reset),
+  // read-a-2..4 reproduce it and re-reach the bound, then the next proposals
+  // are refused without executing: corrections 1..3, then the run stops.
+  for (let index = 1; index <= 8; index += 1) {
+    if (index <= 4) {
+      await respond(`read-a-${index}`, { isError: false, result: { items: [{ documentId: 'd', content: 'same evidence' }] } })
+    }
+  }
+  const failure = await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'run.failed')
+  assert.equal(failure.payload.code, 'runtime.no_progress')
+  const readExecutions = runtime.messages.filter((message) => message.kind === 'request'
+    && message.type === 'tool.execute' && message.runId === runId && message.payload?.tool === 'search_knowledge')
+  assert.equal(readExecutions.length, 5, 'step-1 plus read-a-1..4 execute; the rest are refused')
+  const pollExecutions = runtime.messages.filter((message) => message.kind === 'request'
+    && message.type === 'tool.execute' && message.runId === runId && message.payload?.tool === 'workflow_snapshot_get')
+  assert.equal(pollExecutions.length, 4, 'idle polls execute without correction')
+})
+
+test('wait-semantic polls with unchanged state are never corrected', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-wait-semantics-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const runtime = startRuntime()
+  context.after(() => runtime.close())
+
+  const initialize = runtime.send('initialize', {
+    payload: {
+      modelService: {
+        baseUrl: 'faux://fox',
+        modelId: 'fox-test',
+        apiType: 'faux',
+        contextWindow: 4096,
+        maxOutputTokens: 512,
+        fauxResponses: [
+          ...Array.from({ length: 5 }, (_, index) => ({
+            content: [{ type: 'toolCall', id: `wait-${index + 1}`, name: 'workflow_snapshot_get', arguments: {} }],
+            stopReason: 'toolUse',
+          })),
+          'The workflow is still running; stop polling.',
+        ],
+      },
+    },
+  })
+  await runtime.waitFor((message) => message.requestId === initialize.id && message.type === 'ready')
+
+  const runtimeSessionId = 'pi-wait-session'
+  const conversationId = 'pi-wait-conversation'
+  const create = runtime.send('create_session', {
+    conversationId,
+    runtimeSessionId,
+    payload: { sessionPath: join(directory, 'session.json') },
+  })
+  await runtime.waitFor((message) => message.requestId === create.id && message.type === 'session_created')
+
+  const runId = 'pi-wait-run'
+  runtime.send('prompt', {
+    conversationId,
+    runtimeSessionId,
+    runId,
+    payload: {
+      text: 'Poll the workflow until told otherwise.',
+      messages: [{ role: 'user', content: 'Poll the workflow until told otherwise.' }],
+    },
+  })
+
+  // Identical input + identical result five times in a row: waiting on
+  // external state is exempt from the no-progress guard (Host duration and
+  // token budgets still bound the run).
+  for (let index = 1; index <= 5; index += 1) {
+    const request = await runtime.waitFor((message) => message.kind === 'request'
+      && message.type === 'tool.execute' && message.runId === runId
+      && message.payload?.toolCallId === `wait-${index}`)
+    runtime.respond(request, 'tool.execute_completed', {
+      isError: false,
+      result: { workflow: { id: 'workflow-1', status: 'running' } },
+    })
+  }
+  await runtime.waitFor((message) => message.runId === runId && message.payload?.type === 'run.completed')
+  const executions = runtime.messages.filter((message) => message.kind === 'request'
+    && message.type === 'tool.execute' && message.runId === runId && message.payload?.tool === 'workflow_snapshot_get')
+  assert.equal(executions.length, 5)
 })
 
 test('records tool and prompt diagnostics while allowing a text-only run with no tools', async (context) => {

@@ -82,12 +82,17 @@ const module = banner
 const outputs = new Map([['schema.json', JSON.stringify(bundle, null, 2) + '\n'], ['index.d.ts', declarations], ['index.mjs', module]])
 const checkOnly = process.argv.includes('--check')
 if (!checkOnly) mkdirSync(destination, { recursive: true })
+// Line endings are not part of the contract. Git's autocrlf (enabled on this
+// machine) checks these files out with CRLF, so a byte comparison would report
+// every worktree as stale while the content is identical. Normalize before
+// comparing; a real content difference still fails.
+const normalize = (text) => text.replace(/\r\n/g, '\n')
 for (const [name, content] of outputs) {
   const path = resolve(destination, name)
   if (checkOnly) {
     let actual
     try { actual = readFileSync(path, 'utf8') } catch { throw new Error('missing generated protocol file: ' + name) }
-    if (actual !== content) throw new Error('stale generated protocol file: ' + name)
+    if (normalize(actual) !== normalize(content)) throw new Error('stale generated protocol file: ' + name)
   } else writeFileSync(path, content, 'utf8')
 }
 console.log(checkOnly ? 'Engine protocol bindings are current.' : 'Generated engine protocol schema and bindings.')

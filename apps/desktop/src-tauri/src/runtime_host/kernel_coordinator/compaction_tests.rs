@@ -60,6 +60,112 @@ fn compaction_fixture_count(clock: &TestClock, old_count: usize) -> (Database, P
     (db, root, run_id)
 }
 
+fn compaction_fixture_with_messages(clock: &TestClock, messages: Vec<Value>) -> (Database, PathBuf, String) {
+    let mut config = worker_configuration();
+    config.model_service["contextWindow"] = json!(8192);
+    config.model_service["maxOutputTokens"] = json!(512);
+    let (db, root, run_id) =
+        fixture_with_start_opt(clock, &config.hash().unwrap(), Some(&config), false, true);
+    let mut input = initial_input(&run_id, &config.hash().unwrap());
+    input.messages.extend(messages);
+    db.freeze_kernel_initial_input(&input).unwrap();
+    freeze_host_scope(&db, &run_id);
+    (db, root, run_id)
+}
+
+#[test]
+fn kernel_usage_calibration_pairs_the_dispatched_view_with_full_occupancy_usage() {
+    let clock = TestClock::new(1000);
+    let cancellation = CancellationRegistry::default();
+    let (db, _root, run_id) = compaction_fixture(&clock);
+    let original = db.kernel_initial_input(&run_id).unwrap();
+    let config = db.kernel_model_config(&run_id).unwrap();
+    let estimated = context::estimate_components_tokens(&config, &original.messages).unwrap() as u64;
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    // Cached input still occupies the window: input + cacheRead + cacheWrite
+    // is the full occupancy, and the pair must not apply a billing discount.
+    coordinator
+        .dispatch_initial("usage-owner", &Allow, |binding, frame, _| {
+            Ok(fox_engine_protocol::KernelInitialModelResponse {
+                schema_version: 1,
+                run_id: binding.run_id.clone(),
+                turn_id: frame.input.turn_id.clone(),
+                checkpoint_seq: frame.checkpoint_seq,
+                assistant_message: json!({"role":"assistant","stopReason":"stop",
+                    "content":[{"type":"text","text":"done"}],
+                    "usage":{"input":estimated/2,"output":4,
+                        "cacheRead":estimated - estimated/2,"cacheWrite":0}}),
+            })
+        })
+        .unwrap();
+    let data = db.kernel_usage_calibration(&run_id).unwrap();
+    assert_eq!(
+        data.latest_usage_input_tokens,
+        Some(estimated),
+        "cached tokens count at full occupancy"
+    );
+    let calibration = data
+        .calibration
+        .expect("a pair matching the dispatched view calibrates the estimator");
+    assert!(
+        (900_000..=1_100_000).contains(&calibration.ratio_ppm),
+        "ratio near 1.0 for a faithful estimate: {}",
+        calibration.ratio_ppm
+    );
+    // A pair that can no longer match what was sent is discarded, and the
+    // usage figure stays visible as a labelled estimate fallback.
+    let (db2, _root2, run_id2) = compaction_fixture(&clock);
+    let coordinator = KernelCoordinator::start_prepared(&db2, &clock, &run_id2, &cancellation).unwrap();
+    coordinator
+        .dispatch_initial("usage-owner", &Allow, |binding, frame, _| {
+            Ok(fox_engine_protocol::KernelInitialModelResponse {
+                schema_version: 1,
+                run_id: binding.run_id.clone(),
+                turn_id: frame.input.turn_id.clone(),
+                checkpoint_seq: frame.checkpoint_seq,
+                assistant_message: json!({"role":"assistant","stopReason":"stop",
+                    "content":[{"type":"text","text":"done"}],
+                    "usage":{"input":5,"output":2,"cacheRead":0,"cacheWrite":0}}),
+            })
+        })
+        .unwrap();
+    let data = db2.kernel_usage_calibration(&run_id2).unwrap();
+    assert_eq!(data.latest_usage_input_tokens, Some(5));
+    assert_eq!(data.calibration, None, "a 100x outlier pair is rejected");
+}
+
+#[test]
+fn kernel_compaction_stop_classes_distinguish_single_item_from_no_candidates() {
+    let clock = TestClock::new(1000);
+    let cancellation = CancellationRegistry::default();
+    // One protected message larger than the whole window: no summary can fix
+    // that, and the error must say so distinctly.
+    let (db, _root, run_id) = compaction_fixture_with_messages(&clock, vec![
+        json!({"role":"user","content":"中".repeat(30_000)}),
+    ]);
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    assert_eq!(
+        coordinator.prepare_context_if_needed("initial", 4096).unwrap_err(),
+        context::SINGLE_TOO_LARGE
+    );
+    drop(coordinator);
+    // Over budget with only unremovable material: nothing is a prose
+    // candidate and nothing forms a complete tool round, and no single item
+    // alone blows the window — a genuinely different stop class.
+    let mut filler = Vec::new();
+    for index in 0..30 {
+        filler.push(json!({"role":"assistant","content":[
+            {"type":"thinking","thinking":format!("reasoning {index} {}", "材料 ".repeat(700))}]}));
+    }
+    filler.push(json!({"role":"user","content":"continue"}));
+    let (db, _root, run_id) = compaction_fixture_with_messages(&clock, filler);
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    assert_eq!(
+        coordinator.prepare_context_if_needed("initial", 4096).unwrap_err(),
+        context::NO_CANDIDATES
+    );
+}
+
 fn response(
     request: &fox_engine_protocol::KernelCompactionRequest,
 ) -> fox_engine_protocol::KernelCompactionResponse {

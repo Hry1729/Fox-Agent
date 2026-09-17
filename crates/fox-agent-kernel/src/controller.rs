@@ -745,6 +745,20 @@ impl RunController {
         self.approval_deadline_wall_ms
     }
 
+    /// Read a tool call's state without exposing controller internals. Used by
+    /// adapters and tests to tell an expired (never dispatched) call apart from
+    /// a failed one, and to confirm a completed result is still banked.
+    pub fn tool_call_state(&self, tool_call_id: &str) -> Option<ToolCallState> {
+        self.tools.get(tool_call_id).map(|tool| tool.state)
+    }
+
+    /// The settled result of a tool call, if it has one.
+    pub fn tool_call_result_json(&self, tool_call_id: &str) -> Option<&str> {
+        self.tools
+            .get(tool_call_id)
+            .and_then(|tool| tool.result_json.as_deref())
+    }
+
     fn next_seq(&mut self) -> u64 {
         self.seq += 1;
         self.seq
@@ -1278,6 +1292,14 @@ impl RunController {
             | RunOutcome::BudgetExhausted { code, message } => {
                 serde_json::json!({ "code": code, "message": message })
             }
+            // Expiry keeps the completed work and stays explicitly continuable;
+            // the terminal event must say so, otherwise a reader would treat the
+            // run as a plain failure.
+            RunOutcome::ApprovalExpired { code, message } => serde_json::json!({
+                "code": code,
+                "message": message,
+                "continuable": true,
+            }),
         };
         let mut effects = Vec::new();
         for (tool_call_id, prior_state) in unresolved {
@@ -1391,7 +1413,7 @@ impl RunController {
             "engine.model_rejected",
             serde_json::json!({ "effectKey": effect_key, "failure": failure }),
         )];
-        if used >= maximum || delay_ms >= self.config.run_execution_budget_ms.saturating_sub(self.running_elapsed_ms) {
+        if used >= maximum || (self.config.run_execution_limited && delay_ms >= self.config.run_execution_budget_ms.saturating_sub(self.running_elapsed_ms)) {
             self.retry.model_dispatch_pending = false;
             let (code, message) = if failure["category"] == "incomplete_response" {
                 ("kernel.model_incomplete", "模型未完成本轮答复，自动续答次数已用完。已完成的工具结果已保留；请发送“继续完成剩余工作”。")
@@ -1732,7 +1754,11 @@ impl RunController {
                 .collect::<Vec<_>>();
             for id in &waiting_ids {
                 if let Some(tool) = self.tools.get_mut(id) {
-                    tool.state = ToolCallState::Failed;
+                    // A call that was waiting for a human was NEVER dispatched.
+                    // It is expired, not failed: the work is still open and a
+                    // continuation may re-propose it under a fresh approval.
+                    // Marking it `Failed` made the whole Run look unrecoverable.
+                    tool.state = ToolCallState::Expired;
                 }
             }
             for id in &running_ids {
@@ -1741,17 +1767,24 @@ impl RunController {
                 }
             }
             self.approval_deadline_wall_ms = None;
+            let completed_ids = self
+                .tools
+                .values()
+                .filter(|tool| tool.state == ToolCallState::Completed)
+                .map(|tool| tool.tool_call_id.clone())
+                .collect::<Vec<_>>();
             let mut effects = Vec::new();
-            for tool_call_id in waiting_ids {
+            for tool_call_id in &waiting_ids {
                 effects.push(Effect::ApprovalExpired {
                     tool_call_id: tool_call_id.clone(),
                 });
                 effects.push(self.append_event(
-                    "tool.failed",
+                    "tool.expired",
                     serde_json::json!({
                         "toolCallId": tool_call_id,
                         "code": "approval.wait_timeout",
-                        "message": "The approval request expired before the user decided."
+                        "message": "The approval request expired before the user decided; the call was not executed.",
+                        "continuable": true
                     }),
                 ));
             }
@@ -1767,10 +1800,24 @@ impl RunController {
                     }),
                 ));
             }
-            effects.extend(self.terminate(RunOutcome::Failed {
+            // Record the durable resume facts before the terminal write: which
+            // approvals are dead, that they are not executable, and which
+            // results were already banked. A continuation re-verifies the scope
+            // and opens a NEW approval; it never reuses these.
+            effects.push(self.append_event(
+                "run.awaiting_approval_expired",
+                serde_json::json!({
+                    "approvalWaitTimeoutMs": self.config.approval_wait_timeout_ms,
+                    "expiredToolCallIds": waiting_ids,
+                    "expiredApprovalsExecutable": false,
+                    "completedToolCallIds": completed_ids,
+                    "resumable": true
+                }),
+            ));
+            effects.extend(self.terminate(RunOutcome::ApprovalExpired {
                 code: "approval.wait_timeout".into(),
                 message: format!(
-                    "Approval was not resolved within {}ms.",
+                    "Approval was not resolved within {}ms. The expired approval cannot be executed; the Host can re-verify the scope and open a new one.",
                     self.config.approval_wait_timeout_ms
                 ),
             }));
@@ -1802,7 +1849,7 @@ impl RunController {
                 // fresh full model-request window).
                 self.running_since_mono_ms = Some(monotonic_ms);
             }
-            if self.running_elapsed_ms >= self.config.run_execution_budget_ms {
+            if self.config.run_execution_limited && self.running_elapsed_ms >= self.config.run_execution_budget_ms {
                 return self.terminate(RunOutcome::BudgetExhausted {
                     code: "runtime.duration_budget_exceeded".into(),
                     message: format!(

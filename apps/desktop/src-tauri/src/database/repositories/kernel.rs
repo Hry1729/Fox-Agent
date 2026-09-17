@@ -22,6 +22,7 @@ fn valid_run_state(state: &str) -> bool {
             | "failed"
             | "cancelled"
             | "budget_exhausted"
+            | "approval_expired"
     )
 }
 
@@ -43,6 +44,9 @@ fn run_transition_allowed(from: &str, to: &str) -> bool {
                 | ("waiting_approval", "cancelling")
                 | ("waiting_approval", "failed")
                 | ("waiting_approval", "budget_exhausted")
+                // The human never decided: the attempt ends as a continuable
+                // expiry, and the expired approval stays non-executable.
+                | ("waiting_approval", "approval_expired")
                 | ("retry_scheduled", "running")
                 | ("retry_scheduled", "cancelling")
                 | ("retry_scheduled", "failed")
@@ -58,7 +62,13 @@ fn run_transition_allowed(from: &str, to: &str) -> bool {
 fn valid_tool_state(state: &str) -> bool {
     matches!(
         state,
-        "pending" | "waiting_approval" | "running" | "completed" | "failed" | "cancelled"
+        "pending"
+            | "waiting_approval"
+            | "running"
+            | "completed"
+            | "failed"
+            | "cancelled"
+            | "expired"
     )
 }
 
@@ -73,6 +83,8 @@ fn tool_transition_allowed(from: &str, to: &str) -> bool {
                 | ("waiting_approval", "running")
                 | ("waiting_approval", "failed")
                 | ("waiting_approval", "cancelled")
+                // Never dispatched: the approval expired before a decision.
+                | ("waiting_approval", "expired")
                 | ("running", "completed")
                 | ("running", "failed")
                 | ("running", "cancelled")
@@ -345,7 +357,7 @@ impl Database {
             if terminal {
                 let unresolved = transaction.query_row(
                     "SELECT COUNT(*) FROM kernel_tool_calls
-                      WHERE run_id = ?1 AND state NOT IN ('completed','failed','cancelled')",
+                      WHERE run_id = ?1 AND state NOT IN ('completed','failed','cancelled','expired')",
                     params![run_id],
                     |row| row.get::<_, i64>(0),
                 )?;
@@ -954,7 +966,16 @@ impl Database {
         let compaction_json = serde_json::to_string(&cmd.compaction)
             .map_err(|error| format!("serialize kernel compaction state: {error}"))?;
         let changed = self.with_connection(|connection| {
-            let transaction = connection.transaction()?;
+            // A decision always writes (events, run state, leases), and it reads
+            // before it writes. A deferred transaction that starts as a reader and
+            // then upgrades fails immediately with SQLITE_BUSY_SNAPSHOT —
+            // "database is locked", not retried by any busy timeout — when another
+            // connection commits in between (an approval written by the UI, a
+            // child Run, an observation reader). Taking the write lock up front
+            // makes the same contention wait for its turn instead of failing the
+            // Run.
+            let transaction = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             if let Some((effect_key, owner)) = model_retry_lease {
                 let payload: serde_json::Value = serde_json::from_str(&cmd.events[0].payload_json).map_err(|_|kernel_err("invalid retry evidence"))?;
                 let failure: fox_engine_protocol::KernelModelFailure = serde_json::from_value(payload["failure"].clone()).map_err(|_|kernel_err("invalid retry evidence"))?;
@@ -1600,6 +1621,14 @@ impl Database {
                         )));
                     }
                 } else {
+                    // An approval that already died must not be resurrected by a
+                    // late decision: the call was never dispatched, so the only
+                    // honest outcome is the one already recorded.
+                    let dead_approval = state == "failed" || state == "cancelled";
+                    let already_dead = prior == "expired" || prior == "cancelled";
+                    if dead_approval && already_dead {
+                        continue;
+                    }
                     if !tool_transition_allowed(&prior, state) {
                         return Err(kernel_err(format!(
                             "illegal tool transition {prior}->{state} for {}/{}",
@@ -1839,7 +1868,13 @@ impl Database {
                     "allow_once" | "allow_conversation" => {
                         final_tool_state == "running" && dispatch_exists
                     }
-                    "denied" | "expired" => final_tool_state == "failed" && !dispatch_exists,
+                    // A dead approval may land on `failed` (an explicit denial) or
+                    // on `expired` (the wait elapsed with no decision). Both mean
+                    // the same thing here: no dispatch, so nothing was executed.
+                    "denied" | "expired" => {
+                        matches!(final_tool_state.as_str(), "failed" | "expired")
+                            && !dispatch_exists
+                    }
                     "cancelled" => {
                         !dispatch_exists
                             && (final_tool_state == "cancelled"
@@ -1886,7 +1921,7 @@ impl Database {
                 let unsettled: i64 = transaction.query_row(
                     "SELECT COUNT(*) FROM kernel_tool_calls
                       WHERE run_id=?1 AND batch_id=?2
-                        AND state NOT IN ('completed','failed','cancelled')",
+                        AND state NOT IN ('completed','failed','cancelled','expired')",
                     params![run_id, batch.batch_id],
                     |row| row.get(0),
                 )?;
@@ -1976,7 +2011,7 @@ impl Database {
 
             let unresolved_tools: i64 = transaction.query_row(
                 "SELECT COUNT(*) FROM kernel_tool_calls
-                  WHERE run_id=?1 AND state NOT IN ('completed','failed','cancelled')",
+                  WHERE run_id=?1 AND state NOT IN ('completed','failed','cancelled','expired')",
                 params![run_id],
                 |row| row.get(0),
             )?;
@@ -2060,6 +2095,83 @@ impl Database {
             )?;
             if affected != 1 {
                 return Err(kernel_err(format!("kernel run disappeared during commit: {run_id}")));
+            }
+            if cmd.run_state==crate::kernel::RunState::Completed {
+                let pending:i64=transaction.query_row("SELECT COUNT(*) FROM kernel_jobs WHERE run_id=?1 AND state IN ('queued','running','paused')",[run_id],|r|r.get(0))?;
+                if pending>0 {return Err(kernel_err("kernel.jobs_pending"));}
+            }
+            // 7b. A run that stopped because a human had not answered, or because
+            //     its execution budget ran out, banks a durable progress snapshot
+            //     in the SAME transaction as its terminal state. That is what
+            //     makes the continuation entry point honest: the user is offered
+            //     the work that actually completed, so the continuation never has
+            //     to guess (or replay) what happened. The attempt number keeps
+            //     repeated pauses on one run distinct instead of overwriting.
+            if cmd.run_state.is_terminal() {
+                let pause_reason = match cmd.run_state {
+                    crate::kernel::RunState::ApprovalExpired => Some("approval_expired"),
+                    crate::kernel::RunState::BudgetExhausted => Some("budget_exhausted"),
+                    crate::kernel::RunState::Failed if cmd.events.iter().any(|e| {
+                        e.event_type=="run.failed" && serde_json::from_str::<serde_json::Value>(&e.payload_json).ok().is_some_and(|v| {
+                            let code=v["code"].as_str().or_else(||v["errorCode"].as_str()).unwrap_or("");
+                            ["kernel.jobs_pending",crate::kernel_compaction::NO_CANDIDATES,crate::kernel_compaction::NO_REDUCTION,crate::kernel_compaction::SINGLE_TOO_LARGE,crate::kernel_compaction::INSUFFICIENT,crate::kernel_compaction::FAILED].contains(&code)
+                        })
+                    }) => Some("context_limit"),
+                    _ => None,
+                };
+                if let Some(pause_reason) = pause_reason {
+                    let completed: i64 = transaction.query_row(
+                        "SELECT COUNT(*) FROM kernel_tool_calls
+                          WHERE run_id=?1 AND state='completed'",
+                        params![run_id],
+                        |row| row.get(0),
+                    )?;
+                    let pending: i64 = transaction.query_row(
+                        "SELECT COUNT(*) FROM kernel_tool_calls
+                          WHERE run_id=?1 AND state NOT IN ('completed','failed','cancelled','expired')",
+                        params![run_id],
+                        |row| row.get(0),
+                    )?;
+                    let attempt: i64 = transaction.query_row(
+                        "SELECT attempt FROM kernel_runs WHERE run_id=?1",
+                        params![run_id],
+                        |row| row.get(0),
+                    )?;
+                    let summary = serde_json::json!({
+                        "runId": run_id,
+                        "pauseReason": pause_reason,
+                        "completedToolCalls": completed,
+                        "pendingToolCalls": pending,
+                        "runningElapsedMs": cmd.running_elapsed_ms,
+                        "lastEventSeq": final_last_seq,
+                        "resumable": true,
+                    })
+                    .to_string();
+                    transaction.execute(
+                        "INSERT INTO kernel_run_progress
+                         (run_id, attempt, pause_reason, completed_tool_calls, pending_tool_calls,
+                          terminal_written, running_elapsed_ms, continuable, summary_json, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9)
+                         ON CONFLICT(run_id, attempt, pause_reason) DO UPDATE SET
+                             completed_tool_calls=excluded.completed_tool_calls,
+                             pending_tool_calls=excluded.pending_tool_calls,
+                             terminal_written=excluded.terminal_written,
+                             running_elapsed_ms=excluded.running_elapsed_ms,
+                             continuable=1,
+                             summary_json=excluded.summary_json",
+                        params![
+                            run_id,
+                            attempt,
+                            pause_reason,
+                            completed,
+                            pending,
+                            cmd.terminal_written as i64,
+                            cmd.running_elapsed_ms,
+                            summary,
+                            wall_now_ms
+                        ],
+                    )?;
+                }
             }
             // 8. Mid-run steering transitions ride the same decision write-set
             //    so message status can never disagree with the dispatch/response
@@ -2320,7 +2432,7 @@ impl Database {
                     AND o.effect_type<>'initial_model'
                     AND r.kernel_mode = 'authoritative'
                     AND (
-                        r.state NOT IN ('cancelling','completed','failed','cancelled','budget_exhausted')
+                        r.state NOT IN ('cancelling','completed','failed','cancelled','budget_exhausted','approval_expired')
                         OR o.effect_type IN ('cancel_engine_turn','cancel_tool_call')
                     )
                   ORDER BY o.created_at ASC, o.effect_key ASC",
@@ -2367,7 +2479,7 @@ impl Database {
                  WHERE o.run_id=?1 AND o.effect_key=?2 AND o.status='pending'
                    AND o.effect_type<>'initial_model'
                    AND r.kernel_mode='authoritative'
-                   AND (r.state NOT IN ('cancelling','completed','failed','cancelled','budget_exhausted')
+                   AND (r.state NOT IN ('cancelling','completed','failed','cancelled','budget_exhausted','approval_expired')
                         OR o.effect_type IN ('cancel_engine_turn','cancel_tool_call'))",
                 params![run_id, effect_key], map_outbox_effect,
             ).optional()?;
@@ -2405,7 +2517,7 @@ impl Database {
                     AND o.effect_type<>'initial_model'
                     AND r.kernel_mode = 'authoritative'
                     AND (
-                        r.state NOT IN ('cancelling','completed','failed','cancelled','budget_exhausted')
+                        r.state NOT IN ('cancelling','completed','failed','cancelled','budget_exhausted','approval_expired')
                         OR o.effect_type IN ('cancel_engine_turn','cancel_tool_call')
                     )
                   ORDER BY o.created_at ASC, o.effect_key ASC",
@@ -3222,7 +3334,7 @@ impl Database {
             let mut statement = connection.prepare(
                 "SELECT run_id, engine_id, kernel_mode, frozen_config_json, state
                    FROM kernel_runs
-                  WHERE state NOT IN ('completed','failed','cancelled','budget_exhausted')",
+                  WHERE state NOT IN ('completed','failed','cancelled','budget_exhausted','approval_expired')",
             )?;
             let runs = statement
                 .query_map([], |row| {
@@ -3983,6 +4095,7 @@ mod tests {
             model_idle_ms: 120_000,
             tool_execution_timeout_ms: 600_000,
             run_execution_budget_ms: 600_000,
+            run_execution_limited: true,
             approval_wait_timeout_ms: 3_600_000,
             provider_max_retries: 2,
             turn_max_retries: 0,
@@ -4288,6 +4401,7 @@ mod tests {
             model_idle_ms: 120_000,
             tool_execution_timeout_ms: 600_000,
             run_execution_budget_ms: 600_000,
+            run_execution_limited: true,
             approval_wait_timeout_ms: 3_600_000,
             provider_max_retries: 2,
             turn_max_retries: 1,
@@ -5260,6 +5374,7 @@ mod tests {
             model_idle_ms: 120_000,
             tool_execution_timeout_ms: 600_000,
             run_execution_budget_ms: 1_800_000,
+            run_execution_limited: true,
             approval_wait_timeout_ms: 3_600_000,
             provider_max_retries: 2,
             turn_max_retries: 0,

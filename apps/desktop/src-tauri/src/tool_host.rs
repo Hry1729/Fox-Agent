@@ -13,7 +13,12 @@ use std::{
 use std::os::windows::process::CommandExt;
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_COMMAND_OUTPUT_BYTES: usize = 512 * 1024;
+/// Per-stream hard retention for command output. Everything up to this cap is
+/// kept and handed to the Host result pipeline (which spills large results to
+/// the blob store and pages them back); beyond it the stream keeps draining
+/// so the child cannot deadlock, and the result reports the dropped bytes
+/// explicitly with a remedy instead of silently losing them.
+const MAX_COMMAND_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COMMAND_SECONDS: u64 = 120;
 
 #[derive(Debug, Clone, Serialize)]
@@ -297,8 +302,8 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
         .map_err(|error| format!("failed to start command: {error}"))?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdout_reader = thread::spawn(move || read_limited(stdout, MAX_COMMAND_OUTPUT_BYTES));
-    let stderr_reader = thread::spawn(move || read_limited(stderr, MAX_COMMAND_OUTPUT_BYTES));
+    let stdout_reader = thread::spawn(move || capture_stream(stdout, MAX_COMMAND_OUTPUT_BYTES));
+    let stderr_reader = thread::spawn(move || capture_stream(stderr, MAX_COMMAND_OUTPUT_BYTES));
     let started = Instant::now();
     let status = loop {
         if let Err(error) = check_cancellation(cancellation) {
@@ -323,21 +328,41 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
     let stdout = stdout_reader.join().unwrap_or_default();
     let stderr = stderr_reader.join().unwrap_or_default();
     let code = status.code().unwrap_or(-1);
-    let text = if stderr.trim().is_empty() {
-        stdout.clone()
-    } else if stdout.trim().is_empty() {
-        stderr.clone()
+    let mut text = if stderr.text.trim().is_empty() {
+        stdout.text.clone()
+    } else if stdout.text.trim().is_empty() {
+        stderr.text.clone()
     } else {
-        format!("{stdout}\n\n[stderr]\n{stderr}")
+        format!("{}\n\n[stderr]\n{}", stdout.text, stderr.text)
     };
+    // Every byte the child produced is accounted for. Output within the
+    // retention cap reaches the Host result pipeline intact (and from there
+    // the blob store); only bytes beyond the per-stream cap were dropped,
+    // and that fact is part of the result, with the way to get the rest.
+    let dropped = stdout.dropped_bytes + stderr.dropped_bytes;
+    if dropped > 0 {
+        text.push_str(&format!(
+            "\n\n[fox: 输出超过每路 {} 字节保留上限，丢弃 {dropped} 字节；可将输出重定向到文件后用读取工具分页查看]",
+            MAX_COMMAND_OUTPUT_BYTES,
+        ));
+    }
     let result = text_result(
         text,
-        json!({ "cwd": cwd, "exitCode": code, "stdout": stdout, "stderr": stderr }),
+        json!({
+            "cwd": cwd,
+            "exitCode": code,
+            "stdout": stdout.text,
+            "stderr": stderr.text,
+            "stdoutBytes": stdout.total_bytes,
+            "stderrBytes": stderr.total_bytes,
+            "outputDroppedBytes": dropped,
+            "outputRetentionBytes": MAX_COMMAND_OUTPUT_BYTES,
+        }),
     );
     if status.success() {
         Ok(result)
     } else {
-        Err(format!("command exited with code {code}: {stderr}"))
+        Err(format!("command exited with code {code}: {}", stderr.text))
     }
 }
 
@@ -364,13 +389,36 @@ pub(crate) fn terminate_process_tree(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-fn read_limited<R: Read>(reader: Option<R>, limit: usize) -> String {
-    let Some(reader) = reader else {
-        return String::new();
+/// Fully drained capture of one output stream. The reader keeps draining
+/// after the retention cap so a verbose child can never block on a full
+/// pipe; the accounting makes any dropped bytes explicit in the result.
+#[derive(Debug, Default)]
+struct CapturedStream {
+    text: String,
+    total_bytes: u64,
+    dropped_bytes: u64,
+}
+
+fn capture_stream<R: Read>(reader: Option<R>, retain: usize) -> CapturedStream {
+    let Some(mut reader) = reader else {
+        return CapturedStream::default();
     };
-    let mut buffer = Vec::new();
-    let _ = reader.take(limit as u64).read_to_end(&mut buffer);
-    String::from_utf8_lossy(&buffer).into_owned()
+    let mut kept = Vec::new();
+    let mut total: u64 = 0;
+    let mut buffer = [0u8; 8192];
+    while let Ok(count) = reader.read(&mut buffer) {
+        if count == 0 {
+            break;
+        }
+        total = total.saturating_add(count as u64);
+        let keep = count.min(retain.saturating_sub(kept.len()));
+        kept.extend_from_slice(&buffer[..keep]);
+    }
+    CapturedStream {
+        text: String::from_utf8_lossy(&kept).into_owned(),
+        total_bytes: total,
+        dropped_bytes: total.saturating_sub(kept.len() as u64),
+    }
 }
 
 fn required_string(input: &Value, key: &str) -> Result<String, String> {
@@ -687,6 +735,38 @@ mod tests {
         )
         .is_err());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn command_output_beyond_the_old_cap_is_fully_retained_and_accounted() {
+        let root = project();
+        // ~1 MiB of output used to be cut at 512 KiB (and could wedge the
+        // pipe); it must now reach the result intact with exact accounting.
+        let script = root.join("emit.js");
+        fs::write(
+            &script,
+            "const s='abcdefgh'.repeat(2000); for(let i=0;i<70;i++) process.stdout.write(s+'\\n');",
+        )
+        .unwrap();
+        let command = "node emit.js";
+        let result = execute_command(command, &root, Duration::from_secs(60), None).unwrap();
+        let stdout = result["details"]["stdout"].as_str().unwrap();
+        let expected = ("abcdefgh".repeat(2000) + "\n").repeat(70).len();
+        assert_eq!(result["details"]["stdoutBytes"].as_u64().unwrap() as usize, expected);
+        assert_eq!(stdout.len(), expected, "every byte is retained");
+        assert_eq!(result["details"]["outputDroppedBytes"], 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn capture_stream_drains_past_retention_and_reports_dropped_bytes() {
+        let data = vec![b'x'; MAX_COMMAND_OUTPUT_BYTES + 10_000];
+        let captured = capture_stream(Some(std::io::Cursor::new(data)), MAX_COMMAND_OUTPUT_BYTES);
+        assert_eq!(captured.text.len(), MAX_COMMAND_OUTPUT_BYTES);
+        assert_eq!(captured.total_bytes, (MAX_COMMAND_OUTPUT_BYTES + 10_000) as u64);
+        assert_eq!(captured.dropped_bytes, 10_000);
+        let empty = capture_stream(None::<std::io::Cursor<Vec<u8>>>, 1);
+        assert_eq!(empty.total_bytes, 0);
     }
 
     #[test]

@@ -51,6 +51,7 @@ fn config() -> RunFrozenConfig {
         model_idle_ms: 120_000,
         tool_execution_timeout_ms: 600_000,
         run_execution_budget_ms: 600_000,
+        run_execution_limited: true,
         approval_wait_timeout_ms: 60_000,
         provider_max_retries: 2,
         turn_max_retries: 1,
@@ -256,13 +257,28 @@ fn clock_separation_case() -> bool {
         .unwrap();
     // A long human wait (wall 800 -> 100800) crosses the approval deadline
     // (800 + 5000 = 5800). It fires the APPROVAL timeout — never the execution
-    // budget, which was suspended for the whole wait.
+    // budget, which was suspended for the whole wait — and reports it as a
+    // continuable expiry rather than a plain failure.
     clock.advance(100_000);
     let effects = c.tick(clock.now_monotonic_ms(), clock.now_wall_ms());
-    effects.iter().any(|e| match e {
-        crate::Effect::AppendEvent { event_type, .. } => event_type == "run.failed",
+    let approval_expired = effects.iter().any(|e| match e {
+        crate::Effect::AppendEvent { event_type, .. } => event_type == "run.approval_expired",
         _ => false,
-    })
+    });
+    let budget_used = effects.iter().any(|e| match e {
+        crate::Effect::AppendEvent {
+            event_type,
+            payload_json,
+            ..
+        } => {
+            event_type == "run.budget_exhausted" || payload_json.contains("duration_budget_exceeded")
+        }
+        _ => false,
+    });
+    approval_expired
+        && !budget_used
+        && c.state() == RunState::ApprovalExpired
+        && c.state().is_continuable()
 }
 
 fn compaction_case() -> bool {

@@ -1,0 +1,119 @@
+/* Context budget panel — local styles owned by window B. Mount point and
+   global theme integration belong to window A; these rules are scoped under
+   .fox-context-budget and use the existing fox design tokens where present. */
+
+.fox-context-budget {
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 6px 0;
+  background: var(--card, transparent);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.fox-context-budget-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.fox-context-budget-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.fox-context-budget-badge {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.16);
+  color: var(--muted-foreground, #666);
+  white-space: nowrap;
+}
+
+.fox-context-budget-badge.is-measured {
+  background: rgba(34, 139, 34, 0.15);
+  color: var(--foreground, #1a7f37);
+}
+
+.fox-context-budget-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.18);
+  margin: 8px 0 4px;
+  overflow: hidden;
+}
+
+.fox-context-budget-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--primary, #3b82f6);
+  transition: width 160ms ease-out;
+}
+
+.fox-context-budget-bar-fill.is-high {
+  background: var(--destructive, #dc2626);
+}
+
+.fox-context-budget-reason {
+  margin: 2px 0 0;
+  color: var(--muted-foreground, #666);
+}
+
+.fox-context-budget-body {
+  margin-top: 8px;
+  border-top: 1px dashed rgba(127, 127, 127, 0.25);
+  padding-top: 8px;
+}
+
+.fox-context-budget-rows {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.fox-context-budget-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fox-context-budget-row dt {
+  color: var(--muted-foreground, #666);
+}
+
+.fox-context-budget-row dd {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fox-context-budget-row.is-total {
+  border-top: 1px solid rgba(127, 127, 127, 0.2);
+  padding-top: 4px;
+}
+
+.fox-context-budget-tag {
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.14);
+  color: var(--muted-foreground, #666);
+  white-space: nowrap;
+}
+
+.fox-context-budget-tag.is-exact {
+  background: rgba(59, 130, 246, 0.14);
+}
+
+.fox-context-budget-note {
+  margin: 6px 0 0;
+  color: var(--muted-foreground, #666);
+  font-size: 12px;
+}

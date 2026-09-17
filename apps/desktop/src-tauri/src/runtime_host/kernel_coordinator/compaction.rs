@@ -2,6 +2,15 @@ use super::*;
 use crate::kernel_compaction::{self as context, CompactionPlan, CompactionResult};
 
 impl KernelCoordinator<'_> {
+    pub(super) fn context_fits(&self, config: &crate::kernel_model_config::KernelModelConfig, view: &[Value], extra: usize) -> Result<bool,String> {
+        let usage=self.database.kernel_usage_calibration(&self.binding.run_id)?;
+        let mut report=context::context_budget_report(config,view,extra,usage.calibration,usage.latest_usage_input_tokens,"none",crate::database::now_ms())?;
+        if !report.within_budget {report.trigger_reason="threshold".into();}
+        // Telemetry cannot fail a correctly authorized model dispatch.
+        let _=self.database.kernel_store_context_budget(&self.binding.run_id,&report);
+        Ok(report.within_budget)
+    }
+
     pub(super) fn model_retry_context(&self, target: &str, mut view: Vec<Value>) -> Result<Vec<Value>, String> {
         let effect_key = if target == "initial" { "initial-model".to_string() } else if target.starts_with("continuation:") { target.to_owned() } else { format!("deliver-batch:{target}") };
         if self.database.kernel_model_retry_needs_completion(&self.binding.run_id, &effect_key)? {
@@ -78,15 +87,22 @@ impl KernelCoordinator<'_> {
         let config = self.database.kernel_model_config(&self.binding.run_id)?;
         let original = self.source_context(target)?;
         let view = self.context_view(target, &original)?;
-        if context::context_within_budget(&config, &view, extra_bytes)? {
+        // The budget check is calibrated by this run's own provider usage
+        // (cached input counts at full occupancy); with no valid pair it is
+        // exactly the labelled heuristic fallback.
+        if self.context_fits(&config, &view, extra_bytes)? {
             return Ok(false);
         }
         let previous = self
             .database
             .kernel_compaction_results(&self.binding.run_id, target)?;
-        if previous.len() >= context::MAX_PASSES
-            || previous.last().is_some_and(|(_, result)| !result.applied)
-        {
+        // Bounded stops, classified (#12): an unproductive pass means another
+        // pass cannot help; the pass bound is per target, not a per-run
+        // lifetime limit.
+        if previous.last().is_some_and(|(_, result)| !result.applied) {
+            return Err(context::NO_REDUCTION.into());
+        }
+        if previous.len() >= context::MAX_PASSES {
             return Err(context::INSUFFICIENT.into());
         }
         let turn = self
@@ -95,8 +111,25 @@ impl KernelCoordinator<'_> {
             .map_err(|_| "Kernel coordinator lock poisoned")?
             .shadow_checkpoint(self.clock.now_monotonic_ms())
             .turn_id;
-        let plan = CompactionPlan::prepare(&self.binding.run_id, &turn, target, &view, &config)?
-            .ok_or(context::INSUFFICIENT)?;
+        let plan = match CompactionPlan::prepare_with_outcome(
+            &self.binding.run_id,
+            &turn,
+            target,
+            &view,
+            &config,
+        )? {
+            context::PrepareOutcome::Planned(plan) => plan,
+            context::PrepareOutcome::NoCandidates | context::PrepareOutcome::BelowMinGain => {
+                // A single protected or recent item that alone exceeds the
+                // window is a different failure from having nothing to fold.
+                return Err(if context::single_item_too_large(&config, &view)? {
+                    context::SINGLE_TOO_LARGE
+                } else {
+                    context::NO_CANDIDATES
+                }
+                .into());
+            }
+        };
         self.database
             .kernel_validate_resource_acquisition(&self.binding.run_id)?;
         self.cancellation.run_token(&self.binding.run_id)?.check()?;
@@ -154,17 +187,10 @@ impl KernelCoordinator<'_> {
         if now.wall_ms < since {
             return Err(context::FAILED.into());
         }
-        let remaining = self
-            .binding
-            .budgets
-            .run_execution_ms
-            .saturating_sub(facts.running_elapsed_ms)
-            .min(
-                self.binding
-                    .budgets
-                    .model_request_ms
-                    .saturating_sub(now.wall_ms.saturating_sub(since)),
-            );
+        let remaining = self.binding.budgets.limit_operation_ms(
+            self.binding.budgets.model_request_ms.saturating_sub(now.wall_ms.saturating_sub(since)),
+            facts.running_elapsed_ms,
+        );
         // Owner and input are durable before the first external request. On an
         // unknown result, recovery never renews this request or its deadline.
         let response = deliver(&self.binding, &plan.request, &token, remaining)

@@ -711,7 +711,7 @@ export const desktopClient = {
     })
     return normalizeKnowledgeBindingsSetPayload(payload)
   },
-  startRun: (request: { conversationId: string; text: string; runtimeText?: string; model?: string; attachmentIds?: string[] }) =>
+  startRun: (request: { conversationId: string; text: string; runtimeText?: string; model?: string; attachmentIds?: string[]; budget?: import("../../chat/components/run-budget").RunBudgetSelection }) =>
     command<StartRunResult>('run_start', request),
   rewindRun: (request: { conversationId: string; messageId: string; text: string; runtimeText?: string; model?: string }) =>
     command<StartRunResult>('run_rewind', request),

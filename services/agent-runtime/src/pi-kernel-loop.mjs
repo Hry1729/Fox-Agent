@@ -9,6 +9,7 @@ import { finalizeKernelAnswer, completionPreview, KernelIncompleteResponseError 
 import { createRoundProgress, toolParamBytesOf } from './kernel-model-progress.mjs'
 import { modelToolResultContent, toolResultRef } from './tool-view.mjs'
 import { steeringNoticeText, validateSteeringNotices } from './steering-notice.mjs'
+import { describeKernelError, diagnosticLine } from './pi-kernel-diagnostics.mjs'
 
 export { steeringNoticeText }
 
@@ -59,6 +60,7 @@ function settledToolResult(item, runId = null) {
     isError,
     content: item.result.content,
     details: item.result.details,
+    storage: item.storage,
     resultRef: toolResultRef(runId, item.toolCallId),
   })
   return {
@@ -419,6 +421,25 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
       if (signal.aborted) fail('Host cancelled the run')
       final = session.agent.state.messages.at(-1)
       if (final?.role !== 'assistant' || final.stopReason !== 'stop') {
+        // Diagnosing a real-chain failure needs the *shape* of the failed round:
+        // role, stop reason, block kinds and whether a provider request was even
+        // attempted. Only a fixed field list is published, and the one field
+        // whose text the provider writes (the fetch error) goes through the
+        // capped, redacted shape in pi-kernel-diagnostics.mjs — never a raw
+        // message, stack or argument. Diagnosis switch only.
+        if (process.env.FOX_KERNEL_WORKER_DEBUG) {
+          const structure = {
+            role: final?.role ?? null,
+            stopReason: final?.stopReason ?? null,
+            blockKinds: (final?.content ?? []).map(block => block?.type ?? null),
+            blocks: (final?.content ?? []).length,
+            fetchCalls: hooks?.fetchCalls?.() ?? null,
+            hasRejection: Boolean(hooks?.lastRejection?.()),
+            fetchError: describeKernelError(hooks?.lastFetchError?.()),
+            roundCursor,
+          }
+          console.error(diagnosticLine('kernel-worker unclassified round end', structure))
+        }
         throw modelFailureError(transportFailureCategory(final), hooks?.lastRejection?.())
       }
       let output
@@ -468,12 +489,18 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
   }
 
   function modelFailureError(category, rejection = null) {
+    // The evidence object must always satisfy the frozen protocol: a null
+    // category is rejected by the Host ("invalid type: null, expected a string"),
+    // which turns a real transport failure into an unreadable one and hides the
+    // cause. A round that ended without a successful stop is a transport failure
+    // by definition, so that is the category of last resort.
+    const resolved = typeof category === 'string' && category ? category : 'model_transport_failure'
     const error = new Error('Kernel model round failed; the Host owns retry admission')
     error.evidence = {
       schemaVersion: 1, runId: request.runId, turnId: prepared.turnId,
-      checkpointSeq: roundCursor, category,
-      httpStatus: category === 'provider_unavailable' ? rejection?.httpStatus ?? null : null,
-      retryAfterMs: category === 'provider_unavailable' ? rejection?.retryAfterMs ?? null : null,
+      checkpointSeq: roundCursor, category: resolved,
+      httpStatus: resolved === 'provider_unavailable' ? rejection?.httpStatus ?? null : null,
+      retryAfterMs: resolved === 'provider_unavailable' ? rejection?.retryAfterMs ?? null : null,
     }
     return error
   }

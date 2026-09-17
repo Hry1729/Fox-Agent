@@ -1,4 +1,8 @@
+mod kernel_continuation;
+mod kernel_reliability;
 mod kernel_reconciliation;
+pub use kernel_continuation::*;
+pub use kernel_reliability::*;
 pub use kernel_reconciliation::*;
 use crate::model_service::{
     api_key_configured, clear_api_key, get_api_key, normalize_model_base_url, normalize_model_id,
@@ -2309,6 +2313,22 @@ pub fn run_start(
         Ok(started) => started,
         Err(error) => return ApiResponse::failure("run.create_failed", error, false),
     };
+
+    // #6: record the user's explicit budget choice before dispatch, so the frozen
+    // binding uses exactly the window they picked (and an invalid choice fails
+    // here instead of silently running with the default).
+    if let Some(budget) = &request.budget {
+        if let Err(error) = state.database.record_run_budget_selection(
+            &started.run.id,
+            budget.tier,
+            budget.custom_execution_ms,
+        ) {
+            let _ = state
+                .database
+                .mark_run_failed(&started.run.id, "run.budget_invalid", &error);
+            return ApiResponse::failure("run.budget_invalid", error, false);
+        }
+    }
 
     let attachments = match state.database.bind_attachments_to_message(
         &request.conversation_id,

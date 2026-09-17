@@ -203,16 +203,22 @@ fn the_context_gate_accounts_for_the_input_it_will_actually_send() {
 
     // The gate itself: with a reserve that cannot absorb this queue it must stop
     // reporting "nothing to do". Either it plans a compaction, or it ends with
-    // the explicit capacity error — never a silent skip that leaves the dispatch
-    // detaching forever.
+    // an explicit, classified capacity error — never a silent skip that leaves
+    // the dispatch detaching forever. (#12 splits the old single INSUFFICIENT
+    // into explained stop classes; all of them are explicit.)
     let huge_extra = 10 * 1024 * 1024;
     match coordinator.prepare_context_if_needed("initial", huge_extra) {
         Ok(false) => panic!("an impossible budget must not report 'nothing to do'"),
         Ok(true) => {} // a compaction plan was prepared: real progress
-        Err(error) => assert_eq!(
-            error,
-            crate::kernel_compaction::INSUFFICIENT,
-            "capacity failure must be explicit: {error}"
+        Err(error) => assert!(
+            [
+                crate::kernel_compaction::INSUFFICIENT,
+                crate::kernel_compaction::NO_CANDIDATES,
+                crate::kernel_compaction::NO_REDUCTION,
+                crate::kernel_compaction::SINGLE_TOO_LARGE,
+            ]
+            .contains(&error.as_str()),
+            "capacity failure must be explicit and classified: {error}"
         ),
     }
 }

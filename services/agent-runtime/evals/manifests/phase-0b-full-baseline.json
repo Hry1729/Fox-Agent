@@ -2,7 +2,7 @@
   "kind": "fox-offline-eval-manifest",
   "schemaVersion": 1,
   "id": "phase-0b-full-baseline",
-  "version": "2026-09-14.1",
+  "version": "2026-09-16.1",
   "description": "Phase 0B full deterministic baseline covering every current Runtime tool plus failure, permission, injection, completion, and recovery boundaries.",
   "scorerVersion": "fox-deterministic-contract-v2",
   "runPolicy": {
@@ -92,10 +92,10 @@
   ],
   "expectedCaseCounts": {
     "simple": 10,
-    "medium": 84,
+    "medium": 88,
     "complex": 25,
     "recovery": 5,
-    "total": 124
+    "total": 128
   },
   "cases": [
     {
@@ -381,6 +381,26 @@
     {
       "suiteId": "runtime-tool-catalog",
       "caseId": "attachment_compute",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "compute_job_start",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "compute_job_status",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "compute_job_cancel",
+      "category": "medium"
+    },
+    {
+      "suiteId": "runtime-tool-catalog",
+      "caseId": "compute_job_result",
       "category": "medium"
     },
     {

@@ -158,11 +158,42 @@ fn wait_opts<T>(
     }
 }
 
+/// How the worker's stderr is wired.
+///
+/// The worker's stderr is discarded by default: it may carry model input
+/// fragments, and the Host already reports categorized failures. Opting in
+/// (`FOX_KERNEL_WORKER_STDERR=inherit`) is a diagnosis switch for the real chain
+/// — without it a worker that fails before its first model request leaves no
+/// text anywhere, which is exactly how a startup failure looked like a
+/// mysterious stall.
+///
+/// There is deliberately **no** `piped` mode. A piped stderr with no reader
+/// deadlocks the worker: it blocks in its own write once the OS pipe buffer
+/// fills, and the Host then waits for a protocol frame that is never sent.
+/// Capturing the bytes would need a draining reader of bounded capacity, and
+/// nothing consumes them today.
+#[derive(Debug, PartialEq, Eq)]
+enum StderrMode {
+    Discard,
+    Inherit,
+}
+
+fn stderr_mode(requested: Option<&str>) -> StderrMode {
+    match requested {
+        Some("inherit") => StderrMode::Inherit,
+        _ => StderrMode::Discard,
+    }
+}
+
 impl Worker {
     fn spawn(runtime: &RuntimeCommand) -> Result<Self, String> {
         let mut command = Command::new(&runtime.program);
         if let Some(script) = &runtime.script { command.arg(script); }
-        command.arg("--kernel-worker").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let stderr = match stderr_mode(std::env::var("FOX_KERNEL_WORKER_STDERR").ok().as_deref()) {
+            StderrMode::Inherit => Stdio::inherit(),
+            StderrMode::Discard => Stdio::null(),
+        };
+        command.arg("--kernel-worker").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(stderr);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -440,7 +471,7 @@ fn call_model(
         || config.execution_profile_id != binding.execution_profile_id {
         return Err("isolated Kernel model identity mismatch".into());
     }
-    let budget = binding.budgets.model_request_ms.min(binding.budgets.run_execution_ms).min(remaining_budget_ms);
+    let budget = binding.budgets.limit_operation_ms(binding.budgets.model_request_ms, 0).min(remaining_budget_ms);
     if budget <= 0 { return Err("Kernel worker has no remaining execution budget".into()); }
     let deadline = Instant::now() + Duration::from_millis(budget.try_into().map_err(|_| "invalid model budget")?);
     let session_id = format!("kernel-once-{}", uuid::Uuid::new_v4());
@@ -817,6 +848,54 @@ mod tests {
             assert!(result.unwrap_err().contains("deadline"));
         }
         assert!(start.elapsed() < Duration::from_secs(5));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_requested_stderr_pipe_without_a_reader_is_never_selected() {
+        assert_eq!(stderr_mode(None), StderrMode::Discard);
+        assert_eq!(stderr_mode(Some("")), StderrMode::Discard);
+        assert_eq!(stderr_mode(Some("inherit")), StderrMode::Inherit);
+        // `piped` used to create a stderr pipe nobody drained. An unknown or
+        // withdrawn request must not resurrect that deadlock.
+        assert_eq!(stderr_mode(Some("piped")), StderrMode::Discard);
+    }
+
+    #[test]
+    fn a_worker_flooding_stderr_before_its_first_read_still_answers_the_protocol() {
+        // 4 MiB is far past any OS pipe buffer, and it is written *before* the
+        // script reads stdin: if the Host's stderr wiring applied backpressure,
+        // this round would never return.
+        let (root, runtime) = script(
+            "import { createInterface } from 'node:readline';\n\
+             process.stderr.write('d'.repeat(4 * 1024 * 1024));\n\
+             createInterface({ input: process.stdin }).on('line', line => {\n\
+               const request = JSON.parse(line);\n\
+               process.stdout.write(JSON.stringify({ protocol: 'fox-runtime-jsonl', version: 1,\n\
+                 kind: 'response', type: 'kernel.ready', requestId: request.id, payload: {} }) + '\\n');\n\
+             });\n\
+             setInterval(() => {}, 1000)",
+        );
+        let registry = CancellationRegistry::default();
+        registry.register_run("r").unwrap();
+        let token = registry.run_token("r").unwrap();
+        let start = Instant::now();
+        {
+            let mut worker = Worker::spawn(&runtime).unwrap();
+            worker
+                .exchange(
+                    json!({ "id": "r" }),
+                    "kernel.ready",
+                    &token,
+                    Instant::now() + Duration::from_secs(20),
+                )
+                .expect("a stderr flood must not block the protocol frame");
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "the round took {:?}",
+            start.elapsed()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

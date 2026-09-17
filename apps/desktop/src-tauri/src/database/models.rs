@@ -2009,6 +2009,22 @@ pub struct StartRunRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub attachment_ids: Vec<String>,
+    /// #6: an explicit user-chosen execution budget. Absent means the historical
+    /// default, so an old caller behaves exactly as before.
+    #[serde(default)]
+    pub budget: Option<RunBudgetSelection>,
+}
+
+/// A user's explicit run-budget choice. The tier is frozen into the Run's control
+/// binding and shown back to the user; it never means "unbounded".
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunBudgetSelection {
+    #[serde(default)]
+    pub tier: crate::database::BudgetTier,
+    /// Only meaningful with `tier = "custom"`.
+    #[serde(default)]
+    pub custom_execution_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

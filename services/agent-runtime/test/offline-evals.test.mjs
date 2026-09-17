@@ -29,7 +29,7 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   const report = await runOfflineEvals()
   assert.equal(report.schemaVersion, 4)
   assert.equal(report.summary.suites, 9)
-  assert.equal(report.summary.total, 124) // catalog grew with skill_load
+  assert.equal(report.summary.total, 128) // catalog grew with four compute-job tools
   assert.equal(report.summary.failed, 0, JSON.stringify(report.suites.filter((suite) => suite.cases.some((item) => !item.passed)), null, 2))
   assert.equal(report.metadata.evaluatorVersion, 'fox-offline-evaluator-v8')
   const injectionCases = report.suites.find((suite) => suite.id === 'injection-boundary').cases
@@ -37,11 +37,11 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   assert.equal(injectionCases.every((item) => item.isolatedInHostWorkSnapshot && item.workSnapshotAuthorityCount === 1), true)
   assert.equal(injectionCases.some((item) => 'isolatedInWorkspaceContext' in item), false)
   assert.equal(report.baseline.manifest.id, 'phase-0b-full-baseline')
-  assert.equal(report.baseline.manifest.version, '2026-09-14.1') // skill_load added to the canonical tool catalog
-  assert.equal(report.baseline.summary.total, 124)
+  assert.equal(report.baseline.manifest.version, '2026-09-16.1') // four compute-job tools added to the canonical tool catalog
+  assert.equal(report.baseline.summary.total, 128)
   assert.deepEqual(
     Object.fromEntries(Object.entries(report.baseline.summary.byCategory).map(([category, summary]) => [category, summary.total])),
-    { simple: 10, medium: 84, complex: 25, recovery: 5 },
+    { simple: 10, medium: 88, complex: 25, recovery: 5 },
   )
   const runtimeToolCatalog = report.suites.find((suite) => suite.id === 'runtime-tool-catalog')
   assert.equal(runtimeToolCatalog.cases.length, RUNTIME_TOOL_CATALOG.length)
@@ -119,8 +119,8 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
     { total: 6, passed: 6, failed: 0 },
   )
   assert.equal(report.metadata.datasetHash, '610af6adb505549587222e7410ac7003b46241b974174e2a96ccb01fddadf933')
-  assert.equal(report.metadata.manifestHash, 'f9e92313b963799b3959f0036ceebb9e2917f38a7334c88b69d82206c5f33a62') // manifest now includes the skill_load catalog case
-  assert.equal(report.metadata.toolCatalogHash, '475f570c6b00829e1db4cc358301dc9dd7d7e0fb1792614caeeca66c20c1ea8c') // skill_load added to RUNTIME_TOOL_CATALOG
+  assert.equal(report.metadata.manifestHash, 'cc108d8e92951bf79dcdcc7d9210b36337101efca403bad2da89fff079baa81e') // manifest now includes the compute-job catalog cases
+  assert.equal(report.metadata.toolCatalogHash, '718de0d9c5e75470435075787e3cf9e08618050667c5556c811b909deb0b43d4') // four compute-job tools added to RUNTIME_TOOL_CATALOG
   assert.match(report.metadata.modelConfigHash, /^[a-f0-9]{64}$/)
   assert.match(report.metadata.environmentHash, /^[a-f0-9]{64}$/)
   assert.match(report.metadata.stablePromptHash, /^[a-f0-9]{16,64}$/)
@@ -133,7 +133,7 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   assert.equal(report.metadata.promptCacheDiagnostics.read.eligible, true)
   assert.equal(report.metadata.promptCacheDiagnostics.write.eligible, false)
   // Cursor metadata is model-visible; complete refers only to stored bytes.
-  assert.equal(report.resultHash, 'acfae7dbb89f25cb0b0e26182c76de4b40cb897a8e51e49dbc949eac5520f193') // result identity follows toolCatalogHash
+  assert.equal(report.resultHash, '98e1a074485e2cbc12ca83581f2f395f008aceac7c139d1e16e6ce37a2a40011') // result identity follows toolCatalogHash
 })
 
 test('locks Graph review and final Acceptance schemas, profile boundary, and truthful completion Prompt', () => {

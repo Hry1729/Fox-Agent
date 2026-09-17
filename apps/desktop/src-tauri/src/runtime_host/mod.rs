@@ -1,5 +1,6 @@
 mod capability_tools;
 pub(crate) mod attachment_compute;
+pub(crate) mod background_jobs;
 mod continuation;
 pub(crate) mod managed_files;
 mod tool_result_read;
@@ -10,6 +11,9 @@ mod kernel_model_worker;
 mod kernel_run_lock;
 mod kernel_host;
 mod kernel_authority;
+pub(crate) mod process_identity;
+pub(crate) use process_identity::process_start_marker;
+pub(crate) use process_identity::owner_is_gone as job_owner_is_gone;
 mod kernel_gateway;
 mod kernel_delegation;
 mod protocol;
@@ -661,6 +665,31 @@ struct PendingApproval {
 
 type PendingApprovals = Arc<Mutex<HashMap<String, PendingApproval>>>;
 
+/// Per-target serialization for state-changing built-in Office calls in the
+/// Legacy transport. A model occasionally emits a parallel burst of writes to
+/// the SAME workbook (e.g. one import per sheet); without serialization each
+/// call created its own approval request, producing many overlapping approval
+/// dialogs and racing writes. The key is `run id + absolute target path`;
+/// different files stay independent.
+type ActiveFileWrites = Arc<Mutex<HashSet<String>>>;
+
+/// Holds one per-target Office write slot for the duration of a Legacy
+/// dispatch (approval wait + execution + registration). Removing the key on
+/// drop serializes a parallel model burst aimed at the same file while
+/// leaving writes to different files independent.
+struct ActiveOfficeWrite {
+    active: ActiveFileWrites,
+    key: String,
+}
+
+impl Drop for ActiveOfficeWrite {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.active.lock() {
+            set.remove(&self.key);
+        }
+    }
+}
+
 struct WorkerHandle {
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<ChildStdin>>,
@@ -710,6 +739,7 @@ struct RuntimeHostState {
     capabilities: Value,
     execution_profile_id: String,
     pending_approvals: PendingApprovals,
+    active_file_writes: ActiveFileWrites,
     queued_runs: VecDeque<QueuedRun>,
     dispatching_run_id: Option<String>,
     dispatching_conversation_id: Option<String>,
@@ -807,6 +837,17 @@ fn shadow_legacy_tool_decision(
     shadow_reconcile::legacy_tool_decision(tool, execution_location, requires_approval)
 }
 
+struct AgentPromptContext {
+    system_prompt: String,
+    assistant_package: Value,
+    expert_package: Option<Value>,
+    expert_binding_payload: Option<Value>,
+    run_role: &'static str,
+    run_context: Value,
+    skill_prompt: String,
+    skill_activations: Vec<SkillActivationRecord>,
+}
+
 #[derive(Clone)]
 pub struct RuntimeHost {
     app: AppHandle,
@@ -832,6 +873,46 @@ pub struct RuntimeHost {
 }
 
 impl RuntimeHost {
+    pub(crate) fn execute_job_operation(&self, conversation: &str, run_id: &str, tool: &str, input: &Value) -> Result<Value,String> {
+        run_bound_conversation(&self.database,run_id,Some(conversation))?;
+        let binding=self.database.run_control_binding(run_id)?.ok_or("job operation needs a frozen Run")?;
+        let elapsed=if binding.authority==fox_engine_protocol::ExecutionAuthority::Authoritative {
+            let scope=self.database.kernel_host_scope(run_id)?;
+            if !scope.tool_names.contains(tool) {return Err("job operation is outside the frozen tool scope".into());}
+            if scope.lifecycle_hooks.iter().any(|h|h.event=="before_tool"&&matches!(h.action.as_str(),"block"|"require_approval")&&crate::lifecycle_hooks::matcher_matches(&h.matcher,tool)) {
+                return Err("job operation requires the existing tool approval workflow".into());
+            }
+            self.database.kernel_build_full_snapshot(run_id)?.running_elapsed_ms
+        } else {
+            self.ensure_runtime_tool_allowed(run_id,tool,RuntimeToolIngress::Execute).map_err(|(_,e)|e)?;
+            0
+        };
+        let token=self.state.lock().map_err(|_| "runtime state poisoned")?.cancellation.run_token(run_id).ok();
+        let budget=std::time::Duration::from_millis(binding.budgets.limit_operation_ms(binding.budgets.tool_execution_ms, elapsed).max(0) as u64);
+        background_jobs::execute(&self.database,&self.attachments_dir,&self.sessions_dir,run_id,tool,input,token,budget)
+    }
+    fn handle_job_tool_request(&self, stdin: &Arc<Mutex<ChildStdin>>, envelope: RuntimeEnvelope) {
+        let outcome=(|| -> Result<Value,String> {
+            let run=envelope.run_id.as_deref().ok_or("missing runId")?;
+            let conversation=run_bound_conversation(&self.database,run,envelope.conversation_id.as_deref())?;
+            let p=envelope.payload.as_ref().ok_or("missing payload")?;
+            let tool=p["tool"].as_str().ok_or("missing tool")?;
+            let call=p["toolCallId"].as_str().ok_or("missing toolCallId")?;
+            let input=&p["input"];
+            if let Some(response)=inspect_existing_host_tool_call(&self.database,run,call,tool,input)? {return Ok(response);}
+            let hooks=crate::lifecycle_hooks::before_tool(&self.database,run,call,tool,input)?;
+            if hooks.blocked.is_some()||hooks.requires_approval {return Err("job operation requires explicit approval through Kernel".into());}
+            match create_fresh_host_tool_call(&self.database,run,call,tool,input,"running",false)? {
+                HostToolCallExecution::Replay(response)=>Ok(response),
+                HostToolCallExecution::Execute(_)=>finalize_host_tool_execution(&self.database,run,call,tool,input,hooks.annotations,self.execute_job_operation(&conversation,run,tool,input))
+            }
+        })();
+        let response=outcome.unwrap_or_else(|error| json!({"isError":true,"error":error}));
+        let kind=if response["isError"]==true {"tool.execute_failed"}else{"tool.execute_completed"};
+        let response=HostResponse::for_request(&envelope,kind,response);
+        if let Err(error)=write_protocol_message(stdin,&response) {eprintln!("fox job response: {error}");}
+    }
+
     fn try_acquire_tool_handler(&self) -> Option<ToolHandlerPermit> {
         let active = self.active_tool_handlers.fetch_add(1, Ordering::SeqCst);
         if active >= MAX_CONCURRENT_TOOL_HANDLERS {
@@ -943,6 +1024,7 @@ impl RuntimeHost {
                 capabilities: json!({}),
                 execution_profile_id: "legacy".to_owned(),
                 pending_approvals: Arc::new(Mutex::new(HashMap::new())),
+                active_file_writes: Arc::new(Mutex::new(HashSet::new())),
                 queued_runs: VecDeque::new(),
                 dispatching_run_id: None,
                 dispatching_conversation_id: None,
@@ -971,6 +1053,9 @@ impl RuntimeHost {
             active_tool_handlers: Arc::new(AtomicUsize::new(0)),
         };
         host.reconcile_continuation_proposals();
+        if let Err(error) = database.kernel_jobs_reconcile_orphans() {
+            eprintln!("Background job recovery could not finish: {error}");
+        }
         host
     }
 
@@ -1320,6 +1405,7 @@ impl RuntimeHost {
             model_idle_ms: budgets.model_idle_ms,
             tool_execution_timeout_ms: budgets.tool_execution_ms,
             run_execution_budget_ms: budgets.run_execution_ms,
+            run_execution_limited: budgets.run_execution_limited,
             approval_wait_timeout_ms: budgets.approval_wait_ms,
             provider_max_retries: 2,
             turn_max_retries: 0,
@@ -1688,6 +1774,320 @@ impl RuntimeHost {
         );
     }
 
+    /// Continue a paused Kernel Run through the *normal* initialization path (R2).
+    ///
+    /// Order matters and is the whole point of the fix:
+    ///   1. re-verify the permission scope against live conversation state;
+    ///   2. resolve the runtime/model service and ask the Runtime for the model
+    ///      description — exactly what a fresh authoritative Run does;
+    ///   3. derive the prompt hash, the frozen initial input and the Host scope;
+    ///   4. only then insert the attempt, so the `kernel_runs` row is created with
+    ///      the real `prompt_config_hash` / `frozen_config_json` /
+    ///      `capability_manifest_hash` instead of placeholders;
+    ///   5. freeze the model config, initial input and scope, then drive it.
+    ///
+    /// The previous version inserted placeholder frozen values and never froze the
+    /// artifacts, so the production dispatch failed with
+    /// "Kernel model configuration is missing; no current-settings fallback".
+    #[allow(clippy::too_many_arguments)]
+    pub fn continue_kernel_run(
+        &self,
+        request: &crate::database::ContinuationRequest,
+    ) -> Result<StartRunResult, String> {
+        let source_binding = self
+            .database
+            .run_control_binding(&request.source_run_id)?
+            .ok_or("缺少冻结权限")?;
+        // 1. Permission is re-verified (and recorded) before anything is created.
+        let verified = self.database.re_verify_continuation_permission(
+            &request.source_run_id,
+            &request.conversation_id,
+        )?;
+        let prompt_text =
+            self.database
+                .kernel_continuation_prompt(&request.conversation_id, &request.source_run_id)?;
+        let budgets = crate::database::run_budget_for_tier(
+            source_binding.budgets.clone(),
+            request.tier,
+            request.custom_execution_ms,
+        )?;
+        // 2. The runtime description needs the real prompt/service pair.
+        let model_service = self
+            .database
+            .get_model_service()?
+            .ok_or_else(|| "model service is not configured".to_owned())?;
+        let effective_max_output_tokens = model_service.max_output_tokens;
+        let context_chars = model_service
+            .context_window
+            .saturating_sub(effective_max_output_tokens)
+            .max(4096)
+            .saturating_mul(3)
+            .clamp(12_000, 240_000) as usize;
+        let messages = self.database.runtime_prompt_context_budget(
+            &request.conversation_id,
+            240,
+            context_chars,
+        )?;
+        let context = self.agent_prompt_context(&request.conversation_id, &prompt_text, "primary")?;
+        let prompt = json!({
+            "text": prompt_text,
+            "messages": messages,
+            "images": Vec::<Value>::new(),
+            "systemPrompt": context.system_prompt,
+            "skillPrompt": context.skill_prompt,
+            "assistantPackage": context.assistant_package,
+            "expertPackage": context.expert_package,
+            "expertBinding": context.expert_binding_payload,
+            "projectContext": {"projectRoot": verified.permission.project_root, "permissionMode": verified.permission.mode.as_str()},
+            "workSnapshot": work_tools::snapshot(&self.database, &request.conversation_id)?,
+            "memoryContext": self.database.recall_memories(&request.conversation_id, None, &prompt_text, 8, 6_000)?,
+            "runContext": {
+                "runKind": "primary",
+                "runRole": "user_facing_lead",
+                "isUserFacingLead": true,
+            },
+            "promptBudget": {"maxPromptTokens": model_service
+                .context_window
+                .saturating_sub(effective_max_output_tokens)
+                .max(4096)},
+            "continuation": true,
+        });
+        let service = json!({
+            "baseUrl": model_service.base_url,
+            "modelId": model_service.model_id,
+            "apiType": model_service.api_type,
+            "contextWindow": model_service.context_window,
+            "maxOutputTokens": effective_max_output_tokens,
+            "supportsImageInput": model_service.supports_image_input,
+        });
+        let runtime = self.runtime_command()?;
+        // The description is bound to the *verified* binding, so the frozen scope
+        // and the tool catalog are derived from the re-verified permission.
+        let mut verified_binding = source_binding.clone();
+        verified_binding.run_id = request.source_run_id.clone();
+        verified_binding.permission = verified.permission.clone();
+        verified_binding.permission_snapshot_id = verified.permission_snapshot_id.clone();
+        verified_binding.budgets = budgets.clone();
+        let registry = crate::kernel::CancellationRegistry::default();
+        registry.register_run(&format!("continuation-describe:{}", request.source_run_id))?;
+        let token = registry.run_token(&format!(
+            "continuation-describe:{}",
+            request.source_run_id
+        ))?;
+        let mut supported = kernel_gateway::supported_tools();
+        // 3. Describe against the verified scope, exactly like a fresh start.
+        let config = {
+            let describe_binding = verified_binding.clone();
+            kernel_model_worker::describe(
+                &runtime,
+                &describe_binding,
+                service.clone(),
+                prompt.clone(),
+                std::mem::take(&mut supported),
+                &token,
+            )?
+        };
+        let hash = config.hash()?;
+        let input = kernel_host::initial_input(&verified_binding, &prompt, &hash)?;
+        let scope =
+            kernel_gateway::freeze_scope(&self.database, &verified_binding, &prompt, &config)?;
+        let frozen = crate::kernel::RunFrozenConfig {
+            engine_id: verified_binding.engine_id.clone(),
+            kernel_mode: "authoritative".into(),
+            capability_manifest_version: 2,
+            capability_manifest_hash: runtime_shadow_hash(
+                &serde_json::to_string(&scope).map_err(|_| "invalid resource scope")?,
+            ),
+            permission_snapshot_id: verified_binding.permission_snapshot_id.clone(),
+            execution_profile_id: verified_binding.execution_profile_id.clone(),
+            prompt_config_hash: hash.clone(),
+            model_request_timeout_ms: budgets.model_request_ms,
+            model_first_response_ms: budgets.model_first_response_ms,
+            model_idle_ms: budgets.model_idle_ms,
+            tool_execution_timeout_ms: budgets.tool_execution_ms,
+            run_execution_budget_ms: budgets.run_execution_ms,
+            run_execution_limited: budgets.run_execution_limited,
+            approval_wait_timeout_ms: budgets.approval_wait_ms,
+            provider_max_retries: 2,
+            turn_max_retries: 1,
+        };
+        let prepared = crate::database::PreparedContinuation {
+            budgets: budgets.clone(),
+            prompt_config_hash: hash.clone(),
+            capability_manifest_hash: frozen.capability_manifest_hash.clone(),
+            frozen_config_json: serde_json::to_string(&frozen)
+                .map_err(|_| "invalid frozen Kernel Run")?,
+            artifacts: Some((config, input, scope)),
+            skill_activations: context.skill_activations,
+        };
+        // 4. The attempt row now carries the real frozen values.
+        let started =
+            self.database
+                .kernel_insert_continuation_attempt(request, &prompt_text, &prepared)?;
+        // All new-Run identities and frozen artifacts were committed atomically.
+        // 6. Start it detached, like every other Kernel start.
+        let ownership = kernel_host::acquire(&self.sessions_dir, &started.run.id)?;
+        let binding = self
+            .database
+            .run_control_binding(&started.run.id)?
+            .ok_or("续做任务缺少冻结绑定")?;
+        let host = self.clone_for_detached_dispatch();
+        let database = self.database.clone();
+        let run_id = started.run.id.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = host.start_kernel_run(ownership, &binding, prompt, service) {
+                if error != CANCELLED_BEFORE_SUBMISSION {
+                    let _ = database.mark_run_failed(
+                        &run_id,
+                        "kernel.continuation_start_failed",
+                        &error,
+                    );
+                }
+            }
+        });
+        Ok(started)
+    }
+
+    /// A handle for a detached Kernel dispatch. The struct keeps no mutable
+    /// per-run state of its own, so a shallow copy is enough.
+    fn clone_for_detached_dispatch(&self) -> RuntimeHost {
+        RuntimeHost {
+            app: self.app.clone(),
+            database: self.database.clone(),
+            state: self.state.clone(),
+            run_transition: self.run_transition.clone(),
+            sessions_dir: self.sessions_dir.clone(),
+            attachments_dir: self.attachments_dir.clone(),
+            skills_dir: self.skills_dir.clone(),
+            managed_files_dir: self.managed_files_dir.clone(),
+            yuxi_client: self.yuxi_client.clone(),
+            child_hosts: self.child_hosts.clone(),
+            run_budget_override: self.run_budget_override.clone(),
+            enforce_count_budget_override: self.enforce_count_budget_override,
+            execution_profile_override: self.execution_profile_override,
+            tool_allowlist_override: self.tool_allowlist_override.clone(),
+            mcp_server_scope_override: self.mcp_server_scope_override.clone(),
+            digital_scheduler_started: self.digital_scheduler_started.clone(),
+            digital_scheduler_stop: self.digital_scheduler_stop.clone(),
+            active_tool_handlers: self.active_tool_handlers.clone(),
+        }
+    }
+
+    fn agent_prompt_context(&self, conversation_id: &str, text: &str, run_kind: &str) -> Result<AgentPromptContext, String> {
+        let system_prompt = self
+            .database
+            .conversation_system_prompt(conversation_id)?;
+        let agent_id = self
+            .database
+            .conversation_agent_id(conversation_id)?;
+        let assistant = self
+            .database
+            .get_agent(&agent_id)?
+            .ok_or_else(|| "conversation assistant was not found".to_owned())?;
+        let run_role = match (run_kind, assistant.agent_kind.as_str()) {
+            ("child", "expert") => "expert_consultation",
+            ("child", _) => "child_worker",
+            ("digital_colleague", _) => "digital_colleague",
+            _ => "user_facing_lead",
+        };
+        let run_context = json!({
+            "runKind": run_kind,
+            "runRole": run_role,
+            "isUserFacingLead": run_role == "user_facing_lead",
+        });
+        let expert_binding = self
+            .database
+            .current_conversation_expert_binding(conversation_id)?;
+        let assistant_skills = self.database.enabled_agent_skills(&assistant.id)?;
+        let configured_expert_skills = expert_binding
+            .as_ref()
+            .map(|binding| self.database.enabled_agent_skills(&binding.expert_id))
+            .transpose()?
+            .unwrap_or_default();
+        let enabled_mcps = self
+            .database
+            .list_mcp_servers()?
+            .into_iter()
+            .filter(|server| server.enabled)
+            .map(|server| server.id)
+            .filter(|server_id| {
+                self.mcp_server_scope_override
+                    .as_ref()
+                    .is_none_or(|scope| scope.contains(server_id))
+            })
+            .collect::<Vec<_>>();
+        let bound_knowledge = self
+            .database
+            .conversation_knowledge_references(conversation_id)?;
+        let mut assistant_package = runtime_agent_package(
+            &assistant,
+            &assistant_skills,
+            &enabled_mcps,
+            &bound_knowledge,
+        )?;
+        apply_delegated_package_scope(
+            &mut assistant_package,
+            self.tool_allowlist_override.as_ref(),
+            self.mcp_server_scope_override.as_ref(),
+        )?;
+        let expert_package = expert_binding
+            .as_ref()
+            .map(|binding| {
+                runtime_expert_package(
+                    &binding.package_snapshot,
+                    &binding.package_hash,
+                    &configured_expert_skills,
+                    &enabled_mcps,
+                    &bound_knowledge,
+                )
+            })
+            .transpose()?;
+        let effective_expert_skills = expert_package
+            .as_ref()
+            .map(|package| package_string_list(package, "enabledSkills"))
+            .unwrap_or_default();
+        let mut seen_skills = HashSet::new();
+        let enabled_skills = assistant_skills
+            .iter()
+            .chain(effective_expert_skills.iter())
+            .filter(|skill| seen_skills.insert((*skill).clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let available_skill_tools = intersect_optional_scopes(
+            runtime_package_tool_scope(&assistant_package),
+            expert_package.as_ref().and_then(runtime_package_tool_scope),
+        );
+        // Units are Unicode characters (never UTF-8 bytes or tokens); the plan
+        // also keeps a full on-demand catalog so budget-skipped skills stay
+        // discoverable and loadable through `skill_load`.
+        let skill_plan = crate::skills::skill_prompt_plan(
+            &self.skills_dir,
+            &enabled_skills,
+            available_skill_tools.as_ref(),
+            text,
+            8_000,
+        )?;
+        let expert_binding_payload = expert_binding.as_ref().map(|binding| {
+            json!({
+                "bindingId": binding.id,
+                "expertId": binding.expert_id,
+                "version": binding.expert_version,
+                "packageHash": binding.package_hash,
+                "activationSource": binding.activation_source,
+                "activatedAt": binding.activated_at,
+            })
+        });
+        let skill_activations = skill_plan.included.iter().map(|included| SkillActivationRecord {
+            skill_id: included.id.clone(), version: included.version.clone(),
+            content_sha256: included.content_sha256.clone(), source: "initial_prompt".into(),
+            required_tools: included.required_tools.clone(), missing_tools: Vec::new(),
+            tools_available: true, char_count: included.chars as i64, byte_count: included.bytes as i64,
+            created_at: crate::database::now_ms(),
+        }).collect();
+        Ok(AgentPromptContext { system_prompt, assistant_package, expert_package,
+            expert_binding_payload, run_role, run_context, skill_prompt: skill_plan.prompt, skill_activations })
+    }
+
     fn start_run_inner(
         &self,
         started: &StartRunResult,
@@ -1779,135 +2179,21 @@ impl RuntimeHost {
             240,
             context_chars,
         )?;
-        let system_prompt = self
-            .database
-            .conversation_system_prompt(&started.run.conversation_id)?;
-        let agent_id = self
-            .database
-            .conversation_agent_id(&started.run.conversation_id)?;
-        let assistant = self
-            .database
-            .get_agent(&agent_id)?
-            .ok_or_else(|| "conversation assistant was not found".to_owned())?;
-        let run_role = match (run_kind, assistant.agent_kind.as_str()) {
-            ("child", "expert") => "expert_consultation",
-            ("child", _) => "child_worker",
-            ("digital_colleague", _) => "digital_colleague",
-            _ => "user_facing_lead",
-        };
-        let run_context = json!({
-            "runKind": run_kind,
-            "runRole": run_role,
-            "isUserFacingLead": run_role == "user_facing_lead",
-        });
-        let expert_binding = self
-            .database
-            .current_conversation_expert_binding(&started.run.conversation_id)?;
-        let assistant_skills = self.database.enabled_agent_skills(&assistant.id)?;
-        let configured_expert_skills = expert_binding
-            .as_ref()
-            .map(|binding| self.database.enabled_agent_skills(&binding.expert_id))
-            .transpose()?
-            .unwrap_or_default();
-        let enabled_mcps = self
-            .database
-            .list_mcp_servers()?
-            .into_iter()
-            .filter(|server| server.enabled)
-            .map(|server| server.id)
-            .filter(|server_id| {
-                self.mcp_server_scope_override
-                    .as_ref()
-                    .is_none_or(|scope| scope.contains(server_id))
-            })
-            .collect::<Vec<_>>();
-        let bound_knowledge = self
-            .database
-            .conversation_knowledge_references(&started.run.conversation_id)?;
-        let mut assistant_package = runtime_agent_package(
-            &assistant,
-            &assistant_skills,
-            &enabled_mcps,
-            &bound_knowledge,
-        )?;
-        apply_delegated_package_scope(
-            &mut assistant_package,
-            self.tool_allowlist_override.as_ref(),
-            self.mcp_server_scope_override.as_ref(),
-        )?;
-        let expert_package = expert_binding
-            .as_ref()
-            .map(|binding| {
-                runtime_expert_package(
-                    &binding.package_snapshot,
-                    &binding.package_hash,
-                    &configured_expert_skills,
-                    &enabled_mcps,
-                    &bound_knowledge,
-                )
-            })
-            .transpose()?;
-        let effective_expert_skills = expert_package
-            .as_ref()
-            .map(|package| package_string_list(package, "enabledSkills"))
-            .unwrap_or_default();
-        let mut seen_skills = HashSet::new();
-        let enabled_skills = assistant_skills
-            .iter()
-            .chain(effective_expert_skills.iter())
-            .filter(|skill| seen_skills.insert((*skill).clone()))
-            .cloned()
-            .collect::<Vec<_>>();
-        let available_skill_tools = intersect_optional_scopes(
-            runtime_package_tool_scope(&assistant_package),
-            expert_package.as_ref().and_then(runtime_package_tool_scope),
-        );
-        // Units are Unicode characters (never UTF-8 bytes or tokens); the plan
-        // also keeps a full on-demand catalog so budget-skipped skills stay
-        // discoverable and loadable through `skill_load`.
-        let skill_plan = crate::skills::skill_prompt_plan(
-            &self.skills_dir,
-            &enabled_skills,
-            available_skill_tools.as_ref(),
-            text,
-            8_000,
-        )?;
-        // Audit exactly which skill content versions this Run's frozen first
-        // prompt contained. Failure to record the audit is a Host failure, not
-        // something the model can paper over.
-        for included in &skill_plan.included {
-            self.database.record_skill_activation(
-                &started.run.id,
-                Some(&started.run.conversation_id),
-                &SkillActivationRecord {
-                    skill_id: included.id.clone(),
-                    version: included.version.clone(),
-                    content_sha256: included.content_sha256.clone(),
-                    source: "initial_prompt".to_owned(),
-                    required_tools: included.required_tools.clone(),
-                    missing_tools: Vec::new(),
-                    tools_available: true,
-                    char_count: included.chars as i64,
-                    byte_count: included.bytes as i64,
-                    created_at: crate::database::now_ms(),
-                },
-            )?;
+        let AgentPromptContext { system_prompt, assistant_package, expert_package,
+            expert_binding_payload, run_role, run_context, skill_prompt, skill_activations } =
+            self.agent_prompt_context(&started.run.conversation_id, text, run_kind)?;
+        for record in &skill_activations {
+            self.database.record_skill_activation(&started.run.id, Some(&started.run.conversation_id), record)?;
         }
-        let skill_prompt = skill_plan.prompt;
-        let expert_binding_payload = expert_binding.as_ref().map(|binding| {
-            json!({
-                "bindingId": binding.id,
-                "expertId": binding.expert_id,
-                "version": binding.expert_version,
-                "packageHash": binding.package_hash,
-                "activationSource": binding.activation_source,
-                "activatedAt": binding.activated_at,
-            })
-        });
         let control_binding = match frozen_binding {
             Some(binding) => binding,
             None if authority == fox_engine_protocol::ExecutionAuthority::Authoritative => {
-                let mut budgets = fox_engine_protocol::TimeBudgets::default();
+                let mut budgets = fox_engine_protocol::TimeBudgets::continuous();
+                // Only an explicit caller budget limits the whole task. Existing
+                // frozen bindings above remain unchanged on restart.
+                if let Some((tier, custom_ms)) = self.database.kernel_run_budget_selection(&started.run.id)? {
+                    budgets = crate::database::run_budget_for_tier(budgets, tier, custom_ms)?;
+                }
                 if let Some(budget) = &self.run_budget_override {
                     budgets.restrict_execution_ms(budget.max_duration_ms as i64);
                 }
@@ -1955,9 +2241,7 @@ impl RuntimeHost {
                     })
                     .collect::<Vec<_>>();
                 if !requirements.is_empty() {
-                    for seed in delivery_seeds.iter_mut() {
-                        delivery::attach_requirements(seed, &requirements);
-                    }
+                    delivery::attach_requirements_to_seeds(&mut delivery_seeds, &requirements);
                 }
                 self.database.seed_delivery_checklist(
                     &started.run.id,
@@ -2253,17 +2537,21 @@ impl RuntimeHost {
         if graph_review_request_id.is_some() {
             child_host.execution_profile_override = Some(GRAPH_REVIEWER_EXECUTION_PROFILE);
         }
-        let shared_pending_approvals = self
-            .state
-            .lock()
-            .map_err(|_| "runtime state lock is poisoned".to_owned())?
-            .pending_approvals
-            .clone();
-        child_host
-            .state
-            .lock()
-            .map_err(|_| "child runtime state lock is poisoned".to_owned())?
-            .pending_approvals = shared_pending_approvals;
+        let (shared_pending_approvals, shared_file_writes) = {
+            let current = self
+                .state
+                .lock()
+                .map_err(|_| "runtime state lock is poisoned".to_owned())?;
+            (current.pending_approvals.clone(), current.active_file_writes.clone())
+        };
+        {
+            let mut child_state = child_host
+                .state
+                .lock()
+                .map_err(|_| "child runtime state lock is poisoned".to_owned())?;
+            child_state.pending_approvals = shared_pending_approvals;
+            child_state.active_file_writes = shared_file_writes;
+        }
         let (tool_scope, mcp_scope) = if graph_review_request_id.is_some() {
             (
                 Some(
@@ -2421,17 +2709,21 @@ impl RuntimeHost {
             max_output_tokens: effective_max_output,
             max_tool_calls: prepared.colleague.max_tool_calls,
         });
-        let shared_pending_approvals = self
-            .state
-            .lock()
-            .map_err(|_| "runtime state lock is poisoned".to_owned())?
-            .pending_approvals
-            .clone();
-        managed_host
-            .state
-            .lock()
-            .map_err(|_| "digital colleague runtime state lock is poisoned".to_owned())?
-            .pending_approvals = shared_pending_approvals;
+        let (shared_pending_approvals, shared_file_writes) = {
+            let current = self
+                .state
+                .lock()
+                .map_err(|_| "runtime state lock is poisoned".to_owned())?;
+            (current.pending_approvals.clone(), current.active_file_writes.clone())
+        };
+        {
+            let mut managed_state = managed_host
+                .state
+                .lock()
+                .map_err(|_| "digital colleague runtime state lock is poisoned".to_owned())?;
+            managed_state.pending_approvals = shared_pending_approvals;
+            managed_state.active_file_writes = shared_file_writes;
+        }
         let (tool_scope, mcp_scope) =
             effective_conversation_delegation_scope(&self.database, &conversation_id)?;
         managed_host.tool_allowlist_override = tool_scope;
@@ -3842,6 +4134,8 @@ impl RuntimeHost {
                                 &stdin,
                                 envelope,
                             )
+                        } else if background_jobs::TOOLS.contains(&tool) {
+                            child_runtime_host.handle_job_tool_request(&stdin, envelope);
                         } else if matches!(tool, "read_attachment" | "attachment_compute") {
                             handle_attachment_tool_request(
                                 &app,
@@ -6470,6 +6764,7 @@ fn authoritative_host_tool_terminal(
         return Some(Ok(json!({
             "isError": false,
             "result": record.result.unwrap_or(Value::Null),
+            "toolResultStorage": database.tool_result_storage(run_id, tool_call_id).unwrap_or_default(),
             "hookAnnotations": [],
             "replayed": true,
         })));
@@ -6510,6 +6805,7 @@ fn finalize_host_tool_execution(
             Ok(json!({
                 "isError": false,
                 "result": result,
+                "toolResultStorage": database.tool_result_storage(run_id, tool_call_id).unwrap_or_default(),
                 "hookAnnotations": merge_hook_annotations(before_annotations, after_annotations),
             }))
         }
@@ -6610,6 +6906,20 @@ fn execute_mcp_tool_request(
     }
     let managed_office = tool == "call_mcp_tool" && input["serverId"] == crate::office::SERVER_ID;
     let office_access = if managed_office { database.conversation_project_access(conversation_id)? } else { None };
+    // The Host's own runtime session store, fetched once and reused by the
+    // pre-approval prepare and the execution dispatch. The conversation still
+    // comes from the Run authorization, never from the model's arguments.
+    let legacy_office_sessions_dir = if managed_office {
+        use tauri::Manager;
+        Some(
+            app.state::<crate::app_state::AppState>()
+                .runtime_host
+                .sessions_dir
+                .clone(),
+        )
+    } else {
+        None
+    };
     let permission_scope = if managed_office {
         Some(permission_scope_hash("office-project-request", json!({"access":office_access,"input":input}).to_string().as_bytes()))
     } else { mcp_permission_scope(tool, &input) };
@@ -6619,11 +6929,64 @@ fn execute_mcp_tool_request(
         }
         None => false,
     };
+    // The Host-admitted write target, captured from the pre-approval prepare
+    // BEFORE execution. A create/create-import leaves the output on disk, so a
+    // post-execution re-prepare would trip the "output exists" guard and skip
+    // registering the first version. Classification happens before execution
+    // (matching the Kernel seam); execution re-admits independently, and the
+    // post-write registration still re-verifies the bytes actually on disk.
+    let mut office_prepared_target: Option<std::path::PathBuf> = None;
     let office_needs_approval = if managed_office {
         ensure_plan_approved_before_mutation(database, conversation_id, tool, &input)?;
         let access = database.conversation_project_access(conversation_id)?;
         let permission = database.conversation_permission_mode(conversation_id)?;
         let remote_tool = input["tool"].as_str().ok_or("Office 工具名缺失")?;
+        // Serialize state-changing calls to the SAME file within this run. A
+        // parallel burst (e.g. one import per sheet) would otherwise open one
+        // approval dialog per call and race the workbook. The rejected call
+        // never opens an approval and receives an actionable reason so the
+        // model proceeds sequentially after the in-flight write completes.
+        let mut _office_write_slot: Option<ActiveOfficeWrite> = None;
+        if matches!(
+            remote_tool,
+            "office_create"
+                | "office_edit"
+                | "office_merge"
+                | "office_render"
+                | "office_import_data"
+        ) {
+            if let Some((root, _)) = access.as_ref() {
+                let target_name = input
+                    .get("arguments")
+                    .and_then(|a| a.get("output").or_else(|| a.get("file")))
+                    .and_then(Value::as_str);
+                let key = target_name.map(|name| {
+                    format!(
+                        "{}:{}",
+                        run_id,
+                        std::path::Path::new(root).join(name).to_string_lossy().to_lowercase()
+                    )
+                });
+                if let Some(key) = key {
+                    let active = state
+                        .lock()
+                        .map_err(|_| "runtime state lock is poisoned".to_string())?
+                        .active_file_writes
+                        .clone();
+                    let occupied = {
+                        let mut set = active.lock().map_err(|_| "write set poisoned".to_string())?;
+                        !set.insert(key.clone())
+                    };
+                    if occupied {
+                        return Err(
+                            "同一文件已有一个写入操作正在等待审批或执行；请等当前调用完成后再发起下一个（不要并发对同一工作簿多次写入）。"
+                                .to_owned(),
+                        );
+                    }
+                    _office_write_slot = Some(ActiveOfficeWrite { active, key });
+                }
+            }
+        }
         if let Some(binding) = database.current_conversation_expert_binding(conversation_id)? {
             let manifest = expert_package_manifest(&binding.package_snapshot)?;
             if let Some(allowed) = manifest.get("officeTools").and_then(Value::as_array) {
@@ -6632,7 +6995,27 @@ fn execute_mcp_tool_request(
                 }
             }
         }
-        let prepared = crate::office::prepare(remote_tool, &input["arguments"], access.as_ref().map(|(root,_)| root.as_str()), &permission)?;
+        // Pre-approval preparation uses the same Host-resolved authorization
+        // as execution, so an artifactId is resolved and integrity-checked
+        // before asking a human; a cross-session/tampered reference is denied
+        // here, never approved then failed late.
+        let prepared = {
+            let office_context = legacy_office_sessions_dir.as_ref().map(|sessions_dir| {
+                crate::office::OfficeCallContext {
+                    database,
+                    sessions_dir,
+                    conversation_id,
+                }
+            });
+            crate::office::prepare_with_context(
+                remote_tool,
+                &input["arguments"],
+                access.as_ref().map(|(root, _)| root.as_str()),
+                &permission,
+                office_context.as_ref(),
+            )?
+        };
+        office_prepared_target = prepared.target_path().map(std::path::Path::to_path_buf);
         prepared.mutates && permission != "allow" && !has_conversation_permission
     } else { tool == "call_mcp_tool" && !has_conversation_permission };
     let requires_approval = hook_decision.requires_approval || office_needs_approval;
@@ -6796,13 +7179,34 @@ fn execute_mcp_tool_request(
                 claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
             }
             let health_started = Instant::now();
+            // The Legacy transport must resolve saved compute artifacts by
+            // reference exactly like the Kernel one; without this context an
+            // artifactId would be an unresolvable string and the model would
+            // be back to re-reading the file itself. The sessions dir was
+            // fetched once at pre-approval for the shared prepare.
+            let office_context = legacy_office_sessions_dir.as_ref().map(|sessions_dir| {
+                crate::office::OfficeCallContext {
+                    database,
+                    sessions_dir,
+                    conversation_id,
+                }
+            });
             let call_result = if managed_office {
                 let access = database.conversation_project_access(conversation_id)?;
                 if access != office_access { return Err("Office 项目或权限在等待期间发生变化，请重新发起操作".into()); }
                 ensure_expert_tool_allowed(database, conversation_id, tool)?;
                 let server = database.get_mcp_server(crate::office::SERVER_ID)?.ok_or("Office 连接器不存在")?;
                 let permission = database.conversation_permission_mode(conversation_id)?;
-                crate::office::execute(&server, remote_tool, &arguments, access.as_ref().map(|(root,_)| root.as_str()), &permission)
+                crate::office::execute_with_cancellation(
+                    &server,
+                    remote_tool,
+                    &arguments,
+                    access.as_ref().map(|(root,_)| root.as_str()),
+                    &permission,
+                    None,
+                    Duration::from_secs(120),
+                    office_context.as_ref(),
+                )
             } else {
                 crate::mcp::call_tool(&server, remote_tool, &arguments)
             };
@@ -6818,56 +7222,80 @@ fn execute_mcp_tool_request(
                     // The Legacy transport reaches the built-in Office
                     // connector through the same MCP wrapper as the Kernel one,
                     // so a saved document becomes a user-restorable version
-                    // here too. Managed-file registration is decided from the
-                    // dispatch the Host actually made (wrapper identity + the
-                    // operation the Host itself prepared) and then re-verified
-                    // against the bytes on disk; a generic MCP result can never
-                    // create a restorable row, even with identical JSON.
-                    if managed_office && matches!(remote_tool, "office_create" | "office_edit") {
+                    // here too — including an import-by-artifact reference.
+                    // Managed-file registration is decided from the dispatch
+                    // the Host actually made (wrapper identity + the operation
+                    // the Host itself prepared with the same frozen context)
+                    // and then re-verified against the bytes on disk; a generic
+                    // MCP result can never create a restorable row, even with
+                    // identical JSON.
+                    if managed_office
+                        && matches!(
+                            remote_tool,
+                            "office_create" | "office_edit" | "office_import_data"
+                        )
+                    {
                         let access = database.conversation_project_access(conversation_id)?;
                         if let Some((root, permission)) = access.as_ref() {
-                            match crate::office::prepare(
-                                remote_tool,
-                                &arguments,
-                                Some(root.as_str()),
-                                permission,
-                            ) {
-                                Ok(prepared) => {
-                                    if let Some(target) = prepared.target_path() {
-                                        use tauri::Manager;
-                                        let verified =
-                                            crate::runtime_host::managed_files::VerifiedWriteTarget::new(
-                                                Path::new(root),
-                                                target,
-                                            );
-                                        let backups_dir = app
-                                            .state::<crate::app_state::AppState>()
-                                            .runtime_host
-                                            .managed_files_dir()
-                                            .to_path_buf();
-                                        if let Err(reason) =
-                                            crate::runtime_host::managed_files::record_office_write_from_result(
-                                                database,
-                                                &backups_dir,
-                                                conversation_id,
-                                                run_id,
-                                                Some(tool_call_id),
-                                                &verified,
-                                                remote_tool,
-                                                &result,
-                                            )
-                                        {
-                                            eprintln!(
-                                                "refused an unverified Office managed-file \
-                                                 declaration for {remote_tool} {tool_call_id}: {reason}"
-                                            );
-                                        }
-                                    }
+                            // Prefer the target captured BEFORE execution: a
+                            // create/create-import now exists, so re-preparing
+                            // afterwards trips the "output exists" guard and would
+                            // skip registering the first restorable version. The
+                            // write itself was re-admitted at execution time; this
+                            // path is only re-prepared as a fallback, and the bytes
+                            // registered are still re-verified against disk below.
+                            let make_verified = |target: &std::path::Path| {
+                                crate::runtime_host::managed_files::VerifiedWriteTarget::new(
+                                    Path::new(root),
+                                    target,
+                                )
+                            };
+                            let verified_target = office_prepared_target
+                                .as_ref()
+                                .map(std::path::PathBuf::as_path)
+                                .map(make_verified)
+                                .or_else(|| {
+                                    crate::office::prepare_with_context(
+                                        remote_tool,
+                                        &arguments,
+                                        Some(root.as_str()),
+                                        permission,
+                                        office_context.as_ref(),
+                                    )
+                                    .ok()
+                                    .and_then(|prepared| {
+                                        prepared.target_path().map(make_verified)
+                                    })
+                                });
+                            if let Some(verified) = verified_target {
+                                use tauri::Manager;
+                                let backups_dir = app
+                                    .state::<crate::app_state::AppState>()
+                                    .runtime_host
+                                    .managed_files_dir()
+                                    .to_path_buf();
+                                if let Err(reason) =
+                                    crate::runtime_host::managed_files::record_office_write_from_result(
+                                        database,
+                                        &backups_dir,
+                                        conversation_id,
+                                        run_id,
+                                        Some(tool_call_id),
+                                        &verified,
+                                        remote_tool,
+                                        &result,
+                                    )
+                                {
+                                    eprintln!(
+                                        "refused an unverified Office managed-file \
+                                         declaration for {remote_tool} {tool_call_id}: {reason}"
+                                    );
                                 }
-                                Err(reason) => eprintln!(
+                            } else {
+                                eprintln!(
                                     "managed-file registration skipped for {remote_tool} \
-                                     {tool_call_id}: {reason}"
-                                ),
+                                     {tool_call_id}: no verified target"
+                                );
                             }
                         }
                     }
@@ -8456,7 +8884,16 @@ fn ensure_plan_approved_before_mutation(
     let mutates_project = matches!(tool, "write_file" | "edit_file" | "run_command")
         || (tool == "format_code" && input.get("mode").and_then(Value::as_str) == Some("write"))
         || (tool == "call_mcp_tool" && input["serverId"] == crate::office::SERVER_ID
-            && matches!(input["tool"].as_str(), Some("office_create" | "office_edit" | "office_merge" | "office_render")));
+            && matches!(
+                input["tool"].as_str(),
+                Some(
+                    "office_create"
+                        | "office_edit"
+                        | "office_merge"
+                        | "office_render"
+                        | "office_import_data"
+                )
+            ));
     if !mutates_project {
         return Ok(());
     }
@@ -10287,6 +10724,13 @@ mod attachment_tests {
             &database, &conversation.id, "call_mcp_tool",
             &json!({"serverId":"fox-office","tool":"office_create","arguments":{"output":"report.docx"}}),
         ).is_err());
+        // F-04: importing data writes a workbook, so it must pause for plan
+        // approval just like office_create (the per-call approval still
+        // applies when no plan is proposed).
+        assert!(ensure_plan_approved_before_mutation(
+            &database, &conversation.id, "call_mcp_tool",
+            &json!({"serverId":"fox-office","tool":"office_import_data","arguments":{"output":"data.xlsx","artifactId":"compute-artifact:00"}}),
+        ).is_err());
         assert!(ensure_plan_approved_before_mutation(
             &database, &conversation.id, "call_mcp_tool",
             &json!({"serverId":"fox-office","tool":"office_read","arguments":{"file":"report.docx"}}),
@@ -10308,6 +10752,10 @@ mod attachment_tests {
             &json!({ "path": "src/lib.rs" }),
         )
         .is_ok());
+        assert!(ensure_plan_approved_before_mutation(
+            &database, &conversation.id, "call_mcp_tool",
+            &json!({"serverId":"fox-office","tool":"office_import_data","arguments":{"output":"data.xlsx","artifactId":"compute-artifact:00"}}),
+        ).is_ok());
 
         drop(database);
         let _ = std::fs::remove_file(path);
@@ -10554,6 +11002,20 @@ mod attachment_tests {
 
         let error = extract_docx_text(&bytes).expect_err("reject decompression bomb");
         assert!(error.contains("1 MiB context limit"));
+    }
+
+    #[test]
+    fn actual_runtime_initialize_passes_the_production_host_guard() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let output = std::process::Command::new("node")
+            .arg(root.join("services/agent-runtime/test/fixtures/ready-handshake.mjs"))
+            .current_dir(&root).output().expect("start real runtime handshake probe");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let payload: serde_json::Value = serde_json::from_slice(&output.stdout).expect("real ready payload");
+        let (_, _, capabilities) = parse_runtime_ready_payload(&payload).expect("production startup validation");
+        for name in ["attachment_compute", "skill_load", "compute_job_start", "read_tool_result"] {
+            assert!(capabilities["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == name), "{name}");
+        }
     }
 
     #[test]

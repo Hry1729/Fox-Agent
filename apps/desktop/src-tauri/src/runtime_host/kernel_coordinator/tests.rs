@@ -1,3 +1,5 @@
+#[path = "unified_tests.rs"]
+mod unified_tests;
 #[path = "limit_fix_tests.rs"]
 mod limit_fix_tests;
 use super::*;
@@ -56,6 +58,8 @@ mod steering_tests;
 mod steering_live_tests;
 #[path = "real_eval_tests.rs"]
 mod real_eval_tests;
+#[path = "kernel_artifact_gate_tests.rs"]
+mod kernel_artifact_gate_tests;
 use crate::kernel::{CancellationRegistry, PolicyDecision, TestClock};
 use fox_engine_protocol::{FrozenPermission, PermissionMode, ResourceExecutor, TimeBudgets};
 use serde_json::json;
@@ -166,6 +170,7 @@ fn fixture_with_budgets_opt(clock: &TestClock, prompt_hash: &str, model: Option<
         model_idle_ms: binding.budgets.model_idle_ms,
         tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
         run_execution_budget_ms: binding.budgets.run_execution_ms,
+        run_execution_limited: binding.budgets.run_execution_limited,
         approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
         provider_max_retries: retries.0,
         turn_max_retries: retries.1,
@@ -982,7 +987,7 @@ fn kernel_repair_override_cannot_be_auto_approved_or_prompt_for_ineligible_work(
     binding.permission.mode=PermissionMode::Allow;
     binding.permission.grants.push(fox_engine_protocol::PermissionGrant {tool:"task_repair_escalate_start".into(),scope:"project".into()});
     binding.permission_snapshot_id=Database::run_control_permission_hash(&binding.permission).unwrap();
-    let policy=super::super::kernel_gateway::GatewayPolicy {binding,scope};
+    let policy=super::super::kernel_gateway::GatewayPolicy {binding,scope, database: None, sessions_dir: None };
     let input=json!({"taskId":"missing-task","attemptId":"repair-attempt","expectedVersion":1,
         "rootCause":"Confirmed root cause","findingIds":["missing-finding"],"escalationReason":"One bounded repair"}).to_string();
     assert!(matches!(policy.decide(&run_id,"repair","task_repair_escalate_start",&input),PolicyDecision::RequireApproval));
@@ -1030,7 +1035,7 @@ fn owning_host_recovery_consumes_queued_approvals_then_real_reads_and_model() {
     db.queue_kernel_host_command(&run_id, Some(("read-a","allow_once"))).unwrap();
     drop(coordinator); drop(db);
     let db = Database::open(root.join("facts.db")).unwrap();
-    let policy = super::super::kernel_gateway::GatewayPolicy { binding: db.run_control_binding(&run_id).unwrap().unwrap(), scope };
+    let policy = super::super::kernel_gateway::GatewayPolicy { binding: db.run_control_binding(&run_id).unwrap().unwrap(), scope , database: None, sessions_dir: None };
     let count = AtomicUsize::new(0);
     super::super::kernel_host::drive(super::super::kernel_host::acquire(&root, &run_id).unwrap(),
         &db, &clock, &cancellation, &run_id, &real_worker_command(), "test-key", &policy,
@@ -2076,7 +2081,7 @@ fn kernel_work_snapshot_uses_projected_tool_identity_and_frozen_gateway() {
     let scope = crate::database::KernelHostScope { schema_version:1,tool_names:["work_snapshot_get".into()].into_iter().collect(),
         mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),office_tools:Default::default(),lifecycle_hooks:Vec::new() };
     db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
-    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope};
+    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None };
     let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
     coordinator.dispatch_initial("work-model",&policy,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {
         schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
@@ -2110,7 +2115,7 @@ fn kernel_frozen_hooks_keep_block_and_approval_policy_and_transactional_audit() 
             lifecycle_hooks:vec![hook,after,before_run,after_run]};
         db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
         db.save_lifecycle_hook("kernel-rule","Changed live rule","before_tool","*","annotate","changed",false,10).unwrap();
-        let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope};
+        let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None };
         let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
         coordinator.dispatch_initial("hooks-model",&policy,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {
             schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
@@ -2140,12 +2145,12 @@ fn kernel_frozen_hooks_keep_block_and_approval_policy_and_transactional_audit() 
 #[test]
 fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
     let supported = super::super::kernel_gateway::supported_tools();
-    // 67 = the frozen catalogue including `read_tool_result` (the reader that
+    // 71 = the frozen catalogue including the four compute job tools, `read_tool_result` (the reader that
     // keeps a bounded model view's promise that omitted content is reachable)
     // and `skill_load` (on-demand loading of catalog skills without growing
     // the frozen scope).
-    assert_eq!(supported.len(),67);
-    assert_eq!(supported.iter().collect::<std::collections::BTreeSet<_>>().len(),67);
+    assert_eq!(supported.len(),71);
+    assert_eq!(supported.iter().collect::<std::collections::BTreeSet<_>>().len(),71);
     assert!(supported.iter().any(|tool| *tool == "read_tool_result"));
     assert!(supported.iter().any(|tool| *tool == "skill_load"));
     let mut config = worker_configuration();
@@ -2160,7 +2165,7 @@ fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
         mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),
         office_tools:Default::default(),lifecycle_hooks:Vec::new()};
     db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
-    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope};
+    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None };
     let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
     let input = json!({"objective":"One bounded concern","context":"Explicit context only", "budget":{
         "maxDurationMs":1000,"maxTotalTokens":256,"maxOutputTokens":64,"maxToolCalls":0}});
@@ -2197,7 +2202,7 @@ fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
             assert!(db.child_runs_for_parent(&run_id)?.is_empty());
             assert!(db.pending_kernel_host_action_ids(&run_id)?.is_empty());
         }
-        let mut denied = super::super::kernel_gateway::GatewayPolicy { binding:policy.binding.clone(),scope:policy.scope.clone() };
+        let mut denied = super::super::kernel_gateway::GatewayPolicy { binding:policy.binding.clone(),scope:policy.scope.clone() , database: None, sessions_dir: None };
         denied.scope.tool_names.clear();
         assert!(denied.execute_delegation(&db,"invalid-delegate","child_run_start",&input,token).is_err());
         let result = policy.execute_delegation(&db,"invalid-delegate","child_run_start",&json!({"objctive":"typo"}),token)?;
@@ -2250,7 +2255,7 @@ fn kernel_delegation_correction_limit_survives_reopen_and_staging_errors_stay_fa
             mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),
             office_tools:Default::default(),lifecycle_hooks:Vec::new()};
         db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
-        let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope};
+        let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None };
         let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
         let args = if staging_failure {json!({"objective":"bounded concern"})} else {json!({"objctive":"typo"})};
         let count = if staging_failure {1} else {4};
@@ -2317,7 +2322,7 @@ fn kernel_context_resources_preserve_conversation_scope_and_use_kernel_results()
         mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),
         office_tools:Default::default(),lifecycle_hooks:Vec::new()};
     db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
-    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope};
+    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None };
     let foreign = db.create_conversation(db.default_agent_id(),None,None,None).unwrap();
     for (id,conversation_id) in [("own-attachment",policy.binding.conversation_id.as_str()),("foreign-attachment",foreign.id.as_str())] {
         db.add_attachments(&[crate::database::AttachmentRecord {id:id.into(),conversation_id:conversation_id.into(),message_id:None,
@@ -2399,12 +2404,15 @@ fn assert_live_continuation_projection(after_tool: bool) {
     if after_tool {
         replies.push(json!({"role":"assistant","tool_calls":[{"index":0,"id":"live-read","type":"function",
             "function":{"name":"read","arguments":"{\"path\":\"proof.txt\"}"}}]}));
+        // R8: after this tool result the model delivers a complete answer. Tool
+        // use alone is not evidence of unfinished work, so the run must NOT be
+        // charged another model round; the answer below is the final round.
+        replies.push(json!({"role":"assistant","content":"统计完成，共 5 条记录。","reasoning_content":"Checked the durable results."}));
+    } else {
+        // A first round that only promises work still gets its one bounded review.
+        replies.push(json!({"role":"assistant","content":"I will now analyze the workbook."}));
+        replies.push(json!({"role":"assistant","content":"统计完成，共 5 条记录。","reasoning_content":"Checked the durable results."}));
     }
-    replies.push(json!({"role":"assistant","content":"I will now analyze the workbook."}));
-    if after_tool {
-        replies.push(json!({"role":"assistant","content":"Checking the completed read."}));
-    }
-    replies.push(json!({"role":"assistant","content":"统计完成，共 5 条记录。","reasoning_content":"Checked the durable results."}));
     let expected_rounds = replies.len();
     let (address, server) = start_http_model_fixture(replies);
     let mut config = worker_configuration();
@@ -2452,7 +2460,18 @@ fn assert_live_continuation_projection(after_tool: bool) {
     assert_eq!(executions.load(Ordering::SeqCst), usize::from(after_tool));
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), expected_rounds);
-    assert!(requests.last().unwrap()["messages"].to_string().contains("Fox 续答检查"));
+    // R8: the bounded review prompt appears only for the promised-but-unstarted
+    // first round. A run that executed a tool and then delivered a complete
+    // answer must not carry it.
+    assert_eq!(
+        requests
+            .last()
+            .unwrap()["messages"]
+            .to_string()
+            .contains("Fox 续答检查"),
+        !after_tool,
+        "the stop-review prompt must match whether a review round was warranted"
+    );
     let final_preview = previews.lock().unwrap().last().cloned().expect("streamed final answer");
     let conversation_id = db.run_control_binding(&run_id).unwrap().unwrap().conversation_id;
     drop(sink);
@@ -2472,7 +2491,10 @@ fn assert_live_continuation_projection(after_tool: bool) {
     let streaming: i64 = conn.query_row("SELECT COUNT(*) FROM messages WHERE run_id=?1 AND status='streaming'",[&run_id],|row|row.get(0)).unwrap();
     assert_eq!(streaming, 0);
     let replaced: i64 = conn.query_row("SELECT COUNT(*) FROM messages WHERE run_id=?1 AND status='superseded'",[&run_id],|row|row.get(0)).unwrap();
-    assert_eq!(replaced, if after_tool { 2 } else { 1 });
+    // R8 note: with the review no longer triggered by tool use, the after-tool
+    // run reaches its final answer in one round, so nothing was superseded. The
+    // preface run still replaces its streamed draft exactly once.
+    assert_eq!(replaced, if after_tool { 0 } else { 1 });
     let usage_rows: i64 = conn.query_row("SELECT COUNT(*) FROM run_events WHERE run_id=?1 AND event_type='usage.updated'",[&run_id],|row|row.get(0)).unwrap();
     assert_eq!(usage_rows, expected_rounds as i64, "every model round contributes usage exactly once");
     let reasoning: i64 = conn.query_row("SELECT COUNT(*) FROM run_events WHERE run_id=?1 AND id=?2",
@@ -2520,6 +2542,28 @@ fn live_readonly_complete_answer_completes_without_review_round() {
 }
 
 #[test]
+fn continuous_host_keeps_finite_transport_windows_after_a_day_and_reopen() {
+    let clock = TestClock::new(1000);
+    let cancellation = CancellationRegistry::default();
+    let budgets = TimeBudgets::continuous();
+    let (db, root, run_id) = fixture_with_budgets_opt(&clock, "test", None, false, false, (0,0), true, budgets.clone());
+    {
+        let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+        coordinator.apply(None, |controller, _| { controller.settle_model_request(); Ok(vec![]) }).unwrap();
+        clock.advance(86_400_000);
+        coordinator.tick().unwrap();
+        assert_eq!(coordinator.snapshot().unwrap().state, "running");
+        assert_eq!(coordinator.live_remaining_ms_for_test(), budgets.model_request_ms);
+    }
+    drop(db);
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    assert!(!coordinator.binding.budgets.run_execution_limited);
+    assert_eq!(coordinator.live_remaining_ms_for_test(), budgets.model_request_ms);
+    assert_eq!(coordinator.binding.budgets.limit_operation_ms(600_000, 86_400_000), 600_000);
+}
+
+#[test]
 fn live_remaining_budget_excludes_approval_wait() {
     // A human approval legitimately parks the Run for longer than the
     // remaining execution budget. The running clock is suspended, so the live
@@ -2553,4 +2597,621 @@ fn live_remaining_budget_excludes_approval_wait() {
     coordinator.resolve_approval("read-a", kernel::ApprovalDecision::AllowOnce).unwrap();
     coordinator.resolve_approval("read-b", kernel::ApprovalDecision::AllowOnce).unwrap();
     assert!(coordinator.live_remaining_ms_for_test() > 0);
+}
+
+/// #5 acceptance: one conversation approval covers the same exact operation a
+/// second time, while a different path, a different tool, a frozen read-only
+/// mode and a revoked grant all still ask (or refuse).
+#[test]
+fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
+    use fox_engine_protocol::{ExecutionAuthority, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding};
+    use rusqlite::params;
+
+    let root = std::env::temp_dir().join(format!("fox-grant-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let conversation = db
+        .create_conversation(db.default_agent_id(), None, Some(root.to_str().unwrap()), Some("ask"))
+        .unwrap();
+    let run_id = db.create_run(&conversation.id, "test", None).unwrap().run.id;
+    let permission = FrozenPermission {
+        mode: PermissionMode::Ask,
+        project_root: Some(root.to_string_lossy().into_owned()),
+        grants: vec![],
+    };
+    let mut model = worker_configuration();
+    // The frozen host scope must agree with the model tool catalog.
+    model.proposal_tools = vec![
+        json!({"name":"write_file","description":"Propose a Host-owned write",
+            "parameters":{"type":"object","properties":{
+                "path":{"type":"string"},"content":{"type":"string"}},
+                "required":["path"]}}),
+        json!({"name":"edit_file","description":"Propose a Host-owned edit",
+            "parameters":{"type":"object","properties":{
+                "path":{"type":"string"},"oldText":{"type":"string"},
+                "newText":{"type":"string"}},
+                "required":["path"]}}),
+    ];
+    let prompt_hash = model.hash().unwrap();
+    let binding = RunControlBinding {
+        schema_version: 1,
+        run_id: run_id.clone(),
+        conversation_id: conversation.id.clone(),
+        engine_id: "pi".into(),
+        execution_profile_id: "legacy".into(),
+        authority: ExecutionAuthority::Authoritative,
+        read_only_executor: ResourceExecutor::Rust,
+        permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+        permission,
+        budgets: TimeBudgets::default(),
+    };
+    db.freeze_run_control(&binding).unwrap();
+    let config = kernel::RunFrozenConfig {
+        engine_id: "pi".into(),
+        kernel_mode: "authoritative".into(),
+        capability_manifest_version: 2,
+        capability_manifest_hash: "coordinator-test-manifest".into(),
+        permission_snapshot_id: binding.permission_snapshot_id.clone(),
+        execution_profile_id: binding.execution_profile_id.clone(),
+        prompt_config_hash: prompt_hash.clone(),
+        model_request_timeout_ms: binding.budgets.model_request_ms,
+        model_first_response_ms: binding.budgets.model_first_response_ms,
+        model_idle_ms: binding.budgets.model_idle_ms,
+        tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
+        run_execution_budget_ms: binding.budgets.run_execution_ms,
+        run_execution_limited: binding.budgets.run_execution_limited,
+        approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
+        provider_max_retries: 2,
+        turn_max_retries: 1,
+    };
+    db.kernel_create_run(
+        &run_id,
+        "pi",
+        "authoritative",
+        2,
+        &binding.permission_snapshot_id,
+        "legacy",
+        &prompt_hash,
+        &serde_json::to_string(&config).unwrap(),
+    )
+    .unwrap();
+    // The frozen model config must agree with the run's frozen engine, and it
+    // must exist before the host scope is frozen.
+    db.freeze_kernel_model_config(&run_id, &model).unwrap();
+    // The host scope row references the frozen initial input, so both frozen
+    // facts must exist before the scope can be frozen (production freezes them
+    // in this order too).
+    db.freeze_kernel_initial_input(&initial_input(&run_id, &prompt_hash))
+        .unwrap();
+    let scope = crate::database::KernelHostScope {
+        schema_version: 1,
+        tool_names: ["write_file".into(), "edit_file".into()].into_iter().collect(),
+        mcp_server_hashes: Default::default(),
+        knowledge_reference_hashes: Default::default(),
+        knowledge_connection_hashes: Default::default(),
+        office_tools: Default::default(),
+        lifecycle_hooks: Vec::new(),
+    };
+    db.freeze_kernel_host_scope(&run_id, &scope).unwrap();
+
+    // The decided approval the grant is derived from, exactly as production
+    // records it before the tool dispatches.
+    db.with_connection(|connection| {
+        connection.execute(
+            "INSERT INTO kernel_tool_batches(batch_id, run_id, ordered_tool_call_ids_json, barrier_emitted, created_at)
+             VALUES ('gb', ?1, '[\"g-write-1\"]', 0, 0)",
+            params![run_id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    db.with_connection(|connection| {
+        connection.execute(
+            "INSERT INTO kernel_tool_calls
+             (run_id, tool_call_id, batch_id, tool, source_order, canonical_input_json,
+              state, result_json, created_at, settled_at, dispatch_idempotency_key)
+             VALUES (?1, 'g-write-1', 'gb', 'write_file', 0, ?2, 'running', NULL, 0, 0, NULL)",
+            params![run_id, json!({"path": root.join("a.txt").to_string_lossy()}).to_string()],
+        )?;
+        connection.execute(
+            "INSERT INTO kernel_approvals(run_id, tool_call_id, state, created_at, decided_at)
+             VALUES (?1, 'g-write-1', 'allow_conversation', 0, 0)",
+            params![run_id],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let asks = |policy: &super::super::kernel_gateway::GatewayPolicy, path: &std::path::Path| {
+        let input = json!({"path": path.to_string_lossy(), "content": "x"}).to_string();
+        policy.decide(&run_id, "perm", "write_file", &input)
+    };
+    let policy = || super::super::kernel_gateway::GatewayPolicy {
+        binding: db.run_control_binding(&run_id).unwrap().unwrap(),
+        scope: db.kernel_host_scope(&run_id).unwrap(),
+        database: Some(db.clone()),
+        sessions_dir: None,
+    };
+
+    let target = root.join("a.txt");
+    let other = root.join("other.txt");
+    // Nothing is authorized yet: the first real write asks.
+    assert!(matches!(asks(&policy(), &target), PolicyDecision::RequireApproval));
+    // The human answers "for this conversation"; the Host records the scope.
+    let registered = db
+        .kernel_register_authorization_grant(
+            &run_id,
+            "g-write-1",
+            "allow_conversation",
+            "write_file",
+            super::super::shadow_reconcile::tool_operation_scope(
+                "write_file",
+                &json!({"path": target.to_string_lossy(), "content": "x"}),
+                Some(root.to_str().unwrap()),
+            )
+            .as_deref(),
+        )
+        .unwrap();
+    assert!(matches!(registered, crate::database::GrantRegistration::Registered { .. }));
+    // A second write of the SAME operation is covered: no second question.
+    assert_eq!(asks(&policy(), &target), PolicyDecision::Allow);
+    // A different path is a different operation and still asks.
+    assert!(matches!(asks(&policy(), &other), PolicyDecision::RequireApproval));
+    // The reuse is auditable, not silent.
+    let uses: i64 = db
+        .with_connection(|connection| {
+            connection.query_row(
+                "SELECT use_count FROM kernel_authorization_grants WHERE run_id=?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert!(uses >= 1, "grant reuse must be recorded, got {uses}");
+    // Withdrawing permission takes effect immediately.
+    db.kernel_revoke_authorization_grants(&conversation.id, "user_withdrew_permission")
+        .unwrap();
+    assert!(matches!(asks(&policy(), &target), PolicyDecision::RequireApproval));
+    // The frozen snapshot itself was never rewritten by any of this.
+    assert!(db
+        .run_control_binding(&run_id)
+        .unwrap()
+        .unwrap()
+        .permission
+        .grants
+        .is_empty());
+    drop(db);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// #4 acceptance: an unanswered approval must not destroy the work.
+///
+/// * the run ends as a *continuable* expiry, not a plain failure;
+/// * the call that was waiting was never dispatched, so nothing executed;
+/// * the expired approval cannot be executed afterwards (a late decision is
+///   refused, and the durable row stays non-executable);
+/// * the Host banked the pause, and a continuation re-verifies to build a NEW
+///   attempt without rewriting the source run.
+#[test]
+fn expired_approval_is_never_executable_and_the_run_stays_continuable() {
+    use fox_engine_protocol::{ExecutionAuthority, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding};
+    use rusqlite::params;
+
+    let root = std::env::temp_dir().join(format!("fox-expiry-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let conversation = db
+        .create_conversation(db.default_agent_id(), None, Some(root.to_str().unwrap()), Some("ask"))
+        .unwrap();
+    let run_id = db.create_run(&conversation.id, "test", None).unwrap().run.id;
+    let permission = FrozenPermission {
+        mode: PermissionMode::Ask,
+        project_root: Some(root.to_string_lossy().into_owned()),
+        grants: vec![],
+    };
+    let binding = RunControlBinding {
+        schema_version: 1,
+        run_id: run_id.clone(),
+        conversation_id: conversation.id.clone(),
+        engine_id: "pi".into(),
+        execution_profile_id: "legacy".into(),
+        authority: ExecutionAuthority::Authoritative,
+        read_only_executor: ResourceExecutor::Rust,
+        permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+        permission,
+        budgets: TimeBudgets::default(),
+    };
+    db.freeze_run_control(&binding).unwrap();
+    let config = kernel::RunFrozenConfig {
+        engine_id: "pi".into(),
+        kernel_mode: "authoritative".into(),
+        capability_manifest_version: 2,
+        capability_manifest_hash: "coordinator-test-manifest".into(),
+        permission_snapshot_id: binding.permission_snapshot_id.clone(),
+        execution_profile_id: binding.execution_profile_id.clone(),
+        prompt_config_hash: "expiry-hash".into(),
+        model_request_timeout_ms: 120_000,
+        model_first_response_ms: 60_000,
+        model_idle_ms: 120_000,
+        tool_execution_timeout_ms: 600_000,
+        run_execution_budget_ms: 600_000,
+        run_execution_limited: true,
+        approval_wait_timeout_ms: 1_000,
+        provider_max_retries: 2,
+        turn_max_retries: 1,
+    };
+    db.kernel_create_run(
+        &run_id,
+        "pi",
+        "authoritative",
+        2,
+        &binding.permission_snapshot_id,
+        "legacy",
+        "expiry-hash",
+        &serde_json::to_string(&config).unwrap(),
+    )
+    .unwrap();
+
+    let clock = TestClock::new(0);
+    let (mut controller, start) =
+        RunController::start(&run_id, "turn-1", config, &clock).unwrap();
+    db.kernel_commit_decision(&run_id, 0, &controller.persist_command(&start))
+        .unwrap();
+    // One batch: a write that needs a human and is never answered.
+    let proposed = controller
+        .propose_tool_batch(
+            "batch-expiry",
+            vec![kernel::ToolCallRequest {
+                tool_call_id: "never-answered".into(),
+                tool: "write_file".into(),
+                canonical_input_json: json!({
+                    "path": root.join("a.txt").to_string_lossy(),
+                    "content": "x"
+                })
+                .to_string(),
+                source_order: 0,
+            }],
+            &Ask,
+            0,
+            0,
+        )
+        .unwrap();
+    controller.set_approval_deadline(1_000);
+    db.kernel_commit_decision(&run_id, 0, &controller.persist_command(&proposed))
+        .unwrap();
+    assert_eq!(db.kernel_build_full_snapshot(&run_id).unwrap().state, "waiting_approval");
+
+    // The human never answers.
+    let expired = controller.tick(1_001, 1_001);
+    assert!(expired.iter().any(|effect| matches!(
+        effect,
+        kernel::Effect::AppendEvent { event_type, .. } if event_type == "run.approval_expired"
+    )));
+    db.kernel_commit_decision(&run_id, 1_001, &controller.persist_command(&expired))
+        .unwrap();
+    let snapshot = db.kernel_build_full_snapshot(&run_id).unwrap();
+    assert_eq!(
+        snapshot.state, "approval_expired",
+        "an unanswered approval must not be a plain failure"
+    );
+    assert_eq!(snapshot.tool_calls.len(), 1);
+    assert_eq!(
+        snapshot.tool_calls[0].state, "expired",
+        "the un-decided call was never dispatched, so it is expired"
+    );
+
+    // A late decision cannot execute the dead approval.
+    let late = db.kernel_resolve_approval(&run_id, "never-answered", "allow_once");
+    assert!(
+        matches!(late, Ok(false)) || late.is_err(),
+        "a late approval must not be accepted: {late:?}"
+    );
+    let (approval_state, dispatched): (String, i64) = db
+        .with_connection(|connection| {
+            let state = connection.query_row(
+                "SELECT state FROM kernel_approvals WHERE run_id=?1 AND tool_call_id=?2",
+                params![run_id, "never-answered"],
+                |row| row.get(0),
+            )?;
+            let dispatched = connection.query_row(
+                "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='dispatch_tool' AND status='completed'",
+                params![run_id],
+                |row| row.get(0),
+            )?;
+            Ok((state, dispatched))
+        })
+        .unwrap();
+    assert_eq!(approval_state, "expired");
+    assert_eq!(dispatched, 0, "nothing may have executed");
+
+    // The Host banked the pause, so the work is offerable again.
+    let progress = db.kernel_continuable_run(&conversation.id, &run_id).unwrap();
+    assert_eq!(progress.pause_reason, "approval_expired");
+    assert!(!progress.summary.is_null());
+
+    // A continuation creates a NEW attempt; the source run stays terminal.
+    let prepared = crate::database::PreparedContinuation {
+        artifacts: None,
+        skill_activations: Vec::new(),
+        budgets: db.run_time_budgets(&run_id).unwrap(),
+        prompt_config_hash: "continuation-hash".into(),
+        capability_manifest_hash: "continuation-manifest".into(),
+        frozen_config_json: "{}".into(),
+    };
+    let continuation_request = || crate::database::ContinuationRequest {
+        conversation_id: conversation.id.clone(),
+        source_run_id: run_id.clone(),
+        tier: crate::database::BudgetTier::Standard,
+        custom_execution_ms: None,
+    };
+    let next = db
+        .kernel_insert_continuation_attempt(&continuation_request(), "继续未完成的任务", &prepared)
+        .unwrap();
+    assert_ne!(next.run.id, run_id);
+    assert_eq!(
+        db.kernel_build_full_snapshot(&run_id).unwrap().state,
+        "approval_expired",
+        "a continuation must not rewrite the source run state"
+    );
+    let (child_link, source_link): (Option<String>, Option<String>) = db
+        .with_connection(|connection| {
+            Ok((
+                connection.query_row(
+                    "SELECT continued_from_run_id FROM kernel_runs WHERE run_id=?1",
+                    params![next.run.id],
+                    |row| row.get(0),
+                )?,
+                connection.query_row(
+                    "SELECT continued_from_run_id FROM kernel_runs WHERE run_id=?1",
+                    params![run_id],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(child_link.as_deref(), Some(run_id.as_str()));
+    assert_eq!(
+        source_link, None,
+        "the source must not point forward at its own successor (that formed a cycle)"
+    );
+    // Repeating the continuation is refused rather than starting a third run.
+    assert!(db
+        .kernel_insert_continuation_attempt(&continuation_request(), "重复续做", &prepared)
+        .is_err());
+    drop(db);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// R3 acceptance: continuation chains are one-way, attempts increase, and a
+/// source run gets exactly one direct successor even under concurrent asks.
+#[test]
+fn continuation_chain_is_one_way_and_one_successor_per_source() {
+    use fox_engine_protocol::{ExecutionAuthority, FrozenPermission, PermissionMode, ResourceExecutor, RunControlBinding};
+    use rusqlite::params;
+
+    let root = std::env::temp_dir().join(format!("fox-continuation-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("facts.db");
+    let db = Database::open(path).unwrap();
+    let agent_id = db.default_agent_id().to_string();
+    db.with_connection(|connection| {
+        connection.execute(
+            "INSERT INTO conversations (id, agent_id, title, permission_mode, project_root, status, created_at, updated_at)
+             VALUES ('conv-chain', ?1, 'chain', 'ask', ?2, 'active', 1, 1)",
+            params![agent_id, root.to_string_lossy()],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // Create a paused attempt with everything the continuation path reads.
+    let paused_attempt = |run_id: &str, pause: &str, attempt: i64| {
+        let started = db.create_run("conv-chain", "原始请求：分析这批数据", None).unwrap();
+        let legacy_run_id = started.run.id.clone();
+        let permission = FrozenPermission {
+            mode: PermissionMode::Ask,
+            project_root: Some(root.to_string_lossy().into_owned()),
+            grants: vec![],
+        };
+        let binding = RunControlBinding {
+            schema_version: 1,
+            run_id: legacy_run_id.clone(),
+            conversation_id: "conv-chain".into(),
+            engine_id: "pi".into(),
+            execution_profile_id: "legacy".into(),
+            authority: ExecutionAuthority::Authoritative,
+            read_only_executor: ResourceExecutor::Rust,
+            permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+            permission,
+            budgets: TimeBudgets::default(),
+        };
+        db.freeze_run_control(&binding).unwrap();
+        db.with_connection(|connection| {
+            // A paused Run is not active in the legacy projection, otherwise a
+            // continuation could not create its successor (the active-run guard
+            // would refuse).
+            connection.execute(
+                "UPDATE runs SET status='failed', error_code='approval.wait_timeout' WHERE id=?1",
+                params![legacy_run_id],
+            )?;
+            connection.execute(
+                "INSERT INTO kernel_runs
+                 (run_id, engine_id, kernel_mode, capability_manifest_version,
+                  permission_snapshot_id, execution_profile_id, prompt_config_hash,
+                  frozen_config_json, state, last_event_seq, created_at, updated_at,
+                  terminal_at, capability_manifest_hash, terminal_written, attempt)
+                 VALUES (?1, 'pi', 'authoritative', 2, ?2, 'legacy', 'h', '{}',
+                         ?3, 3, 10, 20, 20, 'm', 1, ?4)",
+                params![
+                    legacy_run_id,
+                    binding.permission_snapshot_id,
+                    if pause == "budget_exhausted" { "budget_exhausted" } else { "approval_expired" },
+                    attempt,
+                ],
+            )?;
+            connection.execute(
+                "INSERT INTO kernel_run_progress
+                 (run_id, attempt, pause_reason, completed_tool_calls, pending_tool_calls,
+                  terminal_written, running_elapsed_ms, continuable, summary_json, created_at)
+                 VALUES (?1, ?2, ?3, 1, 1, 1, 500, 1, '{}', 20)",
+                params![legacy_run_id, attempt, pause],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let _ = run_id;
+        legacy_run_id
+    };
+
+    let first = paused_attempt("attempt-1", "approval_expired", 1);
+    let prepared = || crate::database::PreparedContinuation {
+        artifacts: None,
+        skill_activations: Vec::new(),
+        budgets: TimeBudgets::default(),
+        prompt_config_hash: "chain-hash".into(),
+        capability_manifest_hash: "chain-manifest".into(),
+        frozen_config_json: "{}".into(),
+    };
+    let request = |source: &str| crate::database::ContinuationRequest {
+        conversation_id: "conv-chain".into(),
+        source_run_id: source.to_string(),
+        tier: crate::database::BudgetTier::Standard,
+        custom_execution_ms: None,
+    };
+
+    // Segment 1: source -> attempt 2.
+    let second = db
+        .kernel_insert_continuation_attempt(&request(&first), "继续第一段", &prepared())
+        .unwrap()
+        .run
+        .id;
+    // A second request for the SAME source is refused (one successor).
+    assert!(db
+        .kernel_insert_continuation_attempt(&request(&first), "重复", &prepared())
+        .is_err());
+
+    // Make attempt 2 paused so the chain can continue again.
+    db.with_connection(|connection| {
+        connection.execute(
+            "UPDATE runs SET status='failed', error_code='approval.wait_timeout' WHERE id=?1",
+            params![second],
+        )?;
+        connection.execute(
+            "INSERT INTO kernel_run_progress
+             (run_id, attempt, pause_reason, completed_tool_calls, pending_tool_calls,
+              terminal_written, running_elapsed_ms, continuable, summary_json, created_at)
+             VALUES (?1, 2, 'approval_expired', 2, 1, 1, 900, 1, '{}', 30)",
+            params![second],
+        )?;
+        connection.execute(
+            "UPDATE kernel_runs SET state='approval_expired', terminal_written=1 WHERE run_id=?1",
+            params![second],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // Segment 2: attempt 2 -> attempt 3 (this is what a cycle used to break).
+    let third = db
+        .kernel_insert_continuation_attempt(&request(&second), "继续第二段", &prepared())
+        .unwrap()
+        .run
+        .id;
+    assert_ne!(third, second);
+
+    // The chain is one-way and has no cycle; attempts increase per segment.
+    let chain: Vec<(String, Option<String>, i64)> = db
+        .with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT run_id, continued_from_run_id, attempt FROM kernel_runs
+                  WHERE run_id IN (?1, ?2, ?3) ORDER BY attempt",
+            )?;
+            let rows = statement.query_map(params![first, second, third], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+        .unwrap();
+    assert_eq!(chain.len(), 3, "all three attempts must exist");
+    assert_eq!(chain[0].0, first);
+    assert_eq!(chain[0].1, None, "the first attempt has no predecessor");
+    assert_eq!(chain[1].0, second);
+    assert_eq!(chain[1].1.as_deref(), Some(first.as_str()));
+    assert_eq!(chain[2].0, third);
+    assert_eq!(chain[2].1.as_deref(), Some(second.as_str()));
+    assert_eq!(chain[0].2, 1);
+    assert_eq!(chain[1].2, 2, "each segment increases the attempt number");
+    assert_eq!(chain[2].2, 3);
+    // No run points at itself or at a run that already has it as predecessor.
+    for (run_id, predecessor, _) in &chain {
+        assert_ne!(predecessor.as_deref(), Some(run_id.as_str()));
+    }
+    let cycle: i64 = db
+        .with_connection(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*) FROM kernel_runs a JOIN kernel_runs b
+                   ON b.run_id = a.continued_from_run_id
+                  WHERE b.continued_from_run_id = a.run_id",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(cycle, 0, "no two runs may point at each other");
+    // Concurrent asks for the same source still produce exactly one successor.
+    db.with_connection(|connection| {
+        connection.execute(
+            "INSERT INTO kernel_run_progress
+             (run_id, attempt, pause_reason, completed_tool_calls, pending_tool_calls,
+              terminal_written, running_elapsed_ms, continuable, summary_json, created_at)
+             VALUES (?1, 3, 'approval_expired', 1, 1, 1, 10, 1, '{}', 40)",
+            params![third],
+        )?;
+        connection.execute(
+            "UPDATE runs SET status='failed', error_code='approval.wait_timeout' WHERE id=?1",
+            params![third],
+        )?;
+        connection.execute(
+            "UPDATE kernel_runs SET state='approval_expired', terminal_written=1 WHERE run_id=?1",
+            params![third],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let concurrent = {
+        let db = db.clone();
+        let request = request(&third);
+        let prepared = prepared();
+        std::thread::spawn(move || {
+            let mut ok = 0;
+            let mut err = 0;
+            for _ in 0..4 {
+                match db.kernel_insert_continuation_attempt(&request, "并发", &prepared) {
+                    Ok(_) => ok += 1,
+                    Err(_) => err += 1,
+                }
+            }
+            (ok, err)
+        })
+        .join()
+        .unwrap()
+    };
+    assert_eq!(concurrent.0, 1, "exactly one concurrent ask may win: {concurrent:?}");
+    assert_eq!(concurrent.1, 3, "the rest must be refused: {concurrent:?}");
+    let successors: i64 = db
+        .with_connection(|connection| {
+            connection.query_row(
+                "SELECT COUNT(*) FROM kernel_runs WHERE continued_from_run_id = ?1",
+                params![third],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(successors, 1, "one source has exactly one direct successor");
+    drop(db);
+    let _ = std::fs::remove_dir_all(root);
 }

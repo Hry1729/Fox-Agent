@@ -35,28 +35,10 @@ impl Database {
         &self,
         input: &KernelInitialModelInput,
     ) -> Result<(), String> {
-        input.validate()?;
-        let body = serde_json::to_string(input).map_err(|_| "invalid Kernel initial input")?;
         self.with_connection(|connection| {
-            let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            if read_model_config(&transaction, &input.run_id)?.hash().map_err(invalid)? != input.prompt_config_hash {
-                return Err(invalid("Kernel initial input model configuration mismatch"));
-            }
-            let existing: Option<String> = transaction.query_row(
-                "SELECT input_json FROM kernel_initial_inputs WHERE run_id=?1", [&input.run_id], |row| row.get(0),
-            ).optional()?;
-            if let Some(existing) = existing {
-                if existing != body || read_input(&transaction, &input.run_id)? != *input {
-                    return Err(invalid("immutable Kernel initial input conflict"));
-                }
-            } else {
-                transaction.execute(
-                    "INSERT INTO kernel_initial_inputs(run_id,schema_version,turn_id,input_json,input_hash,prompt_config_hash,created_at)
-                     VALUES(?1,1,?2,?3,?4,?5,?6)",
-                    params![input.run_id,input.turn_id,body,hash(&body),input.prompt_config_hash,now_ms()],
-                )?;
-            }
-            transaction.commit()
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            freeze_initial_input_in_tx(&tx, input)?;
+            tx.commit()
         })
     }
 
@@ -102,4 +84,27 @@ pub(super) fn read_input(
         return Err(invalid("stored Kernel initial input identity mismatch"));
     }
     Ok(input)
+}
+
+pub(super) fn freeze_initial_input_in_tx(transaction: &rusqlite::Transaction<'_>, input: &KernelInitialModelInput) -> rusqlite::Result<()> {
+        input.validate().map_err(invalid)?;
+        let body = serde_json::to_string(input).map_err(|_| invalid("invalid Kernel initial input"))?;
+            if read_model_config(&transaction, &input.run_id)?.hash().map_err(invalid)? != input.prompt_config_hash {
+                return Err(invalid("Kernel initial input model configuration mismatch"));
+            }
+            let existing: Option<String> = transaction.query_row(
+                "SELECT input_json FROM kernel_initial_inputs WHERE run_id=?1", [&input.run_id], |row| row.get(0),
+            ).optional()?;
+            if let Some(existing) = existing {
+                if existing != body || read_input(&transaction, &input.run_id)? != *input {
+                    return Err(invalid("immutable Kernel initial input conflict"));
+                }
+            } else {
+                transaction.execute(
+                    "INSERT INTO kernel_initial_inputs(run_id,schema_version,turn_id,input_json,input_hash,prompt_config_hash,created_at)
+                     VALUES(?1,1,?2,?3,?4,?5,?6)",
+                    params![input.run_id,input.turn_id,body,hash(&body),input.prompt_config_hash,now_ms()],
+                )?;
+            }
+    Ok(())
 }

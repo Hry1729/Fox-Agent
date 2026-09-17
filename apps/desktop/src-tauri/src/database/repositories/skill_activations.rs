@@ -27,27 +27,7 @@ impl Database {
         record: &SkillActivationRecord,
     ) -> Result<(), String> {
         self.with_connection(|conn| {
-            conn.execute(
-                "INSERT OR IGNORE INTO skill_activations(
-                    run_id, conversation_id, skill_id, version, content_sha256, source,
-                    required_tools_json, missing_tools_json, tools_available,
-                    char_count, byte_count, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![
-                    run_id,
-                    conversation_id,
-                    record.skill_id,
-                    record.version,
-                    record.content_sha256,
-                    record.source,
-                    serde_json::to_string(&record.required_tools).unwrap_or_else(|_| "[]".into()),
-                    serde_json::to_string(&record.missing_tools).unwrap_or_else(|_| "[]".into()),
-                    record.tools_available as i64,
-                    record.char_count,
-                    record.byte_count,
-                    record.created_at,
-                ],
-            )?;
+            record_in_connection(conn, run_id, conversation_id, record)?;
             Ok(())
         })
     }
@@ -81,4 +61,30 @@ impl Database {
             Ok(rows)
         })
     }
+}
+
+pub(super) fn record_in_connection(conn: &rusqlite::Connection, run_id: &str,
+    conversation_id: Option<&str>, record: &SkillActivationRecord) -> rusqlite::Result<()> {
+            conn.execute(
+                "INSERT OR IGNORE INTO skill_activations(
+                    run_id, conversation_id, skill_id, version, content_sha256, source,
+                    required_tools_json, missing_tools_json, tools_available,
+                    char_count, byte_count, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    run_id,
+                    conversation_id,
+                    record.skill_id,
+                    record.version,
+                    record.content_sha256,
+                    record.source,
+                    serde_json::to_string(&record.required_tools).unwrap_or_else(|_| "[]".into()),
+                    serde_json::to_string(&record.missing_tools).unwrap_or_else(|_| "[]".into()),
+                    record.tools_available as i64,
+                    record.char_count,
+                    record.byte_count,
+                    record.created_at,
+                ],
+            )?;
+    Ok(())
 }

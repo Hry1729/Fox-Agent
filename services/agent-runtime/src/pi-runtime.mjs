@@ -1,4 +1,5 @@
 import { createInterface } from 'node:readline'
+import { runDurationMs, armRunDurationTimer } from './run-duration.mjs'
 import {
   DefaultResourceLoader,
   PI_PACKAGE_VERSION,
@@ -15,7 +16,7 @@ import { createKernelWorker } from './pi-kernel-worker.mjs'
 import { createPiEventMapper, sanitizeAssistantHistory } from './pi-event-mapper.mjs'
 import { createReadOnlyTools } from './read-only-tools.mjs'
 import { createGraphReadonlyTools } from './graph-readonly-tools.mjs'
-import { createHostTools, createKnowledgeTools, createMcpTools } from './host-tools.mjs'
+import { hostToolResultStorage, createHostTools, createKnowledgeTools, createMcpTools } from './host-tools.mjs'
 import { createSessionState, loadSessionState, normalizeHistory, sanitizeProviderHistory, saveSessionState, transcriptFromSession } from './runtime-session.mjs'
 import { RUNTIME_TOOL_CATALOG, assertRegisteredToolsMatchCatalog, createCapabilityManifest } from './runtime-contract.mjs'
 import { createFoxPlanningExtension } from './fox-planning-extension.mjs'
@@ -56,11 +57,44 @@ const activeRuns = new Map()
 const pendingHostRequests = new Map()
 const RUNTIME_HTTP_IDLE_TIMEOUT_MS = 90_000
 const HOST_REQUEST_TIMEOUT_MS = 6 * 60_000
-const HARD_RUN_BUDGET = Object.freeze({
-  maxDurationMs: 30 * 60_000,
-  maxIdenticalToolCalls: 4,
-  maxWebSearchCalls: 6,
-})
+// No-progress guard (#8/#9/#6 of the ABC review). There is no fixed per-run
+// search count and no cross-run identical-call counter: a 7th productive
+// search, a poll whose state keeps changing, and a read-after-write all
+// continue. A bounded correction fires only on *consecutive no progress* —
+// the same canonical input returning the same result, back to back, for a
+// tool without wait semantics. The correction first refuses to re-execute
+// and returns guidance to the model; only a model that keeps ignoring the
+// guidance stops the run.
+//
+// Real progress on *any* tool — including a wait-semantic poll, a write,
+// or any other call — resets the consecutive counter and the correction
+// ladder. Skipping the counter update for wait tools is the previous
+// behaviour: a successful test_run between identical reads must let the
+// next read observe the new state. We therefore always observe outcome
+// changes globally; only the *trigger* (whether a tool is exempt from
+// firing the correction) is conditional. The ladder does not reset merely
+// because a wait tool ran with no outcome change — it stays armed but
+// counts unchanged, so an idle `read` after a series of idle polls still
+// crosses the streak limit.
+const NO_PROGRESS_STREAK_LIMIT = 3
+const NO_PROGRESS_CORRECTION_LIMIT = 3
+// Tools whose result observes external state that can change while this run
+// waits (polls, snapshots, re-executed checks). Identical input + identical
+// result is the expected shape of waiting, so the guard never *fires* for
+// them; their outcomes still update progress like any other tool.
+const WAIT_SEMANTIC_TOOLS = new Set([
+  "compute_job_status",
+  'child_agent_list',
+  'code_check',
+  'git_read',
+  'graph_readonly_snapshot_get',
+  'run_command',
+  'system_info',
+  'team_snapshot_get',
+  'test_run',
+  'work_snapshot_get',
+  'workflow_snapshot_get',
+])
 let modelService = null
 let fauxProvider = null
 let executionProfile = resolveExecutionProfile('legacy')
@@ -225,11 +259,7 @@ function runBudgetForRequest(payload) {
     ? payload.runBudget
     : {}
   return {
-    maxDurationMs: positiveBudgetValue(
-      configured.maxDurationMs,
-      HARD_RUN_BUDGET.maxDurationMs,
-      HARD_RUN_BUDGET.maxDurationMs,
-    ),
+    maxDurationMs: runDurationMs(payload),
     maxTotalTokens: positiveBudgetValue(
       configured.maxTotalTokens,
       null,
@@ -240,10 +270,12 @@ function runBudgetForRequest(payload) {
       null,
       Number.MAX_SAFE_INTEGER,
     ),
-    maxIdenticalToolCalls: positiveBudgetValue(
+    // Legacy payloads may still carry maxIdenticalToolCalls; it now tunes the
+    // consecutive no-progress streak instead of a cross-run call counter.
+    noProgressStreakLimit: positiveBudgetValue(
       configured.maxIdenticalToolCalls,
-      HARD_RUN_BUDGET.maxIdenticalToolCalls,
-      HARD_RUN_BUDGET.maxIdenticalToolCalls,
+      NO_PROGRESS_STREAK_LIMIT,
+      8,
     ),
   }
 }
@@ -287,10 +319,56 @@ function retryPolicyForRun(payload, modelProfile) {
   }
 }
 
+// Key-order-insensitive input identity: semantically equal arguments must
+// count as the same call regardless of property order.
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+// The model-relevant outcome of one settled call. Two calls with the same
+// outcome produced no new information, whatever their object identity.
+// `details` is excluded on purpose: cursors and diagnostics may differ
+// between identical reads without giving the model anything new.
+function outcomeFingerprint(result) {
+  return canonicalJson({
+    isError: result?.isError === true,
+    content: result?.content ?? result ?? null,
+  })
+}
+
+function noProgressCorrectionResult(toolName, streak) {
+  return {
+    isError: true,
+    content: [{
+      type: 'text',
+      text: `Fox 有界纠偏：工具 ${toolName} 以相同输入连续 ${streak} 次返回相同结果，没有新进展。`
+        + '本次调用未再执行。请基于已收集的证据继续任务、更换查询或参数、或明确说明还需等待什么；'
+        + '不要再次以相同输入调用该工具。写后复读、状态已变化的轮询和不同输入的调用不受影响。',
+    }],
+    details: { noProgress: true, consecutiveRepeats: streak },
+  }
+}
+
 function budgetedTools(tools, budget, failRun) {
   let totalCalls = 0
-  let webSearchCalls = 0
-  const identicalCalls = new Map()
+  // fingerprint -> the outcome that exact call returned last time.
+  const outcomes = new Map()
+  // fingerprint -> how many consecutive times it has reproduced its own
+  // previous outcome since the last change. Per fingerprint, so alternating
+  // loops are bounded too, and an interleaved *productive* call clears it.
+  const streaks = new Map()
+  // Refusals issued for the current stuck episode. Real progress clears it.
+  let corrections = 0
+  const clearProgress = () => {
+    streaks.clear()
+    corrections = 0
+  }
   return tools.map((tool) => ({
     ...tool,
     execute: async (toolCallId, input, signal, ...rest) => {
@@ -301,25 +379,44 @@ function budgetedTools(tools, budget, failRun) {
           `Run exceeded its ${budget.maxToolCalls} tool-call budget.`,
         )
       }
-      if (tool.name === 'web_search') {
-        webSearchCalls += 1
-        if (webSearchCalls > HARD_RUN_BUDGET.maxWebSearchCalls) {
+      const exempt = WAIT_SEMANTIC_TOOLS.has(tool.name)
+      const fingerprint = `${tool.name}\0${canonicalJson(input ?? {})}`
+      const previousOutcome = outcomes.get(fingerprint)
+      const streak = streaks.get(fingerprint) ?? 0
+      // Refuse only a non-exempt call that has already reproduced its own
+      // outcome to the bound. Waiting tools never fire the correction; the
+      // Host duration/token budgets bound them instead.
+      if (!exempt && previousOutcome !== undefined && streak >= budget.noProgressStreakLimit) {
+        corrections += 1
+        if (corrections > NO_PROGRESS_CORRECTION_LIMIT) {
           throw failRun(
-            'runtime.web_search_budget_exceeded',
-            `Run exceeded the hard limit of ${HARD_RUN_BUDGET.maxWebSearchCalls} web searches. Use the evidence already collected instead of retrying equivalent queries.`,
+            'runtime.no_progress',
+            `Run made no progress: ${tool.name} returned identical results for identical input `
+              + `${streak} times in a row and ${corrections - 1} corrections were ignored.`,
           )
         }
+        return noProgressCorrectionResult(tool.name, streak)
       }
-      const fingerprint = `${tool.name}\0${JSON.stringify(input ?? {})}`
-      const repeated = (identicalCalls.get(fingerprint) ?? 0) + 1
-      identicalCalls.set(fingerprint, repeated)
-      if (repeated > budget.maxIdenticalToolCalls) {
-        throw failRun(
-          'runtime.repeated_tool_call',
-          `Tool ${tool.name} repeated the same input more than ${budget.maxIdenticalToolCalls} times.`,
-        )
+      const result = await tool.execute(toolCallId, input, signal, ...rest)
+      const outcome = outcomeFingerprint(result)
+      if (previousOutcome === undefined) {
+        // First sight of this exact call: neutral, nothing to compare yet.
+        outcomes.set(fingerprint, outcome)
+        streaks.set(fingerprint, 0)
+      } else if (previousOutcome !== outcome) {
+        // Real progress: this call returned something new. External state
+        // changed, so every other idle fingerprint may now read differently
+        // too — clear all streaks and the correction ladder. This is what
+        // lets a productive test_run/run_command unblock a later re-read,
+        // even when the productive tool is itself wait-semantic.
+        outcomes.set(fingerprint, outcome)
+        clearProgress()
+      } else {
+        // Identical outcome: one more no-progress repeat of this call.
+        outcomes.set(fingerprint, outcome)
+        streaks.set(fingerprint, streak + 1)
       }
-      return tool.execute(toolCallId, input, signal, ...rest)
+      return result
     },
   }))
 }
@@ -398,12 +495,12 @@ async function executePrompt(request) {
   let checkpoint = Promise.resolve()
   let checkpointError = null
   let stopListening = () => {}
-  const budgetTimer = setTimeout(() => {
+  const budgetTimer = armRunDurationTimer(runBudget.maxDurationMs, () => {
     failRun(
       'runtime.duration_budget_exceeded',
       `Run exceeded its ${runBudget.maxDurationMs}ms duration budget.`,
     )
-  }, runBudget.maxDurationMs)
+  })
   activeRuns.set(request.runId, runControl)
   try {
   const preflight = async (toolCallId, tool, input, signal, metadata = {}) => {
@@ -485,7 +582,11 @@ async function executePrompt(request) {
     ...profileToolSelection.excludedTools,
     ...projectToolSelection.excludedTools,
   ]
-  const tools = budgetedTools(adaptFoxToolsToPi(projectToolSelection.tools), runBudget, failRun)
+  const tools = budgetedTools(
+    adaptFoxToolsToPi(projectToolSelection.tools, { runId: request.runId, storageFor: hostToolResultStorage }),
+    runBudget,
+    failRun,
+  )
   for (const tool of tools) {
     if (tool.prepareArguments) toolPreparers.set(tool.name, tool.prepareArguments)
   }
@@ -848,7 +949,13 @@ const input = createInterface({ input: process.stdin, crlfDelay: Infinity })
 if (kernelWorker) input.on('close', () => { void kernelWorker.close().catch(() => { process.exitCode = 1 }) })
 input.on('line', (line) => {
   try {
-    if (kernelWorker && Buffer.byteLength(line, 'utf8') > 1_048_576) throw new Error('Oversized Kernel input')
+    // Bounded normal Kernel frame (#14): 1 MiB of UTF-8 JSON per input line —
+    // the same bound and wording as `frame_limit_exceeded` on the Host side.
+    if (kernelWorker && Buffer.byteLength(line, 'utf8') > 1_048_576) {
+      throw new Error(
+        `kernel.frame_limit_exceeded: normal Kernel model frame is ${Buffer.byteLength(line, 'utf8') - 1_048_576} UTF-8 JSON bytes over the 1,048,576-byte limit; use references or pagination instead of enlarging the frame`,
+      )
+    }
     const message = JSON.parse(line)
     if (kernelWorker) {
       void kernelWorker.handle(message)

@@ -104,7 +104,22 @@ export default defineConfig(({ mode }) => {
     server: {
       host: '127.0.0.1',
       port: 1421,
-      strictPort: true
+      strictPort: true,
+      watch: {
+        // The Office connector writes transient, briefly-locked working files
+        // (`.fox-office-<uuid>.*`, `*.fox-backup-*`) next to the user project,
+        // and `tests/` is data/output for the agent rather than app source.
+        // Watching them makes the Node watcher throw EBUSY and kill the dev
+        // server mid-run. Ignore them; `src/` HMR is unaffected.
+        ignored: [
+          '**/tests/**',
+          '**/.fox-office-*',
+          '**/*.fox-backup-*',
+          '**/.git/**',
+          '**/dist/**',
+          '**/target/**'
+        ]
+      }
     }
   }
 })

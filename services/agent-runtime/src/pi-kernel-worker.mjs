@@ -9,6 +9,7 @@ import { prepareKernelBatchResume, prepareKernelInitialModel, prepareKernelModel
 import { installKernelHostTools, installKernelProposalSchemas, runPiKernelLoop } from './pi-kernel-loop.mjs'
 import { describeKernelRun } from './pi-kernel-description.mjs'
 import { observeKernelModelTransport } from './pi-kernel-model-failure.mjs'
+import { describeKernelError, diagnosticLine } from './pi-kernel-diagnostics.mjs'
 import { prepareKernelCompaction, compactPiKernelContext, kernelCompactionResult } from './pi-kernel-compaction.mjs'
 import { CODEX_KERNEL_ADAPTER, runCodexKernelModel } from './codex-kernel-adapter.mjs'
 import { completionRequired, completionPreview, KernelIncompleteResponseError } from './kernel-completion.mjs'
@@ -166,6 +167,12 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
       return await runPiKernelLoop(session, request, prepared, {
         signal: abort.signal, preview, requestHost, requireCompletion,
         lastRejection: () => observed?.lastRejection?.() ?? null,
+        // How many provider requests the round actually issued, and why a request
+        // that produced no response failed: a failed round that never reached the
+        // provider is a different defect from one the provider rejected, and the
+        // Host can only see the category.
+        fetchCalls: () => observed?.fetchCallCount?.() ?? null,
+        lastFetchError: () => observed?.lastFetchError?.() ?? null,
         onSettled: settled => { loopSettlement.current = settled },
       })
     } catch (error) {
@@ -240,6 +247,14 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
           }
           try { respond(request, 'kernel.model_response', await active) }
           catch (error) {
+            // Diagnosing a real-chain failure needs the worker-side view: the
+            // Host only receives the categorized evidence, and its worker stderr
+            // is discarded by default. Opt-in only, so a run nobody asked to
+            // debug stays silent, and the fields are whitelisted/capped/redacted
+            // because an error message is provider text, not ours.
+            if (process.env.FOX_KERNEL_WORKER_DEBUG) {
+              console.error(diagnosticLine('kernel-worker model round failed', describeKernelError(error)))
+            }
             const evidence = abort.signal.aborted ? null : error?.evidence
               ?? (error instanceof KernelIncompleteResponseError
                 ? { schemaVersion: 1, runId: request.runId, turnId: prepared.turnId, checkpointSeq: prepared.checkpointSeq,

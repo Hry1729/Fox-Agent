@@ -4,6 +4,16 @@ import { validateKernelControl } from './control-binding.mjs'
 import { runPiKernelModel } from './pi-kernel-batch-resume.mjs'
 
 const fail = () => { throw new Error('Invalid Host context compaction request or result') }
+// Bounded summarizer request frame (#14): 256 KiB of UTF-8 JSON. This is a
+// transport bound for the summary request object, not the model's token
+// window and not the 1 MiB normal model frame; the wording matches
+// `frame_limit_exceeded` in kernel_compaction.rs.
+export const COMPACTION_REQUEST_MAX_BYTES = 262_144
+const frameExceeded = (actual) => {
+  throw new Error(
+    `kernel.frame_limit_exceeded: Kernel compaction request is ${actual - COMPACTION_REQUEST_MAX_BYTES} UTF-8 JSON bytes over the 262,144-byte limit; use references or pagination instead of enlarging the frame`,
+  )
+}
 const plain = message => ['user', 'assistant'].includes(message?.role)
   && (typeof message.content === 'string' || Array.isArray(message.content) && message.content.length > 0
     && message.content.every(block => block?.type === 'text' && typeof block.text === 'string'))
@@ -18,8 +28,9 @@ export function prepareKernelCompaction(request, identity) {
       || [input.runId,input.turnId,input.compactionId].some(id => Buffer.byteLength(id,'utf8') > 512)
       || !/^sha256:[0-9a-fA-F]{64}$/.test(input.inputHash)
       || !Number.isInteger(input.maxSummaryBytes) || input.maxSummaryBytes < 512 || input.maxSummaryBytes > 8192
-      || !input.messages.length || !input.messages.every(plain)
-      || Buffer.byteLength(JSON.stringify(input),'utf8') > 262_144) fail()
+      || !input.messages.length || !input.messages.every(plain)) fail()
+  const wireBytes = Buffer.byteLength(JSON.stringify(input), 'utf8')
+  if (wireBytes > COMPACTION_REQUEST_MAX_BYTES) frameExceeded(wireBytes)
   return input
 }
 

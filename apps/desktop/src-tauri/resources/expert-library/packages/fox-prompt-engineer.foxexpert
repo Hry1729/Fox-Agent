@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "fox.agency.prompt-engineer",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "name": "提示词优化专家",
   "description": "优化可复用提示词并设计可比较的评测",
   "category": "general",
@@ -25,6 +25,10 @@
       "grep",
       "read_attachment",
       "attachment_compute",
+      "compute_job_start",
+      "compute_job_status",
+      "compute_job_cancel",
+      "compute_job_result",
       "web_search",
       "web_read",
       "structured_data",
@@ -54,8 +58,8 @@
       "content": "MIT License\n\nCopyright (c) 2025 Michael Sitarzewski (original English version)\nCopyright (c) 2026 jnMetaCode (Chinese translation and localization)\n\nPermission is hereby granted, free of charge, to any person obtaining a copy\nof this software and associated documentation files (the \"Software\"), to deal\nin the Software without restriction, including without limitation the rights\nto use, copy, modify, merge, publish, distribute, sublicense, and/or sell\ncopies of the Software, and to permit persons to whom the Software is\nfurnished to do so, subject to the following conditions:\n\nThe above copyright notice and this permission notice shall be included in all\ncopies or substantial portions of the Software.\n\nTHE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\nIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\nFITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\nAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\nLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\nOUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\nSOFTWARE.\n"
     },
     "./provenance.json": {
-      "sha256": "748d0de8ea80afb90f9960f9dcad6c68b77b311a355543163496eb88aab74c0a",
-      "content": "{\n  \"upstream\": \"https://github.com/jnMetaCode/agency-agents-zh\",\n  \"commit\": \"972452cdedef8d04fed4a8dd1dc10623e33ed412\",\n  \"source\": \"specialized/prompt-engineer.md\",\n  \"sha256\": \"96abf6dc6efb74391c27248b440ba605f6954510193b1846c626f98ccac56b71\",\n  \"license\": \"MIT\",\n  \"adaptationVersion\": \"1.2.0\",\n  \"changes\": [\n    \"移除虚构履历及无依据 KPI\",\n    \"按 Fox 权限和证据契约适配\",\n    \"加入角色交付范围与具体工作流程\",\n    \"按需绑定受控 Office 能力\",\n    \"继承用户选择的会话知识库\"\n  ]\n}"
+      "sha256": "99d87ac1fbe76ab1543b071440e404c85cb51c8a2ba7eb99a1e6d006b3a64068",
+      "content": "{\n  \"upstream\": \"https://github.com/jnMetaCode/agency-agents-zh\",\n  \"commit\": \"972452cdedef8d04fed4a8dd1dc10623e33ed412\",\n  \"source\": \"specialized/prompt-engineer.md\",\n  \"sha256\": \"96abf6dc6efb74391c27248b440ba605f6954510193b1846c626f98ccac56b71\",\n  \"license\": \"MIT\",\n  \"adaptationVersion\": \"1.3.0\",\n  \"changes\": [\n    \"移除虚构履历及无依据 KPI\",\n    \"按 Fox 权限和证据契约适配\",\n    \"加入角色交付范围与具体工作流程\",\n    \"按需绑定受控 Office 能力\",\n    \"继承用户选择的会话知识库\"\n  ]\n}"
     },
     "./fox/bindings.json": {
       "sha256": "9f1dca1bd8057138dfaaf8ad45a9efb4b8f3f2bd440f67b9bc4d4cee39147393",

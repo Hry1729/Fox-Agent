@@ -17,8 +17,80 @@ use std::{path::Path, time::Duration};
 fn terminal(state: &str) -> bool {
     matches!(
         state,
-        "completed" | "failed" | "cancelled" | "budget_exhausted"
+        "completed" | "failed" | "cancelled" | "budget_exhausted" | "approval_expired"
     )
+}
+
+/// Record the scope a conversation-level approval actually granted (#5).
+///
+/// `allow_once` is deliberately excluded: a one-shot decision must never become
+/// a reusable permission. The scope is recomputed from the call's own input with
+/// the same helper the policy uses, and it is only registered when the current
+/// frozen policy would still have *asked* for these exact parameters - so the
+/// approval can never widen anything (frozen read-only, an out-of-catalog tool,
+/// a lifecycle hook and a denied scope all refuse).
+fn register_approval_grant(
+    database: &Database,
+    run_id: &str,
+    tool_call_id: &str,
+    decision: kernel::ApprovalDecision,
+) -> Result<(), String> {
+    if decision != kernel::ApprovalDecision::AllowConversation {
+        // A one-shot approval is auditable as a decision but must never be
+        // registered as a durable permission.
+        return database
+            .kernel_register_authorization_grant(
+                run_id,
+                tool_call_id,
+                decision.as_str(),
+                "",
+                None,
+            )
+            .map(|_| ());
+    }
+    // The approval row itself is the durable record of what was asked. Nothing
+    // is registered unless a decision for exactly this call exists.
+    let Some((tool, input_json)) = database.kernel_decided_approval_call(run_id, tool_call_id)? else {
+        return Ok(());
+    };
+    let binding = database.run_control_binding(run_id)?;
+    let Some(binding) = binding else {
+        return Ok(());
+    };
+    // Only a call the frozen policy still asks about can be covered by a grant.
+    // Everything else (frozen read-only, an out-of-catalog tool, a lifecycle
+    // hook, an already-granted scope) refuses without registering anything.
+    if super::shadow_reconcile::frozen_kernel_tool_policy(
+        &serde_json::json!({
+            "mode": binding.permission.mode.as_str(),
+            "projectRoot": binding.permission.project_root,
+            "grants": binding.permission.grants.iter()
+                .map(|grant| serde_json::json!([grant.tool, grant.scope]))
+                .collect::<Vec<_>>(),
+        }),
+        &tool,
+        &input_json,
+    ) != kernel::PolicyDecision::RequireApproval
+    {
+        return Ok(());
+    }
+    let Ok(input) = serde_json::from_str::<Value>(&input_json) else {
+        return Ok(());
+    };
+    let scope = super::shadow_reconcile::tool_operation_scope(
+        &tool,
+        &input,
+        binding.permission.project_root.as_deref(),
+    );
+    database
+        .kernel_register_authorization_grant(
+            run_id,
+            tool_call_id,
+            decision.as_str(),
+            &tool,
+            scope.as_deref(),
+        )
+        .map(|_| ())
 }
 
 pub(crate) fn resource_failure_result(tool: &str, error: &str) -> Value {
@@ -153,6 +225,9 @@ pub(super) fn drive_with_actions(
                             _ => return Err("invalid durable approval decision".into()),
                         };
                         coordinator.resolve_approval(tool_id, decision)?;
+                        // #5: a conversation-level allow becomes an auditable
+                        // additional grant; allow_once never does.
+                        register_approval_grant(database, run_id, tool_id, decision)?;
                     }
                 }
             }
@@ -314,14 +389,27 @@ pub(super) fn drive_with_actions(
                 // Do not persist arbitrary adapter errors: they may contain
                 // request bodies or credentials. Detailed diagnostics stay local.
                 let (code, message) = match error.as_str() {
+                    "kernel.jobs_pending" => ("kernel.jobs_pending", "后台计算尚未完成；任务已保留进度，请检查作业状态后继续。"),
                     crate::kernel_compaction::UNCERTAIN => (crate::kernel_compaction::UNCERTAIN,
                         "上下文压缩请求已发出，但结果未确认。原始历史保留，未自动重复请求；请检查后重新发起任务。"),
                     crate::kernel_compaction::INSUFFICIENT => (crate::kernel_compaction::INSUFFICIENT,
                         "保留工具结果、执行凭据和最近消息后，上下文仍超出安全容量。原始历史未删改，请缩小任务或新建对话。"),
+                    crate::kernel_compaction::NO_CANDIDATES => (crate::kernel_compaction::NO_CANDIDATES, "没有可安全折叠的旧历史；已保留进度，可调整输入后续做。"),
+                    crate::kernel_compaction::NO_REDUCTION => (crate::kernel_compaction::NO_REDUCTION, "摘要没有减少上下文；已保留进度，可调整输入后续做。"),
+                    crate::kernel_compaction::SINGLE_TOO_LARGE => (crate::kernel_compaction::SINGLE_TOO_LARGE, "单项输入过大；请分页或引用该结果，再续做。"),
                     crate::kernel_compaction::FAILED => (crate::kernel_compaction::FAILED,
                         "上下文压缩未取得有效结果，任务已停止。原始历史保留，未自动重复请求。"),
                     _ => ("kernel.execution_failed", "The owned model or resource executor failed; uncertain work was not replayed."),
                 };
+                let reason=match code {
+                    crate::kernel_compaction::NO_CANDIDATES => Some("no_candidates"),
+                    crate::kernel_compaction::NO_REDUCTION => Some("no_reduction"),
+                    crate::kernel_compaction::SINGLE_TOO_LARGE => Some("single_item_too_large"),
+                    crate::kernel_compaction::INSUFFICIENT => Some("insufficient"),
+                    crate::kernel_compaction::FAILED => Some("summary_failed"),
+                    _ => None,
+                };
+                if let Some(reason)=reason {let _=database.kernel_context_budget_stopped(run_id,reason);}
                 coordinator.fail(code, message)?;
             }
         }
@@ -332,7 +420,7 @@ pub(super) fn acquire(sessions_dir: &Path, run_id: &str) -> Result<KernelRunLock
     KernelRunLock::acquire(sessions_dir, run_id)
 }
 
-fn initial_input(
+pub(super) fn initial_input(
     binding: &RunControlBinding,
     prompt: &Value,
     prompt_hash: &str,
@@ -625,6 +713,7 @@ impl super::RuntimeHost {
                 model_idle_ms: binding.budgets.model_idle_ms,
                 tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
                 run_execution_budget_ms: binding.budgets.run_execution_ms,
+                run_execution_limited: binding.budgets.run_execution_limited,
                 approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
                 provider_max_retries: 2,
                 turn_max_retries: 1,
@@ -671,6 +760,13 @@ impl super::RuntimeHost {
         let policy = super::kernel_gateway::GatewayPolicy {
             binding: binding.clone(),
             scope: self.database.kernel_host_scope(&binding.run_id)?,
+            // #5: production may also read the run's additional authorization
+            // grants, so a conversation approval is reusable without rewriting
+            // the frozen binding.
+            database: Some(self.database.clone()),
+            // Office artifact references (office_import_data.artifactId) are
+            // resolved against this conversation's own compute store.
+            sessions_dir: Some(self.sessions_dir.clone()),
         };
         let proposal_policy = super::kernel_gateway::GatewayProposalPolicy {
             gateway: &policy,
@@ -765,6 +861,7 @@ impl super::RuntimeHost {
                             project_root: binding.permission.project_root.as_deref(),
                             permission_mode: binding.permission.mode.as_str(),
                             scope: &policy.scope,
+                            sessions_dir: Some(&self.sessions_dir),
                         },
                         tool,
                         &payload["input"],
@@ -939,12 +1036,8 @@ impl super::RuntimeHost {
             .database
             .kernel_build_full_snapshot(&binding.run_id)?
             .running_elapsed_ms;
-        let remaining = binding
-            .budgets
-            .run_execution_ms
-            .saturating_sub(elapsed)
-            .max(0) as u64;
-        let deadline = std::time::Instant::now() + Duration::from_millis(remaining);
+        let deadline = binding.budgets.remaining_run_ms(elapsed)
+            .map(|remaining| std::time::Instant::now() + Duration::from_millis(remaining.max(0) as u64));
         loop {
             let active = self
                 .database
@@ -974,7 +1067,7 @@ impl super::RuntimeHost {
                 return Ok(());
             }
             let cancelling = force_cancel
-                || std::time::Instant::now() >= deadline
+                || deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
                 || self
                     .database
                     .pending_kernel_host_commands(&binding.run_id)?

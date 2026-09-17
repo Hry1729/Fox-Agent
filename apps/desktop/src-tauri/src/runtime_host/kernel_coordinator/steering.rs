@@ -98,18 +98,9 @@ pub(super) fn steering_followup_input(
 /// Single definition shared by the tool-proposal resume and the steering
 /// follow-up, so both rounds see byte-identical results.
 pub(super) fn settled_tool_result_messages(
+    run_id: &str,
     tools: &[fox_engine_protocol::KernelSettledToolResult],
     assistant: &serde_json::Value,
 ) -> Vec<serde_json::Value> {
-    tools
-        .iter()
-        .map(|tool| {
-            serde_json::json!({
-                "role":"toolResult", "toolCallId":tool.tool_call_id, "toolName":tool.tool,
-                "content":tool.result["content"], "details":{},
-                "isError":tool.state == fox_engine_protocol::KernelSettledToolState::Failed,
-                "timestamp":assistant["timestamp"].as_i64().unwrap_or(0),
-            })
-        })
-        .collect()
+    super::KernelCoordinator::tool_result_messages(run_id, assistant, tools)
 }

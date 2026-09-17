@@ -11,6 +11,9 @@
 use crate::state::ApprovalDecision;
 use serde::{Deserialize, Serialize};
 
+fn default_run_execution_limited() -> bool { true }
+fn is_true(value: &bool) -> bool { *value }
+
 fn default_model_first_response_ms() -> i64 {
     60_000
 }
@@ -87,6 +90,8 @@ pub struct RunFrozenConfig {
     pub model_idle_ms: i64,
     pub tool_execution_timeout_ms: i64,
     pub run_execution_budget_ms: i64,
+    #[serde(default = "default_run_execution_limited", skip_serializing_if = "is_true")]
+    pub run_execution_limited: bool,
     /// Approval wall-clock. The run execution budget is suspended while waiting.
     pub approval_wait_timeout_ms: i64,
     /// Provider HTTP retry and whole-turn retry are independent policies.
@@ -117,6 +122,8 @@ impl<'de> Deserialize<'de> for RunFrozenConfig {
             model_idle_ms: Option<i64>,
             tool_execution_timeout_ms: i64,
             run_execution_budget_ms: i64,
+            #[serde(default = "default_run_execution_limited")]
+            run_execution_limited: bool,
             approval_wait_timeout_ms: i64,
             provider_max_retries: u32,
             turn_max_retries: u32,
@@ -135,6 +142,7 @@ impl<'de> Deserialize<'de> for RunFrozenConfig {
             model_idle_ms: stored.model_idle_ms.unwrap_or_else(|| default_model_idle_ms().min(stored.model_request_timeout_ms)),
             tool_execution_timeout_ms: stored.tool_execution_timeout_ms,
             run_execution_budget_ms: stored.run_execution_budget_ms,
+            run_execution_limited: stored.run_execution_limited,
             approval_wait_timeout_ms: stored.approval_wait_timeout_ms,
             provider_max_retries: stored.provider_max_retries,
             turn_max_retries: stored.turn_max_retries,

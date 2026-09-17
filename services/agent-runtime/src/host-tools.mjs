@@ -71,6 +71,9 @@ function preparePlanRevisionArguments(args) {
   }
 }
 
+const hostStorage = new WeakMap()
+export const hostToolResultStorage = (_id, result) => result && typeof result === "object" ? hostStorage.get(result) : null
+
 async function executeHostTool(toolCallId, tool, input, requestHost, signal) {
   const response = await requestHost('tool.execute', { toolCallId, tool, input }, signal)
   const payload = response?.payload ?? {}
@@ -94,8 +97,17 @@ async function executeHostTool(toolCallId, tool, input, requestHost, signal) {
     if (typeof payload.errorCode === 'string' && payload.errorCode) error.code = payload.errorCode
     throw error
   }
+  if (payload.result && typeof payload.result === "object" && payload.toolResultStorage) hostStorage.set(payload.result, payload.toolResultStorage)
   return payload.result
 }
+
+const COMPUTE_PARAMETERS = Type.Object({
+  attachmentIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 8, uniqueItems: true })),
+  artifactIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: 8, uniqueItems: true })),
+  code: Type.String({ minLength: 1, maxLength: 131072 }),
+  processing: Type.Optional(Type.Literal('chunked')),
+  profile: Type.Optional(Type.Union([Type.Literal('standard'), Type.Literal('large')])),
+}, { additionalProperties: false })
 
 export function createHostTools(requestHost) {
   return defineFoxTools([
@@ -110,14 +122,40 @@ export function createHostTools(requestHost) {
     {
       name: 'attachment_compute',
       label: 'Compute attachment with JavaScript',
-      description: 'Execute JavaScript against whole conversation attachments without copying rows into the model context. Pass attachmentIds explicitly to load uploaded files; omitting both attachmentIds and artifactIds gives an EMPTY attachments array and is only for calculations without files. Available without a project; originals stay read-only and generated files go to a conversation workspace. Use this tool for spreadsheet counts, deduplication, grouping, arithmetic, percentages and charts; never compute bulk statistics mentally from paginated read_attachment text. JavaScript globals: attachments = [{id,name,kind,sheets:[{name,rows:[[number|string|boolean|null,...],...]}],text?}]. Workbook rows include the header row. Select sheets by name. Call saveFile(name, UTF8content, optionalMediaType) to create JSON/CSV/SVG/HTML/text output; names must be plain filenames. Generated files return files[].id. In a later call, pass artifactIds:[id] to independently reread or continue calculating from a saved JSON/CSV/text result; it appears in attachments with that ID. Only computed files owned by this conversation are readable. Explicitly return a concise JSON-serializable result from the code. Use raw JavaScript without Markdown fences or escapes; quote entire object keys containing spaces, punctuation or quotation marks. On a script error, inspect the reported code line and retry with corrected code in a new call; a failed call creates no output files. No process, require, filesystem or network APIs. Inspect sheet metadata or a few sample rows with code first if structure is unknown, then compute the full dataset. Use actual column meanings, document deduplication rules and missing values, and do not invent results if execution fails. Formula cells use cached results. Example code: const rows=attachments[0].sheets[0].rows; return {rows:rows.length-1,headers:rows[0]};',
+      description: 'Execute JavaScript against whole conversation attachments without copying rows into the model context. Pass attachmentIds explicitly to load uploaded files; omitting both attachmentIds and artifactIds gives an EMPTY attachments array and is only for calculations without files. Available without a project; originals stay read-only and generated files go to a conversation workspace. Use this tool for spreadsheet counts, deduplication, grouping, arithmetic, percentages and charts; never compute bulk statistics mentally from paginated read_attachment text. JavaScript globals: attachments = [{id,name,kind,sheets:[{name,rows:[[number|string|boolean|null,...],...]}],text?}]. Workbook rows include the header row. Select sheets by name. Call saveFile(name, UTF8content, optionalMediaType) to create JSON/CSV/SVG/HTML/text output; names must be plain filenames. Generated files return files[].id. In a later call, pass artifactIds:[id] to independently reread or continue calculating from a saved JSON/CSV/text result; it appears in attachments with that ID. Only computed files owned by this conversation are readable. Explicitly return a concise JSON-serializable result from the code. Use raw JavaScript without Markdown fences or escapes; quote entire object keys containing spaces, punctuation or quotation marks. On a script error, inspect the reported code line and retry with corrected code in a new call; a failed call creates no output files. No process, require, filesystem or network APIs. Inspect sheet metadata or a few sample rows with code first if structure is unknown, then compute the full dataset. Use actual column meanings, document deduplication rules and missing values, and do not invent results if execution fails. Formula cells use cached results. Example code: const rows=attachments[0].sheets[0].rows; return {rows:rows.length-1,headers:rows[0]}; When the returned JSON exceeds the inline result limit, the full value is stored for you and the tool returns a bounded summary instead: {summary:{storedBytes,rows,columns,sampleRows,complete:false,storedAs:"compute-artifact",artifactId,artifactName,note}} plus files[].id. The complete data is not lost and never needs to be retyped. The large-result JSON artifact is consumed inside the compute environment: pass its id to a later attachment_compute call as artifactIds:[id] to read and transform it there (it is not an attachmentId, and read_tool_result only reads fox-result:// references, not compute-artifact ids). To write the table into Excel, turn it into CSV/TSV in that same code, save it with saveFile("table.csv", csvText), and pass the returned file id (files[].id) to office_import_data as artifactId (the Host streams the saved CSV/TSV bytes directly); never pass the JSON artifact itself as an import and never paste the data inline. The summary rows/columns and sample are enough to choose the next step.',
       parameters: Type.Object({
         attachmentIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 8, uniqueItems: true })),
         artifactIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 8, uniqueItems: true })),
         code: Type.String({ minLength: 1, maxLength: 131072 }),
         timeoutMs: Type.Optional(Type.Integer({ minimum: 100, maximum: 30000 })),
+        processing: Type.Optional(Type.Union([Type.Literal('whole'), Type.Literal('chunked')])),
+        profile: Type.Optional(Type.Union([Type.Literal('standard'), Type.Literal('large')])),
       }, { additionalProperties: false }),
       execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'attachment_compute', params, requestHost, signal),
+    },
+    {
+      name: 'compute_job_start', label: 'Start or resume background computation',
+      description: "Start bounded background attachment computation. For a new job supply idempotencyKey and params. Poll compute_job_status until terminal, then read compute_job_result. A paused job can be resumed using jobId only; never repeat completed writes. Background jobs always use chunked processing: code defines onChunk(chunk) and optional onFinish(). Use profile=large for large files. Whole-array scripts belong in synchronous attachment_compute. Run authorization and execution budget still apply.",
+      parameters: Type.Union([Type.Object({ idempotencyKey: Type.String({ minLength: 1, maxLength: 200 }), params: COMPUTE_PARAMETERS }, { additionalProperties: false }), Type.Object({ jobId: Type.String({ minLength: 1 }) }, { additionalProperties: false })]),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'compute_job_start', params, requestHost, signal),
+    },
+    {
+      name: 'compute_job_status', label: 'Check computation progress',
+      description: "Read durable job progress without starting work. waitMs (up to 5000) waits briefly for progress/completion. Do not declare delivery complete while a required job is queued/running/paused.",
+      parameters: Type.Object({ jobId: Type.String({ minLength: 1 }), waitMs: Type.Optional(Type.Integer({ minimum: 0, maximum: 5000 })) }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'compute_job_status', params, requestHost, signal),
+    },
+    {
+      name: 'compute_job_cancel', label: 'Cancel background computation',
+      description: "Request cancellation. Running remains running until the executor confirms it stopped; inspect cancelRequestedAt/cancelAcknowledgedAt. Only jobs from this conversation can be cancelled.",
+      parameters: Type.Object({ jobId: Type.String({ minLength: 1 }) }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'compute_job_cancel', params, requestHost, signal),
+    },
+    {
+      name: 'compute_job_result', label: 'Read computation result',
+      description: "Read one UTF-8 byte range of a completed, integrity-checked stored result. Concatenate content using nextOffset until complete=true; this never runs the computation again.",
+      parameters: Type.Object({ jobId: Type.String({ minLength: 1 }), offset: Type.Optional(Type.Integer({ minimum: 0 })), limit: Type.Optional(Type.Integer({ minimum: 4, maximum: 65536 })) }, { additionalProperties: false }),
+      execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'compute_job_result', params, requestHost, signal),
     },
     {
       name: 'read_tool_result',

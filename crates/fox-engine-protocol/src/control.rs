@@ -52,6 +52,10 @@ pub struct TimeBudgets {
     pub model_idle_ms: i64,
     pub tool_execution_ms: i64,
     pub run_execution_ms: i64,
+    /// Old frozen runs retain their explicit limit. Ordinary new conversations
+    /// opt out of a whole-run deadline; model/tool stall limits still apply.
+    #[serde(default = "default_run_execution_limited", skip_serializing_if = "is_true")]
+    pub run_execution_limited: bool,
     pub approval_wait_ms: i64,
 }
 
@@ -72,6 +76,8 @@ impl<'de> Deserialize<'de> for TimeBudgets {
             model_idle_ms: Option<i64>,
             tool_execution_ms: i64,
             run_execution_ms: i64,
+            #[serde(default = "default_run_execution_limited")]
+            run_execution_limited: bool,
             approval_wait_ms: i64,
         }
         let stored = Stored::deserialize(deserializer)?;
@@ -81,10 +87,14 @@ impl<'de> Deserialize<'de> for TimeBudgets {
             model_idle_ms: stored.model_idle_ms.unwrap_or_else(|| default_model_idle_ms().min(stored.model_request_ms)),
             tool_execution_ms: stored.tool_execution_ms,
             run_execution_ms: stored.run_execution_ms,
+            run_execution_limited: stored.run_execution_limited,
             approval_wait_ms: stored.approval_wait_ms,
         })
     }
 }
+
+fn default_run_execution_limited() -> bool { true }
+fn is_true(value: &bool) -> bool { *value }
 
 pub fn default_model_first_response_ms() -> i64 {
     60_000
@@ -98,15 +108,33 @@ impl Default for TimeBudgets {
     fn default() -> Self {
         Self { model_request_ms: 300_000, model_first_response_ms: default_model_first_response_ms(),
             model_idle_ms: default_model_idle_ms(), tool_execution_ms: 600_000,
-            run_execution_ms: 1_800_000, approval_wait_ms: 300_000 }
+            run_execution_ms: 1_800_000, run_execution_limited: true, approval_wait_ms: 300_000 }
     }
 }
 
 impl TimeBudgets {
+    /// New ordinary tasks run until completion or cancellation, without a total
+    /// duration cap. Default remains the legacy frozen-record representation.
+    pub fn continuous() -> Self {
+        Self { run_execution_limited: false, ..Self::default() }
+    }
+
+    pub fn remaining_run_ms(&self, elapsed_ms: i64) -> Option<i64> {
+        self.run_execution_limited.then(|| self.run_execution_ms.saturating_sub(elapsed_ms))
+    }
+
+    /// Always returns a finite operation window, even for a continuous run.
+    pub fn limit_operation_ms(&self, operation_ms: i64, elapsed_ms: i64) -> i64 {
+        self.remaining_run_ms(elapsed_ms).map_or(operation_ms, |remaining| operation_ms.min(remaining))
+    }
+
     /// Derive a tighter execution budget while preserving all sub-window bounds.
     /// Approval waiting has its own clock and is not narrowed by execution time.
     pub fn restrict_execution_ms(&mut self, maximum: i64) {
-        self.run_execution_ms = self.run_execution_ms.min(maximum);
+        self.run_execution_ms = if self.run_execution_limited {
+            self.run_execution_ms.min(maximum)
+        } else { maximum };
+        self.run_execution_limited = true;
         self.tool_execution_ms = self.tool_execution_ms.min(self.run_execution_ms);
         self.model_request_ms = self.model_request_ms.min(self.run_execution_ms);
         self.model_first_response_ms = self.model_first_response_ms.min(self.model_request_ms);
@@ -161,6 +189,25 @@ impl RunControlBinding {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn continuous_task_policy_preserves_legacy_hashes_and_explicit_child_limits() {
+        let legacy_json = serde_json::to_string(&TimeBudgets::default()).unwrap();
+        assert!(!legacy_json.contains("runExecutionLimited"));
+        let legacy: TimeBudgets = serde_json::from_str(&legacy_json).unwrap();
+        assert!(legacy.run_execution_limited);
+        assert_eq!(serde_json::to_string(&legacy).unwrap(), legacy_json);
+        let mut continuous = TimeBudgets::continuous();
+        continuous.validate().unwrap();
+        assert_eq!(continuous.remaining_run_ms(86_400_000), None);
+        assert_eq!(continuous.limit_operation_ms(120_000, 86_400_000), 120_000);
+        let decoded: TimeBudgets = serde_json::from_str(&serde_json::to_string(&continuous).unwrap()).unwrap();
+        assert_eq!(decoded, continuous);
+        continuous.restrict_execution_ms(7_200_000);
+        assert_eq!(continuous.remaining_run_ms(7_200_001), Some(-1));
+        assert_eq!(continuous.tool_execution_ms, 600_000);
+        assert_eq!(continuous.model_request_ms, 300_000);
+    }
+
     #[test]
     fn legacy_short_windows_and_child_derivation_preserve_total_budget() {
         for total in [1_000, 30_000, 90_000] {

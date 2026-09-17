@@ -32,6 +32,7 @@ pub(super) const SUPPORTED_TOOLS: &[&str] = &[
     "format_code",
     "tabular_data",
     "attachment_compute",
+    "compute_job_start", "compute_job_status", "compute_job_cancel", "compute_job_result",
     "memory_search",
     "memory_propose",
     "read_attachment",
@@ -69,6 +70,7 @@ pub(super) fn is_context_resource(tool: &str) -> bool {
             | "memory_propose"
             | "read_attachment"
             | "attachment_compute"
+            | "compute_job_start" | "compute_job_status" | "compute_job_cancel" | "compute_job_result"
             | "read_tool_result"
             | "skill_load"
     )
@@ -229,6 +231,15 @@ pub(super) fn freeze_scope(
 pub(super) struct GatewayPolicy {
     pub binding: RunControlBinding,
     pub scope: KernelHostScope,
+    /// Authority to read the run's *additional* authorization grants (#5).
+    /// Absent in unit tests that only exercise the frozen snapshot; production
+    /// always sets it so a conversation approval becomes reusable without ever
+    /// rewriting the frozen binding.
+    pub database: Option<Database>,
+    /// The Host's runtime session store, used to resolve compute-artifact
+    /// references (office_import_data's artifactId) against the frozen
+    /// binding's own conversation. Set by production; optional in unit tests.
+    pub sessions_dir: Option<std::path::PathBuf>,
 }
 
 /// Business eligibility is read before asking a human and checked again inside
@@ -265,22 +276,53 @@ impl PolicyDecisionPort for GatewayProposalPolicy<'_> {
 }
 
 impl GatewayPolicy {
+    /// Trusted Office authorization derived solely from the frozen Run binding:
+    /// the model contributes only the artifact id, never the conversation.
+    /// Production sets both fields; policy unit tests that freeze only a scope
+    /// get `None` and keep the inline-only preparation path.
+    fn office_call_context(&self) -> Option<crate::office::OfficeCallContext<'_>> {
+        match (self.sessions_dir.as_deref(), self.database.as_ref()) {
+            (Some(sessions_dir), Some(database)) => Some(crate::office::OfficeCallContext {
+                database,
+                sessions_dir,
+                conversation_id: &self.binding.conversation_id,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Office preparation through the same authorization the execution
+    /// dispatch uses, so the pre-approval validate/decide gate accepts and
+    /// integrity-checks an `artifactId` exactly as execution will. Never
+    /// resolves an artifact against a model-supplied conversation.
+    fn prepare_office(
+        &self,
+        remote_tool: &str,
+        arguments: &Value,
+    ) -> Result<crate::office::PreparedOffice, String> {
+        let context = self.office_call_context();
+        crate::office::prepare_with_context(
+            remote_tool,
+            arguments,
+            self.binding.permission.project_root.as_deref(),
+            self.binding.permission.mode.as_str(),
+            context.as_ref(),
+        )
+    }
+
     fn remaining_budget(&self, database: &Database) -> Result<std::time::Duration, String> {
         let elapsed = database
             .kernel_build_full_snapshot(&self.binding.run_id)?
             .running_elapsed_ms;
-        let remaining = self
-            .binding
-            .budgets
-            .run_execution_ms
-            .saturating_sub(elapsed)
-            .min(self.binding.budgets.tool_execution_ms);
+        let remaining = self.binding.budgets.limit_operation_ms(
+            self.binding.budgets.tool_execution_ms, elapsed,
+        );
         if remaining <= 0 {
             return Err("Kernel resource execution budget exhausted".into());
         }
         Ok(std::time::Duration::from_millis(remaining as u64))
     }
-    fn validate(&self, tool: &str, input: &Value) -> Result<(), String> {
+    pub(super) fn validate(&self, tool: &str, input: &Value) -> Result<(), String> {
         self.binding.validate()?;
         if !self.scope.tool_names.contains(tool)
             || !(SUPPORTED_TOOLS.contains(&tool)
@@ -359,12 +401,9 @@ impl GatewayPolicy {
                 if !self.scope.office_tools.contains(remote_tool) {
                     return Err("Office operation is outside frozen scope".into());
                 }
-                crate::office::prepare(
-                    remote_tool,
-                    &input["arguments"],
-                    self.binding.permission.project_root.as_deref(),
-                    self.binding.permission.mode.as_str(),
-                )?;
+                // Same Host-resolved authorization as execution, so an
+                // artifactId import is accepted and integrity-checked here.
+                self.prepare_office(remote_tool, &input["arguments"])?;
             } else if self.binding.permission.mode == PermissionMode::ReadOnly {
                 return Err("unclassified external MCP calls are unavailable under frozen read-only permission".into());
             }
@@ -403,6 +442,9 @@ impl GatewayPolicy {
             return Err("frozen Kernel context resource identity changed".into());
         }
         database.kernel_validate_resource_acquisition(&self.binding.run_id)?;
+        if super::background_jobs::TOOLS.contains(&tool) {
+            return super::background_jobs::execute(database, attachments_dir, sessions_dir, &self.binding.run_id, tool, input, Some(token.clone()), self.remaining_budget(database)?);
+        }
         let result = match tool {
             "memory_search" | "memory_propose" => super::execute_memory_operation(
                 database,
@@ -776,6 +818,11 @@ impl GatewayPolicy {
             let server = load(input["serverId"].as_str().unwrap())?;
             let name = input["tool"].as_str().unwrap();
             if server.id == crate::office::SERVER_ID {
+                // The artifact context derives the conversation from the frozen
+                // binding only; the model's input contributes nothing but the
+                // artifact id, so a cross-session or forged reference cannot be
+                // resolved here. Same authorization validate/decide used.
+                let context = self.office_call_context();
                 return crate::office::execute_with_cancellation(
                     &server,
                     name,
@@ -784,6 +831,7 @@ impl GatewayPolicy {
                     self.binding.permission.mode.as_str(),
                     Some(token),
                     remaining()?,
+                    context.as_ref(),
                 );
             }
             return crate::mcp::execute_owned(
@@ -857,24 +905,82 @@ impl PolicyDecisionPort for GatewayPolicy {
             && input.as_ref().unwrap()["serverId"] == crate::office::SERVER_ID
         {
             let input = input.as_ref().unwrap();
-            if crate::office::prepare(
-                input["tool"].as_str().unwrap(),
-                &input["arguments"],
-                self.binding.permission.project_root.as_deref(),
-                self.binding.permission.mode.as_str(),
-            )
-            .is_ok_and(|action| !action.mutates)
+            if self
+                .prepare_office(input["tool"].as_str().unwrap(), &input["arguments"])
+                .is_ok_and(|action| !action.mutates)
             {
                 return PolicyDecision::Allow;
             }
         }
-        super::shadow_reconcile::frozen_kernel_tool_policy(
+        // The effective policy is the frozen snapshot UNION the additional
+        // authorization facts this run accumulated from human approvals (#5).
+        // The frozen list is never rewritten; an added grant can only ever name
+        // an exact (tool, scope) pair it was approved for, so anything outside
+        // that pair still falls through to the unchanged frozen decision.
+        let additional = self
+            .database
+            .as_ref()
+            .and_then(|database| {
+                database
+                    .kernel_effective_authorization_grants(
+                        &self.binding.run_id,
+                        crate::database::now_ms(),
+                    )
+                    .ok()
+            })
+            .unwrap_or_default();
+        let mut grants: Vec<Value> = self
+            .binding
+            .permission
+            .grants
+            .iter()
+            .map(|grant| json!([grant.tool, grant.scope]))
+            .collect();
+        for grant in &additional {
+            let pair = json!([grant.tool, grant.scope_value]);
+            if !grants.contains(&pair) {
+                grants.push(pair);
+            }
+        }
+        let decision = super::shadow_reconcile::frozen_kernel_tool_policy(
             &json!({
                 "mode": self.binding.permission.mode.as_str(), "projectRoot": self.binding.permission.project_root,
-                "grants": self.binding.permission.grants.iter().map(|grant| json!([grant.tool,grant.scope])).collect::<Vec<_>>(),
+                "grants": grants,
             }),
             tool,
             input_json,
+        );
+        // Audit the reuse: a grant that silently authorizes work is not
+        // auditable. Only a grant that actually decided this call is recorded.
+        if matches!(decision, PolicyDecision::Allow) {
+            if let (Some(database), Ok(parsed)) = (
+                self.database.as_ref(),
+                serde_json::from_str::<Value>(input_json),
+            ) {
+                if let Some(scope) = self.scope_key_for(tool, &parsed) {
+                    if additional.iter().any(|grant| grant.matches(tool, &scope)) {
+                        let _ = database.kernel_note_authorization_grant_use(
+                            &self.binding.run_id,
+                            tool,
+                            &scope,
+                        );
+                    }
+                }
+            }
+        }
+        decision
+    }
+}
+
+impl GatewayPolicy {
+    /// The exact scope key this call is measured against, computed by the same
+    /// Host helpers the frozen policy uses. `None` means the call cannot be
+    /// named exactly, so no grant may cover it.
+    fn scope_key_for(&self, tool: &str, input: &Value) -> Option<String> {
+        super::shadow_reconcile::tool_operation_scope(
+            tool,
+            input,
+            self.binding.permission.project_root.as_deref(),
         )
     }
 }

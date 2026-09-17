@@ -174,11 +174,17 @@ fn kernel_context_resource_serves_a_persisted_result_and_rebuilds_it_exactly() {
 
     // The model view Host would publish for this call: bounded, and carrying the
     // reference precisely because the omitted records have to stay reachable.
-    let bounded = crate::kernel_compaction::bound_tool_result_content(
+    // Retrievability now comes from the Host's trusted storage fact — this
+    // fixture persisted the result and rebuilds it byte-exactly below, so the
+    // fact is `whole`. (live.rs must pass the same fact once R4-A1 is wired;
+    // without it the projection stays conservative and publishes every byte.)
+    let stored_whole = crate::kernel_compaction::ToolResultStorage::whole(text.len());
+    let bounded = crate::kernel_compaction::bound_tool_result_content_with_storage(
         "read",
         false,
         &json!([{ "type": "text", "text": text }]),
         Some(&reference),
+        &stored_whole,
     )
     .expect("a large stored result must get a bounded view");
     let view: Value = serde_json::from_str(bounded[0]["text"].as_str().unwrap()).unwrap();
@@ -191,6 +197,9 @@ fn kernel_context_resource_serves_a_persisted_result_and_rebuilds_it_exactly() {
     let policy = GatewayPolicy {
         binding: binding.clone(),
         scope: db.kernel_host_scope(&run_id).unwrap(),
+
+        database: None,
+        sessions_dir: None,
     };
     let dir = std::env::temp_dir();
 
@@ -243,6 +252,9 @@ fn kernel_context_resource_serves_a_persisted_result_and_rebuilds_it_exactly() {
     let narrowed = GatewayPolicy {
         binding: binding.clone(),
         scope: scope_with(&["read"]),
+
+        database: None,
+        sessions_dir: None,
     };
     let error = narrowed
         .execute_context_resource(
@@ -330,6 +342,9 @@ fn a_reopened_database_reads_the_previous_result_without_replaying_it() {
     let policy = GatewayPolicy {
         binding,
         scope: db.kernel_host_scope(&run_id).unwrap(),
+
+        database: None,
+        sessions_dir: None,
     };
     let dir = std::env::temp_dir();
     let mut rebuilt = String::new();
@@ -464,11 +479,15 @@ fn real_pi_jsonl_reads_a_persisted_result_through_read_tool_result() {
 
     // The model view Host publishes for that call: bounded, and carrying the
     // reference precisely because the omitted records must stay reachable.
-    let bounded = crate::kernel_compaction::bound_tool_result_content(
+    // The storage fact is trusted (this fixture persisted the result and reads
+    // it back below); without it the projection would publish every byte.
+    let stored_whole = crate::kernel_compaction::ToolResultStorage::whole(stored.len());
+    let bounded = crate::kernel_compaction::bound_tool_result_content_with_storage(
         "read",
         false,
         &json!([{ "type": "text", "text": stored }]),
         Some(&reference),
+        &stored_whole,
     )
     .expect("a large stored result must get a bounded view");
     let view: Value = serde_json::from_str(bounded[0]["text"].as_str().unwrap()).unwrap();

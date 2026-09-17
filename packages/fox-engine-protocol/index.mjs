@@ -80,6 +80,9 @@ export const SCHEMA_BUNDLE = {
             "state": {
               "$ref": "#/$defs/KernelSettledToolState"
             },
+            "storage": {
+              "description": "Storage facts supplied by the Host, never by the executed tool."
+            },
             "tool": {
               "type": "string"
             },
@@ -654,6 +657,9 @@ export const SCHEMA_BUNDLE = {
             "state": {
               "$ref": "#/$defs/KernelSettledToolState"
             },
+            "storage": {
+              "description": "Storage facts supplied by the Host, never by the executed tool."
+            },
             "tool": {
               "type": "string"
             },
@@ -1011,6 +1017,10 @@ export const SCHEMA_BUNDLE = {
               "format": "int64",
               "type": "integer"
             },
+            "runExecutionLimited": {
+              "description": "Old frozen runs retain their explicit limit. Ordinary new conversations\nopt out of a whole-run deadline; model/tool stall limits still apply.",
+              "type": "boolean"
+            },
             "runExecutionMs": {
               "format": "int64",
               "type": "integer"
@@ -1331,6 +1341,30 @@ export const SCHEMA_BUNDLE = {
       "category": "attachment",
       "execution": "host",
       "name": "attachment_compute"
+    },
+    {
+      "approval": "none",
+      "category": "attachment",
+      "execution": "host",
+      "name": "compute_job_start"
+    },
+    {
+      "approval": "none",
+      "category": "attachment",
+      "execution": "host",
+      "name": "compute_job_status"
+    },
+    {
+      "approval": "none",
+      "category": "attachment",
+      "execution": "host",
+      "name": "compute_job_cancel"
+    },
+    {
+      "approval": "none",
+      "category": "attachment",
+      "execution": "host",
+      "name": "compute_job_result"
     },
     {
       "approval": "none",

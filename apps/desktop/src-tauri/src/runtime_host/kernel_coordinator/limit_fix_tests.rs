@@ -17,7 +17,7 @@ fn live_provider(continuation: bool) -> (std::net::SocketAddr, std::thread::Join
     listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
         let mut requests = Vec::new();
-        let replies = if continuation { vec!["tool", "preface", "stream", "final", "final"] }
+        let replies = if continuation { vec!["tool", "preface", "stream", "final"] }
             else { vec!["stream", "final"] };
         for reply in replies {
             let deadline = Instant::now() + Duration::from_secs(25);
@@ -147,7 +147,7 @@ fn assert_live_total_retry(continuation: bool) {
     assert_eq!(coordinator.snapshot().unwrap().tool_calls,tools);
     assert_eq!(executions.load(Ordering::SeqCst),usize::from(continuation));
     let requests = server.join().unwrap();
-    assert_eq!(requests.len(),if continuation {5}else{2});
+    assert_eq!(requests.len(),if continuation {4}else{2});
     if continuation { assert!(requests[3]["messages"].to_string().contains("durable read proof")); }
     println!("live_total_retry continuation={continuation} requests={} executions={} final=completed",requests.len(),executions.load(Ordering::SeqCst));
 }

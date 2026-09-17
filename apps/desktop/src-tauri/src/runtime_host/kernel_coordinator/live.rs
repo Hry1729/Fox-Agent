@@ -204,6 +204,23 @@ impl KernelCoordinator<'_> {
     /// Host facts (and naturally pauses across approvals). When no model
     /// request is armed (for example during startup) only the Run budget applies.
     /// A bounded transport drain follows model expiry; late output cannot commit.
+    /// Whether this Run was frozen with at least one tool that can actually
+    /// change something. A conversational/read-only Run can be complete after a
+    /// single answer, so the bounded stop-review (#17) must not spend a round on
+    /// it; a Run that owns writable or process tools may still have open work.
+    fn round_can_still_act(&self) -> Result<bool, String> {
+        Ok(self
+            .database
+            .kernel_model_config(&self.binding.run_id)?
+            .proposal_tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .any(|name| {
+                fox_engine_protocol::canonical_runtime_tool_contract(name)
+                    .is_some_and(|(category, _, _)| category != "project-read")
+            }))
+    }
+
     fn live_remaining_ms(&self) -> Result<i64, String> {
         let now = self.clock.read();
         let facts = self
@@ -211,12 +228,8 @@ impl KernelCoordinator<'_> {
             .lock()
             .map_err(|_| "Kernel coordinator lock poisoned")?
             .shadow_checkpoint(now.monotonic_ms);
-        let run_remaining = self
-            .binding
-            .budgets
-            .run_execution_ms
-            .saturating_sub(facts.running_elapsed_ms);
-        if run_remaining <= 0 {
+        let run_remaining = self.binding.budgets.remaining_run_ms(facts.running_elapsed_ms);
+        if run_remaining.is_some_and(|remaining| remaining <= 0) {
             return Err("Kernel Run execution budget exhausted".into());
         }
         let model_remaining = match facts.model_request_since_wall_ms {
@@ -226,11 +239,11 @@ impl KernelCoordinator<'_> {
                 .model_request_ms
                 .saturating_sub(now.wall_ms - since)
                 .saturating_add(super::super::kernel_model_worker::MODEL_SETTLE_GRACE_MS),
-            // No dispatched model request: startup/tool waits use the Run
-            // budget. Every continuation arms its own model window.
-            _ => i64::MAX,
+            // Startup still has a finite transport window. Each subsequent
+            // request gets its own deadline, independent of total task duration.
+            _ => self.binding.budgets.model_request_ms,
         };
-        Ok(run_remaining.min(model_remaining))
+        Ok(run_remaining.map_or(model_remaining, |remaining| remaining.min(model_remaining)))
     }
 
     /// Recomputed deadline source passed to the live worker transport.
@@ -290,7 +303,7 @@ impl KernelCoordinator<'_> {
         Ok((history, checkpoint.assistant_message, tools))
     }
 
-    fn tool_result_messages(
+    pub(super) fn tool_result_messages(
         run_id: &str,
         assistant: &Value,
         tools: &[fox_engine_protocol::KernelSettledToolResult],
@@ -307,11 +320,12 @@ impl KernelCoordinator<'_> {
                 let reference =
                     crate::kernel_compaction::tool_result_ref(run_id, &tool.tool_call_id);
                 let mut content =
-                    crate::kernel_compaction::bound_tool_result_content(
+                    crate::kernel_compaction::bound_tool_result_content_with_storage(
                         &tool.tool,
                         is_error,
                         &tool.result["content"],
                         reference.as_deref(),
+                        &tool.storage.clone().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default(),
                     )
                     .unwrap_or_else(|| tool.result["content"].clone());
                 // `read_tool_result` carries its range cursor in `details`, which
@@ -594,27 +608,45 @@ impl KernelCoordinator<'_> {
             )?;
             match delivery {
                 super::super::delivery::DeliveryStop::NoChecklist => {
-                    let continuation_allowed = if self
+                    // #17/R8: a review is a correction for a stop that left
+                    // explicit work open. "A tool ran at some point" is NOT
+                    // evidence of unfinished work, so it cannot buy another model
+                    // round - that is exactly how a complete answer used to cost
+                    // an extra round.
+                    //
+                    // With no delivery checklist there is no machine-checkable
+                    // demand left (the delivery lane owns those with its own
+                    // evidence and counter). The one remaining case that needs a
+                    // bounded nudge is a run that has already acted but whose stop
+                    // only *promises* further work instead of delivering a result.
+                    // Everything else completes as-is.
+                    let review_budget_left = self
                         .database
                         .kernel_count_continuations(&self.binding.run_id)?
-                        >= CONTINUATION_LIMIT
-                    {
-                        false
-                    } else if !self.snapshot()?.tool_calls.is_empty() {
-                        true
-                    } else if !matches!(stage, Stage::Initial { .. }) {
-                        false
-                    } else {
-                        self.database
-                            .kernel_model_config(&self.binding.run_id)?
-                            .proposal_tools
-                            .iter()
-                            .filter_map(|tool| tool["name"].as_str())
-                            .any(|name| {
-                                fox_engine_protocol::canonical_runtime_tool_contract(name)
-                                    .is_some_and(|(category, _, _)| category != "project-read")
-                            })
-                    };
+                        < CONTINUATION_LIMIT;
+                    let draft = assistant_plain_text(&output);
+                    // The nudge is for a model that stopped while *promising*
+                    // further work - it says it will act (often right after
+                    // reading something) but proposed no concrete step and
+                    // delivered no result. That is the explicit unfinished work
+                    // this lane corrects.
+                    //
+                    // It is deliberately NOT triggered by tool use: a run that
+                    // executed a tool and then produced a complete answer has
+                    // nothing open here (the delivery lane owns machine-checkable
+                    // demands), so it must not be charged another model round.
+                    let pending_jobs=self.database.kernel_jobs_for_run(&self.binding.run_id)?.iter().any(|job| !job.state.is_terminal());
+                    if pending_jobs && !review_budget_left {return Err("kernel.jobs_pending".into());}
+                    let promised_but_unstarted = pending_jobs || !looks_like_final_answer(&draft);
+                    // Never while tools are still in flight: an unresolved call is
+                    // not a promise, and the barrier (not this lane) owns it.
+                    let no_tool_in_flight = self
+                        .snapshot()?
+                        .tool_calls
+                        .iter()
+                        .all(|tool| matches!(tool.state.as_str(), "completed" | "failed" | "cancelled" | "expired"));
+                    let continuation_allowed =
+                        review_budget_left && no_tool_in_flight && promised_but_unstarted;
                     if !continuation_allowed {
                         StopFollowup::Final
                     } else {
@@ -885,7 +917,7 @@ impl KernelCoordinator<'_> {
                 .saturating_add(steering_bytes)
                 .saturating_add(4096);
             let view = self.context_view(&batch_id, &history)?;
-            if !crate::kernel_compaction::context_within_budget(&config, &view, extra)? {
+            if !self.context_fits(&config, &view, extra)? {
                 // Detach before leasing: the drive loop delivers this pending
                 // batch through the compaction-aware replacement transport.
                 return Err(LIVE_DETACHED.to_string());
@@ -939,7 +971,7 @@ impl KernelCoordinator<'_> {
             next_messages.extend(pending_messages.iter().cloned());
             // `next_messages` already contains the notices the worker will splice
             // into this request, so only the fixed per-request reserve is added.
-            if !crate::kernel_compaction::context_within_budget(
+            if !self.context_fits(
                 &config,
                 &next_messages,
                 4096,
@@ -1165,12 +1197,14 @@ impl KernelCoordinator<'_> {
         let mut planned_messages = input.messages.clone();
         planned_messages.extend(steering_messages.iter().cloned());
         let config_for_budget = self.database.kernel_model_config(&self.binding.run_id)?;
-        if !crate::kernel_compaction::context_within_budget(
+        if !self.context_fits(
             &config_for_budget,
             &planned_messages,
             4096,
         )? {
-            return Err(LIVE_DETACHED.into());
+            // The compaction-aware replacement transport has already built the
+            // final request. Re-detaching the same input cannot make it smaller.
+            return Err(crate::kernel_compaction::INSUFFICIENT.into());
         }
         input.messages.extend(steering_messages);
         let continuation_history = input.messages.clone();
@@ -1272,7 +1306,43 @@ impl KernelCoordinator<'_> {
 }
 
 fn kernel_state_is_terminal(state: &str) -> bool {
-    matches!(state, "completed" | "failed" | "cancelled" | "budget_exhausted")
+    matches!(
+        state,
+        "completed" | "failed" | "cancelled" | "budget_exhausted" | "approval_expired"
+    )
+}
+
+/// Whether a first-round plain stop already reads as a delivered answer rather
+/// than a promise to start working.
+///
+/// This exists so the bounded stop-review (#17) is not spent on a task that never
+/// needed a tool: a complete read-only answer must finish in one round. It only
+/// *suppresses* the review for a draft that carries no forward-looking intent, so
+/// a draft that announces future work still gets its one correction.
+fn assistant_plain_text(message: &Value) -> String {
+    match &message["content"] {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks.iter().filter(|b| b["type"]=="text")
+            .filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn looks_like_final_answer(draft: &str) -> bool {
+    let trimmed = draft.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lowered = trimmed.to_lowercase();
+    // Correct only a stand-alone promise, never a complete answer merely
+    // containing sequence words or recommendations. Delivery/steering retain
+    // their own authoritative checks for specific outstanding requirements.
+    let sentence = lowered.trim_end_matches(['.', '!', '。', '！', '…']);
+    let standalone = !sentence.contains(['\n', '.', '。', '!', '！', '?', '？']);
+    let promise = ["我将", "我会", "让我", "接下来我", "下一步我", "现在我", "我先",
+        "i will ", "i'll ", "let me ", "i am going to ", "i’m going to "]
+        .iter().any(|prefix| sentence.starts_with(prefix));
+    !(standalone && promise)
 }
 
 #[cfg(test)]
@@ -1385,5 +1455,20 @@ mod range_model_view_tests {
         assert_eq!(cursor["nextOffset"], json!(4));
         assert_eq!(cursor["complete"], json!(false));
         assert!(!messages[0].to_string().contains("must-not-leak"));
+    }
+}
+
+#[cfg(test)]
+mod stop_completion_tests {
+    use super::looks_like_final_answer;
+    #[test]
+    fn short_answers_and_delivered_recommendations_do_not_trigger_a_review() {
+        for answer in ["完成。", "42", "首先核对源数据，然后按原因统计。", "下一步建议优化调度优先级。",
+            "分析完成。\n我会建议先处理高频原因。"] {
+            assert!(looks_like_final_answer(answer), "{answer}");
+        }
+        for preface in ["", "我先查看附件结构。", "I will now summarize the stored result.", "让我继续分析。"] {
+            assert!(!looks_like_final_answer(preface), "{preface}");
+        }
     }
 }

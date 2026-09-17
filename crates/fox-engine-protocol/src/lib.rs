@@ -246,6 +246,11 @@ pub const TOOL_CONTRACTS: &[(&str, &str, &str, &str)] = &[
     ("graph_readonly_run", "project-read", "runtime", "none"),
     ("read_attachment", "attachment", "host", "none"),
     ("attachment_compute", "attachment", "host", "none"),
+    ("compute_job_start", "attachment", "host", "none"),
+    ("compute_job_status", "attachment", "host", "none"),
+    ("compute_job_cancel", "attachment", "host", "none"),
+    ("compute_job_result", "attachment", "host", "none"),
+
     // Reads bytes Host already stored for a settled call inside the Run's own
     // conversation. Nothing is executed and no file is touched, so no approval
     // level applies.

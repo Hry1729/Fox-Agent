@@ -355,6 +355,9 @@ pub struct KernelSettledToolResult {
     pub source_order: u32,
     pub state: KernelSettledToolState,
     pub result: Value,
+    /// Storage facts supplied by the Host, never by the executed tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<Value>,
 }
 
 /// One engine round output from a live loop session: either a tool proposal or
@@ -609,7 +612,7 @@ mod tests {
             assistant_message: json!({"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"read-1","name":"read","arguments":{"path":"a.txt"}}]}),
             tools: vec![KernelSettledToolResult {
                 tool_call_id: "read-1".into(), tool: "read".into(), canonical_input: json!({"path":"a.txt"}), source_order: 0,
-                state: KernelSettledToolState::Completed, result: json!({"content":[{"type":"text","text":"proof"}]}),
+                storage: None, state: KernelSettledToolState::Completed, result: json!({"content":[{"type":"text","text":"proof"}]}),
             }],
             steering: vec![],
         };

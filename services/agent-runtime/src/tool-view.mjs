@@ -45,18 +45,13 @@ const BOUNDABLE_TOOLS = new Set([
 const HEAD_BYTES = 6_000
 const TAIL_BYTES = 2_000
 const MAX_BYTES = 9_000
-const RECEIPT_MARKER = 'FOX_EXECUTION_RECEIPT_V1'
+// Exported so the legacy adapter can give receipt-bearing results the same
+// "never reshaped" treatment before falling back to its own text bound.
+export const RECEIPT_MARKER = 'FOX_EXECUTION_RECEIPT_V1'
 // The tool the model calls to recover bytes omitted from a bounded view. Its
 // schema, Run policy entry and Host dispatch live in `host-tools.mjs`,
 // `TOOL_CONTRACTS` and `runtime_host/tool_result_read.rs`.
 export const RESULT_REF_TOOL = 'read_tool_result'
-// Host caps `tool_calls.result_json` at this size (mirrors the Rust constant);
-// above it only a bounded preview survives.
-const MAX_STORED_TOOL_RESULT_BYTES = 128 * 1024
-// Slack for the result envelope (`content`, `details`, timestamps) around the
-// view payload: a result sitting near the cap is treated as NOT retrievable
-// rather than promising bytes that were replaced by a preview.
-const STORED_ENVELOPE_MARGIN_BYTES = 4_096
 // Longest single string leaf kept verbatim in a structural projection. The
 // projection lowers this progressively until the JSON fits the budget.
 const STRUCT_FIELD_BYTES = 160
@@ -187,36 +182,75 @@ function replaceLongStrings(value, fieldBytes, preserve) {
 }
 
 /**
- * Whether bytes omitted from the model view can still be recovered.
+ * Trusted storage fact for one settled tool result, produced by the Host on
+ * the durable write path — never inferred from the result's size and never
+ * taken from metadata the tool result declares about itself.
  *
- * True only while the result is small enough that Host stores it whole, so
- * `read_tool_result` can walk the real thing. Above the cap Host keeps a bounded
- * preview and no range read can reach beyond it — the projection must then keep
- * every record instead of omitting content it has no way to hand back.
+ * Shape (mirrors the interface request; all byte counts are Host-measured):
+ *   { stored: boolean, storedBytes?: number, retrievableBytes?: number,
+ *     blobSha256?: string, failureReason?: string }
+ *
+ * `stored === false` or an absent fact means "not verified": the projection
+ * must not omit bytes it cannot hand back, and must not promise that
+ * `read_tool_result` can return them.
  */
-function resultIsRetrievable(totalBytes) {
-  return totalBytes + STORED_ENVELOPE_MARGIN_BYTES <= MAX_STORED_TOOL_RESULT_BYTES
+export function normalizeToolResultStorage(storage) {
+  if (!storage || typeof storage !== 'object' || Array.isArray(storage)) return null
+  if (typeof storage.stored !== 'boolean') return null
+  const bytes = (value) => (Number.isSafeInteger(value) && value >= 0 ? value : null)
+  const storedBytes = bytes(storage.storedBytes)
+  const retrievableBytes = bytes(storage.retrievableBytes)
+  return {
+    stored: storage.stored,
+    storedBytes: storedBytes === null ? 0 : storedBytes,
+    retrievableBytes: retrievableBytes === null ? 0 : retrievableBytes,
+    blobSha256: typeof storage.blobSha256 === 'string' ? storage.blobSha256 : null,
+    failureReason: typeof storage.failureReason === 'string' ? storage.failureReason : null,
+  }
+}
+
+/**
+ * Whether every byte of this result can be read back through the Host.
+ *
+ * Decided only by the trusted storage fact: the Host must report that the
+ * complete result was stored AND that range reads can reach all of it. A
+ * partial store (`retrievableBytes < originalBytes`) is not enough — the
+ * projection would otherwise omit bytes it cannot hand back.
+ */
+export function resultIsRetrievable(storage, originalBytes) {
+  const fact = normalizeToolResultStorage(storage)
+  if (!fact || fact.stored !== true) return false
+  return fact.storedBytes >= originalBytes && fact.retrievableBytes >= originalBytes
 }
 
 /** How the model reaches bytes this projection omitted. */
-function retrievalInstruction(reference) {
-  if (!reference) {
-    return '本次未附带结果引用，请改用同一只读工具以更精确的 selector/页码重新查询。'
+function retrievalInstruction(reference, retrievable) {
+  if (retrievable && reference) {
+    return (
+      `调用 ${RESULT_REF_TOOL} {"reference":"${reference}"} 可只读取回 Host 已保存的本次结果` +
+      '（不重新执行任何工具，也不会重放写操作）；返回 details.complete=true 前按 details.nextOffset 继续接力即可取得全部原文。'
+    )
   }
-  return (
-    `调用 ${RESULT_REF_TOOL} {"reference":"${reference}"} 可只读取回 Host 已保存的本次结果` +
-    '（不重新执行任何工具，也不会重放写操作）；返回 details.complete=true 前按 details.nextOffset 继续接力即可取得全部原文。'
-  )
+  if (reference) {
+    // The reference identifies the call, but Host storage of the complete
+    // result was not confirmed: never assert that it can be read back.
+    return (
+      `本次结果的完整存储未获 Host 确认（引用 ${reference} 仅标识该次调用）。` +
+      '被省略的部分无法保证可取回，请用同一只读工具以更精确的 selector/页码重新查询；不要凭省略内容编造字段。'
+    )
+  }
+  return '本次未附带结果引用，也未获得 Host 已完整存储的确认，请改用同一只读工具以更精确的 selector/页码重新查询。'
 }
 
-function viewNote(totalBytes, retrievable, extra) {
+function viewNote(totalBytes, storageFact, retrievable, extra) {
   return {
     bounded: true,
     originalBytes: totalBytes,
     budgetBytes: MAX_BYTES,
-    // Whether every omitted byte can still be reached. False means Host did not
-    // keep the whole result, so the view must not omit anything.
+    // Whether every omitted byte can still be reached, and whether that claim
+    // rests on a trusted Host fact rather than on a size guess.
     retrievable,
+    storageVerified: storageFact !== null,
     ...extra,
   }
 }
@@ -315,28 +349,34 @@ export function pagedResume(payload, collectionKey, kept) {
  * schema. Returns null when no honest projection fits, so the caller keeps the
  * original content rather than publishing a view whose navigation lies.
  */
-export function projectStructuredText(tool, parsed, maxBytes, reference) {
+export function projectStructuredText(tool, parsed, maxBytes, reference, storage = null) {
   if (parsed === null || typeof parsed !== 'object') return null
   const isArray = Array.isArray(parsed)
   const totalBytes = utf8Bytes(JSON.stringify(parsed))
+  const storageFact = normalizeToolResultStorage(storage)
   // Decided once for the whole payload: omitting anything is only honest while
-  // the omitted bytes stay reachable.
-  const retrievable = resultIsRetrievable(totalBytes)
+  // the omitted bytes stay reachable, and reachability comes from the Host's
+  // storage fact — never from the payload's size.
+  const retrievable = resultIsRetrievable(storageFact, totalBytes)
+  // Every projection below can remove bytes, including string leaves and the
+  // final envelope. A navigation link alone does not recover this exact result.
+  if (!(retrievable && reference)) return null
   const note = viewNote(
     totalBytes,
+    storageFact,
     retrievable,
     reference
       ? {
           resultRef: reference,
-          resultRefNote: retrievalInstruction(reference),
+          resultRefNote: retrievalInstruction(reference, retrievable),
           reason: retrievable
-            ? '模型视图有界化：原始结果对象未被修改。被省略的内容可按 resultRef 取回，不要凭省略内容编造字段。'
-            : '模型视图有界化：原始结果对象未被修改。此结果体量接近或超过 Host 存储上限，超出的部分只会存为摘要预览，因此本视图不省略任何记录。',
+            ? '模型视图有界化：原始结果对象未被修改。被省略的内容已由 Host 完整存储，可按 resultRef 取回；不要凭省略内容编造字段。'
+            : '模型视图有界化：原始结果对象未被修改。Host 未确认完整存储，本视图不省略任何无法取回的记录。',
         }
       : {
           reason: retrievable
             ? '模型视图有界化：原始结果对象未被修改。被省略的记录只能按下述续读方式取回，不要凭省略内容编造字段。'
-            : '模型视图有界化：原始结果对象未被修改。此结果体量接近或超过 Host 存储上限，因此本视图不省略任何记录。',
+            : '模型视图有界化：原始结果对象未被修改。Host 未确认完整存储且未附带引用，因此本视图不省略任何记录。',
         },
   )
 
@@ -386,8 +426,8 @@ export function projectStructuredText(tool, parsed, maxBytes, reference) {
         if (dropped.omittedItems > 0) {
           let advice = resumable
             ? '用同一只读工具按 next 的页码继续查询即可取回'
-            : `${retrievalInstruction(reference)} `
-          if (resumable && reference) {
+            : `${retrievalInstruction(reference, retrievable)} `
+          if (resumable && reference && retrievable) {
             advice += `；也可调用 ${RESULT_REF_TOOL} {"reference":"${reference}"} 按范围读回本次保存的原文`
           }
           advice += '；不要凭被省略的内容编造字段，也不要为读取历史结果而重放任何写操作。'
@@ -409,10 +449,10 @@ export function projectStructuredText(tool, parsed, maxBytes, reference) {
   const fallback = JSON.stringify(
     composeView(
       null,
-      viewNote(totalBytes, retrievable, {
+      viewNote(totalBytes, storageFact, retrievable, {
         ...(reference ? { resultRef: reference } : {}),
         omitted: true,
-        note: retrievalInstruction(reference),
+        note: retrievalInstruction(reference, retrievable),
       }),
       false,
       next,
@@ -436,10 +476,10 @@ function navigationOf(text) {
   return JSON.stringify(parsed.next)
 }
 
-function textBoundNotice(total, headBytes, tailBytes, omitted, reference) {
+function textBoundNotice(total, headBytes, tailBytes, omitted, reference, retrievable) {
   return [
     `[Fox 已为本条工具结果建立有界视图：原文约 ${total} 字节，模型上下文中保留开头 ${headBytes} 与结尾 ${tailBytes} 字节（原始结果对象未被修改）。`,
-    retrievalInstruction(reference),
+    retrievalInstruction(reference, retrievable),
     '也可以按需用同一只读工具以更精确的 selector/页码重新查询——office_help 用 property=<属性名> 或 page=<页码>，office_read/read 用更精确的 selector 或更小范围；不要凭省略内容编造字段，也不要为读取历史结果重复任何写操作。]',
   ]
     .filter(Boolean)
@@ -455,8 +495,12 @@ function textBoundNotice(total, headBytes, tailBytes, omitted, reference) {
  * **unchanged** rather than cut: a head/tail cut would produce invalid JSON and
  * hide records whose continuation was dropped with it. Returning the original
  * is the truthful model view — nothing omitted, nothing to reach for.
+ *
+ * `storage` is the Host's trusted storage fact for this result (see
+ * `normalizeToolResultStorage`). Without it, no omission and no retrieval
+ * promise is made.
  */
-export function boundToolText(tool, { isError = false, text = '', resultRef = null } = {}) {
+export function boundToolText(tool, { isError = false, text = '', resultRef = null, storage = null } = {}) {
   if (isError || !BOUNDABLE_TOOLS.has(tool)) return null
   if (typeof text !== 'string' || utf8Bytes(text) <= MAX_BYTES) return null
   // A receipt block is execution evidence and is never reshaped.
@@ -471,7 +515,7 @@ export function boundToolText(tool, { isError = false, text = '', resultRef = nu
       parsed = undefined
     }
     if (parsed !== undefined) {
-      const projected = projectStructuredText(tool, parsed, MAX_BYTES, resultRef)
+      const projected = projectStructuredText(tool, parsed, MAX_BYTES, resultRef, storage)
       // No honest structured view: keep the payload intact. `next` alone may
       // exceed the whole budget, and omitting records it cannot point back to
       // would make the view lie about navigation.
@@ -480,19 +524,18 @@ export function boundToolText(tool, { isError = false, text = '', resultRef = nu
   }
 
   // A head/tail cut keeps the beginning and the end but loses the middle, so it
-  // is only honest while the omitted bytes can be walked back: Host must keep
-  // the whole result and the view must carry the reference. Without both there
-  // is no path to the middle, and the text is published unchanged rather than
-  // summarized into something unreachable.
-  if (!(resultIsRetrievable(utf8Bytes(text)) && resultRef)) return text
+  // is only honest while the omitted bytes can be walked back: the Host must
+  // have confirmed complete storage and the view must carry the reference.
+  // Both conditions come from trusted facts, never from the text's size.
   const total = utf8Bytes(text)
+  if (!(resultIsRetrievable(storage, total) && resultRef)) return text
   const head = utf8Prefix(text, HEAD_BYTES)
   const tail = utf8Suffix(text, TAIL_BYTES)
   const omitted = Math.max(0, total - utf8Bytes(head) - utf8Bytes(tail))
   const parts = [
     head,
     '',
-    textBoundNotice(total, utf8Bytes(head), utf8Bytes(tail), omitted, resultRef),
+    textBoundNotice(total, utf8Bytes(head), utf8Bytes(tail), omitted, resultRef, true),
     `…[省略约 ${omitted} 字节，可用同一只读工具按需取回]…`,
     '',
     tail,
@@ -508,12 +551,12 @@ export function boundToolText(tool, { isError = false, text = '', resultRef = nu
  * Bound a settled result's content array for the model view. Returns the
  * possibly-replaced content; durable callers must keep the original result.
  */
-export function boundToolResultContent(tool, { isError = false, content = [], resultRef = null } = {}) {
+export function boundToolResultContent(tool, { isError = false, content = [], resultRef = null, storage = null } = {}) {
   if (isError || !BOUNDABLE_TOOLS.has(tool) || !Array.isArray(content)) return content
   let changed = false
   const next = content.map(block => {
     if (!block || block.type !== 'text') return block
-    const bounded = boundToolText(tool, { isError, text: block.text, resultRef })
+    const bounded = boundToolText(tool, { isError, text: block.text, resultRef, storage })
     // A structured payload returned unchanged is not a change.
     if (bounded === null || bounded === block.text) return block
     changed = true
@@ -576,8 +619,8 @@ export function readResultNavigationBlock(details) {
  * reachable; for every other tool it is the existing bounded view. `details`
  * may be null or absent.
  */
-export function modelToolResultContent(tool, { isError = false, content = [], details = null, resultRef = null } = {}) {
-  const bounded = boundToolResultContent(tool, { isError, content, resultRef })
+export function modelToolResultContent(tool, { isError = false, content = [], details = null, resultRef = null, storage = null } = {}) {
+  const bounded = boundToolResultContent(tool, { isError, content, resultRef, storage })
   const view = Array.isArray(bounded) ? bounded : content
   if (isError || tool !== RESULT_REF_TOOL) return view
   const block = readResultNavigationBlock(details)

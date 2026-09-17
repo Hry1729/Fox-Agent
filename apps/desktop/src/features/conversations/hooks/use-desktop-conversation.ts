@@ -777,6 +777,20 @@ export function useDesktopConversation(): DesktopConversationState {
     }
   }, [activeConversationId, activeRunId, activeRunStatus, detail?.lastRun?.errorCode, refreshList])
 
+  useEffect(() => {
+    const onContinued = (event: Event) => {
+      const payload = (event as CustomEvent<{ conversationId: string; started: { run: { id: string } } }>).detail
+        if (!payload?.conversationId || !payload.started?.run?.id) return
+        if (detail?.conversation.id !== payload.conversationId) return
+      activeRunIdRef.current = payload.started.run.id
+      void desktopClient.loadConversation(payload.conversationId).then(persisted => {
+        setDetail(current => current?.conversation.id === payload.conversationId ? persisted : current)
+      }).catch(() => undefined)
+    }
+    window.addEventListener('fox:continued-run', onContinued)
+      return () => window.removeEventListener('fox:continued-run', onContinued)
+    }, [detail?.conversation.id])
+
   const send = useCallback(async (text: string, model?: string, files: Array<{ filename?: string; mediaType?: string; url?: string }> = [], runtimeText?: string) => {
     const cleanText = text.trim()
     const cleanRuntimeText = runtimeText?.trim() || cleanText

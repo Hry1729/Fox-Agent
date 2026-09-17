@@ -365,16 +365,10 @@ pub(super) fn execute(
     let conversation_id = binding.conversation_id.as_str();
     let text = |field, max| super::required_bounded_text(input, field, max);
     let optional = |field, max| super::optional_bounded_text(input, field, max);
-    let remaining = binding
-        .budgets
-        .run_execution_ms
-        .saturating_sub(
-            database
-                .kernel_build_full_snapshot(run_id)?
-                .running_elapsed_ms,
-        )
-        .min(binding.budgets.tool_execution_ms)
-        .max(0) as u64;
+    let remaining = binding.budgets.limit_operation_ms(
+        binding.budgets.tool_execution_ms,
+        database.kernel_build_full_snapshot(run_id)?.running_elapsed_ms,
+    ).max(0) as u64;
     if remaining == 0 {
         return Err("Kernel delegation budget exhausted".into());
     }
@@ -439,7 +433,9 @@ pub(super) fn execute(
                 _ => return Err("invalid child delegation mode".into()),
             };
             let mut budget = super::normalized_child_budget(input.get("budget"), max_output()?)?;
-            budget.max_duration_ms = budget.max_duration_ms.min(binding.budgets.run_execution_ms);
+            if binding.budgets.run_execution_limited {
+                budget.max_duration_ms = budget.max_duration_ms.min(binding.budgets.run_execution_ms);
+            }
             create_child(
                 database,
                 binding,

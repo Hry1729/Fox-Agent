@@ -7,6 +7,7 @@ import {
   defineFoxTools,
   FOX_TOOL_DEFINITION_VERSION,
 } from '../src/tool-adapter.mjs'
+import { RESULT_REF_TOOL } from '../src/tool-view.mjs'
 
 function piTool(overrides = {}) {
   return {
@@ -114,9 +115,112 @@ test('normalizes primitive, missing, circular, and oversized Fox tool results', 
     ok: true,
     self: '[Circular]',
   })
+  // Oversized results from a non-reference tool are published intact: the
+  // unified projection declines (execution/fact tools are never reshaped), and
+  // there is no structure-breaking character cut and no retrieval promise.
   const oversized = await tools[3].execute('oversized-call', {})
-  assert.equal(oversized.details.outputTruncated, true)
-  assert.match(oversized.content[0].text, /\[Tool result truncated\]$/)
+  assert.equal(oversized.details.outputTruncated, false)
+  assert.equal(oversized.details.projectionDeclined, true)
+  assert.deepEqual(JSON.parse(oversized.content[0].text), { value: 'x'.repeat(120_100) },
+    'the oversized payload must stay valid JSON with every byte intact')
+  assert.ok(!oversized.content[0].text.includes('[Tool result truncated]'))
+  assert.ok(!oversized.content[0].text.includes('可只读取回'))
+})
+
+test('oversized results use the unified projection: valid JSON, next, references, receipts', async () => {
+  // Sized so the serialized form exceeds the 120k-char pass-through threshold.
+  // Retrieval is promised only for results the Host's trusted storage fact says
+  // were stored complete — that is what the `storageFor` resolver supplies here,
+  // exactly as the production transport must (never from payload size).
+  const bigJson = JSON.stringify({
+    format: 'docx',
+    element: 'paragraph',
+    page: 1,
+    pageSize: 60,
+    properties: Array.from({ length: 370 }, (_, index) => ({ name: `prop-${index}`, summary: 'x'.repeat(300) })),
+    next: { page: 2, pageSize: 60 },
+  })
+  const bigText = `正文 😀 ${'x'.repeat(118_000)}${'资料'.repeat(1_000)}${'😀'.repeat(400)}`
+  const storedFacts = new Map()
+  const storageFor = (toolCallId, result) => {
+    const serialized = typeof result === 'string' ? result : JSON.stringify(result)
+    const total = Buffer.byteLength(serialized, 'utf8')
+    // The Host confirms it stored this call's complete result.
+    storedFacts.set(toolCallId, total)
+    return { stored: true, storedBytes: total, retrievableBytes: total }
+  }
+  const tools = adaptFoxToolsToPi(defineFoxTools([
+    piTool({ name: 'office_help', execute: async () => bigJson }),
+    piTool({ name: 'read', execute: async () => bigText }),
+    piTool({
+      name: 'write_file',
+      execute: async () => `FOX_EXECUTION_RECEIPT_V1 {"tool":"write_file"} ${'payload '.repeat(30_000)}`,
+    }),
+  ], {
+    source: 'fox-test',
+    execution: 'runtime',
+    trusted: true,
+  }), { runId: 'run-view', storageFor })
+  const [officeHelp, read, writeFile] = tools
+
+  // Structured payload: the view stays parseable JSON within the unified
+  // budget, shrinks the bulky collection, and keeps navigation reachable.
+  const helpResult = await officeHelp.execute('help-call', {})
+  assert.ok(bigJson.length > 120_000)
+  const view = JSON.parse(helpResult.content[0].text)
+  assert.ok(view.foxModelView.bounded)
+  assert.equal(view.foxModelView.storageVerified, true)
+  assert.equal(view.foxModelView.retrievable, true)
+  assert.ok(view.properties.length < 370)
+  assert.ok(view.next)
+  assert.ok(Buffer.byteLength(helpResult.content[0].text, 'utf8') <= 9_000)
+
+  // Oversized plain text from a reference tool: head/tail bound on code-point
+  // boundaries, carrying the stable fox-result:// reference for read-back.
+  const readResult = await read.execute('read-call', {})
+  assert.ok(readResult.content[0].text.includes('fox-result://run-view/read-call'))
+  assert.ok(readResult.content[0].text.includes(RESULT_REF_TOOL))
+  assert.ok(!readResult.content[0].text.includes('�'))
+
+  // A receipt-bearing result is execution evidence: never reshaped.
+  const receipt = await writeFile.execute('write-call', {})
+  assert.ok(receipt.content[0].text.startsWith('FOX_EXECUTION_RECEIPT_V1'))
+  assert.equal(receipt.details.outputTruncated, false)
+  assert.ok(storedFacts.size >= 2, 'storage facts are resolved per settled call')
+})
+
+test('oversized results without a trusted storage fact keep every byte and promise nothing', async () => {
+  // The ABC review R5 counterexample: a large JSON payload for a boundable
+  // tool must never become unparseable text, and a reference alone must not be
+  // presented as proof that Host stored the result. A self-declared storage
+  // claim inside the result is ignored too.
+  const payload = {
+    records: Array.from({ length: 600 }, (_, index) => ({ id: index, body: 'y'.repeat(200) })),
+  }
+  const tools = adaptFoxToolsToPi(defineFoxTools([
+    piTool({
+      name: 'office_read',
+      execute: async () => ({ ...payload, details: { storage: { stored: true, storedBytes: 999_999 } } }),
+    }),
+  ], {
+    source: 'fox-test',
+    execution: 'runtime',
+    trusted: true,
+  }), { runId: 'run-unverified' })
+  const result = await tools[0].execute('unverified-call', {})
+  const text = result.content[0].text
+  // Whatever shape the projection chose, the payload must stay parseable JSON
+  // and must not claim that omitted bytes can be read back.
+  const parsed = JSON.parse(text)
+  assert.ok(parsed && typeof parsed === 'object', 'the view must remain valid JSON')
+  assert.ok(!text.includes('可只读取回'), 'no retrieval promise without a trusted fact')
+  if (parsed.foxModelView) {
+    assert.equal(parsed.foxModelView.retrievable, false)
+    assert.equal(parsed.foxModelView.storageVerified, false)
+    assert.equal((parsed.records ?? payload.records).length, 600, 'no record may be dropped')
+  } else {
+    assert.equal(text, JSON.stringify({ ...payload, details: { storage: { stored: true, storedBytes: 999_999 } } }))
+  }
 })
 
 test('routes imported Pi tools through the Fox Host executor by default', async () => {

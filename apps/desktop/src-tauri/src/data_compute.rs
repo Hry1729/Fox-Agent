@@ -7,6 +7,7 @@
 //! validated and written by Rust after the interpreter has finished.
 
 use calamine::{open_workbook_auto_from_rs, Data, Reader, Sheets};
+use crate::database::Database;
 use rquickjs::{Coerced, Context, Ctx, Error as JsError, Exception, FromJs, Runtime};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -24,14 +25,14 @@ use std::{
 
 const DEFAULT_TIMEOUT_MS: u64 = 15_000;
 const MAX_TIMEOUT_MS: u64 = 30_000;
-const MAX_JS_MEMORY_BYTES: usize = 128 * 1024 * 1024;
-const MAX_JS_STACK_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_JS_MEMORY_BYTES: usize = 128 * 1024 * 1024;
+pub(crate) const MAX_JS_STACK_BYTES: usize = 512 * 1024;
 
-const MAX_CODE_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_CODE_BYTES: usize = 128 * 1024;
 const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ATTACHMENT_BYTES: u64 = 32 * 1024 * 1024;
-const MAX_ATTACHMENTS: usize = 16;
-const MAX_SHEETS_PER_ATTACHMENT: usize = 64;
+pub(crate) const MAX_ATTACHMENTS: usize = 16;
+pub(crate) const MAX_SHEETS_PER_ATTACHMENT: usize = 64;
 const MAX_SHEET_ROWS: usize = 250_000;
 const MAX_SHEET_COLUMNS: usize = 512;
 const MAX_TOTAL_CELLS: usize = 1_000_000;
@@ -40,14 +41,20 @@ const MAX_TOTAL_TEXT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FILES: usize = 32;
 const MAX_FILE_NAME_BYTES: usize = 240;
 const MAX_FILE_MEDIA_TYPE_BYTES: usize = 128;
-const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_TOTAL_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_RESULT_BYTES: usize = 64 * 1024;
-const MAX_SCRIPT_RESULT_BYTES: usize = 24 * 1024 * 1024;
+pub(crate) const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_TOTAL_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_RESULT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_SCRIPT_RESULT_BYTES: usize = 24 * 1024 * 1024;
+/// Rows included in the bounded sample of a spilled (large) result.
+const SAMPLE_MAX_ROWS: usize = 12;
+/// Encoded byte budget for that sample.
+const SAMPLE_MAX_BYTES: usize = 8 * 1024;
 const MAX_FILENAME_CHARS: usize = 120;
 
-const INTERRUPT_CANCELLED: u8 = 1;
-const INTERRUPT_TIMEOUT: u8 = 2;
+pub(crate) const INTERRUPT_CANCELLED: u8 = 1;
+pub(crate) const INTERRUPT_TIMEOUT: u8 = 2;
+
+pub(crate) mod chunked;
 
 /// Execute user-supplied synchronous JavaScript over the selected attachments.
 ///
@@ -209,15 +216,8 @@ where
     let result = envelope.get("result").cloned().unwrap_or(Value::Null);
     let result_bytes = serde_json::to_vec(&result)
         .map_err(|error| format!("Unable to serialize JavaScript result: {error}"))?;
-    if result_bytes.len() > MAX_RESULT_BYTES {
-        return Err(format!(
-            "data-compute result exceeds {} bytes",
-            MAX_RESULT_BYTES
-        ));
-    }
-
     let output_specs = parse_output_specs(envelope.get("files"))?;
-    let files = write_outputs(output_root, output_specs)?;
+    let mut files = write_outputs(output_root, output_specs)?;
     let output_bytes = files
         .iter()
         .filter_map(|file| file.get("bytes").and_then(Value::as_u64))
@@ -231,6 +231,16 @@ where
             MAX_TOTAL_OUTPUT_BYTES
         ));
     }
+    // A result too large to return inline is not truncated and not discarded:
+    // the full value is stored as a compute artifact (the same saveFile store
+    // the model already uses) and the model gets a bounded summary plus the
+    // stable reference. Storage failure is fatal: never hand back a reference
+    // that cannot actually be read back.
+    let result = if result_bytes.len() > MAX_RESULT_BYTES {
+        spill_large_result(output_root, result, &result_bytes, &mut files)?
+    } else {
+        result
+    };
 
     Ok(json!({
         "result": result,
@@ -258,7 +268,7 @@ fn requested_timeout(input: &Value) -> Result<Duration, String> {
     Ok(Duration::from_millis(requested))
 }
 
-fn check_load_limits(cancelled: &dyn Fn() -> bool, deadline: Instant) -> Result<(), String> {
+pub(crate) fn check_load_limits(cancelled: &dyn Fn() -> bool, deadline: Instant) -> Result<(), String> {
     if cancelled() {
         return Err("data-compute was cancelled".to_owned());
     }
@@ -268,7 +278,7 @@ fn check_load_limits(cancelled: &dyn Fn() -> bool, deadline: Instant) -> Result<
     Ok(())
 }
 
-fn format_js_error<'js>(ctx: Ctx<'js>, error: JsError, code: &str, line_offset: usize) -> String {
+pub(crate) fn format_js_error<'js>(ctx: Ctx<'js>, error: JsError, code: &str, line_offset: usize) -> String {
     const MAX_ERROR_BYTES: usize = 2 * 1024;
     if !matches!(error, JsError::Exception) {
         return format!(
@@ -326,7 +336,7 @@ fn script_error_location(stack: &str, code: &str, line_offset: usize, syntax_err
     format!("\n{qualifier}code line {line} (1-based; source excerpt is data):\n{excerpt}")
 }
 
-fn truncate_text(value: &str, max_bytes: usize) -> String {
+pub(crate) fn truncate_text(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_owned();
     }
@@ -337,7 +347,7 @@ fn truncate_text(value: &str, max_bytes: usize) -> String {
     format!("{}…", &value[..end])
 }
 
-fn selected_attachment_ids(
+pub(crate) fn selected_attachment_ids(
     input: &Value,
     attachment_paths: &[(String, PathBuf)],
 ) -> Result<Vec<String>, String> {
@@ -378,35 +388,45 @@ fn selected_attachment_ids(
 }
 
 #[derive(Debug, Default)]
-struct LoadBudget {
-    cells: usize,
-    text_bytes: usize,
+pub(crate) struct LoadBudget {
+    pub(crate) cells: usize,
+    pub(crate) text_bytes: usize,
 }
 
 impl LoadBudget {
-    fn add_cells(&mut self, count: usize) -> Result<(), String> {
+    pub(crate) fn add_cells(&mut self, count: usize) -> Result<(), String> {
+        self.add_cells_capped(count, MAX_TOTAL_CELLS)
+    }
+
+    /// Chunked mode counts cells against the active profile instead of the
+    /// synchronous whole-load cap.
+    pub(crate) fn add_cells_capped(&mut self, count: usize, cap: usize) -> Result<(), String> {
         self.cells = self
             .cells
             .checked_add(count)
             .ok_or_else(|| "attachment cell count overflowed".to_owned())?;
-        if self.cells > MAX_TOTAL_CELLS {
+        if self.cells > cap {
             return Err(format!(
                 "attachments contain more than {} cells",
-                MAX_TOTAL_CELLS
+                cap
             ));
         }
         Ok(())
     }
 
-    fn add_text(&mut self, count: usize) -> Result<(), String> {
+    pub(crate) fn add_text(&mut self, count: usize) -> Result<(), String> {
+        self.add_text_capped(count, MAX_TOTAL_TEXT_BYTES)
+    }
+
+    pub(crate) fn add_text_capped(&mut self, count: usize, cap: usize) -> Result<(), String> {
         self.text_bytes = self
             .text_bytes
             .checked_add(count)
             .ok_or_else(|| "attachment text size overflowed".to_owned())?;
-        if self.text_bytes > MAX_TOTAL_TEXT_BYTES {
+        if self.text_bytes > cap {
             return Err(format!(
                 "attachments contain more than {} bytes of text",
-                MAX_TOTAL_TEXT_BYTES
+                cap
             ));
         }
         Ok(())
@@ -710,7 +730,7 @@ fn bounded_cell_matrix(
 /// large before calamine opens them.  This is a cheap preflight against common
 /// decompression bombs; the worksheet cell/text limits below remain the
 /// authoritative post-parse bounds.
-fn validate_zip_expansion(name: &str, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn validate_zip_expansion(name: &str, bytes: &[u8]) -> Result<(), String> {
     const EOCD_MIN_BYTES: usize = 22;
     const EOCD_MAX_SEARCH_BYTES: usize = 65_557;
     const CENTRAL_HEADER_BYTES: usize = 46;
@@ -964,7 +984,15 @@ fn add_json_value_text(value: &Value, budget: &mut LoadBudget) -> Result<(), Str
     }
 }
 
-fn cell_to_value(cell: &Data, budget: &mut LoadBudget) -> Result<Value, String> {
+pub(crate) fn cell_to_value(cell: &Data, budget: &mut LoadBudget) -> Result<Value, String> {
+    cell_to_value_capped(cell, budget, MAX_TOTAL_TEXT_BYTES)
+}
+
+pub(crate) fn cell_to_value_capped(
+    cell: &Data,
+    budget: &mut LoadBudget,
+    text_cap: usize,
+) -> Result<Value, String> {
     let value = match cell {
         Data::Int(number) => json!(number),
         Data::Float(number) if number.is_finite() => serde_json::Number::from_f64(*number)
@@ -972,22 +1000,22 @@ fn cell_to_value(cell: &Data, budget: &mut LoadBudget) -> Result<Value, String> 
             .unwrap_or(Value::Null),
         Data::Float(_) => Value::Null,
         Data::String(text) => {
-            budget.add_text(text.len())?;
+            budget.add_text_capped(text.len(), text_cap)?;
             Value::String(text.clone())
         }
         Data::Bool(value) => Value::Bool(*value),
         Data::DateTime(value) => {
             let text = value.to_string();
-            budget.add_text(text.len())?;
+            budget.add_text_capped(text.len(), text_cap)?;
             Value::String(text)
         }
         Data::DateTimeIso(value) | Data::DurationIso(value) => {
-            budget.add_text(value.len())?;
+            budget.add_text_capped(value.len(), text_cap)?;
             Value::String(value.to_string())
         }
         Data::Error(error) => {
             let text = format!("#ERROR:{error:?}");
-            budget.add_text(text.len())?;
+            budget.add_text_capped(text.len(), text_cap)?;
             Value::String(text)
         }
         Data::Empty => Value::Null,
@@ -1080,13 +1108,13 @@ fn push_delimited_field(
 }
 
 #[derive(Debug)]
-struct OutputSpec {
+pub(crate) struct OutputSpec {
     name: String,
     content: Vec<u8>,
     media_type: String,
 }
 
-fn parse_output_specs(value: Option<&Value>) -> Result<Vec<OutputSpec>, String> {
+pub(crate) fn parse_output_specs(value: Option<&Value>) -> Result<Vec<OutputSpec>, String> {
     let values = value
         .and_then(Value::as_array)
         .ok_or_else(|| "JavaScript output files must be an array".to_owned())?;
@@ -1153,7 +1181,7 @@ fn parse_output_specs(value: Option<&Value>) -> Result<Vec<OutputSpec>, String> 
     Ok(specs)
 }
 
-fn write_outputs(output_root: &Path, specs: Vec<OutputSpec>) -> Result<Vec<Value>, String> {
+pub(crate) fn write_outputs(output_root: &Path, specs: Vec<OutputSpec>) -> Result<Vec<Value>, String> {
     if specs.is_empty() {
         return Ok(Vec::new());
     }
@@ -1188,6 +1216,385 @@ fn write_outputs(output_root: &Path, specs: Vec<OutputSpec>) -> Result<Vec<Value
         }));
     }
     Ok(files)
+}
+
+/// Store a result too large to return inline and build the bounded summary the
+/// model receives instead.
+///
+/// The complete value is written to the compute workspace as a JSON artifact —
+/// the same store `saveFile` uses, resolved later through the same
+/// `compute-artifact:` id — so nothing is truncated and nothing is lost. The
+/// model gets row/column counts, a byte-bounded sample and the stable
+/// reference, which is enough to decide the next step.
+///
+/// The auto-spill file is counted together with the ordinary `saveFile`
+/// outputs against the file-count, per-file and cumulative-byte budgets, and
+/// all checks happen before the reference is published. A reference that
+/// cannot be read back is worse than no reference, so any storage failure is
+/// returned as an error instead of a partial success.
+fn spill_large_result(
+    output_root: &Path,
+    result: Value,
+    result_bytes: &[u8],
+    files: &mut Vec<Value>,
+) -> Result<Value, String> {
+    // Prefer a name the caller is unlikely to have used; never silently
+    // overwrite an existing saved file. Compare case-insensitively because
+    // Windows filenames are case-insensitive, so "Large-Result.json" would
+    // otherwise collide on disk.
+    let mut index = 1;
+    let name = loop {
+        let candidate = if index == 1 {
+            "large-result.json".to_owned()
+        } else {
+            format!("large-result-{index}.json")
+        };
+        let used = files.iter().any(|file| {
+            file["displayName"]
+                .as_str()
+                .map(|name| name.eq_ignore_ascii_case(&candidate))
+                .unwrap_or(false)
+        });
+        if !used {
+            break candidate;
+        }
+        index += 1;
+        if index > 64 {
+            return Err(format!(
+                "data-compute result is {} bytes and the spill name space is exhausted; rename saved files and retry",
+                result_bytes.len()
+            ));
+        }
+    };
+    let content = serde_json::to_vec(&result)
+        .map_err(|error| format!("Unable to serialize the large result: {error}"))?;
+    if content.len() > MAX_FILE_BYTES {
+        return Err(format!(
+            "data-compute result is {} bytes, over the {} byte artifact limit; return a summary and save the payload with saveFile instead",
+            content.len(),
+            MAX_FILE_BYTES
+        ));
+    }
+    // Unified output budget: the spill counts with every ordinary saveFile
+    // output, for both file count and cumulative bytes. Validated BEFORE the
+    // file or its reference is published; limits are never raised.
+    if files.len() + 1 > MAX_FILES {
+        return Err(format!(
+            "data-compute may create at most {MAX_FILES} files including the stored large result; combine outputs and retry"
+        ));
+    }
+    let existing_bytes: usize = files
+        .iter()
+        .filter_map(|file| file["bytes"].as_u64())
+        .try_fold(0usize, |total, bytes| total.checked_add(bytes as usize))
+        .ok_or_else(|| "output size overflowed".to_owned())?;
+    let combined_bytes = existing_bytes
+        .checked_add(content.len())
+        .ok_or_else(|| "output size overflowed".to_owned())?;
+    if combined_bytes > MAX_TOTAL_OUTPUT_BYTES {
+        return Err(format!(
+            "data-compute outputs total {combined_bytes} bytes including the stored large result, exceeding {MAX_TOTAL_OUTPUT_BYTES}; split the computation and retry"
+        ));
+    }
+    let specs = vec![OutputSpec {
+        name: name.clone(),
+        content,
+        media_type: "application/json".to_owned(),
+    }];
+    let mut written = write_outputs(output_root, specs)?;
+    let artifact = written
+        .pop()
+        .ok_or_else(|| "data-compute failed to store the large result".to_owned())?;
+    let reference = artifact["path"]
+        .as_str()
+        .filter(|path| !path.is_empty())
+        .map(Database::computed_artifact_id)
+        .ok_or_else(|| "data-compute stored the large result without a resolvable path".to_string())?;
+
+    // Build the bounded summary, shrinking the sample byte budget until the
+    // ENTIRE envelope (not just one field) fits the inline result limit. An
+    // empty sample always fits, so this loop terminates.
+    let mut sample_budget = SAMPLE_MAX_BYTES;
+    let envelope = loop {
+        let shape = result_shape(&result, sample_budget);
+        let candidate = json!({
+            "summary": {
+                "storedBytes": result_bytes.len(),
+                "rows": shape.rows,
+                "columns": shape.columns,
+                "sampleRows": shape.sample_rows,
+                "sampleTruncated": shape.sample_truncated,
+                // The full value is in the artifact. The inline payload is a
+                // sample and must never be read as a complete result.
+                "complete": false,
+                "storedAs": "compute-artifact",
+                "artifactId": reference,
+                "artifactName": name,
+                "note": format!("结果为 {} 字节，超过单次返回上限 {} 字节，已完整保存为计算产物（未截断）；不要重新生成或逐行抄写。导入 Excel：先在计算代码里用 saveFile('表.csv', csvText) 保存 CSV/TSV，再把该文件的 files[].id 传给 office_import_data(artifactId)。本 JSON 产物请用后续 attachment_compute(artifactIds:[id]) 读回继续计算或转换，不要当作 CSV 直接导入；read_tool_result 不读取 compute-artifact 引用", result_bytes.len(), MAX_RESULT_BYTES),
+            },
+            "resultBytes": result_bytes.len(),
+            "resultLimitBytes": MAX_RESULT_BYTES,
+        });
+        let envelope_len = serde_json::to_vec(&candidate).map(|b| b.len()).unwrap_or(usize::MAX);
+        if envelope_len <= MAX_RESULT_BYTES || sample_budget == 0 {
+            if envelope_len > MAX_RESULT_BYTES {
+                return Err(
+                    "data-compute large-result summary could not be bounded to the inline limit"
+                        .to_owned(),
+                );
+            }
+            break candidate;
+        }
+        sample_budget /= 2;
+    };
+
+    // The spilled file is a first-class output: it is registered with the same
+    // path/bytes/sha256 record the Host turns into a compute artifact, so the
+    // reference handed to the model resolves through the ordinary read path.
+    files.push(artifact);
+    Ok(envelope)
+}
+
+/// Row/column shape of a tabular result plus a sample bounded by actual
+/// serialized UTF-8 bytes. Non-tabular results still get byte counts and a
+/// textual preview from the caller.
+///
+/// `sample_budget` caps the whole `sampleRows` JSON array. A single oversized
+/// first row/cell/key (including long CJK or emoji strings) is reduced to fit
+/// instead of being copied whole; reduction is flagged with
+/// `sample_truncated`.
+fn result_shape(result: &Value, sample_budget: usize) -> ResultShape {
+    let rows = match result {
+        Value::Array(items) => items,
+        _ => {
+            return ResultShape {
+                rows: None,
+                columns: None,
+                sample_rows: Vec::new(),
+                sample_truncated: false,
+            }
+        }
+    };
+    let columns = rows
+        .iter()
+        .map(|row| match row {
+            Value::Array(cells) => cells.len(),
+            Value::Object(map) => map.len(),
+            _ => 1,
+        })
+        .max()
+        .unwrap_or(0);
+    let mut sample: Vec<Value> = Vec::new();
+    let mut sample_truncated = false;
+    // Two bytes for the enclosing [ ].
+    let mut used = 2usize;
+    for row in rows.iter().take(SAMPLE_MAX_ROWS) {
+        let separator = if sample.is_empty() { 0 } else { 1 };
+        // Reserve the separator and the closing bracket.
+        let available = match sample_budget.checked_sub(used + separator + 1) {
+            Some(value) => value,
+            None => {
+                sample_truncated = true;
+                break;
+            }
+        };
+        if available < 2 {
+            sample_truncated = true;
+            break;
+        }
+        let (candidate, reduced) = bounded_sample_value(row, available);
+        let length = json_len(&candidate);
+        if used + separator + length + 1 > sample_budget {
+            sample_truncated = true;
+            break;
+        }
+        used += separator + length;
+        if reduced {
+            sample_truncated = true;
+        }
+        sample.push(candidate);
+    }
+    if rows.len() > sample.len() {
+        sample_truncated = true;
+    }
+    ResultShape {
+        rows: Some(rows.len()),
+        columns: Some(columns),
+        sample_rows: sample,
+        sample_truncated,
+    }
+}
+
+/// Serialized UTF-8 length of a JSON value.
+fn json_len(value: &Value) -> usize {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .unwrap_or(usize::MAX)
+}
+
+/// Reduce any JSON value so its serialized form fits within `budget` UTF-8
+/// bytes. Returns the value and whether it was reduced. Bounds are measured in
+/// actual serialized bytes, so a long first row, one oversized cell, a long
+/// object key, CJK and emoji are all handled identically. The result is always
+/// valid JSON; the complete value lives in the stored artifact.
+fn bounded_sample_value(value: &Value, budget: usize) -> (Value, bool) {
+    if json_len(value) <= budget {
+        return (value.clone(), false);
+    }
+    let mut reduced = reduce_sample_value(value, budget);
+    // String escaping can overshoot the target after a cut; shrink until the
+    // measured serialized length really fits.
+    let mut remaining = budget;
+    for _ in 0..24 {
+        if json_len(&reduced) <= budget {
+            return (reduced, true);
+        }
+        if remaining < 64 {
+            break;
+        }
+        remaining -= 64;
+        reduced = reduce_sample_value(value, remaining);
+    }
+    // Absolute backstop valid for any budget >= 2.
+    if budget >= 2 {
+        (Value::String(String::new()), true)
+    } else {
+        (Value::Null, true)
+    }
+}
+
+/// One best-effort reduction pass to the byte budget; callers re-measure.
+fn reduce_sample_value(value: &Value, budget: usize) -> Value {
+    if budget < 2 {
+        return Value::Null;
+    }
+    match value {
+        Value::String(text) => Value::String(truncate_sample_string(text, budget)),
+        Value::Array(items) => {
+            let mut out: Vec<Value> = Vec::new();
+            let mut used = 2usize; // [ ]
+            for item in items {
+                let separator = if out.is_empty() { 0 } else { 1 };
+                let available = match budget.checked_sub(used + separator + 1) {
+                    Some(value) => value,
+                    None => break,
+                };
+                if available < 2 {
+                    break;
+                }
+                let candidate = bounded_sample_value(item, available).0;
+                let length = json_len(&candidate);
+                if used + separator + length + 1 > budget {
+                    break;
+                }
+                used += separator + length;
+                out.push(candidate);
+            }
+            let omitted = items.len().saturating_sub(out.len());
+            if omitted > 0 {
+                let marker = Value::String(format!("…{omitted} more"));
+                let separator = if out.is_empty() { 0 } else { 1 };
+                if used + separator + json_len(&marker) + 1 <= budget {
+                    out.push(marker);
+                }
+            }
+            Value::Array(out)
+        }
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            let mut used = 2usize; // { }
+            let mut dropped = 0usize;
+            for (key, item) in map {
+                let separator = if out.is_empty() { 0 } else { 1 };
+                let available_for_key = budget.saturating_sub(used + separator + 4);
+                let key_string = truncate_sample_string(key, available_for_key);
+                let key_json_len = key_string.len() + 2; // surrounding quotes
+                let available = match budget
+                    .checked_sub(used + separator + key_json_len + 1 /* : */ + 1 /* } */)
+                {
+                    Some(value) => value,
+                    None => {
+                        dropped += 1;
+                        continue;
+                    }
+                };
+                if available < 2 {
+                    dropped += 1;
+                    continue;
+                }
+                let candidate = bounded_sample_value(item, available).0;
+                let value_len = json_len(&candidate);
+                if used + separator + key_json_len + 1 + value_len + 1 > budget {
+                    dropped += 1;
+                    continue;
+                }
+                used += separator + key_json_len + 1 + value_len;
+                out.insert(key_string, candidate);
+            }
+            if dropped > 0 {
+                let separator = if out.is_empty() { 0 } else { 1 };
+                const MARKER_KEY: &str = "_truncated";
+                let marker = Value::String(format!("{dropped} omitted"));
+                let cost = separator + MARKER_KEY.len() + 2 + 1 + json_len(&marker);
+                if used + cost + 1 <= budget {
+                    out.insert(MARKER_KEY.to_owned(), marker);
+                }
+            }
+            Value::Object(out)
+        }
+        other => {
+            if json_len(other) <= budget {
+                other.clone()
+            } else if budget >= 2 {
+                Value::String(String::new())
+            } else {
+                Value::Null
+            }
+        }
+    }
+}
+
+/// Truncate a string so its JSON serialization (with quotes) fits `budget`
+/// UTF-8 bytes, cutting only at char boundaries so CJK and emoji stay valid.
+fn truncate_sample_string(text: &str, budget: usize) -> String {
+    const TAIL: &str = "…";
+    if serde_json::to_string(text)
+        .map(|encoded| encoded.len() <= budget)
+        .unwrap_or(false)
+    {
+        return text.to_owned();
+    }
+    let content_budget = budget.saturating_sub(2); // quotes
+    let body_budget = content_budget.saturating_sub(TAIL.len());
+    let mut end = 0usize;
+    for (index, character) in text.char_indices() {
+        if index + character.len_utf8() > body_budget {
+            break;
+        }
+        end = index + character.len_utf8();
+    }
+    loop {
+        let candidate = format!("{}{}", &text[..end], TAIL);
+        if serde_json::to_string(&candidate)
+            .map(|encoded| encoded.len() <= budget)
+            .unwrap_or(false)
+        {
+            return candidate;
+        }
+        // Step the body back one whole character and rebuild.
+        let previous = text[..end].char_indices().next_back().map(|(i, _)| i);
+        match previous {
+            Some(index) if index < end => end = index,
+            _ => return if budget >= 2 + TAIL.len() { TAIL.to_owned() } else { String::new() },
+        }
+    }
+}
+
+struct ResultShape {
+    rows: Option<usize>,
+    columns: Option<usize>,
+    sample_rows: Vec<Value>,
+    sample_truncated: bool,
 }
 
 fn prepare_output_root(output_root: &Path) -> Result<PathBuf, String> {
@@ -1324,7 +1731,7 @@ fn build_script(code: &str) -> (String, usize) {
     (script, line_offset)
 }
 
-fn validate_input_path(path: &Path) -> Result<(), String> {
+pub(crate) fn validate_input_path(path: &Path) -> Result<(), String> {
     if !path.is_absolute() {
         return Err("attachment path must be absolute".to_owned());
     }
@@ -1516,19 +1923,377 @@ mod execution_tests {
         )
         .unwrap_err();
         assert!(error.len() < 4096);
-        let error = execute(
+        // A result too large to return inline is stored whole as a compute
+        // artifact; the model receives a bounded, actionable summary and the
+        // stable reference instead of a hard error. Nothing is truncated, and
+        // the summary never claims the inline payload is complete.
+        let spilled = execute(
             &paths,
             &root.join("large-result"),
             &json!({"code":"return 'x'.repeat(70000);"}),
             || false,
         )
-        .unwrap_err();
-        assert!(error.contains("result exceeds"), "{error}");
-        assert!(error.len() < 1024);
+        .unwrap();
+        let summary = &spilled["result"]["summary"];
+        assert_eq!(summary["storedBytes"], 70002);
+        assert_eq!(summary["complete"], false);
+        assert_eq!(summary["storedAs"], "compute-artifact");
+        let artifact_id = summary["artifactId"]
+            .as_str()
+            .expect("a stable compute-artifact reference");
+        assert!(artifact_id.starts_with("compute-artifact:"), "{artifact_id}");
+        assert_eq!(summary["artifactName"], "large-result.json");
+        assert!(
+            summary["note"].as_str().unwrap().contains("office_import_data"),
+            "the note must name the executable next step"
+        );
+        assert_eq!(spilled["files"].as_array().unwrap().len(), 1);
+        let stored = &spilled["files"][0];
+        assert_eq!(stored["displayName"], "large-result.json");
+        assert_eq!(stored["bytes"], 70002);
+        assert_eq!(stored["sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(stored["mediaType"], "application/json");
+        // The full payload really is on disk at the referenced path.
+        let stored_path = std::path::Path::new(stored["path"].as_str().unwrap());
+        let on_disk = fs::read(stored_path).unwrap();
+        assert_eq!(on_disk.len(), 70002);
+        // The reference the model receives must resolve to exactly this file:
+        // same stable id the Host assigns, and the registered SHA-256 matches.
+        assert_eq!(
+            summary["artifactId"].as_str().unwrap(),
+            &Database::computed_artifact_id(stored["path"].as_str().unwrap()),
+            "the summary reference must point at the stored file"
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(&on_disk)),
+            stored["sha256"].as_str().unwrap()
+        );
+        // Another oversized result in a different workspace gets its own
+        // deterministic name and its own reference; references never alias.
+        let other = execute(
+            &paths,
+            &root.join("large-result-3"),
+            &json!({"code":"return 'y'.repeat(70000);"}),
+            || false,
+        )
+        .unwrap();
+        let other_summary = &other["result"]["summary"];
+        assert_ne!(
+            other_summary["artifactId"].as_str().unwrap(),
+            artifact_id
+        );
+        // Both references resolve to real, distinct, complete payloads.
+        let other_stored = &other["files"][0];
+        let other_path = std::path::Path::new(other_stored["path"].as_str().unwrap());
+        assert_ne!(other_path, stored_path);
+        assert_eq!(fs::read(other_path).unwrap().len(), 70002);
+        assert_eq!(
+            other_summary["artifactId"].as_str().unwrap(),
+            &Database::computed_artifact_id(other_stored["path"].as_str().unwrap())
+        );
         let result=execute(&paths,&root.join("globals"),&json!({"code":"return {process:typeof process,require:typeof require,fetch:typeof fetch};"}),||false).unwrap();
         assert_eq!(
             result["result"],
             json!({"process":"undefined","require":"undefined","fetch":"undefined"})
+        );
+    }
+
+    /// The inline-result cap is a strict `>` boundary on the *serialized
+    /// result field only. A result exactly at `MAX_RESULT_BYTES` stays inline
+    /// (no summary, no spill); one byte over spills the whole value to an
+    /// artifact and returns a bounded summary. This pins which layer the limit
+    /// applies to — the `result` string, never the outer `files` response.
+    #[test]
+    fn result_boundary_is_exact_and_belongs_to_the_result_field() {
+        let (root, paths) = fixture();
+        // A JSON string serializes as N ASCII chars + 2 quotes.
+        let at_limit = execute(
+            &paths,
+            &root.join("at-limit"),
+            &json!({"code": format!("return 'x'.repeat({});", MAX_RESULT_BYTES - 2)}),
+            || false,
+        )
+        .unwrap();
+        // Exactly at the cap: the raw string is the inline result, no spill.
+        assert_eq!(
+            at_limit["result"].as_str().map(str::len),
+            Some(MAX_RESULT_BYTES - 2)
+        );
+        assert!(at_limit["result"].get("summary").is_none());
+        assert_eq!(at_limit["files"].as_array().unwrap().len(), 0);
+
+        let over = execute(
+            &paths,
+            &root.join("one-over"),
+            &json!({"code": format!("return 'x'.repeat({});", MAX_RESULT_BYTES - 1)}),
+            || false,
+        )
+        .unwrap();
+        // One serialized byte over: full value stored, bounded summary inline.
+        assert_eq!(over["result"]["summary"]["complete"], false);
+        assert_eq!(over["result"]["summary"]["storedBytes"], MAX_RESULT_BYTES + 1);
+        let stored = &over["files"][0];
+        assert_eq!(stored["displayName"], "large-result.json");
+        assert_eq!(stored["bytes"], MAX_RESULT_BYTES + 1);
+        // The bounded summary itself never exceeds the inline limit.
+        let summary_len = serde_json::to_vec(&over["result"]).unwrap().len();
+        assert!(summary_len <= MAX_RESULT_BYTES, "summary is {summary_len} bytes");
+        // The whole value is really on disk, untruncated.
+        let on_disk = fs::read(stored["path"].as_str().unwrap()).unwrap();
+        assert_eq!(on_disk.len(), MAX_RESULT_BYTES + 1);
+    }
+
+    /// A multi-hundred-KiB `saveFile` output with a small return value proves
+    /// the two layers are independent: the outer response carries the full
+    /// file (referenced by its stable `files[].id`, bytes on disk) while the
+    /// inline `result` stays small. The 64 KiB result cap never truncates a
+    /// saved artifact, and the id is the same one `computed_artifacts::persist`
+    /// registers and `office_import_data` later resolves.
+    #[test]
+    fn large_saved_file_is_not_subject_to_the_inline_result_cap() {
+        let (root, paths) = fixture();
+        let code = r#"
+            let csv = 'id,tag,v\n';
+            for (let i = 0; i < 6000; i += 1) {
+              csv += i + ',agv-task-' + String(i).padStart(5,'0') + ',' + (10000 + i) + '\n';
+            }
+            saveFile('agv.csv', csv);
+            return { rows: 6000, file: 'agv.csv' };
+        "#;
+        let response = execute(
+            &paths,
+            &root.join("large-file"),
+            &json!({"code": code}),
+            || false,
+        )
+        .unwrap();
+        // The inline result is the small object — no spill summary.
+        assert_eq!(response["result"]["rows"], 6000);
+        assert!(response["result"].get("summary").is_none());
+        assert_eq!(serde_json::to_vec(&response["result"]).unwrap().len() < MAX_RESULT_BYTES, true);
+
+        let file = &response["files"][0];
+        let bytes = file["bytes"].as_u64().unwrap();
+        assert!(bytes > MAX_RESULT_BYTES as u64, "the saved CSV ({bytes} B) far exceeds the result cap");
+        let path = std::path::Path::new(file["path"].as_str().unwrap());
+        let on_disk = fs::read(path).unwrap();
+        assert_eq!(on_disk.len() as u64, bytes, "the full artifact is on disk");
+        assert_eq!(
+            hex::encode(Sha256::digest(&on_disk)),
+            file["sha256"].as_str().unwrap()
+        );
+        // The model-facing id is derived from the path, exactly what the Host
+        // persistence writes and the Office importer resolves.
+        assert_eq!(
+            file.get("id"),
+            None,
+            "the low-level executor leaves id assignment to the Host wrapper"
+        );
+        assert_eq!(
+            Database::computed_artifact_id(file["path"].as_str().unwrap()),
+            Database::computed_artifact_id(path.to_str().unwrap())
+        );
+        // The full dataset really landed, header + 6000 data rows.
+        assert_eq!(on_disk.iter().filter(|b| **b == b'\n').count(), 6001);
+    }
+
+    /// The sample must be bounded by actual serialized UTF-8 bytes even when
+    /// the very first row is one enormous value. Covers a long ASCII first
+    /// row, a single oversized object cell, a long object key, CJK and emoji.
+    #[test]
+    fn oversized_sample_is_byte_bounded_not_copied_whole() {
+        let (root, paths) = fixture();
+        // A reusable assertion: the complete value stays on disk with a
+        // matching hash, while the returned envelope is byte-bounded.
+        let check = |code: &str, name: &str| {
+            let response = execute(
+                &paths,
+                &root.join(name),
+                &json!({ "code": code }),
+                || false,
+            )
+            .unwrap_or_else(|error| panic!("{name} failed: {error}"));
+            let envelope = serde_json::to_vec(&response["result"]).unwrap();
+            assert!(
+                envelope.len() <= MAX_RESULT_BYTES,
+                "{name}: returned result {} bytes exceeds {MAX_RESULT_BYTES}",
+                envelope.len()
+            );
+            let summary = &response["result"]["summary"];
+            assert_eq!(summary["complete"], false, "{name}");
+            assert_eq!(summary["storedAs"], "compute-artifact", "{name}");
+            assert_eq!(summary["sampleTruncated"], true, "{name}: a huge first row must flag the sample as truncated");
+            assert!(
+                serde_json::to_vec(&summary["sampleRows"]).unwrap().len() <= SAMPLE_MAX_BYTES + 4,
+                "{name}: sample rows exceed the sample budget"
+            );
+            let stored = &response["files"][0];
+            let on_disk = fs::read(stored["path"].as_str().unwrap()).unwrap();
+            // The stored artifact is the complete result and its hash matches.
+            let complete: Value = serde_json::from_slice(&on_disk).unwrap();
+            assert_eq!(
+                hex::encode(Sha256::digest(&on_disk)),
+                stored["sha256"].as_str().unwrap(),
+                "{name}: stored hash mismatch"
+            );
+            assert_eq!(
+                summary["artifactId"].as_str().unwrap(),
+                &Database::computed_artifact_id(stored["path"].as_str().unwrap()),
+                "{name}: reference must resolve to the stored file"
+            );
+            complete
+        };
+        // 1) One giant first row (70k-char single-cell array).
+        let array = check("return ['x'.repeat(70000)];", "huge-first-row");
+        assert_eq!(array.as_array().unwrap().len(), 1);
+        assert_eq!(array[0].as_str().unwrap().len(), 70_000);
+        // 2) A huge value nested inside an object cell.
+        let object = check(
+            "return [{a:{b:'y'.repeat(70000)}}];",
+            "huge-object-cell",
+        );
+        assert_eq!(object[0]["a"]["b"].as_str().unwrap().len(), 70_000);
+        // 3) An oversized object KEY (not just a long value).
+        let long_key_object = check(
+            "return [{['k'.repeat(70000)]: 1}];",
+            "huge-object-key",
+        );
+        assert!(long_key_object[0].as_object().unwrap().keys().next().unwrap().len() >= 70_000);
+        // 4) CJK: each character is 3 UTF-8 bytes.
+        let cjk = check("return ['中'.repeat(30000)];", "cjk");
+        assert_eq!(cjk[0].as_str().unwrap().chars().count(), 30_000);
+        // 5) Emoji: each is 4 UTF-8 bytes; cutting must not split a codepoint.
+        let emoji_response = execute(
+            &paths,
+            &root.join("emoji"),
+            &json!({"code":"return ['😀'.repeat(30000)];"}),
+            || false,
+        )
+        .unwrap();
+        let emoji_envelope = serde_json::to_vec(&emoji_response["result"]).unwrap();
+        assert!(emoji_envelope.len() <= MAX_RESULT_BYTES);
+        let emoji_summary = &emoji_response["result"]["summary"];
+        // Every sampled string must remain valid UTF-8/JSON (it parsed above)
+        // and not contain a replacement from a split codepoint.
+        for row in emoji_summary["sampleRows"].as_array().unwrap() {
+            let serialized = serde_json::to_string(row).unwrap();
+            assert!(!serialized.contains('\u{FFFD}'), "emoji must not be split into replacement chars");
+        }
+        let emoji_stored = &emoji_response["files"][0];
+        let emoji_complete: Value =
+            serde_json::from_slice(&fs::read(emoji_stored["path"].as_str().unwrap()).unwrap())
+                .unwrap();
+        assert_eq!(emoji_complete[0].as_str().unwrap().chars().count(), 30_000);
+    }
+
+    /// Ordinary saveFile outputs and the automatic spill file share one
+    /// file-count / cumulative-byte budget, enforced before the reference is
+    /// published; an in-budget combination succeeds.
+    #[test]
+    fn spill_shares_output_count_and_byte_budget() {
+        let (root, paths) = fixture();
+        // 32 ordinary files already saturate the file cap; adding the spill
+        // (33rd) must fail rather than publish an unreachable reference.
+        let many: String = (0..MAX_FILES)
+            .map(|i| format!("saveFile('f{i}.txt','x');"))
+            .collect();
+        let code = format!("{many} return 'z'.repeat(70000);");
+        let error = execute(
+            &paths,
+            &root.join("too-many"),
+            &json!({ "code": code }),
+            || false,
+        )
+        .unwrap_err();
+        assert!(error.contains("at most") || error.contains("files"), "{error}");
+        assert!(!root.join("too-many").join("large-result.json").exists());
+        // 31 ordinary files + the spill = 32 files: within the cap, succeeds.
+        let few: String = (0..MAX_FILES - 1)
+            .map(|i| format!("saveFile('g{i}.txt','x');"))
+            .collect();
+        let code = format!("{few} return 'z'.repeat(70000);");
+        let response = execute(
+            &paths,
+            &root.join("in-budget"),
+            &json!({ "code": code }),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(response["files"].as_array().unwrap().len(), MAX_FILES);
+        let total_bytes: u64 = response["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["bytes"].as_u64().unwrap())
+            .sum();
+        assert!(total_bytes <= MAX_TOTAL_OUTPUT_BYTES as u64);
+        assert!(response["files"].as_array().unwrap().iter().any(
+            |file| file["displayName"] == "large-result.json"
+        ));
+        // A case-insensitive name collision with the reserved spill file is
+        // moved to a new name, never overwritten.
+        let response = execute(
+            &paths,
+            &root.join("case-collision"),
+            &json!({"code":"saveFile('LARGE-RESULT.JSON','mine'); return 'q'.repeat(70000);"}),
+            || false,
+        )
+        .unwrap();
+        let names: Vec<&str> = response["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["displayName"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"LARGE-RESULT.JSON"));
+        assert!(names.contains(&"large-result-2.json"));
+    }
+
+    /// Cumulative-byte budget: a large ordinary file plus the spill must fail
+    /// before publishing a success reference if together they exceed the cap.
+    #[test]
+    fn spill_is_refused_when_total_bytes_exceed_cap() {
+        let (root, paths) = fixture();
+        // Leave only 32 KiB of headroom; the 70 KB spill pushes past the cap.
+        let ordinary_len = MAX_TOTAL_OUTPUT_BYTES - 32 * 1024;
+        let code = format!(
+            "saveFile('big.bin', 'a'.repeat({ordinary_len})); return 'z'.repeat(70000);"
+        );
+        let error = execute(
+            &paths,
+            &root.join("bytes-overflow"),
+            &json!({ "code": code }),
+            || false,
+        )
+        .unwrap_err();
+        assert!(error.contains("exceeding") || error.contains("bytes"), "{error}");
+        assert!(
+            !root.join("bytes-overflow").join("large-result.json").exists(),
+            "no spill reference may be published when the budget is exceeded"
+        );
+    }
+    #[test]
+    fn large_result_spill_fails_explicitly_when_storage_unwritable() {
+        let (root, paths) = fixture();
+        // An output root that cannot be created (its parent is a regular file):
+        // the spill must surface this as a hard error, never a silent drop or
+        // a truncated "complete" result.
+        fs::write(root.join("blocker"), b"not a directory").unwrap();
+        let bad_root = root.join("blocker").join("out");
+        let error = execute(
+            &paths,
+            &bad_root,
+            &json!({"code":"return 'x'.repeat(70000);"}),
+            || false,
+        )
+        .unwrap_err();
+        assert!(
+            !error.is_empty() && error.len() < 4096,
+            "storage failure must be an explicit, bounded error: {error}"
+        );
+        // Nothing is claimed complete: no large-result artifact was written.
+        assert!(
+            !root.join("blocker").join("out").join("large-result.json").exists()
         );
     }
     #[test]
@@ -1610,5 +2375,44 @@ mod sparse_allocation_tests {
             ]
         );
         assert_eq!(budget.cells, 4);
+    }
+
+    /// Real production input, read-only: the actual AGV workbook the analyst
+    /// flow reads must load in the QuickJS compute engine at full scale
+    /// (2,213 source rows). This is the exact first tool step the cloud run
+    /// performs. `#[ignore]` because it reads a workspace fixture; it never
+    /// writes (no saveFile) and never opens the CLI.
+    #[test]
+    #[ignore = "reads the real AGV workbook fixture: tests/execl-ceshi"]
+    fn real_agv_workbook_loads_in_compute() {
+        let xlsx = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/execl-ceshi/AGV长时间任务汇总统计表.xlsx");
+        assert!(xlsx.exists(), "real AGV fixture present: {}", xlsx.display());
+        let root = std::env::temp_dir().join(format!("fox-real-agv-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let response = execute(
+            &[("a".into(), xlsx)],
+            &root.join("read"),
+            &json!({"code": r#"
+                const sheets = attachments[0].sheets;
+                const first = sheets[0];
+                return { sheetCount: sheets.length, sheetName: first.name,
+                         rows: first.rows.length, cols: first.rows[0].length,
+                         header: first.rows[0] };
+            "#}),
+            || false,
+        )
+        .unwrap_or_else(|e| panic!("COMPUTE_ERR::{e}"));
+        let res = &response["result"];
+        println!("real AGV workbook -> {}", serde_json::to_string(res).unwrap());
+        assert_eq!(res["sheetCount"].as_u64().unwrap() >= 1, true);
+        // 2,213 data rows (+ header row in the parsed grid) per 2026-09 history.
+        assert!(
+            res["rows"].as_u64().unwrap() >= 2_213,
+            "expected at least 2,213 source rows, got {}", res["rows"]
+        );
+        assert!(res["cols"].as_u64().unwrap() >= 1);
+        // No files: read-only inspection does not spill.
+        assert_eq!(response["files"].as_array().unwrap().len(), 0);
     }
 }

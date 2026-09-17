@@ -1097,6 +1097,7 @@ mod tests {
             model_idle_ms: 120_000,
             tool_execution_timeout_ms: 600_000,
             run_execution_budget_ms: 1_800_000,
+            run_execution_limited: true,
             approval_wait_timeout_ms: 3_600_000,
             provider_max_retries: 2,
             turn_max_retries: 0,

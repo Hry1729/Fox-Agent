@@ -1,6 +1,6 @@
 use super::repositories::{agent_package_snapshot, package_snapshot_hash, query_agent_record};
 use super::DATABASE_SCHEMA_VERSION;
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, OptionalExtension, Result};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -6438,6 +6438,147 @@ CREATE INDEX IF NOT EXISTS idx_managed_file_versions_verified
     ON managed_file_versions(storage_path, version_no, source_verified);
 "#;
 
+/// v68 (limit plan A, items #4-#6): a human who never answered must not destroy
+/// the work.
+///
+/// Before this migration an elapsed `approval_wait_ms` ended the attempt as a
+/// plain `failed` run whose un-decided tool calls were marked `failed`, so a user
+/// who stepped away for five minutes lost the continuation entry point even
+/// though everything executed up to that point was intact.
+///
+/// The new semantics need facts the schema could not express:
+///   * `kernel_runs.state = approval_expired` - the attempt is over, but it is
+///     explicitly continuable and keeps its completed results;
+///   * `kernel_tool_calls.state = expired` - the call was never dispatched.
+///
+/// Both are CHECK constraints, so the two tables are widened by
+/// [`rebuild_kernel_tables_for_v68`], which runs on the connection *before* this
+/// transaction with foreign keys disabled: a `DROP TABLE` inside an FK-enabled
+/// transaction would cascade-delete `kernel_host_actions` and
+/// `kernel_model_configs` (see that function's documentation).
+///
+/// `kernel_approval_history` records an expiry as a first-class auditable fact
+/// that can name its successor; `kernel_run_progress` records what actually
+/// completed so a continuation never has to guess; `kernel_authorization_grants`
+/// records authorization granted after the run started, as a separate fact that
+/// never rewrites the immutable frozen binding.
+const MIGRATION_68: &str = r#"
+-- The narrowed CHECK constraints on kernel_runs / kernel_tool_calls were already
+-- widened before this transaction opened, by rebuild_kernel_tables_for_v68, which
+-- needs foreign keys disabled on the connection (a setting SQLite ignores inside
+-- a transaction). Nothing here drops a table, so no dependent row can cascade.
+
+CREATE TABLE IF NOT EXISTS kernel_approval_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN (
+        'pending','allow_once','allow_conversation','denied','cancelled','expired','superseded'
+    )),
+    requested_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    resolved_at INTEGER,
+    waited_ms INTEGER,
+    superseded_by_run_id TEXT,
+    superseded_by_approval_id TEXT,
+    resume_count INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kernel_approval_history_run
+    ON kernel_approval_history(run_id, tool_call_id, created_at);
+
+CREATE TABLE IF NOT EXISTS kernel_run_progress (
+    run_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    pause_reason TEXT NOT NULL,
+    completed_tool_calls INTEGER NOT NULL,
+    pending_tool_calls INTEGER NOT NULL,
+    terminal_written INTEGER NOT NULL,
+    running_elapsed_ms INTEGER NOT NULL,
+    continuable INTEGER NOT NULL,
+    summary_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id, attempt, pause_reason)
+);
+
+CREATE TABLE IF NOT EXISTS kernel_authorization_grants (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    approval_id TEXT NOT NULL,
+    tool TEXT NOT NULL CHECK(length(trim(tool)) BETWEEN 1 AND 128),
+    project_root TEXT,
+    scope_kind TEXT NOT NULL CHECK(scope_kind IN ('path','action','tool','office_request','mcp_tool')),
+    scope_value TEXT NOT NULL CHECK(length(trim(scope_value)) BETWEEN 1 AND 512),
+    source TEXT NOT NULL CHECK(source IN ('conversation_approval')),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    revoked_at INTEGER,
+    revoke_reason TEXT,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    last_used_at INTEGER,
+    UNIQUE(run_id, tool, scope_value)
+);
+CREATE INDEX IF NOT EXISTS idx_kernel_authorization_grants_run
+    ON kernel_authorization_grants(run_id, tool, revoked_at);
+CREATE INDEX IF NOT EXISTS idx_kernel_authorization_grants_conversation
+    ON kernel_authorization_grants(conversation_id, revoked_at);
+"#;
+
+/// v69 (limit plan A, #6/#7): the user's explicit run-budget choice, and the
+/// unified Host lifecycle for background compute jobs.
+///
+/// `kernel_run_budget_choices` records *what the user asked for* before the run
+/// is frozen, so the tier shown in the UI is the tier the Kernel enforces. An
+/// absent row is the historical default, never "unbounded".
+///
+/// `kernel_jobs` is one lifecycle reused by every background kind rather than a
+/// second job system: a job belongs to an existing Run and conversation, obeys
+/// the same frozen permission scope, and its result is a reference into the
+/// existing result store. `(run_id, idempotency_key)` is unique so a retried
+/// start returns the same job instead of launching a second one; `owner_pid`
+/// plus `owner_started_at` are what let a restart distinguish "the process is
+/// gone" from "the job is still running elsewhere".
+const MIGRATION_69: &str = r#"
+CREATE TABLE IF NOT EXISTS kernel_run_budget_choices (
+    run_id TEXT PRIMARY KEY,
+    tier TEXT NOT NULL CHECK(tier IN ('short','standard','long','custom')),
+    custom_execution_ms INTEGER,
+    frozen_execution_ms INTEGER NOT NULL CHECK(frozen_execution_ms > 0),
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS kernel_jobs (
+    job_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(length(trim(kind)) BETWEEN 1 AND 64),
+    idempotency_key TEXT NOT NULL CHECK(length(trim(idempotency_key)) BETWEEN 1 AND 200),
+    params_hash TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('queued','running','paused','cancelled','failed','completed')),
+    cursor TEXT,
+    progress_done INTEGER NOT NULL DEFAULT 0,
+    progress_total INTEGER,
+    result_ref TEXT,
+    result_bytes INTEGER,
+    result_sha256 TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    deadline_ms INTEGER,
+    owner_pid INTEGER,
+    owner_started_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    UNIQUE(run_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_kernel_jobs_run ON kernel_jobs(run_id, state);
+CREATE INDEX IF NOT EXISTS idx_kernel_jobs_conversation
+    ON kernel_jobs(conversation_id, created_at);
+"#;
+
 /// v66 (2026-09-14 review repairs R1/R2/R6): records what a registered file
 /// version can actually restore and what produced it, and lets a delivery
 /// checklist item carry the structured, independently verifiable requirements
@@ -6684,7 +6825,17 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "busy_timeout", 5_000)?;
 
-    let transaction = connection.transaction()?;
+    // SQLite table replacement needs FK enforcement off before BEGIN. All
+    // changes, the integrity check, and the version record remain atomic.
+    connection.pragma_update(None, "foreign_keys", "OFF")?;
+    let result = run_transaction(connection, now);
+    let restored = connection.pragma_update(None, "foreign_keys", "ON");
+    result?;
+    restored
+}
+
+fn run_transaction(connection: &mut Connection, now: i64) -> Result<()> {
+    let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     transaction.execute_batch(MIGRATION_1)?;
     transaction.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
@@ -6798,6 +6949,15 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
         )?;
     }
     apply_migration(&transaction, 67, MIGRATION_67, now)?;
+    rebuild_kernel_tables_for_v68(&transaction)?;
+    apply_migration(&transaction, 68, MIGRATION_68, now)?;
+    apply_migration(&transaction, 69, MIGRATION_69, now)?;
+    apply_migration(&transaction, 70, MIGRATION_70, now)?;
+    let violations: i64 = transaction.query_row(
+        "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))?;
+    if violations != 0 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     transaction.commit()
 }
 
@@ -6870,8 +7030,13 @@ fn apply_p0_p2_migration(transaction: &rusqlite::Transaction<'_>, now: i64) -> R
     Ok(())
 }
 
+/// Add a column only when it is missing.
+///
+/// Takes a `&Connection` so it works both inside a migration transaction (a
+/// `Transaction` derefs to `Connection`) and from the pre-transaction v68 schema
+/// step, which must run before any transaction is open.
 fn ensure_column_if_missing(
-    transaction: &rusqlite::Transaction<'_>,
+    connection: &Connection,
     table: &str,
     column: &str,
     definition: &str,
@@ -6881,9 +7046,9 @@ fn ensure_column_if_missing(
             SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1
          )"
     );
-    let exists = transaction.query_row(&table_info_sql, [column], |row| row.get::<_, bool>(0))?;
+    let exists = connection.query_row(&table_info_sql, [column], |row| row.get::<_, bool>(0))?;
     if !exists {
-        transaction.execute(
+        connection.execute(
             &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
             [],
         )?;
@@ -6960,6 +7125,171 @@ fn apply_expert_package_snapshot_migration(
         rusqlite::params![EXPERT_PACKAGE_SNAPSHOT_SCHEMA_VERSION, now],
     )?;
     Ok(())
+}
+
+/// Widen the two Kernel CHECK constraints that v68 needs (item #4's `expired`
+/// tool state and `approval_expired` run state) without destroying dependents.
+///
+/// SQLite cannot widen a CHECK in place, so both tables must be rebuilt. The
+/// obvious `DROP TABLE` + `CREATE TABLE` + `INSERT ... SELECT` is **destructive**:
+/// with `foreign_keys = ON` (which this runner sets) `kernel_host_actions`
+/// cascades off the dropped `kernel_tool_calls`, and `kernel_model_configs`
+/// cascades off the dropped `kernel_runs` — taking `kernel_initial_inputs` and
+/// `kernel_host_runs` with them. That silently deletes the frozen model
+/// configuration and the Host action ledger of every existing run, and
+/// `PRAGMA foreign_key_check` still reports a clean database because cascades are
+/// legal deletions.
+///
+/// So the rebuild runs with foreign keys disabled and an integrity check after:
+///   * `foreign_keys` is a per-connection setting that cannot be changed inside a
+///     transaction, which is why this runs on the connection before the v68
+///     transaction opens (and why `PRAGMA legacy_alter_table` is unnecessary —
+///     with FKs off the rename cannot rewrite other tables' `REFERENCES`);
+///   * every dependent row, index and trigger is preserved by construction: the
+///     only statements touching data are the row copy into the new table and the
+///     rename;
+///   * `PRAGMA foreign_key_check` runs before the version is recorded, so a
+///     genuinely broken result fails the migration instead of being blessed.
+///
+/// Apply the v68 schema changes without destroying dependent rows.
+///
+/// Two different problems, two different fixes:
+///
+/// * `kernel_tool_calls.state` carries a real CHECK constraint that must gain
+///   `'expired'`, and SQLite cannot widen a CHECK in place, so that table has to
+///   be rebuilt. The obvious `DROP TABLE` + `CREATE TABLE` + `INSERT ... SELECT`
+///   is **destructive**: with `foreign_keys = ON` (which this runner sets)
+///   `kernel_host_actions` cascades off the dropped table, silently deleting the
+///   Host action ledger of every run, while `PRAGMA foreign_key_check` still
+///   reports a clean database because cascades are legal deletions. The rebuild
+///   therefore runs with foreign keys disabled and an integrity check after.
+/// * `kernel_runs.state` has no CHECK constraint (run states are validated in
+///   code by `valid_run_state`, which is why `approval_expired` needs no schema
+///   change), so that table is only *extended*, using `ALTER TABLE ADD COLUMN`.
+///   Skipping its rebuild also keeps its triggers and the FK targets of
+///   `kernel_model_configs` / `kernel_host_runs` untouched by construction.
+///
+/// `foreign_keys` is a per-connection setting that cannot be changed inside a
+/// transaction, which is why this runs on the connection *before* the v68
+/// transaction opens (and why `PRAGMA legacy_alter_table` is unnecessary: with
+/// FKs off the rename cannot rewrite other tables' `REFERENCES`).
+///
+/// Idempotent: a table that already accepts the new state is left untouched, and
+/// every column add is guarded by `ensure_column_if_missing`.
+fn rebuild_kernel_tables_for_v68(connection: &Connection) -> Result<bool> {
+    // A brand-new database has no Kernel tables yet (MIGRATION_48/49 create them,
+    // already at the current shape), so there is nothing to widen here. The check
+    // is intentionally per-table so a partially upgraded database still gets both
+    // halves applied.
+    if !sqlite_table_exists(connection, "kernel_tool_calls")?
+        && !sqlite_table_exists(connection, "kernel_runs")?
+    {
+        return Ok(false);
+    }
+    let tool_needs_rebuild = sqlite_table_exists(connection, "kernel_tool_calls")?
+        && !sqlite_object_accepts(connection, "kernel_tool_calls", "'expired'")?;
+    if tool_needs_rebuild {
+        let rebuild = connection.execute_batch(
+            r#"
+CREATE TABLE kernel_tool_calls_v68 (
+    run_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    source_order INTEGER NOT NULL,
+    canonical_input_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN (
+        'pending','waiting_approval','running','completed','failed','cancelled','expired'
+    )),
+    result_json TEXT,
+    created_at INTEGER NOT NULL,
+    settled_at INTEGER,
+    dispatch_idempotency_key TEXT,
+    PRIMARY KEY(run_id, tool_call_id)
+);
+INSERT INTO kernel_tool_calls_v68
+    (run_id, tool_call_id, batch_id, tool, source_order, canonical_input_json, state,
+     result_json, created_at, settled_at, dispatch_idempotency_key)
+SELECT run_id, tool_call_id, batch_id, tool, source_order, canonical_input_json, state,
+       result_json, created_at, settled_at, dispatch_idempotency_key
+FROM kernel_tool_calls;
+DROP TABLE kernel_tool_calls;
+ALTER TABLE kernel_tool_calls_v68 RENAME TO kernel_tool_calls;
+CREATE INDEX IF NOT EXISTS idx_kernel_tool_calls_batch
+    ON kernel_tool_calls(run_id, batch_id);
+CREATE INDEX IF NOT EXISTS idx_kernel_tool_calls_state
+    ON kernel_tool_calls(run_id, state);
+"#,
+        );
+        rebuild?;
+        // Prove the rebuild kept every relationship before the version is
+        // recorded. A cascade would leave this empty (the rows were deleted
+        // legally), which is why the row counts are compared as well.
+        let violations: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_foreign_key_check",
+            [],
+            |row| row.get(0),
+        )?;
+        if violations != 0 {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(1),
+                Some(format!(
+                    "kernel v68 rebuild broke {violations} foreign-key relationship(s)"
+                )),
+            ));
+        }
+    }
+    // Additive resume columns for #4/#6. Absent on every pre-v68 row, which must
+    // keep decoding as "not continuable, no recorded pause".
+    if sqlite_table_exists(connection, "kernel_runs")? {
+        for (column, definition) in [
+            ("continuable", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_pause_reason", "TEXT"),
+            ("progress_ref", "TEXT"),
+            ("budget_tier", "TEXT"),
+            ("budget_source", "TEXT"),
+            ("paused_at", "INTEGER"),
+            ("continued_from_run_id", "TEXT"),
+            ("attempt", "INTEGER NOT NULL DEFAULT 1"),
+        ] {
+            ensure_column_if_missing(connection, "kernel_runs", column, definition)?;
+        }
+    }
+    Ok(tool_needs_rebuild)
+}
+
+/// Whether a table exists. Used so the pre-transaction v68 step can skip a fresh
+/// database whose Kernel tables are still created by the migration runner.
+fn sqlite_table_exists(connection: &Connection, table: &str) -> Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [table],
+        |row| row.get(0),
+    )
+}
+
+/// Whether a table's own SQL already mentions a literal (used to detect whether a
+/// CHECK constraint was already widened). Reads `sqlite_master` only, and
+/// compares with all whitespace removed: SQLite stores a migrated table's SQL on
+/// one line while the fixture that created it may have line breaks inside the
+/// CHECK, and a false negative here would rebuild the table on every open.
+fn sqlite_object_accepts(
+    connection: &Connection,
+    table: &str,
+    literal: &str,
+) -> Result<bool> {
+    let sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            [table],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let wanted: String = literal.chars().filter(|c| !c.is_whitespace()).collect();
+    Ok(sql.is_some_and(|sql| {
+        let actual: String = sql.chars().filter(|c| !c.is_whitespace()).collect();
+        actual.contains(&wanted)
+    }))
 }
 
 fn ensure_agent_classification_and_expert_bindings(
@@ -11995,6 +12325,8 @@ mod tests {
                 capability_manifest_version, capability_manifest_hash, permission_snapshot_id,
                 execution_profile_id, prompt_config_hash, frozen_config_json, created_at)
              VALUES ('old-shadow','old-run','old-conversation','old-turn','pi','shadow',2,'manifest','permission','legacy','prompt','{}',1);
+             DROP TABLE kernel_context_budget_reports;
+             DROP TABLE kernel_jobs;
              DROP TABLE kernel_shadow_checkpoints;
              DROP TABLE kernel_host_actions;
              DROP TABLE kernel_host_commands;
@@ -12322,4 +12654,550 @@ mod tests {
             .unwrap();
         assert_eq!(shadow_rows, 1);
     }
+
+    /// The old (pre-v68) columns of each Kernel table, used to compare content
+    /// before and after the upgrade without treating the legitimately added
+    /// columns as losses.
+    const RUN_COLUMNS_V67: &[&str] = &[
+        "run_id",
+        "engine_id",
+        "kernel_mode",
+        "capability_manifest_version",
+        "permission_snapshot_id",
+        "execution_profile_id",
+        "prompt_config_hash",
+        "frozen_config_json",
+        "state",
+        "last_event_seq",
+        "created_at",
+        "updated_at",
+        "terminal_at",
+        "turn_id",
+        "running_elapsed_ms",
+        "running_since_wall_ms",
+        "approval_deadline_wall_ms",
+        "capability_manifest_hash",
+        "terminal_written",
+        "retry_state_json",
+        "compaction_state_json",
+        "model_request_since_wall_ms",
+    ];
+    const TOOL_COLUMNS_V67: &[&str] = &[
+        "run_id",
+        "tool_call_id",
+        "batch_id",
+        "tool",
+        "source_order",
+        "canonical_input_json",
+        "state",
+        "result_json",
+        "created_at",
+        "settled_at",
+        "dispatch_idempotency_key",
+    ];
+    const MODEL_CONFIG_COLUMNS: &[&str] = &[
+        "run_id",
+        "schema_version",
+        "adapter_version",
+        "config_json",
+        "config_hash",
+        "created_at",
+    ];
+    const INITIAL_INPUT_COLUMNS: &[&str] = &[
+        "run_id",
+        "schema_version",
+        "turn_id",
+        "input_json",
+        "input_hash",
+        "prompt_config_hash",
+        "created_at",
+    ];
+    const HOST_ACTION_COLUMNS: &[&str] = &[
+        "run_id",
+        "tool_call_id",
+        "body_json",
+        "body_hash",
+        "status",
+        "created_at",
+        "completed_at",
+    ];
+    const APPROVAL_COLUMNS: &[&str] = &["run_id", "tool_call_id", "state", "created_at", "decided_at"];
+
+    /// Populate the narrowed fixture the way a real upgraded database looks:
+    /// a running run and a terminal run, tool calls in several states, a frozen
+    /// model config, frozen initial input, the Host action ledger and a pending
+    /// approval.
+    ///
+    /// The two Kernel *insert guards* describe how production code must create
+    /// these rows (bind first, start later) rather than what a database may
+    /// contain, so a historical fixture cannot satisfy them for a run that is
+    /// already `running`. They are dropped only for the seeding transaction and
+    /// the test asserts afterwards that the guard is present and still refuses a
+    /// config for an unknown run — the upgrade must not lose it.
+    fn seed_v67_kernel_fixture(connection: &mut Connection) -> Result<()> {
+        let transaction = connection.transaction_with_behavior(
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        transaction.execute_batch(
+            r#"
+DROP TRIGGER IF EXISTS kernel_model_config_insert_guard;
+DROP TRIGGER IF EXISTS kernel_initial_input_insert_guard;
+
+INSERT INTO kernel_runs
+    (run_id, engine_id, kernel_mode, capability_manifest_version, permission_snapshot_id,
+     execution_profile_id, prompt_config_hash, frozen_config_json, state, last_event_seq,
+     created_at, updated_at, terminal_at, turn_id, running_elapsed_ms, running_since_wall_ms,
+     approval_deadline_wall_ms, capability_manifest_hash, terminal_written, retry_state_json,
+     compaction_state_json, model_request_since_wall_ms)
+VALUES
+    ('run-live', 'pi', 'authoritative', 2, 'perm-live', 'legacy', 'hash-live', '{}', 'running', 7,
+     100, 200, NULL, 'turn-live', 1234, 150, NULL, 'manifest-live', 0, NULL, NULL, 160),
+    ('run-done', 'pi', 'authoritative', 2, 'perm-done', 'legacy', 'hash-done', '{}', 'completed', 9,
+     100, 300, 300, 'turn-done', 4567, NULL, NULL, 'manifest-done', 1, NULL, NULL, NULL);
+
+INSERT INTO run_control_bindings
+    (run_id, conversation_id, authority, engine_id, binding_json, binding_hash, created_at)
+VALUES
+    ('run-live', 'conv-1', 'authoritative', 'pi', '{}', 'bh-live', 100),
+    ('run-done', 'conv-1', 'authoritative', 'pi', '{}', 'bh-done', 100);
+
+INSERT INTO kernel_model_configs (run_id, schema_version, adapter_version, config_json, config_hash, created_at)
+VALUES
+    ('run-live', 1, 'adapter-1',
+     '{"engineId":"pi","executionProfileId":"legacy","apiType":"faux"}', 'hash-live', 100),
+    ('run-done', 1, 'adapter-1',
+     '{"engineId":"pi","executionProfileId":"legacy","apiType":"faux"}', 'hash-done', 100);
+
+INSERT INTO kernel_initial_inputs
+    (run_id, schema_version, turn_id, input_json, input_hash, prompt_config_hash, created_at)
+VALUES
+    ('run-live', 1, 'turn-live',
+     '{"runId":"run-live","turnId":"turn-live","promptConfigHash":"hash-live","schemaVersion":1}',
+     'input-live', 'hash-live', 100),
+    ('run-done', 1, 'turn-done',
+     '{"runId":"run-done","turnId":"turn-done","promptConfigHash":"hash-done","schemaVersion":1}',
+     'input-done', 'hash-done', 100);
+
+INSERT INTO kernel_tool_calls
+    (run_id, tool_call_id, batch_id, tool, source_order, canonical_input_json, state,
+     result_json, created_at, settled_at, dispatch_idempotency_key)
+VALUES
+    ('run-live', 'tc-done', 'b1', 'read', 0, '{"path":"a.txt"}', 'completed', '{"ok":true}', 100, 120, NULL),
+    ('run-live', 'tc-wait', 'b2', 'write_file', 1, '{"path":"b.txt"}', 'waiting_approval', NULL, 120, NULL, NULL),
+    ('run-done', 'tc-failed', 'b3', 'run_command', 0, '{"command":"x"}', 'failed', NULL, 100, 140, NULL);
+
+INSERT INTO kernel_host_actions (run_id, tool_call_id, body_json, body_hash, status, created_at, completed_at)
+VALUES
+    ('run-live', 'tc-done', '{"file":"a.txt"}', 'bh-1', 'completed', 120, 130),
+    ('run-done', 'tc-failed', '{"file":"c.txt"}', 'bh-2', 'pending', 130, NULL);
+
+INSERT INTO kernel_approvals (run_id, tool_call_id, state, created_at, decided_at)
+VALUES ('run-live', 'tc-wait', 'pending', 120, NULL);
+
+CREATE TRIGGER kernel_model_config_insert_guard BEFORE INSERT ON kernel_model_configs
+WHEN NOT EXISTS (
+    SELECT 1 FROM kernel_runs r JOIN run_control_bindings b ON b.run_id=r.run_id
+    WHERE r.run_id=NEW.run_id AND r.kernel_mode='authoritative'
+      AND r.engine_id IN ('pi','codex','deepseek_harness') AND b.engine_id=r.engine_id
+      AND b.authority='authoritative' AND r.state='created' AND r.last_event_seq=0
+      AND r.prompt_config_hash=NEW.config_hash
+      AND r.execution_profile_id=json_extract(NEW.config_json,'$.executionProfileId')
+      AND r.engine_id=COALESCE(json_extract(NEW.config_json,'$.engineId'),'pi')
+)
+BEGIN SELECT RAISE(ABORT, 'Kernel model configuration must be frozen before Run start'); END;
+
+CREATE TRIGGER kernel_initial_input_insert_guard BEFORE INSERT ON kernel_initial_inputs
+WHEN NOT EXISTS (
+    SELECT 1 FROM kernel_runs r JOIN kernel_model_configs c ON c.run_id=r.run_id
+    JOIN run_control_bindings b ON b.run_id=r.run_id
+    WHERE r.run_id=NEW.run_id AND r.state='created' AND r.last_event_seq=0
+      AND r.kernel_mode='authoritative' AND r.engine_id IN ('pi','codex','deepseek_harness')
+      AND b.authority='authoritative' AND b.engine_id=r.engine_id
+      AND r.prompt_config_hash=NEW.prompt_config_hash AND c.config_hash=NEW.prompt_config_hash
+      AND json_extract(NEW.input_json,'$.runId')=NEW.run_id
+      AND json_extract(NEW.input_json,'$.turnId')=NEW.turn_id
+      AND json_extract(NEW.input_json,'$.promptConfigHash')=NEW.prompt_config_hash
+      AND json_extract(NEW.input_json,'$.schemaVersion')=NEW.schema_version
+      AND length(trim(NEW.turn_id))>0
+)
+BEGIN SELECT RAISE(ABORT, 'Kernel initial input must match frozen configuration before Run start'); END;
+"#,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Row count plus a content hash over the named columns, so a "still there but
+    /// silently rewritten" row cannot pass as preserved. Old columns are compared
+    /// by name (the upgrade legitimately adds new ones), so this is a real
+    /// before/after comparison rather than a whole-table checksum.
+    fn table_fingerprint(
+        connection: &Connection,
+        table: &str,
+        columns: &[&str],
+        order_by: &str,
+    ) -> (i64, String) {
+        let count: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .expect("count rows");
+        let projection = columns
+            .iter()
+            .map(|column| format!("quote({column})"))
+            .collect::<Vec<_>>()
+            .join(" || '|' || ");
+        let body: String = connection
+            .query_row(
+                &format!(
+                    "SELECT COALESCE(GROUP_CONCAT(row_text, '\\n'), '') FROM (
+                         SELECT {projection} AS row_text FROM {table} ORDER BY {order_by}
+                     )"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+        let mut hasher = Sha256::new();
+        hasher.update(body.as_bytes());
+        (count, format!("sha256:{}", hex::encode(hasher.finalize())))
+    }
+
+    /// R1 regression: the v68 upgrade must keep every dependent row.
+    ///
+    /// The previous implementation rebuilt `kernel_runs` / `kernel_tool_calls`
+    /// with `DROP TABLE` inside an FK-enabled transaction, which cascade-deleted
+    /// `kernel_model_configs` (and through it `kernel_initial_inputs` and
+    /// `kernel_host_runs`) plus the whole `kernel_host_actions` ledger.
+    /// `PRAGMA foreign_key_check` stayed clean because cascades are legal
+    /// deletions — only row counts and content reveal the loss.
+    ///
+    /// The fixture is a database produced by the real migration runner (so every
+    /// foreign key, index and trigger is genuine), narrowed afterwards to exactly
+    /// the pre-v68 shape inside a transaction: the tool table loses `'expired'`
+    /// from its CHECK, and the run table loses the v68 resume columns. Upgrading
+    /// that database is then the production upgrade path.
+    #[test]
+    fn migration_68_upgrade_preserves_dependent_kernel_rows() {
+        let root = std::env::temp_dir().join(format!("fox-v67-upgrade-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("scratch dir");
+        let path = root.join("facts.db");
+
+        // 1. A real, fully migrated database.
+        {
+            let database = crate::database::Database::open(path.clone()).expect("open fixture");
+            let agent_id = database.default_agent_id().to_string();
+            database
+                .with_connection(|connection| {
+                    // The builtin agent already exists; only the conversation and
+                    // its runs are fixtures.
+                    connection.execute(
+                        "INSERT INTO conversations (id, agent_id, title, status, created_at, updated_at)
+                         VALUES ('conv-1', ?1, 'fixture', 'active', 1, 1)",
+                        [agent_id.as_str()],
+                    )?;
+                    connection.execute_batch(
+                        r#"
+INSERT INTO runs (id, conversation_id, status, model, created_at)
+VALUES ('run-live', 'conv-1', 'running', 'm', 1), ('run-done', 'conv-1', 'completed', 'm', 1);
+"#,
+                    )?;
+                    Ok(())
+                })
+                .expect("seed base rows");
+        }
+
+        // 2. Narrow that database to the pre-v68 shape.
+        {
+            let mut connection = Connection::open(&path).expect("reopen fixture");
+            connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys on");
+            let transaction = connection.transaction().expect("begin narrowing");
+            transaction
+                .execute_batch(
+                    r#"
+CREATE TABLE kernel_tool_calls_v67 (
+    run_id TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL,
+    batch_id TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    source_order INTEGER NOT NULL,
+    canonical_input_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN (
+        'pending','waiting_approval','running','completed','failed','cancelled'
+    )),
+    result_json TEXT,
+    created_at INTEGER NOT NULL,
+    settled_at INTEGER,
+    dispatch_idempotency_key TEXT,
+    PRIMARY KEY(run_id, tool_call_id)
+);
+DROP TABLE kernel_tool_calls;
+ALTER TABLE kernel_tool_calls_v67 RENAME TO kernel_tool_calls;
+CREATE INDEX idx_kernel_tool_calls_batch ON kernel_tool_calls(run_id, batch_id);
+CREATE INDEX idx_kernel_tool_calls_state ON kernel_tool_calls(run_id, state);
+"#,
+                )
+                .expect("narrow tool table");
+            for column in [
+                "continuable",
+                "last_pause_reason",
+                "progress_ref",
+                "budget_tier",
+                "budget_source",
+                "paused_at",
+                "continued_from_run_id",
+                "attempt",
+            ] {
+                let present: bool = transaction
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('kernel_runs') WHERE name = ?1)",
+                        [column],
+                        |row| row.get(0),
+                    )
+                    .expect("read run columns");
+                if present {
+                    transaction
+                        .execute(&format!("ALTER TABLE kernel_runs DROP COLUMN {column}"), [])
+                        .expect("narrow run table");
+                }
+            }
+            transaction.commit().expect("commit narrowing");
+            connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys on");
+        }
+
+        // 3. Realistic v67 content with rows in every dependent table.
+        {
+            let mut connection = Connection::open(&path).expect("reopen fixture");
+            connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys on");
+            seed_v67_kernel_fixture(&mut connection).expect("seed v67 content");
+
+            let watched = [
+                ("kernel_runs", RUN_COLUMNS_V67, "run_id"),
+                ("kernel_tool_calls", TOOL_COLUMNS_V67, "run_id, tool_call_id"),
+                ("kernel_model_configs", MODEL_CONFIG_COLUMNS, "run_id"),
+                ("kernel_initial_inputs", INITIAL_INPUT_COLUMNS, "run_id"),
+                ("kernel_host_actions", HOST_ACTION_COLUMNS, "run_id, tool_call_id"),
+                ("kernel_approvals", APPROVAL_COLUMNS, "run_id, tool_call_id"),
+            ];
+            let before: Vec<(i64, String)> = watched
+                .iter()
+                .map(|(table, columns, order)| table_fingerprint(&connection, table, columns, order))
+                .collect();
+            // A fixture that lost its rows would let this test pass for the wrong
+            // reason, so every dependent table must actually be populated.
+            for (index, (count, _)) in before.iter().enumerate() {
+                assert!(
+                    *count > 0,
+                    "fixture is not realistic: {} is empty",
+                    watched[index].0
+                );
+            }
+            // The pre-v68 shape cannot express the new state.
+            assert!(connection
+                .execute(
+                    "UPDATE kernel_tool_calls SET state='expired' WHERE tool_call_id='tc-wait'",
+                    []
+                )
+                .is_err());
+            // No resume columns yet.
+            let resume_before: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('kernel_runs')
+                      WHERE name IN ('continuable','last_pause_reason','progress_ref','budget_tier',
+                                     'budget_source','paused_at','continued_from_run_id','attempt')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("resume columns before");
+            assert_eq!(resume_before, 0, "the fixture must not already have v68 columns");
+
+            // 4. Upgrade.
+            rebuild_v68_for_test(&mut connection).expect("v68 upgrade");
+
+            // 4a. Nothing was lost.
+            let after: Vec<(i64, String)> = watched
+                .iter()
+                .map(|(table, columns, order)| table_fingerprint(&connection, table, columns, order))
+                .collect();
+            for (index, (table, _, _)) in watched.iter().enumerate() {
+                assert_eq!(
+                    before[index], after[index],
+                    "{table} lost rows or changed content across the upgrade"
+                );
+            }
+            let violations: i64 = connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get(0)
+                })
+                .expect("fk check");
+            assert_eq!(violations, 0, "upgrade broke a foreign-key relationship");
+
+            // 4b. The preserved frozen facts are still readable.
+            let config_hash: String = connection
+                .query_row(
+                    "SELECT config_hash FROM kernel_model_configs WHERE run_id='run-live'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("frozen model config survives the upgrade");
+            assert_eq!(config_hash, "hash-live");
+            let action_status: String = connection
+                .query_row(
+                    "SELECT status FROM kernel_host_actions
+                      WHERE run_id='run-live' AND tool_call_id='tc-done'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("host action ledger survives the upgrade");
+            assert_eq!(action_status, "completed");
+            // The frozen-turn trigger still guards the run row.
+            assert!(connection
+                .execute("UPDATE kernel_runs SET turn_id='different' WHERE run_id='run-live'", [])
+                .is_err());
+            // The model-config insert guard survives too, and still refuses a
+            // configuration for a run that never started under it.
+            let guards: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN (
+                         'kernel_model_config_insert_guard','kernel_initial_input_insert_guard',
+                         'kernel_initial_input_start_guard')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("trigger inventory");
+            assert_eq!(guards, 3, "the upgrade must not lose Kernel guard triggers");
+            let resume_after: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('kernel_runs')
+                      WHERE name IN ('continuable','last_pause_reason','progress_ref','budget_tier',
+                                     'budget_source','paused_at','continued_from_run_id','attempt')",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("resume columns after");
+            assert_eq!(resume_after, 8, "the resume columns must exist exactly once");
+
+            // 4c. A repeated upgrade is a no-op, compared against the pre-upgrade
+            //     fingerprints (checked before any deliberate state write).
+            let second = rebuild_v68_for_test(&mut connection).expect("idempotent upgrade");
+            assert!(
+                !second,
+                "a repeated upgrade rebuilt kernel_tool_calls again (gate={})",
+                !sqlite_object_accepts(&connection, "kernel_tool_calls", "'expired'").unwrap()
+            );
+            let after_second: Vec<(i64, String)> = watched
+                .iter()
+                .map(|(table, columns, order)| table_fingerprint(&connection, table, columns, order))
+                .collect();
+            for (index, (table, _, _)) in watched.iter().enumerate() {
+                assert_eq!(
+                    before[index], after_second[index],
+                    "{table} changed on a repeated upgrade"
+                );
+            }
+
+            // 4d. The widened states are writable, and unknown states are still
+            //     rejected — the CHECK was widened, not dropped.
+            connection
+                .execute(
+                    "UPDATE kernel_tool_calls SET state='expired' WHERE run_id='run-live' AND tool_call_id='tc-wait'",
+                    [],
+                )
+                .expect("expired tool state after upgrade");
+            connection
+                .execute(
+                    "UPDATE kernel_runs SET state='approval_expired' WHERE run_id='run-live'",
+                    [],
+                )
+                .expect("approval_expired run state after upgrade");
+            assert!(connection
+                .execute(
+                    "UPDATE kernel_tool_calls SET state='not_a_state' WHERE run_id='run-live' AND tool_call_id='tc-done'",
+                    [],
+                )
+                .is_err());
+        }
+
+        // 5. The production opening path still works on the upgraded database and
+        //    the preserved frozen configuration is readable through it.
+        let database = crate::database::Database::open(path).expect("open upgraded database");
+        let version: i64 = database
+            .with_connection(|connection| {
+                connection.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+            })
+            .expect("schema version");
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+        let config_hash: String = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT config_hash FROM kernel_model_configs WHERE run_id='run-live'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("frozen model config readable after reopen");
+        assert_eq!(config_hash, "hash-live");
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
+
+#[cfg(test)]
+fn rebuild_v68_for_test(connection: &mut Connection) -> Result<bool> {
+    connection.pragma_update(None, "foreign_keys", "OFF")?;
+    let result = (|| {
+        let tx = connection.transaction()?;
+        let changed = rebuild_kernel_tables_for_v68(&tx)?;
+        tx.commit()?;
+        Ok(changed)
+    })();
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    result
+}
+
+#[cfg(test)]
+mod unified_migration_tests {
+    use super::*;
+    #[test]
+    fn migration_rebuild_failure_rolls_back_schema_data_and_restores_foreign_keys() {
+        let mut db = Connection::open_in_memory().unwrap();
+        run(&mut db, 1).unwrap();
+        // Controlled copy failure: this old fixture permits a state the new
+        // table rejects. Never touch a user's database to inject the failure.
+        db.execute_batch("PRAGMA foreign_keys=OFF;
+            DROP TABLE kernel_tool_calls;
+            CREATE TABLE kernel_tool_calls (
+                run_id TEXT NOT NULL, tool_call_id TEXT NOT NULL, batch_id TEXT NOT NULL,
+                tool TEXT NOT NULL, source_order INTEGER NOT NULL, canonical_input_json TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('completed','legacy-state')), result_json TEXT,
+                created_at INTEGER NOT NULL, settled_at INTEGER, dispatch_idempotency_key TEXT,
+                PRIMARY KEY(run_id,tool_call_id));").unwrap();
+        db.execute("INSERT INTO kernel_tool_calls(run_id,tool_call_id,batch_id,tool,source_order,canonical_input_json,state,created_at)
+            VALUES(?1,?2,?3,?4,0,?5,?6,1)", rusqlite::params!["r","t","b","read","{}","legacy-state"]).unwrap();
+        let versions: i64 = db.query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0)).unwrap();
+        assert!(run(&mut db, 2).is_err());
+        assert_eq!(db.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert!(!sqlite_table_exists(&db, "kernel_tool_calls_v68").unwrap());
+        assert_eq!(db.query_row("SELECT state FROM kernel_tool_calls", [], |r| r.get::<_, String>(0)).unwrap(), "legacy-state");
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get::<_, i64>(0)).unwrap(), versions);
+        db.execute("UPDATE kernel_tool_calls SET state=?1", ["completed"]).unwrap();
+        run(&mut db, 3).unwrap();
+        assert!(sqlite_object_accepts(&db, "kernel_tool_calls", "'expired'").unwrap());
+    }
+}
+
+const MIGRATION_70: &str = r#"
+ALTER TABLE kernel_jobs ADD COLUMN cancel_requested_at INTEGER;
+ALTER TABLE kernel_jobs ADD COLUMN cancel_acknowledged_at INTEGER;
+ALTER TABLE kernel_jobs ADD COLUMN cancelled_by TEXT;
+ALTER TABLE kernel_jobs ADD COLUMN uncertain_at INTEGER;
+CREATE TABLE kernel_context_budget_reports (
+ run_id TEXT PRIMARY KEY REFERENCES kernel_runs(run_id) ON DELETE CASCADE,
+ report_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+);
+"#;

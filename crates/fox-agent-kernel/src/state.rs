@@ -88,6 +88,12 @@ pub enum RunState {
     Failed,
     Cancelled,
     BudgetExhausted,
+    /// The approval wait window elapsed before a human decided. This is a
+    /// terminal state for THIS attempt, but unlike `Failed` it never claims the
+    /// work itself is impossible: completed tool results are preserved and the
+    /// Host may re-verify the scope and open a fresh approval. The expired
+    /// approval can never be executed.
+    ApprovalExpired,
 }
 
 impl RunState {
@@ -103,6 +109,7 @@ impl RunState {
             RunState::Failed => "failed",
             RunState::Cancelled => "cancelled",
             RunState::BudgetExhausted => "budget_exhausted",
+            RunState::ApprovalExpired => "approval_expired",
         }
     }
 
@@ -113,6 +120,17 @@ impl RunState {
                 | RunState::Failed
                 | RunState::Cancelled
                 | RunState::BudgetExhausted
+                | RunState::ApprovalExpired
+        )
+    }
+
+    /// Terminal states that keep the completed work and offer a Host-driven
+    /// continuation instead of forcing the user to start over. Expiry and budget
+    /// exhaustion are pauses of the work, not verdicts about it.
+    pub fn is_continuable(self) -> bool {
+        matches!(
+            self,
+            RunState::ApprovalExpired | RunState::BudgetExhausted
         )
     }
 
@@ -128,6 +146,7 @@ impl RunState {
             "failed" => RunState::Failed,
             "cancelled" => RunState::Cancelled,
             "budget_exhausted" => RunState::BudgetExhausted,
+            "approval_expired" => RunState::ApprovalExpired,
             _ => return None,
         })
     }
@@ -140,6 +159,10 @@ pub enum RunOutcome {
     Failed { code: String, message: String },
     Cancelled,
     BudgetExhausted { code: String, message: String },
+    /// The approval window elapsed with no human decision. Distinct from
+    /// `Failed`: the run kept every completed tool result and the Host can
+    /// re-verify the scope to open a fresh approval (the old one stays dead).
+    ApprovalExpired { code: String, message: String },
 }
 
 impl RunOutcome {
@@ -149,6 +172,7 @@ impl RunOutcome {
             RunOutcome::Failed { .. } => RunState::Failed,
             RunOutcome::Cancelled => RunState::Cancelled,
             RunOutcome::BudgetExhausted { .. } => RunState::BudgetExhausted,
+            RunOutcome::ApprovalExpired { .. } => RunState::ApprovalExpired,
         }
     }
 
@@ -158,7 +182,17 @@ impl RunOutcome {
             RunOutcome::Failed { .. } => "run.failed",
             RunOutcome::Cancelled => "run.cancelled",
             RunOutcome::BudgetExhausted { .. } => "run.budget_exhausted",
+            RunOutcome::ApprovalExpired { .. } => "run.approval_expired",
         }
+    }
+
+    /// Whether the Host may offer a continuation for this outcome instead of
+    /// treating the work as lost. Cancellation and real failures never do.
+    pub fn is_continuable(&self) -> bool {
+        matches!(
+            self,
+            RunOutcome::ApprovalExpired { .. } | RunOutcome::BudgetExhausted { .. }
+        )
     }
 }
 
@@ -171,6 +205,10 @@ pub enum ToolCallState {
     Completed,
     Failed,
     Cancelled,
+    /// The approval request for this call expired before a human decided. The
+    /// call was never dispatched, so this is not an execution failure: a
+    /// continuation may re-propose the same work under a fresh approval.
+    Expired,
 }
 
 impl ToolCallState {
@@ -182,13 +220,17 @@ impl ToolCallState {
             ToolCallState::Completed => "completed",
             ToolCallState::Failed => "failed",
             ToolCallState::Cancelled => "cancelled",
+            ToolCallState::Expired => "expired",
         }
     }
 
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            ToolCallState::Completed | ToolCallState::Failed | ToolCallState::Cancelled
+            ToolCallState::Completed
+                | ToolCallState::Failed
+                | ToolCallState::Cancelled
+                | ToolCallState::Expired
         )
     }
 
@@ -200,6 +242,7 @@ impl ToolCallState {
             "completed" => ToolCallState::Completed,
             "failed" => ToolCallState::Failed,
             "cancelled" => ToolCallState::Cancelled,
+            "expired" => ToolCallState::Expired,
             _ => return None,
         })
     }

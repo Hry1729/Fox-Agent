@@ -3,12 +3,24 @@
 export function observeKernelModelTransport(session, fetchImpl = globalThis.fetch) {
   let calls = 0
   let rejection
+  let thrown = null
   const stream = session.agent.streamFunction.bind(session.agent)
   session.agent.streamFunction = (model, context, options) => stream(model, context, {
     ...options, maxRetries: 0,
     fetch: async (...args) => {
       calls += 1
-      const response = await fetchImpl(...args)
+      let response
+      try {
+        response = await fetchImpl(...args)
+      } catch (error) {
+        // A transport error that never produced a response (bad URL, refused
+        // connection, aborted socket) has no HTTP status, so it cannot be
+        // classified from the response alone. Keep the message for diagnosis;
+        // it is reported only through the opt-in debug hook.
+        thrown = error
+        throw error
+      }
+      thrown = null
       if ([429, 500, 502, 503, 504, 529].includes(response.status)) {
         const raw = response.headers.get('retry-after')
         const rawMs = response.headers.get('retry-after-ms')
@@ -30,6 +42,8 @@ export function observeKernelModelTransport(session, fetchImpl = globalThis.fetc
     /** Last provider transport rejection observed on this session. */
     lastRejection: () => rejection,
     fetchCallCount: () => calls,
+    /** Message of the last fetch that threw before any response, if any. */
+    lastFetchError: () => thrown,
     /** Settled failure evidence for a single-round request frame. */
     failureFor: request => {
       const final = session.agent.state.messages.at(-1)
@@ -39,7 +53,16 @@ export function observeKernelModelTransport(session, fetchImpl = globalThis.fetc
         ? rejection
         : final?.role === 'assistant' && final.stopReason === 'length'
           && !(final.content ?? []).some(block => block?.type === 'toolCall')
-          ? { category: 'incomplete_response', httpStatus: null, retryAfterMs: null } : null
+          ? { category: 'incomplete_response', httpStatus: null, retryAfterMs: null }
+          // A round that ended without a successful stop is a transport failure
+          // even when the provider never produced a classified rejection (for
+          // example the request never left the worker). `null` here would be
+          // rejected by the Host as malformed evidence, turning a real failure
+          // into an unreadable one; the category itself never grants a retry —
+          // the Host still owns retry admission from durable tool state.
+          : final?.role === 'assistant' && final.stopReason !== 'stop'
+            ? { category: 'model_transport_failure', httpStatus: null, retryAfterMs: null }
+            : null
       if (!evidence) return null
       return { schemaVersion: 1, runId: request.runId, turnId: frame.input?.turnId ?? frame.turnId,
         checkpointSeq: frame.checkpointSeq, ...evidence }

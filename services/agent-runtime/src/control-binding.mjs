@@ -32,7 +32,11 @@ function validateAdapterControl(request, executionProfileId, authority, allowAbs
       || binding.executionProfileId !== executionProfileId) {
     throw new Error('Frozen Run control does not match the request identity/profile')
   }
-  for (const value of Object.values(binding.budgets)) {
+  for (const [key, value] of Object.entries(binding.budgets)) {
+    if (key === 'runExecutionLimited') {
+      if (typeof value !== 'boolean') throw new Error('Invalid frozen Run duration policy')
+      continue
+    }
     if (!Number.isSafeInteger(value) || value <= 0 || value > 86_400_000) {
       throw new Error('Frozen Run time budgets must be positive and at most 24 hours')
     }

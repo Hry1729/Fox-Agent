@@ -79,6 +79,23 @@ pub(crate) fn kernel_tool_policy(tool: &str) -> PolicyDecision {
     }
 }
 
+/// The exact scope key a call is measured against, computed by the same Host
+/// helpers the frozen policy uses. `None` means the call cannot be named exactly
+/// (for example a host command with no target), and therefore no grant may ever
+/// cover it. Exposed so an approval-time grant is registered against exactly the
+/// key the policy will later compare.
+pub(super) fn tool_operation_scope(tool: &str, input: &Value, project_root: Option<&str>) -> Option<String> {
+    if matches!(tool, "write_file" | "edit_file" | "run_command") {
+        let root = project_root?;
+        let prepared = crate::tool_host::prepare(tool, input, root).ok()?;
+        super::host_permission_scope(tool, prepared.preview())
+    } else if tool == "call_mcp_tool" {
+        super::mcp_permission_scope(tool, input)
+    } else {
+        super::capability_permission_scope(tool, input)
+    }
+}
+
 /// Production clock. Execution/elapsed time uses a real monotonic source
 pub(super) fn frozen_kernel_tool_policy(snapshot: &Value, tool: &str, input_json: &str) -> PolicyDecision {
     let deny = |reason: &str| PolicyDecision::Deny {
@@ -101,20 +118,11 @@ pub(super) fn frozen_kernel_tool_policy(snapshot: &Value, tool: &str, input_json
         Ok(input) => input,
         Err(_) => return deny("invalid tool input"),
     };
-    let scope = if matches!(tool, "write_file" | "edit_file" | "run_command") {
-        snapshot
-            .get("projectRoot")
-            .and_then(Value::as_str)
-            .and_then(|root| {
-                crate::tool_host::prepare(tool, &input, root)
-                    .ok()
-                    .and_then(|prepared| super::host_permission_scope(tool, prepared.preview()))
-            })
-    } else if tool == "call_mcp_tool" {
-        super::mcp_permission_scope(tool, &input)
-    } else {
-        super::capability_permission_scope(tool, &input)
-    };
+    let scope = tool_operation_scope(
+        tool,
+        &input,
+        snapshot.get("projectRoot").and_then(Value::as_str),
+    );
     let granted = scope.as_ref().is_some_and(|scope| {
         snapshot
             .get("grants")
@@ -1087,6 +1095,7 @@ impl ShadowReconciler {
             model_idle_ms: 120_000,
             tool_execution_timeout_ms: 600_000,
             run_execution_budget_ms: 1_800_000,
+            run_execution_limited: true,
             approval_wait_timeout_ms: 3_600_000,
             provider_max_retries: 2,
             turn_max_retries: 0,

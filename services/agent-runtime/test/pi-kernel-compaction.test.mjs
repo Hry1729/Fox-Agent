@@ -35,3 +35,21 @@ test('compaction request validates identity and never accepts tool history or mu
     assert.throws(()=>prepareKernelCompaction(invalid,identity))
   }
 })
+
+test('an oversized summarizer request gets the unified frame-limit wording', () => {
+  const oversized=request()
+  oversized.payload.compaction.messages=[{role:'user',content:'中'.repeat(200_000)}]
+  assert.throws(
+    ()=>prepareKernelCompaction(oversized,identity),
+    (error) => {
+      assert.match(error.message, /^kernel\.frame_limit_exceeded: Kernel compaction request is \d+ UTF-8 JSON bytes over the 262,144-byte limit/)
+      assert.match(error.message, /references or pagination/)
+      return true
+    },
+  )
+  // Exactly at the boundary the request still passes: the bound is finite,
+  // not a reason to reject content that fits.
+  const fits=request()
+  fits.payload.compaction.messages=[{role:'user',content:'x'.repeat(100_000)}]
+  assert.equal(prepareKernelCompaction(fits,identity).compactionId,'job')
+})

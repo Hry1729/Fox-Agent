@@ -3,8 +3,13 @@ mod kernel_changes;
 mod models;
 mod repositories;
 
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 67;
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 70;
 pub(crate) use repositories::kernel_reconciliation::*;
+pub(crate) use repositories::{BudgetTier, ContinuableRun, ContinuationRequest, GrantRegistration, GrantScopeKind, GrantSkipReason};
+pub(crate) use repositories::{JobSnapshot, JobStartOutcome, JobStartRequest, JobState};
+pub(crate) use repositories::{
+    run_budget_for_tier, PreparedContinuation, VerifiedContinuationPermission,
+};
 pub use models::*;
 /// Cap on `tool_calls.result_json`. Published here because the model-view binder
 /// uses it to decide whether omitted bytes are recoverable at all — one source
