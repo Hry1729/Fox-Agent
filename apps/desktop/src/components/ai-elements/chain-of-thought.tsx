@@ -71,10 +71,10 @@ export const ChainOfThought = memo(
 
 export type ChainOfThoughtHeaderProps = ComponentProps<
   typeof CollapsibleTrigger
-> & { trailing?: ReactNode };
+> & { leading?: ReactNode; trailing?: ReactNode };
 
 export const ChainOfThoughtHeader = memo(
-  ({ className, children, trailing, ...props }: ChainOfThoughtHeaderProps) => {
+  ({ className, children, leading, trailing, ...props }: ChainOfThoughtHeaderProps) => {
     const { isOpen } = useChainOfThought();
 
     return (
@@ -86,6 +86,7 @@ export const ChainOfThoughtHeader = memo(
         {...props}
       >
         <BrainIcon className="size-4" />
+        {leading}
         <span className="flex-1 text-left">
           {children ?? "Chain of Thought"}
         </span>

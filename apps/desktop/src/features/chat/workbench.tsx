@@ -1,4 +1,4 @@
-import { UserMessageAvatar, UserMessageBubble } from './components/UserMessageBubble'
+import { UserMessageBubble } from './components/UserMessageBubble'
 import { RunSteeringStrip } from './components/RunSteeringStrip'
 import { ManagedFilesPanel } from './components/ManagedFilesPanel'
 import { ExpertPickerDialog } from '@/features/agents/ExpertPickerDialog'
@@ -986,6 +986,7 @@ function Sidebar({
   onGlobalSearch,
   activeConversationId,
   newChatActive,
+  running = false,
   yuxiService,
   yuxiUser,
   activeView,
@@ -1019,6 +1020,8 @@ function Sidebar({
   onGlobalSearch?: (query: string) => Promise<GlobalSearchRecord[]>
   activeConversationId?: string
   newChatActive: boolean
+  /** True while the active conversation's run is still working. */
+  running?: boolean
   yuxiService?: { name: string; status: string; connectionType: 'local' | 'lan' | 'remote' } | null
   yuxiUser?: YuxiUserRecord | null
   activeView: WorkspaceView
@@ -1299,6 +1302,11 @@ function Sidebar({
                   <ContextMenu key={item.id}>
                     <ContextMenuTrigger asChild>
                       <div className={`fox-sidebar-tree-row fox-project-conversation-row ${item.active ? 'is-active' : ''}`}>
+                        <span
+                          className={`fox-project-conversation-status ${item.active && running ? 'is-running' : ''}`}
+                          role={item.active && running ? 'status' : undefined}
+                          aria-label={item.active && running ? '正在运行' : undefined}
+                        >{item.active && running && <LoaderCircle />}</span>
                         <button type="button" className="fox-sidebar-tree-main" onClick={() => onOpenConversation(item.id)}><span>{item.title}</span></button>
                         <span className="fox-sidebar-row-time">{item.time}</span>
                         <span className="fox-sidebar-row-actions">
@@ -1812,6 +1820,7 @@ function toolActivity(tool: RuntimeToolStep) {
   if (tool.name === 'ask_user_question') return tool.awaitingUser ? '等待你的回答' : 'Fox 正在向你提问'
 
   if (tool.name === 'read') return `${tool.completed ? '已读取' : 'Fox 正在读取'}${path ? ` ${path}` : '文件'}`
+  if (/^(edit|write|multiedit|apply_patch|str_replace|create)/i.test(tool.name)) return `${tool.completed ? '已编辑' : 'Fox 正在编辑'}${path ? ` ${path}` : '文件'}`
   if (tool.name === 'ls') return `${tool.completed ? '已查看' : 'Fox 正在查看'}${path ? ` ${path}` : '文件夹'}`
   if (tool.name === 'find') return `${tool.completed ? '已查找' : 'Fox 正在查找'}${query ? ` ${query}` : '文件'}${path ? ` · ${path}` : ''}`
   if (tool.name === 'grep') return `${tool.completed ? '已搜索' : 'Fox 正在搜索'}${query ? ` ${query}` : '文件内容'}${path ? ` · ${path}` : ''}`
@@ -1819,20 +1828,29 @@ function toolActivity(tool: RuntimeToolStep) {
   return `${tool.completed ? verb : `Fox ${verb}`} ${tool.name}${subject ? ` · ${subject}` : ''}`
 }
 
+type RuntimeProcessStep =
+  | { kind: 'reasoning'; seq: number; text: string }
+  | { kind: 'tool'; seq: number; id: string }
+
 function runtimeProcess(events: RunEventRecord[]) {
   const reasoningGroups: Array<{ source: string; text: string; seq: number; lastSeq: number }> = []
   const tools = new Map<string, RuntimeToolStep>()
   const sources = new Map<string, RuntimeSource>()
+  // A tool call closes the current thought: reasoning before and after it must
+  // render as separate rows (think → tool → think), like other agent harnesses,
+  // instead of being merged into one long reasoning block.
+  let reasoningBoundary = false
   for (const item of events) {
     if (item.eventType === 'reasoning.delta' && typeof item.event.delta === 'string') {
       const source = typeof item.event.source === 'string' ? item.event.source : 'provider'
-      const previous = reasoningGroups.at(-1)
+      const previous = reasoningBoundary ? undefined : reasoningGroups.at(-1)
       if (previous?.source === source && item.seq === previous.lastSeq + 1) {
         previous.text += item.event.delta
         previous.lastSeq = item.seq
       } else {
         reasoningGroups.push({ source, text: item.event.delta, seq: item.seq, lastSeq: item.seq })
       }
+      reasoningBoundary = false
       continue
     }
     if (item.eventType === 'source.added') {
@@ -1848,6 +1866,8 @@ function runtimeProcess(events: RunEventRecord[]) {
       continue
     }
     if (!item.eventType.startsWith('tool.')) continue
+    // Any tool call ends the current thought so subsequent deltas form a new row.
+    reasoningBoundary = true
     const toolCallId = typeof item.event.toolCallId === 'string' ? item.event.toolCallId : `tool-${item.seq}`
     const current = tools.get(toolCallId) ?? {
       id: toolCallId,
@@ -1871,10 +1891,23 @@ function runtimeProcess(events: RunEventRecord[]) {
     }
     tools.set(toolCallId, current)
   }
-  const reasoning = reasoningGroups.map((group) => group.text.trim()).filter(Boolean).join('\n\n')
+  const reasoningItems = reasoningGroups
+    .map((group) => group.text.trim())
+    .filter(Boolean)
+  const reasoning = reasoningItems.join('\n\n')
+  const sortedTools = [...tools.values()].sort((left, right) => left.seq - right.seq)
+  // One chronological step per thought segment and per tool call.
+  const steps: RuntimeProcessStep[] = [
+    ...reasoningGroups
+      .filter((group) => group.text.trim())
+      .map((group) => ({ kind: 'reasoning' as const, seq: group.seq, text: group.text.trim() })),
+    ...sortedTools.map((tool) => ({ kind: 'tool' as const, seq: tool.seq, id: tool.id })),
+  ].sort((left, right) => left.seq - right.seq)
   return {
     reasoning,
-    tools: [...tools.values()].sort((left, right) => left.seq - right.seq),
+    reasoningItems,
+    steps,
+    tools: sortedTools,
     sources: [...sources.values()],
   }
 }
@@ -1945,7 +1978,7 @@ function RuntimeArtifacts({ artifacts, onOpenArtifact }: { artifacts: ArtifactRe
           <Artifact className="fox-message-artifact" title={artifact.displayName}>
             <ArtifactHeader className="fox-message-artifact-head">
               <div className="fox-message-artifact-title">
-                <span className="fox-message-artifact-icon"><ArtifactIcon size={15} /></span>
+                <span className="fox-message-artifact-icon"><ArtifactIcon size={18} /></span>
                 <div><ArtifactTitle>{artifact.displayName}</ArtifactTitle><ArtifactDescription>{changeLabel} · {formatFileSize(artifact.byteSize)}</ArtifactDescription></div>
               </div>
               <ChevronRight size={14} />
@@ -1996,9 +2029,8 @@ function RuntimeAssistantMessage({ message, processEvents, running, artifacts, a
   return (
     <div className="fox-turn-anchor">
       <Message from="assistant" className="fox-message fox-assistant-message">
-        <FoxAssistantAvatar />
         <MessageContent className="fox-assistant-content">
-          <RuntimeProcess events={processEvents} process={process} running={running} answerStarted={Boolean(parsed.answer)} />
+          <RuntimeProcess events={processEvents} process={process} running={running} answerStarted={Boolean(parsed.answer)} leading={<FoxAssistantAvatar />} />
           {parsed.answer && <div className="fox-answer-body"><MarkdownResponse className="fox-answer-response">{parsed.answer}</MarkdownResponse></div>}
           {!running && <RuntimeArtifacts artifacts={artifacts} onOpenArtifact={onOpenArtifact} />}
           <RuntimeSources sources={process.sources} knowledgeBindings={knowledgeBindings} onOpenSource={onOpenSource} />
@@ -2053,9 +2085,21 @@ const MemoizedRuntimeAssistantMessage = memo(RuntimeAssistantMessage, (previous,
 ))
 
 function RuntimeReasoningItem({ detail, running = false }: { detail: string; running?: boolean }) {
-  return (
-    <ChainOfThoughtStep icon={Brain} label={<RuntimeStepDetail label="深度思考" active={running}><ReasoningText text={detail} /></RuntimeStepDetail>} status={running ? 'active' : 'complete'} />
-  )
+  return <RuntimeProcessRow
+    icon={<Brain className="fox-runtime-step-icon-glyph" />}
+    label={`深度思考 · ${reasoningSummary(detail)}`}
+    active={running}
+    status={running ? 'active' : 'complete'}
+  >
+    <ReasoningText text={detail} />
+  </RuntimeProcessRow>
+}
+
+/** Rows read as one line, so the label carries the first sentence of the thought. */
+function reasoningSummary(text: string) {
+  const firstLine = text.split('\n').map((line) => line.trim()).find(Boolean) ?? ''
+  const plain = firstLine.replace(/^[>\-*#\s]+/, '').trim() || firstLine
+  return plain.length > 96 ? `${plain.slice(0, 96)}…` : plain
 }
 
 function LiveReasoning({ detail, active }: { detail: string; active: boolean }) {
@@ -2080,32 +2124,48 @@ function RuntimeToolItem({ tool, active }: { tool: RuntimeToolStep; active: bool
         : /grep|web|browser|search/i.test(tool.name)
           ? Search
           : CircleDot
-  return (
-    <ChainOfThoughtStep icon={ToolIcon} label={
-      <RuntimeStepDetail label={toolActivity(tool)} active={active}>
-        <AIToolInput className="fox-runtime-tool-detail" input={tool.input as never} />
-        {tool.completed && <AIToolOutput className="fox-runtime-tool-detail" output={tool.output as never} errorText={tool.isError ? '工具执行失败' : undefined} />}
-      </RuntimeStepDetail>
-    } status={tool.awaitingUser ? 'pending' : active ? 'active' : 'complete'} />
-  )
+  return <RuntimeProcessRow
+    icon={<ToolIcon className="fox-runtime-step-icon-glyph" />}
+    label={toolActivity(tool)}
+    active={active}
+    status={tool.awaitingUser ? 'pending' : active ? 'active' : 'complete'}
+  >
+    <AIToolInput className="fox-runtime-tool-detail" input={tool.input as never} />
+    {tool.completed && <AIToolOutput className="fox-runtime-tool-detail" output={tool.output as never} errorText={tool.isError ? '工具执行失败' : undefined} />}
+  </RuntimeProcessRow>
 }
 
-function RuntimeStepDetail({ label, active = false, children }: { label: string; active?: boolean; children: ReactNode }) {
+/** Every thought segment and every tool call is one independently collapsible row. */
+function RuntimeProcessRow({ icon, label, active = false, status = 'complete', children }: { icon: ReactNode; label: string; active?: boolean; status?: 'complete' | 'active' | 'pending'; children: ReactNode }) {
   const [open, setOpen] = useState(false)
   const [visited, setVisited] = useState(false)
   return (
-    <Collapsible open={open} onOpenChange={(next) => { setOpen(next); if (next) setVisited(true) }} className="fox-runtime-step-detail">
-      <CollapsibleTrigger className="fox-runtime-step-trigger">
-        <RunStatusText text={label} active={active} /><ChevronRight />
-      </CollapsibleTrigger>
-      {visited && <CollapsibleContent forceMount className="fox-runtime-step-content" aria-hidden={!open} inert={!open}>
-        <div className="fox-runtime-detail-clip"><div className="fox-runtime-detail-panel">{children}</div></div>
-      </CollapsibleContent>}
+    <Collapsible
+      className={`fox-runtime-step-detail fox-runtime-step-row is-${status}`}
+      open={open}
+      onOpenChange={(next) => { setOpen(next); if (next) setVisited(true) }}
+    >
+      <div className="fox-runtime-step-icon">
+        {/* Hovering the row turns the step glyph into that row's own disclosure toggle. */}
+        <CollapsibleTrigger className="fox-runtime-step-icon-toggle" aria-label={open ? '收起这一步的详情' : '展开这一步的详情'}>
+          {icon}
+          <ChevronRight className="fox-runtime-step-icon-chevron" />
+        </CollapsibleTrigger>
+        <div className="fox-runtime-step-connector" />
+      </div>
+      <div className="fox-runtime-step-body">
+        <CollapsibleTrigger className="fox-runtime-step-trigger">
+          <RunStatusText text={label} active={active} />
+        </CollapsibleTrigger>
+        {visited && <CollapsibleContent forceMount className="fox-runtime-step-content" aria-hidden={!open} inert={!open}>
+          <div className="fox-runtime-detail-clip"><div className="fox-runtime-detail-panel">{children}</div></div>
+        </CollapsibleContent>}
+      </div>
     </Collapsible>
   )
 }
 
-function RuntimeProcess({ events, process: preparedProcess, running: runtimeRunning, answerStarted = false }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; running: boolean; answerStarted?: boolean }) {
+function RuntimeProcess({ events, process: preparedProcess, running: runtimeRunning, answerStarted = false, leading }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; running: boolean; answerStarted?: boolean; leading?: ReactNode }) {
   const [open, setOpen] = useState(false)
   const [visited, setVisited] = useState(false)
   const process = useMemo(() => preparedProcess ?? runtimeProcess(events), [events, preparedProcess])
@@ -2114,7 +2174,7 @@ function RuntimeProcess({ events, process: preparedProcess, running: runtimeRunn
   const hasLifecycle = running || Boolean(terminalEvent) || events.some((item) => (
     item.eventType === 'run.started' || item.eventType === 'message.started'
   ))
-  const processStepCount = process.tools.length + (process.reasoning ? 1 : 0)
+  const processStepCount = process.steps.length
   const lifecycleOnly = processStepCount === 0 && hasLifecycle
   const stepCount = lifecycleOnly ? 1 : processStepCount
   const activeTool = [...process.tools].reverse().find((tool) => activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser)
@@ -2144,10 +2204,10 @@ function RuntimeProcess({ events, process: preparedProcess, running: runtimeRunn
           ? '工作过程已取消'
           : '工作过程已完成'
 
-  if (stepCount === 0 && !running) return null
+  if (stepCount === 0 && !running) return leading ? <>{leading}</> : null
   return (
     <ChainOfThought open={open} onOpenChange={(next) => { setOpen(next); if (next) setVisited(true) }} className="fox-chain-of-thought fox-runtime-process">
-      <ChainOfThoughtHeader className="fox-chain-of-thought-header" trailing={<small className="fox-runtime-step-count" aria-label={`${stepCount} 个步骤`}>{stepCount}</small>}>
+      <ChainOfThoughtHeader className="fox-chain-of-thought-header" leading={<>{leading}<small className="fox-runtime-step-count" aria-label={`${stepCount} 个步骤`}>{stepCount}</small></>}>
         <span className={`fox-runtime-process-summary ${running ? 'is-running' : ''}`}>
           <RunStatusText text={processTitle} active={running} />
         </span>
@@ -2156,8 +2216,16 @@ function RuntimeProcess({ events, process: preparedProcess, running: runtimeRunn
       {visited && <ChainOfThoughtContent forceMount className="fox-chain-of-thought-content fox-runtime-process-disclosure" aria-hidden={!open} inert={!open}>
         <div className="fox-runtime-process-clip"><div className="fox-runtime-process-scroll">
         {processStepCount > 0 ? <>
-          {process.reasoning && <RuntimeReasoningItem detail={process.reasoning} running={activity.reasoning} />}
-          {process.tools.map((tool) => <RuntimeToolItem key={tool.id} tool={tool} active={activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser} />)}
+          {process.steps.map((step) => {
+            if (step.kind === 'reasoning') {
+              // Only the trailing thought can be live; earlier rows are complete.
+              const isLastReasoning = [...process.steps].reverse().find((item) => item.kind === 'reasoning') === step
+              return <RuntimeReasoningItem key={`reason-${step.seq}`} detail={step.text} running={isLastReasoning && activity.reasoning} />
+            }
+            const tool = process.tools.find((item) => item.id === step.id)
+            if (!tool) return null
+            return <RuntimeToolItem key={tool.id} tool={tool} active={activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser} />
+          })}
         </> : <ChainOfThoughtStep
           className={`fox-runtime-empty-step ${running ? 'is-running' : 'is-complete'}`}
           icon={running ? LoaderCircle : awaitingUser ? CircleHelp : lifecycleFailed ? AlertTriangle : Check}
@@ -2367,7 +2435,6 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
             const editing = latest && editingMessageId === message.id
             return <div id={`fox-turn-${message.id}`} key={message.id} className="fox-turn-anchor" data-turn-message-id={message.id}>
               <Message from="user" className={`fox-message fox-user-message ${editing ? 'is-editing' : ''}`}>
-                {runtimeContext.userProfile && <UserMessageAvatar profile={runtimeContext.userProfile} />}
                 {editing ? <MessageContent className="fox-user-edit">
                   <textarea
                     autoFocus
@@ -5371,7 +5438,7 @@ export function Workbench() {
     <main className="fox-shell" style={shellStyle}>
       <MemoizedWindowTitlebar leftSidebarCollapsed={sidebarCollapsed || compactLayout} onNewChat={handleNewChat} onOpenProject={handleComposerProject} onSettings={handleOpenSettings} onAbout={handleOpenAbout} onToggleSidebar={handleToggleSidebar} onZoom={handleZoom} />
       <div className="fox-workbench">
-        <MemoizedSidebar collapsed={sidebarCollapsed || compactLayout} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.detail?.conversation.id} newChatActive={activeView === 'chat' && timelineEmpty} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
+        <MemoizedSidebar collapsed={sidebarCollapsed || compactLayout} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.detail?.conversation.id} newChatActive={activeView === 'chat' && timelineEmpty} running={desktopRunning} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
         {!sidebarCollapsed && !compactLayout && <SidebarResizeDivider onResize={(delta) => setSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
         <div className="fox-content-card">
         <div className={`fox-content-surface ${rightPanelMaximized && showConversationRightSidebar && !rightSidebarCollapsed ? 'is-right-maximized' : ''}`}>

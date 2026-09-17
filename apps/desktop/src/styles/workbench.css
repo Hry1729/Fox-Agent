@@ -1312,18 +1312,25 @@
 
 .fox-project-children {
   position: relative;
-  margin: 3px 0 0 14px;
-  padding-left: 8px;
+  margin: 3px 0 0;
+  padding-left: 0;
 }
 
-.fox-project-children::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 4px;
-  bottom: 4px;
-  width: 1px;
-  background: var(--fox-border);
+/* Reserved 20px gutter: the project conversation title spans the rest of the
+   sidebar, and the running indicator appears there while the model works. */
+.fox-project-conversation-status {
+  width: 20px;
+  min-width: 20px;
+  flex: 0 0 20px;
+  display: grid;
+  place-items: center;
+  color: var(--fox-accent);
+}
+
+.fox-project-conversation-status > svg {
+  width: 13px;
+  height: 13px;
+  animation: foxSpin 1s linear infinite;
 }
 
 .fox-sidebar-tree-row {
@@ -2571,7 +2578,7 @@ button.fox-chat-project-row:disabled {
 }
 
 .fox-conversation-content {
-  width: min(56rem, calc(100% - clamp(2rem, 8vw, 8rem)));
+  width: min(54rem, calc(100% - clamp(3.5rem, 9vw, 10rem)));
   min-height: 100%;
   display: flex;
   flex-direction: column;
@@ -2878,18 +2885,18 @@ button.fox-chat-project-row:disabled {
 .fox-assistant-message {
   position: relative;
   width: 100%;
+  align-items: flex-start;
 }
 
-.fox-user-avatar,
-.fox-assistant-message > .fox-assistant-avatar {
-  position: absolute;
-  top: 5px;
-  width: 28px;
-  height: 28px;
-  padding: 0;
+.fox-assistant-message > .fox-assistant-avatar,
+.fox-assistant-content > .fox-assistant-avatar {
+  /* In-flow at the start of the column so its left edge aligns with the
+     message content (instead of hanging in a -40px gutter). */
+  position: static;
+  top: auto;
+  margin: 0 0 2px;
 }
-.fox-user-avatar { right: -40px; }
-.fox-assistant-message > .fox-assistant-avatar { left: -40px; }
+
 .fox-user-avatar img { object-fit: cover; object-position: center; padding: 0; }
 .fox-user-bubble-text { max-height: 218px; overflow: hidden; white-space: pre-wrap; }
 .fox-user-bubble.is-expanded .fox-user-bubble-text { max-height: none; }
@@ -3344,13 +3351,17 @@ button.fox-chat-project-row:disabled {
 
 .fox-error-prompt {
   align-items: center;
-  border: 1px solid color-mix(in oklch, var(--destructive) 22%, var(--fox-border));
-  background: color-mix(in oklch, var(--destructive) 5%, var(--fox-card));
+  border: 1px solid var(--fox-border);
+  background: var(--fox-card);
+}
+
+.fox-error-prompt small {
+  color: var(--fox-muted);
 }
 
 .fox-error-prompt > span {
-  background: color-mix(in oklch, var(--destructive) 12%, transparent);
-  color: var(--destructive);
+  background: transparent;
+  color: var(--fox-text);
 }
 
 .fox-error-prompt p {
@@ -3475,6 +3486,12 @@ button.fox-chat-project-row:disabled {
   line-height: 20px;
 }
 
+/* Avatar → step badge → status text, all on the header line. */
+.fox-chain-of-thought-header > .fox-assistant-avatar {
+  flex: 0 0 28px;
+  margin: 0;
+}
+
 .fox-assistant-avatar {
   display: block;
   width: 28px;
@@ -3566,32 +3583,29 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-chain-of-thought-header .fox-runtime-step-count {
-  position: absolute;
-  top: -7px;
-  right: -7px;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 2px;
-  display: grid;
+  position: static;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: inline-grid;
   place-items: center;
-  border-radius: 50%;
+  flex: 0 0 auto;
+  border-radius: 999px;
   background: var(--fox-accent-soft);
   color: var(--fox-accent);
-  font-size: 8.5px;
+  font-size: 10px;
   font-weight: 680;
   line-height: 1;
 }
 
+/* Expanding the chain shows every row: no inner scroll container. */
 .fox-chain-of-thought-content {
   width: 100%;
   max-width: 100%;
-  max-height: min(280px, 38vh);
+  max-height: none;
   margin-top: 6px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: auto;
+  overflow: visible;
   padding: 5px 0 7px 2px;
-  scrollbar-gutter: stable;
 }
 
 .fox-live-reasoning {
@@ -3627,13 +3641,15 @@ img[src='/avatars/fox-assistant.png'] {
   font-size: 12px;
   line-height: 1.62;
   overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  scrollbar-width: none;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
 }
+
+.fox-live-reasoning-scroll::-webkit-scrollbar { display: none; }
 
 .fox-live-reasoning-scroll > :last-child,
 .fox-reasoning-card > :last-child {
@@ -3697,16 +3713,65 @@ img[src='/avatars/fox-assistant.png'] {
   font-weight: 450;
 }
 
-.fox-runtime-step-trigger > svg:last-child {
-  flex: 0 0 16px;
-  margin-left: auto;
-  color: var(--fox-faint);
-  transition: transform .18s ease;
+/* One row = one thought segment or one tool call. The leading glyph doubles as
+   that row's disclosure toggle and only becomes one while the row is hovered. */
+.fox-runtime-step-row {
+  position: relative;
 }
 
-.fox-runtime-step-detail[data-state='open'] .fox-runtime-step-trigger > svg:last-child {
+.fox-runtime-step-icon {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.fox-runtime-step-icon-toggle {
+  position: relative;
+  width: 15px;
+  height: 15px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.fox-runtime-step-icon-toggle > svg {
+  grid-area: 1 / 1;
+  width: 15px;
+  height: 15px;
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.fox-runtime-step-icon-chevron { opacity: 0; }
+
+.fox-runtime-step-row:hover .fox-runtime-step-icon-glyph,
+.fox-runtime-step-icon-toggle:focus-visible .fox-runtime-step-icon-glyph,
+.fox-runtime-step-detail[data-state='open'] .fox-runtime-step-icon-glyph {
+  opacity: 0;
+}
+
+.fox-runtime-step-row:hover .fox-runtime-step-icon-chevron,
+.fox-runtime-step-icon-toggle:focus-visible .fox-runtime-step-icon-chevron,
+.fox-runtime-step-detail[data-state='open'] .fox-runtime-step-icon-chevron {
+  opacity: 1;
+}
+
+.fox-runtime-step-detail[data-state='open'] .fox-runtime-step-icon-chevron {
   transform: rotate(90deg);
 }
+
+.fox-runtime-step-connector {
+  position: absolute;
+  left: 50%;
+  top: 23px;
+  bottom: 0;
+  width: 1px;
+  margin-inline: -1px;
+  background: color-mix(in oklch, var(--fox-border) 72%, transparent);
+}
+
+.fox-runtime-step-row.is-pending { opacity: .68; }
 
 .fox-runtime-step-content {
   width: 100%;
@@ -3725,15 +3790,15 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-runtime-detail-clip { min-height: 0; overflow: hidden; }
 
+/* Per-row detail opens in place; the chain keeps a single scroll context. */
 .fox-runtime-detail-panel {
-  max-height: 260px;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
   margin-top: 7px;
   border: 1px solid color-mix(in oklch, var(--fox-border) 86%, transparent);
   border-radius: 8px;
   background: color-mix(in oklch, var(--fox-card) 78%, var(--fox-panel));
   padding: 9px 11px;
-  overscroll-behavior: contain;
 }
 
 .fox-reasoning-text pre {
@@ -3754,6 +3819,12 @@ img[src='/avatars/fox-assistant.png'] {
   background: var(--fox-card);
   font-size: 11px;
 }
+/* The detail panel is not a scrollport anymore, so paging controls travel with it. */
+.fox-runtime-detail-panel .fox-reasoning-pagination {
+  position: static;
+  background: transparent;
+}
+
 .fox-reasoning-pagination > span { margin-right: auto; }
 .fox-reasoning-pagination button { color: var(--fox-accent); cursor: pointer; }
 .fox-reasoning-pagination button:disabled { color: var(--fox-faint); cursor: default; }
@@ -3783,20 +3854,39 @@ img[src='/avatars/fox-assistant.png'] {
   }
 }
 .fox-runtime-process-clip { min-height: 0; overflow: hidden; }
+/* The expanded chain shows every row at once, with no scrollbar of its own. */
 .fox-runtime-process-scroll {
   display: grid;
   gap: 10px;
-  max-height: min(420px, 55vh);
-  overflow: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
+  max-height: none;
+  overflow: visible;
   padding: 8px 0 8px 2px;
 }
 .fox-runtime-process-scroll > div { animation: none; }
 .fox-runtime-process-scroll > div > div:first-child { color: var(--fox-faint); }
 
-.fox-runtime-step-detail,
-.fox-runtime-step-detail > div {
+.fox-runtime-step-detail {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  color: var(--fox-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.fox-runtime-step-detail > .fox-runtime-step-icon {
+  margin-top: 2px;
+  color: var(--fox-faint);
+}
+
+.fox-runtime-step-detail > .fox-runtime-step-body {
+  width: 100%;
+  min-width: 0;
+}
+
+.fox-runtime-step-detail > .fox-runtime-step-content {
   width: 100%;
   min-width: 0;
 }
@@ -4041,15 +4131,26 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-message-footer .fox-message-meta {
   margin-left: 0;
+  min-width: 0;
+  flex: 1 1 0;
 }
 
 .fox-message-live-meta {
   color: var(--fox-accent);
 }
 
+/* Failures always start their own line under name/model/time, and fade out at
+   the end when they are longer than the message column. */
 .fox-message-failure-meta {
+  flex: 1 0 100%;
+  min-width: 0;
+  overflow: hidden;
   color: #E87171;
   cursor: help;
+  font-size: var(--fox-type-meta, 12px);
+  white-space: nowrap;
+  mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 48px), transparent 100%);
+  -webkit-mask-image: linear-gradient(90deg, #000 0, #000 calc(100% - 48px), transparent 100%);
 }
 
 .fox-message-cancelled-meta {
@@ -4067,7 +4168,8 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-message-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 2px 8px;
   margin: 1px 0 0 -3px;
   color: var(--fox-faint);
   font-size: 12px;
@@ -4086,7 +4188,7 @@ img[src='/avatars/fox-assistant.png'] {
   min-width: 0;
   border: 0;
   border-radius: 14px;
-  background: color-mix(in oklch, var(--fox-panel) 74%, var(--fox-card));
+  background: color-mix(in oklch, var(--fox-panel) 54%, var(--fox-card));
   box-shadow: none;
 }
 
@@ -4118,8 +4220,8 @@ img[src='/avatars/fox-assistant.png'] {
   flex: 0 0 28px;
   place-items: center;
   border-radius: 7px;
-  background: var(--fox-accent);
-  color: var(--primary-foreground);
+  background: transparent;
+  color: var(--fox-accent);
 }
 
 .fox-message-artifact .fox-message-artifact-title p {
@@ -4131,7 +4233,7 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-message-artifact .fox-message-artifact-title p:first-child {
   color: var(--fox-text);
   font-size: 14px;
-  font-weight: 620;
+  font-weight: 450;
 }
 
 .fox-message-artifact .fox-message-artifact-title p:last-child {
@@ -6965,7 +7067,8 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .dark .fox-error-prompt {
-  background: color-mix(in oklch, var(--destructive) 8%, var(--fox-card));
+  background: var(--fox-card);
+  box-shadow: none;
 }
 
 .dark .fox-denied-prompt {
@@ -10949,7 +11052,7 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-message-artifact-trigger:hover .fox-message-artifact {
-  background: color-mix(in oklch, var(--fox-accent) 8%, var(--fox-panel));
+  background: color-mix(in oklch, var(--fox-accent) 8%, var(--fox-card));
 }
 
 .fox-message-artifact-trigger .fox-message-artifact {
@@ -11106,7 +11209,7 @@ img[src='/avatars/fox-assistant.png'] {
 
 /* Keep avatars in the outer gutters when the chat column becomes narrow. */
 @container fox-chat (max-width: 900px) {
-  .fox-conversation-content { width: calc(100% - 96px); }
+  .fox-conversation-content { width: calc(100% - 128px); }
 }
 @media (max-width: 520px) {
   .fox-expert-picker-dialog { padding: 16px; }
