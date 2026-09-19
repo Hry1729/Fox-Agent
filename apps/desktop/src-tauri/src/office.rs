@@ -131,8 +131,12 @@ pub fn setup(database: &Database, resource_dir: &Path) -> Result<(), String> {
 }
 
 pub fn tool_definitions() -> Vec<Value> {
-    let file = json!({"type":"string", "description":"Office file path inside the current authorized project (.docx/.xlsx/.pptx)."});
-    let output = json!({"type":"string", "description":"Output path inside the project. Use a new file; overwrite requires explicit true."});
+    let file = json!({"type":"string", "description":"Office file path inside the current authorized project (.docx/.xlsx/.pptx). Relative paths resolve against the project root."});
+    let output = json!({"type":"string", "description":"Explicit output path inside the project. Use it when the user named a location, or to continue writing the SAME file. For a NEW result prefer \"name\" so the Host places it in the conversation result folder. overwrite requires explicit true."});
+    // A *name*, not a path: the Host decides the folder. This is the minimal
+    // output semantic the old contract was missing — it had no way to say "this
+    // is a new artifact" without also inventing a project path.
+    let name = json!({"type":"string", "description":"File name of a NEW artifact, e.g. \"AGV分析报告.docx\". The Host places it in the conversation result folder it decided for this task (the injected deliverableRoot). Must be a plain file name: no directories, no \".\"/\"..\", no drive letters. Mutually exclusive with output."});
     let mut tools = vec![
         ("office_help", "Read a BOUNDED Office format/property reference. No document access. With format only: list available elements. With format+element: a concise property catalog (name/type/ops/short hint). The catalog is paged; request property=<name> for one property's full definition (examples/aliases/readback), or page=<n> for the next catalog page. Do not assume a property exists without reading it. Always echo the returned continuation in the same request when more pages are offered.", json!({
             "format":{"type":"string","enum":["docx","xlsx","pptx"]},
@@ -140,13 +144,14 @@ pub fn tool_definitions() -> Vec<Value> {
             "property":{"type":"string","description":"Optional single property/alias name; returns only that property's full definition."},
             "page":{"type":"integer","minimum":1,"description":"Catalog page number (1-based); defaults to 1."},
             "pageSize":{"type":"integer","minimum":1,"maximum":60,"description":"Properties per catalog page; defaults to 40."}
-        }), vec!["format"]),
-        ("office_read", "Read an Office document as text, outline, stats, or a structured node/query. No changes.", json!({"file":file,"mode":{"type":"string","enum":["text","outline","stats","get","query"]},"selector":{"type":"string"}}), vec!["file"]),
-        ("office_create", "Create a DOCX/XLSX/PPTX, optionally copying an existing template. Returns a saved file.", json!({"output":output,"template":file,"overwrite":{"type":"boolean","default":false}}), vec!["output"]),
-        ("office_edit", "Apply an atomic batch of add/set/remove to a COPY of a document. operations: [{command, path, type?, props?}]. Use office_help for element properties. Source is preserved unless output is the same path and overwrite=true. No shell/raw XML/plugins/network assets.", json!({"file":file,"output":output,"overwrite":{"type":"boolean","default":false},"operations":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["command","path"],"properties":{"command":{"type":"string","enum":["add","set","remove"]},"path":{"type":"string"},"type":{"type":"string"},"props":{"type":"object","additionalProperties":{"type":["string","number","boolean"]}}}}}}), vec!["file","output","operations"]),
+        }), vec!["format"], json!({})),
+        ("office_read", "Read an Office document as text, outline, stats, or a structured node/query. No changes.", json!({"file":file,"mode":{"type":"string","enum":["text","outline","stats","get","query"]},"selector":{"type":"string"}}), vec!["file"], json!({})),
+        ("office_create", "Create a DOCX/XLSX/PPTX, optionally copying an existing template, and save it as a user result. Give \"name\" to have the Host place it in the conversation result folder, or \"output\" for an explicit project path.", json!({"output":output,"name":name,"template":file,"overwrite":{"type":"boolean","default":false}}), Vec::<&str>::new(), json!({"anyOf":[{"required":["output"]},{"required":["name"]}]})),
+        ("office_edit", "Apply an atomic batch of add/set/remove to a COPY of a document. operations: [{command, path, type?, props?}]. Use office_help for element properties. Source is preserved unless output is the same path and overwrite=true. No shell/raw XML/plugins/network assets.", json!({"file":file,"output":output,"name":name,"overwrite":{"type":"boolean","default":false},"operations":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["command","path"],"properties":{"command":{"type":"string","enum":["add","set","remove"]},"path":{"type":"string"},"type":{"type":"string"},"props":{"type":"object","additionalProperties":{"type":["string","number","boolean"]}}}}}}), vec!["file","operations"], json!({"anyOf":[{"required":["output"]},{"required":["name"]}]})),
         ("office_import_data", "Import ONE CSV/TSV data block into an XLSX worksheet atomically; far more compact than many per-cell office_edit operations. Values are typed by the writer (numbers stay numbers); a field starting with = becomes a formula and is screened like office_edit. PREFER the artifact flow: compute and save data once with attachment_compute (saveFile), then pass the returned files[].id here as artifactId — Host reads the saved bytes directly, so the full CSV never has to be rebuilt or copied through the request. data and artifactId are mutually exclusive; artifactId only accepts a compute artifact id from THIS conversation (a compute-artifact: id returned by attachment_compute). Large datasets MUST be split into multiple calls: the response returns nextStartCell for the following block. Re-running the same call with the same startCell overwrites the same cells, it never appends duplicates, so retries are safe. Omit file to create the workbook. Set createSheet=true to add a missing sheet. The sheet receives the data as-is; style it afterwards with office_edit.", json!({
-            "file":{"type":"string", "description":"Optional existing .xlsx inside the authorized project. Omit to create a new workbook at output."},
+            "file":{"type":"string", "description":"Optional existing .xlsx inside the authorized project. Omit to create a new workbook at output/name."},
             "output":output,
+            "name":name,
             "overwrite":{"type":"boolean","default":false},
             "sheet":{"type":"string","description":"Target worksheet name (must exist unless createSheet=true)."},
             "createSheet":{"type":"boolean","default":false,"description":"Add the worksheet when it does not exist yet."},
@@ -155,13 +160,19 @@ pub fn tool_definitions() -> Vec<Value> {
             "header":{"type":"boolean","default":false,"description":"First row is a header: the writer sets AutoFilter and freezes the pane."},
             "data":{"type":"string","description":"The inline CSV/TSV payload, at most 4 MiB, 65536 rows and 512 columns per call. Mutually exclusive with artifactId."},
             "artifactId":{"type":"string","description":"A compute artifact id (compute-artifact:...) returned by this conversation's attachment_compute files[].id. Host resolves and reads the saved CSV/TSV bytes directly; pass format to match the saved file. Mutually exclusive with data."}
-        }), vec!["output","sheet"]),
-        ("office_merge", "Fill {{key}} placeholders in a template with inline data and save a copy.", json!({"file":file,"output":output,"overwrite":{"type":"boolean","default":false},"data":{"type":"object","additionalProperties":{"type":["string","number","boolean"]}}}), vec!["file","output","data"]),
-        ("office_render", "Render an Office document to HTML or PNG in the project. PNG requires a supported local browser; return a clear error when unavailable. This is not proof of Microsoft Office rendering equivalence.", json!({"file":file,"output":output,"mode":{"type":"string","enum":["html","screenshot"]},"page":{"type":"string"}}), vec!["file","output","mode"]),
-        ("office_validate", "Validate OpenXML structure of an existing document. Does not certify visual layout or numerical correctness.", json!({"file":file}), vec!["file"]),
-    ].into_iter().map(|(name, description, properties, required)| json!({
-        "name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}
-    })).collect::<Vec<_>>();
+        }), vec!["sheet"], json!({"anyOf":[{"required":["output"]},{"required":["name"]}]})),
+        ("office_merge", "Fill {{key}} placeholders in a template with inline data and save a copy.", json!({"file":file,"output":output,"name":name,"overwrite":{"type":"boolean","default":false},"data":{"type":"object","additionalProperties":{"type":["string","number","boolean"]}}}), vec!["file","data"], json!({"anyOf":[{"required":["output"]},{"required":["name"]}]})),
+        ("office_render", "Render an Office document to HTML or PNG for the user to preview. By default the Host stores the preview in its private preview area and the user opens it through the saved result's preview entry — pass NO output for that. Pass \"name\" (or an explicit output inside the conversation result folder) only when the user asked for the HTML/PNG itself as a deliverable. PNG requires a supported local browser; return a clear error when unavailable. This is not proof of Microsoft Office rendering equivalence.", json!({"file":file,"output":output,"name":name,"mode":{"type":"string","enum":["html","screenshot"]},"page":{"type":"string"}}), vec!["file","mode"], json!({})),
+        ("office_validate", "Validate OpenXML structure of an existing document. Does not certify visual layout or numerical correctness.", json!({"file":file}), vec!["file"], json!({})),
+    ].into_iter().map(|(name, description, properties, required, extra)| {
+        let mut schema = json!({"type":"object","properties":properties,"required":required,"additionalProperties":false});
+        if let (Some(object), Some(extra)) = (schema.as_object_mut(), extra.as_object()) {
+            for (key, value) in extra {
+                object.insert(key.clone(), value.clone());
+            }
+        }
+        json!({"name":name,"description":description,"inputSchema":schema})
+    }).collect::<Vec<_>>();
     tools.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     tools
 }
@@ -176,6 +187,9 @@ pub struct PreparedOffice {
     render: bool,
     screenshot: bool,
     root: PathBuf,
+    /// Whether the resolved `output` lands in the project (a deliverable) or in
+    /// the Host's private preview cache.
+    placement: OutputPlacement,
     /// Host-side shaping for `office_help` (the CLI always returns the full
     /// reference; the Host bounds/pages it and never executes a document).
     help: Option<HelpQuery>,
@@ -199,6 +213,171 @@ pub struct OfficeCallContext<'a> {
     pub database: &'a crate::database::Database,
     pub sessions_dir: &'a Path,
     pub conversation_id: &'a str,
+    /// Host-private artifact roots (preview cache, working copies, staging).
+    /// Callers that cannot supply it (unit tests of the pure translator) pass
+    /// `None`; every production dispatch passes the Host's own state so a
+    /// model can never point these areas at application data.
+    pub artifacts_dir: Option<&'a Path>,
+}
+
+impl<'a> OfficeCallContext<'a> {
+    /// The Host's private artifact store, or `None` on a context-free path.
+    pub(crate) fn artifact_store(&self) -> Option<crate::runtime_host::artifact_store::ArtifactStore> {
+        self.artifacts_dir
+            .map(crate::runtime_host::artifact_store::ArtifactStore::new)
+    }
+}
+
+/// Host-decided placement for one prepared Office operation.
+///
+/// `root` is always the authorized project folder. `output` is the final
+/// resolved target, which for a preview is an application-private path. The
+/// three are kept separate so permission checks, the approval card, execution
+/// and version registration all use the same resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputPlacement {
+    /// Final result inside the project (`交付物`).
+    Deliverable,
+    /// Rendered preview inside the Host's private preview area.
+    HostPrivatePreview,
+}
+
+fn path_is_in_project_deliverable_dir(root: &Path, path: &Path) -> bool {
+    crate::runtime_host::artifact_store::is_deliverable_path(root, path)
+}
+
+/// The Host-owned directory that holds pre-write snapshots of documents this
+/// connector mutates.
+///
+/// Derived from the Host's own session store, exactly like
+/// `RuntimeHostState::managed_files_dir`, so the connector writes its undo copy
+/// into the version store the restore path already reads instead of leaving a
+/// `*.fox-backup-<uuid>` file next to the user's document.
+pub(crate) fn snapshot_directory(context: &OfficeCallContext<'_>) -> PathBuf {
+    context
+        .sessions_dir
+        .parent()
+        .map(|base| base.join("managed-file-backups"))
+        .unwrap_or_else(|| context.sessions_dir.join("managed-file-backups"))
+}
+
+/// Why a Host ledger still needs these bytes, if it does.
+///
+/// The reclaim pass may only delete commit staging that no artifact row and no
+/// version/recovery row names. An unanswerable query is *not* a licence to
+/// delete: it is reported as a reference so the file is kept.
+fn staging_reference_reason(
+    context: Option<&OfficeCallContext<'_>>,
+    path: &Path,
+) -> Option<String> {
+    let context = context?;
+    let key = path.to_string_lossy();
+    match context.database.path_is_referenced_by_host_ledger(&key) {
+        Ok(true) => Some("产物或版本台账仍引用该路径".to_owned()),
+        Ok(false) => None,
+        Err(error) => Some(format!("无法确认台账引用关系，按保留处理: {error}")),
+    }
+}
+
+/// Write a rendered preview into the Host's private preview area.
+///
+/// Only used when the target would otherwise be an ad-hoc file in the project
+/// root: previews are not deliverables, so they belong to the Host's cache and
+/// are reached through the result's own preview entry. A target the model
+/// deliberately placed in the conversation deliverable folder (`fox/...`) is
+/// respected — the user explicitly asked for that artifact.
+fn private_preview_path(
+    root: &Path,
+    requested: &Path,
+    conversation_id: &str,
+    store: &crate::runtime_host::artifact_store::ArtifactStore,
+    mode: &str,
+) -> PathBuf {
+    if path_is_in_project_deliverable_dir(root, requested) {
+        return requested.to_path_buf();
+    }
+    let extension = requested
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("html");
+    store
+        .preview_path(conversation_id, requested, extension, &format!("mode={mode}"))
+        .unwrap_or_else(|_| requested.to_path_buf())
+}
+
+/// A stable synthetic "requested" path for a render that was given no target.
+///
+/// Derived from the source document so that re-rendering the same document in
+/// the same mode keeps replacing one preview file instead of accumulating one
+/// per call. It is only ever used as a fingerprint input and for the extension;
+/// the real location is the Host's private preview cache.
+fn default_preview_request(root: &Path, source: Option<&Path>, expected: &str) -> PathBuf {
+    let stem = source
+        .and_then(|path| path.file_stem())
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("preview");
+    root.join(format!("{stem}.{expected}"))
+}
+
+/// Project-relative target for a new artifact the caller named but did not place.
+///
+/// The Host puts it in the conversation's result folder — the same folder the
+/// prompt advertises as `deliverableRoot`, persisted by the same ledger — so the
+/// advertised path, the approved path and the executed path cannot drift apart.
+/// A name is a *name*: separators, traversal and reserved device names are
+/// rejected rather than sanitized, because silently moving a file the user named
+/// is worse than refusing it.
+fn default_deliverable_relative(
+    root: &Path,
+    name: &str,
+    context: Option<&OfficeCallContext<'_>>,
+) -> Result<String, String> {
+    if name.is_empty() || name.len() > 160 {
+        return Err("Office name 无效：必须是 1..=160 字节的文件名".into());
+    }
+    if name.contains(['/', '\\', ':', '\0']) || name.starts_with('.') {
+        return Err("Office name 只能是文件名本身，不能包含路径分隔符".into());
+    }
+    if matches!(name, "." | "..") || name.ends_with(['.', ' ']) {
+        return Err("Office name 是无效的文件名".into());
+    }
+    let stem = name.split('.').next().unwrap_or_default().to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6"
+            | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6"
+            | "LPT7" | "LPT8" | "LPT9"
+    ) {
+        return Err("Office name 不能是保留设备名".into());
+    }
+    let context = context.ok_or(
+        "当前链路没有会话上下文，无法使用 Host 默认成果目录；请显式提供 output",
+    )?;
+    let store = context.artifact_store().ok_or(
+        "当前链路没有 Host 私有产物区，无法确定默认成果目录；请显式提供 output",
+    )?;
+    let conversation_id = context.conversation_id;
+    let candidate = store.deliverable_directory_name("", conversation_id);
+    let project_key =
+        crate::runtime_host::artifact_store::project_key(&root.to_string_lossy());
+    let folder = context
+        .database
+        .ensure_deliverable_folder(
+            conversation_id,
+            &project_key,
+            &candidate,
+            &crate::runtime_host::artifact_store::is_valid_deliverable_folder_name,
+            crate::database::now_ms(),
+        )
+        .map_err(|error| format!("无法确定会话成果目录: {error}"))?
+        .ok_or("会话成果目录不可用")?;
+    Ok(format!(
+        "{}/{}/{}",
+        crate::runtime_host::artifact_store::PROJECT_DELIVERABLE_DIR,
+        folder,
+        name
+    ))
 }
 
 /// Resolve a `compute-artifact:` reference into the exact bytes the Office
@@ -415,6 +594,18 @@ fn scoped_path(root: &Path, value: &str, must_exist: bool) -> Result<PathBuf, St
     } else {
         if must_exist {
             return Err("Office 输入文件不存在".to_owned());
+        }
+        // The conversation's own deliverable folder is created on demand: the
+        // Host chooses that folder, so a model that follows the injected
+        // `deliverableRoot` must not first have to invent a directory-creation
+        // step. Any other missing directory stays an error, so an arbitrary
+        // path is never silently materialized.
+        if crate::runtime_host::artifact_store::is_deliverable_path(root, &candidate) {
+            if let Some(parent) = candidate.parent() {
+                fs::create_dir_all(parent).map_err(|e| {
+                    format!("无法创建会话成果目录 {}: {e}", parent.display())
+                })?;
+            }
         }
         let parent = candidate
             .parent()
@@ -664,6 +855,7 @@ pub fn prepare_with_context(
         render: false,
         screenshot: false,
         root: PathBuf::new(),
+        placement: OutputPlacement::Deliverable,
         help: None,
         stdin_data: None,
         import: None,
@@ -714,28 +906,109 @@ pub fn prepare_with_context(
         document(&source)?;
         action.source = Some(source);
     }
-    if input.get("output").is_some() {
-        let output = scoped_path(&action.root, string(input, "output")?, false)?;
+    // Target resolution, in the caller's own terms. Two names for two different
+    // things, which the previous contract conflated:
+    //
+    //  * `output` — a path inside the authorized project (or the exact path of
+    //    an existing file). Semantics unchanged.
+    //  * `name`   — the file name of a NEW artifact. The Host places it in the
+    //    conversation result folder it decided for this task, so "use the
+    //    default result folder" is a Host guarantee rather than a prompt
+    //    suggestion. It never rewrites or prefixes an `output` path.
+    let explicit_output = input.get("output").and_then(Value::as_str).map(str::to_owned);
+    let named = input.get("name").and_then(Value::as_str).map(str::to_owned);
+    if explicit_output.is_some() && named.is_some() {
+        return Err(
+            "Office output 与 name 互斥：output 指定项目内路径，name 让 Host 放入默认成果目录"
+                .into(),
+        );
+    }
+    let requested = match (explicit_output, named) {
+        (Some(value), None) => Some(value),
+        (None, Some(name)) => Some(default_deliverable_relative(&action.root, &name, context)?),
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!("mutual exclusion is checked above"),
+    };
+    if tool == "office_render" {
+        let mode = input["mode"].as_str().unwrap_or("html");
+        let expected = if mode == "html" { "html" } else { "png" };
+        // A render is a *view* of a result, so it is Host-private by default.
+        // It reaches the project only when the caller explicitly exported it:
+        // through `name` (the Host places it in the result folder) or through an
+        // explicit path inside the conversation result folder. Any other
+        // explicit path still lands in the private preview cache, which also
+        // makes a re-render replace the same file so no stale preview link
+        // survives.
+        let (target, placement) = match requested {
+            Some(value) => {
+                let output = scoped_path(&action.root, &value, false)?;
+                let actual = output.extension().and_then(|s| s.to_str());
+                if actual != Some(expected) {
+                    return Err(format!("预览输出扩展名必须为 .{expected}"));
+                }
+                if output.exists() && !action.overwrite {
+                    return Err(
+                        "Office 输出已存在，请选择新文件；覆盖必须显式设置 overwrite=true".into(),
+                    );
+                }
+                match context.and_then(|context| context.artifact_store()) {
+                    Some(store) if !path_is_in_project_deliverable_dir(&action.root, &output) => {
+                        let conversation_id =
+                            context.map(|context| context.conversation_id).unwrap_or_default();
+                        (
+                            private_preview_path(
+                                &action.root,
+                                &output,
+                                conversation_id,
+                                &store,
+                                mode,
+                            ),
+                            OutputPlacement::HostPrivatePreview,
+                        )
+                    }
+                    _ => (output, OutputPlacement::Deliverable),
+                }
+            }
+            None => {
+                // No target at all: the Host decides. This is the normal way to
+                // render a preview and must not require the model to invent a
+                // path in the user's project.
+                let store = context
+                    .and_then(|context| context.artifact_store())
+                    .ok_or("office_render 需要 output/name，或需在此链路提供 Host 私有预览区")?;
+                let conversation_id =
+                    context.map(|context| context.conversation_id).unwrap_or_default();
+                let requested =
+                    default_preview_request(&action.root, action.source.as_deref(), expected);
+                (
+                    private_preview_path(
+                        &action.root,
+                        &requested,
+                        conversation_id,
+                        &store,
+                        mode,
+                    ),
+                    OutputPlacement::HostPrivatePreview,
+                )
+            }
+        };
+        action.placement = placement;
+        action.output = Some(target);
+        action.mutates = true;
+    } else if let Some(value) = requested {
+        let output = scoped_path(&action.root, &value, false)?;
         if output.exists() && !action.overwrite {
             return Err("Office 输出已存在，请选择新文件；覆盖必须显式设置 overwrite=true".into());
         }
-        if tool == "office_render" {
-            let expected = if input["mode"] == "html" {
-                "html"
-            } else {
-                "png"
-            };
-            if output.extension().and_then(|s| s.to_str()) != Some(expected) {
-                return Err(format!("预览输出扩展名必须为 .{expected}"));
-            }
-        } else {
-            document(&output)?;
-            if let Some(source) = &action.source {
-                if source.extension() != output.extension() {
-                    return Err("Office 编辑不进行格式转换，输入输出扩展名必须一致".into());
-                }
+        document(&output)?;
+        if let Some(source) = &action.source {
+            if source.extension() != output.extension() {
+                return Err("Office 编辑不进行格式转换，输入输出扩展名必须一致".into());
             }
         }
+        // Every non-render tool commits to the project path it resolved;
+        // only `office_render` may redirect the target into the Host's private
+        // preview cache.
         action.output = Some(output);
         action.mutates = true;
     }
@@ -1304,17 +1577,109 @@ pub(crate) fn execute_with_cancellation(
     // Recheck all paths and permissions immediately before execution.
     let action = prepare_with_context(tool, input, root, permission, context)?;
     let cwd = (!action.root.as_os_str().is_empty()).then_some(action.root.as_path());
+    // Working copies live in the Host's private artifact area, never next to
+    // the user's document: a briefly locked sibling file made the project
+    // folder unreadable and killed external file watchers with EBUSY. Layout
+    // mirrors the target so the controlled staging file below can be created
+    // on the target's own volume.
+    let store = context.and_then(|context| context.artifact_store());
+    // Cross-process ownership for the staging files this execution will create.
+    //
+    // The in-process `EXECUTION_LOCK` above says nothing about a second Fox
+    // process working in the same project, so ownership of a staging file is
+    // established with an OS handle whose sharing is denied. When the Host's
+    // private artifact area is unavailable the write still proceeds, but no
+    // staging file may then be reclaimed by anyone — leftovers are kept and
+    // reported instead of guessed away.
+    let ledger = match (&store, context) {
+        (Some(store), Some(context)) => {
+            match crate::runtime_host::artifact_store::StagingLedger::begin(
+                store.root(),
+                context.conversation_id,
+            ) {
+                Ok(ledger) => Some(ledger),
+                Err(error) => {
+                    eprintln!("[fox-office] 暂存归属台账不可用，残留将只保留不回收: {error}");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
     let mut temporary = None;
+    let mut staging_scope: Option<(PathBuf, PathBuf, String)> = None;
     if let Some(output) = &action.output {
-        let ext = output.extension().and_then(|s| s.to_str()).unwrap_or("tmp");
-        let path = output.with_file_name(format!(".fox-office-{}.{}", uuid::Uuid::new_v4(), ext));
+        let ext = output
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("tmp")
+            .to_owned();
+        let base = match (&store, context) {
+            (Some(store), Some(context)) => store
+                .work_directory(context.conversation_id)
+                .unwrap_or_else(|_| std::env::temp_dir()),
+            _ => std::env::temp_dir(),
+        };
+        let path = base.join(format!("work-{}.{}", uuid::Uuid::new_v4(), ext));
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
         if matches!(tool, "office_edit" | "office_create" | "office_import_data") {
             if let Some(source) = &action.source {
                 fs::copy(source, &path).map_err(|e| e.to_string())?;
             }
         }
+        // The working copy is a real file with the document's own extension:
+        // the pinned CLI infers the document format from it.
         temporary = Some(path);
+        // Where a verified payload may be staged on the target volume.
+        //
+        // Inside the project the staging file sits in the target's own folder
+        // (a project-relative path keeps `reclaim` scoped to the project).
+        // A target *outside* the project — an evaluation output root, or an
+        // explicitly rendered preview — must not stage inside the project root,
+        // or the staging file would appear in a folder the user owns while the
+        // real target lives elsewhere. It stages in the target's own directory
+        // instead, which is also the only place guaranteed to be on the target's
+        // volume.
+        staging_scope = Some((
+            output
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| action.root.as_path())
+                .to_path_buf(),
+            PathBuf::from("."),
+        ))
+        .map(|(root, relative)| (root, relative, uuid::Uuid::new_v4().to_string()));
+        if let Some((root, _, _)) = staging_scope.as_ref() {
+            // Reclaim residual staging from an interrupted earlier attempt.
+            //
+            // Reclaiming is a *proof*, never a filename match: the Host needs a
+            // registered entry, a controlled location, no live owning process
+            // (proven with the share-denied lease handle, so it holds against a
+            // second Fox process), and no Host ledger still referencing the
+            // bytes. Anything unproven is kept and reported. A user file that
+            // merely happens to be called `.fox-stage-*.tmp` has no ledger entry
+            // and is therefore never touched.
+            if let Some(ledger) = ledger.as_ref() {
+                let protect = |path: &Path| staging_reference_reason(context, path);
+                let report =
+                    ledger.reclaim(&[root.as_path(), action.root.as_path()], &protect);
+                for line in report.diagnostics() {
+                    eprintln!("[fox-office] {line}");
+                }
+            }
+        }
     }
+    // The Host's own version store for this write's undo copy. Passed to the
+    // connector so no `*.fox-backup-*` file is ever created in the project.
+    // Context-free callers fall back to a private temp directory, never to the
+    // target's own folder.
+    let snapshot_dir: PathBuf = context
+        .map(snapshot_directory)
+        .unwrap_or_else(|| std::env::temp_dir().join("fox-office-backups"));
+    let _ = fs::create_dir_all(&snapshot_dir);
+    let snapshot_dir = Some(snapshot_dir);
     // Version metadata for intercepted document writes, surfaced to the
     // Host as details.foxManagedFile (the Host registers the durable row).
     let mut managed_meta: Option<Value> = None;
@@ -1448,72 +1813,118 @@ pub(crate) fn execute_with_cancellation(
             }
             let output = action.output.as_ref().expect("output");
             check()?;
-            scoped_path(
-                &action.root,
-                &output
-                    .strip_prefix(&action.root)
-                    .map_err(|_| "Office 输出超出项目")?
-                    .to_string_lossy(),
-                false,
-            )?;
+            if action.placement == OutputPlacement::Deliverable {
+                scoped_path(
+                    &action.root,
+                    &output
+                        .strip_prefix(&action.root)
+                        .map_err(|_| "Office 输出超出项目")?
+                        .to_string_lossy(),
+                    false,
+                )?;
+            }
             if matches!(tool, "office_edit" | "office_create" | "office_import_data") {
-                if output.exists() {
-                    if !action.overwrite {
-                        return Err("Office 输出在执行期间出现，已保留原文件".into());
+                // The undo copy always goes into the Host's own version store,
+                // never next to the user's document.
+                let before = output.exists().then(|| hash_file_meta(output)).flatten();
+                let backup = match (before.as_ref(), snapshot_dir.as_ref()) {
+                    (Some(_), Some(dir)) => {
+                        let path = dir.join(format!("office-{}.foxbak", uuid::Uuid::new_v4()));
+                        fs::copy(output, &path)
+                            .map_err(|e| format!("Office 备份失败: {e}"))?;
+                        Some(path)
                     }
-                    let before = hash_file_meta(output);
-                    let backup = output.with_file_name(format!(
-                        "{}.fox-backup-{}",
-                        output.file_name().unwrap_or_default().to_string_lossy(),
-                        uuid::Uuid::new_v4()
-                    ));
-                    fs::copy(output, &backup).map_err(|e| format!("Office 备份失败: {e}"))?;
-                    fs::copy(temp, output).map_err(|e| {
-                        format!("Office 写入失败，原文件备份位于 {}: {e}", backup.display())
-                    })?;
-                    if let Some((after_hash, after_size)) = hash_file_meta(output) {
-                        let storage_path = output.canonicalize().unwrap_or_else(|_| output.to_path_buf());
-                        let display_name = root
-                            .map(Path::new)
-                            .and_then(|base| storage_path.strip_prefix(base).ok())
-                            .map(|relative| relative.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| storage_path.to_string_lossy().into_owned());
-                        managed_meta = Some(json!({
-                            "tool": tool,
-                            "storagePath": storage_path.to_string_lossy(),
-                            "displayName": display_name,
-                            "changeKind": "modified",
-                            "beforeHash": before.as_ref().map(|(hash, _)| hash.clone()),
-                            "beforeSize": before.map(|(_, size)| size),
-                            "afterHash": after_hash,
-                            "afterSize": after_size,
-                            "backupPath": backup.to_string_lossy(),
-                        }));
+                    _ => None,
+                };
+                if output.exists() && !action.overwrite {
+                    return Err("Office 输出在执行期间出现，已保留原文件".into());
+                }
+                // One commit primitive: stage on the target volume, then swap.
+                // A direct `fs::copy` over the live file is never described as
+                // atomic, and a cross-volume rename from the application data
+                // directory is never assumed to work.
+                let (staging_root, staging_relative, staging_token) = match &staging_scope {
+                    Some((root, relative, token)) => {
+                        (root.clone(), relative.clone(), token.clone())
                     }
-                } else {
-                    fs::rename(temp, output).map_err(|e| e.to_string())?;
-                    if let Some((after_hash, after_size)) = hash_file_meta(output) {
-                        let storage_path = output.canonicalize().unwrap_or_else(|_| output.to_path_buf());
-                        let display_name = root
-                            .map(Path::new)
-                            .and_then(|base| storage_path.strip_prefix(base).ok())
-                            .map(|relative| relative.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| storage_path.to_string_lossy().into_owned());
-                        managed_meta = Some(json!({
-                            "tool": tool,
-                            "storagePath": storage_path.to_string_lossy(),
-                            "displayName": display_name,
-                            "changeKind": "created",
-                            "beforeHash": Value::Null,
-                            "beforeSize": Value::Null,
-                            "afterHash": after_hash,
-                            "afterSize": after_size,
-                            "backupPath": Value::Null,
-                        }));
-                    }
+                    None => (
+                        output.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                        PathBuf::from("."),
+                        uuid::Uuid::new_v4().to_string(),
+                    ),
+                };
+                crate::runtime_host::artifact_store::commit(
+                    temp,
+                    output,
+                    &staging_root,
+                    &staging_relative,
+                    &staging_token,
+                    ledger.as_ref(),
+                )
+                .map_err(|error| match backup.as_ref() {
+                    Some(path) => format!(
+                        "Office 写入失败，原文件未改变；写前备份位于 {}: {error}",
+                        path.display()
+                    ),
+                    None => format!("Office 写入失败，未产生输出: {error}"),
+                })?;
+                if let Some((after_hash, after_size)) = hash_file_meta(output) {
+                    let storage_path = output.canonicalize().unwrap_or_else(|_| output.to_path_buf());
+                    // Project-relative display name, tolerating the Windows
+                    // extended-length prefix a canonical path carries. A raw
+                    // `strip_prefix` silently fails there and the user would see
+                    // the full absolute path instead of `fox/<folder>/<file>`.
+                    let display_name = root
+                        .map(Path::new)
+                        .and_then(|base| {
+                            crate::runtime_host::artifact_store::relative_to(base, &storage_path)
+                        })
+                        .map(|relative| relative.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| storage_path.to_string_lossy().into_owned());
+                    let change_kind = if backup.is_some() { "modified" } else { "created" };
+                    let (artifact_class, artifact_origin) =
+                        crate::runtime_host::artifact_store::classify(
+                            root.map(Path::new),
+                            &storage_path,
+                            tool,
+                            false,
+                        );
+                    managed_meta = Some(json!({
+                        "tool": tool,
+                        "storagePath": storage_path.to_string_lossy(),
+                        "displayName": display_name,
+                        "changeKind": change_kind,
+                        "artifactClass": artifact_class.as_str(),
+                        "artifactOrigin": artifact_origin.as_str(),
+                        "beforeHash": before.as_ref().map(|(hash, _)| hash.clone()),
+                        "beforeSize": before.as_ref().map(|(_, size)| *size),
+                        "afterHash": after_hash,
+                        "afterSize": after_size,
+                        "backupPath": backup.as_ref().map(|path| path.to_string_lossy().into_owned()),
+                    }));
                 }
             } else if output.exists() {
-                fs::copy(temp, output).map_err(|e| format!("Office 写入失败: {e}"))?;
+                // `office_render` rewrites the same preview target on purpose:
+                // replacing it in place is what keeps the result's preview link
+                // valid, so no stale preview is left behind.
+                let (staging_root, staging_relative, staging_token) = match &staging_scope {
+                    Some((root, relative, token)) => {
+                        (root.clone(), relative.clone(), token.clone())
+                    }
+                    None => (
+                        output.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                        PathBuf::from("."),
+                        uuid::Uuid::new_v4().to_string(),
+                    ),
+                };
+                crate::runtime_host::artifact_store::commit(
+                    temp,
+                    output,
+                    &staging_root,
+                    &staging_relative,
+                    &staging_token,
+                    ledger.as_ref(),
+                )?;
             } else {
                 fs::rename(temp, output).map_err(|e| e.to_string())?;
             }
@@ -1563,16 +1974,60 @@ pub(crate) fn execute_with_cancellation(
                 content.push(json!({"type":"image","mimeType":"image/png","data":base64::engine::general_purpose::STANDARD.encode(bytes)}));
             }
         }
+        // A rendered preview is an *artifact*, not a content version: there is
+        // no previous user document to version, and the preview is regenerated
+        // from the source on demand. It is declared separately from
+        // `foxManagedFile` so a preview can never enter the restore history or
+        // be confused with a written deliverable.
+        let mut preview_meta: Option<Value> = None;
+        if action.render {
+            if let Some(output) = action.output.as_ref() {
+                if let Some((after_hash, after_size)) = hash_file_meta(output) {
+                    let project_root = root.map(Path::new);
+                    let host_private = action.placement == OutputPlacement::HostPrivatePreview;
+                    let (class, origin) = crate::runtime_host::artifact_store::classify(
+                        project_root,
+                        output,
+                        tool,
+                        host_private,
+                    );
+                    let display_name = project_root
+                        .and_then(|base| {
+                            crate::runtime_host::artifact_store::relative_to(base, output)
+                        })
+                        .map(|relative| relative.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| output.to_string_lossy().into_owned());
+                    preview_meta = Some(json!({
+                        "tool": tool,
+                        "storagePath": output.to_string_lossy(),
+                        "displayName": display_name,
+                        "artifactClass": class.as_str(),
+                        "artifactOrigin": origin.as_str(),
+                        "mediaType": if action.screenshot { "image/png" } else { "text/html" },
+                        "afterHash": after_hash,
+                        "afterSize": after_size,
+                        "sourceFile": action
+                            .source
+                            .as_ref()
+                            .map(|path| path.to_string_lossy().into_owned()),
+                    }));
+                }
+            }
+        }
         let mut envelope = serde_json::Map::new();
         envelope.insert("content".into(), json!(content));
         envelope.insert("isError".into(), json!(false));
+        let mut details = serde_json::Map::new();
         if let Some(meta) = managed_meta.take() {
             // Consumed by the Host Kernel dispatch for durable version
             // registration; also visible to the model as plain metadata.
-            envelope.insert(
-                "details".into(),
-                json!({ "foxManagedFile": meta }),
-            );
+            details.insert("foxManagedFile".into(), meta);
+        }
+        if let Some(meta) = preview_meta.take() {
+            details.insert("foxPreview".into(), meta);
+        }
+        if !details.is_empty() {
+            envelope.insert("details".into(), Value::Object(details));
         }
         Ok(Value::Object(envelope))
     })();
@@ -1749,6 +2204,797 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fox-office-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         root
+    }
+
+    /// Every transient name this connector used to scatter next to the target.
+    fn transient_entries(root: &Path) -> Vec<String> {
+        fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+            .filter(|name| crate::runtime_host::artifact_store::is_host_transient_name(name))
+            .collect()
+    }
+
+    fn office_fixture() -> (PathBuf, Database, McpServerRecord, String, PathBuf) {
+        let root = project();
+        let db = Database::open(root.join("test.db")).unwrap();
+        setup(&db, &Path::new(env!("CARGO_MANIFEST_DIR")).join("resources")).unwrap();
+        let server = db
+            .list_mcp_servers()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == SERVER_ID)
+            .unwrap();
+        let conversation = db
+            .create_conversation(db.default_agent_id(), None, None, None)
+            .unwrap()
+            .id;
+        let sessions = root.join("runtime-sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        (root, db, server, conversation, sessions)
+    }
+
+    /// The artifact data channel and the deliverable placement compose: a real
+    /// CSV saved by compute is imported by `artifactId` into a workbook that
+    /// lives in the conversation's deliverable folder, and the resulting
+    /// workbook is genuinely readable with the same rows and columns.
+    #[test]
+    #[ignore = "requires the pinned OfficeCLI binary; run explicitly for integration verification"]
+    fn real_artifact_import_into_the_deliverable_folder_stays_readable() {
+        let (root, db, server, conversation, sessions) = office_fixture();
+        let artifacts = project();
+        let context = OfficeCallContext {
+            database: &db,
+            sessions_dir: &sessions,
+            conversation_id: &conversation,
+            artifacts_dir: Some(&artifacts),
+        };
+        // A saved compute artifact, exactly as attachment_compute would leave it.
+        let compute_root = crate::runtime_host::attachment_compute::safe_workspace(
+            &sessions,
+            &conversation,
+            "run-artifact-deliverable",
+        )
+        .unwrap();
+        let outputs = compute_root.join("outputs");
+        fs::create_dir_all(&outputs).unwrap();
+        let mut csv = String::from("id,tag,v\n");
+        for index in 0..500u32 {
+            csv.push_str(&format!("{index},agv-{index},{}\n", 10_000 + index));
+        }
+        let csv_path = outputs.join("agv.csv");
+        fs::write(&csv_path, csv.as_bytes()).unwrap();
+        let csv_path_string = csv_path.to_string_lossy().into_owned();
+        let artifact_id = Database::computed_artifact_id(&csv_path_string);
+        db.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO artifacts(id,conversation_id,run_id,display_name,artifact_type,storage_path,media_type,byte_size,sha256,status,created_at,updated_at)
+                 VALUES(?1,?2,NULL,'agv.csv','created_file',?3,'text/csv',?4,?5,'ready',?6,?6)",
+                rusqlite::params![
+                    &artifact_id,
+                    &conversation,
+                    &csv_path_string,
+                    csv.len() as i64,
+                    hex::encode(Sha256::digest(csv.as_bytes())),
+                    crate::database::now_ms(),
+                ],
+            )
+        })
+        .unwrap();
+
+        let folder = crate::runtime_host::artifact_store::ArtifactStore::new(&artifacts)
+            .deliverable_directory_name("AGV 统计", &conversation);
+        let relative = format!("fox/{folder}/AGV统计.xlsx");
+        let created = execute_with_cancellation(
+            &server,
+            "office_import_data",
+            &json!({
+                "output": relative,
+                "sheet": "Sheet1",
+                "createSheet": false,
+                "artifactId": artifact_id,
+            }),
+            root.to_str(),
+            "allow",
+            None,
+            Duration::from_secs(180),
+            Some(&context),
+        )
+        .unwrap();
+        assert_eq!(created["details"]["foxManagedFile"]["artifactClass"], "deliverable");
+        // The saved workbook is really readable and carries the imported rows.
+        let read = execute_with_cancellation(
+            &server,
+            "office_read",
+            &json!({"file": relative, "mode": "get", "selector": "/Sheet1/A1:C3"}),
+            root.to_str(),
+            "read_only",
+            None,
+            Duration::from_secs(120),
+            Some(&context),
+        )
+        .unwrap();
+        let text = read.to_string();
+        assert!(text.contains("agv-0"), "{text}");
+        assert!(text.contains("id"), "{text}");
+        // The imported payload came from the artifact, never from a re-typed copy.
+        assert!(
+            read["content"][0]["text"]
+                .as_str()
+                .map(|value| !value.contains(&csv_path_string))
+                .unwrap_or(true),
+            "the source artifact path must not leak into the read result"
+        );
+        assert!(root.join(&relative).is_file());
+        assert_eq!(transient_entries(&root), Vec::<String>::new());
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(artifacts).ok();
+    }
+
+    /// The working copy, the commit staging file and the pre-write backup must
+    /// all live outside the user's project, and a real create → edit → overwrite
+    /// cycle must leave the project folder containing nothing but documents.
+    #[test]
+    #[ignore = "requires the pinned OfficeCLI binary; run explicitly for integration verification"]
+    fn real_office_writes_leave_no_transient_state_in_the_project() {
+        let (root, db, server, conversation, sessions) = office_fixture();
+        // The Host's private area is a different root than the project, exactly
+        // as in production (application data vs. the user's project).
+        let artifacts = project();
+        let context = OfficeCallContext {
+            database: &db,
+            sessions_dir: &sessions,
+            conversation_id: &conversation,
+            artifacts_dir: Some(&artifacts),
+        };
+        let r = root.to_str();
+        let run = |tool: &str, input: Value| {
+            execute_with_cancellation(
+                &server,
+                tool,
+                &input,
+                r,
+                "allow",
+                None,
+                Duration::from_secs(120),
+                Some(&context),
+            )
+        };
+
+        run("office_create", json!({"output":"keep.xlsx"})).unwrap();
+        run(
+            "office_edit",
+            json!({"file":"keep.xlsx","output":"edited.xlsx","operations":[
+                {"command":"set","path":"/Sheet1/A1","props":{"value":"first"}}]}),
+        )
+        .unwrap();
+        // An explicit overwrite takes the staged-replace path.
+        run(
+            "office_edit",
+            json!({"file":"keep.xlsx","output":"keep.xlsx","overwrite":true,"operations":[
+                {"command":"set","path":"/Sheet1/B2","props":{"value":"second"}}]}),
+        )
+        .unwrap();
+
+        let read = run("office_read", json!({"file":"keep.xlsx"})).unwrap();
+        assert!(read.to_string().contains("second"), "{read}");
+        assert_eq!(
+            transient_entries(&root),
+            Vec::<String>::new(),
+            "the project folder must not contain a working copy, a staging file or a backup"
+        );
+        // The Host's own version store kept the undo copy instead.
+        let snapshots = fs::read_dir(snapshot_directory(&context)).unwrap().count();
+        assert!(snapshots >= 1, "a pre-write snapshot must exist in the Host store");
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Cleanup must be a proof of ownership, not a filename match.
+    ///
+    /// A file the user happened to name like a staging file survives an Office
+    /// run byte for byte, while a leftover this Host *registered* for an
+    /// execution that no longer exists is reclaimed — and its ledger entry is
+    /// dropped with it. This is the acceptance test for the P1 finding: the old
+    /// implementation deleted every `.fox-stage-*.tmp` it could see.
+    #[test]
+    #[ignore = "requires the pinned OfficeCLI binary; run explicitly for integration verification"]
+    fn real_office_cleanup_needs_registered_ownership_not_a_filename() {
+        use crate::runtime_host::artifact_store::{
+            staging_entry_path_for_test, write_staging_record_for_test, StagingRecord,
+        };
+        let (root, db, server, conversation, sessions) = office_fixture();
+        let artifacts = project();
+        let context = OfficeCallContext {
+            database: &db,
+            sessions_dir: &sessions,
+            conversation_id: &conversation,
+            artifacts_dir: Some(&artifacts),
+        };
+        // The Host's artifact root, exactly as `OfficeCallContext::artifact_store`
+        // derives it.
+        let artifact_root = artifacts.join("artifacts");
+
+        // (1) Files only the *user* created: identical names, no ledger entry.
+        let user_root = root.join(".fox-stage-user-root.tmp");
+        let user_nested_dir = root.join("fox").join("case");
+        fs::create_dir_all(&user_nested_dir).unwrap();
+        let user_nested = user_nested_dir.join(".fox-stage-user-nested.tmp");
+        let user_bytes = b"bytes a user owns and Fox never wrote".to_vec();
+        fs::write(&user_root, &user_bytes).unwrap();
+        fs::write(&user_nested, &user_bytes).unwrap();
+
+        // (2) A genuinely abandoned commit: registered here, owned by an
+        // execution id that has no lease at all (a crashed process).
+        let orphan = root.join(".fox-stage-orphanleftover.tmp");
+        fs::write(&orphan, b"half-written staging payload").unwrap();
+        write_staging_record_for_test(
+            &artifact_root,
+            &StagingRecord {
+                token: "orphanleftover".to_owned(),
+                staging_path: orphan.to_string_lossy().into_owned(),
+                target_path: root.join("never-produced.xlsx").to_string_lossy().into_owned(),
+                conversation_id: conversation.clone(),
+                execution_id: "crashed-execution-with-no-lease".to_owned(),
+                state: "staging".to_owned(),
+                payload_sha256: String::new(),
+                created_at_ms: 0,
+            },
+        )
+        .unwrap();
+        assert!(staging_entry_path_for_test(&artifact_root, "orphanleftover").is_file());
+
+        // A real Office run in that same directory.
+        execute_with_cancellation(
+            &server,
+            "office_create",
+            &json!({"output":"cleanup-probe.xlsx"}),
+            root.to_str(),
+            "allow",
+            None,
+            Duration::from_secs(120),
+            Some(&context),
+        )
+        .unwrap();
+        assert!(root.join("cleanup-probe.xlsx").is_file());
+
+        // The user's files are untouched, byte for byte.
+        assert_eq!(fs::read(&user_root).unwrap(), user_bytes, "user file was deleted");
+        assert_eq!(fs::read(&user_nested).unwrap(), user_bytes, "nested user file was deleted");
+        // The registered, owner-free leftover is reclaimed and the ledger
+        // converges, so the record cannot accumulate forever.
+        assert!(!orphan.exists(), "a registered orphaned staging file must be reclaimed");
+        assert!(!staging_entry_path_for_test(&artifact_root, "orphanleftover").exists());
+        // The run itself added nothing: the only staging-looking name in the
+        // project root is still the user's own file.
+        assert_eq!(
+            transient_entries(&root),
+            vec![".fox-stage-user-root.tmp".to_owned()],
+            "the run must not add any transient file of its own"
+        );
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(artifacts).ok();
+    }
+
+    /// The pinned CLI creates its own `.work-<uuid>.batch-<hex>.<ext>` copies
+    /// **next to the document it is given**. A "zero residue afterwards" check
+    /// cannot see them, and a filename-only error message cannot prove where
+    /// they were created, so this test watches the tree *while the commands run*
+    /// and asserts where those copies really appear.
+    #[test]
+    #[ignore = "requires the pinned OfficeCLI binary; run explicitly for integration verification"]
+    fn real_office_working_copies_appear_only_in_the_host_area_while_running() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let (root, db, server, conversation, sessions) = office_fixture();
+        let artifacts = project();
+        let context = OfficeCallContext {
+            database: &db,
+            sessions_dir: &sessions,
+            conversation_id: &conversation,
+            artifacts_dir: Some(&artifacts),
+        };
+        let r = root.to_str();
+
+        // Observer: record every file that ever exists under either root. Two
+        // milliseconds is short enough to catch a copy that lives for the
+        // duration of one CLI invocation.
+        //
+        // The staging check is deliberately *not* "was the ledger entry present
+        // at the instant I looked at the file": the entry is written before the
+        // staging file is created and removed after it is consumed, so the two
+        // reads cannot be atomic. What is race-free is the set relationship —
+        // the entry exists strictly longer than the file — so the observer also
+        // accumulates every token it ever sees registered, and the assertion
+        // below is set inclusion.
+        let stop = Arc::new(AtomicBool::new(false));
+        let seen: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let staging_tokens: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let registered_tokens: Arc<Mutex<std::collections::HashSet<String>>> =
+            Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let ledger_entries = artifacts.join("artifacts").join("staging").join("entries");
+        let observer = {
+            let stop = Arc::clone(&stop);
+            let seen = Arc::clone(&seen);
+            let staging_tokens = Arc::clone(&staging_tokens);
+            let registered_tokens = Arc::clone(&registered_tokens);
+            let roots = vec![root.clone(), artifacts.clone()];
+            let project = root.clone();
+            thread::spawn(move || {
+                /// Depth-first file listing, small enough to run every 2 ms.
+                fn collect(base: &Path, out: &mut Vec<PathBuf>) {
+                    let Ok(entries) = fs::read_dir(base) else { return };
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        out.push(path.clone());
+                        if path.is_dir() {
+                            collect(&path, out);
+                        }
+                    }
+                }
+                while !stop.load(Ordering::Relaxed) {
+                    let mut batch = Vec::new();
+                    for base in &roots {
+                        collect(base, &mut batch);
+                    }
+                    if let Ok(entries) = fs::read_dir(&ledger_entries) {
+                        let mut registered = registered_tokens.lock().unwrap();
+                        for entry in entries.flatten() {
+                            if let Some(token) = entry
+                                .path()
+                                .file_stem()
+                                .and_then(|value| value.to_str())
+                            {
+                                registered.insert(token.to_owned());
+                            }
+                        }
+                    }
+                    for path in &batch {
+                        if !path.starts_with(&project) {
+                            continue;
+                        }
+                        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                            continue;
+                        };
+                        if let Some(token) =
+                            crate::runtime_host::artifact_store::staging_token_of_name(name)
+                        {
+                            staging_tokens.lock().unwrap().push(token.to_owned());
+                        }
+                    }
+                    seen.lock().unwrap().extend(batch);
+                    thread::sleep(Duration::from_millis(2));
+                }
+            })
+        };
+
+        let run = |tool: &str, input: Value| {
+            execute_with_cancellation(
+                &server,
+                tool,
+                &input,
+                r,
+                "allow",
+                None,
+                Duration::from_secs(180),
+                Some(&context),
+            )
+        };
+        run("office_create", json!({"output":"probe.xlsx"})).unwrap();
+        run(
+            "office_edit",
+            json!({"file":"probe.xlsx","output":"probe.xlsx","overwrite":true,"operations":[
+                {"command":"set","path":"/Sheet1/A1","props":{"value":"edited"}}]}),
+        )
+        .unwrap();
+        run(
+            "office_import_data",
+            json!({"file":"probe.xlsx","output":"probe.xlsx","overwrite":true,"sheet":"Sheet1",
+                   "startCell":"A3","data":"name,qty\nalpha,1"}),
+        )
+        .unwrap();
+        run("office_render", json!({"file":"probe.xlsx","mode":"html"})).unwrap();
+        // A failure path too: nothing may be left in the project either.
+        assert!(run(
+            "office_edit",
+            json!({"file":"probe.xlsx","output":"probe.xlsx","overwrite":true,"operations":[
+                {"command":"remove","path":"/Sheet1/ZZZ999"}]}),
+        )
+        .is_err());
+        stop.store(true, Ordering::Relaxed);
+        observer.join().unwrap();
+
+        let observed = seen.lock().unwrap().clone();
+        assert!(!observed.is_empty(), "the observer must have seen the fixture");
+        let transient = |path: &Path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    crate::runtime_host::artifact_store::is_host_transient_name(name)
+                        || name.starts_with(".work-")
+                        || name.contains(".batch-")
+                })
+        };
+        // 1) No working copy, no pre-write backup and no CLI work copy may exist
+        //    in the user's project at any instant. The one Host-managed file that
+        //    legitimately appears there is the commit staging file, which must
+        //    live on the target's own volume; it is checked separately below.
+        let forbidden: Vec<&PathBuf> = observed
+            .iter()
+            .filter(|path| {
+                path.starts_with(&root)
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            name.starts_with(".fox-office-")
+                                || name.contains(".fox-backup-")
+                                || name.starts_with(".work-")
+                                || name.contains(".batch-")
+                        })
+            })
+            .collect();
+        assert!(
+            forbidden.is_empty(),
+            "the project must never contain a working copy or backup: {forbidden:?}"
+        );
+        // 2) The commit staging file does appear briefly, and every staging
+        //    token that was ever visible in the project also appeared in the
+        //    ownership ledger — that registration is what makes reclaim safe,
+        //    and it is the property the old filename sweep lacked.
+        let observed_tokens = staging_tokens.lock().unwrap().clone();
+        assert!(
+            !observed_tokens.is_empty(),
+            "the target-volume staging file must be observable while a commit runs"
+        );
+        let registered = registered_tokens.lock().unwrap().clone();
+        let anonymous: Vec<&String> = observed_tokens
+            .iter()
+            .filter(|token| !registered.contains(*token))
+            .collect();
+        assert!(
+            anonymous.is_empty(),
+            "every staging file in the project must be ledger-registered while it exists: {anonymous:?}"
+        );
+        // 3) The CLI's own working copies really were created — in the Host's
+        //    private area. Without this the first assertion would also pass if no
+        //    write had happened at all.
+        let in_host_area: Vec<&PathBuf> = observed
+            .iter()
+            .filter(|path| path.starts_with(&artifacts) && transient(path))
+            .collect();
+        assert!(
+            !in_host_area.is_empty(),
+            "the pinned CLI's working copies must live in the Host area; observed none in {}",
+            artifacts.display()
+        );
+        // 4) And once everything finished, the project holds no transient name.
+        assert_eq!(
+            transient_entries(&root),
+            Vec::<String>::new(),
+            "the project must be clean after the run"
+        );
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(artifacts).ok();
+    }
+
+    /// A rendered preview is Host-private by default: one entry per document and
+    /// mode, re-rendered in place, and never a file in the user's project.
+    #[test]
+    #[ignore = "requires the pinned OfficeCLI binary; run explicitly for integration verification"]
+    fn real_office_preview_is_host_private_and_reused() {        let (root, db, server, conversation, sessions) = office_fixture();
+        let artifacts = project();
+        let context = OfficeCallContext {
+            database: &db,
+            sessions_dir: &sessions,
+            conversation_id: &conversation,
+            artifacts_dir: Some(&artifacts),
+        };
+        let r = root.to_str();
+        execute_with_cancellation(
+            &server,
+            "office_create",
+            &json!({"output":"preview-me.xlsx"}),
+            r,
+            "allow",
+            None,
+            Duration::from_secs(120),
+            Some(&context),
+        )
+        .unwrap();
+
+        let render = |output: &str| {
+            execute_with_cancellation(
+                &server,
+                "office_render",
+                &json!({"file":"preview-me.xlsx","output":output,"mode":"html"}),
+                r,
+                "allow",
+                None,
+                Duration::from_secs(180),
+                Some(&context),
+            )
+            .unwrap()
+        };
+        let first = render("preview.html");
+        let preview = first["details"]["foxPreview"].clone();
+        assert!(preview.is_object(), "a render must declare its preview artifact: {first}");
+        assert_eq!(preview["artifactClass"], "preview");
+        assert_eq!(preview["artifactOrigin"], "host_private");
+        // A rendered preview is a view, not a content version.
+        assert!(first["details"].get("foxManagedFile").is_none());
+        let storage = PathBuf::from(preview["storagePath"].as_str().unwrap());
+        assert!(storage.is_file(), "{storage:?}");
+        assert!(
+            !storage.starts_with(&root),
+            "the preview must not be written into the project: {storage:?}"
+        );
+        assert!(storage.starts_with(&artifacts), "{storage:?}");
+        // A re-render reuses the same preview file, so no stale link survives.
+        let second = render("preview.html");
+        assert_eq!(
+            second["details"]["foxPreview"]["storagePath"].as_str().unwrap(),
+            storage.to_string_lossy()
+        );
+        assert!(!root.join("preview.html").exists());
+        assert_eq!(transient_entries(&root), Vec::<String>::new());
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// The Host's default-placement contract and the purpose split, end to end
+    /// with the real CLI: `name` puts a new result in the *advertised* result
+    /// folder, a plain render stays a Host-private preview, an exported render
+    /// is a deliverable, and editing an existing file keeps the original target
+    /// that the approval showed.
+    #[test]
+    #[ignore = "requires the pinned OfficeCLI binary; run explicitly for integration verification"]
+    fn real_office_default_placement_and_purpose_follow_host_rules() {
+        use crate::runtime_host::artifact_store::{
+            is_valid_deliverable_folder_name, project_key, ArtifactStore, PROJECT_DELIVERABLE_DIR,
+        };
+        let (root, db, server, conversation, sessions) = office_fixture();
+        let artifacts = project();
+        let context = OfficeCallContext {
+            database: &db,
+            sessions_dir: &sessions,
+            conversation_id: &conversation,
+            artifacts_dir: Some(&artifacts),
+        };
+        let r = root.to_str();
+        let run = |tool: &str, input: Value| {
+            execute_with_cancellation(
+                &server,
+                tool,
+                &input,
+                r,
+                "allow",
+                None,
+                Duration::from_secs(180),
+                Some(&context),
+            )
+        };
+
+        // (1) `name` with no path at all: the Host decides the folder, and it is
+        // the same folder the prompt advertises as `deliverableRoot`.
+        let created = run("office_create", json!({"name":"AGV分析报告.xlsx"})).unwrap();
+        let meta = created["details"]["foxManagedFile"].clone();
+        assert_eq!(meta["artifactClass"], "deliverable");
+        assert_eq!(meta["artifactOrigin"], "project");
+        let storage = PathBuf::from(meta["storagePath"].as_str().unwrap());
+        assert!(storage.is_file());
+        let relative = crate::runtime_host::artifact_store::relative_to(&root, &storage)
+            .expect("the result lives in the project")
+            .to_string_lossy()
+            .replace('\\', "/");
+        // The advertised folder is the same ledger entry the prompt reads.
+        let store = ArtifactStore::new(&artifacts);
+        let advertised = db
+            .ensure_deliverable_folder(
+                &conversation,
+                &project_key(r.unwrap()),
+                &store.deliverable_directory_name("", &conversation),
+                &is_valid_deliverable_folder_name,
+                crate::database::now_ms(),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            relative,
+            format!("{PROJECT_DELIVERABLE_DIR}/{advertised}/AGV分析报告.xlsx"),
+            "the Host must place a named artifact in the folder it advertises"
+        );
+        assert_eq!(
+            fs::read_dir(root.join(PROJECT_DELIVERABLE_DIR)).unwrap().count(),
+            1,
+            "one logical task keeps one result folder"
+        );
+
+        // (2) A render with no target is a Host-private preview, not a result.
+        let rendered = run("office_render", json!({"file":relative,"mode":"html"})).unwrap();
+        let preview = rendered["details"]["foxPreview"].clone();
+        assert_eq!(preview["artifactClass"], "preview");
+        assert_eq!(preview["artifactOrigin"], "host_private");
+        let preview_path = PathBuf::from(preview["storagePath"].as_str().unwrap());
+        assert!(!preview_path.starts_with(&root), "{preview_path:?}");
+        assert!(preview_path.starts_with(&artifacts), "{preview_path:?}");
+
+        // (3) The same render exported by name is a deliverable in the folder.
+        let exported = run(
+            "office_render",
+            json!({"file":relative,"name":"预览.html","mode":"html"}),
+        )
+        .unwrap();
+        let exported_meta = exported["details"]["foxPreview"].clone();
+        assert_eq!(exported_meta["artifactClass"], "deliverable");
+        assert_eq!(exported_meta["artifactOrigin"], "project");
+        assert_eq!(
+            crate::runtime_host::artifact_store::relative_to(
+                &root,
+                Path::new(exported_meta["storagePath"].as_str().unwrap())
+            )
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/"),
+            format!("{PROJECT_DELIVERABLE_DIR}/{advertised}/预览.html")
+        );
+
+        // (4) Editing an existing file keeps the authorized original target, and
+        // the target the approval resolves is the target that is executed.
+        let edit = json!({"file":relative,"output":relative,"overwrite":true,"operations":[
+            {"command":"set","path":"/Sheet1/A1","props":{"value":"edited"}}]});
+        let prepared = prepare_with_context("office_edit", &edit, r, "allow", Some(&context)).unwrap();
+        assert_eq!(
+            prepared.target_path().expect("edit resolves a target"),
+            storage.as_path(),
+            "the approved target and the executed target must be one path"
+        );
+        let edited = run("office_edit", edit).unwrap();
+        assert_eq!(edited["details"]["foxManagedFile"]["artifactClass"], "deliverable");
+        assert_eq!(
+            PathBuf::from(
+                edited["details"]["foxManagedFile"]["storagePath"].as_str().unwrap()
+            ),
+            storage
+        );
+
+        // (5) `name` is a name, not a path: separators are refused rather than
+        // silently relocated.
+        for bad in ["sub/report.xlsx", "..\\escape.xlsx", "C:evil.xlsx"] {
+            let error = run("office_create", json!({"name":bad})).unwrap_err();
+            assert!(error.contains("name"), "{bad}: {error}");
+        }
+        assert_eq!(transient_entries(&root), Vec::<String>::new());
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(artifacts).ok();
+    }
+
+    /// An explicit path inside the conversation deliverable folder is a user
+    /// deliverable: the file (and a requested HTML export) lands there, and the
+    /// Host classifies it as a deliverable rather than as a process file.
+    #[test]
+    #[ignore = "requires the pinned OfficeCLI binary; run explicitly for integration verification"]
+    fn real_office_deliverable_folder_is_respected() {
+        let (root, db, server, conversation, sessions) = office_fixture();
+        let artifacts = project();
+        let context = OfficeCallContext {
+            database: &db,
+            sessions_dir: &sessions,
+            conversation_id: &conversation,
+            artifacts_dir: Some(&artifacts),
+        };
+        let r = root.to_str();
+        let folder = crate::runtime_host::artifact_store::ArtifactStore::new(&artifacts)
+            .deliverable_directory_name("AGV report", &conversation);
+        let relative = format!("fox/{folder}/交付表.xlsx");
+        let created = execute_with_cancellation(
+            &server,
+            "office_create",
+            &json!({"output":relative}),
+            r,
+            "allow",
+            None,
+            Duration::from_secs(120),
+            Some(&context),
+        )
+        .unwrap();
+        assert_eq!(created["details"]["foxManagedFile"]["artifactClass"], "deliverable");
+        // The display name is the project-relative path (separators are
+        // platform-native, so compare on normalized form).
+        assert_eq!(
+            created["details"]["foxManagedFile"]["displayName"]
+                .as_str()
+                .unwrap()
+                .replace('\\', "/"),
+            relative
+        );
+        assert!(root.join(&relative).is_file(), "the deliverable must exist where asked");
+        // Contract change (R3), recorded deliberately rather than relaxed:
+        // `office_create`/`office_edit`/`office_import_data`/`office_merge` are
+        // the *document* channel — the formats the user receives — so a file the
+        // caller explicitly named is the user's result wherever it sits inside
+        // the authorized project. Intermediates are not produced here at all;
+        // they come from `attachment_compute`, whose outputs stay Host-private
+        // (see the compute-artifact test above). The old rule called every
+        // project-root document a process file, which is exactly the P2 finding:
+        // a report the user asked to be written elsewhere was filed as an
+        // intermediate.
+        let root_level = execute_with_cancellation(
+            &server,
+            "office_create",
+            &json!({"output":"scratch.xlsx"}),
+            r,
+            "allow",
+            None,
+            Duration::from_secs(120),
+            Some(&context),
+        )
+        .unwrap();
+        assert_eq!(
+            root_level["details"]["foxManagedFile"]["artifactClass"],
+            "deliverable"
+        );
+        assert_eq!(
+            root_level["details"]["foxManagedFile"]["artifactOrigin"],
+            "project"
+        );
+        assert!(root.join("scratch.xlsx").is_file());
+        // The connector writes DOCX/XLSX/PPTX only: it does not pretend to emit
+        // a CSV, and it says so. A CSV the user asked to be *delivered* therefore
+        // reaches the result folder through the general file tool, which the
+        // classification tests cover (a CSV inside `fox/` is a deliverable, a CSV
+        // from the compute workspace is a process file).
+        let refused = execute_with_cancellation(
+            &server,
+            "office_import_data",
+            &json!({"output":format!("fox/{folder}/统计明细.csv"),"sheet":"数据","createSheet":true,"data":"列,值\nalpha,1"}),
+            r,
+            "allow",
+            None,
+            Duration::from_secs(120),
+            Some(&context),
+        )
+        .unwrap_err();
+        assert!(refused.contains("DOCX"), "{refused}");
+        assert!(!root.join("fox").join(&folder).join("统计明细.csv").exists());
+        // An HTML preview the user explicitly asked to be delivered goes to the
+        // deliverable folder with the project origin.
+        let exported = format!("fox/{folder}/预览.html");
+        let rendered = execute_with_cancellation(
+            &server,
+            "office_render",
+            &json!({"file":relative,"output":exported,"mode":"html"}),
+            r,
+            "allow",
+            None,
+            Duration::from_secs(180),
+            Some(&context),
+        )
+        .unwrap();
+        assert_eq!(rendered["details"]["foxPreview"]["artifactOrigin"], "project");
+        assert_eq!(
+            rendered["details"]["foxPreview"]["artifactClass"],
+            "deliverable",
+            "an explicitly exported HTML is the user's result, not a view"
+        );
+        // An explicitly requested export lands in the project, at the exact
+        // requested relative path.
+        let exported_storage = PathBuf::from(
+            rendered["details"]["foxPreview"]["storagePath"].as_str().unwrap(),
+        );
+        assert_eq!(
+            crate::runtime_host::artifact_store::relative_to(&root, &exported_storage)
+                .expect("the exported preview lives in the project")
+                .to_string_lossy()
+                .replace('\\', "/"),
+            exported
+        );
+        // The folder itself is reused: rendering the same document again does
+        // not create a second result folder.
+        let folders = fs::read_dir(root.join("fox")).unwrap().count();
+        assert_eq!(folders, 1, "one logical task keeps one result folder");
+        assert_eq!(transient_entries(&root), Vec::<String>::new());
+        fs::remove_dir_all(root).ok();
     }
     #[test]
     fn blocks_writes_traversal_streams_and_external_properties() {
@@ -2373,6 +3619,7 @@ mod tests {
             database: &db,
             sessions_dir: &sessions,
             conversation_id: &conversation,
+            artifacts_dir: None,
         };
         // A source-less import into the workbook's existing default sheet: no
         // create-sheet batch, so the Host goes create -> inventory -> import.
@@ -2526,6 +3773,7 @@ mod tests {
             database: &db,
             sessions_dir: &sessions,
             conversation_id: &conversation,
+            artifacts_dir: None,
         };
         let import = |artifact: Value, ctx: Option<&OfficeCallContext<'_>>| {
             prepare_with_context(
@@ -2644,6 +3892,7 @@ mod tests {
             database: &db,
             sessions_dir: &sessions,
             conversation_id: &conversation,
+            artifacts_dir: None,
         };
         let action = prepare_with_context(
             "office_import_data",
@@ -2675,6 +3924,7 @@ mod tests {
             database: &db,
             sessions_dir: &sessions,
             conversation_id: &other,
+            artifacts_dir: None,
         };
         let error = prepare_with_context(
             "office_import_data",

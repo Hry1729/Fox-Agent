@@ -1,7 +1,7 @@
 use crate::{
     app_state::AppState,
     database::{
-        AgentIdRequest, AgentRecord, ApiResponse, ExpertPackageVersionRecord,
+        AgentIdRequest, AgentRecord, ApiResponse, Database, ExpertPackageVersionRecord,
         InstallExpertPackageVersionRequest, KnowledgeReference,
     },
 };
@@ -19,64 +19,20 @@ const MAX_FILE_BYTES: usize = 256 * 1024;
 const MAX_TOTAL_FILE_BYTES: usize = 1024 * 1024;
 const MAX_PROMPT_BYTES: usize = 64 * 1024;
 
-const KNOWN_TOOLS: &[&str] = &[
-    "read",
-    "ls",
-    "find",
-    "grep",
-    "read_attachment",
-    "write_file",
-    "edit_file",
-    "run_command",
-    "web_search",
-    "web_read",
-    "http_request",
-    "system_info",
-    "sqlite_read",
-    "structured_data",
-    "git_read",
-    "test_run",
-    "code_check",
-    "format_code",
-    "tabular_data",
-    "child_agent_list",
-    "child_run_start",
-    "child_run_collect",
-    "child_run_cancel",
-    "memory_search",
-    "memory_propose",
-    "list_knowledge_bases",
-    "search_knowledge",
-    "read_knowledge_document",
-    "query_knowledge_graph",
-    "list_mcp_tools",
-    "call_mcp_tool",
-    "work_snapshot_get",
-    "goal_propose",
-    "goal_complete",
-    "task_create_many",
-    "task_update",
-    "task_evidence_add",
-    "task_evidence_validate",
-    "plan_revision_create",
-    "review_finding_add",
-    "review_finding_resolve",
-    "acceptance_submit",
-    "workflow_snapshot_get",
-    "workflow_start",
-    "workflow_stage_start",
-    "workflow_stage_complete",
-    "workflow_stage_fail",
-    "workflow_cancel",
-    "team_snapshot_get",
-    "team_start",
-    "team_member_start",
-    "team_collect",
-    "team_cancel",
-];
-
+/// Whether a tool name is one the Host can actually run.
+///
+/// Derived from the protocol registry (`fox_engine_protocol::TOOL_CONTRACTS`),
+/// which is also what `KernelModelConfig::hash()` validates proposal tools
+/// against. This used to be a hand-maintained list, and it had drifted:
+/// `attachment_compute`, the `compute_job_*` tools and `read_tool_result` were
+/// missing, so the bundled data-analysis expert — which declares them — was
+/// refused installation by its own resource guard ("one or more required
+/// resources are unavailable") even though the runtime offers every one of
+/// them. Deriving the set removes the second list instead of updating it.
 pub(crate) fn is_known_tool(tool: &str) -> bool {
-    KNOWN_TOOLS.contains(&tool)
+    fox_engine_protocol::TOOL_CONTRACTS
+        .iter()
+        .any(|contract| contract.0 == tool)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -540,11 +496,43 @@ fn canonical_json(value: &Value) -> String {
     }
 }
 
+/// Local knowledge bases visible to an expert-package preview.
+///
+/// A trait rather than the concrete store so a non-UI caller (the real
+/// acceptance harness) can feed the *same* guard a truthful empty source instead
+/// of skipping the check: a fresh acceptance database genuinely has no local
+/// knowledge bases, and an expert package that requires one must be refused.
+pub(crate) trait LocalKnowledgeIds {
+    fn base_ids(&self) -> Result<Vec<String>, String>;
+}
+
+impl LocalKnowledgeIds for crate::local_knowledge::LocalKnowledgeStore {
+    fn base_ids(&self) -> Result<Vec<String>, String> {
+        Ok(self
+            .list_bases()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|base| base.id)
+            .collect())
+    }
+}
+
+/// No local knowledge store at all: no bases are available.
+pub(crate) struct NoLocalKnowledge;
+
+impl LocalKnowledgeIds for NoLocalKnowledge {
+    fn base_ids(&self) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+}
+
 fn missing_resources(
-    state: &AppState,
+    database: &Database,
+    skills_dir: &std::path::Path,
+    local_knowledge: &dyn LocalKnowledgeIds,
     package: &ValidatedPackage,
 ) -> Result<MissingPackageResources, PackageError> {
-    let available_skills = crate::skills::scan_skills(&state.skills_dir, &[])
+    let available_skills = crate::skills::scan_skills(skills_dir, &[])
         .map_err(|error| PackageError {
             code: "expert.package_resource_scan_failed",
             message: error,
@@ -553,9 +541,11 @@ fn missing_resources(
         .filter(|skill| skill.record.valid)
         .map(|skill| skill.record.id)
         .collect::<HashSet<_>>();
-    let available_tools = KNOWN_TOOLS.iter().copied().collect::<HashSet<_>>();
-    let available_agents = state
-        .database
+    let available_tools = fox_engine_protocol::TOOL_CONTRACTS
+        .iter()
+        .map(|contract| contract.0)
+        .collect::<HashSet<_>>();
+    let available_agents = database
         .list_child_agents()
         .map_err(|message| PackageError {
             code: "expert.package_storage",
@@ -564,8 +554,7 @@ fn missing_resources(
         .into_iter()
         .map(|agent| agent.id)
         .collect::<HashSet<_>>();
-    let available_mcps = state
-        .database
+    let available_mcps = database
         .list_mcp_servers()
         .map_err(|message| PackageError {
             code: "expert.package_storage",
@@ -574,18 +563,15 @@ fn missing_resources(
         .into_iter()
         .map(|server| server.id)
         .collect::<HashSet<_>>();
-    let available_local_knowledge = state
-        .local_knowledge
-        .list_bases()
+    let available_local_knowledge = local_knowledge
+        .base_ids()
         .map_err(|error| PackageError {
             code: "expert.package_resource_scan_failed",
-            message: error.to_string(),
+            message: error,
         })?
         .into_iter()
-        .map(|base| base.id)
         .collect::<HashSet<_>>();
-    let available_remote_knowledge = state
-        .database
+    let available_remote_knowledge = database
         .known_remote_knowledge_references()
         .map_err(|message| PackageError {
             code: "expert.package_storage",
@@ -659,11 +645,12 @@ fn missing_resources(
 }
 
 fn inspect(
-    state: &AppState,
+    database: &Database,
+    skills_dir: &std::path::Path,
+    local_knowledge: &dyn LocalKnowledgeIds,
     package: &ValidatedPackage,
 ) -> Result<ExpertPackagePreview, PackageError> {
-    let current = state
-        .database
+    let current = database
         .get_agent_by_package_id(&package.package.id)
         .map_err(|message| PackageError {
             code: "expert.package_storage",
@@ -671,7 +658,7 @@ fn inspect(
         })?;
     let fox_version = Version::parse(env!("CARGO_PKG_VERSION")).expect("valid Fox SemVer");
     let compatible = package.compatibility.matches(&fox_version);
-    let missing_resources = missing_resources(state, package)?;
+    let missing_resources = missing_resources(database, skills_dir, local_knowledge, package)?;
     let (action, version_allowed) = match &current {
         None => ("install", true),
         Some(current) => {
@@ -826,13 +813,60 @@ pub(crate) fn bundled_install_request(raw: Value) -> Result<InstallExpertPackage
     Ok(install_request(&package, None))
 }
 
+/// Install one expert package from the bundled library, without the Tauri layer.
+///
+/// This is the same path the `expert_package_install` command takes — the same
+/// parse, the same resource preview, the same compatible/version/conflict
+/// refusals, and the same `install_expert_package_version` write. It exists so a
+/// non-UI entry point (the real acceptance harness) selects an expert through
+/// production code instead of writing an `agents` row by hand. `local_knowledge`
+/// is fed the caller's real view of available bases; an expert package that
+/// requires one is refused here exactly as it is in the application.
+pub(crate) fn install_bundled_expert(
+    database: &Database,
+    skills_dir: &std::path::Path,
+    local_knowledge: &dyn LocalKnowledgeIds,
+    bundled: &Value,
+    expert_id: &str,
+) -> Result<AgentRecord, String> {
+    let entry = bundled
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["expertId"].as_str() == Some(expert_id))
+        })
+        .ok_or_else(|| format!("bundled expert `{expert_id}` was not found"))?;
+    let raw = entry
+        .get("package")
+        .cloned()
+        .ok_or_else(|| format!("bundled expert `{expert_id}` carries no package"))?;
+    let package = parse_package(raw).map_err(|error| format!("{error:?}"))?;
+    let preview = inspect(database, skills_dir, local_knowledge, &package)
+        .map_err(|error| format!("{}: {}", error.code, error.message))?;
+    if !preview.can_install {
+        // The missing categories are named: "one or more resources are
+        // unavailable" alone makes a refused installation unattributable.
+        return Err(format!(
+            "expert package cannot be installed: action={} missing={:?} warnings={:?}",
+            preview.action, preview.missing_resources, preview.warnings
+        ));
+    }
+    if preview.action == "no_change" {
+        return database
+            .get_agent_by_package_id(&package.package.id)?
+            .ok_or_else(|| "expert package was not found".to_owned());
+    }
+    database.install_expert_package_version(&install_request(&package, None))
+}
+
 #[tauri::command]
 pub fn expert_package_inspect(
     state: State<'_, AppState>,
     request: ExpertPackageInspectRequest,
 ) -> ApiResponse<ExpertPackagePreview> {
     parse_package(request.package)
-        .and_then(|package| inspect(&state, &package))
+        .and_then(|package| inspect(&state.database, &state.skills_dir, &state.local_knowledge, &package))
         .map(ApiResponse::success)
         .unwrap_or_else(package_failure)
 }
@@ -846,7 +880,7 @@ pub fn expert_package_install(
         Ok(package) => package,
         Err(error) => return package_failure(error),
     };
-    let preview = match inspect(&state, &package) {
+    let preview = match inspect(&state.database, &state.skills_dir, &state.local_knowledge, &package) {
         Ok(preview) => preview,
         Err(error) => return package_failure(error),
     };
@@ -936,7 +970,7 @@ pub fn expert_package_rollback(
         Ok(package) => package,
         Err(error) => return package_failure(error),
     };
-    let missing = match missing_resources(&state, &package) {
+    let missing = match missing_resources(&state.database, &state.skills_dir, &state.local_knowledge, &package) {
         Ok(missing) => missing,
         Err(error) => return package_failure(error),
     };

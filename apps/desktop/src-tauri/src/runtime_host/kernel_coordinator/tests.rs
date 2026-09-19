@@ -987,7 +987,7 @@ fn kernel_repair_override_cannot_be_auto_approved_or_prompt_for_ineligible_work(
     binding.permission.mode=PermissionMode::Allow;
     binding.permission.grants.push(fox_engine_protocol::PermissionGrant {tool:"task_repair_escalate_start".into(),scope:"project".into()});
     binding.permission_snapshot_id=Database::run_control_permission_hash(&binding.permission).unwrap();
-    let policy=super::super::kernel_gateway::GatewayPolicy {binding,scope, database: None, sessions_dir: None };
+    let policy=super::super::kernel_gateway::GatewayPolicy {binding,scope, database: None, sessions_dir: None, artifacts_dir: None };
     let input=json!({"taskId":"missing-task","attemptId":"repair-attempt","expectedVersion":1,
         "rootCause":"Confirmed root cause","findingIds":["missing-finding"],"escalationReason":"One bounded repair"}).to_string();
     assert!(matches!(policy.decide(&run_id,"repair","task_repair_escalate_start",&input),PolicyDecision::RequireApproval));
@@ -1035,7 +1035,7 @@ fn owning_host_recovery_consumes_queued_approvals_then_real_reads_and_model() {
     db.queue_kernel_host_command(&run_id, Some(("read-a","allow_once"))).unwrap();
     drop(coordinator); drop(db);
     let db = Database::open(root.join("facts.db")).unwrap();
-    let policy = super::super::kernel_gateway::GatewayPolicy { binding: db.run_control_binding(&run_id).unwrap().unwrap(), scope , database: None, sessions_dir: None };
+    let policy = super::super::kernel_gateway::GatewayPolicy { binding: db.run_control_binding(&run_id).unwrap().unwrap(), scope , database: None, sessions_dir: None, artifacts_dir: None };
     let count = AtomicUsize::new(0);
     super::super::kernel_host::drive(super::super::kernel_host::acquire(&root, &run_id).unwrap(),
         &db, &clock, &cancellation, &run_id, &real_worker_command(), "test-key", &policy,
@@ -2081,7 +2081,7 @@ fn kernel_work_snapshot_uses_projected_tool_identity_and_frozen_gateway() {
     let scope = crate::database::KernelHostScope { schema_version:1,tool_names:["work_snapshot_get".into()].into_iter().collect(),
         mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),office_tools:Default::default(),lifecycle_hooks:Vec::new() };
     db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
-    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None };
+    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None, artifacts_dir: None };
     let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
     coordinator.dispatch_initial("work-model",&policy,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {
         schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
@@ -2115,7 +2115,7 @@ fn kernel_frozen_hooks_keep_block_and_approval_policy_and_transactional_audit() 
             lifecycle_hooks:vec![hook,after,before_run,after_run]};
         db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
         db.save_lifecycle_hook("kernel-rule","Changed live rule","before_tool","*","annotate","changed",false,10).unwrap();
-        let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None };
+        let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None, artifacts_dir: None };
         let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
         coordinator.dispatch_initial("hooks-model",&policy,|binding,frame,_|Ok(fox_engine_protocol::KernelInitialModelResponse {
             schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),checkpoint_seq:frame.checkpoint_seq,
@@ -2165,7 +2165,7 @@ fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
         mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),
         office_tools:Default::default(),lifecycle_hooks:Vec::new()};
     db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
-    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None };
+    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None, artifacts_dir: None };
     let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
     let input = json!({"objective":"One bounded concern","context":"Explicit context only", "budget":{
         "maxDurationMs":1000,"maxTotalTokens":256,"maxOutputTokens":64,"maxToolCalls":0}});
@@ -2202,7 +2202,7 @@ fn kernel_delegation_stages_a_single_child_without_starting_an_executor() {
             assert!(db.child_runs_for_parent(&run_id)?.is_empty());
             assert!(db.pending_kernel_host_action_ids(&run_id)?.is_empty());
         }
-        let mut denied = super::super::kernel_gateway::GatewayPolicy { binding:policy.binding.clone(),scope:policy.scope.clone() , database: None, sessions_dir: None };
+        let mut denied = super::super::kernel_gateway::GatewayPolicy { binding:policy.binding.clone(),scope:policy.scope.clone() , database: None, sessions_dir: None, artifacts_dir: None };
         denied.scope.tool_names.clear();
         assert!(denied.execute_delegation(&db,"invalid-delegate","child_run_start",&input,token).is_err());
         let result = policy.execute_delegation(&db,"invalid-delegate","child_run_start",&json!({"objctive":"typo"}),token)?;
@@ -2255,7 +2255,7 @@ fn kernel_delegation_correction_limit_survives_reopen_and_staging_errors_stay_fa
             mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),
             office_tools:Default::default(),lifecycle_hooks:Vec::new()};
         db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
-        let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None };
+        let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None, artifacts_dir: None };
         let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run_id,&cancellation).unwrap();
         let args = if staging_failure {json!({"objective":"bounded concern"})} else {json!({"objctive":"typo"})};
         let count = if staging_failure {1} else {4};
@@ -2322,7 +2322,7 @@ fn kernel_context_resources_preserve_conversation_scope_and_use_kernel_results()
         mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),
         office_tools:Default::default(),lifecycle_hooks:Vec::new()};
     db.freeze_kernel_host_scope(&run_id,&scope).unwrap();
-    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None };
+    let policy = super::super::kernel_gateway::GatewayPolicy {binding:db.run_control_binding(&run_id).unwrap().unwrap(),scope, database: None, sessions_dir: None, artifacts_dir: None };
     let foreign = db.create_conversation(db.default_agent_id(),None,None,None).unwrap();
     for (id,conversation_id) in [("own-attachment",policy.binding.conversation_id.as_str()),("foreign-attachment",foreign.id.as_str())] {
         db.add_attachments(&[crate::database::AttachmentRecord {id:id.into(),conversation_id:conversation_id.into(),message_id:None,
@@ -2730,7 +2730,7 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
         binding: db.run_control_binding(&run_id).unwrap().unwrap(),
         scope: db.kernel_host_scope(&run_id).unwrap(),
         database: Some(db.clone()),
-        sessions_dir: None,
+        sessions_dir: None, artifacts_dir: None,
     };
 
     let target = root.join("a.txt");
@@ -3214,4 +3214,37 @@ fn continuation_chain_is_one_way_and_one_successor_per_source() {
     assert_eq!(successors, 1, "one source has exactly one direct successor");
     drop(db);
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_approved_effect_waits_for_other_approvals_instead_of_failing_admission() {
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let (db, _root, run_id) = fixture(&clock);
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    let requests = ["first", "second"].iter().enumerate().map(|(source_order, id)| ToolCallRequest {
+        tool_call_id: (*id).into(), tool: "write_file".into(),
+        canonical_input_json: json!({"path":format!("{id}.txt"),"content":id}).to_string(), source_order,
+    }).collect();
+    coordinator.propose_tools("two-approvals", requests, &Ask).unwrap();
+    coordinator.resolve_approval("first", kernel::ApprovalDecision::AllowOnce).unwrap();
+    let waiting = coordinator.snapshot().unwrap();
+    assert_eq!(waiting.state, "waiting_approval");
+    assert!(super::live::pending_dispatch_ids(&waiting).is_empty());
+    let first = waiting.pending_effects.iter().find(|e| e.tool_call_id.as_deref() == Some("first")
+        && e.kind == kernel::OutboxEffectKind::DispatchTool).unwrap();
+    assert!(super::live::dispatch_waits_for_approval(&waiting.state, first));
+    assert_eq!(first.status, kernel::OutboxStatus::Pending);
+    coordinator.resolve_approval("second", kernel::ApprovalDecision::AllowOnce).unwrap();
+    let ready = coordinator.snapshot().unwrap();
+    assert_eq!(ready.state, "running");
+    assert_eq!(super::live::pending_dispatch_ids(&ready), vec!["first", "second"]);
+    let executions = AtomicUsize::new(0);
+    for id in ["first", "second"] {
+        coordinator.dispatch_tool(id, "approval-test", |_, _, _| {
+            executions.fetch_add(1, Ordering::SeqCst); Ok((true, json!({"ok":true})))
+        }).unwrap();
+    }
+    assert_eq!(executions.load(Ordering::SeqCst), 2);
+    assert!(coordinator.snapshot().unwrap().tool_calls.iter().all(|call| call.state == "completed"));
 }

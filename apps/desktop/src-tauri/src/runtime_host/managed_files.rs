@@ -186,6 +186,22 @@ pub(crate) struct OfficeWriteDetails<'a> {
     pub after_backup_path: Option<&'a str>,
 }
 
+/// The artifact lifecycle verdict for one verified Office write.
+///
+/// Derived from Host facts only — the frozen operation name and the verified
+/// target path relative to the authorized project root — so a connector result
+/// cannot promote an intermediate file to a deliverable, and the renderer never
+/// has to guess from a file extension.
+pub(crate) fn office_write_artifact_class(
+    project_root: &Path,
+    target: &Path,
+    tool: &str,
+) -> &'static str {
+    crate::runtime_host::artifact_store::classify(Some(project_root), target, tool, false)
+        .0
+        .as_str()
+}
+
 /// The Host-verified managed write behind one frozen dispatch.
 ///
 /// A managed write is identified from Host facts only: the real dispatch tool,
@@ -281,6 +297,12 @@ pub(crate) fn verified_managed_write(
                     database: context.database,
                     sessions_dir: context.sessions_dir?,
                     conversation_id: context.conversation_id,
+                    // Derived from the Host's own session store, exactly like
+                    // `RuntimeHostState::managed_files_dir`, so the pre-flight
+                    // resolves the same private roots as the execution.
+                    artifacts_dir: context
+                        .sessions_dir
+                        .and_then(std::path::Path::parent),
                 })
             });
             let target = crate::office::prepare_with_context(
@@ -299,6 +321,22 @@ pub(crate) fn verified_managed_write(
             })
         }
         _ => None,
+    }
+}
+
+/// Whether two absolute paths denote the same location, tolerating the Windows
+/// extended-length (`\\?\`) prefix difference between a canonicalized path and
+/// a path the Host stored before canonicalization.
+fn same_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (
+        crate::runtime_host::artifact_store::relative_to(left, right),
+        crate::runtime_host::artifact_store::relative_to(right, left),
+    ) {
+        (Some(forward), Some(backward)) => forward.as_os_str().is_empty() && backward.as_os_str().is_empty(),
+        _ => false,
     }
 }
 
@@ -738,12 +776,16 @@ pub(crate) struct VerifiedWriteTarget {
 impl VerifiedWriteTarget {
     pub(crate) fn new(root: &Path, storage_path: &Path) -> VerifiedWriteTarget {
         let storage_path = storage_path.to_string_lossy().into_owned();
-        let display_name = storage_path
-            .parse::<PathBuf>()
-            .ok()
-            .and_then(|path| path.strip_prefix(root).map(|value| value.to_path_buf()).ok())
-            .map(|relative| relative.to_string_lossy().into_owned())
-            .unwrap_or_else(|| storage_path.clone());
+        // `storage_path` may be canonicalized (`\\?\C:\...` on Windows) while
+        // `root` is the Host's stored form, so the comparison tolerates the
+        // verbatim prefix; otherwise every deliverable would be displayed as an
+        // absolute path instead of a project-relative name.
+        let display_name = crate::runtime_host::artifact_store::relative_to(
+            root,
+            Path::new(&storage_path),
+        )
+        .map(|relative| relative.to_string_lossy().into_owned())
+        .unwrap_or_else(|| storage_path.clone());
         VerifiedWriteTarget {
             storage_path,
             display_name,
@@ -794,7 +836,10 @@ pub(crate) fn verify_office_write(
     let declared_path = declared_path.canonicalize().unwrap_or(declared_path);
     let target_path = PathBuf::from(&target.storage_path);
     let target_canonical = target_path.canonicalize().unwrap_or(target_path);
-    if declared_path != target_canonical {
+    // Both sides are canonicalized above, but on Windows the two call sites can
+    // still differ by the extended-length prefix, so the comparison normalizes
+    // it instead of rejecting a legitimate write.
+    if !same_path(&declared_path, &target_canonical) {
         return Err(format!(
             "connector declared target {} but the Host verified {}",
             declared_path.display(),
@@ -1962,6 +2007,7 @@ mod tests {
             database: &db,
             sessions_dir: &sessions,
             conversation_id: &conversation,
+            artifacts_dir: None,
         };
         let arguments = serde_json::json!({
             "output": "legacy-chain.xlsx",
@@ -2225,6 +2271,7 @@ mod tests {
             database: &db,
             sessions_dir: &sessions,
             conversation_id: &other_conversation,
+            artifacts_dir: None,
         };
         let cross = crate::office::prepare_with_context(
             "office_import_data",

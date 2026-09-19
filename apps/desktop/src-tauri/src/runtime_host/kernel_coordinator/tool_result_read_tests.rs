@@ -200,6 +200,7 @@ fn kernel_context_resource_serves_a_persisted_result_and_rebuilds_it_exactly() {
 
         database: None,
         sessions_dir: None,
+        artifacts_dir: None,
     };
     let dir = std::env::temp_dir();
 
@@ -255,6 +256,7 @@ fn kernel_context_resource_serves_a_persisted_result_and_rebuilds_it_exactly() {
 
         database: None,
         sessions_dir: None,
+        artifacts_dir: None,
     };
     let error = narrowed
         .execute_context_resource(
@@ -345,6 +347,7 @@ fn a_reopened_database_reads_the_previous_result_without_replaying_it() {
 
         database: None,
         sessions_dir: None,
+        artifacts_dir: None,
     };
     let dir = std::env::temp_dir();
     let mut rebuilt = String::new();

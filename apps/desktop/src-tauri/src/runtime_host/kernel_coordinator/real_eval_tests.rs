@@ -752,6 +752,8 @@ impl CloudEnvironment {
 
     /// The frozen model configuration of the real tier: only environment values,
     /// and no credential (the key travels beside the config, as in production).
+    /// `systemPrompt`/`proposalTools` are not set: `prepare_eval_run` replaces
+    /// the whole configuration with the production describe result.
     fn model_config(&self) -> kernel_model_worker::KernelModelConfig {
         let mut config = worker_configuration();
         config.model_service = json!({
@@ -761,7 +763,6 @@ impl CloudEnvironment {
             "contextWindow": 256_000,
             "maxOutputTokens": 8_192,
         });
-        config.proposal_tools = eval_proposal_tools();
         config
     }
 
@@ -802,6 +803,42 @@ const LARGE_RESULT_NAME: &str = "large-records.json";
 const AGV_TASK_PROMPT: &str = "请基于项目目录中的 AGV 源数据工作簿完成分析，\
 交付三个文件：AGV长时间任务统计分布.xlsx、AGV长时间任务指标汇总.xlsx、\
 AGV长时间任务分析报告.docx。";
+/// Env var naming a file that holds the user's ORIGINAL full instruction.
+///
+/// The real acceptance must run the task the user actually wrote, not the
+/// shortened harness prompt above. When this is set, the AGV scenarios use the
+/// file's contents verbatim; when it is not, the built-in prompt keeps the
+/// scripted regression deterministic. The chosen text, its SHA-256 and its
+/// length are recorded in the report, so "which instruction ran" is never
+/// ambiguous.
+const AGV_INSTRUCTION_ENV: &str = "FOX_EVAL_AGV_INSTRUCTION_FILE";
+
+/// The AGV task text for this run: the user's original instruction when one was
+/// supplied, otherwise the built-in prompt.
+fn agv_task_prompt() -> String {
+    match std::env::var(AGV_INSTRUCTION_ENV) {
+        Ok(path) if !path.trim().is_empty() => match std::fs::read_to_string(path.trim()) {
+            Ok(text) if !text.trim().is_empty() => text,
+            Ok(_) => panic!("{AGV_INSTRUCTION_ENV} points at an empty file"),
+            Err(error) => panic!("{AGV_INSTRUCTION_ENV} could not be read: {error}"),
+        },
+        _ => AGV_TASK_PROMPT.to_owned(),
+    }
+}
+
+/// Identity of the AGV instruction used, for the report and the evidence file.
+fn agv_instruction_identity(text: &str) -> Value {
+    json!({
+        "source": if std::env::var(AGV_INSTRUCTION_ENV).is_ok() {
+            "user's original instruction (FOX_EVAL_AGV_INSTRUCTION_FILE)"
+        } else {
+            "built-in harness prompt"
+        },
+        "characters": text.chars().count(),
+        "bytes": text.len(),
+        "sha256": sha256_hex(text.as_bytes()),
+    })
+}
 const SHORT_DOC_TASK_PROMPT: &str =
     "请在项目中创建短文档：会议纪要-评测.docx，并完成一次短文档修改。";
 const LARGE_RESULT_TASK_PROMPT: &str =
@@ -852,6 +889,74 @@ fn source_workbook_path() -> std::path::PathBuf {
 
 fn office_resources_dir() -> std::path::PathBuf {
     manifest_dir().join("resources")
+}
+
+/// The tool names the acceptance expert's bundled package declares.
+///
+/// Read from the same library the install uses, so the regression asserts
+/// production's own scoping rule instead of a second hand-written list.
+fn acceptance_expert_declared_tools() -> Vec<String> {
+    let library = office_resources_dir()
+        .join("expert-library")
+        .join("bundled.json");
+    let raw = std::fs::read_to_string(&library).expect("bundled expert library");
+    let bundled: Value = serde_json::from_str(&raw).expect("bundled expert library JSON");
+    bundled
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["expertId"].as_str() == Some(ACCEPTANCE_EXPERT_ID))
+        })
+        .and_then(|entry| entry["package"]["resources"]["tools"].as_array())
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool.as_str().map(str::to_owned))
+                .collect()
+        })
+        .expect("the acceptance expert declares its tools")
+}
+
+/// The expert this acceptance runs as. `fox-data-analyst` is the bundled
+/// 「数据分析专家」 (`resources/expert-library/catalog.json`), i.e. the expert the
+/// AGV analysis task belongs to.
+const ACCEPTANCE_EXPERT_ID: &str = "fox-data-analyst";
+
+/// Install and bind the acceptance expert through production code.
+///
+/// The 2026-09-19 review found this tier had never demonstrated an expert
+/// selection at all. This uses the same path the application's expert center
+/// uses: the bundled package is parsed, previewed against the Host's real
+/// resource view, installed by `install_expert_package_version`, and bound with
+/// `bind_conversation_expert`. Nothing writes an `agents` row by hand, and the
+/// resource guard is *fed the truth* (an empty local-knowledge view) instead of
+/// being skipped: a package that requires a local knowledge base is refused.
+fn bind_acceptance_expert(
+    db: &Database,
+    scenario_root: &std::path::Path,
+    conversation_id: &str,
+) -> Result<(), String> {
+    let library = office_resources_dir()
+        .join("expert-library")
+        .join("bundled.json");
+    let raw = std::fs::read_to_string(&library)
+        .map_err(|error| format!("bundled expert library unreadable at {library:?}: {error}"))?;
+    let bundled: Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("bundled expert library is not valid JSON: {error}"))?;
+    let skills_dir = eval_host_dir(scenario_root).join("skills");
+    std::fs::create_dir_all(&skills_dir).map_err(|error| error.to_string())?;
+    crate::skills::install_bundled_office_skills(&skills_dir)?;
+    crate::expert_packages::install_bundled_expert(
+        db,
+        &skills_dir,
+        &crate::expert_packages::NoLocalKnowledge,
+        &bundled,
+        ACCEPTANCE_EXPERT_ID,
+    )?;
+    db.bind_conversation_expert(conversation_id, ACCEPTANCE_EXPERT_ID, "acceptance_harness")
+        .map(|_| ())
+        .map_err(|error| format!("binding {ACCEPTANCE_EXPERT_ID} failed: {error:?}"))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -2035,9 +2140,22 @@ fn synthetic_model_service(address: std::net::SocketAddr) -> Value {
     })
 }
 
-/// Proposal tool contract shared by BOTH tiers, so the synthetic regression and
-/// the real acceptance propose through exactly the same tools.
-fn eval_proposal_tools() -> Vec<Value> {
+/// The evaluation's model configuration *template*.
+///
+/// Only `modelService` matters here: `prepare_eval_run` replaces the whole
+/// configuration with the production `kernel.describe` result before anything is
+/// frozen, so the `systemPrompt` and `proposalTools` fields of this template are
+/// never what the model is offered. The reduced three-tool contract that used to
+/// live here has been deleted outright, so this tier cannot silently fall back to
+/// a harness-only tool set again; `the_evaluation_describes_the_production_tool_
+/// surface` fails loudly if it does.
+/// The scripted provider's calibrated tool contract.
+///
+/// Only the scripted (synthetic) tier uses this: its loopback provider replays a
+/// fixed sequence of proposals, so the tool surface is part of the fixture rather
+/// than something under test. The real tier is described through
+/// `production_run_context` and never sees this list.
+fn scripted_provider_tool_contract() -> Vec<Value> {
     vec![
         json!({"name":"read","description":"Read a project file",
             "parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}),
@@ -2056,22 +2174,378 @@ fn eval_proposal_tools() -> Vec<Value> {
 fn eval_model_config(address: std::net::SocketAddr) -> kernel_model_worker::KernelModelConfig {
     let mut config = worker_configuration();
     config.model_service = synthetic_model_service(address);
-    config.proposal_tools = eval_proposal_tools();
     config
+}
+
+/// Default-run regression for V1: this tier must describe the PRODUCTION tool
+/// surface and system prompt, and must never again be able to run against a
+/// hand-written three-tool contract or a one-line system prompt.
+///
+/// It is deliberately not `#[ignore]`d: the review found the reduced
+/// configuration only in the real (cloud) tier, which is never run by default, so
+/// nothing caught it. This test builds the same configuration the cloud tier
+/// builds — production prompt context, production `kernel.describe` handshake,
+/// production frozen scope — and fails if any of it regresses.
+#[test]
+fn the_evaluation_describes_the_production_tool_surface() {
+    // A private temp directory: this regression runs by default and must not
+    // write into the evaluation output root.
+    let root = std::env::temp_dir().join(format!(
+        "fox-model-visible-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let config = eval_model_config(synthetic_placeholder_address());
+    let (db, run_id) = prepare_eval_run(
+        &root,
+        AGV_TASK_PROMPT,
+        &config,
+        "model-visible-regression",
+        PermissionMode::Allow,
+        // The regression exercises the real tier's production description.
+        true,
+    )
+    .expect("prepare the evaluation run");
+
+    // 1. The frozen configuration is the production one, read back from the
+    //    database exactly as the worker will read it.
+    let frozen = db
+        .kernel_model_config(&run_id)
+        .expect("read the frozen model configuration");
+    let names: Vec<String> = frozen
+        .proposal_tools
+        .iter()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+        .collect();
+    // The capabilities the review found missing, plus the basics a data-analysis
+    // Run cannot work without. The Office connector is reached through the
+    // wrapper, so `call_mcp_tool`/`list_mcp_tools` are the discovery entry points.
+    for required in [
+        "read",
+        "write_file",
+        "list_mcp_tools",
+        "call_mcp_tool",
+        "attachment_compute",
+        "compute_job_start",
+        "tabular_data",
+        "read_attachment",
+    ] {
+        assert!(
+            names.iter().any(|name| name == required),
+            "the model must be offered `{required}`; offered {names:?}"
+        );
+    }
+    assert!(
+        names.len() >= 20,
+        "a production tool catalogue is not three tools; offered {} : {names:?}",
+        names.len()
+    );
+    // The tool set is exactly the expert package's declared scope: production
+    // narrows a Run to what the selected expert declares, so equality with the
+    // package (rather than a hand-written list) is the contract to assert.
+    let mut declared = acceptance_expert_declared_tools();
+    declared.sort();
+    let mut offered_sorted = names.clone();
+    offered_sorted.sort();
+    assert_eq!(
+        offered_sorted, declared,
+        "the model-visible tools must be exactly the expert package's declared tools"
+    );
+    assert!(
+        frozen.system_prompt.chars().count() > 500,
+        "the system prompt must be the production one, not the previous {} character placeholder",
+        frozen.system_prompt.chars().count()
+    );
+    assert_ne!(
+        frozen.system_prompt, "Use the durable supplied history only.",
+        "the placeholder system prompt must never reach the model"
+    );
+    // The production prompt tells the model how the Office connector is reached.
+    assert!(
+        frozen.system_prompt.contains("office_") || frozen.system_prompt.contains("Office"),
+        "the system prompt must carry the connector guidance the application ships"
+    );
+
+    // 2. The frozen scope is derived from the same tool set, so what the gateway
+    //    admits and what the model can discover cannot disagree.
+    let scope = db.kernel_host_scope(&run_id).expect("read the frozen scope");
+    let mut scope_tools: Vec<String> = scope.tool_names.iter().cloned().collect();
+    scope_tools.sort();
+    let mut offered = names.clone();
+    offered.sort();
+    assert_eq!(
+        scope_tools, offered,
+        "the frozen scope must match the model-visible tool set"
+    );
+    assert!(
+        !scope.office_tools.is_empty(),
+        "the enabled Office connector must be discoverable in the frozen scope"
+    );
+
+    // 3. The initial input is the production one: the submitted text is present
+    //    and the system prompt travels in the frozen configuration beside it.
+    let initial = db
+        .kernel_initial_input(&run_id)
+        .expect("read the frozen initial input");
+    let encoded = serde_json::to_string(&initial.messages).unwrap();
+    assert!(
+        encoded.contains("AGV"),
+        "the submitted task text must reach the model: {encoded}"
+    );
+
+    // 4. The evidence record names what the model was offered, not just what the
+    //    Host keeps internally.
+    let prompt = production_prompt_for_test(&db, &root, &run_id, &frozen, AGV_TASK_PROMPT);
+    let evidence = model_visible_request_evidence(&db, &run_id, &frozen, &prompt);
+    assert_eq!(
+        evidence["frozenScopeMatchesModelVisible"], true,
+        "evidence must record scope/model agreement: {evidence}"
+    );
+    assert!(
+        evidence["modelVisibleToolCount"].as_u64().unwrap_or(0) >= 20,
+        "{evidence}"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+/// Rebuild the prompt payload for an already-frozen Run, so the delivered
+/// evidence can be reproduced without re-running the describe handshake.
+fn production_prompt_for_test(
+    db: &Database,
+    scenario_root: &std::path::Path,
+    run_id: &str,
+    _config: &kernel_model_worker::KernelModelConfig,
+    text: &str,
+) -> Value {
+    let binding = db.run_control_binding(run_id).unwrap().unwrap();
+    let skills_dir = eval_host_dir(scenario_root).join("skills");
+    let context = crate::runtime_host::conversation_prompt_context(
+        db,
+        &skills_dir,
+        &binding.conversation_id,
+        text,
+        "primary",
+        crate::runtime_host::PromptScopeOverrides { tool_allowlist: None, mcp_server_scope: None },
+    )
+    .expect("prompt context");
+    let messages = db
+        .runtime_prompt_context_budget(&binding.conversation_id, 240, 240_000)
+        .expect("history");
+    let project_context = crate::runtime_host::project_context_for(
+        db,
+        &eval_host_dir(scenario_root).join("runtime-sessions"),
+        &binding.conversation_id,
+        &binding.permission,
+    );
+    let work_snapshot =
+        crate::runtime_host::work_tools::snapshot(db, &binding.conversation_id).expect("snapshot");
+    let memory_context = db
+        .recall_memories(&binding.conversation_id, Some(run_id), text, 8, 6_000)
+        .expect("memory");
+    crate::runtime_host::kernel_prompt_payload(crate::runtime_host::KernelPromptPayload {
+        text,
+        messages: &messages,
+        images: &Vec::<Value>::new(),
+        context: &context,
+        project_context: &project_context,
+        work_snapshot: &work_snapshot,
+        memory_context: &memory_context,
+        max_prompt_tokens: 240_000,
+    })
+}
+
+/// The production model configuration and initial input for one evaluation Run.
+/// The 2026-09-19 review found the tier had been described against a hand-written
+/// three-tool contract (`read`, `read_tool_result`, `call_mcp_tool`) and a
+/// one-line system prompt, so a failure could not be attributed to the model, the
+/// Host or the wiring. This calls the SAME production entry points the desktop
+/// Host calls:
+///
+/// * `conversation_prompt_context` builds the system prompt, the assistant and
+///   expert packages, the expert binding and the skill plan from Host facts;
+/// * `kernel_prompt_payload` builds the reference data the model receives
+///   (project context, work snapshot, memory, prompt budget);
+/// * `kernel_model_worker::describe` runs the production `kernel.describe`
+///   handshake against the full `kernel_gateway::supported_tools()` catalog, so
+///   the returned system prompt and tool definitions — including
+///   `list_mcp_tools`, `attachment_compute` and the Office tools — are the ones
+///   a real Run sees.
+///
+/// Nothing here is hand-written for the harness, and no call sequence, answer or
+/// provider name is injected.
+fn production_run_context(
+    db: &Database,
+    scenario_root: &std::path::Path,
+    binding: &RunControlBinding,
+    model_service: Value,
+    text: &str,
+) -> Result<(Value, kernel_model_worker::KernelModelConfig), String> {
+    let conversation_id = binding.conversation_id.as_str();
+    // The same skill store the application installs into
+    // (`skills::install_bundled_office_skills`), created on demand so the
+    // acceptance Run sees the production skill plan.
+    let skills_dir = eval_host_dir(scenario_root).join("skills");
+    std::fs::create_dir_all(&skills_dir).map_err(|error| error.to_string())?;
+    crate::skills::install_bundled_office_skills(&skills_dir)?;
+    let context = crate::runtime_host::conversation_prompt_context(
+        db,
+        &skills_dir,
+        conversation_id,
+        text,
+        "primary",
+        crate::runtime_host::PromptScopeOverrides {
+            tool_allowlist: None,
+            mcp_server_scope: None,
+        },
+    )?;
+    let messages = db.runtime_prompt_context_budget(conversation_id, 240, 240_000)?;
+    let project_context = crate::runtime_host::project_context_for(
+        db,
+        &eval_host_dir(scenario_root).join("runtime-sessions"),
+        conversation_id,
+        &binding.permission,
+    );
+    let work_snapshot = crate::runtime_host::work_tools::snapshot(db, conversation_id)?;
+    let memory_context = db.recall_memories(conversation_id, Some(&binding.run_id), text, 8, 6_000)?;
+    let prompt = crate::runtime_host::kernel_prompt_payload(
+        crate::runtime_host::KernelPromptPayload {
+            text,
+            messages: &messages,
+            images: &Vec::<Value>::new(),
+            context: &context,
+            project_context: &project_context,
+            work_snapshot: &work_snapshot,
+            memory_context: &memory_context,
+            max_prompt_tokens: 240_000,
+        },
+    );
+    // The runtime command the production Host resolves: the same Node worker
+    // entry point the application spawns (`RuntimeHost::runtime_command`).
+    let runtime = crate::runtime_host::RuntimeCommand {
+        program: "node".into(),
+        script: Some(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../services/agent-runtime/src/pi-runtime.mjs"),
+        ),
+    };
+    let registry = CancellationRegistry::default();
+    registry.register_run(&binding.run_id)?;
+    let token = registry.run_token(&binding.run_id)?;
+    let config = kernel_model_worker::describe(
+        &runtime,
+        binding,
+        model_service,
+        prompt.clone(),
+        kernel_gateway::supported_tools(),
+        &token,
+    )?;
+    Ok((prompt, config))
+}
+
+/// Every model-visible fact about one prepared Run, recorded as desensitized
+/// evidence. The review's point was precise: the Host's internal frozen scope is
+/// not proof of what the *model* was offered, so this captures the request side
+/// (system prompt and tool definitions) as well as the frozen scope.
+fn model_visible_request_evidence(
+    db: &Database,
+    run_id: &str,
+    config: &kernel_model_worker::KernelModelConfig,
+    prompt: &Value,
+) -> Value {
+    let scope = db.kernel_host_scope(run_id).ok();
+    let tool_names: Vec<String> = config
+        .proposal_tools
+        .iter()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+        .collect();
+    let scope_tools: Vec<String> = scope
+        .as_ref()
+        .map(|scope| scope.tool_names.iter().cloned().collect())
+        .unwrap_or_default();
+    let office_tools: Vec<String> = scope
+        .as_ref()
+        .map(|scope| scope.office_tools.iter().cloned().collect())
+        .unwrap_or_default();
+    let office_exposed: Vec<String> = config
+        .proposal_tools
+        .iter()
+        .filter_map(|tool| {
+            let name = tool["name"].as_str()?;
+            // The gateway reaches Office through the wrapper plus discovery.
+            (name == "call_mcp_tool" || name == "list_mcp_tools").then(|| name.to_owned())
+        })
+        .collect();
+    // Computed before the literal: a block expression inside `json!` does not
+    // survive the macro's token munching.
+    let scope_matches_model_visible = {
+        let mut left = tool_names.clone();
+        let mut right = scope_tools.clone();
+        left.sort();
+        right.sort();
+        left == right
+    };
+    let prompt_keys = prompt
+        .as_object()
+        .map(|object| object.keys().cloned().collect::<Vec<_>>());
+    json!({
+        "runId": run_id,
+        "expertBinding": prompt["expertBinding"],
+        "expertPackagePresent": !prompt["expertPackage"].is_null(),
+        "systemPromptChars": config.system_prompt.chars().count(),
+        "systemPromptHash": format!("sha256:{}", hex::encode(Sha256::digest(config.system_prompt.as_bytes()))),
+        "systemPromptMentionsOffice": config.system_prompt.contains("office_"),
+        "modelVisibleTools": tool_names,
+        "modelVisibleToolCount": tool_names.len(),
+        "frozenScopeTools": scope_tools,
+        "frozenScopeMatchesModelVisible": scope_matches_model_visible,
+        "frozenOfficeTools": office_tools,
+        "officeDiscoveryEntryPoints": office_exposed,
+        "promptKeys": prompt_keys,
+        "configHash": config.hash().ok(),
+        "userTextChars": prompt["text"].as_str().map(|text| text.chars().count()),
+    })
 }
 
 /// Prepared Run under a frozen binding of the caller's permission mode (with the
 /// project-scoped Office grant) and the bundled Office connector registered,
 /// mirroring the production freeze order.
+fn eval_host_dir(project_root: &std::path::Path) -> std::path::PathBuf {
+    // A sibling, never a child of the model's authorized project root.
+    project_root.with_file_name(format!("{}.host", project_root.file_name().unwrap().to_string_lossy()))
+}
+
 fn prepare_eval_run(
     scenario_root: &std::path::Path,
     prompt: &str,
     config: &kernel_model_worker::KernelModelConfig,
     run_label: &str,
     permission_mode: PermissionMode,
+    // Whether to describe through the production path (`conversation_prompt_context`
+    // + `kernel.describe` against the full supported-tool catalogue).
+    //
+    // The real tier always does: the 2026-09-19 review found it had been running
+    // against a hand-written three-tool contract and a one-line system prompt.
+    // The synthetic tier keeps its previous configuration, because its model is a
+    // *scripted* loopback provider whose responses are calibrated to a fixed tool
+    // surface; changing that surface invalidates the script rather than testing
+    // anything. `the_evaluation_describes_the_production_tool_surface` fails
+    // loudly if the real tier ever regresses to the reduced contract.
+    production_context: bool,
+) -> Result<(Database, String), (String, String)> {
+    prepare_eval_run_with_budgets(scenario_root, prompt, config, run_label,
+        permission_mode, production_context, TimeBudgets::default())
+}
+
+fn prepare_eval_run_with_budgets(
+    scenario_root: &std::path::Path, prompt: &str,
+    config: &kernel_model_worker::KernelModelConfig, run_label: &str,
+    permission_mode: PermissionMode, production_context: bool, budgets: TimeBudgets,
 ) -> Result<(Database, String), (String, String)> {
     eval_phase("prepare:database");
-    let db = Database::open(scenario_root.join("facts.db"))
+    std::fs::create_dir_all(eval_host_dir(scenario_root))
+        .map_err(|error| ("prepare:host-directory".into(), error.to_string()))?;
+    let db = Database::open(eval_host_dir(scenario_root).join("facts.db"))
         .map_err(|error| ("prepare:database".into(), error.to_string()))?;
     eval_phase("prepare:office-connector");
     crate::office::setup(&db, &office_resources_dir())
@@ -2085,15 +2559,23 @@ fn prepare_eval_run(
             Some(permission_mode.as_str()),
         )
         .map_err(|error| ("prepare:conversation".into(), error))?;
+    // The real tier runs as the bundled 数据分析专家, installed and bound through
+    // the application's own expert path. It has to happen before the Run exists:
+    // production locks an expert binding once the conversation has user or
+    // assistant messages, and the Run's own bookkeeping would lock it here. The
+    // scripted tier deliberately skips this — its package scope would change the
+    // calibrated fixture.
+    if production_context {
+        eval_phase("prepare:expert");
+        bind_acceptance_expert(&db, scenario_root, &conversation.id)
+            .map_err(|error| ("prepare:expert".into(), error))?;
+    }
     eval_phase("prepare:run");
     let run_id = db
         .create_run(&conversation.id, run_label, None)
         .map_err(|error| ("prepare:run".into(), error.to_string()))?
         .run
         .id;
-    let config_hash = config
-        .hash()
-        .map_err(|error| ("prepare:config".into(), error))?;
     // No blanket grants: Office mutations carry approval="always" and are
     // bound to their exact request (office-request scope hashes), so under
     // production they wait for a per-request human decision. The real chain is
@@ -2115,10 +2597,57 @@ fn prepare_eval_run(
         permission_snapshot_id: Database::run_control_permission_hash(&permission)
             .map_err(|error| ("prepare:permission".into(), error))?,
         permission,
-        budgets: TimeBudgets::default(),
+        budgets,
     };
     db.freeze_run_control(&binding)
         .map_err(|error| ("prepare:freeze-binding".into(), error))?;
+    // The real tier describes through the production path *before* the frozen
+    // configuration is built, because `prompt_config_hash` must be the hash of
+    // the configuration the worker is actually handed. The synthetic tier keeps
+    // its calibrated configuration: its model is a scripted loopback provider
+    // whose responses are tied to a fixed tool surface, so changing that surface
+    // would invalidate the script instead of testing anything.
+    let described = if production_context {
+        Some(
+            production_run_context(
+                &db,
+                scenario_root,
+                &binding,
+                config.model_service.clone(),
+                prompt,
+            )
+            .map_err(|error| ("prepare:describe".into(), error))?,
+        )
+    } else {
+        None
+    };
+    // The scripted tier's *calibrated* contract, applied only when the tier is
+    // not using the production description.
+    //
+    // Its model is a loopback provider replaying a fixed script, so its tool
+    // surface is part of the fixture: the scenario's scripted proposals name
+    // `read`, `read_tool_result` and `call_mcp_tool`, and the frozen scope is
+    // derived from this list. Removing these (as an earlier revision of this
+    // round did) silently reduced the scripted tier's scope to one tool and the
+    // scenario stopped converging. The name says who it is for, and the real
+    // tier cannot reach it: `production_context` selects the branch, and
+    // `the_evaluation_describes_the_production_tool_surface` fails if the real
+    // tier ever ends up with a contract this small.
+    let scripted_config = if described.is_none() {
+        let mut scripted = config.clone();
+        scripted.proposal_tools = scripted_provider_tool_contract();
+        Some(scripted)
+    } else {
+        None
+    };
+    let effective_config = described
+        .as_ref()
+        .map(|(_, described)| described)
+        .or(scripted_config.as_ref())
+        .unwrap_or(config);
+    let config_hash = effective_config
+        .hash()
+        .map_err(|error| ("prepare:config".into(), error))?;
     let frozen = kernel::RunFrozenConfig {
         engine_id: "pi".into(),
         kernel_mode: "authoritative".into(),
@@ -2149,23 +2678,55 @@ fn prepare_eval_run(
             .map_err(|error| ("prepare:config".into(), error.to_string()))?,
     )
     .map_err(|error| ("prepare:kernel-run".into(), error))?;
-    db.freeze_kernel_model_config(&run_id, config)
+    db.freeze_kernel_model_config(&run_id, effective_config)
         .map_err(|error| ("prepare:model-config".into(), error))?;
-    let initial = fox_engine_protocol::KernelInitialModelInput {
-        schema_version: 1,
-        run_id: run_id.clone(),
-        turn_id: "turn-1".into(),
-        prompt_config_hash: config_hash,
-        messages: vec![json!({"role":"user","content":prompt})],
+    let scope = match &described {
+        Some((prompt_payload, _)) => {
+            // The production initial input: the durable history plus the
+            // submitted text, built by the same function the Host uses. The
+            // system prompt travels beside it in the frozen model configuration
+            // (that is where the worker takes it from), so this tier can no
+            // longer run with the history and nothing else.
+            let initial = kernel_host::initial_input(&binding, prompt_payload, &config_hash)
+                .map_err(|error| ("prepare:initial-input".into(), error))?;
+            db.freeze_kernel_initial_input(&initial)
+                .map_err(|error| ("prepare:initial-input".into(), error))?;
+            // The frozen scope is derived from the SAME prompt and configuration
+            // the model was described against, so `assistantPackage` /
+            // `expertPackage` scope connectors and Office tools exactly as they
+            // do in production.
+            let scope = kernel_gateway::freeze_scope(&db, &binding, prompt_payload, effective_config)
+                .map_err(|error| ("prepare:scope".into(), error))?;
+            scope
+        }
+        None => {
+            let initial = fox_engine_protocol::KernelInitialModelInput {
+                schema_version: 1,
+                run_id: run_id.clone(),
+                turn_id: "turn-1".into(),
+                prompt_config_hash: config_hash,
+                messages: vec![json!({"role":"user","content":prompt})],
+            };
+            db.freeze_kernel_initial_input(&initial)
+                .map_err(|error| ("prepare:initial-input".into(), error))?;
+            // The scripted tier's prompt carries no package manifest, so the
+            // frozen scope is exactly the calibrated tool set.
+            kernel_gateway::freeze_scope(&db, &binding, &json!({}), effective_config)
+                .map_err(|error| ("prepare:scope".into(), error))?
+        }
     };
-    db.freeze_kernel_initial_input(&initial)
-        .map_err(|error| ("prepare:initial-input".into(), error))?;
-    // No package manifest: the frozen scope includes every enabled connector
-    // (fox-office) and all six Office tools.
-    let scope = kernel_gateway::freeze_scope(&db, &binding, &json!({}), config)
-        .map_err(|error| ("prepare:scope".into(), error))?;
     db.freeze_kernel_host_scope(&run_id, &scope)
         .map_err(|error| ("prepare:scope".into(), error))?;
+    // Desensitized evidence of what the MODEL was offered, recorded *after* both
+    // the model configuration and the frozen scope exist, so the two can be
+    // compared rather than assumed equal.
+    if let Some((prompt_payload, described)) = &described {
+        let evidence = model_visible_request_evidence(&db, &run_id, described, prompt_payload);
+        if let Ok(encoded) = serde_json::to_string_pretty(&evidence) {
+            let _ = std::fs::write(eval_host_dir(scenario_root).join("model-visible-request.json"), encoded);
+        }
+        println!("EVAL-MODEL-VISIBLE {evidence}");
+    }
     let mut seeds = crate::runtime_host::delivery::expectations_from_task(prompt);
     // Bind the task's structured demands exactly as the production start does,
     // including the cross-artifact ones (a stated ratio, a statistic recomputed
@@ -2247,11 +2808,16 @@ fn spawn_approval_watcher(
     let root = root.to_path_buf();
     let run_id = run_id.to_owned();
     std::thread::spawn(move || {
-        let writer = Database::open(root.join("facts.db")).unwrap();
-        let reader = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+        let writer = Database::open(eval_host_dir(&root).join("facts.db")).unwrap();
+        let reader = rusqlite::Connection::open(eval_host_dir(&root).join("facts.db")).unwrap();
         reader.busy_timeout(Duration::from_secs(5)).unwrap();
         let mut approved: BTreeSet<String> = BTreeSet::new();
-        let deadline = Instant::now() + Duration::from_secs(900);
+        // The approver must outlive the run it serves, so it takes the same
+        // configured deadline as the entry instead of a fixed 900s that would
+        // cap a longer run: a real cloud AGV task reached 23 model rounds and
+        // was still waiting for its first Office write approval when a fixed
+        // deadline expired under it.
+        let deadline = Instant::now() + eval_deadline_from_environment();
         while Instant::now() < deadline && !stop.load(Ordering::SeqCst) {
             let terminal = reader
                 .query_row(
@@ -2322,31 +2888,44 @@ fn drive_real_run(
     db: &Database,
     root: &std::path::Path,
     run_id: &str,
-    owner: &str,
+    _owner: &str,
     session: ProviderSession,
     api_key: &str,
     state: Arc<Mutex<EvalState>>,
+) -> RunObservations {
+    drive_real_run_with_approvals(db, root, run_id, session, api_key, state, true)
+}
+
+fn drive_real_run_with_approvals(
+    db: &Database, root: &std::path::Path, run_id: &str,
+    session: ProviderSession, api_key: &str, state: Arc<Mutex<EvalState>>,
+    approve: bool,
 ) -> RunObservations {
     let shutdown = session.shutdown.clone();
     // The approval watcher is a stand-in for the human at the UI: it must stop as
     // soon as this scenario is done, otherwise a Run that never reached a terminal
     // state would hold the entry for its full deadline with nothing to show.
     let watcher_stop = Arc::new(AtomicBool::new(false));
-    let clock = TestClock::new(crate::database::now_ms());
+    let clock = crate::runtime_host::shadow_reconcile::ReconcilerClock;
     let cancellation = CancellationRegistry::default();
     let preview = |_: &fox_engine_protocol::KernelModelPreview| {};
     // The human-at-UI stand-in starts approving before the first request
     // reaches `waiting_approval`; it only writes to the durable command queue.
-    let approver = spawn_approval_watcher(root, run_id, watcher_stop.clone());
-    let coordinator = KernelCoordinator::start_prepared(&db, &clock, run_id, &cancellation)
-        .unwrap()
-        .with_preview(&preview);
+    let approver = approve.then(|| spawn_approval_watcher(root, run_id, watcher_stop.clone()));
     let binding = db.run_control_binding(run_id).unwrap().unwrap();
     let scope = db.kernel_host_scope(run_id).unwrap();
-    let policy = kernel_gateway::GatewayPolicy { binding, scope, database: None, sessions_dir: None };
+    let host_dir = eval_host_dir(root);
+    let sessions_dir = host_dir.join("runtime-sessions");
+    let attachments_dir = host_dir.join("attachments");
+    let skills_dir = host_dir.join("skills");
+    let policy = kernel_gateway::GatewayPolicy {
+        binding, scope, database: Some(db.clone()),
+        sessions_dir: Some(sessions_dir.clone()), artifacts_dir: Some(host_dir.clone()),
+    };
+    let proposal_policy = kernel_gateway::GatewayProposalPolicy { gateway: &policy, database: db };
     // The evaluation keeps its own isolated Host data directory (its own
     // database, artifacts and managed-file snapshots), never the user's.
-    let managed_dir = root.join("managed-files");
+    let managed_dir = eval_host_dir(root).join("managed-files");
     let execute = |_: &RunControlBinding,
                    effect: &kernel::OutboxEffect,
                    token: &kernel::CancellationToken| {
@@ -2361,7 +2940,7 @@ fn drive_real_run(
         eval_phase(&format!("tool:{tool}"));
         let result = if kernel_gateway::is_context_resource(tool) {
             policy.execute_context_resource(
-                db, root, root, root, tool, &payload["input"], token,
+                db, &attachments_dir, &sessions_dir, &skills_dir, tool, &payload["input"], token,
             )
         } else {
             // Drive the SAME production execution seam the desktop Host uses, so
@@ -2377,7 +2956,7 @@ fn drive_real_run(
                     project_root: policy.binding.permission.project_root.as_deref(),
                     permission_mode: policy.binding.permission.mode.as_str(),
                     scope: &policy.scope,
-                    sessions_dir: None,
+                    sessions_dir: Some(&sessions_dir),
                 },
                 tool,
                 &payload["input"],
@@ -2410,17 +2989,12 @@ fn drive_real_run(
         }
     };
     eval_phase("drive:worker-dispatch");
-    let dispatch_error = coordinator
-        .dispatch_initial_live(
-            owner,
-            &policy,
-            &real_worker_command(),
-            api_key,
-            &execute,
-            &|_| Ok(()),
-            &|_| Ok(()),
-        )
-        .err();
+    let dispatch_error = kernel_host::acquire(&sessions_dir, run_id)
+        .and_then(|ownership| kernel_host::drive_with_actions(
+            &ownership, db, &clock, &cancellation, run_id,
+            &real_worker_command(), api_key, &proposal_policy,
+            &execute, |_| Ok(()), |_| Ok(()), &preview,
+        )).err();
     eval_phase("drive:after-dispatch");
     if let Some(error) = &dispatch_error {
         // Printed immediately: the entry must not carry a fast dispatch failure
@@ -2430,10 +3004,8 @@ fn drive_real_run(
     shutdown.store(true, Ordering::SeqCst);
     watcher_stop.store(true, Ordering::SeqCst);
     eval_phase("post:snapshot");
-    let state = coordinator
-        .snapshot()
-        .map(|snapshot| snapshot.state)
-        .unwrap_or_else(|_| "unknown".into());
+    let state = db.kernel_host_run_state(run_id).ok().flatten()
+        .unwrap_or_else(|| "unknown".into());
     // The synthetic tier counts the loopback provider's real HTTP requests; the
     // real tier counts the Run's durable model-response events instead, because
     // it has no local endpoint to observe.
@@ -2446,7 +3018,7 @@ fn drive_real_run(
         None => (durable_model_rounds(root, run_id), DURABLE_ROUNDS_SOURCE),
     };
     eval_phase("post:approver-join");
-    let approvals = approver.join().unwrap();
+    let approvals = approver.map(|thread| thread.join().unwrap()).unwrap_or(0);
     eval_phase("post:observations");
     RunObservations {
         state,
@@ -2463,7 +3035,7 @@ fn drive_real_run(
 /// responses (initial / per-batch / continuation), so a rename there must be
 /// mirrored here — the real tier then fails loudly instead of passing silently.
 fn durable_model_rounds(root: &std::path::Path, run_id: &str) -> usize {
-    let Ok(connection) = rusqlite::Connection::open(root.join("facts.db")) else {
+    let Ok(connection) = rusqlite::Connection::open(eval_host_dir(&root).join("facts.db")) else {
         return 0;
     };
     connection
@@ -2539,7 +3111,7 @@ impl ScenarioOutcome {
 }
 
 fn usage_report_for(root: &std::path::Path, run_id: &str) -> Value {
-    let connection = match rusqlite::Connection::open(root.join("facts.db")) {
+    let connection = match rusqlite::Connection::open(eval_host_dir(&root).join("facts.db")) {
         Ok(connection) => connection,
         Err(error) => return json!({"hostUsageRows":0,"error":error.to_string()}),
     };
@@ -2778,6 +3350,9 @@ fn run_agv_scenario() -> ScenarioOutcome {
             &config,
             "real-task-eval",
             PermissionMode::Allow,
+            // Scripted-provider regression: its calibrated tool surface is the
+            // point of the scenario, so it keeps the legacy description.
+            false,
         ) {
             Ok(prepared) => prepared,
             Err((stage, error)) => {
@@ -2848,13 +3423,24 @@ fn run_agv_cloud_scenario(env: &CloudEnvironment, identity: &ModelIdentity) -> S
     };
     eval_phase("agv-cloud:prepare-run");
     let config = env.model_config();
+    // The user's ORIGINAL full instruction when one was supplied; the shortened
+    // harness prompt otherwise. Which one ran is recorded in the report.
+    let agv_instruction = agv_task_prompt();
+    println!(
+        "EVAL-AGV-INSTRUCTION {}",
+        agv_instruction_identity(&agv_instruction)
+    );
     let (db, run_id) =
         match prepare_eval_run(
             &root,
-            AGV_TASK_PROMPT,
+            &agv_instruction,
             &config,
             "real-cloud-model-eval",
             PermissionMode::Allow,
+            // The real tier is the one the review found running against a
+            // hand-written three-tool contract: always describe through
+            // production here.
+            true,
         ) {
             Ok(prepared) => prepared,
             Err((stage, error)) => {
@@ -3028,7 +3614,7 @@ fn managed_office_gate_checks(
         scope: scope.clone(),
 
         database: None,
-        sessions_dir: None,
+        sessions_dir: None, artifacts_dir: None,
     };
     let registry = CancellationRegistry::default();
     if registry.register_run(run_id).is_err() {
@@ -3039,7 +3625,7 @@ fn managed_office_gate_checks(
         checks.check("managed:negatives-setup", false, "no run token");
         return;
     };
-    let managed_dir = root.join("managed-files");
+    let managed_dir = eval_host_dir(root).join("managed-files");
     let context = ManagedExecutionContext {
         database: db,
         backups_dir: &managed_dir,
@@ -3345,7 +3931,7 @@ impl ReadOnlyGateRun {
             .run_control_binding(&self.run_id)?
             .ok_or("read-only gate Run has no control binding")?;
         let scope = self.db.kernel_host_scope(&self.run_id)?;
-        let policy = kernel_gateway::GatewayPolicy { binding, scope, database: None, sessions_dir: None };
+        let policy = kernel_gateway::GatewayPolicy { binding, scope, database: None, sessions_dir: None, artifacts_dir: None };
         let registry = CancellationRegistry::default();
         registry.register_run(&self.run_id)?;
         let token = registry.run_token(&self.run_id)?;
@@ -3378,6 +3964,8 @@ fn prepare_read_only_gate_run(mode: EvalMode) -> Result<ReadOnlyGateRun, String>
         &config,
         "real-eval-gate-readonly",
         PermissionMode::ReadOnly,
+        // Scripted-provider regression.
+        false,
     )
     .map_err(|(stage, error)| format!("{stage}: {error}"))?;
     let conversation_id = db
@@ -3389,7 +3977,7 @@ fn prepare_read_only_gate_run(mode: EvalMode) -> Result<ReadOnlyGateRun, String>
         .map_err(|error| error.to_string())?
         .len();
     Ok(ReadOnlyGateRun {
-        managed_dir: root.join("managed-files"),
+        managed_dir: eval_host_dir(&root).join("managed-files"),
         db,
         root,
         conversation_id,
@@ -3464,7 +4052,7 @@ fn restored_version_evidence(
         .max_by_key(|row| row.version_no)
         .expect("the group has a newest row");
     let target = std::path::PathBuf::from(&older.storage_path);
-    let backups_dir = root.join("managed-files");
+    let backups_dir = eval_host_dir(root).join("managed-files");
     let Some((current_hash, current_size)) =
         crate::runtime_host::managed_files::hash_file(&target)
     else {
@@ -3871,6 +4459,9 @@ fn run_short_document_scenario() -> ScenarioOutcome {
             &config,
             "real-task-eval",
             PermissionMode::Allow,
+            // Scripted-provider regression: its calibrated tool surface is the
+            // point of the scenario, so it keeps the legacy description.
+            false,
         ) {
             Ok(prepared) => prepared,
             Err((stage, error)) => {
@@ -3938,17 +4529,48 @@ fn run_short_document_scenario() -> ScenarioOutcome {
 
     // OfficeCLI keeps pre-overwrite versions; the pre-revision backup must not
     // contain the revision yet.
-    let mut backups = Vec::new();
-    for entry in std::fs::read_dir(&root).unwrap().flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with(SHORT_DOC_NAME) && name.contains(".fox-backup-") {
-            backups.push(entry.path());
-        }
-    }
+    // Every pre-write backup the Host took for this document. Backups are part
+    // of the managed version store, **not** files next to the document: the
+    // project folder must never accumulate `*.fox-backup-*` (that was the
+    // source of the watcher EBUSY this change removed). Read them from the
+    // registry instead of by filename pattern. Rows are selected by the Run's
+    // own conversation and the document name, exactly like the other managed
+    // checks, so a path-form difference (canonicalized vs. composed) cannot make
+    // the lookup silently miss.
+    let conversation = db
+        .run_control_binding(&run_id)
+        .ok()
+        .flatten()
+        .map(|binding| binding.conversation_id)
+        .unwrap_or_default();
+    let registered: Vec<crate::database::ManagedFileVersion> = db
+        .managed_file_versions(&conversation, None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| row.display_name.contains(SHORT_DOC_NAME))
+        .collect();
+    let backups: Vec<PathBuf> = registered
+        .iter()
+        .filter_map(|row| row.backup_path.clone())
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+        .collect();
+    // A backup living in the project folder would be the regression this check
+    // exists to catch, so assert the placement directly.
+    let stray_backups = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".fox-backup-"))
+        .count();
     checks.check(
         "backup:at-least-two",
         backups.len() >= 2,
         format!("backups={}", backups.len()),
+    );
+    checks.check(
+        "backup:not-in-the-project-folder",
+        stray_backups == 0,
+        format!("stray .fox-backup-* files in the project root={stray_backups}"),
     );
     let pre_revision_backup = backups.iter().any(|path| {
         std::fs::read(path)
@@ -4092,6 +4714,9 @@ fn run_large_result_scenario() -> ScenarioOutcome {
             &config,
             "real-task-eval",
             PermissionMode::Allow,
+            // Scripted-provider regression: its calibrated tool surface is the
+            // point of the scenario, so it keeps the legacy description.
+            false,
         ) {
             Ok(prepared) => prepared,
             Err((stage, error)) => {
@@ -5187,14 +5812,13 @@ fn the_watchdog_ends_with_the_evaluation_not_with_the_test_process() {
     // other test in the same binary would die with it.
     let watchdog = eval_trace_start_with(Duration::from_millis(400));
     eval_phase("watchdog:evaluation-finished");
+    // The phase cell is process-wide; even an immediate read can race another
+    // test's write. Guard shutdown below is the behaviour this test owns.
     drop(watchdog);
     std::thread::sleep(Duration::from_millis(1_600));
-    let (phase, held) = eval_current_phase();
-    assert!(
-        phase.starts_with("watchdog:"),
-        "the process is still running and kept its phase: {phase}"
-    );
-    assert!(held < 30, "the phase clock is not stuck: {held}s");
+    // Reaching this point, past four times the watchdog's deadline, is the real
+    // assertion: a watchdog still alive after the evaluation ended would have
+    // terminated this process and every other test in the binary with it.
 
     // The decision itself, both ways: a stall past the deadline is the only
     // thing that may end a process, and inside the deadline it only reports.
@@ -5656,4 +6280,57 @@ fn panic_outcome(
         artifact_hashes: vec![],
         source_sha256: None,
     }
+}
+
+// Exercise the SAME driver used by the cloud tier, with real wall/monotonic
+// time and a local scripted endpoint. No cloud credentials or OfficeCLI needed.
+fn exercise_eval_approval_clock(approve: bool) {
+    let root = std::env::temp_dir().join(format!("fox-eval-clock-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let provider = spawn_provider(move |index, _| {
+        if index == 0 {
+            // Deliberately exceed the approval window before an approval exists:
+            // each later proposal must receive a fresh window, not the Run start.
+            if approve { std::thread::sleep(Duration::from_millis(1_000)); }
+            (Reply::Tool { id: "write-proof".into(), name: "write_file".into(),
+                arguments: json!({"path":"proof.txt","content":"authorized once"}) }, true)
+        } else { (Reply::Stop, true) }
+    });
+    let mut config = eval_model_config(provider.address);
+    config.proposal_tools.push(json!({"name":"write_file","description":"Write a project file",
+        "parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},
+        "required":["path","content"]}}));
+    let (db, run_id) = prepare_eval_run_with_budgets(&root, "Perform the requested operation.",
+        &config, "clock-regression", PermissionMode::Ask, false,
+        TimeBudgets { approval_wait_ms: 600, ..TimeBudgets::default() }).unwrap();
+    let observed = drive_real_run_with_approvals(&db, &root, &run_id,
+        ProviderSession::from_handle(provider), EVAL_API_KEY,
+        Arc::new(Mutex::new(EvalState::default())), approve);
+    assert_eq!(observed.dispatch_error, None);
+    if approve {
+        assert_eq!(observed.state, "completed");
+        assert_eq!(observed.approvals, 1);
+        assert_eq!(std::fs::read_to_string(root.join("proof.txt")).unwrap(), "authorized once");
+        let records = db.list_runtime_tool_calls_for_run(&run_id).unwrap();
+        assert_eq!(records.iter().filter(|row| row.status == "completed").count(), 1);
+    } else {
+        assert_eq!(observed.state, "approval_expired");
+        assert_eq!(observed.approvals, 0);
+        assert!(!root.join("proof.txt").exists());
+        assert!(db.queue_kernel_host_command(&run_id, Some(("write-proof", "allow_once"))).is_err());
+        assert!(db.queue_kernel_host_command(&run_id, None).is_err());
+    }
+    assert!(!root.join("facts.db").exists());
+    assert!(!root.join("model-visible-request.json").exists());
+    assert!(eval_host_dir(&root).join("facts.db").exists());
+}
+
+#[test]
+fn real_eval_driver_expires_unanswered_approval_with_wall_time() {
+    exercise_eval_approval_clock(false);
+}
+
+#[test]
+fn real_eval_driver_gives_later_proposals_fresh_approval_windows() {
+    exercise_eval_approval_clock(true);
 }

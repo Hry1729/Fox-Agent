@@ -1,4 +1,5 @@
 mod capability_tools;
+pub(crate) mod artifact_store;
 pub(crate) mod attachment_compute;
 pub(crate) mod background_jobs;
 mod continuation;
@@ -846,6 +847,180 @@ struct AgentPromptContext {
     run_context: Value,
     skill_prompt: String,
     skill_activations: Vec<SkillActivationRecord>,
+}
+
+/// The conversation-scoped prompt context of one Run, built from Host facts.
+///
+/// This is the *production* construction, extracted from
+/// `RuntimeHost::agent_prompt_context` so a non-UI entry point can build exactly
+/// the same thing. The real acceptance harness calls this instead of
+/// hand-assembling a reduced prompt: the review of 2026-09-19 found that the
+/// cloud tier had been given a three-tool contract and a one-line system prompt
+/// that no production Run ever sees, which made its failures unattributable.
+pub(crate) struct PromptScopeOverrides<'a> {
+    pub tool_allowlist: Option<&'a HashSet<String>>,
+    pub mcp_server_scope: Option<&'a HashSet<String>>,
+}
+
+pub(crate) fn conversation_prompt_context(
+    database: &Database,
+    skills_dir: &std::path::Path,
+    conversation_id: &str,
+    text: &str,
+    run_kind: &str,
+    overrides: PromptScopeOverrides<'_>,
+) -> Result<AgentPromptContext, String> {
+    {
+        let system_prompt = database
+            .conversation_system_prompt(conversation_id)?;
+        let agent_id = database
+            .conversation_agent_id(conversation_id)?;
+        let assistant = database
+            .get_agent(&agent_id)?
+            .ok_or_else(|| "conversation assistant was not found".to_owned())?;
+        let run_role = match (run_kind, assistant.agent_kind.as_str()) {
+            ("child", "expert") => "expert_consultation",
+            ("child", _) => "child_worker",
+            ("digital_colleague", _) => "digital_colleague",
+            _ => "user_facing_lead",
+        };
+        let run_context = json!({
+            "runKind": run_kind,
+            "runRole": run_role,
+            "isUserFacingLead": run_role == "user_facing_lead",
+        });
+        let expert_binding = database
+            .current_conversation_expert_binding(conversation_id)?;
+        let assistant_skills = database.enabled_agent_skills(&assistant.id)?;
+        let configured_expert_skills = expert_binding
+            .as_ref()
+            .map(|binding| database.enabled_agent_skills(&binding.expert_id))
+            .transpose()?
+            .unwrap_or_default();
+        let enabled_mcps = database
+            .list_mcp_servers()?
+            .into_iter()
+            .filter(|server| server.enabled)
+            .map(|server| server.id)
+            .filter(|server_id| {
+                overrides
+                    .mcp_server_scope
+                    .is_none_or(|scope| scope.contains(server_id))
+            })
+            .collect::<Vec<_>>();
+        let bound_knowledge = database
+            .conversation_knowledge_references(conversation_id)?;
+        let mut assistant_package = runtime_agent_package(
+            &assistant,
+            &assistant_skills,
+            &enabled_mcps,
+            &bound_knowledge,
+        )?;
+        apply_delegated_package_scope(
+            &mut assistant_package,
+            overrides.tool_allowlist,
+            overrides.mcp_server_scope,
+        )?;
+        let expert_package = expert_binding
+            .as_ref()
+            .map(|binding| {
+                runtime_expert_package(
+                    &binding.package_snapshot,
+                    &binding.package_hash,
+                    &configured_expert_skills,
+                    &enabled_mcps,
+                    &bound_knowledge,
+                )
+            })
+            .transpose()?;
+        let effective_expert_skills = expert_package
+            .as_ref()
+            .map(|package| package_string_list(package, "enabledSkills"))
+            .unwrap_or_default();
+        let mut seen_skills = HashSet::new();
+        let enabled_skills = assistant_skills
+            .iter()
+            .chain(effective_expert_skills.iter())
+            .filter(|skill| seen_skills.insert((*skill).clone()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let available_skill_tools = intersect_optional_scopes(
+            runtime_package_tool_scope(&assistant_package),
+            expert_package.as_ref().and_then(runtime_package_tool_scope),
+        );
+        // Units are Unicode characters (never UTF-8 bytes or tokens); the plan
+        // also keeps a full on-demand catalog so budget-skipped skills stay
+        // discoverable and loadable through `skill_load`.
+        let skill_plan = crate::skills::skill_prompt_plan(
+            skills_dir,
+            &enabled_skills,
+            available_skill_tools.as_ref(),
+            text,
+            8_000,
+        )?;
+        let expert_binding_payload = expert_binding.as_ref().map(|binding| {
+            json!({
+                "bindingId": binding.id,
+                "expertId": binding.expert_id,
+                "version": binding.expert_version,
+                "packageHash": binding.package_hash,
+                "activationSource": binding.activation_source,
+                "activatedAt": binding.activated_at,
+            })
+        });
+        let skill_activations = skill_plan.included.iter().map(|included| SkillActivationRecord {
+            skill_id: included.id.clone(), version: included.version.clone(),
+            content_sha256: included.content_sha256.clone(), source: "initial_prompt".into(),
+            required_tools: included.required_tools.clone(), missing_tools: Vec::new(),
+            tools_available: true, char_count: included.chars as i64, byte_count: included.bytes as i64,
+            created_at: crate::database::now_ms(),
+        }).collect();
+        Ok(AgentPromptContext { system_prompt, assistant_package, expert_package,
+            expert_binding_payload, run_role, run_context, skill_prompt: skill_plan.prompt, skill_activations })
+    }
+}
+
+/// The model-facing prompt payload of one Kernel Run.
+///
+/// One constructor for every entry point, so the keys and the reference data a
+/// Run receives cannot drift between the application start path and a non-UI
+/// caller such as the real acceptance harness.
+///
+/// Everything is borrowed: the caller keeps ownership of the same values for the
+/// Legacy prompt that follows, and the reference-data fields stay generic over
+/// `Serialize` exactly as the `json!` literal they replace did.
+pub(crate) struct KernelPromptPayload<'a, M, W, R> {
+    pub text: &'a str,
+    pub messages: &'a M,
+    pub images: &'a [Value],
+    pub context: &'a AgentPromptContext,
+    pub project_context: &'a Value,
+    pub work_snapshot: &'a W,
+    pub memory_context: &'a R,
+    pub max_prompt_tokens: i64,
+}
+
+pub(crate) fn kernel_prompt_payload<M, W, R>(payload: KernelPromptPayload<'_, M, W, R>) -> Value
+where
+    M: serde::Serialize,
+    W: serde::Serialize,
+    R: serde::Serialize,
+{
+    json!({
+        "text": payload.text,
+        "messages": payload.messages,
+        "images": payload.images,
+        "systemPrompt": payload.context.system_prompt,
+        "skillPrompt": payload.context.skill_prompt,
+        "assistantPackage": payload.context.assistant_package,
+        "expertPackage": payload.context.expert_package,
+        "expertBinding": payload.context.expert_binding_payload,
+        "runContext": payload.context.run_context,
+        "projectContext": payload.project_context,
+        "workSnapshot": payload.work_snapshot,
+        "memoryContext": payload.memory_context,
+        "promptBudget": {"maxPromptTokens": payload.max_prompt_tokens},
+    })
 }
 
 #[derive(Clone)]
@@ -1829,6 +2004,7 @@ impl RuntimeHost {
             context_chars,
         )?;
         let context = self.agent_prompt_context(&request.conversation_id, &prompt_text, "primary")?;
+        let conversation_id = request.conversation_id.clone();
         let prompt = json!({
             "text": prompt_text,
             "messages": messages,
@@ -1838,7 +2014,7 @@ impl RuntimeHost {
             "assistantPackage": context.assistant_package,
             "expertPackage": context.expert_package,
             "expertBinding": context.expert_binding_payload,
-            "projectContext": {"projectRoot": verified.permission.project_root, "permissionMode": verified.permission.mode.as_str()},
+            "projectContext": project_context_for(&self.database, &self.sessions_dir, &conversation_id, &verified.permission),
             "workSnapshot": work_tools::snapshot(&self.database, &request.conversation_id)?,
             "memoryContext": self.database.recall_memories(&request.conversation_id, None, &prompt_text, 8, 6_000)?,
             "runContext": {
@@ -1973,119 +2149,21 @@ impl RuntimeHost {
         }
     }
 
+    /// Delegates to [`conversation_prompt_context`], the non-UI production
+    /// construction, so the application and any non-UI entry point build the
+    /// same prompt from the same Host facts.
     fn agent_prompt_context(&self, conversation_id: &str, text: &str, run_kind: &str) -> Result<AgentPromptContext, String> {
-        let system_prompt = self
-            .database
-            .conversation_system_prompt(conversation_id)?;
-        let agent_id = self
-            .database
-            .conversation_agent_id(conversation_id)?;
-        let assistant = self
-            .database
-            .get_agent(&agent_id)?
-            .ok_or_else(|| "conversation assistant was not found".to_owned())?;
-        let run_role = match (run_kind, assistant.agent_kind.as_str()) {
-            ("child", "expert") => "expert_consultation",
-            ("child", _) => "child_worker",
-            ("digital_colleague", _) => "digital_colleague",
-            _ => "user_facing_lead",
-        };
-        let run_context = json!({
-            "runKind": run_kind,
-            "runRole": run_role,
-            "isUserFacingLead": run_role == "user_facing_lead",
-        });
-        let expert_binding = self
-            .database
-            .current_conversation_expert_binding(conversation_id)?;
-        let assistant_skills = self.database.enabled_agent_skills(&assistant.id)?;
-        let configured_expert_skills = expert_binding
-            .as_ref()
-            .map(|binding| self.database.enabled_agent_skills(&binding.expert_id))
-            .transpose()?
-            .unwrap_or_default();
-        let enabled_mcps = self
-            .database
-            .list_mcp_servers()?
-            .into_iter()
-            .filter(|server| server.enabled)
-            .map(|server| server.id)
-            .filter(|server_id| {
-                self.mcp_server_scope_override
-                    .as_ref()
-                    .is_none_or(|scope| scope.contains(server_id))
-            })
-            .collect::<Vec<_>>();
-        let bound_knowledge = self
-            .database
-            .conversation_knowledge_references(conversation_id)?;
-        let mut assistant_package = runtime_agent_package(
-            &assistant,
-            &assistant_skills,
-            &enabled_mcps,
-            &bound_knowledge,
-        )?;
-        apply_delegated_package_scope(
-            &mut assistant_package,
-            self.tool_allowlist_override.as_ref(),
-            self.mcp_server_scope_override.as_ref(),
-        )?;
-        let expert_package = expert_binding
-            .as_ref()
-            .map(|binding| {
-                runtime_expert_package(
-                    &binding.package_snapshot,
-                    &binding.package_hash,
-                    &configured_expert_skills,
-                    &enabled_mcps,
-                    &bound_knowledge,
-                )
-            })
-            .transpose()?;
-        let effective_expert_skills = expert_package
-            .as_ref()
-            .map(|package| package_string_list(package, "enabledSkills"))
-            .unwrap_or_default();
-        let mut seen_skills = HashSet::new();
-        let enabled_skills = assistant_skills
-            .iter()
-            .chain(effective_expert_skills.iter())
-            .filter(|skill| seen_skills.insert((*skill).clone()))
-            .cloned()
-            .collect::<Vec<_>>();
-        let available_skill_tools = intersect_optional_scopes(
-            runtime_package_tool_scope(&assistant_package),
-            expert_package.as_ref().and_then(runtime_package_tool_scope),
-        );
-        // Units are Unicode characters (never UTF-8 bytes or tokens); the plan
-        // also keeps a full on-demand catalog so budget-skipped skills stay
-        // discoverable and loadable through `skill_load`.
-        let skill_plan = crate::skills::skill_prompt_plan(
+        conversation_prompt_context(
+            &self.database,
             &self.skills_dir,
-            &enabled_skills,
-            available_skill_tools.as_ref(),
+            conversation_id,
             text,
-            8_000,
-        )?;
-        let expert_binding_payload = expert_binding.as_ref().map(|binding| {
-            json!({
-                "bindingId": binding.id,
-                "expertId": binding.expert_id,
-                "version": binding.expert_version,
-                "packageHash": binding.package_hash,
-                "activationSource": binding.activation_source,
-                "activatedAt": binding.activated_at,
-            })
-        });
-        let skill_activations = skill_plan.included.iter().map(|included| SkillActivationRecord {
-            skill_id: included.id.clone(), version: included.version.clone(),
-            content_sha256: included.content_sha256.clone(), source: "initial_prompt".into(),
-            required_tools: included.required_tools.clone(), missing_tools: Vec::new(),
-            tools_available: true, char_count: included.chars as i64, byte_count: included.bytes as i64,
-            created_at: crate::database::now_ms(),
-        }).collect();
-        Ok(AgentPromptContext { system_prompt, assistant_package, expert_package,
-            expert_binding_payload, run_role, run_context, skill_prompt: skill_plan.prompt, skill_activations })
+            run_kind,
+            PromptScopeOverrides {
+                tool_allowlist: self.tool_allowlist_override.as_ref(),
+                mcp_server_scope: self.mcp_server_scope_override.as_ref(),
+            },
+        )
     }
 
     fn start_run_inner(
@@ -2250,10 +2328,18 @@ impl RuntimeHost {
                 )?;
             }
         }
-        let project_context = json!({
-            "projectRoot": control_binding.permission.project_root,
-            "permissionMode": control_binding.permission.mode.as_str(),
-        });
+        // Host-decided placement for user-facing files. The folder is decided
+        // once per (conversation, project) and persisted, so a continuation,
+        // a retry on a later day and an application restart all land in the
+        // same result folder, while two conversations can never overwrite each
+        // other. It is reference data for the model; the Host still resolves
+        // and admits every real path.
+        let project_context = project_context_for(
+            &self.database,
+            &self.sessions_dir,
+            &started.run.conversation_id,
+            &control_binding.permission,
+        );
         let work_snapshot = work_tools::snapshot(&self.database, &started.run.conversation_id)?;
         let memory_context = self.database.recall_memories(
             &started.run.conversation_id,
@@ -2263,13 +2349,35 @@ impl RuntimeHost {
             6_000,
         )?;
 
+        // Assembled once and borrowed by both prompt branches below, so the
+        // Kernel and Legacy paths cannot disagree about what the model sees.
+        let context = AgentPromptContext {
+            system_prompt,
+            assistant_package,
+            expert_package,
+            expert_binding_payload,
+            run_role,
+            run_context,
+            skill_prompt,
+            skill_activations,
+        };
         if let Some(ownership) = kernel_ownership {
-            let prompt = json!({
-                "text":text,"messages":messages,"images":images,"systemPrompt":system_prompt,"skillPrompt":skill_prompt,
-                "assistantPackage":assistant_package,"expertPackage":expert_package,"expertBinding":expert_binding_payload,
-                "runContext":run_context,"projectContext":project_context,"workSnapshot":work_snapshot,"memoryContext":memory_context,
-                "promptBudget":{"maxPromptTokens":input_tokens},
+            // One payload constructor for every entry point, so what the model
+            // sees cannot drift between the application and a non-UI caller such
+            // as the real acceptance harness.
+            let prompt = kernel_prompt_payload(KernelPromptPayload {
+                text,
+                messages: &messages,
+                images: &images,
+                context: &context,
+                project_context: &project_context,
+                work_snapshot: &work_snapshot,
+                memory_context: &memory_context,
+                max_prompt_tokens: input_tokens,
             });
+            for record in &context.skill_activations {
+                self.database.record_skill_activation(&started.run.id, Some(&started.run.conversation_id), record)?;
+            }
             let service = json!({"baseUrl":model_service.base_url,"modelId":model_service.model_id,"apiType":model_service.api_type,
                 "contextWindow":model_service.context_window,"maxOutputTokens":effective_max_output_tokens,"supportsImageInput":model_service.supports_image_input});
             return self.start_kernel_run(ownership, &control_binding, prompt, service);
@@ -2303,13 +2411,13 @@ impl RuntimeHost {
                 "text": text,
                 "model": started.run.model,
                 "messages": messages,
-                "systemPrompt": system_prompt,
-                "skillPrompt": skill_prompt,
+                "systemPrompt": context.system_prompt,
+                "skillPrompt": context.skill_prompt,
                 "images": images,
-                "assistantPackage": assistant_package,
-                "expertBinding": expert_binding_payload,
-                "expertPackage": expert_package,
-                "runContext": run_context,
+                "assistantPackage": context.assistant_package,
+                "expertBinding": context.expert_binding_payload,
+                "expertPackage": context.expert_package,
+                "runContext": context.run_context,
                 "projectContext": project_context,
                 "controlBinding": control_binding,
                 "workSnapshot": work_snapshot,
@@ -6505,6 +6613,291 @@ fn receive_run_approval(
 }
 
 #[cfg(test)]
+mod deliverable_placement_tests {
+    use super::*;
+    use crate::runtime_host::artifact_store::{
+        is_valid_deliverable_folder_name, project_key, set_test_day_offset,
+    };
+    use fox_engine_protocol::{FrozenPermission, PermissionMode};
+
+    /// The clock seam is process-global, so a test that moves it takes this lock
+    /// and restores the real clock on exit — including on panic, via `Drop`.
+    static CLOCK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ClockGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ClockGuard {
+        fn new() -> ClockGuard {
+            let guard = ClockGuard {
+                _lock: CLOCK_LOCK.lock().unwrap_or_else(|error| error.into_inner()),
+            };
+            set_test_day_offset(0);
+            guard
+        }
+
+        fn set(&self, days: i64) {
+            set_test_day_offset(days);
+        }
+    }
+
+    impl Drop for ClockGuard {
+        fn drop(&mut self) {
+            set_test_day_offset(0);
+        }
+    }
+
+    struct Fixture {
+        root: PathBuf,
+        sessions: PathBuf,
+        database: Option<Database>,
+        conversation: String,
+        other_project: PathBuf,
+    }
+
+    impl Fixture {
+        fn new(tag: &str) -> Fixture {
+            let root = std::env::temp_dir().join(format!(
+                "fox-placement-{tag}-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let sessions = root.join("runtime-sessions");
+            std::fs::create_dir_all(&sessions).unwrap();
+            let other_project = root.join("other-project");
+            std::fs::create_dir_all(&other_project).unwrap();
+            let database = Database::open(root.join("test.db")).unwrap();
+            let conversation = database
+                .create_conversation(database.default_agent_id(), None, None, None)
+                .unwrap()
+                .id;
+            Fixture {
+                root,
+                sessions,
+                database: Some(database),
+                conversation,
+                other_project,
+            }
+        }
+
+        fn database(&self) -> &Database {
+            self.database.as_ref().expect("database is open")
+        }
+
+        /// Really close the connection and reopen the same file, so anything a
+        /// later Run reuses can only have come from durable storage.
+        fn restart(&mut self) {
+            let path = self.root.join("test.db");
+            let previous = self.database.take().expect("database is open");
+            drop(previous);
+            self.database = Some(Database::open(path).unwrap());
+        }
+
+        fn permission(&self, project: &std::path::Path, mode: PermissionMode) -> FrozenPermission {
+            FrozenPermission {
+                mode,
+                project_root: Some(project.to_string_lossy().into_owned()),
+                grants: Vec::new(),
+            }
+        }
+
+        fn context_for(&self, project: &std::path::Path) -> Value {
+            project_context_for(
+                self.database(),
+                &self.sessions,
+                &self.conversation,
+                &self.permission(project, PermissionMode::Allow),
+            )
+        }
+
+        fn folder_of(context: &Value) -> String {
+            context["deliverableFolder"]
+                .as_str()
+                .expect("a deliverable folder is injected")
+                .to_owned()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            self.database = None;
+            std::fs::remove_dir_all(&self.root).ok();
+        }
+    }
+
+    /// The production entry decides the folder once and every later Run — on a
+    /// later day and after the database is closed and reopened — reuses it.
+    /// Before this fix the name was recomputed from the current date on every
+    /// prompt build, so a task crossing midnight moved to a second folder.
+    #[test]
+    fn the_production_entry_keeps_one_deliverable_folder_across_days_and_restarts() {
+        let clock = ClockGuard::new();
+        let mut fixture = Fixture::new("stable");
+        let first = fixture.context_for(&fixture.root.clone());
+        let folder = Fixture::folder_of(&first);
+        assert!(is_valid_deliverable_folder_name(&folder), "{folder}");
+        assert_eq!(
+            first["deliverableRoot"].as_str().unwrap(),
+            format!("fox/{folder}")
+        );
+        // Deciding the placement creates no directory: a conversation that never
+        // produces a deliverable leaves nothing on disk.
+        assert!(!fixture.root.join("fox").exists());
+
+        // The same logical task continues on the following day.
+        clock.set(1);
+        let next_day = fixture.context_for(&fixture.root.clone());
+        assert_eq!(
+            Fixture::folder_of(&next_day),
+            folder,
+            "a continuation on a later day must reuse the assigned folder"
+        );
+
+        // Application restart: the connection is closed and the database file
+        // reopened, so a reused folder can only come from durable storage.
+        fixture.restart();
+        let reopened = fixture.context_for(&fixture.root.clone());
+        assert_eq!(Fixture::folder_of(&reopened), folder);
+
+        // Two more days later it is still the same folder.
+        clock.set(3);
+        assert_eq!(Fixture::folder_of(&fixture.context_for(&fixture.root.clone())), folder);
+    }
+
+    /// Ownership is per (conversation, project): another conversation never
+    /// shares this one's folder, a different project never inherits the record,
+    /// and returning to the original project re-reads the original assignment.
+    #[test]
+    fn deliverable_folders_are_owned_per_conversation_and_per_project() {
+        let _clock = ClockGuard::new();
+        let fixture = Fixture::new("ownership");
+        let mine = Fixture::folder_of(&fixture.context_for(&fixture.root.clone()));
+
+        // Another conversation in the same project gets its own folder.
+        let other_conversation = fixture
+            .database()
+            .create_conversation(fixture.database().default_agent_id(), None, None, None)
+            .unwrap()
+            .id;
+        let theirs = Fixture::folder_of(&project_context_for(
+            fixture.database(),
+            &fixture.sessions,
+            &other_conversation,
+            &fixture.permission(&fixture.root, PermissionMode::Allow),
+        ));
+        assert_ne!(theirs, mine);
+
+        // The same conversation pointed at another project has its own record
+        // there: a stale name for a *different* project is never reused.
+        let other_project = fixture.other_project.clone();
+        fixture
+            .database()
+            .ensure_deliverable_folder(
+                &fixture.conversation,
+                &project_key(&other_project.to_string_lossy()),
+                "pre-existing-folder-for-the-other-project",
+                &is_valid_deliverable_folder_name,
+                crate::database::now_ms(),
+            )
+            .unwrap();
+        assert_eq!(
+            Fixture::folder_of(&fixture.context_for(&other_project)),
+            "pre-existing-folder-for-the-other-project"
+        );
+        // Coming back to the first project reads the first project's own record.
+        assert_eq!(Fixture::folder_of(&fixture.context_for(&fixture.root.clone())), mine);
+    }
+
+    /// A stored name that is no longer a single safe path component is replaced
+    /// rather than trusted, so corrupted durable state cannot redirect a write
+    /// outside the deliverable root.
+    #[test]
+    fn an_unusable_stored_folder_name_is_replaced_not_trusted() {
+        let _clock = ClockGuard::new();
+        let fixture = Fixture::new("tamper");
+        let key = project_key(&fixture.root.to_string_lossy());
+        for hostile in ["../../escape", "sub/dir", "..", "C:evil", "trailing."] {
+            fixture
+                .database()
+                .ensure_deliverable_folder(
+                    &fixture.conversation,
+                    &key,
+                    hostile,
+                    &is_valid_deliverable_folder_name,
+                    crate::database::now_ms(),
+                )
+                .unwrap();
+            let context = fixture.context_for(&fixture.root.clone());
+            let folder = Fixture::folder_of(&context);
+            assert!(
+                is_valid_deliverable_folder_name(&folder),
+                "hostile record {hostile:?} must not survive, got {folder:?}"
+            );
+            assert!(!folder.contains("..") && !folder.contains('/') && !folder.contains('\\'));
+        }
+    }
+
+    /// A read-only conversation is never given durable placement bookkeeping of
+    /// its own, and none of these calls creates a directory.
+    #[test]
+    fn a_read_only_conversation_reserves_nothing_and_creates_nothing() {
+        let _clock = ClockGuard::new();
+        let fixture = Fixture::new("readonly");
+        let context = project_context_for(
+            fixture.database(),
+            &fixture.sessions,
+            &fixture.conversation,
+            &fixture.permission(&fixture.root, PermissionMode::ReadOnly),
+        );
+        let key = project_key(&fixture.root.to_string_lossy());
+        assert_eq!(
+            fixture
+                .database()
+                .deliverable_folder(&fixture.conversation, &key)
+                .unwrap(),
+            None
+        );
+        assert!(is_valid_deliverable_folder_name(&Fixture::folder_of(&context)));
+        assert!(!fixture.root.join("fox").exists());
+    }
+
+    /// Concurrent Runs cannot diverge: the assignment is one idempotent
+    /// `INSERT OR IGNORE` against a composite primary key, so every caller that
+    /// sees the row reads back the same value.
+    #[test]
+    fn concurrent_placement_requests_resolve_to_exactly_one_folder() {
+        let _clock = ClockGuard::new();
+        let fixture = Fixture::new("concurrent");
+        let key = project_key(&fixture.root.to_string_lossy());
+        let accepted = std::sync::Mutex::new(Vec::<String>::new());
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    let folder = fixture
+                        .database()
+                        .ensure_deliverable_folder(
+                            &fixture.conversation,
+                            &key,
+                            "candidate-derived-from-the-first-writer",
+                            &is_valid_deliverable_folder_name,
+                            crate::database::now_ms(),
+                        )
+                        .unwrap()
+                        .unwrap();
+                    accepted.lock().unwrap().push(folder);
+                });
+            }
+        });
+        let values = accepted.into_inner().unwrap();
+        assert_eq!(values.len(), 8);
+        assert!(
+            values.iter().all(|value| *value == values[0]),
+            "every concurrent request must observe one folder: {values:?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod frozen_approval_tests {
     use super::*;
 
@@ -6920,6 +7313,20 @@ fn execute_mcp_tool_request(
     } else {
         None
     };
+    // Host-private placement root for rendered previews, working copies and
+    // commit staging. Derived from the Host's own application data directory,
+    // never from a model argument, so the model cannot redirect these areas.
+    let legacy_office_artifacts_dir = if managed_office {
+        use tauri::Manager;
+        app.state::<crate::app_state::AppState>()
+            .runtime_host
+            .sessions_dir
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .filter(|path| !path.as_os_str().is_empty())
+    } else {
+        None
+    };
     let permission_scope = if managed_office {
         Some(permission_scope_hash("office-project-request", json!({"access":office_access,"input":input}).to_string().as_bytes()))
     } else { mcp_permission_scope(tool, &input) };
@@ -7005,6 +7412,7 @@ fn execute_mcp_tool_request(
                     database,
                     sessions_dir,
                     conversation_id,
+                    artifacts_dir: legacy_office_artifacts_dir.as_deref(),
                 }
             });
             crate::office::prepare_with_context(
@@ -7189,6 +7597,7 @@ fn execute_mcp_tool_request(
                     database,
                     sessions_dir,
                     conversation_id,
+                    artifacts_dir: legacy_office_artifacts_dir.as_deref(),
                 }
             });
             let call_result = if managed_office {
@@ -7332,6 +7741,100 @@ fn execute_mcp_tool_request(
         hook_decision.annotations,
         outcome,
     )
+}
+
+/// Host-decided file placement handed to the model as reference data.
+///
+/// The deliverable folder is decided **once** per (conversation, project) and
+/// persisted in `deliverable_placements`, then read back on every later Run.
+/// Before this, the name was recomputed from the current date on each prompt
+/// build, so a task continued across midnight (or after an application restart
+/// on a later day) silently moved to a second result folder. It is still
+/// *reference data*: the Host resolves, admits and verifies every real path,
+/// and a stored name is re-validated before it is used, so it can never redirect
+/// a write out of `fox/`.
+///
+/// No directory is created here. A read-only conversation that never produces a
+/// deliverable therefore still creates nothing on disk.
+fn project_context_for(
+    database: &crate::database::Database,
+    sessions_dir: &std::path::Path,
+    conversation_id: &str,
+    permission: &fox_engine_protocol::FrozenPermission,
+) -> Value {
+    let data_dir = sessions_dir
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let store = crate::runtime_host::artifact_store::ArtifactStore::new(data_dir);
+    let folder = deliverable_folder_for(database, conversation_id, permission, &store);
+    let deliverable_root = folder.as_ref().map(|folder| {
+        format!(
+            "{}/{}",
+            crate::runtime_host::artifact_store::PROJECT_DELIVERABLE_DIR,
+            folder
+        )
+    });
+    json!({
+        "projectRoot": permission.project_root,
+        "permissionMode": permission.mode.as_str(),
+        "deliverableRoot": deliverable_root,
+        "deliverableFolder": folder,
+        "processFilePolicy": "attachment_compute outputs stay in the Host's private conversation workspace and are reused by artifactId; they are process files, not deliverables.",
+        "previewPolicy": "office_render previews are stored by the Host in its private preview area and opened through the saved result's preview entry; pass an explicit output under deliverableRoot only when the user asked for the HTML/PNG itself.",
+    })
+}
+
+/// The conversation's durable deliverable folder for this project.
+///
+/// Returns `None` when the conversation has no authorized project to write
+/// results into. A stored name is accepted only if it is still a valid single
+/// path component; otherwise the row is ignored and the deterministic candidate
+/// is used, so a corrupted or stale record degrades into a fresh, safe name
+/// instead of an out-of-scope write.
+fn deliverable_folder_for(
+    database: &crate::database::Database,
+    conversation_id: &str,
+    permission: &fox_engine_protocol::FrozenPermission,
+    store: &crate::runtime_host::artifact_store::ArtifactStore,
+) -> Option<String> {
+    let project_root = permission.project_root.as_deref()?;
+    let key = crate::runtime_host::artifact_store::project_key(project_root);
+    let candidate = store.deliverable_directory_name("", conversation_id);
+    let acceptable = crate::runtime_host::artifact_store::is_valid_deliverable_folder_name;
+    // Fast path: an assignment already exists and is still usable. This is a
+    // pure read, so an ordinary prompt build never opens a write transaction.
+    if let Ok(Some(stored)) = database.deliverable_folder(conversation_id, &key) {
+        if acceptable(&stored) {
+            return Some(stored);
+        }
+        eprintln!("[fox-host] 丢弃不可用的成果目录记录 {}", stored);
+    }
+    // A read-only conversation can never produce a deliverable, so the Host does
+    // not reserve a placement for it. Reserving here would manufacture durable
+    // bookkeeping for conversations that never ask for a result; the
+    // deterministic name is still injected as reference data.
+    if permission.mode == fox_engine_protocol::PermissionMode::ReadOnly {
+        return acceptable(&candidate).then_some(candidate);
+    }
+    // Persist the decision so every later Run, and every later application
+    // start, re-reads the same folder, and re-validate whatever comes back:
+    // a stale or tampered record must never be able to redirect a write out of
+    // `fox/`. A failure here is not fatal — the deterministic candidate is
+    // correct for this Run — but the candidate is only returned when it is
+    // itself acceptable.
+    match database.ensure_deliverable_folder(
+        conversation_id,
+        &key,
+        &candidate,
+        &acceptable,
+        crate::database::now_ms(),
+    ) {
+        Ok(folder) => folder,
+        Err(error) => {
+            eprintln!("[fox-host] 成果目录归属台账不可用，本次使用确定性目录名: {error}");
+            acceptable(&candidate).then_some(candidate)
+        }
+    }
 }
 
 fn handle_attachment_tool_request(

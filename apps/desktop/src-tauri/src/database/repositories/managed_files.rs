@@ -234,6 +234,102 @@ impl Database {
                 .optional()?)
         })
     }
+
+    /// Whether any Host ledger still names this exact path.
+    ///
+    /// Consulted before an abandoned commit staging file is reclaimed: bytes an
+    /// artifact row or a version/recovery row still references are never
+    /// deleted, however abandoned they look. This is a required check, not a
+    /// heuristic — an unanswerable query is treated as "still referenced" by
+    /// the caller.
+    pub(crate) fn path_is_referenced_by_host_ledger(&self, path: &str) -> Result<bool, String> {
+        self.with_connection(|conn| {
+            let referenced: bool = conn.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM artifacts WHERE storage_path = ?1
+                    UNION ALL
+                    SELECT 1 FROM managed_file_versions
+                     WHERE storage_path = ?1 OR backup_path = ?1 OR after_backup_path = ?1
+                )",
+                params![path],
+                |row| row.get(0),
+            )?;
+            Ok(referenced)
+        })
+    }
+
+    /// The conversation's already-assigned deliverable folder for this project,
+    /// or `None` when it has never produced a deliverable here.
+    ///
+    /// Read back on every prompt build, so a task continued on a later day (or
+    /// after an application restart) keeps the folder it started with.
+    pub(crate) fn deliverable_folder(
+        &self,
+        conversation_id: &str,
+        project_key: &str,
+    ) -> Result<Option<String>, String> {
+        self.with_connection(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT folder_name FROM deliverable_placements
+                     WHERE conversation_id=?1 AND project_key=?2",
+                    params![conversation_id, project_key],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?)
+        })
+    }
+
+    /// Assign the conversation's deliverable folder for this project, or return
+    /// the one already assigned.
+    ///
+    /// `candidate` is only used the first time. `INSERT OR IGNORE` against the
+    /// composite primary key makes the assignment idempotent under concurrent
+    /// Runs: whichever Run commits first wins and every other Run reads that
+    /// same row back, so two simultaneous requests cannot end up in two
+    /// folders. `now` is passed in so the caller keeps one clock.
+    ///
+    /// `acceptable` re-validates the stored value on every read. A record that
+    /// is no longer a usable single path component is replaced — and only when
+    /// it still holds exactly the rejected value, so a concurrent repair cannot
+    /// clobber a name another Run just stored. Returns `None` when no acceptable
+    /// name could be established, which the caller must treat as "no deliverable
+    /// root" rather than falling back to an unvalidated value.
+    pub(crate) fn ensure_deliverable_folder(
+        &self,
+        conversation_id: &str,
+        project_key: &str,
+        candidate: &str,
+        acceptable: &dyn Fn(&str) -> bool,
+        now: i64,
+    ) -> Result<Option<String>, String> {
+        self.with_connection(|conn| {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "INSERT OR IGNORE INTO deliverable_placements(
+                    conversation_id, project_key, folder_name, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![conversation_id, project_key, candidate, now],
+            )?;
+            let stored: String = tx.query_row(
+                "SELECT folder_name FROM deliverable_placements
+                 WHERE conversation_id=?1 AND project_key=?2",
+                params![conversation_id, project_key],
+                |row| row.get(0),
+            )?;
+            if acceptable(&stored) {
+                tx.commit()?;
+                return Ok(Some(stored));
+            }
+            tx.execute(
+                "UPDATE deliverable_placements SET folder_name=?1, updated_at=?2
+                 WHERE conversation_id=?3 AND project_key=?4 AND folder_name=?5",
+                params![candidate, now, conversation_id, project_key, stored],
+            )?;
+            tx.commit()?;
+            Ok(acceptable(candidate).then(|| candidate.to_owned()))
+        })
+    }
 }
 
 fn row_to_managed_version(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedFileVersion> {

@@ -625,6 +625,17 @@ fn is_boundable(tool: &str) -> bool {
     BOUNDABLE_TOOLS.contains(&tool)
 }
 
+/// The name to judge view-bounding by, when `tool` is a real boundable tool.
+///
+/// A caller that unwraps a dispatch wrapper (the Host reaches every Office
+/// operation through `call_mcp_tool`) must ask here rather than keep its own
+/// list, so the whitelist stays the single source of truth and cannot be
+/// widened by accident: removing a name from `BOUNDABLE_TOOLS` also stops the
+/// unwrapping for it.
+pub(crate) fn boundable_tool_name(tool: &str) -> Option<&str> {
+    is_boundable(tool).then_some(tool)
+}
+
 /// Stable reference to the durable *record* of one settled tool call. Host keys
 /// that record by the pair (run id, tool call id) — `tool_calls.run_id` together
 /// with `tool_calls.runtime_tool_call_id`, which the table declares UNIQUE — and

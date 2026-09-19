@@ -106,11 +106,20 @@ pub(super) fn parallel_read_only_dispatch(effect: &kernel::OutboxEffect) -> bool
 /// actual ordering and is what the engine batch barrier projects back. A
 /// dispatch without a tool row should not exist and is appended so the serial
 /// path keeps rejecting it instead of silently skipping it.
+pub(crate) fn dispatch_waits_for_approval(state: &str, effect: &kernel::OutboxEffect) -> bool {
+    if state != "waiting_approval" || effect.kind != kernel::OutboxEffectKind::DispatchTool {
+        return false;
+    }
+    let payload: Value = serde_json::from_str(&effect.payload_json).unwrap_or(Value::Null);
+    !crate::database::Database::approval_independent(payload["tool"].as_str())
+}
+
 pub(super) fn pending_dispatch_ids(snapshot: &kernel::KernelSnapshot) -> Vec<String> {
     let mut pending = std::collections::HashSet::new();
     for effect in &snapshot.pending_effects {
         if effect.status == kernel::OutboxStatus::Pending
             && effect.kind == kernel::OutboxEffectKind::DispatchTool
+            && !dispatch_waits_for_approval(&snapshot.state, effect)
         {
             if let Some(id) = effect.tool_call_id.as_deref() {
                 pending.insert(id);
@@ -319,9 +328,17 @@ impl KernelCoordinator<'_> {
                 // stays reachable without re-running the tool.
                 let reference =
                     crate::kernel_compaction::tool_result_ref(run_id, &tool.tool_call_id);
+                // The boundable-tool rule must be judged on the operation that
+                // actually ran. The Host dispatches every Office operation through
+                // the `call_mcp_tool` wrapper, so matching the whitelist on the
+                // wrapper name made its `office_read` entry unreachable: a
+                // 927-row `office_read` then passed through verbatim at 2.29 MB,
+                // which is past the model window and detaches the live loop.
+                let boundable_tool =
+                    effective_boundable_tool(&tool.tool, &tool.canonical_input);
                 let mut content =
                     crate::kernel_compaction::bound_tool_result_content_with_storage(
-                        &tool.tool,
+                        boundable_tool,
                         is_error,
                         &tool.result["content"],
                         reference.as_deref(),
@@ -1426,10 +1443,73 @@ fn commit_tail(
     }
 }
 
+/// The operation a settled call is judged by when bounding the model view.
+///
+/// `office_read` is named in `BOUNDABLE_TOOLS`, but the Host never dispatches it
+/// under that name: the built-in connector is always reached through the
+/// `call_mcp_tool` wrapper, so a match on the wrapper name made the whitelist
+/// entry dead code and let a 927-row sheet read pass through verbatim.
+///
+/// Only the built-in Office connector is unwrapped, and only for the read-only
+/// operations the whitelist already accepts. A *generic* MCP call keeps
+/// `call_mcp_tool`: its side-effect and re-read semantics are unknown, which is
+/// what the whitelist's own reasoning requires. An unrecognised or write-form
+/// inner operation also keeps the wrapper name, so it is never bounded.
+pub(super) fn effective_boundable_tool<'a>(tool: &'a str, canonical_input: &'a Value) -> &'a str {
+    const UNWRAPPABLE: &[&str] = &["office_read", "office_help", "office_validate"];
+    if tool != "call_mcp_tool" {
+        return tool;
+    }
+    if canonical_input["serverId"].as_str() != Some(crate::office::SERVER_ID) {
+        return tool;
+    }
+    match canonical_input["tool"].as_str() {
+        Some(inner) if UNWRAPPABLE.contains(&inner) => {
+            crate::kernel_compaction::boundable_tool_name(inner).unwrap_or(tool)
+        }
+        _ => tool,
+    }
+}
+
 #[cfg(test)]
 mod range_model_view_tests {
-    use super::KernelCoordinator;
+    use super::{effective_boundable_tool, KernelCoordinator};
     use serde_json::{json, Value};
+
+    /// The Host reaches every Office operation through `call_mcp_tool`, so the
+    /// boundable-tool whitelist has to be judged on the inner operation. Judging
+    /// it on the wrapper made the whitelist's `office_read` entry unreachable and
+    /// let a 927-row sheet read through at 2.29 MB, past the model window.
+    #[test]
+    fn the_office_wrapper_is_unwrapped_for_view_bounding_but_a_generic_mcp_call_is_not() {
+        // A built-in read-only Office operation: bounded, by its own name.
+        for inner in ["office_read", "office_help", "office_validate"] {
+            let input = json!({"serverId": crate::office::SERVER_ID, "tool": inner, "arguments": {}});
+            assert_eq!(
+                effective_boundable_tool("call_mcp_tool", &input),
+                inner,
+                "{inner} must be judged by its own name"
+            );
+        }
+        // A write: never bounded, so the wrapper name stands.
+        let write = json!({"serverId": crate::office::SERVER_ID, "tool": "office_create", "arguments": {}});
+        assert_eq!(effective_boundable_tool("call_mcp_tool", &write), "call_mcp_tool");
+        // An unknown inner operation: the wrapper name stands.
+        let unknown = json!({"serverId": crate::office::SERVER_ID, "tool": "office_future", "arguments": {}});
+        assert_eq!(
+            effective_boundable_tool("call_mcp_tool", &unknown),
+            "call_mcp_tool"
+        );
+        // A generic MCP server keeps its wrapper: re-read semantics are unknown,
+        // which is exactly what the whitelist documents.
+        let generic = json!({"serverId": "some-other-server", "tool": "office_read", "arguments": {}});
+        assert_eq!(
+            effective_boundable_tool("call_mcp_tool", &generic),
+            "call_mcp_tool"
+        );
+        // A directly dispatched tool is untouched.
+        assert_eq!(effective_boundable_tool("read", &json!({})), "read");
+    }
 
     #[test]
     fn settled_history_exposes_range_cursor_without_rewriting_host_results() {

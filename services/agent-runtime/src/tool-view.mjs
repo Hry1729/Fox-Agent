@@ -41,6 +41,37 @@ const BOUNDABLE_TOOLS = new Set([
   'list_mcp_tools',
 ])
 
+// Exported for tests only: they assert that unwrapping consults this set and that
+// a name removed from it stops being unwrapped.
+export const BOUNDABLE_TOOLS_UNDER_TEST = BOUNDABLE_TOOLS
+
+// The built-in Office connector, and the read-only operations whose results are
+// reference material. The Host reaches all of them through the `call_mcp_tool`
+// wrapper, so a whitelist match on the wrapper name made `office_read` here
+// unreachable and let a 927-row sheet read through at 2.29 MB — past the model
+// window, which detaches the live loop.
+const OFFICE_SERVER_ID = 'fox-office'
+const UNWRAPPABLE_OFFICE_TOOLS = new Set(['office_read', 'office_help', 'office_validate'])
+
+/**
+ * The operation a settled call is judged by when bounding the model view.
+ *
+ * Only the built-in connector's read-only operations are unwrapped, and only
+ * while `BOUNDABLE_TOOLS` still accepts the inner name, so the set above stays
+ * the single source of truth. A *generic* MCP call keeps `call_mcp_tool`: its
+ * side-effect and re-read semantics are unknown, which is what the comment above
+ * requires. Mirrors `effective_boundable_tool` in
+ * `runtime_host/kernel_coordinator/live.rs`.
+ */
+export function effectiveBoundableTool(tool, canonicalInput) {
+  if (tool !== 'call_mcp_tool') return tool
+  if (!canonicalInput || typeof canonicalInput !== 'object' || Array.isArray(canonicalInput)) return tool
+  if (canonicalInput.serverId !== OFFICE_SERVER_ID) return tool
+  const inner = canonicalInput.tool
+  if (typeof inner !== 'string' || !UNWRAPPABLE_OFFICE_TOOLS.has(inner)) return tool
+  return BOUNDABLE_TOOLS.has(inner) ? inner : tool
+}
+
 // Reference text kept verbatim per tool result (UTF-8 bytes).
 const HEAD_BYTES = 6_000
 const TAIL_BYTES = 2_000

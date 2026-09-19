@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -3174,7 +3174,8 @@ impl Database {
         self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT id, conversation_id, run_id, display_name, artifact_type, storage_path,
+                    "SELECT id, conversation_id, run_id, display_name, artifact_type,
+                            artifact_class, artifact_origin, storage_path,
                             media_type, byte_size, sha256, status, created_at, updated_at
                      FROM artifacts
                      WHERE id = ?1 AND conversation_id = ?2",
@@ -3186,13 +3187,15 @@ impl Database {
                             run_id: row.get(2)?,
                             display_name: row.get(3)?,
                             artifact_type: row.get(4)?,
-                            storage_path: row.get(5)?,
-                            media_type: row.get(6)?,
-                            byte_size: row.get(7)?,
-                            sha256: row.get(8)?,
-                            status: row.get(9)?,
-                            created_at: row.get(10)?,
-                            updated_at: row.get(11)?,
+                            artifact_class: row.get(5)?,
+                            artifact_origin: row.get(6)?,
+                            storage_path: row.get(7)?,
+                            media_type: row.get(8)?,
+                            byte_size: row.get(9)?,
+                            sha256: row.get(10)?,
+                            status: row.get(11)?,
+                            created_at: row.get(12)?,
+                            updated_at: row.get(13)?,
                         })
                     },
                 )
@@ -4120,6 +4123,32 @@ impl Database {
                             } else {
                                 "created_file"
                             };
+                            // Lifecycle class from Host facts: a file the Host
+                            // resolved inside the conversation deliverable
+                            // folder is a deliverable, anything else is a
+                            // process file. Independent of the extension.
+                            let (class, origin) = transaction
+                                .query_row(
+                                    "SELECT conversation_id FROM run_control_bindings WHERE run_id = ?1",
+                                    params![run_id],
+                                    |row| row.get::<_, Option<String>>(0),
+                                )
+                                .optional()?
+                                .flatten()
+                                .map(|conversation_id| computed_artifacts::conversation_project_root(&transaction, &conversation_id))
+                                .transpose()?
+                                .flatten()
+                                .map(PathBuf::from)
+                                .map(|root| crate::runtime_host::artifact_store::classify(
+                                    Some(root.as_path()),
+                                    Path::new(path),
+                                    tool_name.as_deref().unwrap_or_default(),
+                                    false,
+                                ))
+                                .unwrap_or((
+                                    crate::runtime_host::artifact_store::ArtifactClass::Process,
+                                    crate::runtime_host::artifact_store::ArtifactOrigin::Project,
+                                ));
                             let updated = transaction.execute(
                                 "UPDATE artifacts
                                  SET display_name = ?1,
@@ -4127,20 +4156,214 @@ impl Database {
                                        WHEN artifact_type = 'created_file' THEN artifact_type
                                        ELSE ?2
                                      END,
+                                     artifact_class = ?7, artifact_origin = ?8,
                                      byte_size = ?3, status = 'ready', updated_at = ?4
                                  WHERE run_id = ?5 AND storage_path = ?6",
-                                params![display_name, artifact_type, byte_size, now, run_id, path],
+                                params![display_name, artifact_type, byte_size, now, run_id, path, class.as_str(), origin.as_str()],
                             )?;
                             if updated == 0 {
                                 transaction.execute(
                                     "INSERT INTO artifacts(id, conversation_id, run_id, display_name,
-                                                           artifact_type, storage_path, byte_size,
+                                                           artifact_type, artifact_class, artifact_origin,
+                                                           storage_path, byte_size,
                                                            status, created_at, updated_at)
-                                     SELECT ?1, conversation_id, run_id, ?2, ?3, ?4, ?5,
+                                     SELECT ?1, conversation_id, run_id, ?2, ?3, ?8, ?9, ?4, ?5,
                                             'ready', ?6, ?6 FROM tool_calls
-                                     WHERE run_id = ?7 AND runtime_tool_call_id = ?8",
-                                    params![Uuid::new_v4().to_string(), display_name, artifact_type, path, byte_size, now, run_id, runtime_tool_call_id],
+                                     WHERE run_id = ?7 AND runtime_tool_call_id = ?10",
+                                    params![Uuid::new_v4().to_string(), display_name, artifact_type, path, byte_size, now, run_id, class.as_str(), origin.as_str(), runtime_tool_call_id],
                                 )?;
+                            }
+                        }
+                    }
+                    // Built-in Office writes (call_mcp_tool → fox-office) are
+                    // user-facing deliverables. They were registered only as
+                    // restorable managed versions, so the conversation file
+                    // list showed intermediate compute files but never the
+                    // xlsx/docx deliverables. Project the Host-verified write
+                    // into the artifacts list as well.
+                    if tool_name.as_deref() == Some("call_mcp_tool") {
+                        // A rendered preview is an artifact, not a content
+                        // version, and it is Host-private by default. It is
+                        // projected separately so it never enters the restore
+                        // history of a user document.
+                        if let Some(preview) = result
+                            .get("details")
+                            .and_then(|details| details.get("foxPreview"))
+                        {
+                            if let Some(preview_path) = preview.get("storagePath").and_then(Value::as_str) {
+                                // Name the *result* the preview depicts, not the
+                                // cache file; the renderer adds the "预览" label,
+                                // and the open action still uses the real path.
+                                let preview_name = preview
+                                    .get("sourceFile")
+                                    .and_then(Value::as_str)
+                                    .and_then(|source| {
+                                        PathBuf::from(source)
+                                            .file_name()
+                                            .and_then(|value| value.to_str())
+                                            .map(str::to_owned)
+                                    })
+                                    .or_else(|| {
+                                        preview
+                                            .get("displayName")
+                                            .and_then(Value::as_str)
+                                            .map(str::to_owned)
+                                    })
+                                    .unwrap_or_else(|| {
+                                        PathBuf::from(preview_path)
+                                            .file_name()
+                                            .and_then(|value| value.to_str())
+                                            .map(str::to_owned)
+                                            .unwrap_or_else(|| preview_path.to_owned())
+                                    });
+                                let preview_bytes = preview
+                                    .get("afterSize")
+                                    .and_then(Value::as_i64)
+                                    .unwrap_or(0);
+                                let preview_sha = preview.get("afterHash").and_then(Value::as_str);
+                                let preview_media = preview.get("mediaType").and_then(Value::as_str);
+                                let project_root = transaction
+                                    .query_row(
+                                        "SELECT conversation_id FROM run_control_bindings WHERE run_id = ?1",
+                                        params![run_id],
+                                        |row| row.get::<_, Option<String>>(0),
+                                    )
+                                    .optional()?
+                                    .flatten()
+                                    .map(|conversation_id| computed_artifacts::conversation_project_root(&transaction, &conversation_id))
+                                    .transpose()?
+                                    .flatten()
+                                    .map(PathBuf::from);
+                                // Placement is recomputed structurally rather
+                                // than read from the declared `artifactOrigin`:
+                                // a cached preview is outside the project by
+                                // construction, and one that stayed inside the
+                                // project is an explicit export. A forged
+                                // declaration therefore cannot relabel it.
+                                let host_private = match project_root.as_deref() {
+                                    Some(root) => !crate::runtime_host::artifact_store::is_inside(
+                                        root,
+                                        Path::new(preview_path),
+                                    ),
+                                    None => true,
+                                };
+                                let (class, origin) = project_root
+                                    .map(|root| crate::runtime_host::artifact_store::classify(
+                                        Some(root.as_path()),
+                                        Path::new(preview_path),
+                                        preview.get("tool").and_then(Value::as_str).unwrap_or("office_render"),
+                                        host_private,
+                                    ))
+                                    .unwrap_or((
+                                        crate::runtime_host::artifact_store::ArtifactClass::Preview,
+                                        crate::runtime_host::artifact_store::ArtifactOrigin::HostPrivate,
+                                    ));
+                                let updated = transaction.execute(
+                                    "UPDATE artifacts
+                                     SET display_name = ?1, byte_size = ?2,
+                                         sha256 = COALESCE(?3, sha256),
+                                         media_type = COALESCE(?4, media_type),
+                                         artifact_class = ?5, artifact_origin = ?6,
+                                         status = 'ready', updated_at = ?7
+                                     WHERE run_id = ?8 AND storage_path = ?9",
+                                    params![preview_name, preview_bytes, preview_sha, preview_media, class.as_str(), origin.as_str(), now, run_id, preview_path],
+                                )?;
+                                if updated == 0 {
+                                    transaction.execute(
+                                        "INSERT INTO artifacts(id, conversation_id, run_id, display_name,
+                                                               artifact_type, artifact_class, artifact_origin,
+                                                               storage_path, byte_size, sha256, media_type,
+                                                               status, created_at, updated_at)
+                                         SELECT ?1, conversation_id, run_id, ?2, 'created_file', ?10, ?11,
+                                                ?3, ?4, ?5, ?6, 'ready', ?7, ?7 FROM tool_calls
+                                         WHERE run_id = ?8 AND runtime_tool_call_id = ?9",
+                                        params![Uuid::new_v4().to_string(), preview_name, preview_path, preview_bytes, preview_sha, preview_media, now, run_id, runtime_tool_call_id, class.as_str(), origin.as_str()],
+                                    )?;
+                                }
+                            }
+                        }
+                        if let Some(meta) = result
+                            .get("details")
+                            .and_then(|details| details.get("foxManagedFile"))
+                        {
+                            let path = meta.get("storagePath").and_then(Value::as_str);
+                            let declared = meta.get("displayName").and_then(Value::as_str);
+                            let change_kind = meta
+                                .get("changeKind")
+                                .and_then(Value::as_str)
+                                .unwrap_or("created");
+                            let byte_size = meta
+                                .get("afterSize")
+                                .and_then(Value::as_i64)
+                                .unwrap_or(0);
+                            let sha256 = meta.get("afterHash").and_then(Value::as_str);
+                            if let Some(path) = path {
+                                let display_name = declared
+                                    .map(str::to_owned)
+                                    .or_else(|| {
+                                        PathBuf::from(path)
+                                            .file_name()
+                                            .and_then(|value| value.to_str())
+                                            .map(str::to_owned)
+                                    })
+                                    .unwrap_or_else(|| path.to_owned());
+                                let artifact_type = if change_kind == "created" {
+                                    "created_file"
+                                } else {
+                                    "modified_file"
+                                };
+                                // Host verdict, not the connector's own
+                                // label: derived from the verified operation
+                                // and the resolved path inside this
+                                // conversation's project root.
+                                let inner_operation = meta.get("tool").and_then(Value::as_str).unwrap_or_default();
+                                let (class, origin) = transaction
+                                    .query_row(
+                                        "SELECT conversation_id FROM run_control_bindings WHERE run_id = ?1",
+                                        params![run_id],
+                                        |row| row.get::<_, Option<String>>(0),
+                                    )
+                                    .optional()?
+                                    .flatten()
+                                    .map(|conversation_id| computed_artifacts::conversation_project_root(&transaction, &conversation_id))
+                                    .transpose()?
+                                    .flatten()
+                                    .map(PathBuf::from)
+                                    .map(|root| crate::runtime_host::artifact_store::classify(
+                                        Some(root.as_path()),
+                                        Path::new(path),
+                                        inner_operation,
+                                        false,
+                                    ))
+                                    .unwrap_or((
+                                        crate::runtime_host::artifact_store::ArtifactClass::Process,
+                                        crate::runtime_host::artifact_store::ArtifactOrigin::Project,
+                                    ));
+                                let updated = transaction.execute(
+                                    "UPDATE artifacts
+                                     SET display_name = ?1,
+                                         artifact_type = CASE
+                                           WHEN artifact_type = 'created_file' THEN artifact_type
+                                           ELSE ?2
+                                         END,
+                                         artifact_class = ?8, artifact_origin = ?9,
+                                         byte_size = ?3, sha256 = COALESCE(?4, sha256),
+                                         status = 'ready', updated_at = ?5
+                                     WHERE run_id = ?6 AND storage_path = ?7",
+                                    params![display_name, artifact_type, byte_size, sha256, now, run_id, path, class.as_str(), origin.as_str()],
+                                )?;
+                                if updated == 0 {
+                                    transaction.execute(
+                                        "INSERT INTO artifacts(id, conversation_id, run_id, display_name,
+                                                               artifact_type, artifact_class, artifact_origin,
+                                                               storage_path, byte_size, sha256,
+                                                               status, created_at, updated_at)
+                                         SELECT ?1, conversation_id, run_id, ?2, ?3, ?10, ?11, ?4, ?5, ?6,
+                                                'ready', ?7, ?7 FROM tool_calls
+                                         WHERE run_id = ?8 AND runtime_tool_call_id = ?9",
+                                        params![Uuid::new_v4().to_string(), display_name, artifact_type, path, byte_size, sha256, now, run_id, class.as_str(), origin.as_str(), runtime_tool_call_id],
+                                    )?;
+                                }
                             }
                         }
                     }
@@ -7135,7 +7358,8 @@ fn query_artifacts_window(
     before_ordinal: Option<i64>,
 ) -> rusqlite::Result<Vec<ArtifactRecord>> {
     let mut statement = connection.prepare(
-        "SELECT id, conversation_id, run_id, display_name, artifact_type, storage_path,
+        "SELECT id, conversation_id, run_id, display_name, artifact_type,
+                artifact_class, artifact_origin, storage_path,
                 media_type, byte_size, sha256, status, created_at, updated_at
          FROM artifacts WHERE conversation_id = ?1
            AND (run_id IS NULL OR EXISTS(
@@ -7154,13 +7378,15 @@ fn query_artifacts_window(
                     run_id: row.get(2)?,
                     display_name: row.get(3)?,
                     artifact_type: row.get(4)?,
-                    storage_path: row.get(5)?,
-                    media_type: row.get(6)?,
-                    byte_size: row.get(7)?,
-                    sha256: row.get(8)?,
-                    status: row.get(9)?,
-                    created_at: row.get(10)?,
-                    updated_at: row.get(11)?,
+                    artifact_class: row.get(5)?,
+                    artifact_origin: row.get(6)?,
+                    storage_path: row.get(7)?,
+                    media_type: row.get(8)?,
+                    byte_size: row.get(9)?,
+                    sha256: row.get(10)?,
+                    status: row.get(11)?,
+                    created_at: row.get(12)?,
+                    updated_at: row.get(13)?,
                 })
             },
         )?

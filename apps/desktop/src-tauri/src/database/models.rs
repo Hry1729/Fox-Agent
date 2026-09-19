@@ -1426,6 +1426,14 @@ pub struct ArtifactRecord {
     pub run_id: Option<String>,
     pub display_name: String,
     pub artifact_type: String,
+    /// Host-verified lifecycle bucket: `deliverable`, `preview` or `process`.
+    /// The renderer groups by this value instead of guessing from the file
+    /// extension, so a deliberately delivered CSV is not demoted and an
+    /// intermediate JSON is not promoted.
+    pub artifact_class: String,
+    /// `project` when the bytes live in the conversation's project folder,
+    /// `host_private` when they live in an application-private Host area.
+    pub artifact_origin: String,
     pub storage_path: String,
     pub media_type: Option<String>,
     pub byte_size: i64,

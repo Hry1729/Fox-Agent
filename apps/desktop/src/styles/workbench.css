@@ -1316,14 +1316,18 @@
   padding-left: 0;
 }
 
-/* Reserved 20px gutter: the project conversation title spans the rest of the
-   sidebar, and the running indicator appears there while the model works. */
+/* Reserved gutter: the running spinner sits in front of the conversation title
+   while the model works. The row has no left padding of its own, so the slot is
+   wider than the glyph and the glyph is nudged right until it lines up with the
+   folder icon of the project row above (and the title with the project name). */
 .fox-project-conversation-status {
-  width: 20px;
-  min-width: 20px;
-  flex: 0 0 20px;
-  display: grid;
-  place-items: center;
+  width: 26px;
+  min-width: 26px;
+  flex: 0 0 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-left: 9px;
   color: var(--fox-accent);
 }
 
@@ -3486,10 +3490,26 @@ button.fox-chat-project-row:disabled {
   line-height: 20px;
 }
 
-/* Avatar → step badge → status text, all on the header line. */
-.fox-chain-of-thought-header > .fox-assistant-avatar {
+/* Avatar → step badge → status text, all on the header line. The avatar is a
+   sibling of the disclosure trigger, so clicking it never opens the process. */
+.fox-runtime-process-head {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.fox-runtime-process-head > .fox-assistant-avatar {
   flex: 0 0 28px;
   margin: 0;
+}
+
+/* The trigger keeps hugging its own content, exactly as it did when the avatar
+   was its first child, so only the badge/summary/chevron stay clickable. */
+.fox-runtime-process-head > .fox-chain-of-thought-header {
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .fox-assistant-avatar {
@@ -3705,7 +3725,63 @@ img[src='/avatars/fox-assistant.png'] {
   white-space: nowrap;
 }
 
-.fox-runtime-step-trigger > .fox-run-status-text { flex: 0 1 auto; }
+/* The status box is the row's flex remainder, and its single column is pinned
+   to that width: the label — not the box — is what clips and scrolls, so the
+   scroll position can follow the newest characters. */
+.fox-runtime-step-trigger > .fox-run-status-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* A step row is exactly one line tall, no matter how long the thought grows.
+   The label keeps its newest characters in view (the component pins its
+   horizontal scroll to the end), and both ends fade — but only while the text
+   is really clipped, so a summary that fits keeps its full contrast. The footer
+   failure line keeps its own single-line horizontal fade — see
+   `.fox-message-failure-meta`. */
+.fox-runtime-step-trigger .fox-run-status-label,
+.fox-runtime-step-trigger .fox-run-status-light {
+  overflow: hidden;
+  overflow-wrap: normal;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+/* The mask lives on the row's status box (not on the scrolling label), so the
+   two fades stay pinned to the visible ends while the text scrolls under them. */
+.fox-runtime-step-trigger .fox-run-status-step.is-clamped {
+  mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
+}
+
+/* A tool row's file name opens in the sidebar; right-click reveals it in the OS
+   explorer. It stays a span so it never nests a button inside the row trigger. */
+.fox-runtime-step-path {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.fox-runtime-step-path:hover {
+  color: var(--fox-accent);
+}
+
+.fox-runtime-step-path:focus-visible {
+  outline: 2px solid var(--fox-accent);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+
+.fox-runtime-path-menu {
+  min-width: 152px;
+}
 
 .fox-runtime-step-trigger > small {
   color: var(--fox-faint);
@@ -3714,9 +3790,18 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 /* One row = one thought segment or one tool call. The leading glyph doubles as
-   that row's disclosure toggle and only becomes one while the row is hovered. */
+   that row's disclosure toggle and only becomes one while the row is hovered.
+   Rows are chrome, not prose: only an expanded detail card can be selected. */
 .fox-runtime-step-row {
   position: relative;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.fox-runtime-step-row .fox-runtime-detail-panel,
+.fox-runtime-step-row .fox-runtime-detail-panel * {
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .fox-runtime-step-icon {
@@ -3790,11 +3875,13 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-runtime-detail-clip { min-height: 0; overflow: hidden; }
 
-/* Per-row detail opens in place; the chain keeps a single scroll context. */
+/* Per-row detail opens in place; the chain keeps a single scroll context. The
+   card is inset on the right by the icon column + gap so it matches the left. */
 .fox-runtime-detail-panel {
   max-height: none;
   overflow: visible;
   margin-top: 7px;
+  margin-right: 24px;
   border: 1px solid color-mix(in oklch, var(--fox-border) 86%, transparent);
   border-radius: 8px;
   background: color-mix(in oklch, var(--fox-card) 78%, var(--fox-panel));
@@ -3876,8 +3963,15 @@ img[src='/avatars/fox-assistant.png'] {
   line-height: 1.55;
 }
 
-.fox-runtime-step-detail > .fox-runtime-step-icon {
-  margin-top: 2px;
+/* The glyph is centered on the row's first line — the 24px disclosure trigger —
+   and stays there while the detail panel expands underneath it. The generic
+   chain-of-thought row rules further down also style this column, so the
+   selector is deliberately long enough to win the specificity contest. */
+:is(.fox-runtime-process-scroll, .fox-chain-of-thought-content) > .fox-runtime-step-row.fox-runtime-step-detail > .fox-runtime-step-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: calc((24px - 15px) / 2);
   color: var(--fox-faint);
 }
 
@@ -4139,10 +4233,10 @@ img[src='/avatars/fox-assistant.png'] {
   color: var(--fox-accent);
 }
 
-/* Failures always start their own line under name/model/time, and fade out at
-   the end when they are longer than the message column. */
+/* The failure summary continues the name/model/time line, takes the rest of it
+   and fades out when clipped; the title attribute still reveals it on hover. */
 .fox-message-failure-meta {
-  flex: 1 0 100%;
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   color: #E87171;
@@ -11051,8 +11145,9 @@ img[src='/avatars/fox-assistant.png'] {
   outline-offset: 2px;
 }
 
+/* Neutral hover: the accent tint read as pink against the card. */
 .fox-message-artifact-trigger:hover .fox-message-artifact {
-  background: color-mix(in oklch, var(--fox-accent) 8%, var(--fox-card));
+  background: var(--fox-hover);
 }
 
 .fox-message-artifact-trigger .fox-message-artifact {
@@ -11064,6 +11159,47 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-message-artifact-trigger .fox-message-artifact-head > svg {
   flex: 0 0 auto;
   color: var(--fox-faint);
+}
+
+/* Deliverables sit above a collapsed group of intermediate work files. */
+.fox-message-artifact-group {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fox-message-artifact-group-title {
+  color: var(--fox-muted);
+}
+
+.fox-message-artifact-group-trigger {
+  width: max-content;
+  max-width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--fox-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.fox-message-artifact-group-trigger:hover {
+  color: var(--fox-text);
+}
+
+.fox-message-artifact-group-trigger:focus-visible {
+  outline: 2px solid color-mix(in oklch, var(--fox-accent) 70%, transparent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.fox-message-artifact-group-trigger > svg {
+  flex: 0 0 auto;
+  color: var(--fox-faint);
+}
+
+.fox-message-artifact-group-content {
+  min-width: 0;
 }
 
 .fox-result-panel.is-single-file {

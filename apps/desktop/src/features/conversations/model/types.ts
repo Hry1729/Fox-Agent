@@ -571,6 +571,15 @@ export interface ArtifactRecord {
   runId: string | null
   displayName: string
   artifactType: string
+  /**
+   * Host-verified lifecycle bucket: `deliverable`, `preview` or `process`.
+   * The renderer groups by this value instead of guessing from the extension,
+   * so a CSV the user asked to be delivered stays a deliverable while the same
+   * CSV computed as an intermediate step stays a process file.
+   */
+  artifactClass: string
+  /** `project` or `host_private` — where the bytes actually live. */
+  artifactOrigin: string
   storagePath: string
   mediaType: string | null
   byteSize: number

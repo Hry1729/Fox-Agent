@@ -105,6 +105,7 @@ fn recovery_worker_flow(reapprove: bool) {
 
         database: None,
         sessions_dir: None,
+        artifacts_dir: None,
     };
     let decision = policy.decide(
             &continued.run.id,
@@ -328,7 +329,7 @@ fn reconciliation_reapprove_requires_new_approval_and_preserves_old_terminal_run
         tool_names: ["write_file".into()].into_iter().collect(),
         mcp_server_hashes: Default::default(), knowledge_reference_hashes: Default::default(),
         knowledge_connection_hashes: Default::default(), office_tools: Default::default(), lifecycle_hooks: vec![] };
-    let policy = super::super::super::kernel_gateway::GatewayPolicy { binding, scope , database: None, sessions_dir: None };
+    let policy = super::super::super::kernel_gateway::GatewayPolicy { binding, scope , database: None, sessions_dir: None, artifacts_dir: None };
     assert!(matches!(policy.decide(&continued.run.id, "new-write", "write_file",
         r#"{"path":"new-after-confirmation.txt","content":"new proposal"}"#), PolicyDecision::RequireApproval));
     assert!(!root.join("new-after-confirmation.txt").exists());

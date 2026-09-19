@@ -21,7 +21,7 @@ if (process.argv.includes('--fetch')) {
   }
 }
 const license = await readFile(path.join(sourceRoot, 'LICENSE'), 'utf8')
-const readTools = ['read','ls','find','grep','read_attachment','attachment_compute','compute_job_start','compute_job_status','compute_job_cancel','compute_job_result','web_search','web_read','structured_data','git_read','memory_search','list_knowledge_bases','search_knowledge','read_knowledge_document','query_knowledge_graph','work_snapshot_get']
+const readTools = ['read','ls','find','grep','read_tool_result','read_attachment','attachment_compute','compute_job_start','compute_job_status','compute_job_cancel','compute_job_result','web_search','web_read','structured_data','git_read','memory_search','list_knowledge_bases','search_knowledge','read_knowledge_document','query_knowledge_graph','work_snapshot_get']
 const taskTools = ['goal_propose','goal_complete','task_create_many','task_update','task_attempt_start','task_attempt_finish','task_evidence_add','task_evidence_validate','plan_revision_create','review_finding_add','review_finding_resolve','acceptance_submit']
 const officeRead = ['office_help','office_read','office_validate','office_render']
 const officeWrite = [...officeRead,'office_create','office_edit','office_merge','office_import_data']

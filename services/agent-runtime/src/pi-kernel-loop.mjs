@@ -7,7 +7,7 @@
 import { RUNTIME_TOOL_CATALOG, validateWireValue } from '../../../packages/fox-engine-protocol/index.mjs'
 import { finalizeKernelAnswer, completionPreview, KernelIncompleteResponseError } from './kernel-completion.mjs'
 import { createRoundProgress, toolParamBytesOf } from './kernel-model-progress.mjs'
-import { modelToolResultContent, toolResultRef } from './tool-view.mjs'
+import { effectiveBoundableTool, modelToolResultContent, toolResultRef } from './tool-view.mjs'
 import { steeringNoticeText, validateSteeringNotices } from './steering-notice.mjs'
 import { describeKernelError, diagnosticLine } from './pi-kernel-diagnostics.mjs'
 
@@ -56,7 +56,10 @@ function settledToolResult(item, runId = null) {
   // and receipt-bearing results always pass through unchanged. The reference is
   // what makes an omitted byte recoverable through `read_tool_result`, so it is
   // attached on every settled result, not only on the batch path.
-  const content = modelToolResultContent(item.tool, {
+  // The Host dispatches every built-in Office operation through the
+  // `call_mcp_tool` wrapper, so boundability is judged on the operation that
+  // actually ran, not the wrapper name.
+  const content = modelToolResultContent(effectiveBoundableTool(item.tool, item.canonicalInput), {
     isError,
     content: item.result.content,
     details: item.result.details,

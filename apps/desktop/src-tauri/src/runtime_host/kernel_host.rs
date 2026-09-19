@@ -277,6 +277,9 @@ pub(super) fn drive_with_actions(
         }
         let next = snapshot.pending_effects.iter().find(|effect| {
             effect.status == OutboxStatus::Pending
+                // An approved write must wait for other outstanding approvals,
+                // rather than reaching a strict resource gate and failing forever.
+                && !super::kernel_coordinator::live::dispatch_waits_for_approval(&snapshot.state, effect)
                 && matches!(
                     effect.kind,
                     OutboxEffectKind::InitialModel
@@ -767,6 +770,13 @@ impl super::RuntimeHost {
             // Office artifact references (office_import_data.artifactId) are
             // resolved against this conversation's own compute store.
             sessions_dir: Some(self.sessions_dir.clone()),
+            // Host-private placement for rendered previews, working copies and
+            // commit staging. Derived from the Host's own state, so the model
+            // cannot redirect these areas.
+            artifacts_dir: self
+                .sessions_dir
+                .parent()
+                .map(std::path::Path::to_path_buf),
         };
         let proposal_policy = super::kernel_gateway::GatewayProposalPolicy {
             gateway: &policy,

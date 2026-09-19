@@ -177,7 +177,7 @@ test('pins stable_v1 Runtime prefix bytes and the knowledge-routing instruction 
   const composed = composeRuntimePrompt({ turn: { date: '2026-08-27T00:00:00.000Z' } })
   assert.equal(composed.prompt.slice(0, composed.diagnostics.stableChars), FOX_RUNTIME_INSTRUCTIONS)
   // Cursor metadata is model-visible; complete refers only to stored bytes.
-  assert.equal(composed.stablePromptHash, '7f2a32c6f767a9ba')
+  assert.equal(composed.stablePromptHash, 'e830c6bc898a830e')
 })
 
 test('separates stable-prefix and dynamic-tail cache identities', () => {

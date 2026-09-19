@@ -219,13 +219,92 @@ impl Database {
 
     /// Kernel already owns the execution clock (approval waits do not consume
     /// that clock). Keep the managed cumulative quotas at final resource admission.
+    ///
+    /// Without a tool name the strict `running` requirement applies; a caller that
+    /// knows which call it is admitting must use
+    /// [`Self::kernel_validate_resource_acquisition_for`].
     pub(crate) fn kernel_validate_resource_acquisition(&self, run_id: &str) -> Result<(), String> {
+        self.kernel_validate_resource_acquisition_for(run_id, None)
+    }
+
+    /// Tools whose admission does not depend on some *other* call's approval.
+    ///
+    /// A pending approval is a decision about ONE call. While it is pending the
+    /// Run is still authoritative, its frozen scope is unchanged, and none of
+    /// these tools can write anywhere — so refusing them made a model's ordinary
+    /// `read`/`ls` fail permanently in the middle of a live Run, with an error
+    /// ("requires an active Kernel owner") it could neither act on nor retry
+    /// around. A real acceptance Run lost six calls that way and then spent
+    /// twenty-odd rounds exploring the filesystem and Fox's own database instead
+    /// of reading the workbook it had been asked about.
+    ///
+    /// Write/command/delegation and generic MCP tools keep the strict requirement.
+    /// Some listed readers can access the network or persist Host bookkeeping;
+    /// they still require their own frozen policy decision and dispatch lease.
+    /// This list permits unrelated admitted reads to proceed, never authorizes
+    /// a call or replaces the gateway scope/approval checks.
+    const APPROVAL_INDEPENDENT_TOOLS: &[&str] = &[
+        "read",
+        "ls",
+        "find",
+        "grep",
+        "read_attachment",
+        "read_tool_result",
+        "sqlite_read",
+        "structured_data",
+        "tabular_data",
+        "git_read",
+        "memory_search",
+        "list_knowledge_bases",
+        "search_knowledge",
+        "read_knowledge_document",
+        "query_knowledge_graph",
+        "list_mcp_tools",
+        "web_search",
+        "web_read",
+        "work_snapshot_get",
+        "skill_load",
+    ];
+
+    pub(crate) fn approval_independent(tool: Option<&str>) -> bool {
+        tool.is_some_and(|tool| Self::APPROVAL_INDEPENDENT_TOOLS.contains(&tool))
+    }
+
+    /// Whether one resource call may be admitted for a Run in `state`.
+    ///
+    /// Pure, so the policy can be asserted without a database fixture: the
+    /// database method below is a lookup plus this decision.
+    fn resource_admission_allowed(state: Option<&str>, tool: Option<&str>) -> bool {
+        match state {
+            Some("running") => true,
+            // A pending approval decides one call; an independent read is still
+            // admitted. Every other state (terminal, cancelled, unknown, no
+            // authoritative binding) keeps the strict refusal.
+            Some("waiting_approval") => Self::approval_independent(tool),
+            _ => false,
+        }
+    }
+
+    /// Admit one resource call for `run_id`, naming the tool it belongs to.
+    pub(crate) fn kernel_validate_resource_acquisition_for(
+        &self,
+        run_id: &str,
+        tool: Option<&str>,
+    ) -> Result<(), String> {
         self.with_connection(|connection| {
             let tx = connection.transaction()?;
-            let owned: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM run_control_bindings b
-                JOIN kernel_runs k ON k.run_id=b.run_id WHERE b.run_id=?1 AND b.authority='authoritative'
-                AND k.state='running')",[run_id],|row|row.get(0))?;
-            if !owned { return Err(invalid("resource admission requires an active Kernel owner")); }
+            let state: Option<String> = tx
+                .query_row(
+                    "SELECT k.state FROM run_control_bindings b
+                       JOIN kernel_runs k ON k.run_id=b.run_id
+                      WHERE b.run_id=?1 AND b.authority='authoritative'",
+                    [run_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if !Self::resource_admission_allowed(state.as_deref(), tool) {
+                return Err(invalid("resource admission requires an active Kernel owner"));
+            }
             let exhausted: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM child_run_delegations d
                 WHERE d.child_run_id=?1 AND (d.total_tokens>=d.max_total_tokens OR d.output_tokens>=d.max_output_tokens
                 OR (SELECT COUNT(*) FROM tool_calls t WHERE t.run_id=d.child_run_id)>d.max_tool_calls))",
@@ -440,7 +519,7 @@ impl Database {
                  WHERE b.run_id=?1 AND b.authority='authoritative'",
                 [run_id], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
             let (state,deadline) = state.ok_or_else(|| invalid("Run is not owned by Kernel Host"))?;
-            if matches!(state.as_str(), "completed" | "failed" | "cancelled" | "budget_exhausted") {
+            if matches!(state.as_str(), "completed" | "failed" | "cancelled" | "budget_exhausted" | "approval_expired") {
                 return Err(invalid("Kernel Host Run is terminal"));
             }
             let now = now_ms();
@@ -518,4 +597,92 @@ pub(super) fn freeze_host_scope_in_tx(tx: &rusqlite::Transaction<'_>, run_id: &s
                     params![run_id,body,hash(&body),now_ms()])?;
             }
     Ok(())
+}
+
+#[cfg(test)]
+mod resource_admission_tests {
+    use super::Database;
+
+    /// A pending approval decides ONE call. Refusing every other read made a
+    /// model's ordinary `read`/`ls` fail permanently mid-Run with an error it
+    /// could neither act on nor retry around: a real acceptance Run lost six
+    /// calls that way and then spent twenty-odd rounds exploring the filesystem
+    /// and Fox's own database instead of reading the workbook it was asked about.
+    #[test]
+    fn a_pending_approval_admits_independent_reads_but_never_effects() {
+        let allowed = |state: Option<&'static str>, tool: Option<&'static str>| {
+            Database::resource_admission_allowed(state, tool)
+        };
+        // Executing: unchanged, everything the frozen scope allows.
+        assert!(allowed(Some("running"), None));
+        assert!(allowed(Some("running"), Some("read")));
+        assert!(allowed(Some("running"), Some("write_file")));
+        // Waiting for approval: independent reads only.
+        for tool in [
+            "read",
+            "ls",
+            "find",
+            "grep",
+            "read_attachment",
+            "read_tool_result",
+            "sqlite_read",
+            "tabular_data",
+            "structured_data",
+            "git_read",
+            "memory_search",
+            "list_knowledge_bases",
+            "search_knowledge",
+            "read_knowledge_document",
+            "query_knowledge_graph",
+            "list_mcp_tools",
+            "web_search",
+            "web_read",
+            "work_snapshot_get",
+            "skill_load",
+        ] {
+            assert!(
+                allowed(Some("waiting_approval"), Some(tool)),
+                "`{tool}` must be admitted while an unrelated approval is pending"
+            );
+        }
+        // Anything that can write, run, delegate or reach the network keeps the
+        // strict requirement: those are what the approval is deciding about.
+        for tool in [
+            "write_file",
+            "edit_file",
+            "run_command",
+            "call_mcp_tool",
+            "attachment_compute",
+            "compute_job_start",
+            "http_request",
+            "memory_propose",
+            "test_run",
+            "format_code",
+            "code_check",
+            "child_run_start",
+            "workflow_start",
+            "office_create",
+        ] {
+            assert!(
+                !allowed(Some("waiting_approval"), Some(tool)),
+                "`{tool}` must stay refused while an approval is pending"
+            );
+        }
+        // An unnamed admission is the strict one, and every terminal or unknown
+        // state stays refused even for a read.
+        assert!(!allowed(Some("waiting_approval"), None));
+        for state in [
+            None,
+            Some("completed"),
+            Some("failed"),
+            Some("cancelled"),
+            Some("budget_exhausted"),
+            Some("approval_expired"),
+        ] {
+            assert!(
+                !allowed(state, Some("read")),
+                "{state:?} must stay refused even for a read"
+            );
+        }
+    }
 }

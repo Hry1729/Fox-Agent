@@ -1,4 +1,5 @@
 use super::*;
+use rusqlite::OptionalExtension;
 
 impl Database {
     pub(crate) fn computed_artifact_id(path: &str) -> String {
@@ -9,7 +10,37 @@ impl Database {
     }
 }
 
+/// The conversation's authorized project root, read inside the caller's own
+/// transaction.
+///
+/// Artifact classification needs the root to tell "the model deliberately put
+/// this result in the conversation deliverable folder" from "this is an
+/// intermediate file", and the projection runs inside a transaction, so it
+/// cannot open the pooled read path.
+pub(super) fn conversation_project_root(
+    tx: &rusqlite::Transaction<'_>,
+    conversation_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    tx.query_row(
+        "SELECT COALESCE(p.root_path, c.project_root)
+         FROM conversations c LEFT JOIN projects p ON p.id = c.project_id
+         WHERE c.id = ?1",
+        rusqlite::params![conversation_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
+}
+
 /// Project the Host's verified generated files for either execution engine.
+///
+/// Every generated file here is an **intermediate computation artifact**: it
+/// lives in the conversation's private compute workspace and is consumed by
+/// reference (`artifactId`) rather than being a user-facing deliverable. That
+/// is a Host fact about where the bytes are, not a property of the extension,
+/// so a CSV saved with `saveFile` is a process file here even though a CSV the
+/// model deliberately writes into the conversation deliverable folder is a
+/// deliverable.
 pub(super) fn persist(
     tx: &rusqlite::Transaction<'_>,
     run: &str,
@@ -20,6 +51,18 @@ pub(super) fn persist(
     let Some(files) = details["files"].as_array() else {
         return Ok(());
     };
+    let conversation: Option<String> = tx
+        .query_row(
+            "SELECT conversation_id FROM run_control_bindings WHERE run_id=?1",
+            rusqlite::params![run],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let project_root = match conversation.as_deref() {
+        Some(conversation_id) => conversation_project_root(tx, conversation_id)?,
+        None => None,
+    };
+    let project_root = project_root.map(std::path::PathBuf::from);
     for file in files {
         let Some(path) = file["path"].as_str() else {
             continue;
@@ -37,9 +80,15 @@ pub(super) fn persist(
             .file_name()
             .and_then(|p| p.to_str())
             .unwrap_or("result");
-        tx.execute("INSERT OR IGNORE INTO artifacts(id,conversation_id,run_id,display_name,artifact_type,storage_path,byte_size,sha256,media_type,status,created_at,updated_at)
-            SELECT ?1,conversation_id,?2,?3,'created_file',?4,?5,?6,?7,'ready',?8,?8 FROM run_control_bindings WHERE run_id=?2",
-            params![Database::computed_artifact_id(path),run,name,path,bytes,sha,file["mediaType"].as_str(),now])?;
+        let (class, origin) = crate::runtime_host::artifact_store::classify(
+            project_root.as_deref(),
+            std::path::Path::new(path),
+            "attachment_compute",
+            true,
+        );
+        tx.execute("INSERT OR IGNORE INTO artifacts(id,conversation_id,run_id,display_name,artifact_type,artifact_class,artifact_origin,storage_path,byte_size,sha256,media_type,status,created_at,updated_at)
+            SELECT ?1,conversation_id,?2,?3,'created_file',?9,?10,?4,?5,?6,?7,'ready',?8,?8 FROM run_control_bindings WHERE run_id=?2",
+            rusqlite::params![Database::computed_artifact_id(path),run,name,path,bytes,sha,file["mediaType"].as_str(),now,class.as_str(),origin.as_str()])?;
     }
     Ok(())
 }

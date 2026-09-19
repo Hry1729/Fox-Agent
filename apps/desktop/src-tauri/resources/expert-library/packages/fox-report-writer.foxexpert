@@ -26,6 +26,7 @@
       "ls",
       "find",
       "grep",
+      "read_tool_result",
       "read_attachment",
       "attachment_compute",
       "compute_job_start",

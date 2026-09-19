@@ -51,7 +51,7 @@ fn job_model_tools_use_real_gateway_worker_storage_and_scope() {
     scope.tool_names=config.proposal_tools.iter().filter_map(|t|t["name"].as_str().map(str::to_owned)).collect();
     db.freeze_kernel_host_scope(&run,&scope).unwrap();
     let binding=db.run_control_binding(&run).unwrap().unwrap();
-    let policy=super::super::super::kernel_gateway::GatewayPolicy {binding:binding.clone(),scope,database:Some(db.clone()),sessions_dir:None};
+    let policy=super::super::super::kernel_gateway::GatewayPolicy {binding:binding.clone(),scope,database:Some(db.clone()),sessions_dir:None,artifacts_dir:None};
     let cancellation=CancellationRegistry::default();
     let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
     let token=cancellation.run_token(&run).unwrap();

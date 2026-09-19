@@ -62,6 +62,28 @@ fn secret_field(value: &Value) -> bool {
     }
 }
 
+/// Whether a proposal tool's parameter schema is object-shaped at the root.
+///
+/// A tool may declare its arguments directly as an object, or as a union of
+/// object variants when the call has genuinely mutually exclusive shapes:
+/// `compute_job_start` takes either `{idempotencyKey, params}` or `{jobId}`, and
+/// the runtime worker therefore emits `anyOf`. Both are object-rooted function
+/// signatures. Requiring the literal `type == "object"` rejected the second form
+/// and made the whole Kernel description fail for any Run whose tool catalogue
+/// included a union-shaped tool — which is every attachment-capable Run, i.e.
+/// exactly the data-analysis scenario. Anything that is not object-shaped at the
+/// root is still rejected.
+fn object_rooted_parameters(parameters: &Value) -> bool {
+    if parameters["type"] == "object" {
+        return true;
+    }
+    ["anyOf", "oneOf"].iter().any(|key| {
+        parameters[*key].as_array().is_some_and(|variants| {
+            !variants.is_empty() && variants.iter().all(object_rooted_parameters)
+        })
+    })
+}
+
 impl KernelModelConfig {
     pub(crate) fn adapter_version(&self) -> Result<&'static str, String> {
         match (self.engine_id.as_str(), self.native_adapter.as_ref()) {
@@ -106,10 +128,17 @@ impl KernelModelConfig {
         let mut names = std::collections::HashSet::new();
         for tool in &self.proposal_tools {
             let name = tool["name"].as_str().ok_or("missing Kernel proposal tool name")?;
-            if !names.insert(name) || fox_engine_protocol::canonical_runtime_tool_contract(name).is_none()
-                || !tool["description"].as_str().is_some_and(|text| !text.trim().is_empty())
-                || !tool["parameters"].is_object() || tool["parameters"]["type"] != "object" {
-                return Err("invalid Kernel proposal tool schema".into());
+            if !names.insert(name) {
+                return Err(format!("invalid Kernel proposal tool schema: `{name}` is duplicated").into());
+            }
+            if fox_engine_protocol::canonical_runtime_tool_contract(name).is_none() {
+                return Err(format!("invalid Kernel proposal tool schema: `{name}` is not a registered tool contract").into());
+            }
+            if !tool["description"].as_str().is_some_and(|text| !text.trim().is_empty()) {
+                return Err(format!("invalid Kernel proposal tool schema: `{name}` has no description").into());
+            }
+            if !object_rooted_parameters(&tool["parameters"]) {
+                return Err(format!("invalid Kernel proposal tool schema: `{name}` has no object parameter schema").into());
             }
         }
         let bytes = serde_json::to_vec(self).map_err(|_| "invalid Kernel model configuration")?;
@@ -143,9 +172,47 @@ mod tests {
         assert!(all.hash().is_err());
     }
 
+    /// A union of object variants is an object-rooted function signature; the
+    /// previous literal `type == "object"` check rejected the runtime worker's own
+    /// `compute_job_start` definition and failed the whole description.
     #[test]
-    fn configuration_rejects_credentials_unknown_fields_and_invalid_tool_schemas() {
-        let good = config();
+    fn a_union_of_object_variants_is_a_valid_tool_schema_but_anything_else_is_not() {
+        let mut config = config();
+        let union = json!({"name":"compute_job_start","description":"Start or resume",
+            "parameters":{"anyOf":[
+                {"type":"object","properties":{"idempotencyKey":{"type":"string"}}},
+                {"type":"object","properties":{"jobId":{"type":"string"}}}]}});
+        config.proposal_tools = vec![union];
+        assert!(config.hash().is_ok(), "an anyOf of object variants must be accepted");
+
+        let nested = json!({"name":"compute_job_start","description":"Start or resume",
+            "parameters":{"oneOf":[{"anyOf":[{"type":"object"}]}]}});
+        config.proposal_tools = vec![nested];
+        assert!(config.hash().is_ok(), "nested unions of objects are still object-rooted");
+
+        for rejected in [
+            json!({"type":"array"}),
+            json!({"anyOf":[{"type":"string"}]}),
+            json!({"anyOf":[]}),
+            json!({"type":"object"}),
+        ] {
+            let tool = json!({"name":"compute_job_start","description":"Start or resume",
+                "parameters": rejected});
+            config.proposal_tools = vec![tool];
+            let outcome = config.hash();
+            if rejected["type"] == "object" {
+                assert!(outcome.is_ok());
+            } else {
+                assert!(
+                    outcome.is_err(),
+                    "a non object-rooted schema must still be rejected: {rejected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn configuration_rejects_credentials_unknown_fields_and_invalid_tool_schemas() {        let good = config();
         assert!(good.hash().unwrap().starts_with("sha256:"));
         for (key,value) in [
             ("apiKey",json!("secret")), ("modelProfile",json!({"compat":{"Authorization":"secret"}})),

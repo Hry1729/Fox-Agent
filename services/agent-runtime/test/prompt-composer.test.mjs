@@ -268,7 +268,9 @@ test('keeps critical recovery facts and legal JSON for 1000 history items under 
   assert.equal(snapshot.taskAttempts.find((attempt) => attempt.id === 'attempt-0-5').policyHash, 'b'.repeat(64))
   assert.ok(snapshot.truncation.omitted.validationPolicies > 0)
   assert.ok(snapshot.truncation.omitted.taskAttempts > 0)
-  assert.equal(snapshot.truncation.strategy, 'structured_budget_v1')
+  // The expanded artifact instructions leave enough space only for the
+  // critical recovery projection; the recovery identity assertions above stay strict.
+  assert.equal(snapshot.truncation.strategy, 'critical_recovery_fields_v1')
 })
 
 test('prioritizes a running Attempt at the end of 40 and 1000 Task snapshots', () => {

@@ -32,7 +32,7 @@ fn native_engine_flow(engine: &str, native: Option<crate::kernel_model_config::N
     let db = Database::open(root.join("facts.db")).unwrap();
     assert_eq!(db.kernel_model_config(&run_id).unwrap(), config);
     assert_eq!(db.run_control_binding(&run_id).unwrap().unwrap().engine_id, engine);
-    let policy = super::super::super::kernel_gateway::GatewayPolicy { binding: db.run_control_binding(&run_id).unwrap().unwrap(), scope , database: None, sessions_dir: None };
+    let policy = super::super::super::kernel_gateway::GatewayPolicy { binding: db.run_control_binding(&run_id).unwrap().unwrap(), scope , database: None, sessions_dir: None, artifacts_dir: None };
     let executions = AtomicUsize::new(0);
     super::super::super::kernel_host::drive(super::super::super::kernel_host::acquire(&root,&run_id).unwrap(),
         &db,&clock,&cancellation,&run_id,&real_worker_command(),"isolated",&policy,|binding,effect,token| {

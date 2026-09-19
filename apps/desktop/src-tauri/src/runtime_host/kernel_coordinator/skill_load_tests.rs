@@ -68,7 +68,7 @@ fn prepared_policy(
     );
     let binding = db.run_control_binding(&run_id).unwrap().unwrap();
     let scope = db.kernel_host_scope(&run_id).unwrap();
-    let policy = GatewayPolicy { binding, scope , database: None, sessions_dir: None };
+    let policy = GatewayPolicy { binding, scope , database: None, sessions_dir: None, artifacts_dir: None };
     let token = cancellation.run_token(&run_id).unwrap();
     (db, root, run_id, policy, token)
 }
@@ -315,6 +315,7 @@ fn unknown_disabled_and_scope_shaped_skill_loads_are_rejected() {
 
         database: None,
         sessions_dir: None,
+        artifacts_dir: None,
     };
     let error = narrowed
         .execute_context_resource(

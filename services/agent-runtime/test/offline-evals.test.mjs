@@ -133,7 +133,7 @@ test('passes the Phase 0B full manifest with complete Runtime tool coverage', as
   assert.equal(report.metadata.promptCacheDiagnostics.read.eligible, true)
   assert.equal(report.metadata.promptCacheDiagnostics.write.eligible, false)
   // Cursor metadata is model-visible; complete refers only to stored bytes.
-  assert.equal(report.resultHash, '98e1a074485e2cbc12ca83581f2f395f008aceac7c139d1e16e6ce37a2a40011') // result identity follows toolCatalogHash
+  assert.equal(report.resultHash, 'e9d55b924c468930213cd0d2320fbb61ff1ca34101d26603d8d669966f11c503') // result identity follows toolCatalogHash
 })
 
 test('locks Graph review and final Acceptance schemas, profile boundary, and truthful completion Prompt', () => {

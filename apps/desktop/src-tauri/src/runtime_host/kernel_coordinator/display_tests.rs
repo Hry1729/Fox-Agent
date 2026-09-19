@@ -29,6 +29,7 @@ fn kernel_reads_project_root_and_office_attachments_through_frozen_gateway() {
 
         database: None,
         sessions_dir: None,
+        artifacts_dir: None,
     };
     let sheet_path = root.join("AGV长时间任务汇总统计表.xlsx");
     let slides_path = root.join("slides.pptx");
@@ -404,7 +405,7 @@ fn exercise_projectless_compute(source: Option<&std::path::Path>, code: &str) ->
     assert!(binding.permission.project_root.is_none());
     let scope=crate::database::KernelHostScope {schema_version:1,tool_names:["attachment_compute".to_owned()].into_iter().collect(),mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),knowledge_connection_hashes:Default::default(),office_tools:Default::default(),lifecycle_hooks:vec![]};
     db.freeze_kernel_host_scope(&run,&scope).unwrap();
-    let policy=super::super::super::kernel_gateway::GatewayPolicy {binding,scope, database: None, sessions_dir: None };
+    let policy=super::super::super::kernel_gateway::GatewayPolicy {binding,scope, database: None, sessions_dir: None, artifacts_dir: None };
     let pure=super::super::super::attachment_compute::execute(&db,&root,&root,&policy.binding.conversation_id,&run,&json!({"code":"return {sum: [1, 2, 3].reduce((a,b)=>a+b,0)};"}),||false).unwrap();
     assert_eq!(pure["result"]["sum"],6);
     let file=root.join(if source.is_some(){"input.xlsx"}else{"input.csv"});

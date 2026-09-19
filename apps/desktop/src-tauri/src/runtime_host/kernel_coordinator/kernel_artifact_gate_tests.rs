@@ -171,7 +171,7 @@ fn kernel_gate_accepts_own_conversation_artifact_and_rejects_abuse() {
         binding,
         scope,
         database: Some(db.clone()),
-        sessions_dir: Some(sessions_dir.clone()),
+        sessions_dir: Some(sessions_dir.clone()), artifacts_dir: None,
     };
     let csv = "name,qty\nalpha,1\nbeta,2\n";
     let (artifact_id, artifact_path) =
@@ -239,7 +239,7 @@ fn kernel_gate_accepts_own_conversation_artifact_and_rejects_abuse() {
         binding: foreign_binding,
         scope: foreign_scope,
         database: Some(db.clone()),
-        sessions_dir: Some(sessions_dir.clone()),
+        sessions_dir: Some(sessions_dir.clone()), artifacts_dir: None,
     };
     assert!(foreign_policy
         .validate("call_mcp_tool", &valid)

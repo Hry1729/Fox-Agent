@@ -517,6 +517,29 @@ impl<'a> KernelCoordinator<'a> {
             };
             let canonical_input: Value =
                 serde_json::from_str(&tool.input_json).map_err(|error| error.to_string())?;
+            // The directive that carries this to the worker is a protocol frame
+            // capped at 1 MiB, so the content sent must be the same *bounded*
+            // projection the Host keeps for its own history — never the complete
+            // durable payload. The durable row is untouched, and the reference
+            // below is what makes an omitted byte reachable through
+            // `read_tool_result`, so nothing is lost by not shipping it twice.
+            let reference =
+                crate::kernel_compaction::tool_result_ref(&self.binding.run_id, id);
+            let storage = self
+                .database
+                .tool_result_storage(&self.binding.run_id, id)
+                .unwrap_or_default();
+            if state == KernelSettledToolState::Completed {
+                if let Some(bounded) = crate::kernel_compaction::bound_tool_result_content_with_storage(
+                    live::effective_boundable_tool(&tool.tool, &canonical_input),
+                    false,
+                    &result["content"],
+                    reference.as_deref(),
+                    &storage,
+                ) {
+                    result["content"] = bounded;
+                }
+            }
             let projected = snapshot.tool_calls.iter().find(|item| item.tool_call_id == *id)
                 .ok_or("missing durable tool approval projection")?;
             receipt::append_execution_receipt(

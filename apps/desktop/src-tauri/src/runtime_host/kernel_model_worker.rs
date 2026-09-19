@@ -15,7 +15,48 @@ use std::{
 };
 
 const MAX_FRAME: usize = 1_048_576;
-/// Transport-only time for the worker to report its already expired model round.
+
+/// A bounded, single-line excerpt of a worker payload for stderr diagnostics.
+///
+/// Capped so a large payload cannot flood a log, and never returned to the
+/// caller: durable diagnostics must not absorb child/provider text.
+fn bounded_diagnostic(payload: &Value) -> String {
+    let text = payload
+        .get("error")
+        .map(|error| error.to_string())
+        .or_else(|| payload.get("message").map(|message| message.to_string()))
+        .unwrap_or_else(|| payload.to_string());
+    text.chars().take(600).collect::<String>().replace('\n', " ")
+}
+
+/// Which identity field of a worker response disagrees with its request.
+///
+/// The transport comparison is unchanged; this only replaces a bare "mismatch"
+/// with the field name, because without it a failure here is unattributable —
+/// exactly the class of problem the 2026-09-19 review flagged.
+fn response_identity_mismatch(request: &Value, response: &Value) -> Option<String> {
+    if response["protocol"] != PROTOCOL_NAME {
+        return Some("protocol".into());
+    }
+    if response["version"] != PROTOCOL_VERSION {
+        return Some("version".into());
+    }
+    if response["kind"] != "response" {
+        return Some(format!("kind={}", response["kind"]));
+    }
+    if response["requestId"] != request["id"] {
+        return Some("requestId".into());
+    }
+    for key in ["runId", "conversationId", "runtimeSessionId"] {
+        if response[key] != request[key] {
+            return Some(format!(
+                "{key}: request={} response={}",
+                request[key], response[key]
+            ));
+        }
+    }
+    None
+}/// Transport-only time for the worker to report its already expired model round.
 /// Late model output is rejected by Host; this does not extend generation budget.
 pub(super) const MODEL_SETTLE_GRACE_MS: i64 = 1_000;
 pub(super) const MODEL_WINDOW_EXPIRED: &str = "Kernel model window expired before response commit";
@@ -269,18 +310,13 @@ impl Worker {
         let mut revision = 0;
         loop {
             let response = wait(&self.messages, token, deadline)??;
-            if response["protocol"] != PROTOCOL_NAME
-                || response["version"] != PROTOCOL_VERSION
-                || response["kind"] != "response"
-                || response["requestId"] != request["id"]
-                || ["runId", "conversationId", "runtimeSessionId"]
-                    .iter()
-                    .any(|key| response[key] != request[key])
-            {
-                // No child message/provider error is copied into durable diagnostics.
-                return Err(
-                    "Kernel worker response identity/type mismatch; reconcile delivery".into(),
-                );
+            if let Some(reason) = response_identity_mismatch(&request, &response) {
+                // No child message/provider error is copied into durable
+                // diagnostics, but the *field* that disagreed is a Host fact and
+                // is what makes this failure attributable.
+                return Err(format!(
+                    "Kernel worker response identity/type mismatch ({reason}); reconcile delivery"
+                ));
             }
             if response["type"] == "kernel.model_preview" {
                 let Some(sink) = preview.filter(|_| expected == "kernel.model_response") else {
@@ -334,9 +370,19 @@ impl Worker {
                 ));
             }
             if response["type"] != expected {
-                return Err(
-                    "Kernel worker response identity/type mismatch; reconcile delivery".into(),
+                // The worker rejected the frame. Its message is deliberately NOT
+                // copied into the returned error (which can become a durable
+                // diagnostic), but without any trace at all this failure is
+                // unattributable, so a bounded excerpt goes to stderr only.
+                eprintln!(
+                    "[kernel-worker] unexpected response type {} while expecting {expected}: {}",
+                    response["type"],
+                    bounded_diagnostic(&response["payload"]),
                 );
+                return Err(format!(
+                    "Kernel worker response identity/type mismatch (expected {expected}, got {}); reconcile delivery",
+                    response["type"]
+                ));
             }
             return Ok(response["payload"].clone());
         }

@@ -1064,6 +1064,7 @@ mod tests {
             database: &fixture.database,
             sessions_dir: &fixture.sessions,
             conversation_id: &fixture.conversation_id,
+            artifacts_dir: None,
         };
         let prepared = crate::office::prepare_with_context(
             "office_import_data",

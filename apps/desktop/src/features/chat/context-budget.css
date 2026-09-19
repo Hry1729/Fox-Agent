@@ -1,4 +1,4 @@
-/* Context budget panel — local styles owned by window B. Mount point and
+/* Context budget panel 鈥?local styles owned by window B. Mount point and
    global theme integration belong to window A; these rules are scoped under
    .fox-context-budget and use the existing fox design tokens where present. */
 

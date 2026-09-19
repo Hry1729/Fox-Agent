@@ -3,7 +3,7 @@ mod kernel_changes;
 mod models;
 mod repositories;
 
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 70;
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 73;
 pub(crate) use repositories::kernel_reconciliation::*;
 pub(crate) use repositories::{BudgetTier, ContinuableRun, ContinuationRequest, GrantRegistration, GrantScopeKind, GrantSkipReason};
 pub(crate) use repositories::{JobSnapshot, JobStartOutcome, JobStartRequest, JobState};

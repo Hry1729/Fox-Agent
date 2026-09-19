@@ -240,6 +240,12 @@ pub(super) struct GatewayPolicy {
     /// references (office_import_data's artifactId) against the frozen
     /// binding's own conversation. Set by production; optional in unit tests.
     pub sessions_dir: Option<std::path::PathBuf>,
+    /// The Host's application data directory, used to place Host-private
+    /// Office artifacts (rendered previews, working copies, commit staging).
+    /// Deliberately **not** derived from a tool argument: the model can never
+    /// point these areas at application data. Optional in unit tests, which
+    /// then keep the project-only placement path.
+    pub artifacts_dir: Option<std::path::PathBuf>,
 }
 
 /// Business eligibility is read before asking a human and checked again inside
@@ -286,6 +292,7 @@ impl GatewayPolicy {
                 database,
                 sessions_dir,
                 conversation_id: &self.binding.conversation_id,
+                artifacts_dir: self.artifacts_dir.as_deref(),
             }),
             _ => None,
         }
@@ -441,7 +448,7 @@ impl GatewayPolicy {
         {
             return Err("frozen Kernel context resource identity changed".into());
         }
-        database.kernel_validate_resource_acquisition(&self.binding.run_id)?;
+        database.kernel_validate_resource_acquisition_for(&self.binding.run_id, Some(tool))?;
         if super::background_jobs::TOOLS.contains(&tool) {
             return super::background_jobs::execute(database, attachments_dir, sessions_dir, &self.binding.run_id, tool, input, Some(token.clone()), self.remaining_budget(database)?);
         }
@@ -559,7 +566,7 @@ impl GatewayPolicy {
         {
             return Err("frozen Kernel work identity changed".into());
         }
-        database.kernel_validate_resource_acquisition(&self.binding.run_id)?;
+        database.kernel_validate_resource_acquisition_for(&self.binding.run_id, Some(tool))?;
         let projected_id = format!("kernel-tool:{}:{tool_id}", self.binding.run_id);
         let outcome = if tool == "task_repair_escalate_start" {
             super::work_tools::preflight_task_repair_override(
@@ -612,7 +619,7 @@ impl GatewayPolicy {
         {
             return Err("frozen Kernel delegation identity changed".into());
         }
-        database.kernel_validate_resource_acquisition(&self.binding.run_id)?;
+        database.kernel_validate_resource_acquisition_for(&self.binding.run_id, Some(tool))?;
         if let Some(result) =
             super::kernel_delegation::preflight_child(database, &self.binding, tool, input)?
         {
@@ -669,7 +676,7 @@ impl GatewayPolicy {
             return Err("frozen knowledge identity changed".into());
         }
         self.validate(tool, input)?;
-        database.kernel_validate_resource_acquisition(&self.binding.run_id)?;
+        database.kernel_validate_resource_acquisition_for(&self.binding.run_id, Some(tool))?;
         let bindings = database
             .conversation_knowledge_reference_bindings(&self.binding.conversation_id)?
             .into_iter()
@@ -753,7 +760,7 @@ impl GatewayPolicy {
             return Err("frozen Kernel resource identity changed".into());
         }
         self.validate(tool, input)?;
-        database.kernel_validate_resource_acquisition(&self.binding.run_id)?;
+        database.kernel_validate_resource_acquisition_for(&self.binding.run_id, Some(tool))?;
         if super::capability_tools::is_capability_tool(tool) {
             let action = super::capability_tools::prepare(
                 tool,

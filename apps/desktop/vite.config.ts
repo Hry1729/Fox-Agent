@@ -4,6 +4,7 @@ import tailwindcss from '@tailwindcss/vite'
 import { visualizer } from 'rollup-plugin-visualizer'
 import { fileURLToPath, URL } from 'node:url'
 import { execSync } from 'node:child_process'
+import { watcherResilience } from './vite-watcher-resilience'
 
 const root = fileURLToPath(new URL('.', import.meta.url))
 
@@ -52,6 +53,10 @@ export default defineConfig(({ mode }) => {
     plugins: [
       react(),
       tailwindcss(),
+      // Bounded, public-API-only watcher error handling. It never disables
+      // watching and never touches process-level exception handlers; see the
+      // module doc for what it does and does not fix.
+      watcherResilience(),
       visualizer({
         filename: 'dist/bundle-stats.html',
         template: 'network',
@@ -105,21 +110,58 @@ export default defineConfig(({ mode }) => {
       host: '127.0.0.1',
       port: 1421,
       strictPort: true,
+      // Source watching is restored. `watch: null` was a workaround for a
+      // reported unhandled EBUSY: the Office connector used to create its
+      // working copy and its pre-write backup *next to the target document*, so
+      // writing into a project that happens to live inside this repo
+      // (`apps/desktop/tests/execl-ceshi`) put briefly-locked files into the
+      // watcher's tree.
+      //
+      // Measured correction to the earlier hand-off (see the R4 evidence under
+      // `output/artifact-placement-repair-20260918/`): an exclusive
+      // `FileShare.None` hold on a file inside this tree does **not** make the
+      // Vite 6.4.3 dev server exit — not with the ignore list below, and not
+      // with the ignore list removed entirely, with or without the React and
+      // Tailwind plugins, during a running server or before it starts. So the
+      // ignore list is not what fixed the crash, and the claim that "glob and
+      // RegExp ignores both failed" says nothing about whether RegExps work:
+      // the working copies simply had to leave the project.
+      //
+      // What keeps the project folder quiet:
+      //
+      // 1. Host-managed transient files no longer live in the user's project.
+      //    Working copies, commit staging and rendered previews are written into
+      //    the application data directory, and pre-write backups go into the
+      //    managed version store. The pinned OfficeCLI writes its own
+      //    `.work-*.batch-*` copies next to the document it is given, which is
+      //    therefore now the Host's private area rather than the user's folder.
+      // 2. The globs below keep the watcher out of the known internal areas even
+      //    if a project is rooted inside this repo: agent test data (`tests/`,
+      //    which holds the real input workbooks and past runs), any leftover
+      //    `.fox-office-*` / `*.fox-backup-*` / `.fox-stage-*` transient name,
+      //    the `fox/` deliverable folder, and build/VCS output. This is a
+      //    work-reduction measure, not the crash fix. `src/` HMR is unaffected.
       watch: {
-        // The Office connector writes transient, briefly-locked working files
-        // (`.fox-office-<uuid>.*`, `*.fox-backup-*`) next to the user project,
-        // and `tests/` is data/output for the agent rather than app source.
-        // Watching them makes the Node watcher throw EBUSY and kill the dev
-        // server mid-run. Ignore them; `src/` HMR is unaffected.
+        // These must be RegExps, not path-globs: chokidar matches glob patterns
+        // against backslash-separated paths on Windows, so `**/tests/**` never
+        // matched a real path. A RegExp is matched against the raw path string
+        // and is separator-agnostic.
         ignored: [
-          '**/tests/**',
-          '**/.fox-office-*',
-          '**/*.fox-backup-*',
-          '**/.git/**',
-          '**/dist/**',
-          '**/target/**'
-        ]
-      }
+          // Agent data and outputs, never application source.
+          /[\\/]tests[\\/]/,
+          // Host-managed transient names from any earlier version.
+          /\.fox-office-/,
+          /\.fox-backup-/,
+          /\.fox-stage-/,
+          // Conversation deliverable folder: user output, not app source.
+          /[\\/]fox[\\/]/,
+          // Build, VCS and dependency output.
+          /[\\/]\.git[\\/]/,
+          /[\\/]dist[\\/]/,
+          /[\\/]target[\\/]/,
+          /[\\/]node_modules[\\/]/,
+        ],
+      },
     }
   }
 })

@@ -226,6 +226,13 @@ CREATE TABLE IF NOT EXISTS artifacts (
     byte_size INTEGER NOT NULL DEFAULT 0,
     sha256 TEXT,
     status TEXT NOT NULL DEFAULT 'ready',
+    -- Lifecycle bucket decided by the Host (deliverable / preview / process),
+    -- never inferred from the file extension by the UI.
+    artifact_class TEXT NOT NULL DEFAULT 'process',
+    -- Where the bytes live: the conversation's project folder or an
+    -- application-private Host area (compute workspace, preview cache,
+    -- working copy, version store).
+    artifact_origin TEXT NOT NULL DEFAULT 'project',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -6953,6 +6960,23 @@ fn run_transaction(connection: &mut Connection, now: i64) -> Result<()> {
     apply_migration(&transaction, 68, MIGRATION_68, now)?;
     apply_migration(&transaction, 69, MIGRATION_69, now)?;
     apply_migration(&transaction, 70, MIGRATION_70, now)?;
+    let v71_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 71)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !v71_applied {
+        for (table, column, definition) in MIGRATION_71_COLUMNS {
+            ensure_column_if_missing(&transaction, table, column, definition)?;
+        }
+        transaction.execute_batch(MIGRATION_71_INDEXES)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (71, ?1)",
+            [now],
+        )?;
+    }
+    apply_migration(&transaction, 72, MIGRATION_72, now)?;
+    apply_migration(&transaction, 73, MIGRATION_73, now)?;
     let violations: i64 = transaction.query_row(
         "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))?;
     if violations != 0 {
@@ -7563,9 +7587,262 @@ mod tests {
         transaction.commit().expect("commit pre-P0/P2 schema");
     }
 
+    /// Upgrading a database written before the artifact split must add the two
+    /// columns without touching a single existing row's identity, and the
+    /// backfill must record where the bytes really live: a historical row in
+    /// the private compute workspace is `host_private`, one in a project is
+    /// `project`, and neither is promoted to a deliverable the Host never
+    /// classified. A second run is a no-op.
     #[test]
-    fn migrates_plugin_and_knowledge_schema_without_losing_legacy_bindings() {
+    fn migration_backfills_artifact_origin_without_promoting_historical_rows() {
         let mut connection = Connection::open_in_memory().expect("open database");
+        run(&mut connection, 1).expect("apply every migration");
+
+        // The columns exist with the additive defaults.
+        let columns: Vec<String> = connection
+            .prepare("SELECT name FROM pragma_table_info('artifacts')")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        assert!(columns.contains(&"artifact_class".to_owned()), "{columns:?}");
+        assert!(columns.contains(&"artifact_origin".to_owned()), "{columns:?}");
+        let version: i64 = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM schema_migrations WHERE version=72", [], |row| row.get::<_, i64>(0))
+                .expect("v72 recorded"),
+            1
+        );
+
+        // Seed a historical row in the Host's private compute workspace, then
+        // restore the state a pre-backfill database is in: migration 71 added
+        // the columns with the conservative default, so the origin still reads
+        // `project` even though the bytes are Host-private. Dropping the v72
+        // record models a database upgraded from exactly that state.
+        connection
+            .execute_batch(
+                "INSERT INTO agents(id, name, description, runtime_type, system_prompt, default_model, created_at, updated_at)
+                 VALUES ('a','A','','pi','','m',1,1);
+                 INSERT INTO conversations(id, agent_id, title, status, created_at, updated_at)
+                 VALUES ('c','a','C','active',1,1);
+                 INSERT INTO artifacts(id, conversation_id, run_id, display_name, artifact_type, storage_path, byte_size, status, created_at, updated_at, artifact_class, artifact_origin)
+                 VALUES ('private','c',NULL,'agv.csv','created_file',
+                         'C:\\Users\\u\\AppData\\Roaming\\com.fox.agent\\runtime-sessions\\attachment-compute\\abc\\def\\ghi\\outputs\\agv.csv',
+                         10,'ready',1,1,'process','project'),
+                        ('project','c',NULL,'report.xlsx','created_file',
+                         'D:\\proj\\report.xlsx',20,'ready',1,1,'process','project'),
+                        ('preview','c',NULL,'report.html','created_file',
+                         'C:\\Users\\u\\AppData\\Roaming\\com.fox.agent\\artifacts\\previews\\abc\\report.html',
+                         30,'ready',1,1,'preview','host_private');
+                 DELETE FROM schema_migrations WHERE version=72;",
+            )
+            .expect("seed historical rows");
+
+        let transaction = connection.transaction().expect("begin");
+        apply_migration(&transaction, 72, MIGRATION_72, 2).expect("apply backfill");
+        transaction.commit().expect("commit");
+
+        let private: (String, String) = connection
+            .query_row(
+                "SELECT artifact_class, artifact_origin FROM artifacts WHERE id='private'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("private row");
+        assert_eq!(private.0, "process", "a historical file is never a deliverable");
+        assert_eq!(private.1, "host_private", "the compute workspace is Host-private");
+        let project: (String, String) = connection
+            .query_row(
+                "SELECT artifact_class, artifact_origin FROM artifacts WHERE id='project'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("project row");
+        assert_eq!(project.0, "process");
+        assert_eq!(project.1, "project");
+        // A private preview is not mistaken for a compute-workspace file and
+        // keeps its own (accurate) class and origin.
+        let preview: (String, String) = connection
+            .query_row(
+                "SELECT artifact_class, artifact_origin FROM artifacts WHERE id='preview'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("preview row");
+        assert_eq!(preview.0, "preview");
+        assert_eq!(preview.1, "host_private");
+
+        // The row identities the UI and the restore history key on are intact.
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM artifacts WHERE id IN ('private','project','preview')", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(count, 3);
+        // Idempotent: the migration is recorded, so a second start is a no-op.
+        let applied: i64 = connection
+            .query_row("SELECT COUNT(*) FROM schema_migrations WHERE version=72", [], |row| row.get(0))
+            .expect("applied");
+        assert_eq!(applied, 1);
+        let repeat = connection.transaction().expect("begin repeat");
+        apply_migration(&repeat, 72, MIGRATION_72, 3).expect("repeat is a no-op");
+        repeat.commit().expect("commit repeat");
+        assert_eq!(
+            connection
+                .query_row("SELECT artifact_origin FROM artifacts WHERE id='project'", [], |row| row.get::<_, String>(0))
+                .expect("project origin after repeat"),
+            "project"
+        );
+    }
+
+    /// The placement migration against the operator's **real activity
+    /// database**, when one is supplied.
+    ///
+    /// Historical rows are the part of this change that cannot be tested with a
+    /// fixture: the question is whether adding the deliverable-placement table
+    /// (and the earlier class/origin columns) leaves every existing artifact id,
+    /// version row and restore pointer exactly as it was. The database is
+    /// *copied* first and never opened in place, so a failure here cannot affect
+    /// the running application.
+    #[test]
+    #[ignore = "reads the operator's real activity database; set FOX_REAL_DATABASE and run explicitly"]
+    fn the_placement_migration_preserves_the_real_activity_database() {
+        let Some(source) = std::env::var_os("FOX_REAL_DATABASE") else {
+            eprintln!("FOX_REAL_DATABASE is not set; nothing to verify");
+            return;
+        };
+        let source = std::path::PathBuf::from(source);
+        let scratch = std::env::temp_dir().join(format!("fox-real-db-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let copy = scratch.join("fox.db");
+        std::fs::copy(&source, &copy).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let extra = std::path::PathBuf::from(format!("{}{suffix}", source.display()));
+            if extra.is_file() {
+                let _ = std::fs::copy(&extra, format!("{}{suffix}", copy.display()));
+            }
+        }
+
+        /// Everything about the database that must survive the migration.
+        fn snapshot(path: &std::path::Path) -> serde_json::Value {
+            let connection = Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("open the copy read-only");
+            let version: i64 = connection
+                .query_row("SELECT COALESCE(MAX(version),0) FROM schema_migrations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let artifacts: i64 = connection
+                .query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0))
+                .unwrap();
+            let versions: i64 = connection
+                .query_row("SELECT COUNT(*) FROM managed_file_versions", [], |row| row.get(0))
+                .unwrap();
+            let has_class: bool = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('artifacts') WHERE name='artifact_class'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+                > 0;
+            let mut classes: Vec<(String, i64)> = Vec::new();
+            if has_class {
+                let mut statement = connection
+                    .prepare("SELECT artifact_class, COUNT(*) FROM artifacts GROUP BY 1 ORDER BY 1")
+                    .unwrap();
+                classes = statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+            }
+            // Identity of every artifact row: id + storage path. Nothing may be
+            // rewritten by a migration.
+            let mut ids: Vec<(String, String)> = connection
+                .prepare("SELECT id, storage_path FROM artifacts ORDER BY id")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            ids.sort();
+            // Every recorded version must still be resolvable: a path and the
+            // hash of the content it records.
+            let resolvable: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM managed_file_versions
+                      WHERE storage_path IS NOT NULL AND trim(storage_path) <> ''
+                        AND after_hash IS NOT NULL AND length(after_hash) = 64",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let placements: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('deliverable_placements')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            serde_json::json!({
+                "schemaVersion": version,
+                "artifacts": artifacts,
+                "artifactIds": ids,
+                "artifactClasses": classes,
+                "managedFileVersions": versions,
+                "resolvableVersions": resolvable,
+                "placementColumns": placements,
+            })
+        }
+
+        let before = snapshot(&copy);
+        let database = crate::database::Database::open(copy.clone()).expect("migrate the copy");
+        drop(database);
+        let after = snapshot(&copy);
+
+        let summary = serde_json::json!({ "before": before, "after": after });
+        println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+
+        assert_eq!(
+            before["artifacts"], after["artifacts"],
+            "the migration must not add or remove artifact rows"
+        );
+        assert_eq!(
+            before["artifactIds"], after["artifactIds"],
+            "artifact ids and storage paths must be untouched"
+        );
+        assert_eq!(
+            before["artifactClasses"], after["artifactClasses"],
+            "historical classifications must not be relabelled"
+        );
+        assert_eq!(
+            before["managedFileVersions"], after["managedFileVersions"],
+            "version rows must be untouched"
+        );
+        assert_eq!(
+            before["resolvableVersions"], after["managedFileVersions"],
+            "every recorded version must still be resolvable after the migration"
+        );
+        assert!(
+            after["schemaVersion"].as_i64().unwrap() >= 73,
+            "the copy must reach the placement migration"
+        );
+        assert!(
+            after["placementColumns"].as_i64().unwrap() > 0,
+            "the placement table must exist after the migration"
+        );
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn migrates_plugin_and_knowledge_schema_without_losing_legacy_bindings() {        let mut connection = Connection::open_in_memory().expect("open database");
         run_pre_p0_p2(&mut connection, 1);
         connection
             .execute_batch(
@@ -13199,5 +13476,84 @@ ALTER TABLE kernel_jobs ADD COLUMN uncertain_at INTEGER;
 CREATE TABLE kernel_context_budget_reports (
  run_id TEXT PRIMARY KEY REFERENCES kernel_runs(run_id) ON DELETE CASCADE,
  report_json TEXT NOT NULL, updated_at INTEGER NOT NULL
+);
+"#;
+
+/// Host-managed artifact lifecycle metadata.
+///
+/// `artifact_class` is the Host's own verdict on what a produced file *is*
+/// (`deliverable` / `preview` / `process`); the renderer groups by this value
+/// instead of guessing from the extension, so a CSV the user asked to be
+/// delivered stays a deliverable while a CSV computed as an intermediate step
+/// stays a process file. `artifact_origin` records whether the bytes live in
+/// the user's project or in an application-private Host area.
+///
+/// Existing rows predate the split and keep their kind, but are **not**
+/// relabelled: the migration only adds the columns with a conservative
+/// default. Process is the safe default because it never claims a file is a
+/// finished deliverable that the Host cannot prove.
+const MIGRATION_71_COLUMNS: &[(&str, &str, &str)] = &[
+    (
+        "artifacts",
+        "artifact_class",
+        "TEXT NOT NULL DEFAULT 'process'",
+    ),
+    (
+        "artifacts",
+        "artifact_origin",
+        "TEXT NOT NULL DEFAULT 'project'",
+    ),
+];
+
+const MIGRATION_71_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_artifacts_conversation_class
+    ON artifacts(conversation_id, artifact_class, created_at);
+"#;
+
+/// Backfill the origin of rows that predate the class/origin split.
+///
+/// Every historical row is a process file: the Host never classified a
+/// deliverable before this change, and promoting old rows on a path pattern
+/// would be exactly the "guess from the location" error the split exists to
+/// avoid. What the Host *can* prove structurally is where the bytes live, so
+/// rows inside an application-private area (the conversation compute workspace,
+/// whose paths carry an `attachment-compute` component) are recorded as
+/// `host_private`. Without this, an old CSV that has always lived in the
+/// private workspace would be reported as an in-project file.
+///
+/// Applied once and recorded as migration 72, so a second start is a no-op and
+/// the two historical groups above do not need to be re-checked.
+const MIGRATION_72: &str = r#"
+UPDATE artifacts
+   SET artifact_origin = 'host_private'
+ WHERE artifact_origin <> 'host_private'
+   AND storage_path LIKE '%attachment-compute%'
+   AND storage_path NOT LIKE '%\artifacts\%';
+UPDATE artifacts
+   SET artifact_class = 'process'
+ WHERE artifact_class IS NULL OR trim(artifact_class) = '';
+"#;
+
+/// One conversation's assigned deliverable folder, per authorized project.
+///
+/// Before this table the deliverable folder name was recomputed from the
+/// *current date* on every prompt build, so a task continued across midnight
+/// silently moved to a second result folder. The assignment is a Host fact and
+/// therefore has to be durable: it is decided once, re-read on every later Run
+/// and on every application restart, and it is scoped by the project root so a
+/// conversation re-pointed at another project cannot inherit (or write into)
+/// the old project's folder.
+///
+/// `PRIMARY KEY(conversation_id, project_key)` is what makes the assignment
+/// idempotent under concurrency: two simultaneous Runs both attempt
+/// `INSERT OR IGNORE` and exactly one row wins, so they cannot diverge.
+const MIGRATION_73: &str = r#"
+CREATE TABLE IF NOT EXISTS deliverable_placements (
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    project_key TEXT NOT NULL,
+    folder_name TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(conversation_id, project_key)
 );
 "#;

@@ -136,7 +136,18 @@ export function createHostTools(requestHost) {
     {
       name: 'compute_job_start', label: 'Start or resume background computation',
       description: "Start bounded background attachment computation. For a new job supply idempotencyKey and params. Poll compute_job_status until terminal, then read compute_job_result. A paused job can be resumed using jobId only; never repeat completed writes. Background jobs always use chunked processing: code defines onChunk(chunk) and optional onFinish(). Use profile=large for large files. Whole-array scripts belong in synchronous attachment_compute. Run authorization and execution budget still apply.",
-      parameters: Type.Union([Type.Object({ idempotencyKey: Type.String({ minLength: 1, maxLength: 200 }), params: COMPUTE_PARAMETERS }, { additionalProperties: false }), Type.Object({ jobId: Type.String({ minLength: 1 }) }, { additionalProperties: false })]),
+      // Object-rooted, not a top-level union. The Kernel worker installs these
+      // schemas as proposal definitions and a `anyOf` at the root is not an
+      // installable function signature, so the union form made the whole
+      // `kernel.ready` handshake fail for every attachment-capable Run — the
+      // data-analysis scenario included. The two shapes stay mutually exclusive
+      // in the handler: `idempotencyKey` + `params` start a job, `jobId` alone
+      // resumes one, and supplying neither is rejected there.
+      parameters: Type.Object({
+        idempotencyKey: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+        params: Type.Optional(COMPUTE_PARAMETERS),
+        jobId: Type.Optional(Type.String({ minLength: 1 })),
+      }, { additionalProperties: false }),
       execute: (toolCallId, params, signal) => executeHostTool(toolCallId, 'compute_job_start', params, requestHost, signal),
     },
     {

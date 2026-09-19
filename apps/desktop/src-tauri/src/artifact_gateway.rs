@@ -344,6 +344,15 @@ fn authorized_roots(
 
     if let Some(root)=crate::runtime_host::attachment_compute::authorized_artifact_root(&state.data_dir.join("runtime-sessions"),conversation_id)
         .map_err(|e|ArtifactGatewayError::new("artifact.path_denied",e,false))? { roots.push(root); }
+    // Host-private rendered previews. They are opened through the result's own
+    // preview entry rather than listed as deliverables, so the gateway must be
+    // able to resolve them — but only inside this conversation's own preview
+    // folder, never any other application data.
+    if let Some(root) =
+        crate::runtime_host::artifact_store::existing_preview_root(&state.data_dir, conversation_id)
+    {
+        roots.push(root);
+    }
     if roots.is_empty() {
         return Err(ArtifactGatewayError::new(
             "artifact.root_unavailable",
@@ -977,6 +986,8 @@ mod tests {
             run_id: None,
             display_name: "result.md".to_owned(),
             artifact_type: "file".to_owned(),
+            artifact_class: "deliverable".to_owned(),
+            artifact_origin: "project".to_owned(),
             storage_path: path.to_string_lossy().into_owned(),
             media_type: Some("text/markdown".to_owned()),
             byte_size: bytes.len() as i64,

@@ -27,7 +27,7 @@ import {
   isApprovalDemoRequest,
   replaceLatestAssistantText,
 } from './runtime-instructions.mjs'
-import { stablePromptHash } from './prompt-composer.mjs'
+import { stablePromptHash, buildFilePlacement } from './prompt-composer.mjs'
 import { plannerHandoff, runPlanner, shouldUsePlanner } from './planner-runtime.mjs'
 import { diagnoseToolsForAgentContext, selectToolsForProjectContext } from './expert-package.mjs'
 import { adaptFoxToolsToPi } from './tool-adapter.mjs'
@@ -527,6 +527,7 @@ async function executePrompt(request) {
   const planningContext = {
     projectRoot: request.payload?.projectContext?.projectRoot,
     permissionMode: request.payload?.projectContext?.permissionMode,
+    filePlacement: buildFilePlacement(request.payload?.projectContext),
     workSnapshot: request.payload?.workSnapshot,
     memoryContext: request.payload?.memoryContext,
     assistantPackage: request.payload?.assistantPackage,
