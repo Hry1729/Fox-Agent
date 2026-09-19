@@ -622,6 +622,41 @@ const READ_RESULT_PUBLIC_FIELDS = [
   'complete', 'originalBytes', 'retrievable', 'truncated',
 ]
 
+// Whitelist of search/read details that are model-relevant for B02 pagination
+// and B01 filtering. These are projected into the model view as a trailing
+// navigation block so the model can see truncation, continuation and scope
+// facts that the provider projection would otherwise drop with `details`.
+const SEARCH_NAV_FIELDS = [
+  'count', 'scanComplete', 'matchLimitReached', 'scanTruncated',
+  'skippedIgnored', 'totalMatches', 'pageComplete', 'hiddenIgnored',
+  'truncated', 'startLine', 'lineCount', 'totalLines', 'readMode',
+]
+
+const SEARCH_NAV_TOOLS = new Set(['read', 'ls', 'find', 'grep'])
+const SEARCH_NAV_MARKER = 'FOX_SEARCH_NAV_V1'
+
+/** Extract whitelisted navigation facts from read/ls/find/grep details. */
+export function searchNavigationView(details) {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return null
+  const view = {}
+  for (const field of SEARCH_NAV_FIELDS) {
+    if (Object.hasOwn(details, field)) view[field] = details[field]
+  }
+  return Object.keys(view).length > 0 ? view : null
+}
+
+/** Render the search navigation as a single-line, JSON-parseable text block. */
+export function renderSearchNavigation(nav) {
+  return `${SEARCH_NAV_MARKER} ${JSON.stringify(nav)}`
+}
+
+/** The trailing text block for one search/read result, or null. */
+export function searchNavigationBlock(tool, details) {
+  if (!SEARCH_NAV_TOOLS.has(tool)) return null
+  const nav = searchNavigationView(details)
+  return nav ? { type: 'text', text: renderSearchNavigation(nav) } : null
+}
+
 /** Extract the whitelisted navigation facts from `read_tool_result` details. */
 export function readToolResultNavigationView(details) {
   if (!details || typeof details !== 'object' || Array.isArray(details)) return null
@@ -653,21 +688,29 @@ export function readResultNavigationBlock(details) {
 export function modelToolResultContent(tool, { isError = false, content = [], details = null, resultRef = null, storage = null } = {}) {
   const bounded = boundToolResultContent(tool, { isError, content, resultRef, storage })
   const view = Array.isArray(bounded) ? bounded : content
-  if (isError || tool !== RESULT_REF_TOOL) return view
-  const block = readResultNavigationBlock(details)
-  if (!block) return view
-  // A replay may already contain a projected cursor. Compare the final block
-  // semantically (Rust and Node serialize keys in different orders), keeping
-  // the first block's stored bytes intact even if they look like a cursor.
-  const last = view.at(-1)
-  const prefix = `${READ_RESULT_CURSOR_MARKER} `
-  if (view.length > 1 && last?.type === 'text' && last.text?.startsWith(prefix)) {
-    try {
-      const prior = JSON.parse(last.text.slice(prefix.length))
-      const nav = readToolResultNavigationView(details)
-      if (prior && Object.keys(prior).length === Object.keys(nav).length
-          && Object.entries(nav).every(([key, value]) => prior[key] === value)) return view
-    } catch { /* A source text block is not navigation merely because it has a marker. */ }
+  if (isError) return view
+  // read_tool_result gets its cursor navigation appended.
+  if (tool === RESULT_REF_TOOL) {
+    const block = readResultNavigationBlock(details)
+    if (!block) return view
+    // A replay may already contain a projected cursor. Compare the final block
+    // semantically (Rust and Node serialize keys in different orders), keeping
+    // the first block's stored bytes intact even if they look like a cursor.
+    const last = view.at(-1)
+    const prefix = `${READ_RESULT_CURSOR_MARKER} `
+    if (view.length > 1 && last?.type === 'text' && last.text?.startsWith(prefix)) {
+      try {
+        const prior = JSON.parse(last.text.slice(prefix.length))
+        const nav = readToolResultNavigationView(details)
+        if (prior && Object.keys(prior).length === Object.keys(nav).length
+            && Object.entries(nav).every(([key, value]) => prior[key] === value)) return view
+      } catch { /* A source text block is not navigation merely because it has a marker. */ }
+    }
+    return [...view, block]
   }
-  return [...view, block]
+  // Search/read tools get their pagination/filtering metadata appended so the
+  // model can see truncation, continuation and scope facts.
+  const searchBlock = searchNavigationBlock(tool, details)
+  if (searchBlock) return [...view, searchBlock]
+  return view
 }

@@ -186,10 +186,58 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
     let path = approved.resolved_path;
     if tool == "read" {
         let text = gateway.text(&path, true)?;
+        // B03: line-mode parameters are mutually exclusive with offset/limit.
+        let has_line_mode = input.get("startLine").is_some() || input.get("lineCount").is_some();
+        let has_char_mode = input.get("offset").is_some() || input.get("limit").is_some();
+        if has_line_mode && has_char_mode {
+            return Err("startLine/lineCount and offset/limit are mutually exclusive; use one mode only".into());
+        }
+        if has_line_mode {
+            // RD-v1: startLine/lineCount must be paired positive integers.
+            let start_line = input.get("startLine").and_then(Value::as_u64)
+                .filter(|v| *v >= 1)
+                .ok_or("startLine and lineCount must both be positive integers (startLine is 1-based)")? as usize;
+            let line_count = input.get("lineCount").and_then(Value::as_u64)
+                .filter(|v| *v >= 1)
+                .ok_or("startLine and lineCount must both be positive integers (startLine is 1-based)")? as usize;
+            // Split into lines preserving line endings for accurate range extraction.
+            let lines: Vec<&str> = text.split_inclusive('\n').collect();
+            let total_lines = lines.len();
+            if start_line > total_lines {
+                return Ok(result(String::new(), json!({
+                    "path": path, "truncated": false,
+                    "startLine": start_line, "lineCount": line_count,
+                    "totalLines": total_lines, "pageComplete": true,
+                    "scanComplete": true,
+                    "readMode": "lines",
+                }), limits.output_chars));
+            }
+            let end_line = start_line.saturating_add(line_count).saturating_sub(1).min(total_lines);
+            let selected: String = lines[start_line - 1..end_line].concat();
+            let selected_utf16 = selected.encode_utf16().count();
+            // RD-v1: pageComplete must reflect the actually returned range.
+            // Any internal (read_chars) or output (result) truncation means the
+            // requested page was not fully returned.
+            let read_chars_cut = selected_utf16 > limits.read_chars;
+            let output_cut = selected_utf16 > limits.output_chars;
+            let truncated = read_chars_cut || output_cut;
+            let bounded = if read_chars_cut { slice_utf16(&selected, 0, limits.read_chars) } else { selected };
+            return Ok(result(bounded, json!({
+                "path": path, "truncated": truncated,
+                "startLine": start_line, "lineCount": line_count,
+                "totalLines": total_lines, "pageComplete": end_line == total_lines && !truncated,
+                "scanComplete": true,
+                "readMode": "lines",
+            }), limits.output_chars));
+        }
+        // Legacy UTF-16 code-unit mode (unchanged).
         let offset = input.get("offset").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as usize;
         let limit = input.get("limit").and_then(Value::as_f64).filter(|v| *v != 0.0).unwrap_or(limits.read_chars as f64).clamp(1.0, limits.read_chars as f64) as usize;
         let truncated = offset.saturating_add(limit) < text.encode_utf16().count();
-        return Ok(result(slice_utf16(&text, offset, limit), json!({"path":path,"truncated":truncated}), limits.output_chars));
+        return Ok(result(slice_utf16(&text, offset, limit), json!({
+            "path": path, "truncated": truncated,
+            "readMode": "utf16",
+        }), limits.output_chars));
     }
     if tool == "ls" {
         let (entries, truncated) = gateway.entries(&path, limits.entries)?;
