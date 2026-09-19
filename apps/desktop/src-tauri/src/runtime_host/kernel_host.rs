@@ -96,14 +96,48 @@ fn register_approval_grant(
 pub(crate) fn resource_failure_result(tool: &str, error: &str) -> Value {
     // Reader errors describe only the authorized path operation (missing path,
     // nonexistent file, OS access failure, scope escape). Keep them actionable.
+    //
+    // A02 (EX-v1): the three local executors are in the same category. Their
+    // text is produced by this Host from the user's own project and child
+    // process, never fetched from a remote body, so a command that failed with
+    // a compiler error, a failing assertion or a denied path must reach the
+    // model as a reason it can act on — a generic sentence makes the failure
+    // unfixable and invites the model to repeat the identical call. It is still
+    // bounded and credential-redacted before it travels.
+    //
     // Other executors may return remote bodies or credentials; do not forward.
-    let message = if crate::resource_gateway::is_reader(tool) || tool == "attachment_compute" {
-        format!("Project file operation failed: {}", error.chars().take(600).collect::<String>())
+    let (label, limit) = if crate::resource_gateway::is_reader(tool) || tool == "attachment_compute"
+    {
+        ("Project file operation failed: ", 600usize)
+    } else if matches!(tool, "run_command" | "write_file" | "edit_file") {
+        // "ran and failed", "was stopped" and "never started" are different facts
+        // for the model: the first has output to read, the last has a
+        // precondition to fix. An unclassified text still says the operation did
+        // not succeed — which is known — without claiming why.
+        let label = match crate::tool_host::ToolErrorCode::classify(error) {
+            Some(code) if code.is_completed_failure() => "Local operation failed: ",
+            Some(crate::tool_host::ToolErrorCode::Cancelled) => "Local operation was cancelled: ",
+            Some(crate::tool_host::ToolErrorCode::StartFailed)
+            | Some(crate::tool_host::ToolErrorCode::InvalidInput)
+            | Some(crate::tool_host::ToolErrorCode::PermissionDenied) => {
+                "Local operation did not run: "
+            }
+            _ => "Local operation failed: ",
+        };
+        (label, 4_000usize)
     } else {
-        "The resource request failed. No successful result is available.".to_owned()
+        return serde_json::json!({"content":[{"type":"text","text":"The resource request failed. No successful result is available."}],
+            "details":{"code":"kernel.resource_failed","tool":tool}});
     };
-    serde_json::json!({"content":[{"type":"text","text":message}],
-        "details":{"code":"kernel.resource_failed","tool":tool}})
+    let message = format!(
+        "{label}{}",
+        super::redact_execution_diagnostic(error, limit)
+    );
+    let mut details = serde_json::json!({"code":"kernel.resource_failed","tool":tool});
+    if let Some(code) = crate::tool_host::ToolErrorCode::classify(error) {
+        details["errorCode"] = serde_json::Value::String(code.as_str().to_owned());
+    }
+    serde_json::json!({"content":[{"type":"text","text":message}],"details":details})
 }
 
 #[cfg(test)]
@@ -115,6 +149,83 @@ mod failure_tests {
         assert!(!result.to_string().contains("frozen policy"));
         let remote = super::resource_failure_result("http_request", "response includes private token");
         assert!(!remote.to_string().contains("private token"));
+    }
+
+    // A02 (EX-v1): a failed local execution must reach the model as a reason it
+    // can act on, while remote executors keep their body to themselves.
+    #[test]
+    fn a_failed_command_keeps_its_compiler_reason_and_classification() {
+        let result = super::resource_failure_result(
+            "run_command",
+            "[tool.nonzero_exit] src\\main.rs:12:5: error[E0308]: mismatched types",
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("error[E0308]: mismatched types"), "{text}");
+        assert!(!text.contains("No successful result is available"), "{text}");
+        assert_eq!(result["details"]["errorCode"], "tool.nonzero_exit");
+        assert_eq!(result["details"]["code"], "kernel.resource_failed");
+    }
+
+    #[test]
+    fn a_refused_call_says_it_never_ran() {
+        // A refusal produces no output at all. Saying only "failed" would send
+        // the model looking for output to read instead of fixing the precondition.
+        let result = super::resource_failure_result(
+            "write_file",
+            "[tool.permission_denied] 'notes/../secrets.env' escapes the authorized project root",
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("Local operation did not run: "), "{text}");
+        assert!(text.contains("escapes the authorized project root"), "{text}");
+        assert_eq!(result["details"]["errorCode"], "tool.permission_denied");
+    }
+
+    #[test]
+    fn a_cancelled_edit_reports_the_denial_reason_rather_than_a_generic_failure() {
+        let result = super::resource_failure_result(
+            "edit_file",
+            "[tool.cancelled] tool.cancelled: the Run was cancelled",
+        );
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("tool.cancelled"));
+        assert_eq!(result["details"]["errorCode"], "tool.cancelled");
+    }
+
+    #[test]
+    fn an_unclassified_failure_stays_generic_for_remote_tools_and_loses_nothing_locally() {
+        // MCP/knowledge/web bodies are not this Host's to forward.
+        let mcp = super::resource_failure_result("call_mcp_tool", "[tool.unknown] secret=abcd");
+        assert!(mcp["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("No successful result is available"));
+        assert!(!mcp.to_string().contains("secret=abcd"));
+        // No tag, no invented classification.
+        let local = super::resource_failure_result("run_command", "the child died oddly");
+        assert!(local["details"].get("errorCode").is_none());
+        assert!(local["content"][0]["text"].as_str().unwrap().contains("the child died oddly"));
+    }
+
+    #[test]
+    fn diagnostics_are_bounded_and_credentials_never_travel() {
+        let noisy = format!(
+            "Authorization: Bearer super-secret-value\n{}",
+            (0..12)
+                .map(|_| "x".repeat(900))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let result = super::resource_failure_result("run_command", &noisy);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("super-secret-value"), "credentials must not travel");
+        assert!(text.contains("[REDACTED]"), "redaction must be visible: {text}");
+        assert!(text.chars().count() < 4_600, "{} chars is over the bound", text.chars().count());
+        assert!(
+            text.contains("截断"),
+            "a bounded diagnostic has to say it was bounded, not look complete: {text}"
+        );
     }
 }
 

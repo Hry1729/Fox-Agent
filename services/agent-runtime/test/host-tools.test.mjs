@@ -1018,3 +1018,169 @@ test('forwards local graph requests and preserves the Host error code', async ()
     },
   }])
 })
+
+// A01/A02 (EX-v1): the Host now reports a completed-but-failed execution as a
+// failed payload that still carries its result. The Runtime must put the real
+// reason in front of the model, not just "it failed".
+test('run_command surfaces the retained diagnostics and error code of a failed execution', async () => {
+  const requestHost = async () => ({
+    payload: {
+      isError: true,
+      error: '[tool.nonzero_exit] src\main.rs:12: error[E0308]: mismatched types',
+      errorCode: 'tool.nonzero_exit',
+      errorDetails: { code: 'tool.nonzero_exit', retryable: false },
+      result: {
+        isError: true,
+        content: [{
+          type: 'text',
+          text: '[fox: 命令以退出码 101 结束（非零退出，工具失败）]\nerror[E0308]: mismatched types\n  --> src\main.rs:12:5\n\n[fox: 编译中止，未生成可执行文件]',
+        }],
+        details: { exitCode: 101, timedOut: false, cancelled: false, errorCode: 'tool.nonzero_exit', stdoutBytes: 180, stderrBytes: 0 },
+      },
+    },
+  })
+  const tool = toolByName(createHostTools(requestHost), 'run_command')
+  await assert.rejects(
+    tool.execute('call-build', { command: 'cargo build' }, new AbortController().signal),
+    (error) => {
+      assert.match(error.message, /error\[E0308\]: mismatched types/)
+      assert.match(error.message, /src\main\.rs:12:5/)
+      assert.match(error.message, /退出码 101/)
+      assert.equal(error.code, 'tool.nonzero_exit')
+      assert.equal(error.retryable, false)
+      assert.equal(error.details.code, 'tool.nonzero_exit')
+      return true
+    },
+  )
+})
+
+test('a failed execution is not reported as a bare unexplained failure', async () => {
+  const requestHost = async () => ({
+    payload: {
+      isError: true,
+      error: 'The resource request failed. No successful result is available.',
+    },
+  })
+  const tool = toolByName(createHostTools(requestHost), 'run_command')
+  await assert.rejects(
+    tool.execute('call-bare', { command: 'npm test' }, new AbortController().signal),
+    (error) => {
+      assert.equal(
+        error.message,
+        'The resource request failed. No successful result is available.',
+      )
+      assert.ok(!error.message.includes('undefined'))
+      return true
+    },
+  )
+})
+
+test('a timed-out command reports its partial output as a timeout, not as empty success', async () => {
+  const requestHost = async () => ({
+    payload: {
+      isError: true,
+      error: '[tool.timed_out] [fox: 命令超过超时上限被终止，以下是终止前已产生的输出]\nrunning phase 1',
+      result: {
+        isError: true,
+        content: [{ type: 'text', text: 'running phase 1' }],
+        details: { exitCode: null, timedOut: true, cancelled: false, errorCode: 'tool.timed_out' },
+      },
+    },
+  })
+  const tool = toolByName(createHostTools(requestHost), 'run_command')
+  await assert.rejects(
+    tool.execute('call-slow', { command: 'long-build' }, new AbortController().signal),
+    (error) => {
+      assert.match(error.message, /running phase 1/)
+      assert.equal(error.code, 'tool.timed_out')
+      return true
+    },
+  )
+})
+
+// O-A-01 #4: a failure whose body is far past the inline cap travels as the
+// Host's own bounded preview plus the reference it derived from this run and
+// call. The executor must surface that navigation, not re-inline the bytes.
+test('an oversized failed execution keeps its diagnostics bounded and navigable', async () => {
+  const requestHost = async () => ({
+    payload: {
+      isError: true,
+      error: '[tool.nonzero_exit] [fox: 命令以退出码 1 结束（非零退出，工具失败）]',
+      errorCode: 'tool.nonzero_exit',
+      errorDetails: { code: 'tool.nonzero_exit', retryable: false },
+      result: {
+        truncated: true,
+        originalBytes: 4_200_000,
+        preview: `${'e'.repeat(8_000)}LEAKED-PREVIEW`,
+        message: 'Large tool result is stored by Fox.',
+      },
+      resultRef: 'fox-result://run-9/call-huge',
+      resultRefNote: '完整输出已由 Fox 保存；调用 read_tool_result {"reference":"fox-result://run-9/call-huge"} 可只读取回。',
+      resultRefRetrievable: true,
+    },
+  })
+  const tool = toolByName(createHostTools(requestHost), 'run_command')
+  await assert.rejects(
+    tool.execute('call-huge', { command: 'mvn test' }, new AbortController().signal),
+    (error) => {
+      assert.match(error.message, /fox-result:\/\/run-9\/call-huge/)
+      assert.match(error.message, /read_tool_result/)
+      assert.ok(!error.message.includes('LEAKED-PREVIEW'), 'the stored body stays off the wire')
+      assert.ok(error.message.length < 4_096, `message must stay bounded: ${error.message.length}`)
+      assert.equal(error.code, 'tool.nonzero_exit')
+      return true
+    },
+  )
+})
+
+// The Host only promises retrieval when the blob actually resolves. When it
+// says the storage is unconfirmed, the executor must pass that honesty through
+// instead of inventing a way back.
+test('a failure whose storage is unconfirmed is not promised as readable', async () => {
+  const requestHost = async () => ({
+    payload: {
+      isError: true,
+      error: '[tool.unknown] the command failed',
+      errorDetails: { code: 'tool.unknown', retryable: false },
+      result: { truncated: true, originalBytes: 500_000, preview: 'partial' },
+      resultRef: 'fox-result://run-9/call-lost',
+      resultRefNote: 'Host 未确认可按 fox-result://run-9/call-lost 取回全文；请把输出重定向到文件后分页读取。',
+      resultRefRetrievable: false,
+    },
+  })
+  const tool = toolByName(createHostTools(requestHost), 'run_command')
+  await assert.rejects(
+    tool.execute('call-lost', { command: 'build' }, new AbortController().signal),
+    (error) => {
+      assert.match(error.message, /未确认/)
+      assert.ok(!error.message.includes('可只读取回'), 'no retrieval promise without the blob')
+      return true
+    },
+  )
+})
+
+test('a successful command still returns the Host result untouched', async () => {
+  const result = {
+    content: [{ type: 'text', text: 'built ok' }],
+    details: { exitCode: 0, timedOut: false, cancelled: false, shell: 'cmd.exe /D /S /C' },
+  }
+  const tool = toolByName(
+    createHostTools(async () => ({ payload: { isError: false, result } })),
+    'run_command',
+  )
+  assert.equal(await tool.execute('call-ok', { command: 'cargo build' }, new AbortController().signal), result)
+})
+
+// A05: the tool description is the only place the model learns how the command
+// actually runs. It must state the real executor, the real bounds and the real
+// encoding behaviour instead of an idealised shell.
+test('run_command states the real executor, bounds and output encoding behaviour', () => {
+  const description = toolByName(createHostTools(async () => ({ payload: { result: {} } })), 'run_command').description
+  assert.match(description, /cmd\.exe \/D \/S \/C/)
+  assert.match(description, /sh -lc/)
+  assert.match(description, /not configurable/)
+  assert.match(description, /timeoutSeconds is clamped to 1\.\.120/)
+  assert.match(description, /OEM codepage/)
+  assert.match(description, /redirect it to a file/)
+  assert.match(description, /do not repeat an identical call that already failed/)
+})

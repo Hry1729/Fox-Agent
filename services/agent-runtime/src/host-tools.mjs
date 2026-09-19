@@ -79,12 +79,38 @@ async function executeHostTool(toolCallId, tool, input, requestHost, signal) {
   const payload = response?.payload ?? {}
   if (payload.isError || !Object.prototype.hasOwnProperty.call(payload, 'result')) {
     const baseMessage = payload.error || `Fox host tool ${tool} failed.`
+    // A completed attempt that did not succeed keeps its diagnostics in the
+    // persisted result. Surface them here as well, or the model is told only
+    // that something failed and repeats the identical call. The Host text is
+    // already bounded and credential-redacted; the full output stays behind
+    // the result reference and is reachable through read_tool_result.
+    const resultText = Array.isArray(payload.result?.content)
+      ? payload.result.content
+        .filter((block) => typeof block?.text === 'string' && block.text.trim())
+        .map((block) => block.text.trim())
+        .join('\n\n')
+      : ''
+    // A result that exceeded the inline cap comes back as the Host's bounded
+    // preview, so its body is deliberately not on the wire. The Host states the
+    // reference (its own run/call identity, never tool input) together with
+    // whether that reference really resolves, which is how the model reaches the
+    // retained diagnostics without repeating the failing call.
+    const reference = typeof payload.resultRef === 'string' && payload.resultRef
+      ? payload.resultRef
+      : ''
+    const storageNote = reference
+      ? payload.resultRefNote || `完整输出可按 ${reference} 用 read_tool_result 分页读回`
+      : ''
+    const parts = [baseMessage]
+    if (resultText && !baseMessage.includes(resultText)) parts.push(resultText)
+    if (reference && !parts.some((part) => part.includes(reference))) parts.push(storageNote)
+    const message = parts.join('\n')
     const serializedDetails = payload.errorDetails && typeof payload.errorDetails === 'object'
       ? JSON.stringify(payload.errorDetails)
       : ''
     const error = new Error(serializedDetails
-      ? `${baseMessage}\nFox error details: ${serializedDetails}`
-      : baseMessage)
+      ? `${message}\nFox error details: ${serializedDetails}`
+      : message)
     if (payload.errorDetails && typeof payload.errorDetails === 'object') {
       error.details = payload.errorDetails
       if (typeof payload.errorDetails.code === 'string' && payload.errorDetails.code) {
@@ -95,6 +121,10 @@ async function executeHostTool(toolCallId, tool, input, requestHost, signal) {
       }
     }
     if (typeof payload.errorCode === 'string' && payload.errorCode) error.code = payload.errorCode
+    // The classification belongs to the execution, so a payload that carries
+    // it only inside the persisted result is still unambiguous.
+    const detailCode = payload.result?.details?.errorCode
+    if (!error.code && typeof detailCode === 'string' && detailCode) error.code = detailCode
     throw error
   }
   if (payload.result && typeof payload.result === "object" && payload.toolResultStorage) hostStorage.set(payload.result, payload.toolResultStorage)
@@ -236,7 +266,7 @@ export function createHostTools(requestHost) {
     {
       name: 'run_command',
       label: 'Run command',
-      description: 'Run a real non-interactive command with a working directory inside the authorized project. Every call requires explicit approval. On Windows, wrap PowerShell cmdlets with powershell -NoProfile -Command "...".',
+      description: 'Run a real non-interactive command with a working directory inside the authorized project. Every call requires explicit approval. The Host starts cmd.exe /D /S /C on Windows and sh -lc elsewhere; the shell itself is not configurable, so use batch/cmd syntax on Windows (%VAR%, &&) and POSIX syntax elsewhere. To call PowerShell, wrap it: powershell -NoProfile -Command "...". Blank cwd means the project root. timeoutSeconds is clamped to 1..120 and the whole call also obeys the Run budget. Console programs write the system OEM codepage, so non-ASCII output may be decoded imperfectly; when a command must produce exact text, redirect it to a file (command > out.txt 2>&1) and read that file instead. A non-zero exit, a timeout or a dropped output is reported with errorCode plus the output the command actually produced - read it before retrying, and do not repeat an identical call that already failed.',
       parameters: Type.Object({
         command: Type.String(),
         cwd: Type.Optional(Type.String()),
