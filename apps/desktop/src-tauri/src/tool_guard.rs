@@ -54,6 +54,36 @@ pub fn approve_read_only_tool(
         .as_object()
         .cloned()
         .ok_or_else(|| "tool input must be an object".to_owned())?;
+    if tool == "read" {
+        let has_line = fields.contains_key("startLine") || fields.contains_key("lineCount");
+        let has_units = fields.contains_key("offset") || fields.contains_key("limit");
+        if has_line && has_units {
+            return Err("startLine/lineCount and offset/limit are mutually exclusive; use one mode only".to_owned());
+        }
+        if has_line {
+            let positive_integer = |name: &str| {
+                fields
+                    .get(name)
+                    .and_then(Value::as_u64)
+                    .filter(|value| *value > 0)
+                    .is_some()
+            };
+            if !positive_integer("startLine") || !positive_integer("lineCount") {
+                return Err("startLine and lineCount must both be positive integers (startLine is 1-based)".to_owned());
+            }
+        }
+    }
+    if matches!(tool, "find" | "grep") {
+        if fields.get("pattern").and_then(Value::as_str).is_none() {
+            return Err("search input must contain a string pattern".to_owned());
+        }
+        if fields
+            .get("cursor")
+            .is_some_and(|value| value.as_str().is_none_or(str::is_empty))
+        {
+            return Err("search cursor must be a non-empty string".to_owned());
+        }
+    }
     normalized.insert(
         "path".to_owned(),
         Value::String(canonical_target.to_string_lossy().into_owned()),
@@ -161,6 +191,33 @@ mod tests {
             approve_read_only_tool("read", &serde_json::json!({"path": outside}), root.to_str());
         assert!(result.is_err());
         let _ = fs::remove_file(outside);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn validates_frozen_read_ranges_and_search_cursor_shape() {
+        let root = test_project();
+        let root_text = root.to_str();
+        assert!(approve_read_only_tool(
+            "read",
+            &serde_json::json!({"path":"src/note.txt","startLine":1}),
+            root_text,
+        ).unwrap_err().contains("positive integers"));
+        assert!(approve_read_only_tool(
+            "read",
+            &serde_json::json!({"path":"src/note.txt","startLine":1,"lineCount":1,"offset":0}),
+            root_text,
+        ).unwrap_err().contains("mutually exclusive"));
+        assert!(approve_read_only_tool(
+            "grep",
+            &serde_json::json!({"path":".","pattern":"hello","cursor":7}),
+            root_text,
+        ).unwrap_err().contains("cursor"));
+        assert!(approve_read_only_tool(
+            "find",
+            &serde_json::json!({"path":".","pattern":"note","cursor":""}),
+            root_text,
+        ).unwrap_err().contains("cursor"));
         let _ = fs::remove_dir_all(root);
     }
 }

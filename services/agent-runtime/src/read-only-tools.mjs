@@ -29,14 +29,18 @@ export function createReadOnlyTools(requestPreflight, { limits, executeHost } = 
       return response.payload.result
     }
     if (route !== 'runtime') throw new Error(`Unknown frozen read-only execution route: ${route}`)
-    return executeReadOnlyTool(tool, approved.input, { signal, limits })
+    return executeReadOnlyTool(tool, approved.input, {
+      signal,
+      limits,
+      authorizationScope: approved.permissionSnapshotId ?? '',
+    })
   }
   return defineFoxTools([
     {
       name: 'read',
       label: 'Read file',
-      description: 'Read a UTF-8 text file inside the authorized project folder. The Rust reader also extracts DOCX, XLSX and PPTX text; spreadsheet formulas use saved results, not recalculation. Legacy DOC/XLS/PPT require conversion.',
-      parameters: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()) }),
+            description: 'Read a UTF-8 text file inside the authorized project folder. Use offset/limit (UTF-16 code units, never split surrogate pairs; nextOffset advances by actually returned units) or startLine/lineCount (1-based lines, mutually exclusive with offset/limit). The Rust reader also extracts DOCX, XLSX and PPTX text; spreadsheet formulas use saved results, not recalculation. Legacy DOC/XLS/PPT require conversion.',
+      parameters: Type.Object({ path: Type.String(), offset: Type.Optional(Type.Number()), limit: Type.Optional(Type.Number()), startLine: Type.Optional(Type.Number()), lineCount: Type.Optional(Type.Number()) }),
       execute: async (toolCallId, params, signal) => {
         return execute(toolCallId, 'read', params, signal)
       },
@@ -53,8 +57,8 @@ export function createReadOnlyTools(requestPreflight, { limits, executeHost } = 
     {
       name: 'find',
       label: 'Find files',
-      description: 'Find file and directory names below a project path. Omit path to search from the project root.',
-      parameters: Type.Object({ path: Type.Optional(Type.String()), pattern: Type.String() }),
+            description: 'Find file and directory names below a project path. Omit path to search from the project root. Supports caseSensitive and glob on both routes; regex is supported by the runtime route and explicitly rejected by the Rust resource route. Respects dependency/build ignore rules. Pass cursor (from a previous nextCursor) with the SAME pattern/options/scope to continue; null nextCursor means the scope is exhausted.',
+      parameters: Type.Object({ path: Type.Optional(Type.String()), pattern: Type.String(), caseSensitive: Type.Optional(Type.Boolean()), regex: Type.Optional(Type.Boolean()), glob: Type.Optional(Type.String()), cursor: Type.Optional(Type.String()) }),
       execute: async (toolCallId, params, signal) => {
         return execute(toolCallId, 'find', params, signal)
       },
@@ -62,8 +66,8 @@ export function createReadOnlyTools(requestPreflight, { limits, executeHost } = 
     {
       name: 'grep',
       label: 'Search files',
-      description: 'Search text files below a project path for a literal string. Omit path to search from the project root.',
-      parameters: Type.Object({ path: Type.Optional(Type.String()), pattern: Type.String() }),
+      description: 'Search text files below a project path. Omit path to search from the project root. Supports caseSensitive and glob on both routes; regex is supported by the runtime route and explicitly rejected by the Rust resource route. Respects dependency/build ignore rules. Pass cursor (from a previous nextCursor) with the SAME pattern/options/scope to continue; null nextCursor means the scope is exhausted.',
+      parameters: Type.Object({ path: Type.Optional(Type.String()), pattern: Type.String(), caseSensitive: Type.Optional(Type.Boolean()), regex: Type.Optional(Type.Boolean()), glob: Type.Optional(Type.String()), cursor: Type.Optional(Type.String()) }),
       execute: async (toolCallId, params, signal) => {
         return execute(toolCallId, 'grep', params, signal)
       },

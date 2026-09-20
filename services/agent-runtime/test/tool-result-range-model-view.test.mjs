@@ -326,10 +326,16 @@ test('a non-retrievable stored preview is distinguishable in the model view', ()
 })
 
 test('non-read_tool_result tools never leak a cursor block', () => {
-  const content = modelToolResultContent('read', { content: [{ type: 'text', text: 'plain text' }], details: { nextOffset: 5 } })
-  assert.equal(content.length, 1, 'whitelist applies only to read_tool_result')
+  const content = modelToolResultContent('read', { content: [{ type: 'text', text: 'plain text' }], details: {} })
+  assert.equal(content.length, 1, 'empty navigation must not append a block')
   assert.equal(readToolResultNavigationView({ kept: 'private', nextOffset: 3 }).nextOffset, 3, 'unlisted keys are dropped')
   assert.ok(!('kept' in readToolResultNavigationView({ kept: 'private', nextOffset: 3 })))
+  // Search/read navigation is intentional and namespaced: a read with real
+  // pagination facts carries FOX_SEARCH_NAV_V1, never the cursor marker.
+  const nav = modelToolResultContent('read', { content: [{ type: 'text', text: 'plain text' }], details: { nextOffset: 5, truncated: true } })
+  assert.equal(nav.length, 2)
+  assert.ok(nav[1].text.startsWith('FOX_SEARCH_NAV_V1 '))
+  assert.ok(!nav[1].text.includes(READ_RESULT_CURSOR_MARKER))
 })
 
 test('replayed views keep a single cursor across Rust key order and repeated Legacy adaptation', async () => {
