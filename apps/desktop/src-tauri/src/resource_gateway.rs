@@ -410,6 +410,11 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
                 .sum();
             let delivered_lines = bounded.matches('\n').count();
             let next_start_line = start_line + delivered_lines;
+            let next_start_line_value = if truncated && bounded.ends_with('\n') {
+                json!(next_start_line)
+            } else {
+                Value::Null
+            };
             return Ok(result(bounded, json!({
                 "path": path, "truncated": truncated,
                 "startLine": start_line, "lineCount": line_count,
@@ -417,7 +422,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
                 "scanComplete": true,
                 "readMode": "lines",
                 "nextOffset": if truncated { json!(selected_start + delivered_utf16) } else { Value::Null },
-                "nextStartLine": if truncated && bounded.ends_with('\n') { json!(next_start_line) } else { Value::Null },
+                "nextStartLine": next_start_line_value,
                 "returnedUnits": delivered_utf16, "totalUnits": text.encode_utf16().count(),
             }), limits.output_chars));
         }
