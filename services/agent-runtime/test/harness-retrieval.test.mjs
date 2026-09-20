@@ -358,6 +358,14 @@ test('grep supports regex option', async (context) => {
 
   const literal = await executeReadOnlyTool('grep', { path: root, pattern: 'foo\\d+bar' })
   assert.equal(literal.details.count, 0, 'literal search must not match regex pattern')
+  await assert.rejects(
+    executeReadOnlyTool('grep', { path: root, pattern: '[', regex: true }),
+    /invalid regex/,
+  )
+  await assert.rejects(
+    executeReadOnlyTool('grep', { path: root, pattern: 'x'.repeat(4097), regex: true }),
+    /pattern exceeds 4096 bytes/,
+  )
 })
 
 test('one-unit emoji read advances and final output cap never splits a surrogate pair', async (context) => {
