@@ -194,7 +194,7 @@ fn create_fresh_host_tool_call(
         HostToolCallDisposition::Created | HostToolCallDisposition::PromotedRuntime => {
             Ok(HostToolCallExecution::Execute(record))
         }
-        HostToolCallDisposition::ReplayTerminal => replayed_host_tool_call(record),
+        HostToolCallDisposition::ReplayTerminal => replayed_host_tool_call(database, record),
         HostToolCallDisposition::AlreadyInFlight => Err(format!(
             "[tool_call.already_in_flight] ToolCall '{runtime_tool_call_id}' is already '{}' and cannot start a second handler",
             record.status
@@ -215,10 +215,12 @@ fn inspect_existing_host_tool_call(
         return Ok(None);
     };
     match disposition {
-        HostToolCallDisposition::ReplayTerminal => match replayed_host_tool_call(record)? {
-            HostToolCallExecution::Replay(response) => Ok(Some(response)),
-            HostToolCallExecution::Execute(_) => unreachable!("terminal replay never executes"),
-        },
+        HostToolCallDisposition::ReplayTerminal => {
+            match replayed_host_tool_call(database, record)? {
+                HostToolCallExecution::Replay(response) => Ok(Some(response)),
+                HostToolCallExecution::Execute(_) => unreachable!("terminal replay never executes"),
+            }
+        }
         HostToolCallDisposition::AlreadyInFlight => Err(format!(
             "[tool_call.already_in_flight] ToolCall '{runtime_tool_call_id}' is already in flight"
         )),
@@ -228,33 +230,50 @@ fn inspect_existing_host_tool_call(
     }
 }
 
-fn replayed_host_tool_call(record: ToolCallRecord) -> Result<HostToolCallExecution, String> {
+fn replayed_host_tool_call(
+    database: &Database,
+    record: ToolCallRecord,
+) -> Result<HostToolCallExecution, String> {
     if record.status == "completed" {
-        return Ok(HostToolCallExecution::Replay(json!({
-            "isError": false,
-            "result": record.result.unwrap_or(Value::Null),
-            "hookAnnotations": [],
-            "replayed": true,
-        })));
+        return Ok(HostToolCallExecution::Replay(settled_host_tool_call_envelope(
+            database,
+            &record.run_id,
+            &record.runtime_tool_call_id,
+            &record.conversation_id,
+            record.result.clone().unwrap_or(Value::Null),
+            None,
+            // Replays never re-run hooks, so their annotation set is empty.
+            Vec::new(),
+            true,
+        )));
     }
     if record.status == "failed" {
-        // A replayed failure must hand back the same diagnostics the original
-        // attempt produced, otherwise the second delivery of one tool call
-        // silently loses the reason and the model repeats the failed command.
+        // A replayed failure must hand back the same facts the original attempt
+        // produced - same bounded result, same classification, same trusted
+        // storage fact and reference - otherwise the second delivery of one
+        // ToolCall is silently less informative and the model repeats the
+        // command it was told about.
         let error = record
             .error_message
             .clone()
             .unwrap_or_else(|| "the persisted ToolCall failed".to_owned());
-        return Ok(HostToolCallExecution::Replay(match record.result {
-            Some(result) => json!({
+        let Some(result) = record.result.clone() else {
+            // A failure that never had a result keeps its original minimal shape.
+            return Ok(HostToolCallExecution::Replay(json!({
                 "isError": true,
                 "error": error,
-                "errorCode": failure_error_code(&result).to_owned(),
-                "result": result,
-                "replayed": true,
-            }),
-            None => json!({ "isError": true, "error": error }),
-        }));
+            })));
+        };
+        return Ok(HostToolCallExecution::Replay(settled_host_tool_call_envelope(
+            database,
+            &record.run_id,
+            &record.runtime_tool_call_id,
+            &record.conversation_id,
+            result,
+            Some(error),
+            Vec::new(),
+            true,
+        )));
     }
     Err(format!(
         "[tool_call.replayed_terminal] ToolCall '{}' already ended as '{}': {}",
@@ -7187,19 +7206,49 @@ fn authoritative_host_tool_terminal(
         return None;
     }
     if record.status == "completed" {
-        return Some(Ok(json!({
-            "isError": false,
-            "result": record.result.unwrap_or(Value::Null),
-            "toolResultStorage": database.tool_result_storage(run_id, tool_call_id).unwrap_or_default(),
-            "hookAnnotations": [],
-            "replayed": true,
-        })));
+        // One builder for the first receipt, the ordinary replay and this
+        // finalize-race fallback: whichever side of a duplicate delivery wins,
+        // the settled shape cannot drift.
+        return Some(Ok(settled_host_tool_call_envelope(
+            database,
+            run_id,
+            tool_call_id,
+            &record.conversation_id,
+            record.result.clone().unwrap_or(Value::Null),
+            None,
+            Vec::new(),
+            true,
+        )));
     }
-    (record.status == "failed").then(|| {
-        Err(record
+    if record.status == "failed" {
+        // A-REQ-007: this row is the authoritative terminal state of *this*
+        // ToolCall - the identity check above already rejected a different tool
+        // or input, and a Runtime-owned row was refused. So the losing side of a
+        // duplicate settle must hand back the same facts the winning side got:
+        // same tag, same bounded preview, same reference, same storage fact.
+        // A failure that never stored a result is the hard-error channel
+        // (cancellation, start failure) and stays `Err`, which is also what its
+        // first delivery returned. Nothing here re-runs the tool or touches
+        // scheduling.
+        let error = record
             .error_message
-            .unwrap_or_else(|| "the persisted ToolCall failed".to_owned()))
-    })
+            .clone()
+            .unwrap_or_else(|| "the persisted ToolCall failed".to_owned());
+        return Some(match record.result.clone() {
+            Some(result) => Ok(settled_host_tool_call_envelope(
+                database,
+                run_id,
+                tool_call_id,
+                &record.conversation_id,
+                result,
+                Some(error),
+                Vec::new(),
+                true,
+            )),
+            None => Err(error),
+        });
+    }
+    None
 }
 
 fn finalize_host_tool_execution(
@@ -7239,10 +7288,9 @@ fn finalize_host_tool_execution(
             let tool_result_storage =
                 database.tool_result_storage(run_id, tool_call_id).unwrap_or_default();
             if reported_failure {
-                let code = failure_error_code(&result).to_owned();
                 // Bounded transport: the wire carries exactly what the Host
-                // persisted — which `complete_host_tool_call` already compacts
-                // into a preview above the inline cap — instead of the raw
+                // persisted - which `complete_host_tool_call` already compacts
+                // into a preview above the inline cap - instead of the raw
                 // multi-megabyte value, so a failure log cannot dominate the
                 // JSONL frame or the model context. The in-memory value is used
                 // only when the terminal row cannot be read back at all.
@@ -7251,65 +7299,25 @@ fn finalize_host_tool_execution(
                     .ok()
                     .flatten()
                     .map(|(record, _)| record);
-                let stored = match persisted.as_ref().and_then(|record| record.result.clone()) {
-                    Some(stored) => stored,
-                    None => result,
+                let (stored, conversation) = match persisted.as_ref() {
+                    Some(record) => (
+                        record.result.clone().unwrap_or(result),
+                        record.conversation_id.as_str().to_owned(),
+                    ),
+                    None => (result, String::new()),
                 };
-                // Whether the persisted body is only the bounded preview. Decided
-                // before the value is moved into the response so a multi-megabyte
-                // fallback is never cloned.
-                let spilled = stored
-                    .get("truncated")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                let mut response = json!({
-                    "isError": true,
-                    "error": error_message.unwrap_or_else(|| "the tool reported a failed execution".to_owned()),
-                    "errorCode": code,
-                    "errorDetails": { "code": code, "retryable": false },
-                    "result": stored,
-                    "toolResultStorage": tool_result_storage,
-                    "hookAnnotations": merge_hook_annotations(before_annotations, after_annotations),
-                });
-                // When the body was spilled to the blob store, the preview alone
-                // would leave the model without a way back to the bytes, and the
-                // trusted `toolResultStorage` fact is reserved for completed rows.
-                // The reference is the Host's own identity (never tool input) and
-                // whether it really resolves is asked of the same reader the model
-                // would use, so a retrieval promise is made only with the blob
-                // present. The key names match the `resultRef`/`resultRefNote`
-                // vocabulary of the model view.
-                if let Some(reference) = spilled
-                    .then(|| crate::kernel_compaction::tool_result_ref(run_id, tool_call_id))
-                    .flatten()
-                {
-                    let retrievable = persisted
-                        .as_ref()
-                        .and_then(|record| {
-                            // The reader's minimum range is 4 bytes so a UTF-8
-                            // code point is never split; only `retrievable` is
-                            // read here, so the smallest legal request is used.
-                            database
-                                .tool_result_range(&reference, &record.conversation_id, 0, 4)
-                                .ok()
-                        })
-                        .is_some_and(|range| range.retrievable);
-                    let note = if retrievable {
-                        format!(
-                            "完整输出已由 Fox 保存；调用 read_tool_result {{\"reference\":\"{reference}\"}} 可只读取回（不重新执行本工具，也不会重放任何写操作），返回 details.complete=true 前按 details.nextOffset 继续接力即可取得全部原文。"
-                        )
-                    } else {
-                        format!(
-                            "上面的结果正文是 Fox 的有界预览，且 Host 未确认可按 {reference} 取回全文；需要完整诊断时，请让命令把输出重定向到文件（command > out.txt 2>&1）后用读取工具分页查看，不要重复同一失败调用。"
-                        )
-                    };
-                    if let Some(object) = response.as_object_mut() {
-                        object.insert("resultRef".to_owned(), json!(reference));
-                        object.insert("resultRefNote".to_owned(), json!(note));
-                        object.insert("resultRefRetrievable".to_owned(), json!(retrievable));
-                    }
-                }
-                return Ok(response);
+                return Ok(settled_host_tool_call_envelope(
+                    database,
+                    run_id,
+                    tool_call_id,
+                    &conversation,
+                    stored,
+                    Some(error_message.unwrap_or_else(|| {
+                        "the tool reported a failed execution".to_owned()
+                    })),
+                    merge_hook_annotations(before_annotations, after_annotations),
+                    false,
+                ));
             }
             Ok(json!({
                 "isError": false,
@@ -7337,6 +7345,96 @@ fn finalize_host_tool_execution(
     }
 }
 
+/// The single envelope shape a settled Host ToolCall produces, used for the
+/// first receipt and for every replay so the two cannot drift: the bounded
+/// persisted result, the Host's own trusted storage fact, the same
+/// classification, and - when the body was spilled to the blob store - the
+/// reference plus whether the very reader the model would use can serve it.
+///
+/// `stored` is what the Host persisted, never a re-inlined megabyte body;
+/// `authorized_conversation_id` comes from the row, never from tool input, and
+/// an empty value simply means the reference cannot be verified as readable.
+/// A retrieval promise is only made on the verified side; an unverified one
+/// still says so. The successful branch keeps exactly the shape it had before,
+/// so this is about failure receipts and their replay, not about growing the
+/// success contract.
+fn settled_host_tool_call_envelope(
+    database: &Database,
+    run_id: &str,
+    tool_call_id: &str,
+    authorized_conversation_id: &str,
+    stored: Value,
+    failure: Option<String>,
+    hook_annotations: Vec<String>,
+    replayed: bool,
+) -> Value {
+    let storage = database
+        .tool_result_storage(run_id, tool_call_id)
+        .unwrap_or_default();
+    let spilled = stored
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut response = match failure {
+        Some(error) => {
+            let code = settled_failure_error_code(&error, &stored);
+            let mut envelope = json!({
+                "isError": true,
+                "error": error,
+                "errorCode": code,
+                "errorDetails": { "code": code, "retryable": false },
+                "result": stored,
+                "toolResultStorage": storage,
+                "hookAnnotations": hook_annotations,
+            });
+            // Key names follow the `resultRef`/`resultRefNote` vocabulary of the
+            // model view so the executor, the projection and the reader agree on
+            // one word.
+            if spilled {
+                if let Some(reference) =
+                    crate::kernel_compaction::tool_result_ref(run_id, tool_call_id)
+                {
+                    // The reader's minimum range is 4 bytes so a UTF-8 code point
+                    // is never split; only `retrievable` is read here, so the
+                    // smallest legal request is used rather than guessing from
+                    // the row's shape.
+                    let retrievable = database
+                        .tool_result_range(&reference, authorized_conversation_id, 0, 4)
+                        .ok()
+                        .is_some_and(|range| range.retrievable);
+                    let note = if retrievable {
+                        format!(
+                            "完整输出已由 Fox 保存；调用 read_tool_result {{\"reference\":\"{reference}\"}} 可只读取回（不重新执行本工具，也不会重放任何写操作），返回 details.complete=true 前按 details.nextOffset 继续接力即可取得全部原文。"
+                        )
+                    } else {
+                        format!(
+                            "上面的结果正文是 Fox 的有界预览，且 Host 未确认可按 {reference} 取回全文；需要完整诊断时，请让命令把输出重定向到文件（command > out.txt 2>&1）后用读取工具分页查看，不要重复同一失败调用。"
+                        )
+                    };
+                    if let Some(object) = envelope.as_object_mut() {
+                        object.insert("resultRef".to_owned(), json!(reference));
+                        object.insert("resultRefNote".to_owned(), json!(note));
+                        object.insert("resultRefRetrievable".to_owned(), json!(retrievable));
+                    }
+                }
+            }
+            envelope
+        }
+        None => json!({
+            "isError": false,
+            "result": stored,
+            "toolResultStorage": storage,
+            "hookAnnotations": hook_annotations,
+        }),
+    };
+    if replayed {
+        if let Some(object) = response.as_object_mut() {
+            object.insert("replayed".to_owned(), Value::Bool(true));
+        }
+    }
+    response
+}
+
 /// The bounded `error_message` for a completed-but-failed execution. It stays
 /// short on purpose: the retained output belongs to the result and the blob
 /// store, while the persisted error column is what the approval card, the
@@ -7357,6 +7455,33 @@ fn failure_error_code(result: &Value) -> &str {
         .and_then(Value::as_str)
         .filter(|code| !code.trim().is_empty())
         .unwrap_or_else(|| crate::tool_host::ToolErrorCode::Unknown.as_str())
+}
+
+/// The EX-v1 tag a settled failure is reported with, for the first receipt **and**
+/// every replay.
+///
+/// The result body is the first source, because that is what the executor
+/// actually returned. It cannot be the only one: `complete_host_tool_call`
+/// compacts an oversized result into a bounded preview, and `details` does not
+/// survive that - so deriving the tag from the body alone would classify a
+/// multi-megabyte failure as `tool.unknown` while the very same small failure
+/// keeps its real tag, which is exactly the drift between what the model is
+/// told and what the run did. The `error_message` the Host wrote for this same
+/// ToolCall is the compaction-proof copy of that decision (`[tool.<tag>] …`,
+/// CONTRACTS v1.2 §1 EX-v1) and lives in its own column, so it is consulted
+/// only when the body no longer carries a tag.
+///
+/// This does not let a tool label itself: the prefix is honoured only when it
+/// parses as one of the seven tags, both sources here are Host-authored, and the
+/// bounded transport is unchanged - the full body still stays out of the wire.
+fn settled_failure_error_code(error_message: &str, stored: &Value) -> String {
+    let from_body = failure_error_code(stored);
+    if from_body != crate::tool_host::ToolErrorCode::Unknown.as_str() {
+        return from_body.to_owned();
+    }
+    crate::tool_host::ToolErrorCode::classify(error_message)
+        .map(|code| code.as_str().to_owned())
+        .unwrap_or_else(|| from_body.to_owned())
 }
 
 fn handle_mcp_tool_request(
@@ -10266,6 +10391,353 @@ mod attachment_tests {
             stdout[..64 * 1024],
             "the same reference is re-readable without re-running anything"
         );
+        // A-REQ-006 at the Host seam: the failed row now carries the same trusted
+        // storage fact a completed one does, so a bounded view of it is honest.
+        assert_eq!(response["toolResultStorage"]["stored"], Value::Bool(true));
+        assert!(
+            response["toolResultStorage"]["retrievableBytes"]
+                .as_u64()
+                .unwrap()
+                >= 1,
+            "{}",
+            response["toolResultStorage"]
+        );
+
+        // Item 3: a re-delivery of this very call must not be less informative
+        // than the first receipt, and must not take a second execution slot.
+        let replayed = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            "call-huge",
+            "run_command",
+            &input,
+            "running",
+            false,
+        )
+        .unwrap();
+        let HostToolCallExecution::Replay(replay) = replayed else {
+            panic!("a terminal failed ToolCall replays; it never re-executes");
+        };
+        assert_eq!(replay["isError"], Value::Bool(true));
+        assert_eq!(replay["errorCode"], "tool.nonzero_exit");
+        assert_eq!(replay["replayed"], Value::Bool(true));
+        assert_eq!(replay["resultRef"].as_str(), Some(reference.as_str()));
+        assert_eq!(replay["resultRefRetrievable"], Value::Bool(true));
+        assert_eq!(replay["result"]["truncated"], Value::Bool(true));
+        assert_eq!(replay["toolResultStorage"]["stored"], Value::Bool(true));
+        assert_eq!(
+            database
+                .tool_result_range(
+                    replay["resultRef"].as_str().unwrap(),
+                    &conversation.id,
+                    0,
+                    4_096,
+                )
+                .unwrap()
+                .content,
+            stdout[..4_096],
+            "the reference handed to the model on replay pages the same bytes"
+        );
+        // The read-only inspection the protocol handler uses before dispatch also
+        // answers from storage, so the executor is never reached a second time.
+        let inspection = inspect_existing_host_tool_call(
+            &database,
+            &run.id,
+            "call-huge",
+            "run_command",
+            &input,
+        )
+        .unwrap()
+        .expect("a settled call is answered from storage, not by running it again");
+        assert_eq!(inspection["isError"], Value::Bool(true));
+        assert_eq!(inspection["resultRef"].as_str(), Some(reference.as_str()));
+        let (_, _, calls) = database
+            .load_conversation_trace_records(&conversation.id)
+            .unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "replay and inspection must not add a second ToolCall row"
+        );
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A-REQ-006: the storage fact is about reachability, not about success.
+    /// Both terminal states that really stored their result are trusted; anything
+    /// still in flight, without a result, or only kept as a preview is not - and
+    /// nothing here widened authorization, which still comes from the row.
+    #[test]
+    fn failed_and_completed_results_get_the_same_trusted_storage_fact() {
+        let path = std::env::temp_dir()
+            .join(format!("fox-storage-fact-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), None, None, None)
+            .unwrap();
+        let run = database
+            .create_run(&conversation.id, "storage facts", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let storage_of = |id: &str| {
+            database
+                .tool_result_storage(&run.id, id)
+                .expect("the fact is derived from the row")
+        };
+        let unknown = |id: &str| {
+            assert!(
+                !storage_of(id).stored,
+                "{id} must not be advertised as retrievable"
+            );
+        };
+
+        // Still running: nothing is settled, so nothing may be omitted.
+        let running = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            "call-running",
+            "read",
+            &json!({"path":"a.txt"}),
+            "running",
+            false,
+        )
+        .unwrap();
+        assert!(matches!(running, HostToolCallExecution::Execute(_)));
+        unknown("call-running");
+
+        // Failed with no result at all (the error channel, e.g. cancellation).
+        database
+            .complete_host_tool_call(&run.id, "call-running", None, Some("[tool.cancelled] cancelled"))
+            .unwrap();
+        assert_eq!(
+            database
+                .inspect_host_tool_call_replay(
+                    &run.id,
+                    "call-running",
+                    "read",
+                    &json!({"path":"a.txt"}),
+                )
+                .unwrap()
+                .expect("terminal row")
+                .0
+                .status,
+            "failed"
+        );
+        unknown("call-running");
+
+        // Failed with a stored result: the diagnostics are paged from storage.
+        let failed_input = json!({ "command": "cargo check" });
+        assert!(matches!(
+            create_fresh_host_tool_call(&database, &run.id, "call-failed", "run_command", &failed_input, "running", false)
+                .unwrap(),
+            HostToolCallExecution::Execute(_)
+        ));
+        database
+            .complete_host_tool_call(
+                &run.id,
+                "call-failed",
+                Some(&json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": "error[E0308]: mismatched types" }],
+                    "details": { "errorCode": "tool.nonzero_exit", "exitCode": 101 },
+                })),
+                Some("[tool.nonzero_exit] mismatched types"),
+            )
+            .unwrap();
+        let fact = storage_of("call-failed");
+        assert!(fact.stored, "a failed result the Host stored completely is reachable");
+        assert!(
+            fact.retrievable_bytes >= 1,
+            "the fact has to describe real bytes: {fact:?}"
+        );
+
+        // A completed result keeps behaving exactly as before.
+        let done_input = json!({ "path": "a.txt" });
+        assert!(matches!(
+            create_fresh_host_tool_call(&database, &run.id, "call-done", "read", &done_input, "running", false)
+                .unwrap(),
+            HostToolCallExecution::Execute(_)
+        ));
+        database
+            .complete_host_tool_call(
+                &run.id,
+                "call-done",
+                Some(&json!({ "content": [{ "type": "text", "text": "file body" }] })),
+                None,
+            )
+            .unwrap();
+        assert!(storage_of("call-done").stored);
+
+        // Authorization is unchanged: another conversation cannot read either.
+        let other = database
+            .create_conversation(database.default_agent_id(), Some("other"), None, None)
+            .unwrap();
+        let reference = crate::kernel_compaction::tool_result_ref(&run.id, "call-failed")
+            .expect("host-derived reference");
+        assert!(database
+            .tool_result_range(&reference, &other.id, 0, 4)
+            .is_err());
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A-REQ-007: when two deliveries of one ToolCall settle at the same time,
+    /// the loser's durable write is refused and it must answer from the
+    /// authoritative row with the **same** failure envelope the winner got - a
+    /// tag, a bounded preview, a reference - instead of a bare string that
+    /// silently loses all three. Neither delivery may re-run the tool, and the
+    /// row must keep describing the first, authoritative outcome. The fixture is
+    /// deliberately past the inline cap so the spilled path is the one under
+    /// test: a small result would never have lost its `details`.
+    #[test]
+    fn a_second_settle_of_the_same_failure_answers_with_the_same_envelope() {
+        const INLINE_CAP: usize = crate::database::MAX_STORED_TOOL_RESULT_BYTES;
+        let path = std::env::temp_dir().join(format!("fox-settle-race-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), None, None, None)
+            .unwrap();
+        let run = database
+            .create_run(&conversation.id, "duplicate settle", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let input = json!({ "command": "gradle build" });
+        let line = "e: file:///src/main/kotlin/App.kt:12:5 unresolved reference: foo\n";
+        let stdout = line.repeat((INLINE_CAP / line.len()) * 3 + 1);
+        let reported = json!({
+            "isError": true,
+            "content": [{ "type": "text", "text": stdout }],
+            "details": {
+                "exitCode": 1, "timedOut": false, "cancelled": false,
+                "errorCode": "tool.nonzero_exit",
+                "stdout": stdout, "stderr": "",
+                "stdoutBytes": stdout.len(), "stderrBytes": 0,
+            },
+        });
+        assert!(
+            serde_json::to_string(&reported).unwrap().len() > INLINE_CAP,
+            "the racing failure has to be big enough to be compacted"
+        );
+        assert!(matches!(
+            create_fresh_host_tool_call(
+                &database, &run.id, "call-race", "run_command", &input, "running", false,
+            )
+            .unwrap(),
+            HostToolCallExecution::Execute(_)
+        ));
+
+        let first = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            "call-race",
+            "run_command",
+            &input,
+            Vec::new(),
+            Ok(reported.clone()),
+        )
+        .unwrap();
+        assert_eq!(first["isError"], Value::Bool(true));
+        assert_eq!(
+            first["errorCode"], "tool.nonzero_exit",
+            "the first receipt must not degrade a spilled failure to tool.unknown"
+        );
+        assert_eq!(first["errorDetails"]["code"], "tool.nonzero_exit");
+        assert_eq!(first.get("replayed"), None, "the first receipt is not a replay");
+        assert_eq!(first["result"]["truncated"], Value::Bool(true));
+        assert_eq!(first["resultRefRetrievable"], Value::Bool(true));
+        let reference = first["resultRef"].as_str().expect("host-derived reference").to_owned();
+
+        // The second delivery claims success. That is not merely different - it
+        // contradicts the authoritative row, so it must be refused there.
+        let contradicting = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            "call-race",
+            "run_command",
+            &input,
+            Vec::new(),
+            Ok(json!({
+                "isError": false,
+                "content": [{ "type": "text", "text": "BUILD SUCCESSFUL in 2s" }],
+                "details": { "exitCode": 0 },
+            })),
+        )
+        .unwrap();
+        assert_eq!(
+            contradicting["isError"],
+            Value::Bool(true),
+            "a settled failure cannot be rewritten into success by a later delivery"
+        );
+        assert_eq!(contradicting["replayed"], Value::Bool(true));
+        assert_eq!(contradicting["errorCode"], first["errorCode"]);
+        assert_eq!(contradicting["error"], first["error"]);
+        assert_eq!(contradicting["result"], first["result"]);
+        assert_eq!(contradicting["toolResultStorage"], first["toolResultStorage"]);
+        assert_eq!(contradicting["resultRef"].as_str(), Some(reference.as_str()));
+        assert_eq!(contradicting["resultRefRetrievable"], Value::Bool(true));
+        // The reference the racing loser was handed really pages the bytes.
+        assert_eq!(
+            database
+                .tool_result_range(contradicting["resultRef"].as_str().unwrap(), &conversation.id, 0, 4_096)
+                .unwrap()
+                .content,
+            stdout[..4_096],
+            "the loser must be able to read back what it was pointed at"
+        );
+
+        // A hard-error loser is answered the same way: the row already holds a
+        // result, so it gets the envelope - and it reports the authoritative
+        // outcome, not a status the late delivery invented.
+        let late_error = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            "call-race",
+            "run_command",
+            &input,
+            Vec::new(),
+            Err("[tool.cancelled] the run was cancelled".to_owned()),
+        )
+        .expect("a terminal authoritative row answers a late error instead of overwriting it");
+        assert_eq!(late_error["isError"], Value::Bool(true));
+        assert_eq!(late_error["errorCode"], "tool.nonzero_exit");
+        assert_eq!(late_error["error"], first["error"]);
+        assert_eq!(late_error["resultRef"].as_str(), Some(reference.as_str()));
+
+        // Nothing about the row changed, and no second ToolCall was created.
+        let (record, _) = database
+            .inspect_host_tool_call_replay(&run.id, "call-race", "run_command", &input)
+            .unwrap()
+            .expect("terminal row");
+        assert_eq!(record.status, "failed");
+        assert!(record
+            .error_message
+            .as_deref()
+            .unwrap()
+            .starts_with("[tool.nonzero_exit]"));
+        assert_eq!(record.result.expect("preview")["truncated"], Value::Bool(true));
+        let (_, _, calls) = database
+            .load_conversation_trace_records(&conversation.id)
+            .unwrap();
+        assert_eq!(
+            calls.len(),
+            1,
+            "a duplicate settle replays; it never adds a second ToolCall"
+        );
+        // And an identity mismatch is still refused rather than answered: the
+        // fallback cannot be used to borrow another call's stored bytes.
+        let other_input = json!({ "command": "gradle test" });
+        assert!(matches!(
+            create_fresh_host_tool_call(
+                &database, &run.id, "call-race", "run_command", &other_input, "running", false,
+            ),
+            Err(_)
+        ));
         drop(database);
         let _ = std::fs::remove_file(path);
     }

@@ -827,3 +827,634 @@ fn a_start_outcome_reports_whether_it_launched() {
     }
     let _ = describe;
 }
+
+// ---------------------------------------------------------------------------
+// C-FINDING-01: a bounded environment matrix for the tree-termination pipes
+// ---------------------------------------------------------------------------
+//
+// The finding: after a tree kill that reported success, the output pipes can
+// still be held open. It was measured at 5/5 failures in one environment and
+// 46/46 passes in another, on the same binary — so "it passes here" is evidence
+// of nothing, and "it fails there" was not reproducible on demand.
+//
+// This matrix is the instrument that replaces that argument. It varies the few
+// environmental knobs that differed between those runs, repeats each cell a
+// bounded number of times, and records per trial: the process identity, the
+// teardown phases with their timings, the reader counts, whether the pipe was
+// *ever* released, and the privilege context the trial ran under.
+//
+// It deliberately does NOT assert `!readers_orphaned`. That assertion lives in
+// `a_real_grandchild_does_not_survive_the_tree_termination` and stays as strict
+// as it was; weakening it here to turn this green would be closing the finding
+// by moving the goalposts. What this test does assert is the part that must hold
+// in *any* environment, and that a broken implementation would break:
+//
+//   * no descendant survived the termination (the fixture's own sentinel);
+//   * the reclaim guard finds nothing left behind;
+//   * the orphan report and the reader post-mortem agree with each other.
+//
+// The dimensions, and why each is here:
+//
+//   * `reader_grace` 500 ms vs 3 s — separates "the grace was too short" from a
+//     genuinely held pipe. 500 ms is the product default.
+//   * CREATE_NO_WINDOW vs DETACHED_PROCESS — a console is backed by
+//     `conhost.exe`, created after the child, inheriting its standard handles,
+//     and not a descendant that `taskkill /T` walks. DETACHED_PROCESS removes
+//     that candidate, which is the difference between a hypothesis and a
+//     measurement. Neither flag is a product recommendation.
+//   * nested (cmd -> cmd -> ping) vs flat (cmd -> ping) — how deep the walker
+//     has to go.
+//   * fixture root: the harness project root vs the system temp directory.
+//   * one long watch — bounds the "still held" verdict, which a short window
+//     alone cannot do.
+
+/// How long a trial watches a pipe that was still held when the grace expired.
+#[cfg(windows)]
+const MATRIX_OBSERVE: Duration = Duration::from_millis(1200);
+
+/// The long watch. High enough that "still held" stops being a statement about
+/// the observation window.
+#[cfg(windows)]
+const MATRIX_LONG_OBSERVE: Duration = Duration::from_secs(8);
+
+/// The gate-polling fixture, shared with the grandchild test's shape: it waits
+/// indefinitely, so the tree cannot quietly end on its own.
+#[cfg(windows)]
+const WAITER_BATCH: &str = "@echo off\r\n\
+     :poll\r\n\
+     if exist \"%~dp0gate.txt\" goto fire\r\n\
+     ping -n 2 127.0.0.1 > nul\r\n\
+     goto poll\r\n\
+     :fire\r\n\
+     echo survived > \"%~dp0sentinel-for-test.txt\"\r\n";
+
+/// Where a trial's scratch directory goes.
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MatrixRoot {
+    /// The harness-provided isolated project root (env var, if set).
+    Harness,
+    /// The system temp directory, i.e. what a bare `rustc --test` would use.
+    SystemTemp,
+}
+
+#[cfg(windows)]
+impl MatrixRoot {
+    fn resolve(self) -> PathBuf {
+        match self {
+            MatrixRoot::Harness => std::env::var_os("FOX_HARNESS_PROJECT_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir),
+            MatrixRoot::SystemTemp => std::env::temp_dir(),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            MatrixRoot::Harness => "harness-root",
+            MatrixRoot::SystemTemp => "system-temp",
+        }
+    }
+}
+
+#[cfg(windows)]
+struct MatrixCell {
+    name: &'static str,
+    root: MatrixRoot,
+    nested: bool,
+    grace: Duration,
+    creation_flags: u32,
+    observe: Duration,
+    reps: u32,
+    /// Bounded background load to start before each trial (0 = none).
+    ///
+    /// The one measurement that differed visibly between the failing
+    /// environment and the clean one was how long `taskkill /T /F` took
+    /// (~1.2 s there, ~0.33 s here), so the cheapest lever that might bring
+    /// that state back is to make the machine busy on purpose.
+    load: usize,
+}
+
+/// One measurement. Everything here is recorded, not asserted, except the
+/// invariants the caller checks.
+#[cfg(windows)]
+struct MatrixTrial {
+    terminal: bool,
+    terminate: String,
+    walker_exit: Option<i32>,
+    visited: u32,
+    state: String,
+    owner_after_stop: String,
+    orphaned: bool,
+    pending_at_orphan: u8,
+    orphan_observed_at_ms: Option<i64>,
+    stdout_released: Option<bool>,
+    stderr_released: Option<bool>,
+    stdout_released_after_ms: Option<u128>,
+    stderr_released_after_ms: Option<u128>,
+    pid: u32,
+    start_marker: Option<i64>,
+    phases: String,
+    sentinel: bool,
+    reclaimed: bool,
+}
+
+#[cfg(windows)]
+impl MatrixTrial {
+    /// The part that must hold in any environment: the orphan report and the
+    /// post-mortem describe the same event.
+    fn mutually_consistent(&self) -> bool {
+        if self.orphaned {
+            self.pending_at_orphan >= 1 && self.orphan_observed_at_ms.is_some()
+        } else {
+            self.pending_at_orphan == 0 && self.orphan_observed_at_ms.is_none()
+        }
+    }
+
+    fn violated(&self) -> bool {
+        !self.terminal || self.sentinel || !self.reclaimed || !self.mutually_consistent()
+    }
+
+    fn render(&self, cell: &MatrixCell, rep: u32) -> String {
+        // A cooperative descendant (the batch poller) can write a sentinel; a
+        // bare `ping` survivor cannot, so a pipe-only cell can only be reported
+        // through `readers_orphaned`. Naming the evidence kind keeps the two
+        // readings from being compared as if they were the same measurement.
+        let evidence = if cell.nested { "sentinel+pipe" } else { "pipe-only" };
+        format!(
+            "MATRIX{{\"cell\":\"{cell}\",\"root\":\"{root}\",\"evidence\":\"{evidence}\",\"rep\":{rep},\
+             \"pid\":{pid},\"start_marker\":{marker:?},\
+             \"state\":\"{state}\",\"terminate\":\"{terminate}\",\"walker_exit\":{wx:?},\
+             \"walker_visited\":{visited},\"owner_after_stop\":\"{owner}\",\
+             \"orphaned\":{orphaned},\"pending\":{pending},\"orphan_at_ms\":{oat:?},\
+             \"stdout_released\":{sor:?},\"stderr_released\":{ser:?},\
+             \"stdout_released_after_ms\":{sora:?},\"stderr_released_after_ms\":{sera:?},\
+             \"observe_ms\":{obs},\"phases\":\"{phases}\",\"sentinel_written\":{sentinel},\
+             \"reclaimed\":{reclaimed}}}",
+            cell = cell.name,
+            root = cell.root.label(),
+            evidence = evidence,
+            rep = rep,
+            pid = self.pid,
+            marker = self.start_marker,
+            state = self.state,
+            terminate = self.terminate,
+            wx = self.walker_exit,
+            visited = self.visited,
+            owner = self.owner_after_stop,
+            orphaned = self.orphaned,
+            pending = self.pending_at_orphan,
+            oat = self.orphan_observed_at_ms,
+            sor = self.stdout_released,
+            ser = self.stderr_released,
+            sora = self.stdout_released_after_ms,
+            sera = self.stderr_released_after_ms,
+            obs = cell.observe.as_millis(),
+            phases = self.phases,
+            sentinel = self.sentinel,
+            reclaimed = self.reclaimed,
+        )
+    }
+}
+
+/// FNV-1a over the bytes the binary was actually compiled from.
+///
+/// A content fingerprint, not a checksum. The SHA-256 in the evidence file is
+/// computed by the shell from the file on disk, so this is what pins the two
+/// together: if they ever disagree, the evidence describes a different source
+/// than the run did.
+#[cfg(windows)]
+fn source_fingerprint(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// The privilege context the run executes under.
+///
+/// Recorded because "normal permissions" and "restricted sandbox" were two of
+/// the environments the finding differed between, and an evidence line that
+/// does not say which one it was cannot be compared with another.
+#[cfg(windows)]
+fn privilege_context() -> String {
+    let output = match std::process::Command::new("whoami").arg("/groups").output() {
+        Ok(output) => output,
+        Err(error) => return format!("unknown: {error}"),
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    for (sid, label) in [
+        ("S-1-16-16384", "system"),
+        ("S-1-16-12288", "high"),
+        ("S-1-16-8192", "medium"),
+        ("S-1-16-4096", "low"),
+    ] {
+        if text.contains(sid) {
+            return label.to_owned();
+        }
+    }
+    "unknown".to_owned()
+}
+
+#[cfg(windows)]
+fn event_label(kind: &process_jobs::JobEventKind) -> &'static str {
+    use process_jobs::JobEventKind as K;
+    match kind {
+        K::Started => "started",
+        K::StopRequested(_) => "stop_requested",
+        K::TreeTerminated(_) => "tree_terminated",
+        K::ReadersJoined => "readers_joined",
+        K::ReadersOrphaned => "readers_orphaned",
+        K::Finished(_) => "finished",
+    }
+}
+
+/// `phase+offsetMs` joined with `->`, so the teardown timing is readable without
+/// cross-referencing timestamps.
+#[cfg(windows)]
+fn phase_timeline(view: &process_jobs::JobStatusView) -> String {
+    let Some(first) = view.events.first() else {
+        return "none".to_owned();
+    };
+    let base = first.at_ms;
+    view.events
+        .iter()
+        .map(|event| format!("{}+{}ms", event_label(&event.kind), event.at_ms - base))
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
+#[cfg(windows)]
+fn terminate_fields(view: &process_jobs::JobStatusView) -> (String, Option<i32>, u32) {
+    use process_jobs::TerminateOutcome as T;
+    match &view.terminate {
+        Some(T::Terminated { walker_exit_code, walker_visited }) => {
+            ("terminated".to_owned(), *walker_exit_code, *walker_visited)
+        }
+        Some(T::Incomplete { walker_exit_code, walker_visited, .. }) => {
+            ("incomplete".to_owned(), *walker_exit_code, *walker_visited)
+        }
+        Some(T::AlreadyExited) => ("already_exited".to_owned(), None, 0),
+        Some(T::SkippedIdentityMismatch) => ("skipped_identity_mismatch".to_owned(), None, 0),
+        None => ("none".to_owned(), None, 0),
+    }
+}
+
+#[cfg(windows)]
+fn matrix_manager(flags: u32, grace: Duration) -> Arc<ProcessJobManager> {
+    Arc::new(ProcessJobManager::new(
+        Arc::new(SystemClock),
+        Arc::new(process_jobs::SystemSpawnerFlags { creation_flags: flags }),
+        Arc::new(SystemIdentityProbe),
+        ManagerConfig { reader_grace: grace, ..ManagerConfig::default() },
+    ))
+}
+
+/// Ticks supervision until the job is terminal, bounded, **without failing**:
+/// the matrix has to be able to record a trial that never finished.
+#[cfg(windows)]
+fn wait_terminal_bounded(
+    manager: &ProcessJobManager,
+    job_id: &str,
+    within: Duration,
+) -> Option<process_jobs::JobStatusView> {
+    let deadline = Instant::now() + within;
+    loop {
+        let view = manager.status(job_id).ok()?;
+        if view.is_terminal() {
+            return Some(view);
+        }
+        if Instant::now() >= deadline {
+            return None;
+        }
+        manager.tick();
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Bounded, self-terminating background load.
+///
+/// Deliberately cheap and short-lived: these are fixture processes whose only
+/// purpose is to occupy the scheduler during a trial, and they are killed and
+/// reaped before the trial's result is recorded, so nothing here can outlive
+/// the cell.
+#[cfg(windows)]
+fn spawn_bounded_load(count: usize) -> Vec<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    let mut children = Vec::new();
+    for _ in 0..count {
+        let spawned = std::process::Command::new("cmd")
+            .args(["/D", "/S", "/C", "ping -n 8 127.0.0.1 > nul"])
+            .creation_flags(process_jobs::CREATE_NO_WINDOW_FLAG)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(child) = spawned {
+            children.push(child);
+        }
+    }
+    children
+}
+
+/// Kills and reaps load processes. Bounded by construction: `kill` + `wait`
+/// cannot block on a process that is already gone.
+#[cfg(windows)]
+fn reap_bounded_load(mut children: Vec<std::process::Child>) {
+    for child in children.iter_mut() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    children.clear();
+}
+
+#[cfg(windows)]
+fn matrix_fixture(root: &std::path::Path, tag: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let unique = format!(
+        "{tag}-{}-{}-{}",
+        std::process::id(),
+        stamp,
+        FIXTURE_SEQ.fetch_add(1, Ordering::SeqCst)
+    );
+    let dir = root.join("process-jobs-matrix").join(unique);
+    std::fs::create_dir_all(&dir).expect("matrix fixture directory");
+    dir
+}
+
+/// Runs one trial and returns what it measured. Never panics on a slow or
+/// missing terminal state: an unfinishable trial is a result.
+#[cfg(windows)]
+fn run_matrix_trial(
+    cell: &MatrixCell,
+    rep: u32,
+    reclaimer: &mut JobReclaimer,
+    manager: &Arc<ProcessJobManager>,
+) -> MatrixTrial {
+    let dir = matrix_fixture(&cell.root.resolve(), cell.name.replace('/', "-").as_str());
+    let gate = dir.join("gate.txt");
+    let sentinel = dir.join("sentinel-for-test.txt");
+    if cell.nested {
+        std::fs::write(dir.join("waiter.cmd"), WAITER_BATCH).expect("write waiter fixture");
+    }
+
+    let spec = if cell.nested {
+        SpawnSpec::shell("cmd /c waiter.cmd", &dir.to_string_lossy())
+    } else {
+        SpawnSpec::shell("ping -n 60 127.0.0.1 > nul", &dir.to_string_lossy())
+    };
+    if cell.nested {
+        reclaimer.arm_gate(gate.clone());
+    }
+
+    let mut trial = MatrixTrial {
+        terminal: false,
+        terminate: "none".to_owned(),
+        walker_exit: None,
+        visited: 0,
+        state: "none".to_owned(),
+        owner_after_stop: "none".to_owned(),
+        orphaned: false,
+        pending_at_orphan: 0,
+        orphan_observed_at_ms: None,
+        stdout_released: None,
+        stderr_released: None,
+        stdout_released_after_ms: None,
+        stderr_released_after_ms: None,
+        pid: 0,
+        start_marker: None,
+        phases: "none".to_owned(),
+        sentinel: false,
+        reclaimed: false,
+    };
+
+    let key = format!("{}-{rep}", cell.name.replace('/', "-"));
+    let started = manager.start(start_request(&key, spec, Duration::from_millis(500)));
+    let Ok(outcome) = started else {
+        return trial;
+    };
+    let job_id = outcome.view().job_id.clone();
+    reclaimer.track(&job_id);
+
+    let Some(view) = wait_terminal_bounded(manager, &job_id, Duration::from_secs(20)) else {
+        // Still worth reclaiming: whatever this trial started must not outlive it.
+        trial.reclaimed = reclaimer.reclaim_now();
+        return trial;
+    };
+    trial.terminal = true;
+    trial.state = view.state.as_str().to_owned();
+    trial.pid = view.owner.as_ref().map(|owner| owner.pid).unwrap_or(0);
+    trial.start_marker = view.owner.as_ref().and_then(|owner| owner.start_marker);
+    trial.owner_after_stop = format!("{:?}", view.owner_after_stop);
+    trial.orphaned = view.readers_orphaned;
+    trial.phases = phase_timeline(&view);
+    let (terminate, walker_exit, visited) = terminate_fields(&view);
+    trial.terminate = terminate;
+    trial.walker_exit = walker_exit;
+    trial.visited = visited;
+
+    // Watch the pipes. A pipe that is released shortly after the grace is a
+    // timing artefact; one still held at the end of the window is not.
+    let observed_at = Instant::now();
+    let watch_until = observed_at + cell.observe;
+    loop {
+        let Some(post) = manager.reader_post_mortem(&job_id) else {
+            break;
+        };
+        trial.pending_at_orphan = post.pending_at_orphan;
+        trial.orphan_observed_at_ms = post.orphan_observed_at_ms;
+        trial.stdout_released = post.stdout_released;
+        trial.stderr_released = post.stderr_released;
+        if trial.stdout_released_after_ms.is_none() && post.stdout_released == Some(true) {
+            trial.stdout_released_after_ms = Some(observed_at.elapsed().as_millis());
+        }
+        if trial.stderr_released_after_ms.is_none() && post.stderr_released == Some(true) {
+            trial.stderr_released_after_ms = Some(observed_at.elapsed().as_millis());
+        }
+        let nothing_to_watch =
+            post.stdout_released.is_none() && post.stderr_released.is_none();
+        let both_released = post.stdout_released == Some(true) && post.stderr_released == Some(true);
+        if nothing_to_watch || both_released || Instant::now() >= watch_until {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    // (1) Descendant evidence: a survivor would notice the gate within one poll
+    // interval and write the sentinel. A killed tree cannot.
+    if cell.nested {
+        std::fs::write(&gate, b"go").expect("write gate");
+        thread::sleep(Duration::from_millis(1500));
+    }
+    trial.sentinel = sentinel.exists();
+
+    // (2) Nothing this trial started may outlive it — on the failing path too.
+    trial.reclaimed = reclaimer.reclaim_now();
+    trial
+}
+
+#[cfg(windows)]
+#[test]
+fn c_finding_01_environment_matrix_is_bounded_and_releases_its_fixtures() {
+    let reps: u32 = std::env::var("FOX_C_MATRIX_REPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2);
+    let module_source = include_str!("../src/process_jobs.rs");
+    let test_source = include_str!("harness_process_jobs.rs");
+
+    println!(
+        "MATRIX-ENV{{\"src_process_jobs_bytes\":{mb},\"src_process_jobs_fnv\":{mf},\
+         \"src_test_bytes\":{tb},\"src_test_fnv\":{tf},\"authority\":\"{auth}\",\
+         \"role\":\"{role}\",\"privilege\":\"{priv}\",\"os\":\"{os}\",\"cwd\":\"{cwd}\",\
+         \"harness_root\":\"{hr}\",\"system_temp\":\"{tmp}\",\"reps\":{reps},\
+         \"observe_ms\":{obs},\"long_observe_ms\":{long}}}",
+        mb = module_source.len(),
+        mf = source_fingerprint(module_source),
+        tb = test_source.len(),
+        tf = source_fingerprint(test_source),
+        auth = std::env::var("FOX_KERNEL_MODE").unwrap_or_else(|_| "unset".to_owned()),
+        role = std::env::var("FOX_HARNESS_ROLE").unwrap_or_else(|_| "unset".to_owned()),
+        priv = privilege_context(),
+        os = std::env::consts::OS,
+        cwd = std::env::current_dir()
+            .map(|path| path.display().to_string().replace('\\', "/"))
+            .unwrap_or_default(),
+        hr = std::env::var_os("FOX_HARNESS_PROJECT_ROOT")
+            .map(|value| PathBuf::from(value).display().to_string().replace('\\', "/"))
+            .unwrap_or_else(|| "unset".to_owned()),
+        tmp = std::env::temp_dir().display().to_string().replace('\\', "/"),
+        reps = reps,
+        obs = MATRIX_OBSERVE.as_millis(),
+        long = MATRIX_LONG_OBSERVE.as_millis(),
+    );
+
+    let cells = vec![
+        MatrixCell {
+            name: "nested/no-window/grace500",
+            root: MatrixRoot::Harness,
+            nested: true,
+            grace: Duration::from_millis(500),
+            creation_flags: process_jobs::CREATE_NO_WINDOW_FLAG,
+            observe: MATRIX_OBSERVE,
+            reps,
+            load: 0,
+        },
+        MatrixCell {
+            name: "nested/no-window/grace500/temp-root",
+            root: MatrixRoot::SystemTemp,
+            nested: true,
+            grace: Duration::from_millis(500),
+            creation_flags: process_jobs::CREATE_NO_WINDOW_FLAG,
+            observe: MATRIX_OBSERVE,
+            reps,
+            load: 0,
+        },
+        MatrixCell {
+            name: "nested/detached/grace500",
+            root: MatrixRoot::Harness,
+            nested: true,
+            grace: Duration::from_millis(500),
+            creation_flags: process_jobs::DETACHED_PROCESS_FLAG,
+            observe: MATRIX_OBSERVE,
+            reps,
+            load: 0,
+        },
+        MatrixCell {
+            name: "flat/no-window/grace500",
+            root: MatrixRoot::Harness,
+            nested: false,
+            grace: Duration::from_millis(500),
+            creation_flags: process_jobs::CREATE_NO_WINDOW_FLAG,
+            observe: MATRIX_OBSERVE,
+            reps: 1,
+            load: 0,
+        },
+        MatrixCell {
+            name: "nested/no-window/grace3000",
+            root: MatrixRoot::Harness,
+            nested: true,
+            grace: Duration::from_secs(3),
+            creation_flags: process_jobs::CREATE_NO_WINDOW_FLAG,
+            observe: MATRIX_OBSERVE,
+            reps: 1,
+            load: 0,
+        },
+        MatrixCell {
+            name: "nested/no-window/grace500/under-load",
+            root: MatrixRoot::Harness,
+            nested: true,
+            grace: Duration::from_millis(500),
+            creation_flags: process_jobs::CREATE_NO_WINDOW_FLAG,
+            observe: MATRIX_OBSERVE,
+            reps: 1,
+            load: 6,
+        },
+        MatrixCell {
+            name: "nested/no-window/grace500/long-watch",
+            root: MatrixRoot::Harness,
+            nested: true,
+            grace: Duration::from_millis(500),
+            creation_flags: process_jobs::CREATE_NO_WINDOW_FLAG,
+            observe: MATRIX_LONG_OBSERVE,
+            reps: 1,
+            load: 0,
+        },
+    ];
+
+    let mut total = 0usize;
+    let mut orphaned = 0usize;
+    let mut violated = 0usize;
+    let mut unresolved: Vec<String> = Vec::new();
+
+    for cell in &cells {
+        // One manager and one reclaim guard per cell, so a failing trial can
+        // never outlive the cell that started it.
+        let manager = matrix_manager(cell.creation_flags, cell.grace);
+        let mut reclaimer = JobReclaimer::new(Arc::clone(&manager));
+        for rep in 1..=cell.reps {
+            let load = spawn_bounded_load(cell.load);
+            let trial = run_matrix_trial(cell, rep, &mut reclaimer, &manager);
+            reap_bounded_load(load);
+            total += 1;
+            if trial.orphaned {
+                orphaned += 1;
+                if trial.stdout_released == Some(false) || trial.stderr_released == Some(false) {
+                    unresolved.push(format!("{}#{}", cell.name, rep));
+                }
+            }
+            if trial.violated() {
+                violated += 1;
+            }
+            println!("{}", trial.render(cell, rep));
+        }
+        // The cell is over: prove nothing it started is still running.
+        assert!(
+            reclaimer.reclaim_now(),
+            "cell {} left something behind: the reclaim deadline elapsed",
+            cell.name
+        );
+    }
+
+    println!(
+        "MATRIX-SUMMARY{{\"trials\":{total},\"orphaned\":{orphaned},\
+         \"held_to_the_end_of_the_watch\":{unresolved_len},\"violations\":{violated},\
+         \"unresolved\":\"{unresolved}\"}}",
+        total = total,
+        orphaned = orphaned,
+        unresolved_len = unresolved.len(),
+        violated = violated,
+        unresolved = unresolved.join(","),
+    );
+
+    assert!(total > 0, "the matrix must actually run trials");
+    assert_eq!(
+        violated, 0,
+        "{violated} of {total} trials violated an invariant (not the open finding): see MATRIX lines"
+    );
+}
