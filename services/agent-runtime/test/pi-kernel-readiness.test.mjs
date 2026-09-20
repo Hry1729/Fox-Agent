@@ -343,7 +343,9 @@ async function runOpenAIProviderRetryProbe(maxRetries) {
     contextWindow: 4096,
     maxTokens: 256,
   }
-  const modelRuntime = await createFoxModelRuntime({ model, apiKey: 'test-key' })
+  const usageRecords = []
+  const modelRuntime = await createFoxModelRuntime({ model, apiKey: 'test-key',
+    usage: { runId: 'provider-retry-probe', onRecord: record => usageRecords.push(record) } })
   const settingsManager = SettingsManager.inMemory(baseSettings({
     retry: {
       enabled: false,
@@ -378,7 +380,7 @@ async function runOpenAIProviderRetryProbe(maxRetries) {
   })
   try {
     await session.prompt('provider retry probe', { expandPromptTemplates: false })
-    return { requestCount, messages: session.state.messages }
+    return { requestCount, messages: session.state.messages, usageRecords }
   } finally {
     await session.abort()
     await closeServer(server)
@@ -394,6 +396,15 @@ test('OpenAI-compatible provider HTTP retry can be disabled independently of tur
   const enabled = await runOpenAIProviderRetryProbe(1)
   assert.equal(enabled.requestCount, 2, JSON.stringify(enabled.messages.at(-1)))
   assert.equal(enabled.messages.at(-1).stopReason, 'error')
+  assert.equal(disabled.usageRecords.length, 1)
+  assert.equal(enabled.usageRecords.length, 2)
+  assert.equal(new Set(enabled.usageRecords.map(r => r.requestId)).size, 1)
+  assert.deepEqual(enabled.usageRecords.map(r => r.attemptId), ['attempt-0', 'attempt-1'])
+  for (const record of [...disabled.usageRecords, ...enabled.usageRecords]) {
+    assert.equal(record.outcome, 'failure')
+    assert.equal(record.transportAttempts, 1)
+    assert.equal(record.cost.costComplete, false)
+  }
 })
 
 test('parallel tool batch commits every result and presents them to the next model call in source order', async (context) => {

@@ -122,7 +122,7 @@ async function createBundlerWorkspace() {
   await writeFile(harnessEntry, harnessSource.replace(versionLookup, `const version = ${JSON.stringify(harnessManifest.version)};`))
   // Stage all local modules so new transitive imports remain available to Bun.
   for (const file of await readdir(resolve(root, 'src'))) {
-    if (!file.endsWith('.mjs')) continue
+    if (!file.endsWith('.mjs') && !file.endsWith('.json')) continue
     await copyFile(resolve(root, 'src', file), resolve(workspace, file))
   }
   return workspace

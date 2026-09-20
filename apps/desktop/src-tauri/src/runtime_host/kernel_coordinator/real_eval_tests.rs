@@ -3121,7 +3121,7 @@ fn usage_report_for(root: &std::path::Path, run_id: &str) -> Value {
         Err(error) => return json!({"hostUsageRows":0,"error":error.to_string()}),
     };
     let mut statement = match connection.prepare(
-        "SELECT event_json FROM run_events WHERE run_id=?1 AND event_type='usage.updated' ORDER BY rowid",
+        "SELECT event_json FROM run_events WHERE run_id=?1 AND event_type IN ('usage.updated','usage.request') ORDER BY rowid",
     ) {
         Ok(statement) => statement,
         Err(error) => return json!({"hostUsageRows":0,"error":error.to_string()}),
@@ -3135,7 +3135,7 @@ fn usage_report_for(root: &std::path::Path, run_id: &str) -> Value {
         if let Ok(json_text) = row {
             if let Ok(value) = serde_json::from_str::<Value>(&json_text) {
                 events.push(value);
-                count += 1;
+                if events.last().is_some_and(|event|event["type"]=="usage.updated") {count += 1;}
             }
         }
     }

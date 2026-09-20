@@ -465,6 +465,7 @@ async function executePrompt(request) {
   const emit = (type, payload = {}) => {
     if (runControl.cancelled
       && type !== 'usage.updated'
+      && type !== 'usage.request'
       && type !== 'run.completed'
       && type !== 'run.cancelled'
       && type !== 'run.interrupted'
@@ -520,6 +521,7 @@ async function executePrompt(request) {
   const retryPolicy = retryPolicyForRun(request.payload, modelProfile)
   const model = createModel(modelService, modelProfile)
   const modelRuntime = await createFoxModelRuntime({
+    usage: { runId: request.runId, raw: modelService, onRecord: record => emit('usage.request', { record }) },
     model,
     apiKey: modelService.apiKey,
     fauxRegistration: modelService.apiType === 'faux' ? fauxProvider : null,

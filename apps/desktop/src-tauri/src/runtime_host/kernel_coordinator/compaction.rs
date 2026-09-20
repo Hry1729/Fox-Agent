@@ -220,7 +220,7 @@ impl KernelCoordinator<'_> {
         let config = self.database.kernel_model_config(&self.binding.run_id)?;
         self.dispatch_pending_compaction(owner, |binding, request, token, remaining| {
             super::super::kernel_model_worker::compact_context(
-                runtime, &config, api_key, binding, request, token, remaining,
+                runtime, &config, api_key, binding, request, token, remaining, Some(self.database),
             )
         })
     }

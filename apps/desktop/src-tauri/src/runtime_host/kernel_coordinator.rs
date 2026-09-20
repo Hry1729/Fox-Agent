@@ -600,6 +600,7 @@ impl<'a> KernelCoordinator<'a> {
                 token,
                 remaining,
                 self.preview,
+                Some(self.database),
             )
         })
     }
@@ -907,6 +908,7 @@ impl<'a> KernelCoordinator<'a> {
                 token,
                 remaining,
                 self.preview,
+                Some(self.database),
             )
         })
     }

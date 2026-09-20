@@ -2,6 +2,7 @@ mod capability_tools;
 pub(crate) mod artifact_store;
 pub(crate) mod attachment_compute;
 pub(crate) mod background_jobs;
+pub(crate) mod command_jobs;
 mod continuation;
 pub(crate) mod managed_files;
 mod tool_result_read;
@@ -9435,7 +9436,13 @@ fn execute_host_tool_request(
                 .ok();
             }
         }
-        crate::tool_host::execute_with_cancellation(prepared, Some(&cancellation))
+        if let crate::tool_host::PreparedToolAction::CommandJob {root,input,..} = &prepared {
+            let binding=database.run_control_binding(run_id)?.ok_or("command job needs a frozen Run")?;
+            let budget=Duration::from_millis(binding.budgets.limit_operation_ms(binding.budgets.tool_execution_ms, 0).max(0) as u64);
+            command_jobs::execute(database,run_id,input,root,&cancellation,budget)
+        } else {
+            crate::tool_host::execute_with_cancellation(prepared, Some(&cancellation))
+        }
     })();
     if let (Ok(result), Some(capture), Some(backups_dir)) =
         (&outcome, managed_capture, managed_backups.as_deref())

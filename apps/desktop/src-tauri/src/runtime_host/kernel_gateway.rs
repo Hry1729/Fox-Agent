@@ -790,6 +790,9 @@ impl GatewayPolicy {
                 input,
                 self.binding.permission.project_root.as_deref().unwrap(),
             )?;
+            if let crate::tool_host::PreparedToolAction::CommandJob {root,input,..} = &action {
+                return super::command_jobs::execute(database,&self.binding.run_id,input,root,token,self.remaining_budget(database)?);
+            }
             if let crate::tool_host::PreparedToolAction::RunCommand { timeout, .. } = &mut action {
                 *timeout = (*timeout).min(self.remaining_budget(database)?);
             }

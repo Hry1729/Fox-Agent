@@ -5,6 +5,7 @@ services/agent-runtime/dist/*
 !services/agent-runtime/dist/.gitkeep
 target/
 /.test-target/
+/.worktrees/
 # Isolated default-feature verification output (may contain locked DLLs).
 /apps/desktop/src-tauri/target-default-check/
 .runtime-*/

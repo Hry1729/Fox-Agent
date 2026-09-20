@@ -374,6 +374,7 @@ async function runReadonlyNodeAgent({
   await resourceLoader.reload()
   const nodeModel = { ...model, maxTokens: Math.min(model.maxTokens || 1_024, 1_024) }
   const created = await createFoxAgentSession({
+    usageStage: 'subtask', usageTaskId: node.id,
     cwd,
     agentDir: process.cwd(),
     model: nodeModel,

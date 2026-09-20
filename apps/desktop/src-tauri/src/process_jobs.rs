@@ -65,6 +65,9 @@
 
 #![allow(dead_code)]
 
+#[path = "command_environment.rs"]
+mod command_environment;
+
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -279,8 +282,8 @@ impl StartOutcome {
 // Canonical request + digest
 // ---------------------------------------------------------------------------
 
-/// How the child's environment is built. Inheriting is the default so this
-/// module does not silently narrow what the caller's policy already allowed.
+/// How the child's environment is built. `Inherit` means the product's
+/// platform allowlist, never the complete Fox parent environment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnvMode {
     Inherit,
@@ -316,6 +319,25 @@ impl SpawnSpec {
             env: EnvMode::Inherit,
         }
     }
+}
+
+pub(crate) fn apply_spawn_arguments(command: &mut std::process::Command, spec: &SpawnSpec) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if spec.program.eq_ignore_ascii_case("cmd.exe")
+            && spec.args.len() == 4
+            && spec.args[0..3] == ["/D", "/S", "/C"]
+        {
+            command.args(&spec.args[..3]);
+            // `/S /C` requires one quoted command-line tail. `Command::arg`
+            // applies CreateProcess/CRT quoting, which turns inner PowerShell
+            // quotes into literal text. `raw_arg` preserves cmd.exe's grammar.
+            command.raw_arg(format!("\"{}\"", spec.args[3]));
+            return;
+        }
+    }
+    command.args(&spec.args);
 }
 
 /// The caller's request. `run_id` is carried for scope binding only; this module
@@ -701,6 +723,7 @@ impl StreamWindow {
         let next = self.retained_start + end as u64;
         OutputPage {
             content: String::from_utf8_lossy(slice).into_owned(),
+            raw_bytes: slice.to_vec(),
             offset: start,
             next_offset: next,
             at_end_of_available: next >= self.total,
@@ -723,6 +746,10 @@ impl StreamWindow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputPage {
     pub content: String,
+    /// Exact pipe bytes for durable adapters that page in raw-byte units.
+    /// `content` is a lossy display projection and must never be re-sliced by
+    /// offsets from this page when invalid UTF-8 was replaced.
+    pub raw_bytes: Vec<u8>,
     pub offset: u64,
     pub next_offset: u64,
     /// This cursor has consumed every byte produced so far.
@@ -867,6 +894,9 @@ pub struct SystemSpawner;
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW_FLAG: u32 = 0x0800_0000;
 
+#[cfg(windows)]
+pub(crate) const CREATE_SUSPENDED_FLAG: u32 = 0x0000_0004;
+
 /// DETACHED_PROCESS: no console is allocated at all.
 ///
 /// This exists for one open investigation (C-FINDING-01). A console is backed by
@@ -915,32 +945,225 @@ fn spawn_system_child(
 ) -> io::Result<Box<dyn ChildHandle>> {
     let mut command = std::process::Command::new(&spec.program);
     command
-        .args(&spec.args)
         .current_dir(&spec.cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    if let EnvMode::Replace(entries) = &spec.env {
-        command.env_clear();
-        for (key, value) in entries {
-            command.env(key, value);
-        }
+    apply_spawn_arguments(&mut command, spec);
+    match &spec.env {
+        EnvMode::Inherit => command_environment::apply_inherited(&mut command),
+        EnvMode::Replace(entries) => command_environment::apply_explicit(&mut command, entries)?,
     }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(creation_flags);
+        command.creation_flags(creation_flags | CREATE_SUSPENDED_FLAG);
     }
     #[cfg(not(windows))]
     {
         let _ = creation_flags;
     }
-    let child = command.spawn()?;
-    Ok(Box::new(SystemChild { child: Some(child) }))
+    let mut child = command.spawn()?;
+    #[cfg(windows)]
+    let job = match WindowsJob::assign_and_resume(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    Ok(Box::new(SystemChild {
+        child: Some(child),
+        #[cfg(windows)]
+        job: Some(job),
+    }))
 }
 
 struct SystemChild {
     child: Option<std::process::Child>,
+    #[cfg(windows)]
+    job: Option<WindowsJob>,
+}
+
+#[cfg(windows)]
+pub(crate) struct WindowsJob {
+    handle: isize,
+}
+
+#[cfg(windows)]
+unsafe impl Send for WindowsJob {}
+
+#[cfg(windows)]
+impl WindowsJob {
+    pub(crate) fn assign_and_resume(child: &std::process::Child) -> io::Result<Self> {
+        use std::mem::{size_of, zeroed};
+        use std::os::windows::io::AsRawHandle;
+
+        const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS: i32 = 9;
+        const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+
+        let handle = unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) };
+        if handle == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let mut information: JobObjectExtendedLimitInformation = unsafe { zeroed() };
+        information.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                (&mut information as *mut JobObjectExtendedLimitInformation).cast(),
+                size_of::<JobObjectExtendedLimitInformation>() as u32,
+            )
+        };
+        if configured == 0 {
+            let error = io::Error::last_os_error();
+            unsafe { CloseHandle(handle) };
+            return Err(error);
+        }
+
+        let assigned = unsafe { AssignProcessToJobObject(handle, child.as_raw_handle() as isize) };
+        if assigned == 0 {
+            let error = io::Error::last_os_error();
+            unsafe { CloseHandle(handle) };
+            return Err(error);
+        }
+        let job = Self { handle };
+        if let Err(error) = resume_process_thread(child.id()) {
+            let _ = job.terminate();
+            return Err(error);
+        }
+        Ok(job)
+    }
+
+    pub(crate) fn terminate(&self) -> io::Result<()> {
+        if unsafe { TerminateJobObject(self.handle, 1) } == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(windows)]
+fn resume_process_thread(pid: u32) -> io::Result<()> {
+    const TH32CS_SNAPTHREAD: u32 = 0x0000_0004;
+    const THREAD_SUSPEND_RESUME: u32 = 0x0002;
+    const INVALID_HANDLE_VALUE: isize = -1;
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    let mut entry: ThreadEntry32 = unsafe { std::mem::zeroed() };
+    entry.size = std::mem::size_of::<ThreadEntry32>() as u32;
+    let mut found = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    let mut thread_id = None;
+    while found {
+        if entry.owner_process_id == pid {
+            thread_id = Some(entry.thread_id);
+            break;
+        }
+        found = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+    }
+    unsafe { CloseHandle(snapshot) };
+    let thread_id = thread_id.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "suspended child thread was not found")
+    })?;
+    let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread_id) };
+    if thread == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let resumed = unsafe { ResumeThread(thread) };
+    let resume_error = (resumed == u32::MAX).then(io::Error::last_os_error);
+    unsafe { CloseHandle(thread) };
+    match resume_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.handle) };
+    }
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct JobObjectBasicLimitInformation {
+    per_process_user_time_limit: i64,
+    per_job_user_time_limit: i64,
+    limit_flags: u32,
+    minimum_working_set_size: usize,
+    maximum_working_set_size: usize,
+    active_process_limit: u32,
+    affinity: usize,
+    priority_class: u32,
+    scheduling_class: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct IoCounters {
+    read_operation_count: u64,
+    write_operation_count: u64,
+    other_operation_count: u64,
+    read_transfer_count: u64,
+    write_transfer_count: u64,
+    other_transfer_count: u64,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct JobObjectExtendedLimitInformation {
+    basic_limit_information: JobObjectBasicLimitInformation,
+    io_info: IoCounters,
+    process_memory_limit: usize,
+    job_memory_limit: usize,
+    peak_process_memory_used: usize,
+    peak_job_memory_used: usize,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct ThreadEntry32 {
+    size: u32,
+    usage_count: u32,
+    thread_id: u32,
+    owner_process_id: u32,
+    base_priority: i32,
+    delta_priority: i32,
+    flags: u32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn CreateJobObjectW(
+        job_attributes: *mut std::ffi::c_void,
+        name: *const u16,
+    ) -> isize;
+    fn SetInformationJobObject(
+        job: isize,
+        information_class: i32,
+        information: *mut std::ffi::c_void,
+        information_length: u32,
+    ) -> i32;
+    fn AssignProcessToJobObject(
+        job: isize,
+        process: isize,
+    ) -> i32;
+    fn TerminateJobObject(job: isize, exit_code: u32) -> i32;
+    fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> isize;
+    fn Thread32First(snapshot: isize, entry: *mut ThreadEntry32) -> i32;
+    fn Thread32Next(snapshot: isize, entry: *mut ThreadEntry32) -> i32;
+    fn OpenThread(access: u32, inherit_handle: i32, thread_id: u32) -> isize;
+    fn ResumeThread(thread: isize) -> u32;
+    fn CloseHandle(object: isize) -> i32;
 }
 
 impl ChildHandle for SystemChild {
@@ -952,7 +1175,16 @@ impl ChildHandle for SystemChild {
         let Some(child) = self.child.as_mut() else {
             return Ok(None);
         };
-        Ok(child.try_wait()?.map(|status| ExitReport { code: status.code() }))
+        let Some(status) = child.try_wait()? else {
+            return Ok(None);
+        };
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            let terminated = job.terminate();
+            drop(job);
+            terminated?;
+        }
+        Ok(Some(ExitReport { code: status.code() }))
     }
 
     fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
@@ -979,7 +1211,6 @@ impl ChildHandle for SystemChild {
                 direct_kill: false,
             };
         };
-        let pid = child.id();
         let mut report = TreeKillReport {
             walker_exit_code: None,
             walker_visited: 0,
@@ -989,42 +1220,18 @@ impl ChildHandle for SystemChild {
         };
         #[cfg(windows)]
         {
-            use std::os::windows::process::CommandExt;
-            // `Child::kill` only stops cmd.exe; descendants (a compiler, a
-            // package manager) would survive invisibly. Same approach as
-            // tool_host. The walker's status and output are captured rather than
-            // discarded: a tree walk that silently failed must not be reported
-            // as a completed teardown.
-            // `output()` captures both streams for us; the walker's text is
-            // localised, so only its shape is used below.
-            match std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .creation_flags(0x0800_0000)
-                .output()
-            {
-                Ok(output) => {
-                    report.walker_exit_code = output.status.code();
-                    // taskkill prints one line per process it acted on. Counting
-                    // terminators works whatever the console code page is, so
-                    // the count is evidence even though the text is not.
-                    report.walker_visited = output
-                        .stdout
-                        .iter()
-                        .chain(output.stderr.iter())
-                        .filter(|byte| **byte == b'\n')
-                        .count()
-                        .min(u32::MAX as usize) as u32;
-                    report.walker_stderr_bytes =
-                        output.stderr.len().min(u32::MAX as usize) as u32;
-                    if !output.status.success() {
-                        report.walker_error = Some(match output.status.code() {
-                            Some(code) => format!("taskkill exited with {code}"),
-                            None => "taskkill was signalled".to_owned(),
-                        });
+            match self.job.as_ref() {
+                Some(job) => match job.terminate() {
+                    Ok(()) => {
+                        report.walker_exit_code = Some(0);
+                        report.walker_visited = 1;
                     }
-                }
-                Err(error) => {
-                    report.walker_error = Some(format!("could not run taskkill: {error}"));
+                    Err(error) => {
+                        report.walker_error = Some(format!("could not terminate Job Object: {error}"));
+                    }
+                },
+                None => {
+                    report.walker_error = Some("child has no Job Object confinement".to_owned());
                 }
             }
         }
@@ -3427,6 +3634,25 @@ mod tests {
         assert!(rest.at_end_of_available);
         assert_eq!(rest.lost_before_offset, 0);
         assert_eq!(rest.next_offset, 10);
+    }
+
+    #[test]
+    fn invalid_utf8_keeps_exact_raw_byte_pages_and_monotonic_raw_offsets() {
+        let mut window = OutputWindow::new(16);
+        window.push(Stream::Stdout, &[0xff, b'A', 0xfe, b'B']);
+
+        let first = window.page(Stream::Stdout, 0, 1);
+        assert_eq!(first.raw_bytes, vec![0xff]);
+        assert_eq!(first.content, "�");
+        assert_eq!(first.offset, 0);
+        assert_eq!(first.next_offset, 1);
+
+        let rest = window.page(Stream::Stdout, first.next_offset, 3);
+        assert_eq!(rest.raw_bytes, vec![b'A', 0xfe, b'B']);
+        assert_eq!(rest.content, "A�B");
+        assert_eq!(rest.offset, 1);
+        assert_eq!(rest.next_offset, 4);
+        assert!(rest.at_end_of_available);
     }
 
     #[test]

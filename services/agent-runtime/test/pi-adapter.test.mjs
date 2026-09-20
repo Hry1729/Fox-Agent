@@ -23,6 +23,7 @@ test('keeps direct Pi imports inside the Pi adapter', async () => {
     .filter((file) => file.endsWith('.mjs') && file !== 'pi-adapter.mjs')
   for (const file of files) {
     const source = await readFile(resolve(root, 'src', file), 'utf8')
-    assert.doesNotMatch(source, /@earendil-works\/pi-/u, file)
+    // Provenance strings/comments may name the SDK. Guard executable imports.
+    assert.doesNotMatch(source, /(?:^\s*(?:import|export)\s+(?:[^;]*?\bfrom\s*)?['"]@earendil-works\/pi-|\b(?:import|require)\(\s*['"]@earendil-works\/pi-)/mu, file)
   }
 })

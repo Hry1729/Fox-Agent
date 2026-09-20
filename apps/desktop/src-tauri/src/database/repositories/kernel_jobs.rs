@@ -226,6 +226,7 @@ impl Database {
                     return Err(invalid("job_idempotency_conflict"));
                 }
                 let snapshot = read_snapshot(&transaction, &job_id)?;
+                if snapshot.kind != request.kind {return Err(invalid("job_idempotency_conflict"));}
                 transaction.commit()?;
                 return Ok(JobStartOutcome::Existing(snapshot));
             }
@@ -237,7 +238,7 @@ impl Database {
                   result_sha256, error_code, error_message, attempts, deadline_ms, owner_pid,
                   owner_started_at, created_at, updated_at, finished_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', NULL, 0, ?8, NULL, NULL, NULL,
-                         NULL, NULL, 0, ?9, NULL, NULL, ?10, ?10, NULL)",
+                         NULL, NULL, 0, ?9, CASE WHEN ?4='command' THEN ?11 ELSE NULL END, CASE WHEN ?4='command' THEN ?12 ELSE NULL END, ?10, ?10, NULL)",
                 params![
                     job_id,
                     request.run_id,
@@ -248,7 +249,9 @@ impl Database {
                     request.params.to_string(),
                     request.progress_total.map(|total| total as i64),
                     request.deadline_ms,
-                    now
+                    now,
+                    i64::from(std::process::id()),
+                    process_started_at()
                 ],
             )?;
             let snapshot = read_snapshot(&transaction, &job_id)?;
@@ -456,7 +459,7 @@ impl Database {
     pub fn kernel_jobs_reconcile_orphans(&self) -> Result<Vec<JobSnapshot>, String> {
         let running: Vec<(String, Option<i64>, Option<i64>)> = self.with_connection(|connection| {
             let mut statement = connection.prepare(
-                "SELECT job_id, owner_pid, owner_started_at FROM kernel_jobs WHERE state='running'",
+                "SELECT job_id, owner_pid, owner_started_at FROM kernel_jobs WHERE state='running' OR (kind='command' AND state='queued')",
             )?;
             let rows = statement.query_map([], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?))
@@ -474,9 +477,11 @@ impl Database {
             }
             let changed=self.with_connection(|connection| {
                 let tx=connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-                let changed=tx.execute("UPDATE kernel_jobs SET state='paused',owner_pid=NULL,owner_started_at=NULL,
-                    error_code='job.owner_missing',error_message=?4,updated_at=?5,uncertain_at=?5
-                    WHERE job_id=?1 AND state='running' AND owner_pid IS ?2 AND owner_started_at IS ?3",
+                let changed=tx.execute("UPDATE kernel_jobs SET state=CASE WHEN kind='command' THEN 'failed' ELSE 'paused' END,owner_pid=NULL,owner_started_at=NULL,
+                    error_code=CASE WHEN kind='command' THEN 'job.interrupted_unknown' ELSE 'job.owner_missing' END,
+                    finished_at=CASE WHEN kind='command' THEN ?5 ELSE finished_at END,
+                    error_message=CASE WHEN kind='command' THEN 'Command owner ended; effects are uncertain and the command must not be replayed.' ELSE ?4 END,updated_at=?5,uncertain_at=?5
+                    WHERE job_id=?1 AND (state='running' OR (kind='command' AND state='queued')) AND owner_pid IS ?2 AND owner_started_at IS ?3",
                     params![job_id,pid,started_at,"The owning process ended. Resume re-verifies permission before a new attempt.",now_ms()])?;
                 let snapshot=if changed==1 {Some(read_snapshot(&tx,&job_id)?)}else{None};
                 tx.commit()?;Ok(snapshot)
@@ -490,6 +495,7 @@ impl Database {
     /// marks the job running again under this process.
     pub fn kernel_job_resume(&self, job_id: &str) -> Result<JobSnapshot, String> {
         let snapshot = self.kernel_job_snapshot(job_id)?;
+        if snapshot.kind == "command" { return Err("Commands cannot be resumed or replayed".into()); }
         if snapshot.state != JobState::Paused { return Err("job is not paused".into()); }
         Ok(snapshot)
     }
@@ -542,9 +548,9 @@ pub(super) fn read_snapshot(
                 updated_at: row.get(14)?,
                 finished_at: row.get(15)?,
                 attempts: row.get::<_, i64>(16)?.max(0) as u32,
-                resumable: state == JobState::Paused
+                resumable: row.get::<_,String>(3)? != "command" && (state == JobState::Paused
                     || (state == JobState::Running
-                        && !owned_by_current_process(owner_pid, owner_started_at)),
+                        && !owned_by_current_process(owner_pid, owner_started_at))),
                 owner_pid,
                 cancel_requested_at: row.get(19)?,
                 cancel_acknowledged_at: row.get(20)?,

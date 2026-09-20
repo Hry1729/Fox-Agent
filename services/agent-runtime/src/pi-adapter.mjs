@@ -1,4 +1,6 @@
 import { InMemoryCredentialStore, InMemoryModelsStore } from '@earendil-works/pi-ai'
+import { observeModelUsage } from './model-usage-runtime.mjs'
+const usageContexts = new WeakMap()
 import { fauxAssistantMessage, registerFauxProvider, streamSimple } from '@earendil-works/pi-ai/compat'
 import {
   DefaultResourceLoader,
@@ -35,7 +37,7 @@ function modelDefinition(model) {
   }
 }
 
-export async function createFoxModelRuntime({ model, apiKey, fauxRegistration } = {}) {
+export async function createFoxModelRuntime({ model, apiKey, fauxRegistration, usage } = {}) {
   if (!model?.provider || !model?.api || !model?.baseUrl) {
     throw new Error('Fox Pi model runtime requires a complete model definition.')
   }
@@ -56,9 +58,21 @@ export async function createFoxModelRuntime({ model, apiKey, fauxRegistration } 
     ...(fauxRegistration ? { streamSimple } : {}),
     models: [modelDefinition(model)],
   })
+  if (usage) usageContexts.set(modelRuntime, usage)
   return modelRuntime
 }
 
-export function createFoxAgentSession(options) {
-  return createAgentSession(options)
+export async function createFoxAgentSession({ usageStage, usageTaskId, ...options }) {
+  const created = await createAgentSession(options)
+  const context = usageContexts.get(options.modelRuntime)
+  let compacting = false
+  created.session.subscribe(event => {
+    if (event.type === 'auto_compaction_start') compacting = true
+    if (event.type === 'auto_compaction_end') compacting = false
+  })
+  // Request limits apply in production even when telemetry was not requested.
+  observeModelUsage(created.session, { ...context,
+    stage: () => compacting ? 'compaction' : usageStage ?? (typeof context?.stage === 'function' ? context.stage() : context?.stage ?? 'agent'),
+    ...(usageTaskId ? { taskId: usageTaskId } : {}) })
+  return created
 }

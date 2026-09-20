@@ -16,6 +16,37 @@ fn owned(tx: &Transaction<'_>, id: &str, attempt: u32) -> rusqlite::Result<JobSn
 }
 
 impl Database {
+    pub(crate) fn kernel_command_job_checkpoint(&self,id:&str,attempt:u32,value:&Value)->Result<(),String> {
+        self.with_connection(|conn| {
+            let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if owned(&tx,id,attempt)?.kind!="command" {return Err(invalid("not a command job"));}
+            tx.execute("UPDATE kernel_jobs SET cursor=?2,updated_at=?3 WHERE job_id=?1",params![id,value.to_string(),now_ms()])?;
+            tx.commit()
+        })
+    }
+    /// Publish success AND failure diagnostics atomically; a failure never becomes completed.
+    pub(crate) fn kernel_command_job_publish(&self,id:&str,attempt:u32,value:&Value)->Result<(),String> {
+        self.with_connection(|conn| {
+            let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let job=owned(&tx,id,attempt)?;
+            if job.kind!="command" {return Err(invalid("not a command job"));}
+            let mut body_value=value.clone();
+            let mut state=value["state"].as_str().ok_or_else(||invalid("missing command terminal state"))?;
+            if !["completed","failed","cancelled"].contains(&state) {return Err(invalid("command is not terminal"));}
+            if job.cancel_requested_at.is_some() && state=="completed" {
+                state="cancelled";body_value["state"]=Value::from(state);body_value["errorCode"]=Value::from("tool.cancelled");
+            }
+            let body=body_value.to_string();let sha=format!("sha256:{}",hex::encode(Sha256::digest(body.as_bytes())));
+            tx.execute("INSERT OR IGNORE INTO tool_call_result_blobs(sha256,body_json,byte_size,created_at) VALUES(?1,?2,?3,?4)",params![sha,body,body.len() as i64,now_ms()])?;
+            let stored:String=tx.query_row("SELECT body_json FROM tool_call_result_blobs WHERE sha256=?1",[&sha],|r|r.get(0))?;
+            if stored!=body {return Err(invalid("command result integrity mismatch"));}
+            tx.execute("UPDATE kernel_jobs SET state=?2,result_ref=?3,result_bytes=?4,result_sha256=?5,
+                error_code=?6,error_message=?7,updated_at=?8,finished_at=?8,owner_pid=NULL,owner_started_at=NULL,cursor=NULL,
+                cancel_acknowledged_at=CASE WHEN ?2='cancelled' THEN ?8 ELSE cancel_acknowledged_at END WHERE job_id=?1",
+                params![id,state,format!("fox-job-result://{id}"),body.len() as i64,sha,body_value["errorCode"].as_str(),body_value["errorMessage"].as_str(),now_ms()])?;
+            tx.commit()
+        })
+    }
     pub(crate) fn kernel_job_parent_stopped(&self, id: &str) -> Result<bool, String> {
         self.with_connection(|conn| conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM kernel_jobs j JOIN runs r ON r.id=j.run_id
@@ -81,7 +112,7 @@ impl Database {
         self.with_connection(|conn| {
             let row:Option<(String,String,i64)>=conn.query_row("SELECT b.body_json,j.result_sha256,j.result_bytes
                 FROM kernel_jobs j JOIN tool_call_result_blobs b ON b.sha256=j.result_sha256
-                WHERE j.job_id=?1 AND j.conversation_id=?2 AND j.state='completed'",
+                WHERE j.job_id=?1 AND j.conversation_id=?2 AND (j.state='completed' OR (j.kind='command' AND j.state IN ('failed','cancelled')))",
                 params![id,conversation],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
             let (body,sha,len)=row.ok_or_else(||invalid("job result unavailable in this conversation"))?;
             if body.len() as i64!=len||format!("sha256:{}",hex::encode(Sha256::digest(body.as_bytes())))!=sha {

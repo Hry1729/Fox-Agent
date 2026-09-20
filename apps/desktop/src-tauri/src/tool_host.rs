@@ -13,6 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "command_environment.rs"]
+mod command_environment;
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -122,6 +125,7 @@ pub struct ToolPreview {
 
 #[derive(Debug, Clone)]
 pub enum PreparedToolAction {
+    CommandJob {root:PathBuf,input:Value,preview:ToolPreview},
     WriteFile {
         root: PathBuf,
         path: PathBuf,
@@ -147,7 +151,8 @@ pub enum PreparedToolAction {
 impl PreparedToolAction {
     pub fn preview(&self) -> &ToolPreview {
         match self {
-            Self::WriteFile { preview, .. }
+            Self::CommandJob { preview, .. }
+            | Self::WriteFile { preview, .. }
             | Self::EditFile { preview, .. }
             | Self::RunCommand { preview, .. } => preview,
         }
@@ -158,7 +163,7 @@ impl PreparedToolAction {
     pub fn target_path(&self) -> Option<&Path> {
         match self {
             Self::WriteFile { path, .. } | Self::EditFile { path, .. } => Some(path),
-            Self::RunCommand { .. } => None,
+            Self::RunCommand { .. } | Self::CommandJob { .. } => None,
         }
     }
 }
@@ -173,6 +178,7 @@ pub fn prepare(
     match tool {
         "write_file" => prepare_write(input, &root),
         "edit_file" => prepare_edit(input, &root),
+        "run_command" if input.get("action").is_some_and(|a|a!="sync") => crate::runtime_host::command_jobs::prepare(input,&root),
         "run_command" => prepare_command(input, &root),
         _ => Err(ToolErrorCode::InvalidInput.error(format!("unsupported host tool: {tool}"))),
     }
@@ -188,6 +194,7 @@ pub fn execute_with_cancellation(
 ) -> Result<Value, String> {
     check_cancellation(cancellation)?;
     match action {
+        PreparedToolAction::CommandJob { .. } => Err(ToolErrorCode::PermissionDenied.error("Command jobs require the durable Host adapter")),
         PreparedToolAction::WriteFile {
             root,
             path,
@@ -402,6 +409,70 @@ enum CommandOutcome {
     WaitFailed,
 }
 
+struct CommandContainment {
+    #[cfg(windows)]
+    job: Option<crate::process_jobs::WindowsJob>,
+}
+
+impl CommandContainment {
+    fn attach(child: &std::process::Child) -> std::io::Result<Self> {
+        #[cfg(windows)]
+        {
+            return crate::process_jobs::WindowsJob::assign_and_resume(child)
+                .map(|job| Self { job: Some(job) });
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+            Ok(Self {})
+        }
+    }
+
+    fn terminate(&mut self, child: &mut std::process::Child) {
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            let _ = job.terminate();
+            drop(job);
+        }
+        terminate_process_tree(child);
+    }
+
+    fn close_after_parent_exit(&mut self) -> std::io::Result<()> {
+        #[cfg(windows)]
+        if let Some(job) = self.job.take() {
+            let terminated = job.terminate();
+            drop(job);
+            terminated?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn command_spawn_spec(
+    command: &str,
+    cwd: &Path,
+) -> crate::process_jobs::SpawnSpec {
+    #[cfg(windows)]
+    let (program, args) = (
+        "cmd.exe".to_owned(),
+        vec![
+            "/D".to_owned(),
+            "/S".to_owned(),
+            "/C".to_owned(),
+            command.to_owned(),
+        ],
+    );
+    #[cfg(not(windows))]
+    let (program, args) = ("sh".to_owned(), vec!["-lc".to_owned(), command.to_owned()]);
+
+    crate::process_jobs::SpawnSpec {
+        program,
+        args,
+        cwd: cwd.to_string_lossy().into_owned(),
+        env: crate::process_jobs::EnvMode::Inherit,
+    }
+}
+
 fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: Option<&crate::kernel::CancellationToken>) -> Result<Value, String> {
     // The reader budget is process-wide, so the tests that measure it cannot run
     // against each other's reservations. Compiles out of the product build; in
@@ -413,19 +484,25 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
     // Reap output readers left behind by earlier commands whose pipes only now
     // reached EOF, before this call adds any of its own.
     reap_finished_readers();
+    let spawn_spec = command_spawn_spec(command, cwd);
+    let mut process = Command::new(&spawn_spec.program);
+    crate::process_jobs::apply_spawn_arguments(&mut process, &spawn_spec);
     #[cfg(windows)]
-    let mut process = {
-        let mut process = Command::new("cmd.exe");
-        process.args(["/D", "/S", "/C", command]);
-        process.creation_flags(0x0800_0000);
-        process
-    };
-    #[cfg(not(windows))]
-    let mut process = {
-        let mut process = Command::new("sh");
-        process.args(["-lc", command]);
-        process
-    };
+    {
+        process.creation_flags(
+            crate::process_jobs::CREATE_NO_WINDOW_FLAG
+                | crate::process_jobs::CREATE_SUSPENDED_FLAG,
+        );
+    }
+    match &spawn_spec.env {
+        crate::process_jobs::EnvMode::Inherit => {
+            command_environment::apply_inherited(&mut process)
+        }
+        crate::process_jobs::EnvMode::Replace(entries) => {
+            command_environment::apply_explicit(&mut process, entries)
+                .map_err(|error| ToolErrorCode::InvalidInput.error(error.to_string()))?;
+        }
+    }
     // A command costs two drain slots, and both of its pipes exist from here on.
     // Reserve them while there is still no child: after spawning, the only ways
     // out of a full ceiling are leaking a thread or hanging on a read that no
@@ -437,7 +514,7 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
         )));
     }
     let mut child = match process
-        .current_dir(cwd)
+        .current_dir(&spawn_spec.cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -454,6 +531,19 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
             )));
         }
     };
+    let mut containment = match CommandContainment::attach(&child) {
+        Ok(containment) => containment,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            for _ in 0..READERS_PER_COMMAND {
+                release_reader_slot();
+            }
+            return Err(ToolErrorCode::StartFailed.error(format!(
+                "failed to confine command before execution: {error}"
+            )));
+        }
+    };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     // Each call consumes exactly one of the two reserved slots, releasing it
@@ -464,7 +554,7 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
     let mut wait_failure = None;
     let outcome = loop {
         if let Err(error) = check_cancellation(cancellation) {
-            terminate_process_tree(&mut child);
+            containment.terminate(&mut child);
             break CommandOutcome::Cancelled(error);
         }
         let status = match child.try_wait() {
@@ -477,7 +567,7 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
                 wait_failure = Some(ToolErrorCode::Unknown.error(format!(
                     "failed to wait for command: {error}"
                 )));
-                terminate_process_tree(&mut child);
+                containment.terminate(&mut child);
                 break CommandOutcome::WaitFailed;
             }
         };
@@ -485,11 +575,18 @@ fn execute_command(command: &str, cwd: &Path, timeout: Duration, cancellation: O
             break CommandOutcome::Exited(status.code());
         }
         if started.elapsed() >= timeout {
-            terminate_process_tree(&mut child);
+            containment.terminate(&mut child);
             break CommandOutcome::TimedOut;
         }
         thread::sleep(Duration::from_millis(40));
     };
+    if matches!(outcome, CommandOutcome::Exited(_)) {
+        if let Err(error) = containment.close_after_parent_exit() {
+            wait_failure = Some(ToolErrorCode::Unknown.error(format!(
+                "failed to terminate command descendants after shell exit: {error}"
+            )));
+        }
+    }
     // The tree is gone (or was never going to be killed), so both pipes normally
     // reach end of file; whatever the child printed before it stopped is what
     // the model needs in order to act. The snapshot is taken even when a

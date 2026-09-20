@@ -1365,6 +1365,15 @@ fn initial_model_real_worker_after_reopen_commits_final_and_consumes_once() {
     let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
     let (status, attempts): (String, i64) = connection.query_row("SELECT status,attempts FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key='initial-model'", [&run_id], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
     assert_eq!((status, attempts), ("completed".into(), 1));
+    let records:Vec<String>={let mut q=connection.prepare("SELECT event_json FROM run_events WHERE run_id=?1 AND event_type='usage.request'").unwrap();
+        q.query_map([&run_id],|r|r.get(0)).unwrap().collect::<Result<_,_>>().unwrap()};
+    assert_eq!(records.len(),1,"the real worker request is durably accounted once, including after attempted replay");
+    let record:Value=serde_json::from_str(&records[0]).unwrap();
+    assert_eq!(record["record"]["schemaVersion"],"usage-v1");
+    assert_eq!(record["record"]["runId"],run_id);
+    assert_eq!(record["record"]["outcome"],"success");
+    assert!(record["record"]["cost"]["knownCost"].is_null());
+    assert!(!records[0].contains("test-key"));
 }
 
 fn settled_provider_rejection(run_id: &str, turn_id: &str, checkpoint_seq: u64) -> String {

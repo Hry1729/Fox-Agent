@@ -31,6 +31,8 @@ mod resource_gateway;
 mod skills;
 mod tool_guard;
 mod tool_host;
+mod html_preview;
+mod process_jobs;
 mod vector_store;
 mod work_diagnostics;
 mod work_mode_gate;
@@ -139,6 +141,7 @@ pub fn run() {
         }).collect::<Vec<_>>()
     });
     let app = tauri::Builder::default()
+        .register_uri_scheme_protocol("fox-preview", |ctx,request| html_preview::serve(ctx.webview_label(),request))
         .setup(move |app| {
             let app_data_dir = std::env::var_os("FOX_DATA_DIR")
                 .map(std::path::PathBuf::from)
@@ -216,6 +219,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            html_preview::html_preview_create,
+            html_preview::html_preview_release,
             commands::runtime_initialize,
             commands::runtime_status,
             commands::runtime_diagnostics,

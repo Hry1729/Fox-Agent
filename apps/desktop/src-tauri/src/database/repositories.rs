@@ -40,6 +40,7 @@ pub(crate) mod kernel_authorization;
 pub(crate) mod kernel_continuation;
 pub(crate) mod kernel_jobs;
 mod kernel_job_execution;
+mod model_usage;
 pub(crate) mod kernel_reconciliation;
 pub(crate) use kernel_authorization::{
     AdditionalGrant, GrantRegistration, GrantScopeKind, GrantSkipReason,
@@ -6059,6 +6060,12 @@ impl Database {
             if seq <= last_seq {
                 transaction.rollback()?;
                 return Ok(false);
+            }
+            if event_type == "usage.request" {
+                model_usage::store(&transaction,run_id,&payload["record"])?;
+                transaction.execute("UPDATE runs SET last_seq=?2 WHERE id=?1",params![run_id,seq])?;
+                transaction.commit()?;
+                return Ok(true);
             }
             let run_is_terminal = matches!(
                 run_status.as_str(),

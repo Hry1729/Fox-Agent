@@ -12,6 +12,52 @@ import { createHostTools } from '../src/host-tools.mjs'
 
 const identity = { runId: 'run-k', conversationId: 'conversation-k', runtimeSessionId: 'session-k' }
 
+test('production worker records actual request limits, exclusive cache tokens and failed requests', { timeout: 60000 }, async t => {
+  const sent = []
+  const server = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk
+    const body = JSON.parse(raw); sent.push(body)
+    if (body.model === 'usage-fail') { res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":{"message":"private provider body"}}'); return }
+    res.writeHead(200, { 'content-type': 'text/event-stream' })
+    res.write(`data: ${JSON.stringify({ id: 'usage-test', object: 'chat.completion.chunk', created: 1, model: body.model,
+      choices: [{ index: 0, delta: { role: 'assistant', content: 'done' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 20, completion_tokens: 5, total_tokens: 25, prompt_tokens_details: { cached_tokens: 7 } } })}\n\n`)
+    res.end('data: [DONE]\n\n')
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => { server.closeAllConnections(); server.close() })
+  for (const mode of ['success', 'failure', 'compaction']) {
+    const child = await worker(t)
+    const config = initialization({ usageRecords: true, proposalTools: [], modelService: {
+      apiType: 'openai-completions', modelId: mode === 'failure' ? 'usage-fail' : 'usage-ok',
+      baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'private-test-key', maxOutputTokens: 1536,
+    } })
+    assert.equal((await child.request('kernel.initialize', config)).type, 'kernel.ready')
+    const answer = mode === 'compaction'
+      ? await child.request('kernel.compact_context', compactionPayload())
+      : await child.request('kernel.resume_batch', resumePayload())
+    assert.equal(answer.type, mode === 'failure' ? 'kernel.model_failure' : mode === 'compaction' ? 'kernel.compaction_result' : 'kernel.model_response')
+    const records = child.events.filter(e => e.type === 'kernel.usage_record').map(e => e.payload)
+    assert.equal(records.length, 1)
+    const record = records[0]
+    assert.equal(record.runId, identity.runId)
+    assert.equal(record.stage, mode === 'compaction' ? 'compaction' : 'agent')
+    assert.equal(record.outcome, mode === 'failure' ? 'failure' : 'success')
+    assert.equal(record.cost.knownCost, null)
+    assert.equal(record.cost.costComplete, false)
+    assert.ok(record.timings.modelRequestMs >= 0)
+    assert.equal(record.config.sent.max_tokens, sent.at(-1).max_tokens)
+    assert.equal(sent.at(-1).max_tokens, 1536)
+    assert.doesNotMatch(JSON.stringify(record), /private-test-key|private provider body|Read the file|persisted result/)
+    if (mode !== 'failure') {
+      assert.equal(record.usage.input, 13, 'Pi already removed the 7 cache tokens; do not subtract twice')
+      assert.equal(record.usage.cacheRead, 7)
+      assert.equal(record.usage.output, 5)
+    } else assert.equal(record.usage.completeness, 'unavailable')
+  }
+  assert.equal(sent.length, 3, 'one observed attempt per actual request, no hidden SDK retries')
+})
+
 test('real HTTP Kernel live and resumed loops choose every range from model-visible cursors', { timeout: 60000 }, async t => {
   const source = Array.from({ length: 350 }, (_, index) => `记录${index}:中文数据😀及等待原因；`).join('\n')
   const stored = Buffer.from(source)
@@ -417,7 +463,7 @@ async function worker(t, args = ['--kernel-worker'], { onRoundOutput, mapHostRes
         child.stdin.write(`${JSON.stringify(mapHostResponse(reply))}\n`)
         continue
       }
-      if (message.type === 'kernel.model_preview') continue
+      if (message.type === 'kernel.model_preview' || message.type === 'kernel.usage_record') continue
       pending.get(message.requestId)?.(message)
       pending.delete(message.requestId)
     }

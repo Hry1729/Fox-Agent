@@ -121,17 +121,13 @@ fn b04_acc_read_tool_result_clamps_one_range_and_defaults_the_rest() {
 }
 
 // ---------------------------------------------------------------------------
-// S01 — a Host-executed command inherits the full parent environment
+// S01 — a Host-executed command excludes parent secrets
 // ---------------------------------------------------------------------------
 
-/// Evidence for the S01 boundary (not a fix). `tool_host` spawns the child with
-/// a bare `Command::new` and never filters the environment, so any variable
-/// present in the Fox process is readable by a tool the model requested. The
-/// command runs inside the authorized project root and still sees the canary:
-/// cwd, approval and cancellation are therefore not an OS sandbox.
+/// Acceptance for the minimal environment contract. This does not claim OS isolation.
 #[cfg(windows)]
 #[test]
-fn s01_evidence_command_child_inherits_parent_environment_canary() {
+fn s01_command_child_excludes_parent_environment_canary() {
     let dir = isolated_dir("s01-env");
     // A synthetic secret that exists only for this test.
     std::env::set_var("FOX_HARNESS_S1_CANARY", OUTSIDE_CANARY);
@@ -152,18 +148,17 @@ fn s01_evidence_command_child_inherits_parent_environment_canary() {
         .as_str()
         .unwrap();
     assert!(
-        text.contains(OUTSIDE_CANARY),
-        "the child inherited the parent environment: a model-requested command inside the authorized root saw the canary; got: {text}"
+        !text.contains(OUTSIDE_CANARY),
+        "the command must not inherit the synthetic parent secret; got: {text}"
     );
 
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The same inheritance holds on non-Windows shells, so this is not a cmd.exe
-/// quirk. Runs only where the platform shell is `sh -lc`.
+/// Apply the same minimal environment contract to the POSIX shell.
 #[cfg(not(windows))]
 #[test]
-fn s01_evidence_command_child_inherits_environment_nonwindows() {
+fn s01_command_child_excludes_environment_nonwindows() {
     let dir = isolated_dir("s01-env2");
     std::env::set_var("FOX_HARNESS_S1_CANARY", OUTSIDE_CANARY);
 
@@ -178,7 +173,7 @@ fn s01_evidence_command_child_inherits_environment_nonwindows() {
 
     let result = result.expect("printf must exit zero");
     let text = result["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains(OUTSIDE_CANARY), "posix shell also inherited the canary");
+    assert!(!text.contains(OUTSIDE_CANARY), "posix shell inherited the secret canary");
     std::fs::remove_dir_all(&dir).ok();
 }
 

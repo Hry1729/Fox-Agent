@@ -139,6 +139,7 @@ export async function runPlanner({
   await resourceLoader.reload()
   const plannerModel = { ...model, maxTokens: Math.min(model.maxTokens || 2_048, modelProfile?.planner?.maxOutputTokens || 2_048) }
   const { session } = await createFoxAgentSession({
+    usageStage: 'planner',
     cwd,
     agentDir: process.cwd(),
     model: plannerModel,

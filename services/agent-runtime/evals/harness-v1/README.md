@@ -59,3 +59,11 @@ Rust记录的六个被测产品文件哈希来自编译时嵌入的源码字节�
 
 - `evals/manifests/phase-0a/0b` 与 `src/offline-evaluator.mjs` 保持不变；本 harness 是新增独立清单，不改它们。
 - `real_eval_tests.rs` 的既有完整链路入口保持不变；本目录的三个Rust Host定向用例与之并列，不能冒充完整synthetic-provider或云模型证据。
+
+## 6. 生产请求用量汇总
+
+`node evals/summarize-request-usage.mjs events.json` 读取事件数组、包含 `events` 的 JSON 或 NDJSON。
+支持导出的 `eventJson` / `event_json`、Legacy `usage.request` 和 Kernel `kernel.usage_record`。
+它复用 D 的归一与费用聚合模块，按 Run/request/attempt 去重；HTTP 重试分别记录，不将未知价格或缺失 usage 当作零费用。
+原 `usage.updated` 仍供兼容 UI / 预算使用，本汇总不重复计入它。
+当前价格表未核实，报告成本为未知；没有实际云请求时不据此判断线上模型参数或账单生效。

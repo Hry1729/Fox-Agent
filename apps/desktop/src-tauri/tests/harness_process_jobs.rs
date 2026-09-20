@@ -303,6 +303,25 @@ fn a_real_zero_exit_is_success() {
     assert!(read_all(&manager, &job_id, Stream::Stdout).contains("all-good"));
 }
 
+#[cfg(windows)]
+#[test]
+fn cmd_shell_preserves_quoted_arguments_spaces_and_powershell_exit_code() {
+    let dir = fixture("cmd-raw-arg");
+    let manager = manager(ManagerConfig::default());
+    let spec = SpawnSpec::shell(
+        "powershell.exe -NoProfile -Command \"[Console]::Write('quoted value with spaces'); exit 13\"",
+        &dir.to_string_lossy(),
+    );
+    let job = manager
+        .start(start_request("cmd-raw-arg", spec, Duration::from_secs(30)))
+        .expect("start quoted shell command");
+    let id = job.view().job_id.clone();
+    let view = wait_terminal(&manager, &id, Duration::from_secs(20));
+    assert_eq!(view.state, JobRunState::Failed, "{view:?}");
+    assert_eq!(view.exit_code, Some(13), "PowerShell must actually execute");
+    assert_eq!(read_all(&manager, &id, Stream::Stdout), "quoted value with spaces");
+}
+
 // ---------------------------------------------------------------------------
 // Back-pressure: two pipes at once, far past any pipe buffer
 // ---------------------------------------------------------------------------
@@ -570,6 +589,62 @@ fn a_real_grandchild_does_not_survive_the_tree_termination() {
 
 #[cfg(windows)]
 #[test]
+fn a_naturally_exited_shell_closes_its_job_before_waiting_for_pipe_eof() {
+    let dir = fixture("natural-descendant");
+    let gate = dir.join("gate.txt");
+    let sentinel = dir.join("natural-descendant-survived.txt");
+    std::fs::write(
+        dir.join("natural-waiter.cmd"),
+        "@echo off\r\n\
+         :poll\r\n\
+         if exist \"%~dp0gate.txt\" goto fire\r\n\
+         ping -n 2 127.0.0.1 > nul\r\n\
+         goto poll\r\n\
+         :fire\r\n\
+         echo survived > \"%~dp0natural-descendant-survived.txt\"\r\n",
+    )
+    .expect("write natural-exit waiter");
+
+    std::fs::write(
+        dir.join("launch-descendant.ps1"),
+        "Start-Process -FilePath 'cmd.exe' -ArgumentList '/D','/S','/C','natural-waiter.cmd'\n",
+    )
+    .expect("write natural-exit launcher");
+    let manager = manager(ManagerConfig::default());
+    let spec = SpawnSpec {
+        program: "powershell.exe".to_owned(),
+        args: vec![
+            "-NoProfile".to_owned(),
+            "-NonInteractive".to_owned(),
+            "-ExecutionPolicy".to_owned(),
+            "Bypass".to_owned(),
+            "-File".to_owned(),
+            "launch-descendant.ps1".to_owned(),
+        ],
+        cwd: dir.to_string_lossy().into_owned(),
+        env: EnvMode::Inherit,
+    };
+    let job = manager
+        .start(start_request("natural-descendant", spec, Duration::from_secs(30)))
+        .expect("start");
+    let job_id = job.view().job_id.clone();
+    let view = wait_terminal(&manager, &job_id, Duration::from_secs(20));
+
+    assert_eq!(view.state, JobRunState::Succeeded, "{view:?}");
+    assert!(
+        !view.readers_orphaned,
+        "natural parent exit must close the Job before pipe draining: {view:?}"
+    );
+    std::fs::write(&gate, b"go").expect("open descendant gate");
+    thread::sleep(Duration::from_secs(3));
+    assert!(
+        !sentinel.exists(),
+        "a descendant survived after its shell exited naturally"
+    );
+}
+
+#[cfg(windows)]
+#[test]
 fn cancel_is_a_request_until_acknowledged_and_is_idempotent() {
     let dir = fixture("cancel");
     let manager = manager(ManagerConfig::default());
@@ -680,10 +755,9 @@ fn polling_and_reconnecting_never_re_execute_the_command() {
 
 #[cfg(windows)]
 #[test]
-fn an_environment_isolated_child_cannot_see_a_planted_variable() {
-    // Proves the adapter boundary can actually isolate an environment, which the
-    // wiring layer needs in order to apply A's policy rather than inheriting
-    // whatever the Host happens to have.
+fn the_default_environment_cannot_see_a_planted_parent_secret() {
+    // The production default is an allowlist, so a secret-shaped parent value
+    // cannot cross the process boundary without an explicit approved entry.
     let dir = fixture("env");
     let manager = manager(ManagerConfig::default());
     std::env::set_var("FOX_IT_LEAK_MARKER", "should-not-appear");
@@ -696,7 +770,7 @@ fn an_environment_isolated_child_cannot_see_a_planted_variable() {
             "echo [%FOX_IT_LEAK_MARKER%]".to_owned(),
         ],
         cwd: dir.to_string_lossy().into_owned(),
-        env: EnvMode::Replace(vec![("PATH".to_owned(), std::env::var("PATH").unwrap_or_default())]),
+        env: EnvMode::Inherit,
     };
     let job = manager
         .start(start_request("env", spec, Duration::from_secs(30)))
@@ -706,7 +780,7 @@ fn an_environment_isolated_child_cannot_see_a_planted_variable() {
     let output = read_all(&manager, &job_id, Stream::Stdout);
     assert!(
         !output.contains("should-not-appear"),
-        "a replaced environment must not leak the parent's variables: {output:?}"
+        "the default environment must not leak the parent's variables: {output:?}"
     );
     std::env::remove_var("FOX_IT_LEAK_MARKER");
 }
@@ -779,11 +853,11 @@ fn recovery_reads_identity_from_the_real_process_table() {
 }
 
 // ---------------------------------------------------------------------------
-// A module that is not wired must stay unwired
+// Production registration must remain explicit
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_module_is_not_registered_as_a_product_tool() {
+fn the_production_command_job_path_is_registered_durable_and_not_directly_executable() {
     // The text of `lib.rs` is embedded at *compile* time. `include_str!` resolves
     // the path relative to this file, so the check needs no environment variable,
     // no runtime cwd, and no path-format guessing -- it behaves identically under
@@ -797,14 +871,27 @@ fn the_module_is_not_registered_as_a_product_tool() {
     // depending on where the binary was started from, which is worse than useless
     // for a boundary check. `include_str!` removes the whole class of problem.
     //
-    // This file exists to prove the module works *before* wiring. If the module
-    // ever gets registered in `lib.rs`, that is an `integration_ready` change and
-    // this guard should fail so the batch boundary is noticed rather than
-    // silently crossed.
     const LIB_RS: &str = include_str!("../src/lib.rs");
+    const RUNTIME_MOD_RS: &str = include_str!("../src/runtime_host/mod.rs");
+    const COMMAND_JOBS_RS: &str = include_str!("../src/runtime_host/command_jobs.rs");
+    const TOOL_HOST_RS: &str = include_str!("../src/tool_host.rs");
     assert!(
-        !LIB_RS.contains("process_jobs"),
-        "process_jobs must not be declared in lib.rs while the batch is module_ready"
+        LIB_RS.lines().any(|line| line.trim() == "mod process_jobs;"),
+        "the production command-job path must explicitly register process_jobs"
+    );
+    assert!(
+        RUNTIME_MOD_RS.contains("mod command_jobs;"),
+        "the Runtime Host must own the command-job adapter"
+    );
+    assert!(
+        COMMAND_JOBS_RS.contains("kernel_job_start")
+            && COMMAND_JOBS_RS.contains("kernel_command_job_publish")
+            && COMMAND_JOBS_RS.contains("command_spawn_spec"),
+        "start must pass through durable DB ownership and the shared spawn spec"
+    );
+    assert!(
+        TOOL_HOST_RS.contains("Command jobs require the durable Host adapter"),
+        "CommandJob must fail closed if someone tries the direct executor"
     );
 }
 

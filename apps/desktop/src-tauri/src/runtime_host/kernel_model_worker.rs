@@ -130,6 +130,7 @@ pub(super) fn describe(
 // Drop always terminates/reaps only the child created here, then joins bounded
 // readers/writers. A timeout never leaves a pipe writer or model process alive.
 struct Worker {
+    usage_database: Option<crate::database::Database>,
     child: Child,
     #[cfg(windows)]
     job: Option<worker_job::WorkerJob>,
@@ -266,6 +267,7 @@ impl Worker {
             }
         });
         Ok(Self {
+            usage_database: None,
             child,
             #[cfg(windows)]
             job,
@@ -317,6 +319,12 @@ impl Worker {
                 return Err(format!(
                     "Kernel worker response identity/type mismatch ({reason}); reconcile delivery"
                 ));
+            }
+            if response["type"] == "kernel.usage_record" {
+                let run=request["runId"].as_str().ok_or("usage request has no Run")?;
+                if response["payload"]["runId"]!=run {return Err("usage Run identity mismatch".into());}
+                if let Some(db)=&self.usage_database {db.record_model_usage(run,&response["payload"])?;}
+                continue;
             }
             if response["type"] == "kernel.model_preview" {
                 let Some(sink) = preview.filter(|_| expected == "kernel.model_response") else {
@@ -403,13 +411,14 @@ pub(crate) fn deliver(
         token,
         remaining_budget_ms,
         None,
+        None,
     )
 }
 
 pub(super) fn deliver_with_preview(
     runtime: &RuntimeCommand, config: &KernelModelConfig, api_key: &str,
     binding: &RunControlBinding, frame: &KernelBatchResumeFrame, token: &CancellationToken,
-    remaining_budget_ms: i64, preview: Option<&PreviewSink>,
+    remaining_budget_ms: i64, preview: Option<&PreviewSink>, database: Option<&crate::database::Database>,
 ) -> Result<KernelModelResponse, String> {
     token.check()?;
     frame.validate()?;
@@ -423,6 +432,7 @@ pub(super) fn deliver_with_preview(
         token,
         remaining_budget_ms,
         preview,
+        database,
     )?;
     if payload["idempotencyKey"] != frame.idempotency_key
         || payload["checkpointSeq"] != frame.checkpoint_seq
@@ -455,6 +465,7 @@ pub(crate) fn deliver_initial(
         token,
         remaining_budget_ms,
         None,
+        None,
     )
 }
 
@@ -467,6 +478,7 @@ pub(super) fn deliver_initial_with_preview(
     token: &CancellationToken,
     remaining_budget_ms: i64,
     preview: Option<&PreviewSink>,
+    database: Option<&crate::database::Database>,
 ) -> Result<fox_engine_protocol::KernelInitialModelResponse, String> {
     token.check()?;
     frame.validate()?;
@@ -483,6 +495,7 @@ pub(super) fn deliver_initial_with_preview(
         token,
         remaining_budget_ms,
         preview,
+        database,
     )?;
     if payload["idempotencyKey"] != frame.idempotency_key
         || payload["checkpointSeq"] != frame.checkpoint_seq
@@ -510,6 +523,7 @@ fn call_model(
     token: &CancellationToken,
     remaining_budget_ms: i64,
     preview: Option<&PreviewSink>,
+    database: Option<&crate::database::Database>,
 ) -> Result<Value, String> {
     config.hash()?;
     binding.validate()?;
@@ -534,7 +548,9 @@ fn call_model(
     // The durable per-round transport requests one model delivery per process;
     // the worker must not open the live round loop on this path.
     initialization["execution"] = json!("once");
+    initialization["usageRecords"] = json!(database.is_some());
     let mut worker = Worker::spawn(runtime)?;
+    worker.usage_database=database.cloned();
     let ready = worker.exchange(
         request("kernel.initialize", initialization),
         "kernel.ready",
@@ -575,6 +591,7 @@ pub(super) fn compact_context(
     input: &fox_engine_protocol::KernelCompactionRequest,
     token: &CancellationToken,
     remaining_ms: i64,
+    database: Option<&crate::database::Database>,
 ) -> Result<fox_engine_protocol::KernelCompactionResponse, String> {
     input.validate()?;
     if input.run_id != binding.run_id {
@@ -600,6 +617,7 @@ pub(super) fn compact_context(
         token,
         remaining_ms,
         None,
+        database,
     )?;
     let response: fox_engine_protocol::KernelCompactionResponse =
         serde_json::from_value(payload).map_err(|_| "invalid compaction response")?;
@@ -618,6 +636,9 @@ pub(super) struct LiveKernelSession {
 }
 
 impl LiveKernelSession {
+    pub(super) fn observe_usage(&mut self,database:&crate::database::Database) {
+        self.worker.usage_database=Some(database.clone());
+    }
     fn envelope(
         request_type: &str,
         payload: Value,
@@ -657,6 +678,7 @@ impl LiveKernelSession {
         initialization["modelService"]["apiKey"] = Value::String(api_key.into());
         // The whole authoritative Run is driven through one live loop session.
         initialization["execution"] = json!("loop");
+        initialization["usageRecords"] = json!(true);
         let ready = worker.exchange(
             Self::envelope("kernel.initialize", initialization, binding, &session_id),
             "kernel.ready",
@@ -805,6 +827,11 @@ impl LiveKernelSession {
                 return Err(
                     "Kernel worker response identity/type mismatch; reconcile delivery".into(),
                 );
+            }
+            if response["type"] == "kernel.usage_record" {
+                if response["payload"]["runId"]!=binding.run_id {return Err("usage Run identity mismatch".into());}
+                if let Some(db)=&self.worker.usage_database {db.record_model_usage(&binding.run_id,&response["payload"])?;}
+                continue;
             }
             if response["type"] == "kernel.model_preview" {
                 let Some(sink) = preview else {

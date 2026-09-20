@@ -1184,6 +1184,7 @@ impl KernelCoordinator<'_> {
             &token,
             self.live_deadline()?,
         )?;
+        session.observe_usage(self.database);
         self.tick()?;
         self.database
             .kernel_validate_resource_acquisition(&self.binding.run_id)?;
