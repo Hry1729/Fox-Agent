@@ -56,6 +56,11 @@
 //! and need neither Node, OfficeCLI nor credentials.
 
 use super::*;
+// O-REVIEW-03：O 完整编译发现本文件漏了这三个导入（e-compile-glue.patch），
+// 导致 E-T-01/02/05 无法编译执行。此处按 O 已验证的形式补齐。
+use crate::runtime_host::{
+    create_fresh_host_tool_call, finalize_host_tool_execution, HostToolCallExecution,
+};
 use crate::runtime_host::{kernel_gateway, kernel_host, kernel_model_worker};
 use calamine::{open_workbook_auto_from_rs, Data as CellData, Reader};
 use serde_json::{json, Value};
@@ -6333,4 +6338,788 @@ fn real_eval_driver_expires_unanswered_approval_with_wall_time() {
 #[test]
 fn real_eval_driver_gives_later_proposals_fresh_approval_windows() {
     exercise_eval_approval_clock(true);
+}
+
+// ---------------------------------------------------------------------------
+// E-T-01 / E-T-02 / E-T-05 — the three rust-host acceptance cases.
+//
+// Each one drives the SAME chain a Legacy Runtime drives in production:
+//
+//   the frozen RunControlBinding (Legacy authority, Rust read-only executor)
+//   -> a real durable Host ToolCall row (`create_fresh_host_tool_call`)
+//   -> the real executor (`tool_host::prepare` / `execute_with_cancellation`
+//      for file/command tools, `resource_gateway` for readers, reached through
+//      `execute_rust_reader_request`)
+//   -> `finalize_host_tool_execution`, which persists the terminal status and
+//      the result the model later re-reads
+//   -> `Database::tool_result_range` over `fox-result://<run>/<call>`, the only
+//      route by which a model reaches those stored bytes back
+//
+// No model, no cloud credentials, no Node runtime and no OfficeCLI are needed,
+// so these are plain (non-ignored) tests: the exact `cargo test` filters in
+// `services/agent-runtime/evals/harness-v1/tasks.mjs` name each one.
+//
+// A contract requirement the CURRENT product base does not satisfy is
+// RECORDED (`passed: false`, with expected vs actual) in the evidence file and
+// in `tasks.mjs` as `expectedOutcomeAtBaseline` — it is never hidden and never
+// relabelled as a product improvement when a later base satisfies it. Only a
+// broken measurement chain (the executor did not really run, the row was not
+// persisted, the re-read did not resolve) fails the test itself, because that
+// would mean the case measured nothing.
+// ---------------------------------------------------------------------------
+
+/// Mirrors `HARNESS_VERSION` in `evals/harness-v1/tasks.mjs` so an evidence
+/// file names the harness revision that produced it.
+const RUST_HOST_HARNESS: &str = "harness-v1.2/rust-host";
+/// Mirrors `CONTRACT_VERSION` in the same file.
+const RUST_HOST_CONTRACT: &str = "CONTRACTS v1.2";
+
+/// A frozen Legacy Run with the Rust read-only executor, project root and an
+/// explicit permission mode — the shape the Legacy protocol gives Host when a
+/// model calls `read` / `write_file` / `edit_file` / `run_command`. Legacy
+/// authority is not optional here: `complete_host_tool_call` refuses to
+/// finalize a tool call on an Authoritative-owned Run, and the re-read half of
+/// every case below depends on that finalization.
+fn rust_host_run(label: &str, permission_mode: &str) -> (Database, std::path::PathBuf, String, String) {
+    let root = std::env::temp_dir().join(format!(
+        "fox-eval-rust-host-{label}-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir_all(&root).expect("an isolated project root");
+    let db = Database::open(root.join("facts.db")).expect("a facts database");
+    let conversation = db
+        .create_conversation(
+            db.default_agent_id(),
+            None,
+            Some(root.to_str().unwrap()),
+            Some(permission_mode),
+        )
+        .expect("a conversation bound to the project root");
+    let run = db
+        .create_run(&conversation.id, "rust-host-eval", None)
+        .expect("a Run")
+        .run;
+    db.freeze_legacy_run_control_with_executor(&run.id, "legacy", ResourceExecutor::Rust)
+        .expect("a frozen Legacy binding with the Rust executor");
+    db.apply_runtime_event(&run.id, 1, &json!({ "type": "run.started" }))
+        .expect("a fresh Host ToolCall needs a running Run");
+    (db, root, conversation.id, run.id)
+}
+
+/// The Legacy Host dispatch core for a file or command tool, in the exact order
+/// `execute_host_tool_request` uses: admission (`tool_host::prepare`), then the
+/// durable ToolCall row, then real execution, then `finalize_host_tool_execution`.
+///
+/// `run_command` always waits for a one-shot human approval in production, so
+/// this entry corresponds to the post-approval state (the same state an
+/// `allow_once` decision produces); the approval UI is not what E-T-01
+/// measures. For `write_file` / `edit_file` under an `allow` project this IS the
+/// production path verbatim.
+fn dispatch_host_tool(
+    db: &Database,
+    root: &std::path::Path,
+    run_id: &str,
+    tool: &str,
+    input: &Value,
+    tool_call_id: &str,
+) -> Result<Value, String> {
+    let registry = CancellationRegistry::default();
+    registry.register_run(run_id)?;
+    let token = registry.tool_token(run_id, tool_call_id)?;
+    let prepared = crate::tool_host::prepare(
+        tool,
+        input,
+        root.to_str().ok_or("the project root is not valid UTF-8")?,
+    )?;
+    match create_fresh_host_tool_call(db, run_id, tool_call_id, tool, input, "running", false)? {
+        HostToolCallExecution::Replay(response) => Ok(response),
+        HostToolCallExecution::Execute(_) => {
+            let outcome = crate::tool_host::execute_with_cancellation(prepared, Some(&token));
+            finalize_host_tool_execution(db, run_id, tool_call_id, tool, input, Vec::new(), outcome)
+        }
+    }
+}
+
+/// The reader route: a real `tool.readonly_execute` envelope admitted by
+/// `execute_rust_reader_request`, which is the Legacy+Rust seam a Runtime
+/// reaches. Identical to the envelope `legacy_read_result` builds.
+fn dispatch_reader(
+    db: &Database,
+    run_id: &str,
+    tool: &str,
+    path: &str,
+    tool_call_id: &str,
+) -> Result<Value, String> {
+    use crate::runtime_host::protocol::{timestamp, RuntimeEnvelope, PROTOCOL_NAME, PROTOCOL_VERSION};
+    let binding = db
+        .run_control_binding(run_id)?
+        .ok_or("the reader Run has no frozen control binding")?;
+    let registry = CancellationRegistry::default();
+    registry.register_run(run_id)?;
+    let token = registry.tool_token(run_id, tool_call_id)?;
+    let envelope: RuntimeEnvelope = serde_json::from_value(json!({
+        "protocol": PROTOCOL_NAME, "version": PROTOCOL_VERSION,
+        "kind": "request", "type": "tool.readonly_execute",
+        "id": format!("reader-{tool_call_id}"),
+        "timestamp": timestamp(),
+        "runId": binding.run_id, "conversationId": binding.conversation_id,
+        "payload": { "toolCallId": tool_call_id, "tool": tool,
+                     "input": { "path": path },
+                     "permissionSnapshotId": binding.permission_snapshot_id },
+    }))
+    .expect("the reader envelope is well-formed");
+    crate::runtime_host::execute_rust_reader_request(db, &envelope, &token)
+}
+
+/// What the Host hands the model for this call, built exactly as
+/// `handle_host_tool_request` builds it: an `Ok` payload carries the result; an
+/// `Err` becomes `{"isError":true,"error":...}`. That envelope is the failure
+/// receipt EX-v1 requires, and the checker never trusts the model's own reading
+/// of it.
+fn model_receipt(outcome: &Result<Value, String>) -> Value {
+    match outcome {
+        Ok(value) => value.clone(),
+        Err(error) => json!({ "isError": true, "error": error }),
+    }
+}
+
+/// The receipt reports a failure when it says so at the top level (an `Err`
+/// dispatch) or through the nested business-failure result EX-v1 allows (an
+/// `Ok` whose result carries `isError`). Either is a legal failure receipt;
+/// neither may read as a success.
+fn receipt_reports_failure(receipt: &Value) -> bool {
+    receipt.get("isError").and_then(Value::as_bool) == Some(true)
+        || receipt
+            .get("result")
+            .and_then(|result| result.get("isError"))
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
+/// A persisted row is a business-failure outcome only when it ended `failed`.
+///
+/// CONTRACTS v1.2 §6: an execution that has already ended in business failure
+/// may be returned as `Ok(Value)` with a top-level `isError=true`, but Host
+/// **must persist `failed`**. `completed` is therefore never a failure outcome,
+/// whatever `isError` the row carries — accepting `completed + isError` would let
+/// a mutant row read as a failure it never was, and would broaden the allowed
+/// set beyond the frozen contract to accommodate an old baseline. This is the
+/// strict criterion; `persisted_completed_is_error_mutant_must_not_be_a_failure`
+/// pins it.
+fn persisted_failure(record: &crate::database::ToolCallRecord) -> bool {
+    record.status.as_str() == "failed"
+}
+
+/// Compile-time source bytes of the product files a rust-host case exercises.
+/// An old executable must never label itself with newly edited checkout bytes.
+/// The importer compares these digests with the current checkout. Mirrors
+/// `MEASURED_PRODUCT_FILES` in `evals/harness-v1/evidence-identity.mjs`
+/// verbatim; both sides must list the same paths in the same order.
+const MEASURED_PRODUCT_FILES: &[(&str, &[u8])] = &[
+    ("apps/desktop/src-tauri/src/tool_host.rs", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tool_host.rs"))),
+    ("apps/desktop/src-tauri/src/resource_gateway.rs", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/resource_gateway.rs"))),
+    ("apps/desktop/src-tauri/src/tool_guard.rs", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tool_guard.rs"))),
+    ("apps/desktop/src-tauri/src/runtime_host/mod.rs", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/runtime_host/mod.rs"))),
+    ("apps/desktop/src-tauri/src/database/repositories.rs", include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/database/repositories.rs"))),
+    ("apps/desktop/src-tauri/src/runtime_host/kernel_coordinator/real_eval_tests.rs", include_bytes!("real_eval_tests.rs")),
+];
+
+/// sha256 of one file's bytes, or `None` when unreadable.
+fn file_sha256(path: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(format!("{:x}", Sha256::digest(&bytes)))
+}
+
+/// Content hashes of the measured product files, relative to the repository
+/// root. Mirrors `productFileDigests` in `evidence-identity.mjs`.
+fn product_file_digests() -> Vec<Value> {
+    MEASURED_PRODUCT_FILES
+        .iter()
+        .map(|(relative, compiled_bytes)| {
+            json!({ "path": relative, "sha256": format!("{:x}", Sha256::digest(compiled_bytes)) })
+        })
+        .collect()
+}
+
+#[test]
+fn rust_host_evidence_compiled_sources_match_the_checkout() {
+    for (relative, compiled_bytes) in MEASURED_PRODUCT_FILES {
+        let current = std::fs::read(repository_dir().join(relative)).expect("measured source is readable");
+        assert_eq!(Sha256::digest(compiled_bytes), Sha256::digest(&current), "stale test executable: {relative}");
+    }
+}
+
+/// sha256 over the harness sources, mirroring `hashHarnessDir` in
+/// `evidence-identity.mjs`: walk the harness dir, collect `*.mjs`/`*.js`/`*.md`,
+/// sort by full path, digest each file's bytes, join `basename:sha256` with
+/// `|`, sha256 the result. Returns `None` when the harness sources are absent
+/// (a run without the checker sources present cannot prove which checker
+/// version judged it — the harness then rejects the evidence, by design).
+fn harness_source_sha256() -> Option<String> {
+    let dir = harness_dir()?;
+    let mut files = Vec::new();
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if let Some(extension) = path.extension() {
+                if matches!(extension.to_str(), Some("mjs") | Some("js") | Some("md")) {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    walk(&dir, &mut files);
+    files.sort();
+    let joined = files
+        .iter()
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?;
+            let digest = file_sha256(path)?;
+            Some(format!("{name}:{digest}"))
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    Some(format!("{:x}", Sha256::digest(joined.as_bytes())))
+}
+
+/// The harness directory, next to the measured product sources. Mirrors the
+/// default the Node runner resolves for the same product root.
+fn harness_dir() -> Option<std::path::PathBuf> {
+    let dir = repository_dir().join("services/agent-runtime/evals/harness-v1");
+    dir.is_dir().then_some(dir)
+}
+
+/// The product commit this test compiled against, resolved by reading git's
+/// files (no subprocess). Mirrors `gitMetadataViaFiles` in `run-harness.mjs`:
+/// `.git` → gitdir → `HEAD` → `refs/heads/<branch>` (via commondir) with a
+/// packed-refs fallback. Returns `None` when unresolvable — the harness then
+/// refuses to accept the evidence, which is the correct outcome for a run whose
+/// product identity cannot be established.
+fn product_sha() -> Option<String> {
+    let gitdir = read_gitdir(&repository_dir())?;
+    let head = read_trim(&gitdir.join("HEAD"))?;
+    if let Some(branch) = head.strip_prefix("ref:") {
+        let branch = branch.trim().strip_prefix("refs/heads/")?;
+        let commondir = read_trim(&gitdir.join("commondir"))
+            .map(|value| {
+                if value.contains(':') || value.starts_with('/') {
+                    std::path::PathBuf::from(value)
+                } else {
+                    gitdir.join(value)
+                }
+            })
+            .unwrap_or_else(|| gitdir.clone());
+        if let Some(commit) = read_trim(&commondir.join("refs").join("heads").join(branch)) {
+            return Some(commit);
+        }
+        return read_packed_ref(&commondir, branch);
+    }
+    Some(head)
+}
+
+fn read_gitdir(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    if root.join(".git").is_dir() {
+        return Some(root.join(".git"));
+    }
+    let dot_git = read_trim(&root.join(".git"))?;
+    if let Some(relative) = dot_git.strip_prefix("gitdir:") {
+        let path = relative.trim();
+        return Some(if path.contains(':') || path.starts_with('/') {
+            std::path::PathBuf::from(path)
+        } else {
+            root.join(path)
+        });
+    }
+    Some(root.join(".git"))
+}
+
+fn read_trim(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path).ok().map(|value| value.trim().to_owned())
+}
+
+fn read_packed_ref(commondir: &std::path::Path, branch: &str) -> Option<String> {
+    let packed = read_trim(&commondir.join("packed-refs"))?;
+    packed
+        .lines()
+        .find(|line| line.ends_with(&format!("refs/heads/{branch}")))
+        .and_then(|line| line.split_whitespace().next().map(|value| value.to_owned()))
+}
+
+/// The execution identity: product + harness + contract + case. Mirrors
+/// `executionStampOf` in `evidence-identity.mjs`; a plain join, no hashing, so
+/// both languages produce the identical string.
+fn execution_stamp(product_sha: &str, harness_source_sha256: &str, case: &str) -> String {
+    format!("{product_sha}|{harness_source_sha256}|{RUST_HOST_CONTRACT}|{case}")
+}
+
+/// Persist one case's checks so a verdict survives the test process: a baseline
+/// contract failure is evidence, not a console line next to a pass.
+///
+/// O-REVIEW-03 gate 1: the record binds production (product commit + measured
+/// source content hashes), evaluation (harness source hash), contract, case and
+/// execution identity, with a real timestamp. The Node harness re-derives every
+/// one of these from its own run and rejects the record on any mismatch, any
+/// missing field, an empty check set, a missing required check, or a
+/// contradictory `overall`. Older records are never overwritten: each run writes
+/// `<case>-<generatedAtMs>.json` and the harness takes the newest.
+fn record_rust_host_case(case: &str, problems: &[&str], tool: &str, checks: &CheckResults) {
+    let rows = checks
+        .rows
+        .iter()
+        .map(|(id, passed, detail)| json!({ "id": id, "passed": *passed, "detail": detail }))
+        .collect::<Vec<_>>();
+    let generated_at_ms = crate::database::now_ms();
+    let product_sha = product_sha().unwrap_or_default();
+    let harness_source_sha256 = harness_source_sha256().unwrap_or_default();
+    let report = json!({
+        "case": case,
+        "harness": RUST_HOST_HARNESS,
+        "contractVersion": RUST_HOST_CONTRACT,
+        "productSha": product_sha,
+        "productRoot": repository_dir().to_string_lossy(),
+        "harnessSourceSha256": harness_source_sha256,
+        "executionStamp": execution_stamp(&product_sha, &harness_source_sha256, case),
+        "executionId": std::env::var("FOX_HARNESS_EXECUTION_ID").unwrap_or_default(),
+        "problemIds": problems,
+        "tool": tool,
+        "generatedAtMs": generated_at_ms,
+        // Verdicts are per product base; a later base may satisfy a requirement
+        // the current one does not, and tasks.mjs records which.
+        "verdictScope": "the product base this cargo test compiled against",
+        "productFiles": product_file_digests(),
+        "requiredChecks": rows.iter().map(|row| row["id"].clone()).collect::<Vec<_>>(),
+        "overall": if checks.ok() { "passed" } else { "failed" },
+        "checks": rows,
+    });
+    // Newest file for a case is used; old ones stay on disk, untouched.
+    let name = format!(
+        "{}-{generated_at_ms}.json",
+        case.to_lowercase().replace('-', "_")
+    );
+    let dir = rust_host_evidence_dir();
+    let path = match dir {
+        Ok(dir) => {
+            let path = dir.join(&name);
+            // Each run writes its own timestamped file; earlier runs' files are
+            // never overwritten, only superseded by a newer timestamp.
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap_or_default());
+            path
+        }
+        Err(reason) => {
+            // The round directory is unusable (or is the historical one): keep
+            // the verdict out of temp rather than writing it somewhere nobody
+            // looks, and say so.
+            println!("[rust-host:{case}] evidence could not be persisted: {reason}");
+            std::path::PathBuf::from(format!("<unwritable: {reason}>/{name}"))
+        }
+    };
+    println!(
+        "[rust-host:{case}] {} — evidence at {}",
+        if checks.ok() { "PASS" } else { "FAIL" },
+        path.display()
+    );
+    println!(
+        "[rust-host:{case}] identity productSha={product_sha} harnessSourceSha256={}",
+        if harness_source_sha256.is_empty() { "<unavailable>" } else { &harness_source_sha256[..16] }
+    );
+    for (id, passed, detail) in &checks.rows {
+        println!(
+            "  [{}] {id} — {}",
+            if *passed { "PASS" } else { "FAIL" },
+            detail.chars().take(300).collect::<String>()
+        );
+    }
+}
+
+/// Where the rust-host cases persist their verdicts. Mirrors
+/// `rustHostEvidenceDir` in `evals/harness-v1/run-harness.mjs` and reuses the
+/// same round-directory rules as the other evaluation entries.
+fn rust_host_evidence_dir() -> Result<std::path::PathBuf, String> {
+    let dir = round_dir().join("rust-host");
+    if dir.starts_with(historical_eval_dir()) {
+        return Err(format!(
+            "the historical evidence directory is read-only for this round: {}",
+            historical_eval_dir().display()
+        ));
+    }
+    Ok(dir)
+}
+
+/// E-T-01 (A01, rust-host): a command that writes a unique marker to stdout and
+/// then exits non-zero. EX-v1 requires the exit code AND the stdout diagnostics
+/// to reach the model with a failure receipt, and the persisted ToolCall to end
+/// as a failure.
+#[test]
+fn real_eval_command_stdout_only_non_zero_exit_preserves_diagnostics() {
+    let mut checks = CheckResults::default();
+    let (db, root, conversation, run_id) = rust_host_run("stdout-only", "allow");
+    // A marker only the real child process can produce; the expectation is
+    // recomputed from it, never from the tool's own output.
+    let marker = format!("fox-eval-stdout-{}", uuid::Uuid::new_v4().simple());
+    #[cfg(windows)]
+    let command = format!("echo {marker}>side-effect.txt& echo {marker}& exit /b 7");
+    #[cfg(not(windows))]
+    let command = format!("printf '{marker}' > side-effect.txt; printf '{marker}'; exit 7");
+    let input = json!({ "command": command, "timeoutSeconds": 20 });
+    let outcome = dispatch_host_tool(&db, &root, &run_id, "run_command", &input, "cmd-stdout-only");
+    let receipt = model_receipt(&outcome);
+    let blob = receipt.to_string();
+
+    // 1. The executor really ran: the side-effect file exists and holds the
+    //    marker. Independent of anything the tool returned.
+    let side_effect = std::fs::read_to_string(root.join("side-effect.txt")).unwrap_or_default();
+    checks.check(
+        "et01:real-command-executed",
+        side_effect.contains(&marker),
+        format!("sideEffectFile={} bytes markerFound={}", side_effect.len(), side_effect.contains(&marker)),
+    );
+    // 2. A non-zero exit is reported as a failure, never as a success.
+    let reported_failure = receipt_reports_failure(&receipt);
+    checks.check(
+        "et01:non-zero-exit-is-a-failure-receipt",
+        reported_failure,
+        format!("receipt={}", blob.chars().take(240).collect::<String>()),
+    );
+    // 3. The exit code reaches the model.
+    let exit_code_present = blob.contains("\"exitCode\":7") || blob.contains("exited with code 7");
+    checks.check(
+        "et01:exit-code-reaches-the-model",
+        exit_code_present,
+        format!("exitCodeInReceipt={exit_code_present}"),
+    );
+    // 4. The stdout produced before the non-zero exit survives the failure.
+    //    This is the A01 defect the case exists for: the current base drops it.
+    let stdout_preserved = blob.contains(&marker);
+    checks.check(
+        "et01:stdout-diagnostics-preserved",
+        stdout_preserved,
+        if stdout_preserved {
+            "the stdout marker reached the model".to_owned()
+        } else {
+            "BASELINE: the stdout produced before the non-zero exit was dropped from the failure receipt".to_owned()
+        },
+    );
+    // 5. Persisted state: the Host ToolCall row ended as a failure with a reason.
+    let row = db
+        .get_runtime_tool_call(&run_id, "cmd-stdout-only")
+        .expect("the persisted ToolCall row must be readable")
+        .expect("the Host ToolCall row must exist");
+    checks.check(
+        "et01:persisted-tool-call-ended-as-a-failure",
+        persisted_failure(&row),
+        format!("status={} error={:?}", row.status, row.error_message),
+    );
+    // 6. Historical re-read: the stored outcome is reachable by reference under
+    //    conversation authorization.
+    let reference = format!("fox-result://{run_id}/cmd-stdout-only");
+    let re_read = db.tool_result_range(&reference, &conversation, 0, 65_536);
+    checks.check(
+        "et01:stored-outcome-is-re-readable-by-reference",
+        re_read.as_ref().is_ok_and(|range| {
+            range.status == row.status && range.tool_name == "run_command"
+        }),
+        match &re_read {
+            Ok(range) => format!("status={} tool={} bytes={}", range.status, range.tool_name, range.returned_bytes),
+            Err(error) => format!("re-read failed: {error}"),
+        },
+    );
+
+    record_rust_host_case("E-T-01", &["A01"], "run_command", &checks);
+    let _ = std::fs::remove_dir_all(&root);
+
+    // Only the measurement invariants are asserted here: the chain really ran,
+    // really persisted, and really re-reads. The contract verdicts above are the
+    // recorded evidence, and tasks.mjs carries the baseline expectation.
+    assert!(side_effect.contains(&marker), "the real command never produced its side-effect file; the case measured nothing");
+    assert!(persisted_failure(&row), "the Host ToolCall row was not persisted as a failure outcome");
+    assert!(
+        re_read.as_ref().is_ok_and(|range| range.tool_name == "run_command"),
+        "the stored outcome could not be re-read by reference"
+    );
+}
+
+/// E-T-02 (A03, rust-host): deleting text with a non-empty `oldText` and an
+/// empty `newText` is a legal edit and must succeed; an empty `oldText` must
+/// still be rejected.
+#[test]
+fn real_eval_edit_file_allows_deleting_matched_text_to_empty() {
+    let mut checks = CheckResults::default();
+    let (db, root, conversation, run_id) = rust_host_run("legal-deletion", "allow");
+    std::fs::write(root.join("note.txt"), "keep this line\nremove this line\n").unwrap();
+
+    // Positive case: a real deletion to empty.
+    let input = json!({ "path": "note.txt", "oldText": "remove this line\n", "newText": "" });
+    let outcome = dispatch_host_tool(&db, &root, &run_id, "edit_file", &input, "edit-delete");
+    let receipt = model_receipt(&outcome);
+    let accepted = outcome.is_ok() && !receipt_reports_failure(&receipt);
+    let disk = std::fs::read_to_string(root.join("note.txt")).unwrap_or_default();
+    checks.check(
+        "et02:legal-deletion-is-accepted",
+        accepted,
+        format!("accepted={accepted} receipt={}", receipt.to_string().chars().take(200).collect::<String>()),
+    );
+    checks.check(
+        "et02:deleted-text-is-gone-from-disk",
+        disk == "keep this line\n",
+        format!("disk={disk:?}"),
+    );
+    // Negative case: an empty oldText must be rejected — it is not a deletion.
+    let bad = json!({ "path": "note.txt", "oldText": "", "newText": "anything" });
+    let rejected = dispatch_host_tool(&db, &root, &run_id, "edit_file", &bad, "edit-empty-oldtext");
+    let rejection_is_a_rejection = match &rejected {
+        Err(error) => !error.contains("cannot be resolved") && !error.contains("is not a file"),
+        Ok(value) => value.get("isError").and_then(Value::as_bool) == Some(true),
+    };
+    checks.check(
+        "et02:empty-oldtext-is-rejected",
+        rejection_is_a_rejection,
+        match &rejected {
+            Err(error) => format!("rejected with: {error}"),
+            Ok(value) => format!("accepted (business failure): {}", value.to_string().chars().take(200).collect::<String>()),
+        },
+    );
+    // The rejected call must not have mutated the file.
+    let after_reject = std::fs::read_to_string(root.join("note.txt")).unwrap_or_default();
+    checks.check(
+        "et02:rejection-left-the-file-untouched",
+        after_reject == disk,
+        format!("diskBefore={disk:?} diskAfter={after_reject:?}"),
+    );
+    // Persisted state + historical re-read for the accepted edit.
+    let row = db.get_runtime_tool_call(&run_id, "edit-delete");
+    checks.check(
+        "et02:accepted-edit-persisted-its-outcome",
+        row.as_ref().is_ok_and(|row| {
+            row.as_ref().is_some_and(|row| !persisted_failure(row) && row.status == "completed")
+        }),
+        match &row {
+            Ok(Some(row)) => format!("status={} error={:?}", row.status, row.error_message),
+            Ok(None) => "no ToolCall row was persisted".to_owned(),
+            Err(error) => format!("the row could not be read: {error}"),
+        },
+    );
+    let reference = format!("fox-result://{run_id}/edit-delete");
+    let re_read = db.tool_result_range(&reference, &conversation, 0, 65_536);
+    checks.check(
+        "et02:accepted-edit-is-re-readable-by-reference",
+        re_read.as_ref().is_ok_and(|range| range.tool_name == "edit_file"),
+        match &re_read {
+            Ok(range) => format!("status={} tool={} bytes={}", range.status, range.tool_name, range.returned_bytes),
+            Err(error) => format!("re-read failed: {error}"),
+        },
+    );
+
+    record_rust_host_case("E-T-02", &["A03"], "edit_file", &checks);
+    let _ = std::fs::remove_dir_all(&root);
+
+    // Measurement invariants only: the negative case was really exercised — an
+    // empty oldText was either rejected with an identifiable reason or reported
+    // as a business failure, never silently accepted as a successful edit.
+    assert!(
+        rejection_is_a_rejection,
+        "an empty oldText was neither accepted nor rejected with an identifiable reason"
+    );
+}
+
+/// E-T-05 (S01, rust-host): reading a path outside the frozen project root must
+/// be denied with a reason distinguishable from an ordinary read error, and the
+/// frozen root itself must never become the basis for escaping it.
+#[test]
+fn real_eval_read_outside_the_frozen_project_root_is_denied_and_re_readable() {
+    let mut checks = CheckResults::default();
+    let (db, root, conversation, run_id) = rust_host_run("out-of-root", "read_only");
+    std::fs::write(root.join("allowed.txt"), "authorized content").unwrap();
+    // A file outside the frozen root: a sibling directory, never a child.
+    let outside_dir = root
+        .parent()
+        .unwrap()
+        .join(format!("fox-eval-outside-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    let outside_file = outside_dir.join("secret.txt");
+    std::fs::write(&outside_file, "must never be read").unwrap();
+
+    // Positive control: an in-root read executes, persists completed and is
+    // re-readable. Without it a refusal below could be an infrastructure fault.
+    let inside = dispatch_reader(&db, &run_id, "read", "allowed.txt", "read-inside");
+    let inside_ok = inside.as_ref().is_ok_and(|value| {
+        !receipt_reports_failure(value)
+            && value["result"]["content"][0]["text"].as_str() == Some("authorized content")
+    });
+    checks.check(
+        "et05:in-root-read-succeeds",
+        inside_ok,
+        match &inside {
+            Ok(value) => format!("receipt={}", value.to_string().chars().take(200).collect::<String>()),
+            Err(error) => format!("in-root read failed: {error}"),
+        },
+    );
+    let inside_row = db
+        .get_runtime_tool_call(&run_id, "read-inside")
+        .expect("the in-root ToolCall row must exist");
+    checks.check(
+        "et05:in-root-read-persisted-completed",
+        inside_row.as_ref().is_some_and(|row| row.status == "completed"),
+        format!("status={:?}", inside_row.as_ref().map(|row| row.status.as_str())),
+    );
+    let inside_reference = format!("fox-result://{run_id}/read-inside");
+    let inside_re_read = db.tool_result_range(&inside_reference, &conversation, 0, 65_536);
+    checks.check(
+        "et05:in-root-read-is-re-readable-by-reference",
+        inside_re_read.as_ref().is_ok_and(|range| range.content == "authorized content"),
+        match &inside_re_read {
+            Ok(range) => format!("content={:?} bytes={}", range.content, range.returned_bytes),
+            Err(error) => format!("re-read failed: {error}"),
+        },
+    );
+
+    // The denial: an absolute path outside the frozen root.
+    let denied = dispatch_reader(
+        &db,
+        &run_id,
+        "read",
+        outside_file.to_str().unwrap(),
+        "read-outside",
+    );
+    let denial = denied.as_ref().err().is_some_and(|error| error.contains("outside"));
+    checks.check(
+        "et05:out-of-root-read-is-denied",
+        denial,
+        match &denied {
+            Err(error) => format!("denied with: {error}"),
+            Ok(value) => format!("ACCEPTED (leak): {}", value.to_string().chars().take(200).collect::<String>()),
+        },
+    );
+    // The refusal must be distinguishable from an ordinary read failure: a file
+    // that is missing *inside* the root resolves differently.
+    let missing = dispatch_reader(&db, &run_id, "read", "does-not-exist.txt", "read-missing");
+    let distinguishable = match (denied.as_ref().err(), missing.as_ref().err()) {
+        (Some(denied_error), Some(missing_error)) => {
+            denied_error.contains("outside") && !missing_error.contains("outside")
+        }
+        _ => false,
+    };
+    checks.check(
+        "et05:denial-is-distinguishable-from-an-ordinary-read-error",
+        distinguishable,
+        format!(
+            "denial={:?} missing={:?}",
+            denied.as_ref().err().map(|error| error.chars().take(80).collect::<String>()),
+            missing.as_ref().err().map(|error| error.chars().take(80).collect::<String>()),
+        ),
+    );
+    // The frozen root must not become the basis for escaping it: a path built
+    // FROM the root but leaving it is denied for the same reason.
+    let escape_path = format!(
+        "{root}{sep}..{sep}{dir}{sep}{file}",
+        root = root.to_str().unwrap(),
+        sep = std::path::MAIN_SEPARATOR,
+        dir = outside_dir.file_name().unwrap().to_str().unwrap(),
+        file = outside_file.file_name().unwrap().to_str().unwrap(),
+    );
+    let denied_from_root = dispatch_reader(&db, &run_id, "read", &escape_path, "read-escape");
+    let denial_from_root = denied_from_root
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.contains("outside"));
+    checks.check(
+        "et05:frozen-root-is-not-a-basis-for-escaping-it",
+        denial_from_root,
+        match &denied_from_root {
+            Err(error) => format!("denied with: {error}"),
+            Ok(value) => format!("ACCEPTED (leak): {}", value.to_string().chars().take(200).collect::<String>()),
+        },
+    );
+    // Persisted state: the denial is a failed ToolCall with the refusal reason,
+    // reachable by reference — the model learns it was refused, not skipped.
+    let row = db
+        .get_runtime_tool_call(&run_id, "read-outside")
+        .expect("the denied ToolCall row must exist")
+        .expect("the denied ToolCall row must be persisted");
+    checks.check(
+        "et05:denial-persisted-as-a-failed-tool-call",
+        row.status == "failed"
+            && row.error_message.as_deref().is_some_and(|message| message.contains("outside")),
+        format!("status={} error={:?}", row.status, row.error_message),
+    );
+    let reference = format!("fox-result://{run_id}/read-outside");
+    let re_read = db.tool_result_range(&reference, &conversation, 0, 65_536);
+    checks.check(
+        "et05:denial-outcome-is-re-readable-by-reference",
+        re_read.as_ref().is_ok_and(|range| range.status == "failed" && range.tool_name == "read"),
+        match &re_read {
+            Ok(range) => format!("status={} tool={} bytes={}", range.status, range.tool_name, range.returned_bytes),
+            Err(error) => format!("re-read failed: {error}"),
+        },
+    );
+
+    record_rust_host_case("E-T-05", &["S01"], "read", &checks);
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(&outside_dir);
+
+    // E-T-05 is satisfied by the current base, so every check is a gate.
+    assert!(
+        checks.ok(),
+        "E-T-05 (out-of-root read denial) failed; see the evidence file and the printed checks"
+    );
+}
+
+/// O-REVIEW-03 gate 2: a `completed` row carrying `isError=true` is NOT a
+/// business failure, and must not be counted as one by `persisted_failure`.
+///
+/// CONTRACTS v1.2 §6 lets an ended business failure be returned as
+/// `Ok(Value)` with a top-level `isError=true`, but requires Host to persist
+/// `failed`. A mutant row that persists `completed` while claiming `isError`
+/// therefore violates the contract, and any acceptance criterion that accepted
+/// it would be silently tolerant of the exact regression the criterion exists
+/// to catch. This mutant must fail the strict criterion — no widening of v1.2
+/// to accommodate an old baseline is permitted.
+#[test]
+fn persisted_completed_is_error_mutant_must_not_be_a_failure() {
+    let mutant = crate::database::ToolCallRecord {
+        id: "mutant-row".to_owned(),
+        runtime_tool_call_id: "mutant-call".to_owned(),
+        run_id: "mutant-run".to_owned(),
+        conversation_id: "mutant-conversation".to_owned(),
+        tool_name: "run_command".to_owned(),
+        input: json!({}),
+        status: "completed".to_owned(),
+        // The mutant: a business-failure receipt attached to a completed row.
+        result: Some(json!({ "isError": true, "error": "command exited with code 7" })),
+        error_message: Some("command exited with code 7".to_owned()),
+        execution_location: "host".to_owned(),
+        requires_approval: false,
+        started_at: 0,
+        completed_at: Some(0),
+        updated_at: 0,
+        trace_id: None,
+        span_id: None,
+    };
+    assert!(
+        !persisted_failure(&mutant),
+        "a completed+isError mutant row must not read as a persisted failure"
+    );
+
+    // The strict criterion still recognises the real failure shape.
+    let mut real = mutant.clone();
+    real.status = "failed".to_owned();
+    assert!(
+        persisted_failure(&real),
+        "a failed row must read as a persisted failure"
+    );
+
+    // Any other terminal status is neither.
+    for status in ["running", "pending", "cancelled", "interrupted"] {
+        let mut other = mutant.clone();
+        other.status = status.to_owned();
+        assert!(
+            !persisted_failure(&other),
+            "a {status} row must not read as a persisted failure"
+        );
+    }
 }
