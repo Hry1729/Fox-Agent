@@ -469,3 +469,19 @@ test('read rejects an output budget that cannot hold the next complete character
     /output budget is too small/,
   )
 })
+
+test('search output budget preserves truncation fact through the final result view', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-b02-output-cut-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  await writeFile(join(root, 'a.txt'), 'hit', 'utf8')
+  await writeFile(join(root, 'b.txt'), 'hit', 'utf8')
+  const firstPath = join(root, 'a.txt')
+  const page = await executeReadOnlyTool('find', { path: root, pattern: 'txt' }, {
+    limits: { maxOutputChars: firstPath.length + 1 },
+  })
+  assert.equal(page.details.outputTruncated, true)
+  assert.equal(page.details.pageComplete, false)
+  assert.ok(page.details.nextCursor)
+  const nav = searchNavigationView(page.details)
+  assert.equal(nav.outputTruncated, true)
+})

@@ -74,7 +74,7 @@ function textResult(text, details = {}, maxOutputChars = DEFAULT_LIMITS.maxOutpu
   const bounded = sliceUtf16Budget(source, maxOutputChars)
   return {
     content: [{ type: 'text', text: bounded }],
-    details: { ...details, outputTruncated: bounded.length < source.length },
+    details: { ...details, outputTruncated: details.outputTruncated === true || bounded.length < source.length },
   }
 }
 
@@ -397,6 +397,7 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
         matchLimitReached: capReached,
         skippedIgnored: skipped.ignored,
         totalMatches: scannedFromStart && scanComplete && !capReached && !outputCut ? hitsThisPage : null,
+        outputTruncated: outputCut,
         cursorConsistency: 'live', cursorVersion: 1, cursorStalePossible: true,
         nextCursor,
       },
@@ -502,6 +503,7 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
         matchLimitReached: capReached,
         skippedIgnored: skipped.ignored, skippedUnreadable: unreadable,
         totalMatches: scannedFromStart && effectiveScanComplete && !capReached && !outputCut ? hitsThisPage : null,
+        outputTruncated: outputCut,
         cursorConsistency: 'live', cursorVersion: 1, cursorStalePossible: true,
         nextCursor,
       },

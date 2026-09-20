@@ -629,7 +629,7 @@ const READ_RESULT_PUBLIC_FIELDS = [
 const SEARCH_NAV_FIELDS = [
   'count', 'returnedCount', 'scanComplete', 'scanTruncated', 'matchLimitReached',
   'skippedIgnored', 'skippedUnreadable', 'totalMatches', 'pageComplete', 'hiddenIgnored',
-  'truncated', 'startLine', 'lineCount', 'totalLines', 'readMode',
+  'truncated', 'outputTruncated', 'startLine', 'lineCount', 'totalLines', 'readMode',
   'offset', 'nextOffset', 'returnedUnits', 'totalUnits', 'nextCursor',
   'nextStartLine', 'cursorConsistency', 'cursorVersion', 'cursorStalePossible',
 ]

@@ -127,7 +127,10 @@ impl Gateway<'_> {
         let mut found = Vec::new();
         let mut index = 0usize;
         while let Some(directory) = queue.pop_front() {
-            let (entries, truncated) = self.entries(&directory, self.limits.entries)?;
+            // Pagination is global walk-order pagination. Do not truncate each
+            // directory before applying the global cursor, or a continuation
+            // can never reach sibling entries beyond the first local page.
+            let (entries, truncated) = self.entries(&directory, usize::MAX)?;
             for entry in entries {
                 if entry.directory { queue.push_back(entry.path.clone()); }
                 index += 1;
@@ -345,7 +348,11 @@ fn result(text: String, mut details: Value, max_chars: usize) -> Value {
     // returned unit count here.
     let returned = slice_utf16_budget(&text, max_chars);
     let returned_units = returned.encode_utf16().count();
-    details["outputTruncated"] = json!(returned_units < text.encode_utf16().count());
+    let already_truncated = details
+        .get("outputTruncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    details["outputTruncated"] = json!(already_truncated || returned_units < text.encode_utf16().count());
     details["returnedUnits"] = json!(returned_units);
     json!({ "content": [{"type":"text", "text": returned}], "details": details })
 }
@@ -556,6 +563,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
             "skippedUnreadable": unreadable,
             "totalMatches": if scanned_from_start && scan_complete && !cap_reached && !output_cut { json!(total_hits) } else { Value::Null },
             "nextCursor": next_cursor,
+            "outputTruncated": output_cut,
             "cursorConsistency": "live", "cursorVersion": 1, "cursorStalePossible": true,
         }), limits.output_chars));
     }
@@ -633,6 +641,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
         "skippedUnreadable": unreadable,
         "totalMatches": if scanned_from_start && scan_complete && !cap_or_cut { json!(total_hits) } else { Value::Null },
         "nextCursor": next_cursor,
+        "outputTruncated": output_cut,
         "cursorConsistency": "live", "cursorVersion": 1, "cursorStalePossible": true,
     }), limits.output_chars))
 }
