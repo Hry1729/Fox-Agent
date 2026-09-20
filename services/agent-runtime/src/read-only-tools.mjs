@@ -29,7 +29,11 @@ export function createReadOnlyTools(requestPreflight, { limits, executeHost } = 
       return response.payload.result
     }
     if (route !== 'runtime') throw new Error(`Unknown frozen read-only execution route: ${route}`)
-    return executeReadOnlyTool(tool, approved.input, { signal, limits })
+    return executeReadOnlyTool(tool, approved.input, {
+      signal,
+      limits,
+      authorizationScope: approved.permissionSnapshotId ?? '',
+    })
   }
   return defineFoxTools([
     {

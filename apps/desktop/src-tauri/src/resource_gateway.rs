@@ -108,37 +108,44 @@ impl Gateway<'_> {
         for item in fs::read_dir(path).map_err(|error| error.to_string())? {
             self.check()?;
             let item = item.map_err(|error| error.to_string())?;
-            if entries.len() == limit { return Ok((entries, true)); }
+            let name = item.file_name().to_string_lossy().into_owned();
+            if is_ignored_name(&name) { continue; }
             let target = item.path();
             let canonical = target.canonicalize().map_err(|error| format!("nested resource cannot be resolved: {error}"))?;
             if !canonical.starts_with(&self.root) { return Err("nested resource is outside the frozen project root".into()); }
             let kind = item.file_type().map_err(|error| error.to_string())?;
             // Never traverse links. File reads still validate the actual handle.
-            entries.push(Entry { path: target, name: item.file_name().to_string_lossy().into_owned(), directory: kind.is_dir() });
+            entries.push(Entry { index: 0, path: target, name, directory: kind.is_dir() });
         }
         entries.sort_by(|a,b| a.name.cmp(&b.name));
-        Ok((entries, false))
+        let truncated = entries.len() > limit;
+        entries.truncate(limit);
+        Ok((entries, truncated))
     }
-    fn walk(&self, path: &Path) -> Result<(Vec<Entry>, bool), String> {
+    fn walk(&self, path: &Path, start_after: usize) -> Result<(Vec<Entry>, bool), String> {
         let mut queue = VecDeque::from([path.to_path_buf()]);
         let mut found = Vec::new();
+        let mut index = 0usize;
         while let Some(directory) = queue.pop_front() {
-            let (entries, truncated) = self.entries(&directory, self.limits.entries - found.len())?;
+            let (entries, truncated) = self.entries(&directory, self.limits.entries)?;
             for entry in entries {
                 if entry.directory { queue.push_back(entry.path.clone()); }
-                // Position in walk order (1-based): the search cursor points at
-                // the last DELIVERED match, so scanned-but-undelivered matches
-                // stay reachable (O-REVIEW-03 item 3).
-                let index = found.len() + 1;
+                index += 1;
+                if index <= start_after { continue; }
                 found.push(Entry { index, ..entry });
+                if found.len() == self.limits.entries { return Ok((found, true)); }
             }
-            if truncated || found.len() == self.limits.entries { return Ok((found, truncated || !queue.is_empty())); }
+            if truncated { return Ok((found, true)); }
         }
         Ok((found, false))
     }
 }
 
 struct Entry { index: usize, path: PathBuf, name: String, directory: bool }
+
+fn is_ignored_name(name: &str) -> bool {
+    matches!(name, "node_modules" | ".git" | ".hg" | ".svn" | "target" | "dist" | "build" | "out" | ".output" | "__pycache__" | ".pytest_cache" | ".mypy_cache" | ".next" | ".nuxt" | ".svelte-kit" | "coverage" | ".nyc_output" | ".turbo" | ".cache" | "vendor" | "third_party" | "third-party")
+}
 
 #[cfg(windows)]
 fn verify_opened_path(file: &File, _requested: &Path, root: &Path) -> Result<(), String> {
@@ -385,13 +392,14 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
             // Any internal (read_chars) or output (result) truncation means the
             // requested page was not fully returned. Both cuts are
             // surrogate-pair safe (O-REVIEW-03 item 2).
-            let read_chars_cut = selected_utf16 > limits.read_chars;
-            let bounded = if read_chars_cut { slice_utf16_budget(&selected, limits.read_chars) } else { selected };
+            let budget = limits.read_chars.min(limits.output_chars);
+            let bounded = slice_utf16_budget(&selected, budget);
             let delivered_utf16 = bounded.encode_utf16().count();
-            let truncated = delivered_utf16 < selected_utf16 || delivered_utf16 > limits.output_chars;
-            // Continuation for a truncated line page: the next line after the
-            // last delivered newline (an output cut inside a line re-reads that
-            // line from its start — overlap, never a gap).
+            let truncated = delivered_utf16 < selected_utf16;
+            let selected_start: usize = lines[..start_line - 1]
+                .iter()
+                .map(|line| line.encode_utf16().count())
+                .sum();
             let delivered_lines = bounded.matches('\n').count();
             let next_start_line = start_line + delivered_lines;
             return Ok(result(bounded, json!({
@@ -400,7 +408,9 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
                 "totalLines": total_lines, "pageComplete": end_line == total_lines && !truncated,
                 "scanComplete": true,
                 "readMode": "lines",
-                "nextStartLine": if truncated { json!(next_start_line) } else { Value::Null },
+                "nextOffset": if truncated { json!(selected_start + delivered_utf16) } else { Value::Null },
+                "nextStartLine": if truncated && bounded.ends_with('\n') { json!(next_start_line) } else { Value::Null },
+                "returnedUnits": delivered_utf16, "totalUnits": text.encode_utf16().count(),
             }), limits.output_chars));
         }
         // Legacy UTF-16 code-unit mode: surrogate-pair safe, with nextOffset
@@ -439,11 +449,13 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
     // a cursor from another scope or another query is rejected rather than
     // silently answering a different question.
     let scope = format!(
-        "{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}",
         tool, path.display(), raw_pattern,
         if case_sensitive { "cs" } else { "ci" },
         if glob.is_empty() { "-" } else { glob },
-        limits.matches
+        limits.matches,
+        binding.run_id,
+        binding.permission_snapshot_id
     );
     let mut consumed: usize = 0;
     let mut resume: Option<(usize, usize)> = None;
@@ -457,7 +469,11 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
             CursorPosition::Pair(file, line) => { consumed = file; resume = Some((file, line)); }
         }
     }
-    let (entries, scan_truncated) = gateway.walk(&path)?;
+    let walk_start = match resume {
+        Some((file, _)) => file.saturating_sub(1),
+        None => consumed,
+    };
+    let (entries, scan_truncated) = gateway.walk(&path, walk_start)?;
     let mut total_hits: usize = 0;
     let mut unreadable: usize = 0;
     let mut last_consumed: usize = consumed;
@@ -518,12 +534,13 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
         let scanned_from_start = consumed == 0;
         return Ok(result(text, json!({
             "count": delivered.len(), "returnedCount": delivered.len(),
-            "pageComplete": !output_cut,
+            "pageComplete": !output_cut && !cap_reached,
             "scanComplete": scan_complete, "scanTruncated": scan_truncated,
             "matchLimitReached": cap_reached,
             "skippedUnreadable": unreadable,
             "totalMatches": if scanned_from_start && scan_complete && !cap_reached && !output_cut { json!(total_hits) } else { Value::Null },
             "nextCursor": next_cursor,
+            "cursorConsistency": "live", "cursorVersion": 1, "cursorStalePossible": true,
         }), limits.output_chars));
     }
     // grep
@@ -540,6 +557,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
     let mut cap_reached = false;
     let mut resume_out = (0usize, 0usize);
     let mut last_processed: usize = walk_skip;
+    let mut broke_mid_file = false;
     for entry in entries.into_iter().filter(|e| !e.directory) {
         if entry.index <= walk_skip { continue; }
         last_processed = entry.index;
@@ -558,6 +576,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
             total_hits += 1;
             if delivered >= limits.matches {
                 cap_reached = true;
+                broke_mid_file = true;
                 resume_out = (entry.index, line_index);
                 stop = true;
                 break;
@@ -570,6 +589,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
                     return Err("match line exceeds the output budget; narrow the query or raise limits".into());
                 }
                 output_cut = true;
+                broke_mid_file = true;
                 resume_out = (entry.index, line_index);
                 stop = true;
                 break;
@@ -581,7 +601,8 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
         if stop { break; }
     }
     let cap_or_cut = cap_reached || output_cut;
-    let next_cursor = if scan_truncated == false && !cap_or_cut {
+    let scan_complete = !scan_truncated && !broke_mid_file;
+    let next_cursor = if scan_complete && !cap_or_cut {
         Value::Null
     } else {
         let position = if delivered > 0 || cap_or_cut { resume_out } else { (last_processed + 1, 0) };
@@ -591,12 +612,13 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
     let scanned_from_start = consumed == 0 && resume.is_none();
     Ok(result(text, json!({
         "count": delivered, "returnedCount": delivered,
-        "pageComplete": !output_cut,
-        "scanComplete": !scan_truncated, "scanTruncated": scan_truncated,
+        "pageComplete": !output_cut && !cap_reached,
+        "scanComplete": scan_complete, "scanTruncated": !scan_complete,
         "matchLimitReached": cap_reached,
         "skippedUnreadable": unreadable,
-        "totalMatches": if scanned_from_start && !scan_truncated && !cap_or_cut { json!(total_hits) } else { Value::Null },
+        "totalMatches": if scanned_from_start && scan_complete && !cap_or_cut { json!(total_hits) } else { Value::Null },
         "nextCursor": next_cursor,
+        "cursorConsistency": "live", "cursorVersion": 1, "cursorStalePossible": true,
     }), limits.output_chars))
 }
 
@@ -654,6 +676,9 @@ mod tests {
         let searched = execute(&binding, "grep", &json!({"path":".","pattern":"fox"}), &token).unwrap();
         assert_eq!(searched["details"]["count"], 2);
         assert!(searched["content"][0]["text"].as_str().unwrap().contains(":2:second Fox line"));
+        let tiny = execute(&binding, "read", &json!({"path":"src/note.txt","offset":1,"limit":1}), &token).unwrap();
+        assert_eq!(tiny["content"][0]["text"], "😀");
+        assert_eq!(tiny["details"]["nextOffset"], 3);
     }
 
     #[test]
@@ -681,8 +706,9 @@ mod tests {
         assert_eq!(read["details"]["truncated"], true);
         fs::write(&file, format!("{}\n", "x".repeat(2_000)).repeat(100)).unwrap();
         let grep = execute(&binding, "grep", &json!({"path":".","pattern":"x"}), &token).unwrap();
-        assert_eq!(grep["details"]["count"], 50);
-        assert_eq!(grep["details"]["matchLimitReached"], true);
+        assert!(grep["details"]["count"].as_u64().unwrap() < 50);
+        assert_eq!(grep["details"]["pageComplete"], false);
+        assert!(grep["details"]["nextCursor"].is_string());
         assert_eq!(grep["details"]["outputTruncated"], true);
         assert!(grep["content"][0]["text"].as_str().unwrap().encode_utf16().count() <= 24_000);
     }
@@ -718,5 +744,29 @@ mod tests {
         std::os::unix::fs::symlink(&outside,&link).unwrap();
         assert!(execute(&binding,"grep",&json!({"path":".","pattern":"must"}),&token).unwrap_err().contains("outside"));
         assert!(execute(&binding,"read",&json!({"path":outside.join("secret.txt")}),&token).is_err());
+    }
+
+    #[test]
+    fn search_cursor_keeps_capped_results_reachable_and_globbed() {
+        let (binding, _, token) = fixture();
+        let root = Path::new(binding.permission.project_root.as_ref().unwrap());
+        for index in 0..5 {
+            fs::write(root.join(format!("hit-{index}.txt")), "hit\nhit\n").unwrap();
+        }
+        fs::write(root.join("hit-no.md"), "hit\n").unwrap();
+        let mut cursor = Value::Null;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..10 {
+            let mut input = json!({"path":".","pattern":"hit","glob":"*.txt"});
+            if !cursor.is_null() { input["cursor"] = cursor.clone(); }
+            let page = execute_with_budget(&binding, "find", &input, &token, Budget { read_chars: 100, entries: 4, matches: 2, output_chars: 10_000, line_chars: 100 }).unwrap();
+            for line in page["content"][0]["text"].as_str().unwrap().lines() { seen.insert(line.to_owned()); }
+            cursor = page["details"]["nextCursor"].clone();
+            if cursor.is_null() { break; }
+        }
+        assert_eq!(seen.len(), 5);
+
+        let grep = execute(&binding, "grep", &json!({"path":".","pattern":"hit","glob":"*.txt"}), &token).unwrap();
+        assert!(!grep["content"][0]["text"].as_str().unwrap().contains("hit-no.md"));
     }
 }

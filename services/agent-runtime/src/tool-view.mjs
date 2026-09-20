@@ -631,6 +631,7 @@ const SEARCH_NAV_FIELDS = [
   'skippedIgnored', 'skippedUnreadable', 'totalMatches', 'pageComplete', 'hiddenIgnored',
   'truncated', 'startLine', 'lineCount', 'totalLines', 'readMode',
   'offset', 'nextOffset', 'returnedUnits', 'totalUnits', 'nextCursor',
+  'nextStartLine', 'cursorConsistency', 'cursorVersion', 'cursorStalePossible',
 ]
 
 const SEARCH_NAV_TOOLS = new Set(['read', 'ls', 'find', 'grep'])

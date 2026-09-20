@@ -149,6 +149,7 @@ test('complete scan with capped hits: scanComplete=true + matchLimitReached=true
   const result = await executeReadOnlyTool('find', { path: root, pattern: 'txt' }, { limits: { maxMatches: 3 } })
   assert.equal(result.details.scanComplete, true, 'scope exhausted')
   assert.equal(result.details.matchLimitReached, true, 'hits hit the cap')
+  assert.equal(result.details.pageComplete, false, 'retained matches mean the page is incomplete')
   assert.equal(result.details.totalMatches, null, 'unknown total stays null')
   assert.equal(result.details.returnedCount, 3)
 })
@@ -357,4 +358,82 @@ test('grep supports regex option', async (context) => {
 
   const literal = await executeReadOnlyTool('grep', { path: root, pattern: 'foo\\d+bar' })
   assert.equal(literal.details.count, 0, 'literal search must not match regex pattern')
+})
+
+test('one-unit emoji read advances and final output cap never splits a surrogate pair', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-b03-budget-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  const path = join(root, 'emoji.txt')
+  await writeFile(path, 'A😀tail', 'utf8')
+  const tiny = await executeReadOnlyTool('read', { path, offset: 1, limit: 1 })
+  assert.equal(tiny.content[0].text, '😀')
+  assert.equal(tiny.details.nextOffset, 3)
+  const capped = await executeReadOnlyTool('read', { path, offset: 0, limit: 7 }, { limits: { maxOutputChars: 2 } })
+  assert.equal(capped.content[0].text, 'A')
+  assert.equal(capped.details.returnedUnits, 1)
+  assert.equal(capped.details.nextOffset, 1)
+  assert.doesNotMatch(capped.content[0].text, LONE_SURROGATE)
+})
+
+test('find pagination retains matches scanned beyond match and entry caps', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-b02-caps-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  for (let i = 0; i < 5; i++) await writeFile(join(root, `hit-${i}.txt`), 'hit', 'utf8')
+  const seen = new Set()
+  let cursor = null
+  for (let page = 0; page < 10; page++) {
+    const result = await executeReadOnlyTool('find', { path: root, pattern: 'hit', cursor }, { limits: { maxEntries: 4, maxMatches: 2 } })
+    result.content[0].text.split('\n').filter(Boolean).forEach((path) => seen.add(path))
+    if (result.details.matchLimitReached) assert.equal(result.details.pageComplete, false)
+    cursor = result.details.nextCursor
+    if (!cursor) break
+  }
+  assert.equal(seen.size, 5)
+})
+
+test('grep continues within one file after match cap and applies glob', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-b02-grep-cap-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  await writeFile(join(root, 'yes.txt'), 'hit\nhit\nhit\nhit\nhit', 'utf8')
+  await writeFile(join(root, 'no.md'), 'hit', 'utf8')
+  const seen = new Set()
+  let cursor = null
+  for (let page = 0; page < 10; page++) {
+    const result = await executeReadOnlyTool('grep', { path: root, pattern: 'hit', glob: '*.txt', cursor }, { limits: { maxMatches: 2 } })
+    result.content[0].text.split('\n').filter(Boolean).forEach((line) => seen.add(line))
+    assert.equal(result.content[0].text.includes('no.md'), false)
+    cursor = result.details.nextCursor
+    if (!cursor) break
+  }
+  assert.equal(seen.size, 5)
+})
+
+test('cursor binds authorization scope and declares live non-snapshot semantics', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-b02-auth-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  for (let i = 0; i < 5; i++) await writeFile(join(root, `f${i}.txt`), 'x', 'utf8')
+  const first = await executeReadOnlyTool('find', { path: root, pattern: 'txt' }, {
+    limits: { maxEntries: 2 }, authorizationScope: 'permission-A',
+  })
+  assert.equal(first.details.cursorConsistency, 'live')
+  assert.equal(first.details.cursorStalePossible, true)
+  await assert.rejects(
+    executeReadOnlyTool('find', { path: root, pattern: 'txt', cursor: first.details.nextCursor }, {
+      limits: { maxEntries: 2 }, authorizationScope: 'permission-B',
+    }),
+    /cursor scope mismatch/,
+  )
+})
+
+test('bounded line mode exposes UTF-16 continuation for a long single line', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-b03-long-line-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  const path = join(root, 'long.txt')
+  await writeFile(path, 'A😀tail', 'utf8')
+  const page = await executeReadOnlyTool('read', { path, startLine: 1, lineCount: 1 }, { limits: { maxOutputChars: 2 } })
+  assert.equal(page.content[0].text, 'A')
+  assert.equal(page.details.pageComplete, false)
+  assert.equal(page.details.nextStartLine, null)
+  assert.equal(page.details.nextOffset, 1)
+  assert.equal(page.details.returnedUnits, 1)
 })

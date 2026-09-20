@@ -206,11 +206,12 @@ async function walk(root, { signal, maxEntries = 4_000, glob = null, cursor = nu
 }
 
 /** Query fingerprint: everything a cursor must stay bound to. */
-export function searchCursorBinding(root, { tool, pattern, caseSensitive = false, regex = false, glob = '', pageSize }) {
+export function searchCursorBinding(root, { tool, pattern, caseSensitive = false, regex = false, glob = '', pageSize, authorizationScope = '' }) {
   return [
     String(root), tool, String(pattern ?? ''),
     caseSensitive ? 'cs' : 'ci', regex ? 're' : 'li',
     glob ? `g:${glob}` : 'g:-', `n:${pageSize}`,
+    authorizationScope ? `a:${authorizationScope}` : 'a:direct',
   ].join('\u0001')
 }
 
@@ -252,7 +253,7 @@ function decodeCursor(cursor) {
   return { ok: true, binding: payload.binding, consumed, pageSize: payload.pageSize }
 }
 
-export async function executeReadOnlyTool(tool, input, { signal, limits: requestedLimits } = {}) {
+export async function executeReadOnlyTool(tool, input, { signal, limits: requestedLimits, authorizationScope = '' } = {}) {
   const limits = normalizedLimits(requestedLimits)
   throwIfAborted(signal)
   if (tool === 'read') {
@@ -287,13 +288,18 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
       // RD-v1: pageComplete must reflect the actually returned range.
       // Any internal (readChars) or output (textResult) truncation means the
       // requested page was not fully returned.
-      const readCharsCut = selected.length > limits.maxReadChars
-      const truncated = readCharsCut || selected.length > limits.maxOutputChars
-      const bounded = readCharsCut ? selected.slice(0, limits.maxReadChars) : selected
+      const selectedStart = lines.slice(0, startLine - 1).join('').length
+      const budget = Math.min(limits.maxReadChars, limits.maxOutputChars)
+      const bounded = sliceUtf16Budget(selected, budget)
+      const truncated = bounded.length < selected.length
+      const deliveredLines = (bounded.match(/\n/g) || []).length
       return textResult(bounded, {
         path: input.path, truncated,
         startLine, lineCount, totalLines,
         pageComplete: endLine === totalLines && !truncated, scanComplete: true, readMode: 'lines',
+        nextOffset: truncated ? selectedStart + bounded.length : null,
+        nextStartLine: truncated && bounded.endsWith('\n') ? startLine + deliveredLines : null,
+        returnedUnits: bounded.length, totalUnits: contents.length,
       }, limits.maxOutputChars)
     }
     // Legacy UTF-16 code-unit mode: surrogate-pair safe, with nextOffset.
@@ -341,7 +347,7 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
     const rawCursor = input.cursor ?? null
     const binding = searchCursorBinding(input.path, {
       tool: 'find', pattern: input.pattern, caseSensitive: input.caseSensitive,
-      regex: input.regex, glob: input.glob ?? '', pageSize: limits.maxEntries,
+      regex: input.regex, glob: input.glob ?? '', pageSize: limits.maxEntries, authorizationScope,
     })
     const { entries, skipped, scanComplete, lastIndex } = await walk(input.path, {
       signal, maxEntries: limits.maxEntries, glob: input.glob, cursor: rawCursor, cursorBinding: binding,
@@ -380,11 +386,12 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
       text,
       {
         count: delivered.length, returnedCount: delivered.length,
-        pageComplete: !outputCut,
+        pageComplete: !outputCut && !capReached,
         scanComplete, scanTruncated: !scanComplete,
         matchLimitReached: capReached,
         skippedIgnored: skipped.ignored,
         totalMatches: scannedFromStart && scanComplete && !capReached && !outputCut ? hitsThisPage : null,
+        cursorConsistency: 'live', cursorVersion: 1, cursorStalePossible: true,
         nextCursor,
       },
       limits.maxOutputChars,
@@ -395,7 +402,7 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
     const rawCursor = input.cursor ?? null
     const binding = searchCursorBinding(input.path, {
       tool: 'grep', pattern: input.pattern, caseSensitive: input.caseSensitive,
-      regex: input.regex, glob: input.glob ?? '', pageSize: limits.maxEntries,
+      regex: input.regex, glob: input.glob ?? '', pageSize: limits.maxEntries, authorizationScope,
     })
     // O-REVIEW-03 item 3: grep's cursor is file+line shaped, so one file with
     // more hits than the cap continues mid-file instead of losing the rest.
@@ -454,7 +461,7 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
           brokeMidFile = true
           break
         }
-        const formatted = `${file.path}:${index + 1}:${line.slice(0, limits.maxLineChars)}`
+        const formatted = `${file.path}:${index + 1}:${sliceUtf16Budget(line, limits.maxLineChars)}`
         const candidate = text ? `${text}\n${formatted}` : formatted
         if (candidate.length > limits.maxOutputChars) {
           if (delivered === 0) throw new Error('match line exceeds the output budget; narrow the query or raise limits')
@@ -474,6 +481,7 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
       if (stop) break
     }
     const capOrCut = capReached || outputCut
+    const effectiveScanComplete = scanComplete && !brokeMidFile
     let nextCursor = null
     if (!scanComplete || capOrCut) {
       const consumed = (delivered > 0 || capOrCut)
@@ -486,11 +494,12 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
       text,
       {
         count: delivered, returnedCount: delivered,
-        pageComplete: !outputCut,
-        scanComplete, scanTruncated: !scanComplete,
+        pageComplete: !outputCut && !capReached,
+        scanComplete: effectiveScanComplete, scanTruncated: !effectiveScanComplete,
         matchLimitReached: capReached,
         skippedIgnored: skipped.ignored, skippedUnreadable: unreadable,
-        totalMatches: scannedFromStart && scanComplete && !capReached && !outputCut ? hitsThisPage : null,
+        totalMatches: scannedFromStart && effectiveScanComplete && !capReached && !outputCut ? hitsThisPage : null,
+        cursorConsistency: 'live', cursorVersion: 1, cursorStalePossible: true,
         nextCursor,
       },
       limits.maxOutputChars,
