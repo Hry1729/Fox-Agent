@@ -57,7 +57,7 @@ export function createReadOnlyTools(requestPreflight, { limits, executeHost } = 
     {
       name: 'find',
       label: 'Find files',
-            description: 'Find file and directory names below a project path. Omit path to search from the project root. Supports caseSensitive, regex and glob options. Respects dependency/build ignore rules. Pass cursor (from a previous nextCursor) with the SAME pattern/options/scope to continue; null nextCursor means the scope is exhausted.',
+            description: 'Find file and directory names below a project path. Omit path to search from the project root. Supports caseSensitive and glob on both routes; regex is supported by the runtime route and explicitly rejected by the Rust resource route. Respects dependency/build ignore rules. Pass cursor (from a previous nextCursor) with the SAME pattern/options/scope to continue; null nextCursor means the scope is exhausted.',
       parameters: Type.Object({ path: Type.Optional(Type.String()), pattern: Type.String(), caseSensitive: Type.Optional(Type.Boolean()), regex: Type.Optional(Type.Boolean()), glob: Type.Optional(Type.String()), cursor: Type.Optional(Type.String()) }),
       execute: async (toolCallId, params, signal) => {
         return execute(toolCallId, 'find', params, signal)
@@ -66,7 +66,7 @@ export function createReadOnlyTools(requestPreflight, { limits, executeHost } = 
     {
       name: 'grep',
       label: 'Search files',
-      description: 'Search text files below a project path. Omit path to search from the project root. Supports caseSensitive, regex and glob options. Respects dependency/build ignore rules. Pass cursor (from a previous nextCursor) with the SAME pattern/options/scope to continue; null nextCursor means the scope is exhausted.',
+      description: 'Search text files below a project path. Omit path to search from the project root. Supports caseSensitive and glob on both routes; regex is supported by the runtime route and explicitly rejected by the Rust resource route. Respects dependency/build ignore rules. Pass cursor (from a previous nextCursor) with the SAME pattern/options/scope to continue; null nextCursor means the scope is exhausted.',
       parameters: Type.Object({ path: Type.Optional(Type.String()), pattern: Type.String(), caseSensitive: Type.Optional(Type.Boolean()), regex: Type.Optional(Type.Boolean()), glob: Type.Optional(Type.String()), cursor: Type.Optional(Type.String()) }),
       execute: async (toolCallId, params, signal) => {
         return execute(toolCallId, 'grep', params, signal)

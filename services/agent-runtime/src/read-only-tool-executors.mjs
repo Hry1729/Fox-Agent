@@ -291,6 +291,9 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
       const selectedStart = lines.slice(0, startLine - 1).join('').length
       const budget = Math.min(limits.maxReadChars, limits.maxOutputChars)
       const bounded = sliceUtf16Budget(selected, budget)
+      if (selected.length > 0 && bounded.length === 0) {
+        throw new Error('output budget is too small for the next complete UTF-16 character; raise maxOutputChars or use a larger range')
+      }
       const truncated = bounded.length < selected.length
       const deliveredLines = (bounded.match(/\n/g) || []).length
       return textResult(bounded, {
@@ -311,6 +314,9 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
     const totalUnits = contents.length
     const page = sliceUtf16Range(contents, offset, limit)
     const finalText = sliceUtf16Budget(page.text, limits.maxOutputChars)
+    if (page.text.length > 0 && finalText.length === 0) {
+      throw new Error('output budget is too small for the next complete UTF-16 character; raise maxOutputChars')
+    }
     const outputCut = finalText.length < page.text.length
     const sourceExhausted = page.end >= totalUnits
     const truncated = !sourceExhausted || outputCut
@@ -418,7 +424,7 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
     // O-REVIEW-03 item 4: the advertised glob must actually filter the walk —
     // grep previously declared `glob` but never passed it, so *.txt also
     // returned .md files.
-    const { entries, skipped, scanComplete } = await walk(input.path, {
+    const { entries, skipped, scanComplete, lastIndex } = await walk(input.path, {
       signal, maxEntries: limits.maxEntries, glob: input.glob,
       cursor: rawCursor ? encodeCursor({ binding, consumed: Math.max(0, resume.f - 1), pageSize: limits.maxEntries }) : null,
       cursorBinding: binding,
@@ -432,7 +438,6 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
     let unreadable = 0
     let resumeFile = 0
     let resumeLine = 0
-    let lastProcessed = 0
     let brokeMidFile = false
     for (const file of files) {
       throwIfAborted(signal)
@@ -442,7 +447,6 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
       } catch {
         // Read errors are counted and reported, never silently a complete scan.
         unreadable++
-        lastProcessed = file.walkIndex
         continue
       }
       const startLine = file.walkIndex === resume.f ? resume.l : 0
@@ -477,16 +481,15 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
         resumeFile = file.walkIndex
         resumeLine = index + 1
       }
-      lastProcessed = file.walkIndex
       if (stop) break
     }
     const capOrCut = capReached || outputCut
-    const effectiveScanComplete = scanComplete && !brokeMidFile
+    const effectiveScanComplete = scanComplete && !brokeMidFile && unreadable === 0
     let nextCursor = null
     if (!scanComplete || capOrCut) {
       const consumed = (delivered > 0 || capOrCut)
         ? { f: resumeFile, l: resumeLine }
-        : { f: lastProcessed + 1, l: 0 }
+        : { f: lastIndex + 1, l: 0 }
       if (consumed.f > 0 || consumed.l > 0) nextCursor = encodeCursor({ binding, consumed, pageSize: limits.maxEntries })
     }
     const scannedFromStart = rawCursor === null
@@ -494,7 +497,7 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
       text,
       {
         count: delivered, returnedCount: delivered,
-        pageComplete: !outputCut && !capReached,
+        pageComplete: !outputCut && !capReached && unreadable === 0,
         scanComplete: effectiveScanComplete, scanTruncated: !effectiveScanComplete,
         matchLimitReached: capReached,
         skippedIgnored: skipped.ignored, skippedUnreadable: unreadable,

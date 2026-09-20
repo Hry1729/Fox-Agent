@@ -437,3 +437,35 @@ test('bounded line mode exposes UTF-16 continuation for a long single line', asy
   assert.equal(page.details.nextOffset, 1)
   assert.equal(page.details.returnedUnits, 1)
 })
+
+test('grep advances across directory-only walk pages', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-b02-dir-page-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  await mkdir(join(root, 'a-dir'))
+  await writeFile(join(root, 'a-dir', 'match.txt'), 'needle', 'utf8')
+  let cursor = null
+  const seen = []
+  for (let page = 0; page < 5; page++) {
+    const result = await executeReadOnlyTool('grep', { path: root, pattern: 'needle', cursor }, { limits: { maxEntries: 1 } })
+    seen.push(...result.content[0].text.split('\n').filter(Boolean))
+    cursor = result.details.nextCursor
+    if (!cursor) break
+  }
+  assert.equal(seen.length, 1)
+  assert.match(seen[0], /match\.txt:1:needle/)
+})
+
+test('read rejects an output budget that cannot hold the next complete character', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-b03-too-small-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  const path = join(root, 'emoji.txt')
+  await writeFile(path, '😀X', 'utf8')
+  await assert.rejects(
+    executeReadOnlyTool('read', { path, offset: 0, limit: 2 }, { limits: { maxOutputChars: 1 } }),
+    /output budget is too small/,
+  )
+  await assert.rejects(
+    executeReadOnlyTool('read', { path, startLine: 1, lineCount: 1 }, { limits: { maxOutputChars: 1 } }),
+    /output budget is too small/,
+  )
+})

@@ -244,6 +244,14 @@ fn slice_utf16_budget(text: &str, max_units: usize) -> String {
     }
     String::from_utf16_lossy(&units[..end])
 }
+
+fn bounded_nonempty_utf16(text: &str, max_units: usize) -> Result<String, String> {
+    let bounded = slice_utf16_budget(text, max_units);
+    if !text.is_empty() && bounded.is_empty() {
+        return Err("output budget is too small for the next complete UTF-16 character; raise the output budget".into());
+    }
+    Ok(bounded)
+}
 // Opaque search cursor (RD-v1 B02), mirroring the Node runtime encoding so the
 // two executors agree on token shape: base64url(JSON { v, scope, consumed }).
 // `consumed` is tool-shaped: find uses an entry position; grep uses
@@ -393,7 +401,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
             // requested page was not fully returned. Both cuts are
             // surrogate-pair safe (O-REVIEW-03 item 2).
             let budget = limits.read_chars.min(limits.output_chars);
-            let bounded = slice_utf16_budget(&selected, budget);
+            let bounded = bounded_nonempty_utf16(&selected, budget)?;
             let delivered_utf16 = bounded.encode_utf16().count();
             let truncated = delivered_utf16 < selected_utf16;
             let selected_start: usize = lines[..start_line - 1]
@@ -420,7 +428,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
         let limit = input.get("limit").and_then(Value::as_f64).filter(|v| *v != 0.0).unwrap_or(limits.read_chars as f64).clamp(1.0, limits.read_chars as f64) as usize;
         let total_units = text.encode_utf16().count();
         let (page_text, safe_end) = slice_utf16_range(&text, offset, limit);
-        let final_text = slice_utf16_budget(&page_text, limits.output_chars);
+        let final_text = bounded_nonempty_utf16(&page_text, limits.output_chars)?;
         let final_units = final_text.encode_utf16().count();
         let page_units = page_text.encode_utf16().count();
         let output_cut = final_units < page_units;
@@ -441,6 +449,9 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
         return Ok(result(entries.iter().map(|e| format!("{} {}", if e.directory {"[dir]"} else {"[file]"}, e.name)).collect::<Vec<_>>().join("\n"), json!({"path":path,"count":entries.len(),"truncated":truncated}), limits.output_chars));
     }
     let raw_pattern = input.get("pattern").and_then(Value::as_str).unwrap_or_default();
+    if input.get("regex").and_then(Value::as_bool).unwrap_or(false) {
+        return Err("regex search is unavailable on the Rust resource route; use literal search or the runtime route".into());
+    }
     let needle = raw_pattern.to_lowercase();
     let case_sensitive = input.get("caseSensitive").and_then(Value::as_bool).unwrap_or(false);
     let glob = input.get("glob").and_then(Value::as_str).unwrap_or_default();
@@ -551,16 +562,15 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
         None => (0usize, 0usize),
     };
     let walk_skip = resume_file.saturating_sub(1);
+    let page_last_index = entries.last().map(|entry| entry.index).unwrap_or(walk_skip);
     let mut text = String::new();
     let mut delivered: usize = 0;
     let mut output_cut = false;
     let mut cap_reached = false;
     let mut resume_out = (0usize, 0usize);
-    let mut last_processed: usize = walk_skip;
     let mut broke_mid_file = false;
     for entry in entries.into_iter().filter(|e| !e.directory) {
         if entry.index <= walk_skip { continue; }
-        last_processed = entry.index;
         if !glob_hit(&entry.name) { continue; }
         let contents = match gateway.text(&entry.path, false) {
             Ok(text) => text,
@@ -601,18 +611,18 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
         if stop { break; }
     }
     let cap_or_cut = cap_reached || output_cut;
-    let scan_complete = !scan_truncated && !broke_mid_file;
+    let scan_complete = !scan_truncated && !broke_mid_file && unreadable == 0;
     let next_cursor = if scan_complete && !cap_or_cut {
         Value::Null
     } else {
-        let position = if delivered > 0 || cap_or_cut { resume_out } else { (last_processed + 1, 0) };
+        let position = if delivered > 0 || cap_or_cut { resume_out } else { (page_last_index + 1, 0) };
         if position.0 == 0 && position.1 == 0 { Value::Null }
         else { json!(encode_search_cursor_pair(&scope, position.0, position.1)) }
     };
     let scanned_from_start = consumed == 0 && resume.is_none();
     Ok(result(text, json!({
         "count": delivered, "returnedCount": delivered,
-        "pageComplete": !output_cut && !cap_reached,
+        "pageComplete": !output_cut && !cap_reached && unreadable == 0,
         "scanComplete": scan_complete, "scanTruncated": !scan_complete,
         "matchLimitReached": cap_reached,
         "skippedUnreadable": unreadable,
@@ -676,6 +686,8 @@ mod tests {
         let searched = execute(&binding, "grep", &json!({"path":".","pattern":"fox"}), &token).unwrap();
         assert_eq!(searched["details"]["count"], 2);
         assert!(searched["content"][0]["text"].as_str().unwrap().contains(":2:second Fox line"));
+        assert!(execute(&binding, "grep", &json!({"path":".","pattern":"f.*x","regex":true}), &token)
+            .unwrap_err().contains("unavailable on the Rust resource route"));
         let tiny = execute(&binding, "read", &json!({"path":"src/note.txt","offset":1,"limit":1}), &token).unwrap();
         assert_eq!(tiny["content"][0]["text"], "😀");
         assert_eq!(tiny["details"]["nextOffset"], 3);
@@ -750,7 +762,7 @@ mod tests {
     fn search_cursor_keeps_capped_results_reachable_and_globbed() {
         let (binding, _, token) = fixture();
         let root = Path::new(binding.permission.project_root.as_ref().unwrap());
-        for index in 0..5 {
+        for index in 0..205 {
             fs::write(root.join(format!("hit-{index}.txt")), "hit\nhit\n").unwrap();
         }
         fs::write(root.join("hit-no.md"), "hit\n").unwrap();
@@ -759,14 +771,44 @@ mod tests {
         for _ in 0..10 {
             let mut input = json!({"path":".","pattern":"hit","glob":"*.txt"});
             if !cursor.is_null() { input["cursor"] = cursor.clone(); }
-            let page = execute_with_budget(&binding, "find", &input, &token, Budget { read_chars: 100, entries: 4, matches: 2, output_chars: 10_000, line_chars: 100 }).unwrap();
+            let page = execute(&binding, "find", &input, &token).unwrap();
             for line in page["content"][0]["text"].as_str().unwrap().lines() { seen.insert(line.to_owned()); }
             cursor = page["details"]["nextCursor"].clone();
             if cursor.is_null() { break; }
         }
-        assert_eq!(seen.len(), 5);
+        assert_eq!(seen.len(), 205);
 
         let grep = execute(&binding, "grep", &json!({"path":".","pattern":"hit","glob":"*.txt"}), &token).unwrap();
         assert!(!grep["content"][0]["text"].as_str().unwrap().contains("hit-no.md"));
+    }
+
+    #[test]
+    fn grep_cursor_advances_directory_only_pages_and_tiny_budget_rejects() {
+        let (binding, _, token) = fixture();
+        let root = Path::new(binding.permission.project_root.as_ref().unwrap());
+        fs::create_dir_all(root.join("a-dir")).unwrap();
+        fs::write(root.join("a-dir/match.txt"), "needle").unwrap();
+        let gateway = Gateway {
+            root: root.canonicalize().unwrap(), cancellation: &token,
+            deadline: Instant::now() + Duration::from_secs(5), remaining_bytes: MAX_SCAN_BYTES,
+            limits: ReadLimits { entries: 1, matches: 2, read_chars: 100, output_chars: 100, line_chars: 100 },
+        };
+        let (first, first_more) = gateway.walk(root, 0).unwrap();
+        assert!(first_more);
+        assert!(first[0].directory);
+        let first_index = first[0].index;
+        let (second, _) = gateway.walk(root, first_index).unwrap();
+        assert!(second[0].index > first_index);
+
+        fs::write(root.join("emoji.txt"), "😀X").unwrap();
+        let err = bounded_nonempty_utf16("😀X", 1).unwrap_err();
+        assert!(err.contains("output budget is too small"));
+
+        File::create(root.join("unreadable-large.txt")).unwrap().set_len(MAX_FILE_BYTES + 1).unwrap();
+        let incomplete = execute(&binding, "grep", &json!({"path":".","pattern":"needle"}), &token).unwrap();
+        assert!(incomplete["details"]["skippedUnreadable"].as_u64().unwrap() >= 1);
+        assert_eq!(incomplete["details"]["scanComplete"], false);
+        assert_eq!(incomplete["details"]["pageComplete"], false);
+        assert!(incomplete["details"]["totalMatches"].is_null());
     }
 }
