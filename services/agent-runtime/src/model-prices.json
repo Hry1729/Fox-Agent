@@ -1,0 +1,31 @@
+{
+  "priceVersion": "2026-09-19-d0-unverified",
+  "unit": "per_million_tokens",
+  "defaultCurrency": "USD",
+  "verified": false,
+  "generatedBy": "D",
+  "generatedAt": "2026-09-19T08:35:00Z",
+  "notes": [
+    "USAGE-v1 price table. Deliberately shipped with an empty model map.",
+    "No verified provider rate card was available to this batch, and CONTRACTS USAGE-v1 forbids inventing rates to fill a gap.",
+    "An entry only becomes usable once rates, currency, effectiveAt, verifiedAt and source are all present and reviewed.",
+    "A missing entry or a null rate MUST produce knownCost=null (or a labelled lower bound) and costComplete=false, never 0."
+  ],
+  "entrySchema": {
+    "key": "<provider>/<modelId>",
+    "fields": {
+      "currency": "ISO 4217 code; never mixed across currencies when aggregating",
+      "effectiveAt": "ISO 8601 instant the rate card took effect; a record may not use a rate younger than its own request time",
+      "verifiedAt": "ISO 8601 instant the rate card was last verified against the provider; null means unverified",
+      "source": "provenance of the rate card (documentation URL or reviewed ticket id); value is not a secret",
+      "rates": {
+        "input": "price per million non-cached input tokens",
+        "output": "price per million output tokens",
+        "cacheRead": "price per million cache-read tokens",
+        "cacheWrite": "price per million cache-write tokens"
+      },
+      "unit": "per_million_tokens"
+    }
+  },
+  "models": {}
+}

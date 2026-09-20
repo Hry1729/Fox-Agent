@@ -238,12 +238,23 @@ fn replayed_host_tool_call(record: ToolCallRecord) -> Result<HostToolCallExecuti
         })));
     }
     if record.status == "failed" {
-        return Ok(HostToolCallExecution::Replay(json!({
-            "isError": true,
-            "error": record
-                .error_message
-                .unwrap_or_else(|| "the persisted ToolCall failed".to_owned()),
-        })));
+        // A replayed failure must hand back the same diagnostics the original
+        // attempt produced, otherwise the second delivery of one tool call
+        // silently loses the reason and the model repeats the failed command.
+        let error = record
+            .error_message
+            .clone()
+            .unwrap_or_else(|| "the persisted ToolCall failed".to_owned());
+        return Ok(HostToolCallExecution::Replay(match record.result {
+            Some(result) => json!({
+                "isError": true,
+                "error": error,
+                "errorCode": failure_error_code(&result).to_owned(),
+                "result": result,
+                "replayed": true,
+            }),
+            None => json!({ "isError": true, "error": error }),
+        }));
     }
     Err(format!(
         "[tool_call.replayed_terminal] ToolCall '{}' already ended as '{}': {}",
@@ -4868,6 +4879,28 @@ fn redact_diagnostic_line(line: &str) -> String {
     result
 }
 
+/// Bound one multi-line execution diagnostic for transport to the model or a
+/// receipt. Every line goes through the same credential redaction as Host
+/// diagnostics, then the whole text is capped. This never claims to be the
+/// complete output: the full retained result stays persisted and reachable
+/// through `read_tool_result`, so bounding here loses nothing that cannot be
+/// fetched again under the same Run authorization.
+pub(crate) fn redact_execution_diagnostic(text: &str, limit: usize) -> String {
+    let joined = text
+        .lines()
+        .map(redact_diagnostic_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let characters = joined.chars().count();
+    if characters <= limit {
+        return joined;
+    }
+    format!(
+        "{}…[诊断按 {limit} 字截断，完整输出见本工具调用的持久结果]",
+        joined.chars().take(limit).collect::<String>()
+    )
+}
+
 fn parse_runtime_ready_payload(payload: &Value) -> Result<(String, Option<String>, Value), String> {
     let declared_protocol = payload
         .get("protocol")
@@ -7180,8 +7213,16 @@ fn finalize_host_tool_execution(
 ) -> Result<Value, String> {
     match outcome {
         Ok(result) => {
+            // A01/A02 (EX-v1): an executor may report a completed attempt that
+            // did not succeed. The result keeps its diagnostics, but the
+            // ToolCall must still end `failed`, so the receipt, the UI card,
+            // the continuation decision and the model view all agree the
+            // operation failed. Persistence keeps both columns: the error
+            // message carries the outcome, the result carries the reason.
+            let reported_failure = result.get("isError").and_then(Value::as_bool) == Some(true);
+            let error_message = reported_failure.then(|| execution_failure_message(&result));
             if let Err(persist_error) =
-                database.complete_host_tool_call(run_id, tool_call_id, Some(&result), None)
+                database.complete_host_tool_call(run_id, tool_call_id, Some(&result), error_message.as_deref())
             {
                 if let Some(authoritative) =
                     authoritative_host_tool_terminal(database, run_id, tool_call_id, tool, input)
@@ -7193,12 +7234,87 @@ fn finalize_host_tool_execution(
                 ));
             }
             let after_annotations =
-                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, true)
+                crate::lifecycle_hooks::after_tool(database, run_id, tool_call_id, tool, !reported_failure)
                     .unwrap_or_default();
+            let tool_result_storage =
+                database.tool_result_storage(run_id, tool_call_id).unwrap_or_default();
+            if reported_failure {
+                let code = failure_error_code(&result).to_owned();
+                // Bounded transport: the wire carries exactly what the Host
+                // persisted — which `complete_host_tool_call` already compacts
+                // into a preview above the inline cap — instead of the raw
+                // multi-megabyte value, so a failure log cannot dominate the
+                // JSONL frame or the model context. The in-memory value is used
+                // only when the terminal row cannot be read back at all.
+                let persisted = database
+                    .inspect_host_tool_call_replay(run_id, tool_call_id, tool, input)
+                    .ok()
+                    .flatten()
+                    .map(|(record, _)| record);
+                let stored = match persisted.as_ref().and_then(|record| record.result.clone()) {
+                    Some(stored) => stored,
+                    None => result,
+                };
+                // Whether the persisted body is only the bounded preview. Decided
+                // before the value is moved into the response so a multi-megabyte
+                // fallback is never cloned.
+                let spilled = stored
+                    .get("truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let mut response = json!({
+                    "isError": true,
+                    "error": error_message.unwrap_or_else(|| "the tool reported a failed execution".to_owned()),
+                    "errorCode": code,
+                    "errorDetails": { "code": code, "retryable": false },
+                    "result": stored,
+                    "toolResultStorage": tool_result_storage,
+                    "hookAnnotations": merge_hook_annotations(before_annotations, after_annotations),
+                });
+                // When the body was spilled to the blob store, the preview alone
+                // would leave the model without a way back to the bytes, and the
+                // trusted `toolResultStorage` fact is reserved for completed rows.
+                // The reference is the Host's own identity (never tool input) and
+                // whether it really resolves is asked of the same reader the model
+                // would use, so a retrieval promise is made only with the blob
+                // present. The key names match the `resultRef`/`resultRefNote`
+                // vocabulary of the model view.
+                if let Some(reference) = spilled
+                    .then(|| crate::kernel_compaction::tool_result_ref(run_id, tool_call_id))
+                    .flatten()
+                {
+                    let retrievable = persisted
+                        .as_ref()
+                        .and_then(|record| {
+                            // The reader's minimum range is 4 bytes so a UTF-8
+                            // code point is never split; only `retrievable` is
+                            // read here, so the smallest legal request is used.
+                            database
+                                .tool_result_range(&reference, &record.conversation_id, 0, 4)
+                                .ok()
+                        })
+                        .is_some_and(|range| range.retrievable);
+                    let note = if retrievable {
+                        format!(
+                            "完整输出已由 Fox 保存；调用 read_tool_result {{\"reference\":\"{reference}\"}} 可只读取回（不重新执行本工具，也不会重放任何写操作），返回 details.complete=true 前按 details.nextOffset 继续接力即可取得全部原文。"
+                        )
+                    } else {
+                        format!(
+                            "上面的结果正文是 Fox 的有界预览，且 Host 未确认可按 {reference} 取回全文；需要完整诊断时，请让命令把输出重定向到文件（command > out.txt 2>&1）后用读取工具分页查看，不要重复同一失败调用。"
+                        )
+                    };
+                    if let Some(object) = response.as_object_mut() {
+                        object.insert("resultRef".to_owned(), json!(reference));
+                        object.insert("resultRefNote".to_owned(), json!(note));
+                        object.insert("resultRefRetrievable".to_owned(), json!(retrievable));
+                    }
+                }
+                return Ok(response);
+            }
             Ok(json!({
                 "isError": false,
                 "result": result,
-                "toolResultStorage": database.tool_result_storage(run_id, tool_call_id).unwrap_or_default(),
+                "toolResultStorage": tool_result_storage,
                 "hookAnnotations": merge_hook_annotations(before_annotations, after_annotations),
             }))
         }
@@ -7219,6 +7335,28 @@ fn finalize_host_tool_execution(
             Err(error)
         }
     }
+}
+
+/// The bounded `error_message` for a completed-but-failed execution. It stays
+/// short on purpose: the retained output belongs to the result and the blob
+/// store, while the persisted error column is what the approval card, the
+/// receipt and the audit trail quote.
+fn execution_failure_message(result: &Value) -> String {
+    let code = failure_error_code(result);
+    let text = result
+        .pointer("/content/0/text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let summary: String = text.chars().take(2_000).collect();
+    format!("[{code}] {summary}")
+}
+
+fn failure_error_code(result: &Value) -> &str {
+    result
+        .pointer("/details/errorCode")
+        .and_then(Value::as_str)
+        .filter(|code| !code.trim().is_empty())
+        .unwrap_or_else(|| crate::tool_host::ToolErrorCode::Unknown.as_str())
 }
 
 fn handle_mcp_tool_request(
@@ -9508,7 +9646,7 @@ mod attachment_tests {
         CAPABILITY_MANIFEST_VERSION,
     };
     use flate2::{write::DeflateEncoder, Compression};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
     use std::{
         collections::{HashMap, HashSet},
@@ -9892,6 +10030,242 @@ mod attachment_tests {
         .unwrap_err()
         .contains("tool_call.already_in_flight"));
 
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A01/A02 acceptance at the Host seam: an execution that completed but
+    /// did not succeed must stay failed in the persisted fact, keep its
+    /// diagnostics reachable for the model and the receipt, and replay with the
+    /// same information instead of a bare "it failed".
+    #[test]
+    fn a_reported_execution_failure_stays_failed_and_keeps_its_diagnostics_reachable() {
+        let path = std::env::temp_dir()
+            .join(format!("fox-execution-failure-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), None, None, None)
+            .unwrap();
+        let run = database
+            .create_run(&conversation.id, "failed build", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let input = json!({ "command": "tsc --noEmit" });
+        assert!(matches!(
+            create_fresh_host_tool_call(&database, &run.id, "call-failed", "run_command", &input, "running", false)
+                .unwrap(),
+            HostToolCallExecution::Execute(_)
+        ));
+        let reported = json!({
+            "isError": true,
+            "content": [{ "type": "text", "text": "[fox: 命令以退出码 2 结束（非零退出，工具失败）]\nsrc/app.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'" }],
+            "details": {
+                "exitCode": 2, "timedOut": false, "cancelled": false,
+                "errorCode": "tool.nonzero_exit",
+                "stdout": "", "stderr": "error TS2322",
+                "stdoutBytes": 0, "stderrBytes": 63,
+                "shell": "cmd.exe /D /S /C", "platform": "windows",
+                "outputEncoding": "utf-8",
+            },
+        });
+
+        let response = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            "call-failed",
+            "run_command",
+            &input,
+            Vec::new(),
+            Ok(reported.clone()),
+        )
+        .unwrap();
+        assert_eq!(response["isError"], Value::Bool(true));
+        assert_eq!(response["errorCode"], "tool.nonzero_exit");
+        assert_eq!(response["errorDetails"]["code"], "tool.nonzero_exit");
+        assert_eq!(response["errorDetails"]["retryable"], Value::Bool(false));
+        assert!(response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("TS2322"));
+
+        let (record, _) = database
+            .inspect_host_tool_call_replay(&run.id, "call-failed", "run_command", &input)
+            .unwrap()
+            .expect("a terminal ToolCall must be persisted");
+        assert_eq!(record.status, "failed", "a reported failure cannot become a completed row");
+        let error = record.error_message.clone().expect("the failure needs a persisted reason");
+        assert!(error.starts_with("[tool.nonzero_exit]"), "{error}");
+        assert!(error.contains("TS2322"), "the persisted error stays actionable: {error}");
+        let persisted = record.result.expect("the diagnostics stay attached to the row");
+        assert_eq!(persisted["details"]["exitCode"], 2);
+        assert!(persisted["content"][0]["text"].as_str().unwrap().contains("TS2322"));
+
+        let replay = create_fresh_host_tool_call(
+            &database,
+            &run.id,
+            "call-failed",
+            "run_command",
+            &input,
+            "running",
+            false,
+        )
+        .unwrap();
+        let HostToolCallExecution::Replay(replayed) = replay else {
+            panic!("a terminal failed ToolCall replays; it must not acquire a second handler");
+        };
+        assert_eq!(replayed["isError"], Value::Bool(true));
+        assert_eq!(replayed["errorCode"], "tool.nonzero_exit");
+        assert_eq!(replayed["replayed"], Value::Bool(true));
+        assert!(replayed["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("TS2322"));
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// O-A-01 #4 at the Host seam: a stdout-only non-zero failure far larger
+    /// than the inline stored-result cap must (a) stay `failed`, (b) travel as a
+    /// bounded wire payload instead of the raw value, and (c) keep every byte
+    /// readable through the reference the Host derived, without re-executing the
+    /// tool. A small JSON stand-in could not show any of that, so the fixture is
+    /// megabytes of real compiler-shaped output.
+    #[test]
+    fn an_oversized_stdout_only_failure_travels_bounded_and_stays_readable() {
+        const INLINE_CAP: usize = crate::database::MAX_STORED_TOOL_RESULT_BYTES;
+        let path = std::env::temp_dir().join(format!("fox-execution-failure-huge-{}.db", Uuid::new_v4()));
+        let database = Database::open(path.clone()).unwrap();
+        let conversation = database
+            .create_conversation(database.default_agent_id(), None, None, None)
+            .unwrap();
+        let run = database
+            .create_run(&conversation.id, "huge build log", None)
+            .unwrap()
+            .run;
+        database
+            .apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+            .unwrap();
+        let input = json!({ "command": "mvn -q test" });
+        assert!(matches!(
+            create_fresh_host_tool_call(&database, &run.id, "call-huge", "run_command", &input, "running", false)
+                .unwrap(),
+            HostToolCallExecution::Execute(_)
+        ));
+        // Several megabytes on stdout, nothing on stderr: the exact shape A01 was
+        // filed for, scaled past every bound the transport has.
+        let line = "[ERROR] src/main/java/App.java:42: incompatible types: cannot convert\n";
+        let stdout = line.repeat((INLINE_CAP / line.len()) * 24 + 3);
+        let reported = json!({
+            "isError": true,
+            "content": [{ "type": "text", "text": stdout }],
+            "details": {
+                "exitCode": 1, "timedOut": false, "cancelled": false,
+                "errorCode": "tool.nonzero_exit",
+                "stdout": stdout, "stderr": "",
+                "stdoutBytes": stdout.len(), "stderrBytes": 0,
+                "shell": "cmd.exe /D /S /C", "platform": "windows",
+                "outputEncoding": "utf-8",
+            },
+        });
+        let serialized = serde_json::to_string(&reported).unwrap();
+        assert!(
+            serialized.len() > 8 * INLINE_CAP,
+            "the fixture must be far past the inline cap, got {}",
+            serialized.len()
+        );
+
+        let response = finalize_host_tool_execution(
+            &database,
+            &run.id,
+            "call-huge",
+            "run_command",
+            &input,
+            Vec::new(),
+            Ok(reported.clone()),
+        )
+        .unwrap();
+        let wire = serde_json::to_string(&response).unwrap();
+        assert_eq!(response["isError"], Value::Bool(true));
+        assert_eq!(response["errorCode"], "tool.nonzero_exit");
+        assert!(
+            wire.len() < INLINE_CAP,
+            "a {}-byte failure must not travel whole (wire: {})",
+            serialized.len(),
+            wire.len()
+        );
+        assert!(
+            wire.len() < 1_048_576,
+            "the payload also has to stay inside the JSONL frame cap (wire: {})",
+            wire.len()
+        );
+        // Bounded does not mean vague: the head of the real reason is still on
+        // the wire, and the bytes behind it have a stated way back.
+        assert!(response["error"].as_str().unwrap().contains("incompatible types"));
+        assert_eq!(response["result"]["truncated"], Value::Bool(true));
+        assert_eq!(
+            response["resultRef"].as_str(),
+            Some(format!("fox-result://{}/call-huge", run.id).as_str()),
+            "the Host must state the reference it derived itself"
+        );
+        assert_eq!(response["resultRefRetrievable"], Value::Bool(true));
+        assert!(response["resultRefNote"]
+            .as_str()
+            .unwrap()
+            .contains("read_tool_result"));
+
+        let (record, _) = database
+            .inspect_host_tool_call_replay(&run.id, "call-huge", "run_command", &input)
+            .unwrap()
+            .expect("the failed ToolCall stays persisted");
+        assert_eq!(record.status, "failed");
+        assert!(record
+            .error_message
+            .as_deref()
+            .unwrap()
+            .starts_with("[tool.nonzero_exit]"));
+        let inline = record.result.expect("the compacted preview is the stored row");
+        assert_eq!(inline["truncated"], Value::Bool(true));
+        assert_eq!(
+            inline["originalBytes"].as_u64().unwrap() as usize,
+            serialized.len(),
+            "the preview must report the size of the value it replaced"
+        );
+
+        // Every retained byte comes back through the reference, and the tool is
+        // not executed again to get them.
+        let reference = response["resultRef"].as_str().unwrap().to_owned();
+        let mut reassembled = String::new();
+        let mut offset = 0usize;
+        let mut pages = 0usize;
+        loop {
+            let range = database
+                .tool_result_range(&reference, &conversation.id, offset, 64 * 1024)
+                .unwrap();
+            assert!(range.retrievable, "the blob holds the whole original result");
+            assert!(!range.truncated, "ranges are served from the full copy");
+            assert_eq!(range.status, "failed", "a failed call's stored bytes stay readable");
+            assert_eq!(range.original_bytes, stdout.len());
+            pages += 1;
+            reassembled.push_str(&range.content);
+            match range.next_offset {
+                Some(next) if next > offset => offset = next,
+                _ => break,
+            }
+        }
+        assert_eq!(reassembled, stdout, "paging must reassemble the failure verbatim");
+        assert!(pages > 8, "a {}-byte body needs many pages, got {pages}", stdout.len());
+        assert_eq!(
+            database
+                .tool_result_range(&reference, &conversation.id, 0, 64 * 1024)
+                .unwrap()
+                .content,
+            stdout[..64 * 1024],
+            "the same reference is re-readable without re-running anything"
+        );
         drop(database);
         let _ = std::fs::remove_file(path);
     }
