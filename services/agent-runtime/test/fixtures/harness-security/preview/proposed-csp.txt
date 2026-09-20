@@ -1,0 +1,1 @@
+default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://models.dev; font-src 'self' data:; connect-src 'self' https://ejiidnob33g9ap1r.public.blob.vercel-storage.com; worker-src 'self' blob:; frame-src 'self' http: https:; object-src 'none'; base-uri 'self'; form-action 'self'

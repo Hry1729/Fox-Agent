@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Legitimate preview fixture</title>
+<style>
+  body { font-family: system-ui, sans-serif; padding: 16px; color: #1a1a1a; }
+  .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+  .accent { color: #2563eb; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1 class="accent">合法 HTML 预览</h1>
+    <p>这是一个正常的模型产物预览。它只操作自身 DOM，不发起任何网络请求。</p>
+    <ul id="list"></ul>
+  </div>
+  <script>
+    // Pure local DOM work. No fetch, no beacon, no external resource.
+    var list = document.getElementById('list');
+    ['第一项', '第二项', '第三项'].forEach(function (item, index) {
+      var li = document.createElement('li');
+      li.textContent = item + '（' + (index + 1) + '）';
+      list.appendChild(li);
+    });
+    // Signal to a harness reading this frame that the script ran cleanly.
+    document.title = 'legitimate-preview-rendered';
+  </script>
+</body>
+</html>

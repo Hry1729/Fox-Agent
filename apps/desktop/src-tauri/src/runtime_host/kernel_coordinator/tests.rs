@@ -58,6 +58,8 @@ mod steering_tests;
 mod steering_live_tests;
 #[path = "real_eval_tests.rs"]
 mod real_eval_tests;
+#[path = "harness_security_tests.rs"]
+mod harness_security_tests;
 #[path = "kernel_artifact_gate_tests.rs"]
 mod kernel_artifact_gate_tests;
 use crate::kernel::{CancellationRegistry, PolicyDecision, TestClock};
