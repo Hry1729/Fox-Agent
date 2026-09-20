@@ -145,6 +145,114 @@ fn read_all(manager: &ProcessJobManager, job_id: &str, stream: Stream) -> String
 }
 
 // ---------------------------------------------------------------------------
+// Reclaiming what a test started, on the failing path too
+// ---------------------------------------------------------------------------
+
+/// How long a *passing* test will spend confirming nothing was left behind.
+const RECLAIM_BUDGET: Duration = Duration::from_secs(10);
+
+/// How long the unwind path spends. Deliberately shorter than
+/// [`RECLAIM_BUDGET`]: a test that has already failed should not also stall the
+/// suite.
+const UNWIND_BUDGET: Duration = Duration::from_secs(5);
+
+/// Reclaims the processes a test started, **including when an assertion panics**.
+///
+/// A failing assertion unwinds straight past whatever cleanup sits at the end of
+/// the test body. The tree fixture polls forever, so before this guard existed a
+/// single red assertion could leave a spinning `cmd.exe` behind for the rest of
+/// the session. That is not hypothetical: it is what a restricted sandbox
+/// produced when its `taskkill` returned `1`, the tree walk was honestly
+/// reported `Incomplete`, and the assertion that caught it then unwound past the
+/// gate write.
+///
+/// The guard is deliberately narrow, because "clean up after a failure" is one
+/// short step away from "kill things that are not yours":
+///
+/// * **Identity, never image name.** It never matches on `cmd.exe`, `ping.exe`
+///   or `taskkill.exe`. It only ever addresses the exact jobs this test started,
+///   by id, through the same manager, and the module's own identity-checked
+///   teardown then decides what may be signalled. A process this test did not
+///   start — another test's, the build's, the user's — is unreachable from here.
+/// * **Fixture-local fallback.** Opening the gate only drops a file into this
+///   test's own scratch directory so a cooperative fixture can leave by itself.
+/// * **Bounded.** A wedged teardown turns into a slow test, not a hung one.
+///
+/// On the passing path the guard finds nothing to do: the job is already
+/// terminal and the test has already opened its own gate.
+struct JobReclaimer {
+    manager: Arc<ProcessJobManager>,
+    job_ids: Vec<String>,
+    gates: Vec<PathBuf>,
+}
+
+impl JobReclaimer {
+    fn new(manager: Arc<ProcessJobManager>) -> Self {
+        Self { manager, job_ids: Vec::new(), gates: Vec::new() }
+    }
+
+    /// Remembers a job so it can still be reclaimed if the test unwinds.
+    fn track(&mut self, job_id: &str) {
+        if !self.job_ids.iter().any(|known| known == job_id) {
+            self.job_ids.push(job_id.to_owned());
+        }
+    }
+
+    /// Remembers a gate file that releases a cooperative fixture.
+    fn arm_gate(&mut self, gate: PathBuf) {
+        self.gates.push(gate);
+    }
+
+    /// Runs the same bounded reclaim `Drop` would and reports whether every
+    /// tracked job reached a terminal state inside the deadline. Call it at the
+    /// end of a test that has to prove it left nothing behind.
+    fn reclaim_now(&self) -> bool {
+        self.reclaim(RECLAIM_BUDGET)
+    }
+
+    fn reclaim(&self, within: Duration) -> bool {
+        // 1. Release cooperative fixtures first, so they can leave on their own
+        //    rather than being forced.
+        for gate in &self.gates {
+            let _ = std::fs::write(gate, b"go");
+        }
+        // 2. Ask the manager to stop anything this test started. Cancelling an
+        //    already-terminal job is a no-op by contract, so this is safe to run
+        //    on the passing path too.
+        for job_id in &self.job_ids {
+            let _ = self.manager.cancel(job_id);
+        }
+        // 3. Drive supervision until every tracked job is terminal, bounded.
+        let deadline = Instant::now() + within;
+        loop {
+            self.manager.tick();
+            let all_terminal = self.job_ids.iter().all(|job_id| {
+                self.manager
+                    .status(job_id)
+                    .map(|view| view.is_terminal())
+                    .unwrap_or(true)
+            });
+            if all_terminal {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+impl Drop for JobReclaimer {
+    fn drop(&mut self) {
+        // Never panics. A panic here while already unwinding from a failed
+        // assertion would abort the whole test binary, turning one red test into
+        // no results at all.
+        let _ = self.reclaim(UNWIND_BUDGET);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Real exit codes, and the diagnostics that must survive them
 // ---------------------------------------------------------------------------
 
@@ -209,6 +317,9 @@ fn heavy_output_on_both_streams_does_not_deadlock_and_reports_what_was_dropped()
         stream_retention_bytes: 8 * 1024,
         ..ManagerConfig::default()
     });
+    // 10,000 echo lines per stream: long enough that a panic would otherwise
+    // leave the child writing into abandoned pipes.
+    let mut reclaimer = JobReclaimer::new(Arc::clone(&manager));
     let spec = batch_fixture(
         &dir,
         "heavy.cmd",
@@ -220,6 +331,7 @@ fn heavy_output_on_both_streams_does_not_deadlock_and_reports_what_was_dropped()
         .start(start_request("heavy", spec, Duration::from_secs(60)))
         .expect("start");
     let job_id = job.view().job_id.clone();
+    reclaimer.track(&job_id);
     let view = wait_terminal(&manager, &job_id, Duration::from_secs(45));
 
     assert_eq!(view.state, JobRunState::Succeeded, "{view:?}");
@@ -246,6 +358,10 @@ fn heavy_output_on_both_streams_does_not_deadlock_and_reports_what_was_dropped()
     assert!(page.lost_before_offset > 0, "an old cursor is informed, not silently shifted");
     assert!(!page.content.is_empty());
     assert!(page.stream_closed, "the pipe ended with the process");
+    assert!(
+        reclaimer.reclaim_now(),
+        "the reclaim deadline elapsed, so the writer was still alive: {view:?}"
+    );
 }
 
 #[cfg(windows)]
@@ -278,6 +394,8 @@ fn a_process_with_no_output_still_completes() {
 fn a_timeout_stops_a_real_tree_and_keeps_partial_output() {
     let dir = fixture("timeout");
     let manager = manager(ManagerConfig::default());
+    // The child blocks ~59 s, so it outlives the test unless it is reclaimed.
+    let mut reclaimer = JobReclaimer::new(Arc::clone(&manager));
     // Emits one line, then blocks for ~59 s.
     let spec = SpawnSpec::shell(
         "echo started && ping -n 60 127.0.0.1 > nul",
@@ -288,6 +406,7 @@ fn a_timeout_stops_a_real_tree_and_keeps_partial_output() {
         .start(start_request("timeout", spec, Duration::from_millis(400)))
         .expect("start");
     let job_id = job.view().job_id.clone();
+    reclaimer.track(&job_id);
     let view = wait_terminal(&manager, &job_id, Duration::from_secs(20));
 
     assert_eq!(view.state, JobRunState::TimedOut);
@@ -321,6 +440,11 @@ fn a_timeout_stops_a_real_tree_and_keeps_partial_output() {
     let terminated = position("TreeTerminated");
     let finished = position("Finished");
     assert!(stop < terminated && terminated < finished);
+
+    assert!(
+        reclaimer.reclaim_now(),
+        "the reclaim deadline elapsed, so the ~59 s child was still alive: {view:?}"
+    );
 }
 
 #[cfg(windows)]
@@ -358,6 +482,11 @@ fn a_real_grandchild_does_not_survive_the_tree_termination() {
     .expect("write waiter");
 
     let manager = manager(ManagerConfig::default());
+    // This is the one fixture that never ends by itself, so it is also the one
+    // that can outlive a failed assertion. The guard releases it on the failing
+    // path; on the passing path the test opens the gate itself, below.
+    let mut reclaimer = JobReclaimer::new(Arc::clone(&manager));
+    reclaimer.arm_gate(gate.clone());
     // Three levels, all of them real: our child is cmd.exe, which waits on a
     // nested `cmd.exe` running the fixture, which waits on the gate. `taskkill /T`
     // has to walk the whole chain, and the grandchild waits indefinitely, so the
@@ -367,6 +496,7 @@ fn a_real_grandchild_does_not_survive_the_tree_termination() {
         .start(start_request("tree", spec, Duration::from_millis(500)))
         .expect("start");
     let job_id = job.view().job_id.clone();
+    reclaimer.track(&job_id);
     let view = wait_terminal(&manager, &job_id, Duration::from_secs(20));
 
     assert_eq!(view.state, JobRunState::TimedOut, "{view:?}");
@@ -395,6 +525,22 @@ fn a_real_grandchild_does_not_survive_the_tree_termination() {
 
     // (3) Nothing may still be holding the output pipes. If a descendant
     // survived, it keeps them open and the readers have to be abandoned.
+    //
+    // KNOWN OPEN FINDING -- this assertion currently FAILS on this machine, and
+    // it has been left failing on purpose. C-FINDING-01 measured that the write
+    // end of the pipe can stay open for **more than eight seconds** after a tree
+    // kill that reported `walker_exit_code: Some(0)` and `owner_after_stop:
+    // Gone`, while the fixture's own processes were provably gone (its heartbeat
+    // froze and its sentinel was never written). Widening `reader_grace` to 8 s
+    // does not clear it, so this is not a grace-window artefact: whatever holds
+    // the pipe is outside the tree `taskkill /T` walked -- a handle-inheriting
+    // process such as the console host is the leading candidate.
+    //
+    // The assertion is deliberately NOT relaxed: it points at a real handle
+    // leak. The honest fix is structural reclamation (a Job Object with
+    // KILL_ON_JOB_CLOSE), not a weaker assertion. Assertion (4) below -- the
+    // sentinel -- is the check that actually proves "no descendant survived",
+    // and it continues to pass.
     assert!(
         !view.readers_orphaned,
         "something still holds the pipes, so a descendant outlived the kill: {view:?}"
@@ -409,6 +555,17 @@ fn a_real_grandchild_does_not_survive_the_tree_termination() {
         "a descendant outlived the tree termination; it wrote {}",
         sentinel.display()
     );
+
+    // (4) The bounded reclaim finds nothing left to do. This is the guard's own
+    // check, so a run that *did* leave a process behind fails here instead of
+    // passing and orphaning it. On a restricted sandbox, where `taskkill` can
+    // legitimately return non-zero and the walk is reported `Incomplete`, this
+    // is the line that turns "we could not reclaim" into a red test rather than
+    // a silent leak.
+    assert!(
+        reclaimer.reclaim_now(),
+        "the reclaim deadline elapsed, so something this test started was still alive: {view:?}"
+    );
 }
 
 #[cfg(windows)]
@@ -416,11 +573,14 @@ fn a_real_grandchild_does_not_survive_the_tree_termination() {
 fn cancel_is_a_request_until_acknowledged_and_is_idempotent() {
     let dir = fixture("cancel");
     let manager = manager(ManagerConfig::default());
+    // ~59 s of child: it must be reclaimed even if an assertion unwinds first.
+    let mut reclaimer = JobReclaimer::new(Arc::clone(&manager));
     let spec = long_running_spec(&dir);
     let job = manager
         .start(start_request("cancel", spec, Duration::from_secs(300)))
         .expect("start");
     let job_id = job.view().job_id.clone();
+    reclaimer.track(&job_id);
 
     let first = manager.cancel(&job_id).expect("cancel");
     assert!(first.changed);
@@ -441,6 +601,11 @@ fn cancel_is_a_request_until_acknowledged_and_is_idempotent() {
     assert_eq!(
         second.view.terminate, view.terminate,
         "a repeat cancel must not signal the tree again"
+    );
+
+    assert!(
+        reclaimer.reclaim_now(),
+        "the reclaim deadline elapsed, so the long-running child was still alive: {view:?}"
     );
 }
 
