@@ -209,9 +209,9 @@ await run('acceptance', 'B03-ACC-01', 'a whole-code-unit offset returns the exac
 
 /// CONTRACTS v1.2 §6 (RD): the historical surrogate-pair splitting is a defect,
 /// not the contract — "历史拆代理对行为仅能作基线复现，不能据此关闭 B03".
-/// Kept as an explicit baseline reproduction so the defect stays visible; a fix
-/// by B flips this case, and the acceptance above is what must then hold.
-await run('baseline', 'B03-BASE-01', 'an offset landing between surrogates currently splits the pair', async (context) => {
+/// O-REVIEW-04: B03-BASE-01 is retained in prior commits/evidence. The integrated
+/// repair is now checked against the frozen safe-boundary contract.
+await run('acceptance', 'B03-ACC-02', 'an offset inside a surrogate pair returns a whole character and an honest next offset', async (context) => {
   const { mkdir, rm, writeFile } = await import('node:fs/promises')
   const dir = join(tmpdir(), `fox-harness-b03-${process.pid}`)
   await mkdir(dir, { recursive: true })
@@ -220,18 +220,22 @@ await run('baseline', 'B03-BASE-01', 'an offset landing between surrogates curre
   const text = 'a😀b'
   await writeFile(join(dir, 'u.txt'), text, 'utf8')
 
-  // offset=2 lands inside the surrogate pair: both layers slice UTF-16 units,
-  // so the returned text is a lone surrogate, not a valid character.
+  // offset=2 lands inside the pair; navigation describes the adjusted range.
   const atTwo = await executeReadOnlyTool('read', { path: join(dir, 'u.txt'), offset: 2, limit: 2 })
-  assert.equal(atTwo.content[0].text, text.slice(2, 4))
-  context.note = 'defect reproduced: offset can split a surrogate pair (owner B); v1.2 requires a safe boundary'
+  assert.equal(atTwo.content[0].text, '😀')
+  assert.equal(atTwo.details.offset, 1)
+  assert.equal(atTwo.details.returnedUnits, 2)
+  assert.equal(atTwo.details.nextOffset, 3)
+  const next = await executeReadOnlyTool('read', { path: join(dir, 'u.txt'), offset: atTwo.details.nextOffset, limit: 2 })
+  assert.equal(next.content[0].text, 'b')
+  assert.equal(next.details.nextOffset, null)
 })
 
 // ===========================================================================
 // B02 — match-limit continuation boundary
 // ===========================================================================
 
-await run('baseline', 'B02-BASE-01', 'grep stops at maxMatches and exposes no continuation cursor', async (context) => {
+await run('acceptance', 'B02-ACC-01', 'grep resumes beyond maxMatches without loss or duplicate rows', async (context) => {
   const { root, cleanup } = await createProjectWithCanaries()
   context.after(cleanup)
 
@@ -242,20 +246,34 @@ await run('baseline', 'B02-BASE-01', 'grep stops at maxMatches and exposes no co
   assert.equal(lines.length, 200, 'emitted lines must equal the cap')
   assert.ok(MATCH_COUNT > 200, 'corpus must exceed the cap for the boundary to be meaningful')
 
-  // BASELINE: the defect is the absence of a resume cursor and of the
-  // scanComplete distinction required by CONTRACTS RD-v1.
-  assert.equal(grep.details.nextCursor, undefined, 'JS layer offers no resume cursor')
-  assert.equal(grep.details.scanComplete, undefined, 'JS layer does not distinguish scanComplete')
-  context.note = 'defect reproduced: B02 continuation contract absent at JS layer (owner B)'
+  assert.equal(grep.details.scanComplete, false)
+  assert.equal(grep.details.matchLimitReached, true)
+  assert.equal(grep.details.totalMatches, null)
+  assert.equal(typeof grep.details.nextCursor, 'string')
+  let cursor = grep.details.nextCursor
+  const all = [...lines]
+  const seen = new Set()
+  for (let page = 0; cursor && page < 10; page++) {
+    assert.ok(!seen.has(cursor), 'cursor must progress')
+    seen.add(cursor)
+    const next = await executeReadOnlyTool('grep', { path: root, pattern: MATCH_LINE, cursor })
+    all.push(...next.content[0].text.split('\n').filter(Boolean))
+    cursor = next.details.nextCursor
+  }
+  assert.equal(cursor, null)
+  assert.equal(all.length, MATCH_COUNT)
+  assert.equal(new Set(all).size, MATCH_COUNT)
 })
 
-await run('baseline', 'B02-BASE-02', 'find reports only count and never claims scope exhaustion', async (context) => {
+await run('acceptance', 'B02-ACC-02', 'find reports the count and actual scope exhaustion', async (context) => {
   const { root, cleanup } = await createProjectWithCanaries()
   context.after(cleanup)
 
   const found = await executeReadOnlyTool('find', { path: root, pattern: 'corpus' })
   assert.equal(found.details.count, 1)
-  assert.equal(found.details.scanComplete, undefined)
+  assert.equal(found.details.scanComplete, true)
+  assert.equal(found.details.totalMatches, 1)
+  assert.equal(found.details.nextCursor, null)
 })
 
 // ===========================================================================
@@ -366,9 +384,13 @@ await run('acceptance', 'B04-ACC-05', 'modelToolResultContent appends the cursor
   assert.equal(projected[0].text, 'abcd', 'stored fragment stays first and untouched')
   assert.match(projected[1].text, /^FOX_RESULT_CURSOR_V1 /)
 
-  // Any other tool must not gain a navigation block.
+  // Search tools get the distinct RD-v1 block, never a result-reference cursor.
   const other = modelToolResultContent('grep', { content, details })
-  assert.equal(other.length, 1)
+  assert.equal(other[0].text, 'abcd')
+  assert.equal(other.some(block => block.text?.startsWith('FOX_RESULT_CURSOR_V1 ')), false)
+  assert.match(other[1].text, /^FOX_SEARCH_NAV_V1 /)
+  const searchNav = JSON.parse(other[1].text.slice('FOX_SEARCH_NAV_V1 '.length))
+  assert.equal(Object.hasOwn(searchNav, 'reference'), false)
 
   // An error result must not project read-back navigation.
   const errored = modelToolResultContent('read_tool_result', { isError: true, content, details })
