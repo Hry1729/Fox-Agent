@@ -2270,13 +2270,25 @@ impl Database {
 
     /// Derived exclusively from the persisted Host row and its range reader.
     /// Tool-supplied fields never authorize model-view omission.
+    ///
+    /// A-REQ-006 (EX-v1): this is a fact about *storage*, not about success. A
+    /// call that settled as `failed` still had its complete result spilled to the
+    /// content-addressed blob store by `complete_host_tool_call`, and the model
+    /// has to be able to page through those diagnostics exactly like a
+    /// successful result - otherwise a bounded view of a multi-megabyte failure
+    /// would promise a retrieval that only completed rows were allowed to have.
+    /// So both terminal states are in scope, while anything still in flight
+    /// (`running`/`pending`), anything with no stored result, and anything the
+    /// reader can only serve as a preview stay `unknown` - which no caller may
+    /// read as permission to omit. Authorization still comes from the row's own
+    /// conversation and from the same real range read, never from the status.
     pub(crate) fn tool_result_storage(
         &self, run_id: &str, tool_call_id: &str,
     ) -> Result<crate::kernel_compaction::ToolResultStorage, String> {
         let record = self.with_connection(|connection| {
             Ok(query_tool_call(connection, run_id, tool_call_id).optional()?)
         })?.ok_or("tool result has not been stored")?;
-        if record.status != "completed" || record.result.is_none() {
+        if !matches!(record.status.as_str(), "completed" | "failed") || record.result.is_none() {
             return Ok(crate::kernel_compaction::ToolResultStorage::unknown());
         }
         let reference = crate::kernel_compaction::tool_result_ref(run_id, tool_call_id)

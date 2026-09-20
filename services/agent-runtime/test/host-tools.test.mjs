@@ -1171,6 +1171,32 @@ test('a successful command still returns the Host result untouched', async () =>
   assert.equal(await tool.execute('call-ok', { command: 'cargo build' }, new AbortController().signal), result)
 })
 
+// A reader-budget refusal is the one failure where the command never ran. The
+// model has to be told that, or it will read "failed" as "try a different
+// command" and the side-effect reasoning of the whole tool breaks.
+test('an output-reader budget refusal says the command never started', async () => {
+  const refusal = '[tool.start_failed] Fox 的输出读取线程已达上限（64/64）：本次命令未启动，未产生任何副作用。等待片刻后重试即可，或让命令把输出重定向到文件（command > out.txt 2>&1）'
+  const requestHost = async () => ({
+    payload: {
+      isError: true,
+      error: refusal,
+      errorCode: 'tool.start_failed',
+      errorDetails: { code: 'tool.start_failed', retryable: true },
+    },
+  })
+  const tool = toolByName(createHostTools(requestHost), 'run_command')
+  await assert.rejects(
+    tool.execute('call-refused', { command: 'npm test' }, new AbortController().signal),
+    (error) => {
+      assert.equal(error.code, 'tool.start_failed')
+      assert.equal(error.retryable, true)
+      assert.ok(error.message.startsWith(refusal), error.message)
+      assert.ok(!error.message.includes('fox-result'), 'nothing was stored for a call that never ran')
+      return true
+    },
+  )
+})
+
 // A05: the tool description is the only place the model learns how the command
 // actually runs. It must state the real executor, the real bounds and the real
 // encoding behaviour instead of an idealised shell.
@@ -1183,4 +1209,6 @@ test('run_command states the real executor, bounds and output encoding behaviour
   assert.match(description, /OEM codepage/)
   assert.match(description, /redirect it to a file/)
   assert.match(description, /do not repeat an identical call that already failed/)
+  assert.match(description, /bounded preview carrying a fox-result:\/\/ reference/)
+  assert.match(description, /did not start and had no side effect/)
 })
