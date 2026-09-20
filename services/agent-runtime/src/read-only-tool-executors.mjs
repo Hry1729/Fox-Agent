@@ -7,6 +7,7 @@ const DEFAULT_LIMITS = Object.freeze({
   maxOutputChars: 120_000,
   maxLineChars: 8_000,
 })
+const MAX_REGEX_PATTERN_BYTES = 4 * 1024
 
 // ---------------------------------------------------------------------------
 // Ignore rules (B01): dependency noise, build output, VCS internals.
@@ -32,8 +33,17 @@ function isIgnored(name) {
 
 function compilePattern(pattern, { caseSensitive = false, regex = false } = {}) {
   if (regex) {
+    if (Buffer.byteLength(String(pattern), 'utf8') > MAX_REGEX_PATTERN_BYTES) {
+      throw new Error(`invalid regex: pattern exceeds ${MAX_REGEX_PATTERN_BYTES} bytes`)
+    }
     const flags = caseSensitive ? '' : 'i'
-    return { test: (value) => new RegExp(pattern, flags).test(value) }
+    let compiled
+    try {
+      compiled = new RegExp(pattern, flags)
+    } catch (error) {
+      throw new Error(`invalid regex: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return { test: (value) => compiled.test(value) }
   }
   const needle = caseSensitive ? String(pattern) : String(pattern).toLowerCase()
   return {

@@ -2,6 +2,7 @@
 //! resource is checked against the frozen root; no runtime fallback is allowed.
 use crate::kernel::CancellationToken;
 use fox_engine_protocol::{ResourceExecutor, RunControlBinding};
+use regex::RegexBuilder;
 use serde_json::{json, Value};
 use std::{collections::VecDeque, fs::{self, File, OpenOptions}, io::Read, path::{Path, PathBuf}, time::{Duration, Instant}};
 
@@ -10,6 +11,9 @@ const MAX_MATCHES: usize = 200;
 const MAX_CHARS: usize = 120_000;
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_REGEX_PATTERN_BYTES: usize = 4 * 1024;
+const REGEX_COMPILED_SIZE_LIMIT: usize = 2 * 1024 * 1024;
+const REGEX_DFA_SIZE_LIMIT: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 struct ReadLimits { entries: usize, matches: usize, read_chars: usize, output_chars: usize, line_chars: usize }
@@ -461,22 +465,39 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
         return Ok(result(entries.iter().map(|e| format!("{} {}", if e.directory {"[dir]"} else {"[file]"}, e.name)).collect::<Vec<_>>().join("\n"), json!({"path":path,"count":entries.len(),"truncated":truncated}), limits.output_chars));
     }
     let raw_pattern = input.get("pattern").and_then(Value::as_str).unwrap_or_default();
-    if input.get("regex").and_then(Value::as_bool).unwrap_or(false) {
-        return Err("regex search is unavailable on the Rust resource route; use literal search or the runtime route".into());
-    }
+    let regex_mode = input.get("regex").and_then(Value::as_bool).unwrap_or(false);
     let needle = raw_pattern.to_lowercase();
     let case_sensitive = input.get("caseSensitive").and_then(Value::as_bool).unwrap_or(false);
     let glob = input.get("glob").and_then(Value::as_str).unwrap_or_default();
+    let regex_matcher = if regex_mode {
+        if raw_pattern.len() > MAX_REGEX_PATTERN_BYTES {
+            return Err(format!("invalid regex: pattern exceeds {MAX_REGEX_PATTERN_BYTES} bytes"));
+        }
+        Some(
+            RegexBuilder::new(raw_pattern)
+                .case_insensitive(!case_sensitive)
+                .size_limit(REGEX_COMPILED_SIZE_LIMIT)
+                .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
+                .build()
+                .map_err(|error| format!("invalid regex: {error}"))?,
+        )
+    } else {
+        None
+    };
     // RD-v1 cursor (B02): deterministic continuation bound to query + scope.
     // Scope fingerprint = resolved search path + tool + pattern + options, so
     // a cursor from another scope or another query is rejected rather than
     // silently answering a different question.
     let scope = format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         tool, path.display(), raw_pattern,
         if case_sensitive { "cs" } else { "ci" },
+        if regex_mode { "re" } else { "li" },
         if glob.is_empty() { "-" } else { glob },
         limits.matches,
+        limits.entries,
+        limits.output_chars,
+        limits.line_chars,
         binding.run_id,
         binding.permission_snapshot_id
     );
@@ -500,11 +521,17 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
     let mut total_hits: usize = 0;
     let mut unreadable: usize = 0;
     let mut last_consumed: usize = consumed;
-    // Name/content matcher: literal (default) with per-call case handling.
-    // Full regex evaluation stays a Node-runtime feature; the Rust path is
-    // documented literal to avoid diverging semantics across engines.
+    // Name/content matcher: literal by default, or a once-compiled bounded
+    // regex. Rust's regex engine is linear-time and has explicit compiled/DFA
+    // size caps above, so user patterns cannot enable backtracking blowups.
     let name_hit = |value: &str| -> bool {
-        if case_sensitive { value.contains(raw_pattern) } else { value.to_lowercase().contains(&needle) }
+        if let Some(matcher) = &regex_matcher {
+            matcher.is_match(value)
+        } else if case_sensitive {
+            value.contains(raw_pattern)
+        } else {
+            value.to_lowercase().contains(&needle)
+        }
     };
     // Glob filter (* and ?), applied to file names in both find and grep.
     let glob_hit = |name: &str| -> bool {
@@ -700,8 +727,12 @@ mod tests {
         let searched = execute(&binding, "grep", &json!({"path":".","pattern":"fox"}), &token).unwrap();
         assert_eq!(searched["details"]["count"], 2);
         assert!(searched["content"][0]["text"].as_str().unwrap().contains(":2:second Fox line"));
-        assert!(execute(&binding, "grep", &json!({"path":".","pattern":"f.*x","regex":true}), &token)
-            .unwrap_err().contains("unavailable on the Rust resource route"));
+        let regex = execute(&binding, "grep", &json!({"path":".","pattern":"^a😀f.*$","regex":true}), &token).unwrap();
+        assert_eq!(regex["details"]["returnedCount"], 1);
+        let strict_case = execute(&binding, "grep", &json!({"path":".","pattern":"^a😀f.*$","regex":true,"caseSensitive":true}), &token).unwrap();
+        assert_eq!(strict_case["details"]["returnedCount"], 0);
+        assert!(execute(&binding, "grep", &json!({"path":".","pattern":"[","regex":true}), &token)
+            .unwrap_err().contains("invalid regex"));
         let tiny = execute(&binding, "read", &json!({"path":"src/note.txt","offset":1,"limit":1}), &token).unwrap();
         assert_eq!(tiny["content"][0]["text"], "😀");
         assert_eq!(tiny["details"]["nextOffset"], 3);
@@ -780,6 +811,15 @@ mod tests {
             fs::write(root.join(format!("hit-{index}.txt")), "hit\nhit\n").unwrap();
         }
         fs::write(root.join("hit-no.md"), "hit\n").unwrap();
+        let literal_page = execute(&binding, "find", &json!({"path":".","pattern":"hit"}), &token).unwrap();
+        assert!(literal_page["details"]["nextCursor"].is_string());
+        assert!(execute(&binding, "find", &json!({
+            "path":".", "pattern":"hit", "regex":true,
+            "cursor": literal_page["details"]["nextCursor"],
+        }), &token).unwrap_err().contains("cursor scope mismatch"));
+        assert!(execute(&binding, "find", &json!({
+            "path":".", "pattern":"x".repeat(MAX_REGEX_PATTERN_BYTES + 1), "regex":true,
+        }), &token).unwrap_err().contains("pattern exceeds"));
         let mut cursor = Value::Null;
         let mut seen = std::collections::HashSet::new();
         for _ in 0..10 {
