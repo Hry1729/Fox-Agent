@@ -627,9 +627,10 @@ const READ_RESULT_PUBLIC_FIELDS = [
 // navigation block so the model can see truncation, continuation and scope
 // facts that the provider projection would otherwise drop with `details`.
 const SEARCH_NAV_FIELDS = [
-  'count', 'scanComplete', 'matchLimitReached', 'scanTruncated',
-  'skippedIgnored', 'totalMatches', 'pageComplete', 'hiddenIgnored',
+  'count', 'returnedCount', 'scanComplete', 'scanTruncated', 'matchLimitReached',
+  'skippedIgnored', 'skippedUnreadable', 'totalMatches', 'pageComplete', 'hiddenIgnored',
   'truncated', 'startLine', 'lineCount', 'totalLines', 'readMode',
+  'offset', 'nextOffset', 'returnedUnits', 'totalUnits', 'nextCursor',
 ]
 
 const SEARCH_NAV_TOOLS = new Set(['read', 'ls', 'find', 'grep'])

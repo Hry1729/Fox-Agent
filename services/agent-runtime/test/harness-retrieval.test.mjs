@@ -3,8 +3,156 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { executeReadOnlyTool } from '../src/read-only-tool-executors.mjs'
+import { executeReadOnlyTool, sliceUtf16Range } from '../src/read-only-tool-executors.mjs'
 import { searchNavigationView, renderSearchNavigation, modelToolResultContent } from '../src/tool-view.mjs'
+
+// ---------------------------------------------------------------------------
+// E-T-03b: surrogate-pair safe UTF-16 paging (O-REVIEW-02 item 1)
+// ---------------------------------------------------------------------------
+
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/
+
+test('E-T-03b: offset inside a surrogate pair never returns a lone surrogate', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-03b-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  // 'A'(U+0041) + U+1F600 (D83D DE00) + 'Fox': units [41 D83D DE00 46 6F 78]
+  await writeFile(join(root, 'emoji.txt'), 'A😀Fox', 'utf8')
+  const path = join(root, 'emoji.txt')
+  const result = await executeReadOnlyTool('read', { path, offset: 2, limit: 2 })
+  assert.ok(!LONE_SURROGATE.test(result.content[0].text), `no lone surrogate: ${JSON.stringify(result.content[0].text)}`)
+  assert.equal(result.details.readMode, 'utf16')
+  assert.ok(result.details.nextOffset !== undefined, 'nextOffset must be present')
+})
+
+test('UTF-16 pages reassemble exactly via nextOffset (first/middle/last)', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-pages-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  // Mixed BMP + non-BMP + CRLF content.
+  const source = 'A😀Fox\r\n中文行😀尾\nline3 plain\n🎉🎉🎉\nend'
+  await writeFile(join(root, 'mixed.txt'), source, 'utf8')
+  const path = join(root, 'mixed.txt')
+  // Paginate with a small limit that forces mid-pair landings.
+  let offset = 0
+  let reassembled = ''
+  let pages = 0
+  for (;;) {
+    const page = await executeReadOnlyTool('read', { path, offset, limit: 5 })
+    assert.ok(!LONE_SURROGATE.test(page.content[0].text), `page ${pages} well-formed`)
+    reassembled += page.content[0].text
+    pages++
+    if (pages > 10_000) throw new Error('paging did not terminate')
+    if (page.details.nextOffset === null || page.details.truncated === false) break
+    // Advance by the ACTUAL returned end, not offset+limit.
+    assert.ok(page.details.nextOffset > offset, 'nextOffset must advance')
+    offset = page.details.nextOffset
+  }
+  assert.equal(reassembled, source, 'reassembly must be exact')
+  assert.ok(pages >= 3, `expected >=3 pages, got ${pages}`)
+})
+
+test('sliceUtf16Range: direct unit cases', () => {
+  // 'A😀Fox' units: A=0, D83D=1, DE00=2, F=3, o=4, x=5
+  const s = 'A😀Fox'
+  // offset=2 lands on the low half: steps back to include the whole pair.
+  const mid = sliceUtf16Range(s, 2, 2)
+  assert.ok(!LONE_SURROGATE.test(mid.text))
+  assert.ok(mid.end > 2, 'must advance past the pair')
+  // O-REVIEW-03 item 1: a too-small window in front of a pair must PROGRESS,
+  // not return a dead empty page. limit=1 at the high half extends by one
+  // unit to return the complete character.
+  const hi = sliceUtf16Range(s, 1, 1)
+  assert.equal(hi.text, '😀', 'window extends to one whole character — no dead page')
+  assert.equal(hi.end, 3, 'next page continues after the pair')
+  // Full read is complete with null nextOffset semantics.
+  const full = sliceUtf16Range(s, 0, 100)
+  assert.equal(full.text, s)
+  assert.equal(full.complete, true)
+})
+
+// ---------------------------------------------------------------------------
+// RD-v1 field-independence: capped page does not imply incomplete scan
+// (O-REVIEW-02 item 4 — do NOT follow the erroneous E checker)
+// ---------------------------------------------------------------------------
+
+
+// ---------------------------------------------------------------------------
+// B02 cursor: deterministic continuation, scope/query binding, rejection
+// ---------------------------------------------------------------------------
+
+test('cursor continues an exhausted-in-one-page scan to the rest (no rescan from zero)', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-cursor-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  for (let i = 0; i < 6; i++) { await writeFile(join(root, `item${i}.txt`), 'x\n', 'utf8') }
+  const first = await executeReadOnlyTool('find', { path: root, pattern: 'txt' }, { limits: { maxEntries: 4 } })
+  assert.equal(first.details.scanComplete, false, 'first page must not claim exhaustion')
+  assert.ok(typeof first.details.nextCursor === 'string' && first.details.nextCursor.length > 0, 'must issue a cursor')
+  const second = await executeReadOnlyTool('find', { path: root, pattern: 'txt', cursor: first.details.nextCursor }, { limits: { maxEntries: 4 } })
+  const seen = new Set([...first.content[0].text.split('\n'), ...second.content[0].text.split('\n')].filter(Boolean))
+  assert.equal(seen.size, 6, 'both pages together cover all 6 files with no overlap loss')
+  assert.equal(second.details.nextCursor, null, 'exhausted scope yields null cursor')
+})
+
+test('cursor rejects wrong scope, wrong page size and garbage', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-cursor-neg-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  await writeFile(join(root, 'a.txt'), 'x\n', 'utf8')
+  const other = await mkdtemp(join(tmpdir(), 'fox-cursor-other-'))
+  context.after(() => rm(other, { recursive: true, force: true }))
+  await writeFile(join(other, 'b.txt'), 'x\n', 'utf8')
+  const first = await executeReadOnlyTool('find', { path: root, pattern: 'txt' }, { limits: { maxEntries: 4 } })
+  // nextCursor is null here (exhausted); craft continuation manually via a real cursor:
+  const big = await mkdtemp(join(tmpdir(), 'fox-cursor-big-'))
+  context.after(() => rm(big, { recursive: true, force: true }))
+  for (let i = 0; i < 6; i++) { await writeFile(join(big, `f${i}.txt`), 'x\n', 'utf8') }
+  const page1 = await executeReadOnlyTool('find', { path: big, pattern: 'txt' }, { limits: { maxEntries: 4 } })
+  const cursor = page1.details.nextCursor
+  assert.ok(cursor, 'need a live cursor for rejection tests')
+  await assert.rejects(
+    executeReadOnlyTool('find', { path: other, pattern: 'txt', cursor }, { limits: { maxEntries: 4 } }),
+    /scope mismatch/,
+  )
+  await assert.rejects(
+    executeReadOnlyTool('find', { path: big, pattern: 'txt', cursor }, { limits: { maxEntries: 99 } }),
+    /scope mismatch/,
+  )
+  // A different query for the same scope must also be rejected, not answered.
+  await assert.rejects(
+    executeReadOnlyTool('find', { path: big, pattern: 'f1', cursor }, { limits: { maxEntries: 4 } }),
+    /scope mismatch/,
+  )
+  await assert.rejects(
+    executeReadOnlyTool('find', { path: big, pattern: 'txt', caseSensitive: true, cursor }, { limits: { maxEntries: 4 } }),
+    /scope mismatch/,
+  )
+  await assert.rejects(
+    executeReadOnlyTool('find', { path: big, pattern: 'txt', cursor: '!!!not-a-cursor!!!' }, { limits: { maxEntries: 4 } }),
+    /invalid cursor/,
+  )
+  void first
+})
+
+test('grep cursor continuation covers all files across pages', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-grep-cursor-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  for (let i = 0; i < 5; i++) { await writeFile(join(root, `g${i}.txt`), `needle-${i}\n`, 'utf8') }
+  const first = await executeReadOnlyTool('grep', { path: root, pattern: 'needle' }, { limits: { maxEntries: 3 } })
+  assert.ok(first.details.nextCursor, 'must issue a cursor when scope remains')
+  const second = await executeReadOnlyTool('grep', { path: root, pattern: 'needle', cursor: first.details.nextCursor }, { limits: { maxEntries: 3 } })
+  const all = [...first.content[0].text.split('\n'), ...second.content[0].text.split('\n')].filter(Boolean)
+  assert.equal(all.length, 5, 'all 5 hits reachable across pages')
+})
+
+test('complete scan with capped hits: scanComplete=true + matchLimitReached=true', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'fox-cap-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  for (let i = 0; i < 5; i++) { await writeFile(join(root, `m${i}.txt`), 'x\n', 'utf8') }
+  const result = await executeReadOnlyTool('find', { path: root, pattern: 'txt' }, { limits: { maxMatches: 3 } })
+  assert.equal(result.details.scanComplete, true, 'scope exhausted')
+  assert.equal(result.details.matchLimitReached, true, 'hits hit the cap')
+  assert.equal(result.details.totalMatches, null, 'unknown total stays null')
+  assert.equal(result.details.returnedCount, 3)
+})
+
 
 // ---------------------------------------------------------------------------
 // B01: search filtering, scope and pattern completeness

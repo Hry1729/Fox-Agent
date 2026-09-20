@@ -126,7 +126,11 @@ impl Gateway<'_> {
             let (entries, truncated) = self.entries(&directory, self.limits.entries - found.len())?;
             for entry in entries {
                 if entry.directory { queue.push_back(entry.path.clone()); }
-                found.push(entry);
+                // Position in walk order (1-based): the search cursor points at
+                // the last DELIVERED match, so scanned-but-undelivered matches
+                // stay reachable (O-REVIEW-03 item 3).
+                let index = found.len() + 1;
+                found.push(Entry { index, ..entry });
             }
             if truncated || found.len() == self.limits.entries { return Ok((found, truncated || !queue.is_empty())); }
         }
@@ -134,7 +138,7 @@ impl Gateway<'_> {
     }
 }
 
-struct Entry { path: PathBuf, name: String, directory: bool }
+struct Entry { index: usize, path: PathBuf, name: String, directory: bool }
 
 #[cfg(windows)]
 fn verify_opened_path(file: &File, _requested: &Path, root: &Path) -> Result<(), String> {
@@ -160,13 +164,175 @@ fn verify_opened_path(file: &File, requested: &Path, root: &Path) -> Result<(), 
     Ok(())
 }
 
-fn slice_utf16(text: &str, offset: usize, limit: usize) -> String {
-    String::from_utf16_lossy(&text.encode_utf16().skip(offset).take(limit).collect::<Vec<_>>())
+// Simple glob over file names: `*` matches any sequence, `?` matches one
+// character. Matching is case-insensitive, like the Node runtime helper.
+fn glob_match(glob: &str, name: &str) -> bool {
+    let name_lower = name.to_lowercase();
+    let glob_lower: String = glob.to_lowercase();
+    fn recurse(pattern: &[char], text: &[char]) -> bool {
+        match pattern.split_first() {
+            None => text.is_empty(),
+            Some((&'*', rest)) => {
+                (0..=text.len()).any(|i| recurse(rest, &text[i..]))
+            }
+            Some((&'?', rest)) => !text.is_empty() && recurse(rest, &text[1..]),
+            Some((&p, rest)) => !text.is_empty() && text[0] == p && recurse(rest, &text[1..]),
+        }
+    }
+    let pattern: Vec<char> = glob_lower.chars().collect();
+    let text: Vec<char> = name_lower.chars().collect();
+    recurse(&pattern, &text)
 }
+
+// Slice UTF-16 code units without splitting a surrogate pair. Units stay
+// UTF-16 (contract). Returns (text, safe_end): `safe_end` is the exclusive
+// UTF-16 end index actually returned, so sequential pages advance by real
+// length (no overlap, no gap). A trailing high surrogate whose low half is
+// outside the window is dropped; the next page starts at `safe_end` and
+// re-reads the pair whole. Never returns a lone surrogate.
+fn slice_utf16_range(text: &str, offset: usize, limit: usize) -> (String, usize) {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let total = units.len();
+    let mut start = offset.min(total);
+    // Never start inside a pair: a low half at `start` steps back one unit.
+    if start > 0 && start < total && (0xd800..=0xdbff).contains(&units[start - 1]) && (0xdc00..=0xdfff).contains(&units[start]) {
+        start -= 1;
+    }
+    let mut safe_end = start.saturating_add(limit).min(total);
+    // Never end inside a pair: drop a dangling high half.
+    if safe_end > start && safe_end < total && (0xd800..=0xdbff).contains(&units[safe_end - 1]) && (0xdc00..=0xdfff).contains(&units[safe_end]) {
+        safe_end -= 1;
+    }
+    // Defensive: never return a lone trailing high surrogate.
+    if safe_end > start && safe_end == total && (0xd800..=0xdbff).contains(&units[safe_end - 1]) {
+        safe_end -= 1;
+    }
+    // O-REVIEW-03 item 1: a window too small for even one whole character
+    // must PROGRESS, not return a dead empty page (no infinite loop). Extend
+    // just enough to return one complete character (at most one extra unit).
+    if safe_end == start && start < total {
+        safe_end = (start + 2).min(total);
+        if safe_end < total && (0xd800..=0xdbff).contains(&units[safe_end - 1]) {
+            safe_end += 1;
+        }
+    }
+    (String::from_utf16_lossy(&units[start..safe_end]), safe_end)
+}
+
+// Surrogate-pair-safe prefix cut to a UTF-16 unit budget (O-REVIEW-03 item 2).
+// A trailing high surrogate whose low half would be cut is dropped, so the
+// result is always well-formed; callers derive navigation from the RETURNED
+// length.
+fn slice_utf16_budget(text: &str, max_units: usize) -> String {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    if units.len() <= max_units {
+        return text.to_owned();
+    }
+    let mut end = max_units;
+    if end > 0 && end < units.len() && (0xd800..=0xdbff).contains(&units[end - 1]) && (0xdc00..=0xdfff).contains(&units[end]) {
+        end -= 1;
+    }
+    if end > 0 && end == units.len() && (0xd800..=0xdbff).contains(&units[end - 1]) {
+        end -= 1;
+    }
+    String::from_utf16_lossy(&units[..end])
+}
+// Opaque search cursor (RD-v1 B02), mirroring the Node runtime encoding so the
+// two executors agree on token shape: base64url(JSON { v, scope, consumed }).
+// `consumed` is tool-shaped: find uses an entry position; grep uses
+// { f, l } = (file position, next line). Scope is a fingerprint of the query
+// and search root — used only for mismatch rejection, never as an
+// authorization basis, and never a snapshot fact (see the reported semantics).
+#[derive(Clone, Copy)]
+enum CursorPosition { Entry(usize), Pair(usize, usize) }
+
+fn encode_search_cursor(scope: &str, consumed: usize) -> String {
+    let payload = serde_json::json!({ "v": 1, "scope": scope, "consumed": consumed }).to_string();
+    base64_encode_url(payload.as_bytes())
+}
+
+fn encode_search_cursor_pair(scope: &str, file: usize, line: usize) -> String {
+    let payload = serde_json::json!({ "v": 1, "scope": scope, "consumed": { "f": file, "l": line } }).to_string();
+    base64_encode_url(payload.as_bytes())
+}
+
+fn decode_search_cursor(cursor: &str) -> Result<(String, CursorPosition), String> {
+    if cursor.is_empty() || cursor.len() > 4096 {
+        return Err("invalid cursor: cursor must be a non-empty bounded string".into());
+    }
+    let bytes = base64_decode_url(cursor).map_err(|_| "invalid cursor: not decodable".to_owned())?;
+    let text = String::from_utf8(bytes).map_err(|_| "invalid cursor: not valid UTF-8".to_owned())?;
+    let payload: Value = serde_json::from_str(&text).map_err(|_| "invalid cursor: not JSON".to_owned())?;
+    if payload.get("v").and_then(Value::as_u64) != Some(1) {
+        return Err("invalid cursor: unknown version".into());
+    }
+    let scope = payload.get("scope").and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or("invalid cursor: missing scope")?;
+    let consumed = payload.get("consumed").ok_or("invalid cursor: missing position")?;
+    if let Some(entry) = consumed.as_u64() {
+        return Ok((scope.to_owned(), CursorPosition::Entry(entry as usize)));
+    }
+    let file = consumed.get("f").and_then(Value::as_u64).ok_or("invalid cursor: missing file position")?;
+    let line = consumed.get("l").and_then(Value::as_u64).ok_or("invalid cursor: missing line position")?;
+    Ok((scope.to_owned(), CursorPosition::Pair(file as usize, line as usize)))
+}
+
+// Minimal base64url helpers (no new dependencies): encode/decode with padding
+// tolerated on decode. Only used for the opaque cursor token.
+fn base64_encode_url(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 { out.push(TABLE[((triple >> 6) & 0x3f) as usize] as char); }
+        if chunk.len() > 2 { out.push(TABLE[(triple & 0x3f) as usize] as char); }
+    }
+    out
+}
+
+fn base64_decode_url(text: &str) -> Result<Vec<u8>, ()> {
+    let mut values = Vec::with_capacity(text.len());
+    for byte in text.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            b'=' => continue,
+            _ => return Err(()),
+        };
+        values.push(value);
+    }
+    let mut out = Vec::with_capacity(values.len() / 4 * 3);
+    for chunk in values.chunks(4) {
+        if chunk.len() == 1 { return Err(()); }
+        let mut triple = 0u32;
+        for (position, value) in chunk.iter().enumerate() {
+            triple |= (*value as u32) << (18 - 6 * position);
+        }
+        out.push(((triple >> 16) & 0xff) as u8);
+        if chunk.len() > 2 { out.push(((triple >> 8) & 0xff) as u8); }
+        if chunk.len() > 3 { out.push((triple & 0xff) as u8); }
+    }
+    Ok(out)
+}
+
 fn result(text: String, mut details: Value, max_chars: usize) -> Value {
-    let length = text.encode_utf16().count();
-    details["outputTruncated"] = json!(length > max_chars);
-    json!({ "content": [{"type":"text", "text": slice_utf16(&text, 0, max_chars)}], "details": details })
+    // O-REVIEW-03 item 2: the final output budget is surrogate-pair safe and
+    // consumers must derive navigation from the RETURNED length, so expose the
+    // returned unit count here.
+    let returned = slice_utf16_budget(&text, max_chars);
+    let returned_units = returned.encode_utf16().count();
+    details["outputTruncated"] = json!(returned_units < text.encode_utf16().count());
+    details["returnedUnits"] = json!(returned_units);
+    json!({ "content": [{"type":"text", "text": returned}], "details": details })
 }
 
 pub fn execute(binding: &RunControlBinding, tool: &str, input: &Value, cancellation: &CancellationToken) -> Result<Value, String> {
@@ -217,56 +383,221 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
             let selected_utf16 = selected.encode_utf16().count();
             // RD-v1: pageComplete must reflect the actually returned range.
             // Any internal (read_chars) or output (result) truncation means the
-            // requested page was not fully returned.
+            // requested page was not fully returned. Both cuts are
+            // surrogate-pair safe (O-REVIEW-03 item 2).
             let read_chars_cut = selected_utf16 > limits.read_chars;
-            let output_cut = selected_utf16 > limits.output_chars;
-            let truncated = read_chars_cut || output_cut;
-            let bounded = if read_chars_cut { slice_utf16(&selected, 0, limits.read_chars) } else { selected };
+            let bounded = if read_chars_cut { slice_utf16_budget(&selected, limits.read_chars) } else { selected };
+            let delivered_utf16 = bounded.encode_utf16().count();
+            let truncated = delivered_utf16 < selected_utf16 || delivered_utf16 > limits.output_chars;
+            // Continuation for a truncated line page: the next line after the
+            // last delivered newline (an output cut inside a line re-reads that
+            // line from its start — overlap, never a gap).
+            let delivered_lines = bounded.matches('\n').count();
+            let next_start_line = start_line + delivered_lines;
             return Ok(result(bounded, json!({
                 "path": path, "truncated": truncated,
                 "startLine": start_line, "lineCount": line_count,
                 "totalLines": total_lines, "pageComplete": end_line == total_lines && !truncated,
                 "scanComplete": true,
                 "readMode": "lines",
+                "nextStartLine": if truncated { json!(next_start_line) } else { Value::Null },
             }), limits.output_chars));
         }
-        // Legacy UTF-16 code-unit mode (unchanged).
+        // Legacy UTF-16 code-unit mode: surrogate-pair safe, with nextOffset
+        // derived from the ACTUALLY RETURNED text after the output budget
+        // (O-REVIEW-03 item 2).
         let offset = input.get("offset").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as usize;
         let limit = input.get("limit").and_then(Value::as_f64).filter(|v| *v != 0.0).unwrap_or(limits.read_chars as f64).clamp(1.0, limits.read_chars as f64) as usize;
-        let truncated = offset.saturating_add(limit) < text.encode_utf16().count();
-        return Ok(result(slice_utf16(&text, offset, limit), json!({
-            "path": path, "truncated": truncated,
+        let total_units = text.encode_utf16().count();
+        let (page_text, safe_end) = slice_utf16_range(&text, offset, limit);
+        let final_text = slice_utf16_budget(&page_text, limits.output_chars);
+        let final_units = final_text.encode_utf16().count();
+        let page_units = page_text.encode_utf16().count();
+        let output_cut = final_units < page_units;
+        let source_exhausted = safe_end >= total_units;
+        let start = offset.min(total_units);
+        let fully_delivered = source_exhausted && !output_cut;
+        let next_offset = if fully_delivered { Value::Null } else { json!(start + final_units) };
+        return Ok(result(final_text, json!({
+            "path": path, "truncated": !source_exhausted || output_cut,
             "readMode": "utf16",
+            "offset": start,
+            "nextOffset": next_offset,
+            "totalUnits": total_units,
         }), limits.output_chars));
     }
     if tool == "ls" {
         let (entries, truncated) = gateway.entries(&path, limits.entries)?;
         return Ok(result(entries.iter().map(|e| format!("{} {}", if e.directory {"[dir]"} else {"[file]"}, e.name)).collect::<Vec<_>>().join("\n"), json!({"path":path,"count":entries.len(),"truncated":truncated}), limits.output_chars));
     }
-    let needle = input.get("pattern").and_then(Value::as_str).unwrap_or_default().to_lowercase();
-    let (entries, scan_truncated) = gateway.walk(&path)?;
-    let mut matches = Vec::new();
-    if tool == "find" {
-        for entry in entries {
-            gateway.check()?;
-            if entry.name.to_lowercase().contains(&needle) { matches.push(entry.path.to_string_lossy().into_owned()); }
-            if matches.len() == limits.matches { break; }
+    let raw_pattern = input.get("pattern").and_then(Value::as_str).unwrap_or_default();
+    let needle = raw_pattern.to_lowercase();
+    let case_sensitive = input.get("caseSensitive").and_then(Value::as_bool).unwrap_or(false);
+    let glob = input.get("glob").and_then(Value::as_str).unwrap_or_default();
+    // RD-v1 cursor (B02): deterministic continuation bound to query + scope.
+    // Scope fingerprint = resolved search path + tool + pattern + options, so
+    // a cursor from another scope or another query is rejected rather than
+    // silently answering a different question.
+    let scope = format!(
+        "{}|{}|{}|{}|{}|{}",
+        tool, path.display(), raw_pattern,
+        if case_sensitive { "cs" } else { "ci" },
+        if glob.is_empty() { "-" } else { glob },
+        limits.matches
+    );
+    let mut consumed: usize = 0;
+    let mut resume: Option<(usize, usize)> = None;
+    if let Some(raw_cursor) = input.get("cursor").and_then(Value::as_str) {
+        let (cursor_scope, position) = decode_search_cursor(raw_cursor)?;
+        if cursor_scope != scope {
+            return Err("cursor scope mismatch: this cursor was issued for a different search scope or query".into());
         }
-    } else {
-        for entry in entries.into_iter().filter(|e| !e.directory) {
-            let text = gateway.text(&entry.path, false)?;
-            for (index, line) in text.split('\n').enumerate() {
-                gateway.check()?;
-                let line = line.strip_suffix('\r').unwrap_or(line);
-                if line.to_lowercase().contains(&needle) {
-                    matches.push(format!("{}:{}:{}",entry.path.display(),index+1,slice_utf16(line,0,limits.line_chars)));
-                }
-                if matches.len() == limits.matches { break; }
-            }
-            if matches.len() == limits.matches { break; }
+        match position {
+            CursorPosition::Entry(value) => consumed = value,
+            CursorPosition::Pair(file, line) => { consumed = file; resume = Some((file, line)); }
         }
     }
-    Ok(result(matches.join("\n"), json!({"count":matches.len(),"scanTruncated":scan_truncated,"matchLimitReached":matches.len()==limits.matches}), limits.output_chars))
+    let (entries, scan_truncated) = gateway.walk(&path)?;
+    let mut total_hits: usize = 0;
+    let mut unreadable: usize = 0;
+    let mut last_consumed: usize = consumed;
+    // Name/content matcher: literal (default) with per-call case handling.
+    // Full regex evaluation stays a Node-runtime feature; the Rust path is
+    // documented literal to avoid diverging semantics across engines.
+    let name_hit = |value: &str| -> bool {
+        if case_sensitive { value.contains(raw_pattern) } else { value.to_lowercase().contains(&needle) }
+    };
+    // Glob filter (* and ?), applied to file names in both find and grep.
+    let glob_hit = |name: &str| -> bool {
+        if glob.is_empty() { return true; }
+        glob_match(&glob, name)
+    };
+    if tool == "find" {
+        // O-REVIEW-03 item 3: the cursor follows the last DELIVERED match, so
+        // matches scanned but not delivered (match cap or output budget) stay
+        // reachable on the next page instead of being skipped.
+        let mut delivered: Vec<usize> = Vec::new();
+        let mut text = String::new();
+        let mut output_cut = false;
+        let mut last_scanned: usize = consumed;
+        for entry in entries {
+            gateway.check()?;
+            if entry.index <= consumed { continue; }
+            last_scanned = entry.index;
+            if !glob_hit(&entry.name) { continue; }
+            if !name_hit(&entry.name) { continue; }
+            total_hits += 1;
+            if delivered.len() >= limits.matches { continue; }
+            let candidate = if text.is_empty() { entry.path.to_string_lossy().into_owned() }
+                else { format!("{}\n{}", text, entry.path.display()) };
+            if candidate.encode_utf16().count() > limits.output_chars {
+                if delivered.is_empty() {
+                    return Err("match line exceeds the output budget; narrow the query or raise limits".into());
+                }
+                output_cut = true;
+                break;
+            }
+            text = candidate;
+            delivered.push(entry.index);
+        }
+        let cap_reached = total_hits > delivered.len();
+        let scan_complete = !scan_truncated;
+        let next_position = if delivered.is_empty() {
+            if scan_complete { None } else { Some(last_scanned) }
+        } else {
+            Some(*delivered.last().unwrap())
+        };
+        let next_cursor = if scan_complete && !cap_reached && !output_cut {
+            Value::Null
+        } else {
+            match next_position.filter(|value| *value > 0) {
+                Some(value) => json!(encode_search_cursor(&scope, value)),
+                None => Value::Null,
+            }
+        };
+        let scanned_from_start = consumed == 0;
+        return Ok(result(text, json!({
+            "count": delivered.len(), "returnedCount": delivered.len(),
+            "pageComplete": !output_cut,
+            "scanComplete": scan_complete, "scanTruncated": scan_truncated,
+            "matchLimitReached": cap_reached,
+            "skippedUnreadable": unreadable,
+            "totalMatches": if scanned_from_start && scan_complete && !cap_reached && !output_cut { json!(total_hits) } else { Value::Null },
+            "nextCursor": next_cursor,
+        }), limits.output_chars));
+    }
+    // grep
+    // O-REVIEW-03 item 3: grep's cursor is file+line shaped, so one file with
+    // more hits than the cap continues mid-file instead of losing the rest.
+    let (resume_file, resume_line) = match &resume {
+        Some((file, line)) => (*file, *line),
+        None => (0usize, 0usize),
+    };
+    let walk_skip = resume_file.saturating_sub(1);
+    let mut text = String::new();
+    let mut delivered: usize = 0;
+    let mut output_cut = false;
+    let mut cap_reached = false;
+    let mut resume_out = (0usize, 0usize);
+    let mut last_processed: usize = walk_skip;
+    for entry in entries.into_iter().filter(|e| !e.directory) {
+        if entry.index <= walk_skip { continue; }
+        last_processed = entry.index;
+        if !glob_hit(&entry.name) { continue; }
+        let contents = match gateway.text(&entry.path, false) {
+            Ok(text) => text,
+            Err(_) => { unreadable += 1; continue; }
+        };
+        let start_line = if entry.index == resume_file { resume_line } else { 0 };
+        let mut stop = false;
+        for (line_index, line) in contents.split('\n').enumerate() {
+            gateway.check()?;
+            if line_index < start_line { continue; }
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if !name_hit(line) { continue; }
+            total_hits += 1;
+            if delivered >= limits.matches {
+                cap_reached = true;
+                resume_out = (entry.index, line_index);
+                stop = true;
+                break;
+            }
+            let (bounded_line, _) = slice_utf16_range(line, 0, limits.line_chars);
+            let formatted = format!("{}:{}:{}", entry.path.display(), line_index + 1, bounded_line);
+            let candidate = if text.is_empty() { formatted } else { format!("{}\n{}", text, formatted) };
+            if candidate.encode_utf16().count() > limits.output_chars {
+                if delivered == 0 {
+                    return Err("match line exceeds the output budget; narrow the query or raise limits".into());
+                }
+                output_cut = true;
+                resume_out = (entry.index, line_index);
+                stop = true;
+                break;
+            }
+            text = candidate;
+            delivered += 1;
+            resume_out = (entry.index, line_index + 1);
+        }
+        if stop { break; }
+    }
+    let cap_or_cut = cap_reached || output_cut;
+    let next_cursor = if scan_truncated == false && !cap_or_cut {
+        Value::Null
+    } else {
+        let position = if delivered > 0 || cap_or_cut { resume_out } else { (last_processed + 1, 0) };
+        if position.0 == 0 && position.1 == 0 { Value::Null }
+        else { json!(encode_search_cursor_pair(&scope, position.0, position.1)) }
+    };
+    let scanned_from_start = consumed == 0 && resume.is_none();
+    Ok(result(text, json!({
+        "count": delivered, "returnedCount": delivered,
+        "pageComplete": !output_cut,
+        "scanComplete": !scan_truncated, "scanTruncated": scan_truncated,
+        "matchLimitReached": cap_reached,
+        "skippedUnreadable": unreadable,
+        "totalMatches": if scanned_from_start && !scan_truncated && !cap_or_cut { json!(total_hits) } else { Value::Null },
+        "nextCursor": next_cursor,
+    }), limits.output_chars))
 }
 
 #[cfg(test)]
