@@ -862,30 +862,81 @@ pub trait ProcessSpawner: Send + Sync {
 #[derive(Default)]
 pub struct SystemSpawner;
 
+/// CREATE_NO_WINDOW: the product default. A background job must not flash a
+/// console.
+#[cfg(windows)]
+pub const CREATE_NO_WINDOW_FLAG: u32 = 0x0800_0000;
+
+/// DETACHED_PROCESS: no console is allocated at all.
+///
+/// This exists for one open investigation (C-FINDING-01). A console is backed by
+/// `conhost.exe`, which is created after the child and inherits the child's
+/// standard handles — so it is a candidate holder of the output pipes after the
+/// child itself has been killed and re-probed gone. Spawning with this flag
+/// removes that candidate, which is what turns "a console host might hold the
+/// pipe" from a guess into a measurement.
+///
+/// It is **not** a product recommendation: console semantics are a decision for
+/// the wiring review, not a side effect of a diagnostic.
+#[cfg(windows)]
+pub const DETACHED_PROCESS_FLAG: u32 = 0x0000_0008;
+
 impl ProcessSpawner for SystemSpawner {
     fn spawn(&self, spec: &SpawnSpec) -> io::Result<Box<dyn ChildHandle>> {
-        let mut command = std::process::Command::new(&spec.program);
-        command
-            .args(&spec.args)
-            .current_dir(&spec.cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        if let EnvMode::Replace(entries) = &spec.env {
-            command.env_clear();
-            for (key, value) in entries {
-                command.env(key, value);
-            }
-        }
         #[cfg(windows)]
         {
-            use std::os::windows::process::CommandExt;
-            // CREATE_NO_WINDOW: a background job must not flash a console.
-            command.creation_flags(0x0800_0000);
+            spawn_system_child(spec, CREATE_NO_WINDOW_FLAG)
         }
-        let child = command.spawn()?;
-        Ok(Box::new(SystemChild { child: Some(child) }))
+        #[cfg(not(windows))]
+        {
+            spawn_system_child(spec, 0)
+        }
     }
+}
+
+/// The same real spawner with an explicit console mode.
+///
+/// Only the creation flags differ, so the environment matrix can compare
+/// console modes without duplicating the child handle, the identity-aware
+/// teardown or the tree walk.
+pub struct SystemSpawnerFlags {
+    pub creation_flags: u32,
+}
+
+impl ProcessSpawner for SystemSpawnerFlags {
+    fn spawn(&self, spec: &SpawnSpec) -> io::Result<Box<dyn ChildHandle>> {
+        spawn_system_child(spec, self.creation_flags)
+    }
+}
+
+fn spawn_system_child(
+    spec: &SpawnSpec,
+    creation_flags: u32,
+) -> io::Result<Box<dyn ChildHandle>> {
+    let mut command = std::process::Command::new(&spec.program);
+    command
+        .args(&spec.args)
+        .current_dir(&spec.cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let EnvMode::Replace(entries) = &spec.env {
+        command.env_clear();
+        for (key, value) in entries {
+            command.env(key, value);
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(creation_flags);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = creation_flags;
+    }
+    let child = command.spawn()?;
+    Ok(Box::new(SystemChild { child: Some(child) }))
 }
 
 struct SystemChild {
@@ -1083,6 +1134,33 @@ pub struct CancelOutcome {
     pub acknowledged: bool,
 }
 
+/// What became of the output readers after the grace window expired.
+///
+/// This exists for one open investigation (C-FINDING-01): `readers_orphaned`
+/// only says the pipe was *still* held when the grace ran out. It cannot
+/// distinguish "the grace was a little too short" from "something still holds
+/// the write end". `stdout_released`/`stderr_released` do: they are sampled
+/// later, so a pipe that is released shortly after the orphan is a timing
+/// artefact, while one that is still held after seconds is a real handle leak.
+///
+/// Diagnostic only. It is never consulted by the lifecycle, and the detached
+/// threads are never joined.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReaderPostMortem {
+    /// How many reader threads were still unfinished when the grace expired
+    /// (0..=2). Zero means the readers were joined normally.
+    pub pending_at_orphan: u8,
+    /// Clock reading when the readers were declared orphaned, if they were.
+    pub orphan_observed_at_ms: Option<i64>,
+    /// Whether the stdout pipe has since been released.
+    ///
+    /// `None` means the reader was never abandoned, so there is nothing to
+    /// report — distinct from `Some(false)`, which is "detached and still
+    /// holding the write end open".
+    pub stdout_released: Option<bool>,
+    pub stderr_released: Option<bool>,
+}
+
 /// What one supervision step did, for tests and logs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TickAction {
@@ -1131,6 +1209,15 @@ struct ChildControl {
     child: Option<Box<dyn ChildHandle>>,
     stdout_reader: Option<JoinHandle<()>>,
     stderr_reader: Option<JoinHandle<()>>,
+    /// Reader threads that were detached when the grace window expired.
+    ///
+    /// Detaching is the same thing that dropping a `JoinHandle` does — the
+    /// thread keeps running either way — so retaining the handle changes no
+    /// behaviour. It only lets a diagnostic ask, afterwards, whether the pipe
+    /// was *ever* released, and how long that took. Nothing here is joined, and
+    /// nothing in the lifecycle reads it.
+    abandoned_stdout: Option<JoinHandle<()>>,
+    abandoned_stderr: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug)]
@@ -1151,6 +1238,11 @@ struct JobStateCell {
     terminate: Option<TerminateOutcome>,
     owner_after_stop: Option<OwnerStatus>,
     readers_orphaned: bool,
+    /// How many reader threads were still unfinished when the grace expired.
+    /// Evidence only: 0 when the peers reached EOF in time, up to 2 otherwise.
+    readers_pending_at_orphan: u8,
+    /// Clock reading at the moment the readers were declared orphaned.
+    orphan_observed_at_ms: Option<i64>,
     /// Set once the child has exited and we are waiting for reader threads.
     drain_deadline: Option<Instant>,
     /// True while teardown steps (terminate + drain) are still owed.
@@ -1304,6 +1396,8 @@ impl ProcessJobManager {
                 terminate: None,
                 owner_after_stop: None,
                 readers_orphaned: false,
+                readers_pending_at_orphan: 0,
+                orphan_observed_at_ms: None,
                 drain_deadline: None,
                 teardown_started: false,
                 // Set from the moment the record is visible: between here and the
@@ -1312,7 +1406,13 @@ impl ProcessJobManager {
                 launch_in_flight: true,
             }),
             output: Arc::new(Mutex::new(OutputWindow::new(self.config.stream_retention_bytes))),
-            control: Mutex::new(ChildControl { child: None, stdout_reader: None, stderr_reader: None }),
+            control: Mutex::new(ChildControl {
+                child: None,
+                stdout_reader: None,
+                stderr_reader: None,
+                abandoned_stdout: None,
+                abandoned_stderr: None,
+            }),
             events: Mutex::new(Vec::new()),
         });
 
@@ -1476,6 +1576,31 @@ impl ProcessJobManager {
             Stream::Stderr => control.stderr_reader.as_ref(),
         };
         handle.is_none_or(|handle| handle.is_finished())
+    }
+
+    /// What became of the output readers, including whether a pipe that was
+    /// still held when the grace expired has since been released.
+    ///
+    /// A pure read, like every other accessor here: sampling it repeatedly is
+    /// how a caller measures "released after N ms" instead of only "not
+    /// released in time". `None` when the job is unknown, or when the readers
+    /// were joined normally (nothing was abandoned).
+    pub fn reader_post_mortem(&self, job_id: &str) -> Option<ReaderPostMortem> {
+        let entry = self.entry(job_id).ok()?;
+        let control = lock(&entry.control);
+        let state = lock(&entry.state);
+        Some(ReaderPostMortem {
+            pending_at_orphan: state.readers_pending_at_orphan,
+            orphan_observed_at_ms: state.orphan_observed_at_ms,
+            stdout_released: control
+                .abandoned_stdout
+                .as_ref()
+                .map(|handle| handle.is_finished()),
+            stderr_released: control
+                .abandoned_stderr
+                .as_ref()
+                .map(|handle| handle.is_finished()),
+        })
     }
 
     /// All jobs, optionally filtered to one Run. Ordered by jobId so evidence is
@@ -1678,10 +1803,24 @@ impl ProcessJobManager {
                 }
                 // A descendant may still hold the pipe open. Do not block on a
                 // join that may never return: detach and report incomplete output.
+                // The handles are kept on the side (never joined) so the
+                // investigation into *who* holds the pipe can ask later whether it
+                // was ever released at all, instead of only knowing that it had
+                // not been released yet when the grace expired.
                 state.readers_orphaned = true;
+                state.readers_pending_at_orphan =
+                    u8::from(!stdout_done) + u8::from(!stderr_done);
                 drop(state);
-                control.stdout_reader = None;
-                control.stderr_reader = None;
+                // Taken after the state lock is released: the clock is an injected
+                // dependency and must never be called while holding a lock.
+                let orphan_at = self.clock.now_ms();
+                lock(&entry.state).orphan_observed_at_ms = Some(orphan_at);
+                if let Some(handle) = control.stdout_reader.take() {
+                    control.abandoned_stdout = Some(handle);
+                }
+                if let Some(handle) = control.stderr_reader.take() {
+                    control.abandoned_stderr = Some(handle);
+                }
                 self.record(entry, JobEventKind::ReadersOrphaned);
                 actions.push(TickAction::ReadersOrphaned { job_id: entry.id.clone() });
             }
@@ -2026,7 +2165,7 @@ impl RecoveryDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::mpsc;
 
     // -- fakes ---------------------------------------------------------------
@@ -2203,6 +2342,86 @@ mod tests {
             stdout: stdout.as_bytes().to_vec(),
             stderr: Vec::new(),
             fail: false,
+        }
+    }
+
+    // -- fake for the pipe-retention post-mortem ------------------------------
+
+    /// How long a [`HeldPipe`] waits for release before giving up.
+    ///
+    /// Bounded on purpose: a test that never releases its pipe must not leave a
+    /// thread spinning forever.
+    const HELD_PIPE_MAX_WAIT: Duration = Duration::from_secs(6);
+
+    /// A reader that does not reach EOF until it is released — the fake
+    /// equivalent of a write end held open by a process outside the tree walk.
+    struct HeldPipe {
+        released: Arc<AtomicBool>,
+    }
+
+    impl Read for HeldPipe {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            let deadline = Instant::now() + HELD_PIPE_MAX_WAIT;
+            while Instant::now() < deadline {
+                if self.released.load(Ordering::SeqCst) {
+                    return Ok(0);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(0)
+        }
+    }
+
+    /// A child whose two pipes stay open until the test releases them.
+    struct HeldPipeChild {
+        pid: u32,
+        terminated: Arc<AtomicUsize>,
+        stdout: Option<Box<dyn Read + Send>>,
+        stderr: Option<Box<dyn Read + Send>>,
+    }
+
+    impl ChildHandle for HeldPipeChild {
+        fn pid(&self) -> u32 {
+            self.pid
+        }
+        fn try_wait(&mut self) -> io::Result<Option<ExitReport>> {
+            if self.terminated.load(Ordering::SeqCst) > 0 {
+                return Ok(Some(ExitReport { code: None }));
+            }
+            Ok(None)
+        }
+        fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+            self.stdout.take()
+        }
+        fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+            self.stderr.take()
+        }
+        fn terminate_tree(&mut self) -> TreeKillReport {
+            self.terminated.fetch_add(1, Ordering::SeqCst);
+            TreeKillReport {
+                walker_exit_code: Some(0),
+                walker_visited: 3,
+                walker_stderr_bytes: 0,
+                walker_error: None,
+                direct_kill: true,
+            }
+        }
+    }
+
+    struct HeldPipeSpawner {
+        pid: u32,
+        terminated: Arc<AtomicUsize>,
+        released: Arc<AtomicBool>,
+    }
+
+    impl ProcessSpawner for HeldPipeSpawner {
+        fn spawn(&self, _spec: &SpawnSpec) -> io::Result<Box<dyn ChildHandle>> {
+            Ok(Box::new(HeldPipeChild {
+                pid: self.pid,
+                terminated: Arc::clone(&self.terminated),
+                stdout: Some(Box::new(HeldPipe { released: Arc::clone(&self.released) })),
+                stderr: Some(Box::new(HeldPipe { released: Arc::clone(&self.released) })),
+            }))
         }
     }
 
@@ -2792,6 +3011,105 @@ mod tests {
             Some(OwnerStatus::Alive),
             "the re-probe must show the process was not reclaimed: {view:?}"
         );
+    }
+
+    // -- what happened to the pipes (C-FINDING-01 evidence path) -------------
+
+    /// An orphaned reader must report *which* pipe was still held, and the
+    /// report must be able to observe a later release.
+    ///
+    /// That second half is the whole point: `readers_orphaned` alone cannot tell
+    /// "the grace was 50 ms too short" from "the write end is held by something
+    /// we cannot see". Without an observable release time the investigation has
+    /// only an opinion.
+    #[test]
+    fn orphaned_readers_report_which_pipe_is_still_held_and_when_it_is_released() {
+        let pid = 940;
+        let terminated = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        let spawner: Arc<dyn ProcessSpawner> = Arc::new(HeldPipeSpawner {
+            pid,
+            terminated: Arc::clone(&terminated),
+            released: Arc::clone(&released),
+        });
+        let probe: Arc<dyn IdentityProbe> =
+            Arc::new(ScriptedProbe::new(vec![(pid, Liveness::Alive { start_marker: Some(5) })]));
+        let clock: Arc<dyn Clock> = Arc::new(ManualClock::default());
+        let manager = ProcessJobManager::new(
+            clock,
+            spawner,
+            probe,
+            ManagerConfig { reader_grace: Duration::from_millis(50), ..ManagerConfig::default() },
+        );
+
+        let mut req = request("held", "echo held");
+        req.execution_budget = Duration::from_millis(1);
+        let job_id = manager.start(req).unwrap().view().job_id.clone();
+        let view = wait_terminal(&manager, &job_id);
+
+        assert_eq!(view.state, JobRunState::TimedOut, "{view:?}");
+        assert!(
+            view.readers_orphaned,
+            "a pipe that is still held after the grace must be reported: {view:?}"
+        );
+
+        let post = manager.reader_post_mortem(&job_id).expect("post mortem is readable");
+        assert_eq!(post.pending_at_orphan, 2, "both streams were still open");
+        assert!(post.orphan_observed_at_ms.is_some(), "{post:?}");
+        assert_eq!(
+            post.stdout_released,
+            Some(false),
+            "an abandoned reader that is still running must report the pipe as held, \
+             not as absent: {post:?}"
+        );
+        assert_eq!(post.stderr_released, Some(false), "{post:?}");
+
+        // The release is observable afterwards. This is what separates "held
+        // forever" from "held until the grace expired".
+        released.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut observed_release = false;
+        while Instant::now() < deadline {
+            let post = manager.reader_post_mortem(&job_id).unwrap();
+            if post.stdout_released == Some(true) && post.stderr_released == Some(true) {
+                observed_release = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            observed_release,
+            "a pipe released after the grace window must be reported as released, \
+             otherwise the report cannot distinguish the two cases"
+        );
+    }
+
+    /// The normal path must not look like a leak: joined readers report no
+    /// abandonment at all, which is distinguishable from "held".
+    #[test]
+    fn joined_readers_report_no_abandonment() {
+        let pid = 941;
+        let spawner = ScriptedSpawner::new(vec![scripted_plan(pid, "hello")]);
+        let probe = Arc::new(ScriptedProbe::new(vec![(pid, Liveness::Gone)]));
+        let manager = manager(
+            Arc::clone(&spawner),
+            Arc::clone(&probe),
+            Arc::new(ManualClock::default()),
+            ManagerConfig::default(),
+        );
+
+        let job_id = manager.start(request("joined", "echo hello")).unwrap().view().job_id.clone();
+        let view = wait_terminal(&manager, &job_id);
+        assert!(!view.readers_orphaned, "{view:?}");
+
+        let post = manager.reader_post_mortem(&job_id).expect("post mortem is readable");
+        assert_eq!(post.pending_at_orphan, 0, "{post:?}");
+        assert_eq!(post.orphan_observed_at_ms, None, "{post:?}");
+        assert_eq!(
+            post.stdout_released, None,
+            "nothing was abandoned, so there is no pipe to report on: {post:?}"
+        );
+        assert_eq!(post.stderr_released, None, "{post:?}");
     }
 
     // -- terminal states -----------------------------------------------------
