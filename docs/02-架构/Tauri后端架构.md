@@ -71,7 +71,7 @@ flowchart TD
 
 ## 安全注意
 
-Host 是安全边界而不是简单代理。写文件、编辑、命令和 MCP 调用在执行前均需策略判断或用户审批；远程内容视为不可信。当前无 CSP 是已知风险，详见 `安全架构.md`。
+Host 是安全边界而不是简单代理。写文件、编辑、命令和 MCP 调用在执行前均需策略判断或用户审批；远程内容视为不可信。`tauri.conf.json` 的 `app.security` 已同时配置 `csp` 与 `devCsp`（完整策略字符串，含 `default-src 'self'`、`object-src 'none'`、显式 `connect-src`/`worker-src`），不再是「无 CSP」状态；仍需补充浏览器端策略回归。详见[安全架构](安全架构.md)。
 
 ## 测试依据
 

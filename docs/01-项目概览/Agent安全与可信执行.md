@@ -147,8 +147,8 @@ Child Run 的权限来自父级与自身 Profile 的交集，不能继承父级�
 
 Fox 采用纵深防御，但仍有需要继续加固的工程边界：
 
-- Runtime 与本地 MCP 进程尚未进入 OS 容器或 Windows AppContainer；
-- Tauri CSP 仍需收紧；
+- Runtime 与本地 MCP 进程尚未进入 OS 容器或 Windows AppContainer；没有经过验证的命令后端，任意 Shell 启动保持拒绝；
+- Tauri 已配置 `csp` 与 `devCsp`（不再是 `null`），但缺少浏览器端的策略回归验证；
 - 用户显式配置的 MCP/OpenAPI 地址和本地命令属于高风险受信配置；
 - Office/PDF 等复杂解析器需要持续进行依赖更新和恶意文件测试；
 - SQLite 无法防止数据库所有者主动关闭 trigger 或直接修改文件；Repository Hash 与数据库约束主要防止正常产品链路中的越权和误用。
