@@ -59,6 +59,9 @@ impl Gateway<'_> {
         Ok(())
     }
     fn open(&self, path: &Path, directory: bool) -> Result<File, String> {
+        self.open_observed(path, directory).map(|(file, _)| file)
+    }
+    fn open_observed(&self, path: &Path, directory: bool) -> Result<(File, PathBuf), String> {
         self.check()?;
         let canonical = path.canonicalize().map_err(|error| format!("resource cannot be resolved: {error}"))?;
         if !canonical.starts_with(&self.root) { return Err("resource is outside the frozen project root".into()); }
@@ -78,10 +81,13 @@ impl Gateway<'_> {
         }
         verify_opened_path(&file, &canonical, &self.root)?;
         self.check()?;
-        Ok(file)
+        Ok((file, canonical))
     }
     fn bytes(&mut self, path: &Path) -> Result<Vec<u8>, String> {
-        let mut file = self.open(path, false)?;
+        self.bytes_observed(path).map(|(bytes, _)| bytes)
+    }
+    fn bytes_observed(&mut self, path: &Path) -> Result<(Vec<u8>, PathBuf), String> {
+        let (mut file, identity) = self.open_observed(path, false)?;
         let mut contents = Vec::new();
         let mut chunk = [0u8; 16 * 1024];
         loop {
@@ -94,7 +100,7 @@ impl Gateway<'_> {
             self.remaining_bytes -= count as u64;
             contents.extend_from_slice(&chunk[..count]);
         }
-        Ok(contents)
+        Ok((contents, identity))
     }
     fn text(&mut self, path: &Path, extract_office: bool) -> Result<String, String> {
         let contents = self.bytes(path)?;
@@ -180,22 +186,28 @@ fn verify_opened_path(file: &File, requested: &Path, root: &Path) -> Result<(), 
 
 // Simple glob over file names: `*` matches any sequence, `?` matches one
 // character. Matching is case-insensitive, like the Node runtime helper.
-fn glob_match(glob: &str, name: &str) -> bool {
-    let name_lower = name.to_lowercase();
-    let glob_lower: String = glob.to_lowercase();
-    fn recurse(pattern: &[char], text: &[char]) -> bool {
-        match pattern.split_first() {
-            None => text.is_empty(),
-            Some((&'*', rest)) => {
-                (0..=text.len()).any(|i| recurse(rest, &text[i..]))
-            }
-            Some((&'?', rest)) => !text.is_empty() && recurse(rest, &text[1..]),
-            Some((&p, rest)) => !text.is_empty() && text[0] == p && recurse(rest, &text[1..]),
+// Dynamic programming: O(pattern chars * name chars) time, O(pattern chars)
+// memory. No recursive backtracking, and cancellation is checked per row.
+fn glob_match(glob: &str, name: &str, check: impl Fn() -> Result<(), String>) -> Result<bool, String> {
+    if glob.len() > MAX_REGEX_PATTERN_BYTES {
+        return Err("invalid glob: pattern exceeds 4096 bytes".into());
+    }
+    let pattern: Vec<char> = glob.to_lowercase().chars().collect();
+    let mut row = vec![false; pattern.len() + 1];
+    row[0] = true;
+    for (i, p) in pattern.iter().enumerate() { row[i+1] = row[i] && *p == '*'; }
+    check()?;
+    for c in name.to_lowercase().chars() {
+        check()?;
+        let mut diagonal = row[0];
+        row[0] = false;
+        for (i, p) in pattern.iter().enumerate() {
+            let previous = row[i+1];
+            row[i+1] = if *p == '*' { row[i] || previous } else { diagonal && (*p == '?' || *p == c) };
+            diagonal = previous;
         }
     }
-    let pattern: Vec<char> = glob_lower.chars().collect();
-    let text: Vec<char> = name_lower.chars().collect();
-    recurse(&pattern, &text)
+    Ok(row[pattern.len()])
 }
 
 // Slice UTF-16 code units without splitting a surrogate pair. Units stay
@@ -358,14 +370,75 @@ fn result(text: String, mut details: Value, max_chars: usize) -> Value {
         .unwrap_or(false);
     details["outputTruncated"] = json!(already_truncated || returned_units < text.encode_utf16().count());
     details["returnedUnits"] = json!(returned_units);
-    json!({ "content": [{"type":"text", "text": returned}], "details": details })
+    let mut content = vec![json!({"type":"text", "text": returned})];
+    if let Some(version) = details["readVersion"].as_str() {
+        content.push(json!({"type":"text", "text":format!("readVersion: {version}. Use this as expectedVersion for write_file/edit_file.")}));
+    }
+    json!({ "content": content, "details": details })
 }
 
 pub fn execute(binding: &RunControlBinding, tool: &str, input: &Value, cancellation: &CancellationToken) -> Result<Value, String> {
     execute_with_budget(binding, tool, input, cancellation, Duration::from_millis(binding.budgets.tool_execution_ms as u64))
 }
 
+/// Host-private read evidence constructed at the actual opened-file boundary.
+/// It is never deserialized from tool input/results and retains the full-byte
+/// hash even when the model receives a paginated/extracted text view.
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedReadObservation {
+    target_identity: String,
+    version: String,
+}
+impl VerifiedReadObservation {
+    pub(crate) fn host_observation(&self, tool_call_id: &str) -> fox_engine_protocol::HostObservation {
+        fox_engine_protocol::HostObservation {
+            target_identity: self.target_identity.clone(), version: self.version.clone(),
+            observed_by_tool_call_id: tool_call_id.into(),
+        }
+    }
+}
+
+pub(crate) fn execute_with_observation(binding: &RunControlBinding, tool: &str,
+    input: &Value, cancellation: &CancellationToken,
+) -> Result<(Value, Option<VerifiedReadObservation>), String> {
+    execute_with_observation_budget(binding, tool, input, cancellation,
+        Duration::from_millis(binding.budgets.tool_execution_ms as u64))
+}
+
+pub(crate) fn execute_with_observation_budget(binding: &RunControlBinding, tool: &str,
+    input: &Value, cancellation: &CancellationToken, budget: Duration,
+) -> Result<(Value, Option<VerifiedReadObservation>), String> {
+    let mut observation = None;
+    let result = execute_observed_with_budget(binding, tool, input, cancellation, budget, Some(&mut observation))?;
+    Ok((result, observation))
+}
+
+/// A failed read may establish a missing-file baseline, but only from an
+/// independent filesystem NotFound observation within the frozen root.
+pub(crate) fn observe_missing_file(binding: &RunControlBinding, path: &str,
+    cancellation: &CancellationToken) -> Result<VerifiedReadObservation, String> {
+    binding.validate()?;
+    cancellation.check()?;
+    if binding.read_only_executor != ResourceExecutor::Rust { return Err("reader is not Rust".into()); }
+    let root = Path::new(binding.permission.project_root.as_deref().ok_or("missing frozen project root")?);
+    let identity = crate::tool_host::canonical_file_identity(root, path)?;
+    match fs::symlink_metadata(&identity) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            cancellation.check()?;
+            Ok(VerifiedReadObservation { target_identity: identity, version: "missing".into() })
+        },
+        _ => Err("target is not a verified missing file".into()),
+    }
+}
+
 pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input: &Value, cancellation: &CancellationToken, budget: Duration) -> Result<Value,String> {
+    execute_observed_with_budget(binding, tool, input, cancellation, budget, None)
+}
+
+fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: &Value,
+    cancellation: &CancellationToken, budget: Duration,
+    observation: Option<&mut Option<VerifiedReadObservation>>,
+) -> Result<Value,String> {
     binding.validate()?;
     if binding.read_only_executor != ResourceExecutor::Rust || !is_reader(tool) {
         return Err("resource gateway is not the frozen executor for this tool".into());
@@ -377,7 +450,16 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
     gateway.check()?;
     let path = approved.resolved_path;
     if tool == "read" {
-        let text = gateway.text(&path, true)?;
+        let (bytes, opened_identity) = gateway.bytes_observed(&path)?;
+        let version = crate::tool_host::file_version(&bytes);
+        if let Some(observation) = observation {
+            *observation = Some(VerifiedReadObservation {
+                target_identity: opened_identity.to_string_lossy().into_owned(), version: version.clone(),
+            });
+        }
+        let text = crate::local_knowledge_import::extract_office_text(&bytes, &path.to_string_lossy())?
+            .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
+        gateway.check()?;
         // B03: line-mode parameters are mutually exclusive with offset/limit.
         let has_line_mode = input.get("startLine").is_some() || input.get("lineCount").is_some();
         let has_char_mode = input.get("offset").is_some() || input.get("limit").is_some();
@@ -397,7 +479,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
             let total_lines = lines.len();
             if start_line > total_lines {
                 return Ok(result(String::new(), json!({
-                    "path": path, "truncated": false,
+                    "path": path, "readVersion": version, "truncated": false,
                     "startLine": start_line, "lineCount": line_count,
                     "totalLines": total_lines, "pageComplete": true,
                     "scanComplete": true,
@@ -427,7 +509,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
                 Value::Null
             };
             return Ok(result(bounded, json!({
-                "path": path, "truncated": truncated,
+                "path": path, "readVersion": version, "truncated": truncated,
                 "startLine": start_line, "lineCount": line_count,
                 "totalLines": total_lines, "pageComplete": end_line == total_lines && !truncated,
                 "scanComplete": true,
@@ -453,7 +535,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
         let fully_delivered = source_exhausted && !output_cut;
         let next_offset = if fully_delivered { Value::Null } else { json!(start + final_units) };
         return Ok(result(final_text, json!({
-            "path": path, "truncated": !source_exhausted || output_cut,
+            "path": path, "readVersion": version, "truncated": !source_exhausted || output_cut,
             "readMode": "utf16",
             "offset": start,
             "nextOffset": next_offset,
@@ -469,6 +551,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
     let needle = raw_pattern.to_lowercase();
     let case_sensitive = input.get("caseSensitive").and_then(Value::as_bool).unwrap_or(false);
     let glob = input.get("glob").and_then(Value::as_str).unwrap_or_default();
+    if glob.len() > MAX_REGEX_PATTERN_BYTES { return Err("invalid glob: pattern exceeds 4096 bytes".into()); }
     let regex_matcher = if regex_mode {
         if raw_pattern.len() > MAX_REGEX_PATTERN_BYTES {
             return Err(format!("invalid regex: pattern exceeds {MAX_REGEX_PATTERN_BYTES} bytes"));
@@ -520,7 +603,6 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
     let (entries, scan_truncated) = gateway.walk(&path, walk_start)?;
     let mut total_hits: usize = 0;
     let mut unreadable: usize = 0;
-    let mut last_consumed: usize = consumed;
     // Name/content matcher: literal by default, or a once-compiled bounded
     // regex. Rust's regex engine is linear-time and has explicit compiled/DFA
     // size caps above, so user patterns cannot enable backtracking blowups.
@@ -534,10 +616,6 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
         }
     };
     // Glob filter (* and ?), applied to file names in both find and grep.
-    let glob_hit = |name: &str| -> bool {
-        if glob.is_empty() { return true; }
-        glob_match(&glob, name)
-    };
     if tool == "find" {
         // O-REVIEW-03 item 3: the cursor follows the last DELIVERED match, so
         // matches scanned but not delivered (match cap or output budget) stay
@@ -550,7 +628,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
             gateway.check()?;
             if entry.index <= consumed { continue; }
             last_scanned = entry.index;
-            if !glob_hit(&entry.name) { continue; }
+            if !glob.is_empty() && !glob_match(glob, &entry.name, || gateway.check())? { continue; }
             if !name_hit(&entry.name) { continue; }
             total_hits += 1;
             if delivered.len() >= limits.matches { continue; }
@@ -611,7 +689,7 @@ pub(crate) fn execute_with_budget(binding: &RunControlBinding, tool: &str, input
     let mut broke_mid_file = false;
     for entry in entries.into_iter().filter(|e| !e.directory) {
         if entry.index <= walk_skip { continue; }
-        if !glob_hit(&entry.name) { continue; }
+        if !glob.is_empty() && !glob_match(glob, &entry.name, || gateway.check())? { continue; }
         let contents = match gateway.text(&entry.path, false) {
             Ok(text) => text,
             Err(_) => { unreadable += 1; continue; }
@@ -693,6 +771,67 @@ mod tests {
         registry.register_run(&binding.run_id).unwrap();
         let token = registry.tool_token(&binding.run_id, "tool").unwrap();
         (binding, registry, token)
+    }
+
+    #[test]
+    fn trusted_read_observation_hashes_full_bytes_independently_of_returned_page() {
+        let (binding, _, token) = fixture();
+        let root = Path::new(binding.permission.project_root.as_ref().unwrap());
+        let full = fs::read(root.join("src/note.txt")).unwrap();
+        let (mut output, observation) = execute_with_observation(&binding, "read",
+            &json!({"path":"src/note.txt", "offset":1, "limit":2}), &token).unwrap();
+        assert_eq!(output["content"][0]["text"], "😀");
+        output["details"]["readVersion"] = json!("forged");
+        let evidence = observation.unwrap().host_observation("reader-id");
+        assert_eq!(evidence.version, crate::tool_host::file_version(&full));
+        assert_eq!(evidence.target_identity, crate::tool_host::canonical_file_identity(root, "src/note.txt").unwrap());
+        assert_eq!(evidence.observed_by_tool_call_id, "reader-id");
+        fs::write(root.join("src/note.txt"), "later mutation").unwrap();
+        assert_ne!(evidence.version, crate::tool_host::file_version(b"later mutation"));
+        assert!(execute_with_observation(&binding, "ls", &json!({}), &token).unwrap().1.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_observation_requires_actual_absence_in_frozen_scope() {
+        let (binding, _, token) = fixture();
+        let root = Path::new(binding.permission.project_root.as_ref().unwrap());
+        let missing = observe_missing_file(&binding, "src/new.txt", &token).unwrap().host_observation("read-missing");
+        assert_eq!(missing.version, "missing");
+        assert!(observe_missing_file(&binding, "src/note.txt", &token).is_err());
+        assert!(observe_missing_file(&binding, "../outside.txt", &token).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn r3_adversarial_glob_has_bounded_work_and_checks_cancellation() {
+        use std::cell::Cell;
+        let checks=Cell::new(0usize);
+        let name="a".repeat(2000);
+        let started=Instant::now();
+        assert!(!glob_match("*a*a*a*a*a*a*a*a*a*a*b", &name, || {checks.set(checks.get()+1); Ok(())}).unwrap());
+        assert_eq!(checks.get(),2001);
+        assert!(started.elapsed()<Duration::from_secs(2));
+        assert!(glob_match("*a*a*a*b", &name, || Err("cancelled".into())).unwrap_err().contains("cancelled"));
+        assert!(glob_match(&"*".repeat(4097), "a", || Ok(())).is_err());
+        for (pattern,name,expected) in [("*.TXT","文件.txt",true),("?","😀",true),("a?c","ac",false),("**","",true)] {
+            assert_eq!(glob_match(pattern,name,||Ok(())).unwrap(),expected);
+        }
+    }
+    #[test]
+    fn r4_read_version_reaches_model_and_drives_conflict_detection() {
+        let (binding, _, token)=fixture();
+        let root=Path::new(binding.permission.project_root.as_ref().unwrap());
+        let read=execute(&binding,"read",&json!({"path":"src/note.txt","startLine":1,"lineCount":1}),&token).unwrap();
+        let version=read["details"]["readVersion"].as_str().unwrap();
+        assert!(read["content"][1]["text"].as_str().unwrap().contains(version));
+        let input=json!({"path":"src/note.txt","content":"replacement","expectedVersion":version});
+        fs::write(root.join("src/note.txt"),"new user edit").unwrap();
+        assert!(crate::tool_host::prepare("write_file",&input,root.to_str().unwrap()).unwrap_err().contains("tool.file_conflict"));
+        let read=execute(&binding,"read",&json!({"path":"src/note.txt"}),&token).unwrap();
+        let input=json!({"path":"src/note.txt","content":"reconciled","expectedVersion":read["details"]["readVersion"]});
+        crate::tool_host::execute(crate::tool_host::prepare("write_file",&input,root.to_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(fs::read_to_string(root.join("src/note.txt")).unwrap(),"reconciled");
     }
 
     #[test]

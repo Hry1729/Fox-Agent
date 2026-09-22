@@ -2,6 +2,50 @@ use super::*;
 use crate::kernel::{CancellationRegistry, CancellationPort};
 use fox_engine_protocol::ResourceExecutor;
 
+#[test]
+fn legacy_file_read_claim_commit_and_duplicate_use_the_real_host_chain() {
+    let root = std::env::temp_dir().join(format!("fox-legacy-file-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let target = root.join("note.txt");
+    std::fs::write(&target, "original").unwrap();
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let conversation = db.create_conversation(db.default_agent_id(), None, Some(root.to_str().unwrap()), Some("allow")).unwrap();
+    let run = db.create_run(&conversation.id, "edit", None).unwrap().run;
+    let binding = db.freeze_legacy_run_control_with_executor(&run.id, "legacy", ResourceExecutor::Rust).unwrap();
+    db.apply_runtime_event(&run.id, 1, &json!({"type":"run.started"})).unwrap();
+    let registry = CancellationRegistry::default();
+    registry.register_run(&run.id).unwrap();
+    let read_token = registry.tool_token(&run.id, "read-source").unwrap();
+    execute_rust_reader_request(&db, &request(&binding,"read-source"), &read_token).unwrap();
+    // Read the exact Host-persisted authority, never a model version claim.
+    let resolver = managed_files::HostFileTargetResolver { project_root: &root };
+    let input = json!({"path":"note.txt","content":"committed","expectedVersion":"model-forgery"});
+    let identity = crate::database::kernel_execution_admission::FileTargetResolver::resolve(&resolver, fox_engine_protocol::ActionClass::Write, &input.to_string()).unwrap();
+    let observed = db.host_observation_for(&run.id, &identity).unwrap().unwrap();
+    create_fresh_host_tool_call(&db, &run.id, "write-once", "write_file", &input, "running", false).unwrap();
+    let token = registry.tool_token(&run.id, "write-once").unwrap();
+    let version = db.execution_policy(&conversation.id).unwrap().version;
+    for forged in [json!({"path":"note.txt","content":"forged"}),
+        json!({"path":"note.txt","content":"committed","createDirectories":true})] {
+        let error = execute_legacy_admitted_file(&db, &root.join("backups"), &run.id, &conversation.id,
+            "write-once", "write_file", &forged, root.to_str().unwrap(), version, &observed, &token).unwrap_err();
+        assert!(error.contains("credential_mismatch"), "{error}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+        let dispatch = fox_engine_protocol::encode_dispatch_id(&run.id, "write-once").unwrap();
+        assert!(db.read_execution_attempt(&run.id, &dispatch).unwrap().is_none());
+    }
+    let invoke = || execute_legacy_admitted_file(&db, &root.join("backups"), &run.id, &conversation.id,
+        "write-once", "write_file", &input, root.to_str().unwrap(), version, &observed, &token).unwrap();
+    let result = invoke();
+    assert_ne!(result["isError"], true, "{result}");
+    assert_eq!(result["details"]["executionReceipt"]["executionStarted"], "true");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "committed");
+    std::fs::write(&target, "external edit").unwrap();
+    let repeated = invoke();
+    assert_eq!(repeated["details"]["allowReplay"], false);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "external edit");
+}
+
 fn fixture(profile: &str) -> (Database, fox_engine_protocol::RunControlBinding, CancellationRegistry, std::path::PathBuf) {
     let root = std::env::temp_dir().join(format!("fox-rust-reader-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();

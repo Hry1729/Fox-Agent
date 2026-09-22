@@ -45,16 +45,16 @@ pub(super) fn project(
             requires_approval=excluded.requires_approval,completed_at=excluded.completed_at,updated_at=excluded.updated_at",
         params![run_id,conversation,now])?;
     tx.execute("INSERT INTO approvals(id,tool_call_id,status,requested_action,request_json,decision_json,requested_at,resolved_at,category)
-        SELECT 'kernel-approval:'||a.run_id||':'||a.tool_call_id,'kernel-tool:'||a.run_id||':'||a.tool_call_id,
+        SELECT 'kernel-approval:'||a.run_id||':'||a.tool_call_id||CASE WHEN a.policy_version IS NULL THEN '' ELSE ':v'||a.policy_version END,'kernel-tool:'||a.run_id||':'||a.tool_call_id,
             CASE a.state WHEN 'allow_once' THEN 'approved' WHEN 'allow_conversation' THEN 'approved' ELSE a.state END,
             t.tool,CASE WHEN t.tool='task_repair_escalate_start' THEN json_object(
-                'authority','kernel','runId',a.run_id,'toolCallId',a.tool_call_id,'tool',t.tool,
+                'authority','kernel','runId',a.run_id,'toolCallId',a.tool_call_id,'tool',t.tool,'policyVersion',a.policy_version,
                 'category','task_repair_budget_override','title','Task Repair 预算人工升级',
                 'target',json_extract(t.canonical_input_json,'$.taskId'),
                 'summary',json_extract(t.canonical_input_json,'$.escalationReason'),
                 'arguments',json(t.canonical_input_json),'input',json(t.canonical_input_json),
                 'policyReason','普通 Repair 预算已耗尽','availableDecisions',json('[\"allow_once\",\"deny\"]'))
-                ELSE json_object('authority','kernel','runId',a.run_id,'toolCallId',a.tool_call_id,'tool',t.tool,
+                ELSE json_object('authority','kernel','runId',a.run_id,'toolCallId',a.tool_call_id,'tool',t.tool,'policyVersion',a.policy_version,
                 'input',json(t.canonical_input_json)) END,
             CASE WHEN a.state='pending' THEN NULL ELSE json_object('decision',a.state,'authority','kernel',
                 'approved',json(CASE WHEN a.state IN ('allow_once','allow_conversation') THEN 'true' ELSE 'false' END),
@@ -62,7 +62,7 @@ pub(super) fn project(
                 'category',CASE WHEN t.tool='task_repair_escalate_start' THEN 'task_repair_budget_override' ELSE 'tool_execution' END) END,
             a.created_at,a.decided_at,CASE WHEN t.tool='task_repair_escalate_start' THEN 'task_repair_budget_override' ELSE 'tool_execution' END
             FROM kernel_approvals a JOIN kernel_tool_calls t ON t.run_id=a.run_id AND t.tool_call_id=a.tool_call_id
-        WHERE a.run_id=?1 ON CONFLICT(tool_call_id) DO UPDATE SET status=excluded.status,
+        WHERE a.run_id=?1 ON CONFLICT(tool_call_id) DO UPDATE SET id=excluded.id,request_json=excluded.request_json,requested_at=excluded.requested_at,status=excluded.status,
             decision_json=excluded.decision_json,resolved_at=excluded.resolved_at", [run_id])?;
 
     super::kernel_display::activity(tx, run_id, now)?;

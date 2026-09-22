@@ -946,6 +946,29 @@ impl Database {
         continuation_lease: Option<(&str, &str, bool)>,
         steering: Option<&super::SteeringDecision>,
     ) -> Result<(), String> {
+        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,dispatch_lease,batch_lease,batch_response_lease,initial_lease,model_retry_lease,continuation_lease,steering,None)
+    }
+
+    /// The UI must send the policy version captured when this approval was
+    /// displayed. Re-reading it while answering would revive an obsolete ticket.
+    pub fn kernel_commit_decision_with_approval_version(&self,run_id:&str,wall_now_ms:i64,cmd:&crate::kernel::KernelPersistCommand,expected_policy_version:u64)->Result<(),String>{
+        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,None,None,None,None,None,None,None,Some(expected_policy_version))
+    }
+
+    fn kernel_commit_decision_with_dispatch_lease_and_policy(
+        &self,
+        run_id: &str,
+        wall_now_ms: i64,
+        cmd: &crate::kernel::KernelPersistCommand,
+        dispatch_lease: Option<(&str, &str)>,
+        batch_lease: Option<(&str, &str)>,
+        batch_response_lease: Option<(&str, &str)>,
+        initial_lease: Option<(&str, bool)>,
+        model_retry_lease: Option<(&str, &str)>,
+        continuation_lease: Option<(&str, &str, bool)>,
+        steering: Option<&super::SteeringDecision>,
+        expected_approval_policy_version: Option<u64>,
+    ) -> Result<(), String> {
         if !valid_run_state(cmd.run_state.as_str()) {
             return Err(format!(
                 "unsupported kernel run state: {}",
@@ -1380,6 +1403,36 @@ impl Database {
                 }
             }
 
+            // Explicit re-evaluation is part of this decision's atomic write-set,
+            // never a separate pre-commit mutation of the live aggregate.
+            for event in cmd.events.iter().filter(|e|e.event_type=="tool.reevaluated") {
+                let body:serde_json::Value=serde_json::from_str(&event.payload_json).map_err(|e|kernel_err(e.to_string()))?;
+                let call=body.get("toolCallId").and_then(|v|v.as_str()).ok_or_else(||kernel_err("reevaluation is missing tool identity"))?;
+                let expected=body.get("expectedPolicyVersion").and_then(|v|v.as_u64()).ok_or_else(||kernel_err("reevaluation is missing policy version"))?;
+                let current:Option<u64>=transaction.query_row("SELECT p.version FROM kernel_execution_policies p JOIN runs r ON r.conversation_id=p.conversation_id WHERE r.id=?1",[run_id],|r|r.get(0)).optional()?;
+                if current!=Some(expected) {return Err(kernel_err("policy_version_conflict"));}
+                let consumed:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM kernel_effect_outbox WHERE run_id=?1 AND tool_call_id=?2 AND effect_type='dispatch_tool')",params![run_id,call],|r|r.get(0))?;
+                let dispatch=fox_engine_protocol::encode_dispatch_id(run_id,call).map_err(kernel_err)?;
+                let attempted:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM kernel_execution_attempts WHERE run_id=?1 AND dispatch_id=?2) OR EXISTS(SELECT 1 FROM kernel_execution_credentials WHERE run_id=?1 AND dispatch_id=?2)",params![run_id,dispatch],|r|r.get(0))?;
+                if consumed || attempted {return Err(kernel_err("intent_consumed"));}
+                let old_version:Option<u64>=transaction.query_row("SELECT policy_version FROM kernel_approvals WHERE run_id=?1 AND tool_call_id=?2",params![run_id,call],|r|r.get(0)).optional()?.flatten();
+                if old_version==current {return Err(kernel_err("intent_policy_unchanged"));}
+                let reset=transaction.execute("UPDATE kernel_tool_calls SET state='pending' WHERE run_id=?1 AND tool_call_id=?2 AND state IN ('pending','waiting_approval')",params![run_id,call])?;
+                if reset!=1 {return Err(kernel_err("intent_not_reevaluable"));}
+                transaction.execute(
+                    "INSERT INTO kernel_approval_history(
+                        run_id,tool_call_id,state,requested_at,resolved_at,created_at)
+                     SELECT run_id,tool_call_id,state,created_at,decided_at,?3
+                       FROM kernel_approvals
+                      WHERE run_id=?1 AND tool_call_id=?2",
+                    params![run_id, call, wall_now_ms],
+                )?;
+                transaction.execute("DELETE FROM kernel_approvals WHERE run_id=?1 AND tool_call_id=?2",params![run_id,call])?;
+                // Keep the old prompt as a terminal audit fact under a generation
+                // key, freeing the live prompt key for this same logical intent.
+                transaction.execute("UPDATE kernel_effect_outbox SET effect_key='superseded:'||effect_key||':v'||?3,idempotency_key='superseded:'||idempotency_key||':v'||?3,status='completed',completed_at=?4,updated_at=?4,lease_owner=NULL WHERE run_id=?1 AND tool_call_id=?2 AND effect_type='request_approval' AND effect_key NOT LIKE 'superseded:%'",params![run_id,call,old_version.unwrap_or(0),wall_now_ms])?;
+            }
+
             // 3. Apply approval CAS facts in this same decision transaction.
             let mut seen_approval_ids = std::collections::BTreeSet::new();
             for resolution in &cmd.approval_resolutions {
@@ -1391,6 +1444,16 @@ impl Database {
                     )
                 {
                     return Err(kernel_err("invalid or duplicate approval resolution"));
+                }
+                if matches!(resolution.state.as_str(), "allow_once"|"allow_conversation"|"denied") {
+                    let reissued:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM kernel_approval_history WHERE run_id=?1 AND tool_call_id=?2)",params![run_id,resolution.tool_call_id],|r|r.get(0))?;
+                    if reissued && expected_approval_policy_version.is_none() { return Err(kernel_err("stale_approval: reissued intent requires the displayed policy version")); }
+                    let ticket_version:Option<u64>=transaction.query_row("SELECT policy_version FROM kernel_approvals WHERE run_id=?1 AND tool_call_id=?2",params![run_id,resolution.tool_call_id],|r|r.get(0))?;
+                    let current:Option<u64>=transaction.query_row("SELECT p.version FROM kernel_execution_policies p JOIN runs r ON r.conversation_id=p.conversation_id WHERE r.id=?1",[run_id],|r|r.get(0)).optional()?;
+                    if current.is_some() && current!=ticket_version {return Err(kernel_err("stale_approval: authoritative ticket version is not current"));}
+                    if let Some(expected)=expected_approval_policy_version {
+                        if current!=Some(expected) || ticket_version!=Some(expected) {return Err(kernel_err("stale_approval: displayed policy version no longer current"));}
+                    }
                 }
                 let current_approval: String = transaction.query_row(
                     "SELECT state FROM kernel_approvals
@@ -1526,7 +1589,7 @@ impl Database {
                     )));
                 }
                 if let Some(key) = &tool.dispatch_idempotency_key {
-                    if key != &crate::kernel::dispatch_idempotency_key(&tool.tool_call_id) {
+                    if key != &fox_engine_protocol::encode_dispatch_id(run_id, &tool.tool_call_id).map_err(kernel_err)? {
                         return Err(kernel_err(format!(
                             "dispatch idempotency key conflict for {}/{}",
                             run_id, tool.tool_call_id
@@ -1662,6 +1725,10 @@ impl Database {
             // 5. Enqueue outbox effects with exact immutable replay checks.
             let mut seen_effect_keys = std::collections::BTreeSet::new();
             for effect in &cmd.outbox {
+                // A dispatch created by THIS effect gets its authoritative
+                // credential in the same transaction; a pre-existing row is
+                // never backfilled into authorization.
+                let mut dispatch_newly_inserted = false;
                 if effect.kind == crate::kernel::OutboxEffectKind::ContinuationModel {
                     let payload: serde_json::Value = serde_json::from_str(&effect.payload_json).map_err(|_| kernel_err("invalid continuation input"))?;
                     let input: fox_engine_protocol::KernelInitialModelInput = serde_json::from_value(payload["input"].clone()).map_err(|_| kernel_err("invalid continuation input"))?;
@@ -1750,6 +1817,9 @@ impl Database {
                         wall_now_ms
                     ],
                     )?;
+                    if effect.kind == crate::kernel::OutboxEffectKind::DispatchTool {
+                        dispatch_newly_inserted = true;
+                    }
                 }
                 let payload_value: serde_json::Value = serde_json::from_str(&effect.payload_json)
                     .map_err(|error| kernel_err(error.to_string()))?;
@@ -1792,6 +1862,21 @@ impl Database {
                             return Err(kernel_err(format!(
                                 "tool outbox payload conflicts with durable identity for {run_id}/{tool_call_id}"
                             )));
+                        }
+                        // The authoritative credential is frozen in the SAME
+                        // transaction as the dispatch fact. Only a dispatch
+                        // created by this commit gets one: an older row without
+                        // a credential is never backfilled into authorization.
+                        if dispatch_newly_inserted {
+                            super::kernel_execution_admission::issue_dispatch_credential_in_tx(
+                                &transaction,
+                                run_id,
+                                tool_call_id,
+                                &persisted.1,
+                                &persisted.2,
+                                wall_now_ms,
+                            )
+                            .map_err(kernel_err)?;
                         }
                     }
                     crate::kernel::OutboxEffectKind::DeliverToolBatch => {
@@ -2040,8 +2125,27 @@ impl Database {
                 )?;
             }
             let pending_approvals: i64 = transaction.query_row(
-                "SELECT COUNT(*) FROM kernel_approvals
-                  WHERE run_id=?1 AND state='pending'",
+                // A batch can contain several superseded tickets. Re-evaluating
+                // one must not make the other undecided intents disappear from
+                // the waiting state. They are not live approval tickets and are
+                // never granted here; only the explicit re-evaluation can replace
+                // them. Use the same unconsumed-policy-expiry boundary as recovery.
+                "SELECT COUNT(*) FROM kernel_approvals a
+                  JOIN kernel_tool_calls c ON c.run_id=a.run_id AND c.tool_call_id=a.tool_call_id
+                  WHERE a.run_id=?1 AND (a.state='pending' OR (
+                    c.state='waiting_approval' AND a.state='expired' AND a.decided_at IS NULL
+                    AND a.policy_version < (SELECT p.version FROM kernel_execution_policies p
+                      JOIN runs r ON r.conversation_id=p.conversation_id WHERE r.id=a.run_id)
+                    AND EXISTS(SELECT 1 FROM kernel_effect_outbox o WHERE o.run_id=a.run_id
+                      AND o.tool_call_id=a.tool_call_id AND o.effect_type='request_approval'
+                      AND o.status IN ('pending','leased','completed'))
+                    AND NOT EXISTS(SELECT 1 FROM kernel_effect_outbox o WHERE o.run_id=a.run_id
+                      AND o.tool_call_id=a.tool_call_id AND o.effect_type='dispatch_tool')
+                    AND NOT EXISTS(SELECT 1 FROM kernel_execution_credentials e WHERE e.run_id=a.run_id
+                      AND e.dispatch_id='tool-dispatch:'||length(CAST(a.run_id AS BLOB))||':'||a.run_id||':'||a.tool_call_id)
+                    AND NOT EXISTS(SELECT 1 FROM kernel_execution_attempts e WHERE e.run_id=a.run_id
+                      AND e.dispatch_id='tool-dispatch:'||length(CAST(a.run_id AS BLOB))||':'||a.run_id||':'||a.tool_call_id)
+                  ))",
                 params![run_id],
                 |row| row.get(0),
             )?;
@@ -2303,7 +2407,7 @@ impl Database {
                     params![
                         run_id,
                         tool_call_id,
-                        crate::kernel::dispatch_idempotency_key(tool_call_id)
+                        crate::kernel::dispatch_idempotency_key(run_id, tool_call_id)
                     ],
                 )?;
             if tool_affected != 1 {
@@ -2324,7 +2428,7 @@ impl Database {
             });
             let payload = payload_value.to_string();
             let effect_key = crate::kernel::dispatch_effect_key(tool_call_id);
-            let idempotency_key = crate::kernel::dispatch_idempotency_key(tool_call_id);
+            let idempotency_key = crate::kernel::dispatch_idempotency_key(run_id, tool_call_id);
             let existing: Option<(String, String, Option<String>, Option<String>, String)> =
                 transaction
                     .query_row(
@@ -2370,6 +2474,17 @@ impl Database {
                         wall_now_ms
                     ],
                 )?;
+                // The authoritative credential is frozen in the SAME transaction
+                // as the dispatch fact; a pre-existing row is never backfilled.
+                super::kernel_execution_admission::issue_dispatch_credential_in_tx(
+                    &transaction,
+                    run_id,
+                    tool_call_id,
+                    &tool,
+                    &input,
+                    wall_now_ms,
+                )
+                .map_err(kernel_err)?;
             }
             // The approval prompt effect is now satisfied (decided): complete it so
             // recovery does not re-publish an approval that was resolved.
@@ -2804,22 +2919,97 @@ impl Database {
 
             drop(tool_statement);
 
-            let approval_mismatches: i64 = transaction.query_row(
-                "SELECT COUNT(*)
-                   FROM kernel_tool_calls c
-                   LEFT JOIN kernel_approvals a
-                     ON a.run_id=c.run_id AND a.tool_call_id=c.tool_call_id
-                  WHERE c.run_id=?1 AND (
-                    (c.state='waiting_approval' AND COALESCE(a.state,'')<>'pending')
-                    OR (c.state<>'waiting_approval' AND a.state='pending')
-                  )",
-                params![run_id],
-                |row| row.get(0),
-            )?;
-            if approval_mismatches != 0 {
-                return Err(kernel_err(format!(
-                    "persisted approval facts disagree with tool states for {run_id}"
-                )));
+            let approval_mismatches = {
+                let mut statement = transaction.prepare(
+                    "SELECT c.tool_call_id,c.state,a.state,a.decided_at,a.policy_version
+                       FROM kernel_tool_calls c
+                       LEFT JOIN kernel_approvals a
+                         ON a.run_id=c.run_id AND a.tool_call_id=c.tool_call_id
+                      WHERE c.run_id=?1 AND (
+                        (c.state='waiting_approval' AND COALESCE(a.state,'')<>'pending')
+                        OR (c.state<>'waiting_approval' AND a.state='pending')
+                      )",
+                )?;
+                let values = statement
+                    .query_map(params![run_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<u64>>(4)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                values
+            };
+            for (tool_call_id, tool_state, approval_state, decided_at, ticket_version) in
+                approval_mismatches
+            {
+                // A live policy change expires an unused ticket without deciding
+                // it. Keep that exact, unconsumed intent rehydratable so the
+                // explicit re-evaluation command can archive the old ticket and
+                // install its replacement atomically. This is deliberately much
+                // narrower than accepting any expired approval: a human/timeout
+                // decision has decided_at, an unchanged/future ticket version is
+                // invalid, and any dispatch/credential/attempt consumes the intent.
+                let stale_policy_wait = if tool_state == "waiting_approval"
+                    && approval_state.as_deref() == Some("expired")
+                    && decided_at.is_none()
+                    && ticket_version.is_some()
+                {
+                    let current_version: Option<u64> = transaction
+                        .query_row(
+                            "SELECT p.version
+                               FROM runs r
+                               JOIN kernel_execution_policies p
+                                 ON p.conversation_id=r.conversation_id
+                              WHERE r.id=?1",
+                            params![run_id],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    let dispatch_id = fox_engine_protocol::encode_dispatch_id(
+                        run_id,
+                        &tool_call_id,
+                    )
+                    .map_err(kernel_err)?;
+                    let (has_original_prompt, consumed): (bool, bool) = transaction.query_row(
+                        "SELECT
+                            EXISTS(
+                                SELECT 1 FROM kernel_effect_outbox
+                                 WHERE run_id=?1 AND tool_call_id=?2
+                                   AND effect_type='request_approval'
+                                   AND status IN ('pending','leased','completed')
+                            ),
+                            EXISTS(
+                                SELECT 1 FROM kernel_effect_outbox
+                                 WHERE run_id=?1 AND tool_call_id=?2
+                                   AND effect_type='dispatch_tool'
+                            )
+                            OR EXISTS(
+                                SELECT 1 FROM kernel_execution_credentials
+                                 WHERE run_id=?1 AND dispatch_id=?3
+                            )
+                            OR EXISTS(
+                                SELECT 1 FROM kernel_execution_attempts
+                                 WHERE run_id=?1 AND dispatch_id=?3
+                            )",
+                        params![run_id, tool_call_id, dispatch_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                    current_version.is_some_and(|current| {
+                        current > ticket_version.expect("checked above")
+                    }) && has_original_prompt
+                        && !consumed
+                } else {
+                    false
+                };
+                if !stale_policy_wait {
+                    return Err(kernel_err(format!(
+                        "persisted approval facts disagree with tool states for {run_id}"
+                    )));
+                }
             }
             let running_without_dispatch: i64 = transaction.query_row(
                 "SELECT COUNT(*)
@@ -4612,7 +4802,7 @@ mod tests {
         let dispatch = &recovered_plan.redispatch_pending[0].1;
         assert_eq!(
             dispatch.idempotency_key,
-            crate::kernel::dispatch_idempotency_key("call-x")
+            crate::kernel::dispatch_idempotency_key(run_id, "call-x")
         );
         let payload: serde_json::Value = serde_json::from_str(&dispatch.payload_json).unwrap();
         assert_eq!(payload["input"]["path"], "a.txt");
@@ -4987,6 +5177,232 @@ mod tests {
                 .state,
             "completed"
         );
+    }
+
+    #[test]
+    fn approval_commit_binds_displayed_policy_version_and_refuses_legacy_reissued_ticket() {
+        use crate::kernel::{ApprovalDecision, PolicyDecision, PolicyDecisionPort, RunController};
+        struct RequireApproval;
+        impl PolicyDecisionPort for RequireApproval {
+            fn decide(&self, _: &str, _: &str, _: &str, _: &str) -> PolicyDecision {
+                PolicyDecision::RequireApproval
+            }
+        }
+
+        let db = fresh_db();
+        let mut config = phase3b_config();
+        config.approval_wait_timeout_ms = 100;
+        let conv=db.create_conversation("fox-general",Some("approval version"),None,None).unwrap();
+        db.with_connection(|c|{c.execute("INSERT INTO runs(id,conversation_id,status,model,created_at) VALUES('run-late-approval',?1,'running','test',1)",[&conv.id])?;Ok(())}).unwrap();
+        db.kernel_create_run(
+            "run-late-approval",
+            "pi",
+            "authoritative",
+            2,
+            "perm-1",
+            "legacy",
+            "h",
+            &serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        let clock = crate::kernel::TestClock::new(0);
+        let (mut controller, start) =
+            RunController::start("run-late-approval", "turn-1", config, &clock).unwrap();
+        db.kernel_commit_decision(
+            "run-late-approval",
+            1_000,
+            &controller.persist_command(&start),
+        )
+        .unwrap();
+        let proposal = controller
+            .propose_tool_batch(
+                "batch-late",
+                vec![crate::kernel::ToolCallRequest {
+                    tool_call_id: "call-late".into(),
+                    tool: "write_file".into(),
+                    canonical_input_json: r#"{"path":"late.txt"}"#.into(),
+                    source_order: 0,
+                }],
+                &RequireApproval,
+                0,
+                1_000,
+            )
+            .unwrap();
+        db.kernel_commit_decision(
+            "run-late-approval",
+            1_000,
+            &controller.persist_command(&proposal),
+        )
+        .unwrap();
+        let approved = controller
+            .resolve_approval("call-late", ApprovalDecision::AllowOnce, 0)
+            .unwrap();
+        let approved_command = controller.persist_command(&approved);
+
+        let version=db.execution_policy(&conv.id).unwrap().version;
+        let stale=db.kernel_commit_decision_with_approval_version("run-late-approval",1_001,&approved_command,version+1).unwrap_err();
+        assert!(stale.contains("stale_approval"));
+        db.with_connection(|c| {c.execute("INSERT INTO kernel_approval_history(run_id,tool_call_id,state,requested_at,created_at) VALUES('run-late-approval','call-late','expired',1,1)",[])?;Ok(())}).unwrap();
+        assert!(db.kernel_commit_decision("run-late-approval",1_001,&approved_command).unwrap_err().contains("stale_approval"));
+        db.kernel_commit_decision_with_approval_version("run-late-approval",1_001,&approved_command,version).unwrap();
+        let facts=db.kernel_recovery_facts("run-late-approval").unwrap().unwrap();
+        assert_eq!(facts.pending_approvals.len(),0);
+    }
+
+    fn policy_expired_waiting_approval_fixture(
+        run_id: &str,
+    ) -> (Database, String, u64, u64) {
+        use crate::kernel::{PolicyDecision, PolicyDecisionPort, RunController};
+        struct RequireApproval;
+        impl PolicyDecisionPort for RequireApproval {
+            fn decide(&self, _: &str, _: &str, _: &str, _: &str) -> PolicyDecision {
+                PolicyDecision::RequireApproval
+            }
+        }
+
+        let db = fresh_db();
+        let config = phase3b_config();
+        let conversation = db
+            .create_conversation("fox-general", Some("policy expired wait"), None, None)
+            .unwrap();
+        db.with_connection(|connection| {
+            connection.execute(
+                "INSERT INTO runs(id,conversation_id,status,model,created_at)
+                 VALUES(?1,?2,'running','test',1)",
+                params![run_id, conversation.id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        db.kernel_create_run(
+            run_id,
+            "pi",
+            "authoritative",
+            2,
+            "perm-1",
+            "legacy",
+            "h",
+            &serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        let clock = crate::kernel::TestClock::new(0);
+        let (mut controller, start) =
+            RunController::start(run_id, "turn-1", config, &clock).unwrap();
+        db.kernel_commit_decision(run_id, 1_000, &controller.persist_command(&start))
+            .unwrap();
+        let proposal = controller
+            .propose_tool_batch(
+                "batch-policy",
+                vec![crate::kernel::ToolCallRequest {
+                    tool_call_id: "call-policy".into(),
+                    tool: "write_file".into(),
+                    canonical_input_json: r#"{"path":"policy.txt"}"#.into(),
+                    source_order: 0,
+                }],
+                &RequireApproval,
+                0,
+                1_000,
+            )
+            .unwrap();
+        db.kernel_commit_decision(run_id, 1_000, &controller.persist_command(&proposal))
+            .unwrap();
+        let old = db.execution_policy(&conversation.id).unwrap();
+        let desired = if old.mode == "allow" { "ask" } else { "allow" };
+        let current = db
+            .change_execution_policy(&conversation.id, "expire-old-ticket", old.version, desired)
+            .unwrap();
+        assert_eq!(current.version, old.version + 1);
+        let approval: (String, Option<i64>, Option<u64>) = db
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT state,decided_at,policy_version
+                       FROM kernel_approvals
+                      WHERE run_id=?1 AND tool_call_id='call-policy'",
+                    params![run_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .unwrap();
+        assert_eq!(approval, ("expired".into(), None, Some(old.version)));
+        (db, run_id.to_owned(), old.version, current.version)
+    }
+
+    #[test]
+    fn rehydrate_allows_only_unconsumed_policy_expiry_pending_reevaluation() {
+        use crate::kernel::plan_recovery;
+        let (db, run_id, _, _) =
+            policy_expired_waiting_approval_fixture("run-policy-reevaluate");
+        let rehydrated = db.kernel_rehydrate(&run_id).unwrap().unwrap();
+        assert_eq!(rehydrated.state, crate::kernel::RunState::WaitingApproval);
+        assert_eq!(
+            rehydrated.tools[0].state,
+            crate::kernel::ToolCallState::WaitingApproval
+        );
+        let recovery = plan_recovery(vec![db.kernel_recovery_facts(&run_id).unwrap().unwrap()]);
+        assert!(recovery.republish_approvals.is_empty());
+        assert!(recovery.redispatch_pending.is_empty());
+    }
+
+    #[test]
+    fn rehydrate_rejects_expired_waits_without_authoritative_reevaluation_proof() {
+        let (same_version, run_id, _, current_version) =
+            policy_expired_waiting_approval_fixture("run-policy-same-version");
+        same_version
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE kernel_approvals SET policy_version=?2
+                      WHERE run_id=?1 AND tool_call_id='call-policy'",
+                    params![run_id, current_version],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(same_version.kernel_rehydrate(&run_id).is_err());
+
+        let (timed_out, run_id, _, _) =
+            policy_expired_waiting_approval_fixture("run-policy-timeout");
+        timed_out
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE kernel_approvals SET decided_at=2000
+                      WHERE run_id=?1 AND tool_call_id='call-policy'",
+                    params![run_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(timed_out.kernel_rehydrate(&run_id).is_err());
+
+        let (missing, run_id, _, _) =
+            policy_expired_waiting_approval_fixture("run-policy-missing-ticket");
+        missing
+            .with_connection(|connection| {
+                connection.execute(
+                    "DELETE FROM kernel_approvals
+                      WHERE run_id=?1 AND tool_call_id='call-policy'",
+                    params![run_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(missing.kernel_rehydrate(&run_id).is_err());
+
+        let (consumed, run_id, _, _) =
+            policy_expired_waiting_approval_fixture("run-policy-consumed");
+        consumed
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO kernel_effect_outbox(
+                        run_id,effect_key,effect_type,idempotency_key,tool_call_id,batch_id,
+                        payload_json,status,attempts,created_at,updated_at)
+                     VALUES(?1,'dispatch:call-policy','dispatch_tool','consumed',
+                            'call-policy','batch-policy','{}','pending',0,2,2)",
+                    params![run_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(consumed.kernel_rehydrate(&run_id).is_err());
     }
 
     #[test]
@@ -5744,7 +6160,7 @@ mod tests {
                 .expect("one dispatch leased");
             assert_eq!(
                 dispatch.idempotency_key,
-                crate::kernel::dispatch_idempotency_key("t1")
+                crate::kernel::dispatch_idempotency_key("auth-1", "t1")
             );
             // Executor crashes WITHOUT completing; mark t2's running state.
         }

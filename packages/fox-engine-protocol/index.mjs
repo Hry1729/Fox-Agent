@@ -6,6 +6,336 @@ export const SCHEMA_BUNDLE = {
   "protocolVersion": 1,
   "schemaVersion": 1,
   "schemas": {
+    "ExecutionCredential": {
+      "$defs": {
+        "ActionClass": {
+          "description": "Action classification of one admitted operation.",
+          "oneOf": [
+            {
+              "enum": [
+                "read",
+                "write",
+                "execute",
+                "destructive",
+                "sensitive_egress"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "manage",
+              "description": "Safe management surface (status/output/cancel of an already-admitted\njob). It never starts an external process, so it does not require a\nverified execution backend; scope checks still apply.",
+              "type": "string"
+            }
+          ]
+        },
+        "BackendRequirement": {
+          "additionalProperties": false,
+          "description": "Backend requirement bound into a credential. `evidence_digest` is `None`\nuntil a backend has actually been verified; it is never synthesized.",
+          "properties": {
+            "evidenceDigest": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "required": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "required"
+          ],
+          "type": "object"
+        },
+        "HostObservation": {
+          "additionalProperties": false,
+          "description": "An authoritative Host observation of a file target: which durable Host read\nrecord saw which version of which target. A model-declared\n`expectedVersion` is a *precondition claim*, never an observation.",
+          "properties": {
+            "observedByToolCallId": {
+              "description": "The durable Host tool-call record that produced this observation.",
+              "type": "string"
+            },
+            "targetIdentity": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "targetIdentity",
+            "version",
+            "observedByToolCallId"
+          ],
+          "type": "object"
+        },
+        "RealtimeRequirement": {
+          "description": "Real-time requirements the executor must re-verify before any side effect.\nA requirement whose authoritative source does not exist yet is *unsatisfied*\n(fail-closed); it is never silently treated as met.",
+          "oneOf": [
+            {
+              "const": "policy_version",
+              "description": "Live session policy version (source pending in a later batch).",
+              "type": "string"
+            },
+            {
+              "const": "parent_revocation",
+              "description": "The parent's current revocation generation.",
+              "type": "string"
+            },
+            {
+              "const": "resource_grant",
+              "description": "The scope ResourceGrant is still valid.",
+              "type": "string"
+            },
+            {
+              "const": "cancellation",
+              "description": "Run/tool cancellation state.",
+              "type": "string"
+            },
+            {
+              "const": "backend_evidence",
+              "description": "A verified execution backend.",
+              "type": "string"
+            },
+            {
+              "const": "host_observation",
+              "description": "An authoritative Host observation of the file target/version.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "The immutable execution credential issued once per dispatch inside the\nfinal admission transaction. The model never constructs it: the Host\nderives every field from durable facts.",
+      "properties": {
+        "actionClass": {
+          "$ref": "#/$defs/ActionClass"
+        },
+        "backendRequirement": {
+          "$ref": "#/$defs/BackendRequirement"
+        },
+        "budgetCeilingMs": {
+          "description": "Budget bound at issue time (milliseconds). The executor may only\ntighten it, never widen it.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "conversationId": {
+          "type": "string"
+        },
+        "credentialDigest": {
+          "type": "string"
+        },
+        "dispatchId": {
+          "type": "string"
+        },
+        "fileBaseline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostObservation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Authoritative Host observation of the file target. `None` means no\nobservation existed at issue time — a write-class action must then be\nrefused, never executed against a model-declared version."
+        },
+        "intentDigest": {
+          "description": "Digest over the frozen tool + canonical input (what was admitted).",
+          "type": "string"
+        },
+        "parentRevocationGeneration": {
+          "description": "The parent's revocation generation observed at issue time. `None` = no\nparent fact (root run); a child must re-read the parent's *current*\ngeneration at execution.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "policySnapshotId": {
+          "description": "Durable policy identity bound at issue time (the frozen permission\nsnapshot id).",
+          "type": "string"
+        },
+        "policyVersion": {
+          "description": "Live session policy version. `None` = no such durable fact exists yet;\nthe live-version re-verification requirement stays listed and\nunsatisfied rather than being silently skipped.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "realtimeRequirements": {
+          "description": "What the executor must re-verify in real time before any side effect.",
+          "items": {
+            "$ref": "#/$defs/RealtimeRequirement"
+          },
+          "type": "array"
+        },
+        "resolvedProfile": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "dispatchId",
+        "runId",
+        "conversationId",
+        "intentDigest",
+        "actionClass",
+        "resolvedProfile",
+        "policySnapshotId",
+        "budgetCeilingMs",
+        "realtimeRequirements",
+        "backendRequirement",
+        "credentialDigest"
+      ],
+      "title": "ExecutionCredential",
+      "type": "object"
+    },
+    "ExecutionEvidence": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What the executor reports about the target operation it just ran. This is\nthe Host-internal trusted evidence channel: it is produced by the code that\nactually performed (or refused) the operation, NEVER inferred from the shape\nof a tool result.\n\nA Rust `Ok(..)` says nothing here: Fox tools return `Ok(json)` with\n`isError=true` for business failures, and a successful read/query is not the\nstart of an external process.",
+      "oneOf": [
+        {
+          "const": "not_started",
+          "description": "The executor refused or completed the call WITHOUT starting the target\noperation (pre-execution refusal, validation failure, a read/query that\nfinished). The attempt is terminal and no start fact exists.",
+          "type": "string"
+        },
+        {
+          "const": "started",
+          "description": "The executor has positive evidence that the target operation started\n(a recorded applying journal, a spawned process identity, ...). Only the\nexecutor can assert this.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "The outcome of an already-started operation is unknown (crash,\ninterruption, lost transport). Never replayed.",
+          "type": "string"
+        }
+      ],
+      "title": "ExecutionEvidence"
+    },
+    "ExecutionReceipt": {
+      "$defs": {
+        "ControlPlaneState": {
+          "description": "Control-plane persistence state, enumerated per stage.",
+          "enum": [
+            "none",
+            "prepared",
+            "applying",
+            "committed",
+            "not_applied",
+            "uncertain",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "ExecutionKind": {
+          "description": "Execution family: file and process stages are expressed separately.",
+          "enum": [
+            "process",
+            "file"
+          ],
+          "type": "string"
+        },
+        "ExecutionStage": {
+          "description": "Stage enumeration. Process and file stages never mix.",
+          "enum": [
+            "admitted",
+            "job_created",
+            "launch_confirmed",
+            "interrupted",
+            "file_prepared",
+            "file_applying",
+            "file_committed",
+            "file_not_applied",
+            "file_recovery_required",
+            "file_indeterminate"
+          ],
+          "type": "string"
+        },
+        "SideEffectState": {
+          "description": "External (target) side-effect state, kept separate from the control plane.",
+          "enum": [
+            "none",
+            "prepared",
+            "applying",
+            "committed",
+            "not_applied",
+            "uncertain",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "TriState": {
+          "description": "Three-valued fact: unknown is never collapsed into true or false.",
+          "enum": [
+            "true",
+            "false",
+            "unknown"
+          ],
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "description": "One stage receipt. Illegal kind/stage or state combinations are rejected at\nconstruction, so a receipt can never claim a fact its stage cannot hold.",
+      "properties": {
+        "allowReplay": {
+          "description": "Always false in the first version; kept explicit so wiring cannot\n\"helpfully\" replay a side-effecting attempt.",
+          "type": "boolean"
+        },
+        "codeAlias": {
+          "description": "Same-fact alias of an uncertain outcome (`job.interrupted_unknown`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "controlPlane": {
+          "$ref": "#/$defs/ControlPlaneState"
+        },
+        "dispatchId": {
+          "type": "string"
+        },
+        "executionStarted": {
+          "$ref": "#/$defs/TriState"
+        },
+        "externalEffect": {
+          "$ref": "#/$defs/SideEffectState"
+        },
+        "kind": {
+          "$ref": "#/$defs/ExecutionKind"
+        },
+        "reasonCode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resumable": {
+          "type": "boolean"
+        },
+        "stage": {
+          "$ref": "#/$defs/ExecutionStage"
+        }
+      },
+      "required": [
+        "dispatchId",
+        "kind",
+        "stage",
+        "executionStarted",
+        "controlPlane",
+        "externalEffect",
+        "resumable",
+        "allowReplay"
+      ],
+      "title": "ExecutionReceipt",
+      "type": "object"
+    },
     "HostResponse": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {

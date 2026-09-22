@@ -1,4 +1,16 @@
 // Generated from fox-engine-protocol Rust DTOs. Do not edit; run node scripts/generate-engine-protocol.mjs.
+export type ActionClass = ("read" | "write" | "execute" | "destructive" | "sensitive_egress" | "manage")
+export type BackendRequirement = { "evidenceDigest"?: (string | null); "required": string; }
+export type HostObservation = { "observedByToolCallId": string; "targetIdentity": string; "version": string; }
+export type RealtimeRequirement = ("policy_version" | "parent_revocation" | "resource_grant" | "cancellation" | "backend_evidence" | "host_observation")
+export type ExecutionCredential = { "actionClass": ActionClass; "backendRequirement": BackendRequirement; "budgetCeilingMs": number; "conversationId": string; "credentialDigest": string; "dispatchId": string; "fileBaseline"?: (HostObservation | null); "intentDigest": string; "parentRevocationGeneration"?: (number | null); "policySnapshotId": string; "policyVersion"?: (number | null); "realtimeRequirements": Array<RealtimeRequirement>; "resolvedProfile": string; "runId": string; }
+export type ExecutionEvidence = ("not_started" | "started" | "unknown")
+export type ControlPlaneState = "none" | "prepared" | "applying" | "committed" | "not_applied" | "uncertain" | "unknown"
+export type ExecutionKind = "process" | "file"
+export type ExecutionStage = "admitted" | "job_created" | "launch_confirmed" | "interrupted" | "file_prepared" | "file_applying" | "file_committed" | "file_not_applied" | "file_recovery_required" | "file_indeterminate"
+export type SideEffectState = "none" | "prepared" | "applying" | "committed" | "not_applied" | "uncertain" | "unknown"
+export type TriState = "true" | "false" | "unknown"
+export type ExecutionReceipt = { "allowReplay": boolean; "codeAlias"?: (string | null); "controlPlane": ControlPlaneState; "dispatchId": string; "executionStarted": TriState; "externalEffect": SideEffectState; "kind": ExecutionKind; "reasonCode"?: (string | null); "resumable": boolean; "stage": ExecutionStage; }
 export type HostResponse = { "conversationId"?: (string | null); "id": string; "kind": string; "payload": unknown; "protocol": string; "requestId": string; "runId"?: (string | null); "runtimeSessionId"?: (string | null); "timestamp": string; "type": string; "version": number; }
 export type KernelSettledToolResult = { "canonicalInput": unknown; "result": unknown; "sourceOrder": number; "state": KernelSettledToolState; "storage"?: unknown; "tool": string; "toolCallId": string; }
 export type KernelSettledToolState = "completed" | "failed"

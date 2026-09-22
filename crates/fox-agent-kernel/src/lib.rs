@@ -1289,3 +1289,28 @@ mod tests {
         assert!(RunController::start("r", "t", config, &TestClock::new(0)).is_err());
     }
 }
+
+#[cfg(test)]
+mod rejection_regression_tests {
+    use super::*;
+    struct Invalid;
+    impl PolicyDecisionPort for Invalid {
+        fn decide(&self,_:&str,_:&str,_:&str,_:&str)->PolicyDecision {
+            PolicyDecision::Reject {code:"tool.invalid_input".into(),message:"oldText was not found; read the file again".into()}
+        }
+    }
+    #[test]
+    fn r1_preflight_rejection_is_delivered_and_persisted_without_dispatch_or_approval() {
+        let clock=TestClock::new(0);
+        let (mut c,_)=RunController::start("r","t",test_config(),&clock).unwrap();
+        let effects=c.propose_tool_batch("b",vec![ToolCallRequest {tool_call_id:"edit".into(),tool:"edit_file".into(),canonical_input_json:"{}".into(),source_order:0}],&Invalid,0,0).unwrap();
+        assert!(!effects.iter().any(|e|matches!(e,Effect::DispatchTool {..}|Effect::RequestApproval {..})));
+        assert!(effects.iter().any(|e|matches!(e,Effect::BatchBarrier {..})));
+        let result:serde_json::Value=serde_json::from_str(c.tool_call_result_json("edit").unwrap()).unwrap();
+        assert_eq!(result["details"]["code"],"tool.invalid_input");
+        assert_eq!(result["details"]["executionStarted"],false);
+        assert!(result["content"][0]["text"].as_str().unwrap().contains("oldText was not found"));
+        let persisted=c.persist_command(&effects);
+        assert_eq!(persisted.tools[0].result_json.as_deref(),c.tool_call_result_json("edit"));
+    }
+}

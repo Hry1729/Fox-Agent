@@ -140,7 +140,7 @@ fn s01_command_child_excludes_parent_environment_canary() {
     .expect("run_command inside the authorized root must prepare");
     assert_eq!(tool_host::PreparedToolAction::preview(&action).tool, "run_command");
 
-    let result = tool_host::execute(action);
+    let result = tool_host::execute_command_with_test_backend(action, &crate::process_jobs::AvailableInTests::host_user_unconfined("security-command-fixture"));
     std::env::remove_var("FOX_HARNESS_S1_CANARY");
 
     let result = result.expect("echo must exit zero");
@@ -168,7 +168,7 @@ fn s01_command_child_excludes_environment_nonwindows() {
         dir.to_str().unwrap(),
     )
     .expect("run_command must prepare");
-    let result = tool_host::execute(action);
+    let result = tool_host::execute_command_with_test_backend(action, &crate::process_jobs::AvailableInTests::host_user_unconfined("security-command-fixture"));
     std::env::remove_var("FOX_HARNESS_S1_CANARY");
 
     let result = result.expect("printf must exit zero");
@@ -197,7 +197,7 @@ fn ex_baseline_nonzero_exit_currently_returns_string_err() {
     let action = tool_host::prepare("run_command", &json!({ "command": command }), dir.to_str().unwrap())
         .expect("run_command must prepare");
 
-    let error = tool_host::execute(action).expect_err("the current form is Err");
+    let error = tool_host::execute_command_with_test_backend(action, &crate::process_jobs::AvailableInTests::host_user_unconfined("security-command-fixture")).expect_err("the current form is Err");
 
     // The current form names the exit code ...
     assert!(error.contains('3'), "current form reports the code in the message: {error}");
@@ -228,7 +228,7 @@ fn ex_gate_nonzero_exit_reports_failure_without_losing_diagnostics() {
     let action = tool_host::prepare("run_command", &json!({ "command": command }), dir.to_str().unwrap())
         .expect("run_command must prepare");
 
-    match tool_host::execute(action) {
+    match tool_host::execute_command_with_test_backend(action, &crate::process_jobs::AvailableInTests::host_user_unconfined("security-command-fixture")) {
         // Form A: structured failure delivered as an error.
         Err(message) => {
             assert!(!message.is_empty(), "a business failure must carry a diagnosis");

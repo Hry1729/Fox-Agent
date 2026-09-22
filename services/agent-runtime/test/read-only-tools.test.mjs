@@ -67,3 +67,18 @@ test('Rust reader routing keeps the frozen identity and never falls back on fail
   const unknown = createReadOnlyTools(async () => ({decision:'allow',input:{path:'.'},executionRoute:'unknown'}))
   await assert.rejects(unknown.find(tool => tool.name === 'ls').execute('reader-3', {}), /Unknown frozen/)
 })
+
+test('R4 read version hashes the full raw file and reaches model content on every page', async (context) => {
+  const { createHash } = await import('node:crypto')
+  const root = await mkdtemp(join(tmpdir(), 'fox-read-version-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  const path = join(root, 'note.txt')
+  const bytes = Buffer.from('第一行\r\nsecond 😀\r\n')
+  await writeFile(path, bytes)
+  const expected = `sha256:${createHash('sha256').update(bytes).digest('hex')}`
+  for (const page of [{ offset: 0, limit: 1 }, { startLine: 2, lineCount: 1 }, { startLine: 99, lineCount: 1 }]) {
+    const result = await executeReadOnlyTool('read', { path, ...page })
+    assert.equal(result.details.readVersion, expected)
+    assert.ok(result.content.some(block => block.text.includes(expected)))
+  }
+})

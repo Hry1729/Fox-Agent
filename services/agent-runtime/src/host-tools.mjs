@@ -241,11 +241,12 @@ export function createHostTools(requestHost) {
     {
       name: 'write_file',
       label: 'Write file',
-      description: 'Create or replace a UTF-8 text file inside the authorized project. Call this tool for a real file write; describing a write in text does nothing. Fox may require user approval before the host writes it.',
+      description: 'Create or replace a UTF-8 text file inside the authorized project. Call this tool for a real file write; describing a write in text does nothing. For existing files, first read the file and pass its readVersion as expectedVersion. On tool.file_conflict, re-read and reconcile your changes. Fox may require user approval before the host writes it.',
       parameters: Type.Object({
         path: Type.String(),
         content: Type.String(),
         createDirectories: Type.Optional(Type.Boolean()),
+        expectedVersion: Type.Optional(Type.String({ description: "Required when replacing an existing file: readVersion from read. Omit only to create a new file." })),
       }),
       execute: (toolCallId, params, signal) =>
         executeHostTool(toolCallId, 'write_file', params, requestHost, signal),
@@ -253,12 +254,13 @@ export function createHostTools(requestHost) {
     {
       name: 'edit_file',
       label: 'Edit file',
-      description: 'Replace an exact text section in a UTF-8 file inside the authorized project. Call this tool for a real edit; Fox shows a diff and enforces the project permission mode.',
+      description: 'Replace an exact text section in a UTF-8 file inside the authorized project. Call this tool for a real edit; First read the file and pass its readVersion as expectedVersion. On tool.file_conflict, re-read and reconcile your changes. Fox shows a diff and enforces the project permission mode.',
       parameters: Type.Object({
         path: Type.String(),
         oldText: Type.String(),
         newText: Type.String(),
         replaceAll: Type.Optional(Type.Boolean()),
+        expectedVersion: Type.Optional(Type.String({ description: "readVersion from read; required for edits. On conflict, re-read and reconcile before retrying." })),
       }),
       execute: (toolCallId, params, signal) =>
         executeHostTool(toolCallId, 'edit_file', params, requestHost, signal),
@@ -266,13 +268,12 @@ export function createHostTools(requestHost) {
     {
       name: 'run_command',
       label: 'Run command',
-      description: 'Run a real non-interactive command with a working directory inside the authorized project. Every call requires explicit approval. The Host starts cmd.exe /D /S /C on Windows and sh -lc elsewhere; the shell itself is not configurable, so use batch/cmd syntax on Windows (%VAR%, &&) and POSIX syntax elsewhere. To call PowerShell, wrap it: powershell -NoProfile -Command "...". Blank cwd means the project root. timeoutSeconds is clamped to 1..120 and the whole call also obeys the Run budget. Console programs write the system OEM codepage, so non-ASCII output may be decoded imperfectly; when a command must produce exact text, redirect it to a file (command > out.txt 2>&1) and read that file instead. A non-zero exit, a timeout or a dropped output is reported with errorCode plus the output the command actually produced - read it before retrying, and do not repeat an identical call that already failed. When the retained output is too large to send back, the result arrives as a bounded preview carrying a fox-result:// reference; page it with read_tool_result instead of re-running. If the Host reports its output-reader budget is full, the command did not start and had no side effect - that is transient backpressure, so retry shortly or redirect output to a file. For long commands, use action=start with command and a stable idempotencyKey (timeoutSeconds defaults to 600, at most 3600 and bounded by the remaining Run budget); this returns a durable jobId promptly. Use action=status or cancel with jobId only. Use action=output with jobId, stream stdout/stderr, raw-byte offset and limit 4..65536, and continue at nextOffset. atEndOfAvailable is not streamClosed: output may still arrive. Keep polling until terminal; failed/cancelled jobs return isError plus readable retained output. A key reused with different command/cwd/timeout is rejected. Interrupted commands are never resumed or replayed. Omit action or use sync for the original bounded synchronous call.',
+      description: 'Run a real non-interactive command with a working directory inside the authorized project. Starting a command requires authorization and a verified execution backend; without one the Host refuses to start it. Status, output and cancel do not start a process. The Host starts cmd.exe /D /S /C on Windows and sh -lc elsewhere; the shell itself is not configurable, so use batch/cmd syntax on Windows (%VAR%, &&) and POSIX syntax elsewhere. To call PowerShell, wrap it: powershell -NoProfile -Command "...". Blank cwd means the project root. timeoutSeconds is clamped to 1..120 and the whole call also obeys the Run budget. Console programs write the system OEM codepage, so non-ASCII output may be decoded imperfectly; when a command must produce exact text, redirect it to a file (command > out.txt 2>&1) and read that file instead. A non-zero exit, a timeout or a dropped output is reported with errorCode plus the output the command actually produced - read it before retrying, and do not repeat an identical call that already failed. When the retained output is too large to send back, the result arrives as a bounded preview carrying a fox-result:// reference; page it with read_tool_result instead of re-running. If the Host reports its output-reader budget is full, the command did not start and had no side effect - that is transient backpressure, so retry shortly or redirect output to a file. For long commands, use action=start with command; execution identity is assigned by the Host (timeoutSeconds defaults to 600, at most 3600 and bounded by the remaining Run budget); this returns a durable jobId promptly. Use action=status or cancel with jobId only. Use action=output with jobId, stream stdout/stderr, raw-byte offset and limit 4..65536, and continue at nextOffset. atEndOfAvailable is not streamClosed: output may still arrive. Keep polling until terminal; failed/cancelled jobs return isError plus readable retained output. Do not supply idempotencyKey or credentials. Every logical attempt has a Host identity; repeated delivery cannot start it again. Interrupted commands are never resumed or replayed. Omit action or use sync for the original bounded synchronous call.',
       parameters: Type.Object({
         action: Type.Optional(Type.Union(['sync', 'start', 'status', 'output', 'cancel'].map(value => Type.Literal(value)))),
         command: Type.Optional(Type.String()),
         cwd: Type.Optional(Type.String()),
         timeoutSeconds: Type.Optional(Type.Number()),
-        idempotencyKey: Type.Optional(Type.String()),
         jobId: Type.Optional(Type.String()),
         stream: Type.Optional(Type.Union([Type.Literal('stdout'), Type.Literal('stderr')])),
         offset: Type.Optional(Type.Integer({ minimum: 0 })),

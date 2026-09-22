@@ -20,6 +20,339 @@ fn terminal(state: &str) -> bool {
         "completed" | "failed" | "cancelled" | "budget_exhausted" | "approval_expired"
     )
 }
+/// Outcome of the B1a admission at the real execution boundary.
+enum DispatchAdmission {
+    /// The claim winner may run the existing executor chain.
+    Proceed(ClaimedExecution),
+    /// A repeat delivery, terminal refusal or unknown outcome: answer from
+    /// durable facts without executing anything.
+    Repeat(Value),
+}
+
+/// Linear Host capability: constructed only after winning the durable claim.
+pub(super) struct ClaimedExecution {
+    credential: fox_engine_protocol::ExecutionCredential,
+}
+impl ClaimedExecution {
+    pub(super) fn credential(&self) -> &fox_engine_protocol::ExecutionCredential {
+        &self.credential
+    }
+}
+
+/// What the executor reports about the target operation it just performed.
+/// This is the Host-internal trusted evidence channel: it comes from the code
+/// that actually performed (or refused) the operation and is NEVER inferred
+/// from the shape of a tool result (`Ok`/`isError`).
+#[cfg(test)]
+type ExecutionOutcome = (Result<Value, String>, fox_engine_protocol::ExecutionEvidence);
+
+/// Executors without a trusted effect channel cannot infer a start from JSON.
+/// Read/Manage complete without starting an external operation; effectful calls
+/// stay unknown until their concrete executor supplies evidence.
+fn conservative_evidence(
+    class: fox_engine_protocol::ActionClass,
+    result: &Result<Value, String>,
+) -> fox_engine_protocol::ExecutionEvidence {
+    use fox_engine_protocol::{ActionClass, ExecutionEvidence};
+    let _ = result;
+    match class {
+        ActionClass::Read | ActionClass::Manage => ExecutionEvidence::NotStarted,
+        _ => ExecutionEvidence::Unknown,
+    }
+}
+
+/// The real Host order for one dispatch execution, extracted so it is
+/// testable without a Tauri app handle: admit (verify → claim) → execute the
+/// verified durable input → settle from trusted execution evidence. The
+/// executor only ever receives the durable canonical input.
+///
+/// The executor returns a pair `(result, evidence)`. A Rust `Ok` is not
+/// evidence: Fox tools return `Ok(json)` with `isError=true` for business
+/// failures, a read/query completing is not the start of an external process,
+/// and a failure after a real start must stay uncertain. The Host therefore
+/// settles ONLY from the executor's evidence value.
+fn execute_claimed_dispatch(
+    database: &Database,
+    binding: &RunControlBinding,
+    effect: &kernel::OutboxEffect,
+    tool: &str,
+    payload: &Value,
+    execute: impl FnOnce(&str, ClaimedExecution) -> (Result<Value, String>, fox_engine_protocol::ExecutionEvidence, fox_engine_protocol::CallOutcome),
+) -> Result<Value, String> {
+    let host = HostAdmission { database, binding };
+    match host.admit(effect, tool, payload)? {
+        DispatchAdmission::Repeat(receipt) => Ok(receipt),
+        DispatchAdmission::Proceed(claim) => {
+            let tool_call_id = effect
+                .tool_call_id
+                .as_deref()
+                .ok_or("missing dispatch tool identity")?;
+            let durable_input = database
+                .tool_call_identity(&binding.run_id, tool_call_id)?
+                .ok_or("dispatch has no durable tool call identity")?
+                .1;
+            let (result, evidence, outcome) = execute(&durable_input, claim);
+            let dispatch_id =
+                fox_engine_protocol::encode_dispatch_id(&binding.run_id, tool_call_id)?;
+            settle_execution_outcome(database, &binding.run_id, &dispatch_id, &result, evidence, &outcome)?;
+            result.and_then(|value| with_execution_receipt(database, &binding.run_id, &dispatch_id, value))
+        }
+    }
+}
+
+pub(super) fn with_execution_receipt(database: &Database, run_id: &str, dispatch_id: &str, mut value: Value) -> Result<Value, String> {
+    if let Some(receipt) = database.execution_receipt(run_id, dispatch_id)? {
+        if !value["details"].is_object() { value["details"] = serde_json::json!({}); }
+        value["details"]["executionReceipt"] = serde_json::to_value(receipt).map_err(|e| e.to_string())?;
+    }
+    Ok(value)
+}
+
+pub(super) fn settle_execution_outcome(
+    database: &Database, run_id: &str, dispatch_id: &str, result: &Result<Value, String>,
+    evidence: fox_engine_protocol::ExecutionEvidence, outcome: &fox_engine_protocol::CallOutcome,
+) -> Result<(), String> {
+    use fox_engine_protocol::{CallOutcome, ExecutionEvidence};
+    if evidence == ExecutionEvidence::Started {
+        database.record_attempt_started(run_id, dispatch_id)?;
+    }
+    match (&evidence, &outcome) {
+        (ExecutionEvidence::Unknown, _) => database.record_attempt_failure(
+            run_id, dispatch_id, &refusal_code_from_result(result))?,
+        (_, CallOutcome::Completed) => database.record_attempt_completed(
+            run_id, dispatch_id, evidence == ExecutionEvidence::Started)?,
+        (ExecutionEvidence::Started, CallOutcome::Failed { code } | CallOutcome::Refused { code }) =>
+            database.record_attempt_failure(run_id, dispatch_id, code)?,
+        (_, CallOutcome::Failed { code } | CallOutcome::Refused { code }) =>
+            database.record_attempt_refusal(run_id, dispatch_id, code)?,
+    }
+    Ok(())
+}
+
+pub(super) fn call_outcome(result: &Result<Value, String>) -> fox_engine_protocol::CallOutcome {
+    if matches!(result, Ok(value) if value.get("isError").and_then(Value::as_bool) != Some(true)) {
+        fox_engine_protocol::CallOutcome::Completed
+    } else {
+        fox_engine_protocol::CallOutcome::Failed { code: refusal_code_from_result(result) }
+    }
+}
+
+#[cfg(test)]
+fn admit_and_execute_dispatch(
+    database: &Database, binding: &RunControlBinding, effect: &kernel::OutboxEffect,
+    tool: &str, payload: &Value, execute: impl FnOnce(&str) -> ExecutionOutcome,
+) -> Result<Value, String> {
+    execute_claimed_dispatch(database, binding, effect, tool, payload, |input, _claim| {
+        let (result, evidence) = execute(input);
+        let outcome = call_outcome(&result);
+        (result, evidence, outcome)
+    })
+}
+
+/// The refusal code the executor itself reported. Prefers the tool's own
+/// structured code; never invents one.
+fn refusal_code_from_result(result: &Result<Value, String>) -> String {
+    match result {
+        Err(error) => return execution_failure_code(error),
+        Ok(value) => {
+            if let Some(code) = value
+                .get("details")
+                .and_then(|details| details.get("errorCode"))
+                .or_else(|| value.get("details").and_then(|details| details.get("error")).and_then(|error| error.get("code")))
+                .and_then(serde_json::Value::as_str)
+            {
+                return code.to_owned();
+            }
+            if value.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
+                return "tool.error".to_owned();
+            }
+        }
+    }
+    "kernel.not_started".to_owned()
+}
+
+/// Classify a Host error string into a stable code without inventing facts.
+fn execution_failure_code(error: &str) -> String {
+    if error.contains("cancelled") {
+        return "tool.cancelled".to_owned();
+    }
+    if error.contains("permission") || error.contains("denied") {
+        return "tool.permission_denied".to_owned();
+    }
+    "kernel.execution_failed".to_owned()
+}
+
+/// Admission half of the Host order (verify → claim). Kept separate so the
+/// executor chain can stay in `RuntimeHost` where the gateway state lives.
+struct HostAdmission<'a> {
+    database: &'a Database,
+    binding: &'a RunControlBinding,
+}
+
+impl HostAdmission<'_> {
+    fn admit(
+        &self,
+        effect: &kernel::OutboxEffect,
+        tool: &str,
+        payload: &Value,
+    ) -> Result<DispatchAdmission, String> {
+        let tool_call_id = effect
+            .tool_call_id
+            .as_deref()
+            .ok_or("missing dispatch tool identity")?;
+        // The presented credential is built from durable facts only: the
+        // dispatch payload can never contribute an identity field.
+        let (durable_tool, durable_input) = self
+            .database
+            .tool_call_identity(&self.binding.run_id, tool_call_id)?
+            .ok_or("dispatch has no durable tool call identity")?;
+        if durable_tool != tool {
+            return Err("dispatch payload tool differs from the durable identity".into());
+        }
+        // I4: the payload that will be executed must BE the verified durable
+        // input. A strict canonical comparison happens before any claim, so a
+        // substituted path/content never reaches an executor.
+        let payload_input = payload
+            .get("input")
+            .map(|input| input.to_string())
+            .unwrap_or_else(|| "null".to_owned());
+        if payload_input != durable_input {
+            return Err(
+                "credential_mismatch: dispatch payload input differs from the durable identity"
+                    .into(),
+            );
+        }
+        let dispatch_id =
+            fox_engine_protocol::encode_dispatch_id(&self.binding.run_id, tool_call_id)?;
+        let presented = self.database.read_execution_credential(&self.binding.run_id, &dispatch_id)?
+            .ok_or("credential_mismatch: no issued execution credential")?;
+        if presented.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(&durable_tool, &durable_input)
+            || presented.conversation_id != self.binding.conversation_id
+            || presented.resolved_profile != self.binding.execution_profile_id
+            || presented.policy_snapshot_id != self.binding.permission_snapshot_id {
+            return Err("credential_mismatch: durable run identity differs".into());
+        }
+        // Credential verification happens BEFORE the claim (read-only).
+        self.database
+            .verify_execution_credential(&self.binding.run_id, &presented)?;
+        // Persistent single claim across connections. The claim transaction
+        // also evaluates the real-time requirements: an unsatisfied one (no
+        // verified backend, no Host observation, no live policy version, no
+        // readable parent revocation) is a persistent terminal refusal.
+        let outcome = self.database.claim_execution_attempt(
+            &self.binding.run_id,
+            &self.binding.conversation_id,
+            &presented,
+            &presented.intent_digest,
+            &format!("kernel-host:{tool_call_id}"),
+        )?;
+        match outcome {
+            fox_engine_protocol::AttemptOutcome::Claimed => Ok(DispatchAdmission::Proceed(ClaimedExecution { credential: presented })),
+            fox_engine_protocol::AttemptOutcome::AlreadyRefused { code } => Ok(
+                DispatchAdmission::Repeat(execution_receipt_result(
+                    self.database,
+                    &self.binding.run_id,
+                    &dispatch_id,
+                    tool,
+                    Some(code),
+                )?),
+            ),
+            fox_engine_protocol::AttemptOutcome::AlreadyLaunched | fox_engine_protocol::AttemptOutcome::AlreadyCompleted => Ok(
+                DispatchAdmission::Repeat(execution_receipt_result(
+                    self.database,
+                    &self.binding.run_id,
+                    &dispatch_id,
+                    tool,
+                    None,
+                )?),
+            ),
+            fox_engine_protocol::AttemptOutcome::Unknown => Ok(
+                DispatchAdmission::Repeat(execution_receipt_result(
+                    self.database,
+                    &self.binding.run_id,
+                    &dispatch_id,
+                    tool,
+                    None,
+                )?),
+            ),
+        }
+    }
+}
+
+/// A tool result carrying the ACTUAL durable receipt for a repeat delivery,
+/// terminal refusal or unknown outcome. Nothing is hard-coded: the stage, kind,
+/// start evidence and original refusal code come from the durable attempt row.
+pub(super) fn execution_receipt_result(
+    database: &crate::database::Database,
+    run_id: &str,
+    dispatch_id: &str,
+    tool: &str,
+    fallback_code: Option<String>,
+) -> Result<Value, String> {
+    let receipt = database.execution_receipt(run_id, dispatch_id)?;
+    let Some(receipt) = receipt else {
+        // No durable attempt fact at all: nothing is claimed about execution.
+        return Ok(execution_refusal_result(
+            tool,
+            &fallback_code.unwrap_or_else(|| "kernel.uncertain_execution".to_owned()),
+        ));
+    };
+    let existing = database.read_execution_attempt(run_id, dispatch_id)?
+        .is_some_and(|row| matches!(row.state, fox_engine_protocol::AttemptState::Completed | fox_engine_protocol::AttemptState::Launched));
+    let code = receipt
+        .reason_code
+        .clone()
+        .or(receipt.code_alias.clone())
+        .unwrap_or_else(|| if existing { "kernel.existing_execution" } else { "kernel.uncertain_execution" }.to_owned());
+    let details = serde_json::json!({
+        "source": "fox_kernel_host",
+        "error": { "code": code },
+        "executionStarted": match receipt.execution_started {
+            fox_engine_protocol::TriState::True => serde_json::json!(true),
+            fox_engine_protocol::TriState::False => serde_json::json!(false),
+            fox_engine_protocol::TriState::Unknown => serde_json::json!("unknown"),
+        },
+        "sideEffectState": match receipt.external_effect {
+            fox_engine_protocol::SideEffectState::None => "none",
+            fox_engine_protocol::SideEffectState::Prepared => "prepared",
+            fox_engine_protocol::SideEffectState::Applying => "applying",
+            fox_engine_protocol::SideEffectState::Committed => "committed",
+            fox_engine_protocol::SideEffectState::NotApplied => "not_applied",
+            fox_engine_protocol::SideEffectState::Uncertain => "uncertain",
+            fox_engine_protocol::SideEffectState::Unknown => "unknown",
+        },
+        "stage": receipt.stage,
+        "kind": receipt.kind,
+        "controlPlane": receipt.control_plane,
+        "dispatchId": receipt.dispatch_id,
+        "codeAlias": receipt.code_alias,
+        "allowReplay": receipt.allow_replay,
+        "recovery": "This dispatch attempt is finished; a new logical attempt needs a new tool call and full re-admission."
+    });
+    with_execution_receipt(database, run_id, dispatch_id, serde_json::json!({
+        "isError": !existing,
+        "content": [{"type": "text", "text": format!("[tool.{code}] {tool} was not re-executed")}],
+        "details": details,
+    }))
+}
+
+/// Missing durable evidence must never be projected as a confirmed refusal.
+fn execution_refusal_result(tool: &str, code: &str) -> Value {
+    let details = serde_json::json!({
+        "source": "fox_kernel_host",
+        "error": { "code": code },
+        "executionStarted": "unknown",
+        "sideEffectState": "unknown",
+        "controlPlane": "unknown",
+        "allowReplay": false,
+        "recovery": "This dispatch attempt is finished; a new logical attempt needs a new tool call and full re-admission."
+    });
+    serde_json::json!({
+        "isError": true,
+        "content": [{"type": "text", "text": format!("[tool.{code}] {tool} has no durable execution receipt; execution is unknown and must not be replayed")}],
+        "details": details,
+    })
+}
 
 /// Record the scope a conversation-level approval actually granted (#5).
 ///
@@ -119,6 +452,7 @@ pub(crate) fn resource_failure_result(tool: &str, error: &str) -> Value {
             Some(crate::tool_host::ToolErrorCode::Cancelled) => "Local operation was cancelled: ",
             Some(crate::tool_host::ToolErrorCode::StartFailed)
             | Some(crate::tool_host::ToolErrorCode::InvalidInput)
+            | Some(crate::tool_host::ToolErrorCode::Conflict)
             | Some(crate::tool_host::ToolErrorCode::PermissionDenied) => {
                 "Local operation did not run: "
             }
@@ -307,6 +641,21 @@ pub(super) fn drive_with_actions(
             after_commit(&tool_id)?;
         }
         settle_children(false)?;
+        // A policy change expires tickets durably. Re-evaluate the original
+        // unconsumed intent through the same controller/transaction boundary.
+        let changed = coordinator.snapshot()?;
+        if !terminal(&changed.state) && changed.state != "cancelling" {
+            for call in &changed.tool_calls {
+                if call.approval_state.as_deref() == Some("expired")
+                    && matches!(call.state.as_str(), "pending" | "waiting_approval") {
+                    match coordinator.reevaluate_tool(&call.tool_call_id, policy) {
+                        Ok(()) => {},
+                        Err(error) if error.contains("policy_version") || error.contains("stale_approval") => continue,
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }
         let commands = database.pending_kernel_host_commands(run_id)?;
         for command in commands {
             let snapshot = coordinator.snapshot()?;
@@ -335,7 +684,14 @@ pub(super) fn drive_with_actions(
                             Some("denied") => kernel::ApprovalDecision::Deny,
                             _ => return Err("invalid durable approval decision".into()),
                         };
-                        coordinator.resolve_approval(tool_id, decision)?;
+                        let version = command.policy_version.ok_or("approval has no frozen policy version")?;
+                        if let Err(error) = coordinator.resolve_approval_at_version(tool_id, decision, version) {
+                            if error.contains("stale_approval") || error.contains("policy_version") {
+                                database.complete_kernel_host_command(run_id, command.seq)?;
+                                continue;
+                            }
+                            return Err(error);
+                        }
                         // #5: a conversation-level allow becomes an auditable
                         // additional grant; allow_once never does.
                         register_approval_grant(database, run_id, tool_id, decision)?;
@@ -922,75 +1278,22 @@ impl super::RuntimeHost {
                 let payload: Value = serde_json::from_str(&effect.payload_json)
                     .map_err(|_| "invalid frozen tool dispatch")?;
                 let tool = payload["tool"].as_str().ok_or("missing tool name")?;
-                let result = if super::work_tools::is_work_tool(tool) {
-                    policy.execute_work(
-                        &self.database,
-                        effect
-                            .tool_call_id
-                            .as_deref()
-                            .ok_or("missing work tool identity")?,
-                        tool,
-                        &payload["input"],
-                        token,
-                    )
-                } else if super::kernel_delegation::TOOLS.contains(&tool) {
-                    policy.execute_delegation(
-                        &self.database,
-                        effect
-                            .tool_call_id
-                            .as_deref()
-                            .ok_or("missing delegation identity")?,
-                        tool,
-                        &payload["input"],
-                        token,
-                    )
-                } else if super::kernel_gateway::is_context_resource(tool) {
-                    policy.execute_context_resource(
-                        &self.database,
-                        &self.attachments_dir,
-                        &self.sessions_dir,
-                        &self.skills_dir,
-                        tool,
-                        &payload["input"],
-                        token,
-                    )
-                } else if super::kernel_gateway::is_knowledge(tool) {
-                    use tauri::Manager;
-                    let app_state = self.app.state::<crate::app_state::AppState>();
-                    policy.execute_knowledge(
-                        &self.database,
-                        &self.yuxi_client,
-                        &app_state.local_knowledge,
-                        tool,
-                        &payload["input"],
-                        token,
-                    )
-                } else {
-                    // A managed write is identified from Host facts only: the
-                    // real dispatch tool (including the frozen Office wrapper)
-                    // plus the target the Host itself admitted for this frozen
-                    // dispatch. The shared seam protects the current bytes before
-                    // the write and registers the resulting content version, so
-                    // the desktop Host and the real-task evaluation cannot drift
-                    // apart on what "a managed write" means.
-                    let outcome = super::managed_files::execute_with_managed_versions(
-                        super::managed_files::ManagedExecutionContext {
-                            database: &self.database,
-                            backups_dir: &self.managed_files_dir,
-                            conversation_id: &binding.conversation_id,
-                            run_id: &binding.run_id,
-                            project_root: binding.permission.project_root.as_deref(),
-                            permission_mode: binding.permission.mode.as_str(),
-                            scope: &policy.scope,
-                            sessions_dir: Some(&self.sessions_dir),
-                        },
-                        tool,
-                        &payload["input"],
-                        effect.tool_call_id.as_deref(),
-                        || policy.execute(&self.database, tool, &payload["input"], token),
-                    );
-                    outcome
-                };
+                // B1a execution boundary: the persistent single claim. The
+                // credential is verified against the authoritative snapshot
+                // before the claim, the payload must equal the durable identity,
+                // and only the claim winner starts the first execution attempt.
+                // Repeat deliveries, terminal refusals and unknown outcomes are
+                // answered from durable facts without executing anything.
+                let result = execute_claimed_dispatch(
+                    &self.database,
+                    binding,
+                    effect,
+                    tool,
+                    &payload,
+                    |durable_input, claim| {
+                        self.execute_claimed_resource(binding, &policy, effect, tool, durable_input, token, claim)
+                    },
+                );
                 match result {
                     Ok(result) => Ok((
                         result.get("isError").and_then(Value::as_bool) != Some(true),
@@ -1005,10 +1308,11 @@ impl super::RuntimeHost {
                     {
                         Err(error)
                     }
-                    Err(error) if token.check().is_ok() => Ok((
-                        false,
-                        resource_failure_result(tool, &error),
-                    )),
+                    Err(error) if token.check().is_ok() => {
+                        let dispatch_id = fox_engine_protocol::encode_dispatch_id(&binding.run_id, effect.tool_call_id.as_deref().ok_or("missing dispatch identity")?)?;
+                        Ok((false, with_execution_receipt(&self.database, &binding.run_id, &dispatch_id,
+                            resource_failure_result(tool, &error))?))
+                    },
                     Err(error) => Err(error),
                 }
             },
@@ -1020,6 +1324,168 @@ impl super::RuntimeHost {
             self.wait_kernel_action_children(binding, true)?;
         }
         result
+    }
+
+    /// B1a admission at the real execution boundary (frozen contract v1.6).
+    ///
+    /// Order: read the durable (tool, canonical input) identity, prove the
+    /// dispatch payload is byte-identical to it, present a credential built
+    /// from durable facts, verify it against the authoritative snapshot
+    /// (read-only), then take the persistent single claim. Only the claim
+    /// winner starts the first execution attempt, and it executes the verified
+    /// durable input — never the payload.
+    /// B1a admission at the real execution boundary. The production Host
+    /// delegates to the shared `HostAdmission` order so the drive loop and the
+    /// Host-order tests exercise exactly the same sequence.
+    fn admit_dispatch_execution(
+        &self,
+        binding: &RunControlBinding,
+        effect: &kernel::OutboxEffect,
+        tool: &str,
+        payload: &Value,
+    ) -> Result<DispatchAdmission, String> {
+        HostAdmission {
+            database: &self.database,
+            binding,
+        }
+        .admit(effect, tool, payload)
+    }
+
+    fn execute_claimed_resource(
+        &self, binding: &RunControlBinding, policy: &super::kernel_gateway::GatewayPolicy,
+        effect: &kernel::OutboxEffect, tool: &str, input_json: &str,
+        token: &kernel::CancellationToken, claim: ClaimedExecution,
+    ) -> (Result<Value, String>, fox_engine_protocol::ExecutionEvidence, fox_engine_protocol::CallOutcome) {
+        use fox_engine_protocol::{CallOutcome, ExecutionEvidence};
+        let input: Value = match serde_json::from_str(input_json) {
+            Ok(input) => input,
+            Err(_) => return (Err("invalid durable input".into()), ExecutionEvidence::NotStarted,
+                CallOutcome::Refused { code: "tool.invalid_input".into() }),
+        };
+        let validate = || -> Result<(), String> {
+            token.check()?;
+            self.database.revalidate_execution_credential(claim.credential())?;
+            self.database.kernel_validate_resource_acquisition_for(&binding.run_id, Some(tool))?;
+            policy.validate(tool, &input)
+        };
+        if let Err(error) = validate() {
+            return (Err(error.clone()), ExecutionEvidence::NotStarted, CallOutcome::Refused { code: error });
+        }
+        if matches!(tool, "write_file" | "edit_file") {
+            let (result, evidence) = super::managed_files::execute_admitted_file(
+                super::managed_files::ManagedExecutionContext {
+                    database: &self.database, backups_dir: &self.managed_files_dir,
+                    conversation_id: &binding.conversation_id, run_id: &binding.run_id,
+                    project_root: binding.permission.project_root.as_deref(),
+                    permission_mode: binding.permission.mode.as_str(), scope: &policy.scope,
+                    sessions_dir: Some(&self.sessions_dir),
+                }, tool, &input, effect.tool_call_id.as_deref().unwrap_or_default(),
+                claim.credential(), Some(token), &mut || validate());
+            let outcome = call_outcome(&result);
+            return (result, evidence, outcome);
+        }
+        if tool == "run_command" {
+            let root = Path::new(binding.permission.project_root.as_deref().unwrap_or(""));
+            let budget = match policy.remaining_budget(&self.database) {
+                Ok(budget) => budget,
+                Err(error) => return (Err(error.clone()), ExecutionEvidence::NotStarted, CallOutcome::Refused { code: error }),
+            };
+            return super::command_jobs::execute_authorized(&self.database, &binding.run_id, &input,
+                root, token, budget, claim);
+        }
+        let result = if crate::resource_gateway::is_reader(tool) {
+            policy.execute_reader(&self.database, tool, &input,
+                effect.tool_call_id.as_deref().unwrap_or_default(), token)
+        } else {
+            self.execute_admitted_dispatch(binding, policy, effect, tool, input_json, token)
+        };
+        let evidence = conservative_evidence(claim.credential().action_class, &result);
+        let outcome = call_outcome(&result);
+        (result, evidence, outcome)
+    }
+
+    /// The existing executor chain, reached only by the claim winner, and it
+    /// runs the VERIFIED durable canonical input (never the dispatch payload).
+    fn execute_admitted_dispatch(
+        &self,
+        binding: &RunControlBinding,
+        policy: &super::kernel_gateway::GatewayPolicy,
+        effect: &kernel::OutboxEffect,
+        tool: &str,
+        durable_input_json: &str,
+        token: &kernel::CancellationToken,
+    ) -> Result<Value, String> {
+        let input: Value = serde_json::from_str(durable_input_json)
+            .map_err(|_| "durable canonical input is not valid JSON")?;
+        if super::work_tools::is_work_tool(tool) {
+            policy.execute_work(
+                &self.database,
+                effect
+                    .tool_call_id
+                    .as_deref()
+                    .ok_or("missing work tool identity")?,
+                tool,
+                &input,
+                token,
+            )
+        } else if super::kernel_delegation::TOOLS.contains(&tool) {
+            policy.execute_delegation(
+                &self.database,
+                effect
+                    .tool_call_id
+                    .as_deref()
+                    .ok_or("missing delegation identity")?,
+                tool,
+                &input,
+                token,
+            )
+        } else if super::kernel_gateway::is_context_resource(tool) {
+            policy.execute_context_resource(
+                &self.database,
+                &self.attachments_dir,
+                &self.sessions_dir,
+                &self.skills_dir,
+                tool,
+                &input,
+                token,
+            )
+        } else if super::kernel_gateway::is_knowledge(tool) {
+            use tauri::Manager;
+            let app_state = self.app.state::<crate::app_state::AppState>();
+            policy.execute_knowledge(
+                &self.database,
+                &self.yuxi_client,
+                &app_state.local_knowledge,
+                tool,
+                &input,
+                token,
+            )
+        } else {
+            // A managed write is identified from Host facts only: the real
+            // dispatch tool (including the frozen Office wrapper) plus the
+            // target the Host itself admitted for this frozen dispatch. The
+            // shared seam protects the current bytes before the write and
+            // registers the resulting content version, so the desktop Host and
+            // the real-task evaluation cannot drift apart on what "a managed
+            // write" means.
+            let outcome = super::managed_files::execute_with_managed_versions(
+                super::managed_files::ManagedExecutionContext {
+                    database: &self.database,
+                    backups_dir: &self.managed_files_dir,
+                    conversation_id: &binding.conversation_id,
+                    run_id: &binding.run_id,
+                    project_root: binding.permission.project_root.as_deref(),
+                    permission_mode: binding.permission.mode.as_str(),
+                    scope: &policy.scope,
+                    sessions_dir: Some(&self.sessions_dir),
+                },
+                tool,
+                &input,
+                effect.tool_call_id.as_deref(),
+                || policy.execute(&self.database, tool, &input, token),
+            );
+            outcome
+        }
     }
 
     fn dispatch_kernel_host_action(
@@ -1259,5 +1725,648 @@ impl super::RuntimeHost {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+}
+
+/// Host-order regression tests for the B1a-R1 seams: a claim is not a start
+/// confirmation, only execution evidence confirms it, the executor only ever
+/// sees the verified durable input, and the safe management surface stays
+/// reachable while external launches stay refused. They drive the SAME
+/// `admit_and_execute_dispatch` the production closure uses, with real SQLite
+/// durable facts.
+#[cfg(test)]
+mod host_order_tests {
+    #[test]
+    fn missing_receipt_does_not_invent_a_confirmed_non_start() {
+        let (db, _root, run_id, _, _) = fixture();
+        let result = super::execution_receipt_result(&db, &run_id, "missing", "run_command", None).unwrap();
+        assert_eq!(result["details"]["executionStarted"], "unknown");
+        assert_eq!(result["details"]["sideEffectState"], "unknown");
+        assert_eq!(result["details"]["allowReplay"], false);
+    }
+    use super::*;
+    use crate::database::Database;
+    use fox_engine_protocol::{encode_dispatch_id, ExecutionStage, TriState};
+
+    fn fixture() -> (Database, std::path::PathBuf, String, String, RunControlBinding) {
+        let path = std::env::temp_dir().join(format!("fox-host-order-{}.db", uuid::Uuid::new_v4()));
+        let db = Database::open(path.clone()).unwrap();
+        let conversation = db
+            .create_conversation("fox-general", Some("host order"), None, None)
+            .unwrap();
+        let run = db.create_run(&conversation.id, "host order run", None).unwrap();
+        let run_id = run.run.id.clone();
+        let mut budgets = fox_engine_protocol::TimeBudgets::default();
+        budgets.tool_execution_ms = 30_000;
+        let binding = db
+            .freeze_kernel_run_control(&run_id, "durable", budgets)
+            .unwrap();
+        db.with_connection(|c| {
+            c.execute(
+                "INSERT INTO kernel_runs(run_id, engine_id, kernel_mode, capability_manifest_version,
+                     permission_snapshot_id, execution_profile_id, prompt_config_hash, frozen_config_json,
+                     state, last_event_seq, created_at, updated_at, terminal_at)
+                 VALUES (?1,'kernel','authoritative',1,?2,'durable','h','{}','running',0,1,1,NULL)",
+                rusqlite::params![run_id, binding.permission_snapshot_id],
+            )?;
+            c.execute(
+                "INSERT INTO kernel_tool_calls(run_id, tool_call_id, batch_id, tool, source_order,
+                     canonical_input_json, state, result_json, created_at, settled_at)
+                 VALUES (?1,'call-1','b1','read',0,'{\"path\":\"a.txt\"}','pending',NULL,1,NULL)",
+                rusqlite::params![run_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        (db, path, run_id, conversation.id, binding)
+    }
+
+    fn effect_for(tool_call_id: &str, input: serde_json::Value) -> kernel::OutboxEffect {
+        kernel::OutboxEffect {
+            effect_key: format!("dispatch:{tool_call_id}"),
+            kind: kernel::OutboxEffectKind::DispatchTool,
+            payload_json: serde_json::json!({"tool": "read", "input": input}).to_string(),
+            tool_call_id: Some(tool_call_id.to_owned()),
+            batch_id: Some("b1".to_owned()),
+            idempotency_key: format!("tool-dispatch:{tool_call_id}"),
+            status: kernel::OutboxStatus::Pending,
+            attempts: 0,
+        }
+    }
+
+    /// Issue a credential the way the admission transaction does: every field
+    /// derived from the run's durable facts (the same values the Host presents
+    /// back), never from the model.
+    fn issue_credential(
+        db: &Database,
+        binding: &RunControlBinding,
+        conversation_id: &str,
+        tool_call_id: &str,
+        tool: &str,
+        input: &str,
+        class: fox_engine_protocol::ActionClass,
+    ) -> String {
+        let dispatch_id = encode_dispatch_id(&binding.run_id, tool_call_id).unwrap();
+        let credential = fox_engine_protocol::ExecutionCredential::new(
+            dispatch_id.clone(),
+            binding.run_id.clone(),
+            conversation_id.to_owned(),
+            crate::database::kernel_execution_admission::launch_params_hash(tool, input),
+            class,
+            None,
+            binding.execution_profile_id.clone(),
+            binding.permission_snapshot_id.clone(),
+            None,
+            binding.budgets.tool_execution_ms,
+            None,
+            crate::database::kernel_execution_admission::unverified_backend_requirement(),
+        )
+        .unwrap();
+        db.issue_execution_credential(&credential).unwrap();
+        dispatch_id
+    }
+
+    #[test]
+    fn claim_is_not_start_and_only_execution_evidence_confirms_it() {
+        let (db, _path, run_id, conversation_id, binding) = fixture();
+        let dispatch_id = issue_credential(
+            &db,
+            &binding,
+            &conversation_id,
+            "call-1",
+            "read",
+            "{\"path\":\"a.txt\"}",
+            fox_engine_protocol::ActionClass::Read,
+        );
+        let effect = effect_for("call-1", serde_json::json!({"path": "a.txt"}));
+
+        let mut executed_with: Option<String> = None;
+        let mut start_inside_executor = None;
+        let result = admit_and_execute_dispatch(
+            &db,
+            &binding,
+            &effect,
+            "read",
+            &serde_json::json!({"input": {"path": "a.txt"}}),
+            |durable| {
+                executed_with = Some(durable.to_owned());
+                start_inside_executor = db
+                    .read_execution_attempt(&run_id, &dispatch_id)
+                    .unwrap()
+                    .map(|row| row.start_confirmed);
+                (
+                    Ok(serde_json::json!({"content":[{"type":"text","text":"ok"}]})),
+                    fox_engine_protocol::ExecutionEvidence::Started,
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(result["isError"].as_bool(), None, "result: {result}");
+        // I4: the executor received exactly the durable canonical input.
+        assert_eq!(executed_with.as_deref(), Some("{\"path\":\"a.txt\"}"));
+        // I1: inside the executor the start fact was still unknown.
+        assert_eq!(start_inside_executor, Some(None));
+        let row = db.read_execution_attempt(&run_id, &dispatch_id).unwrap().unwrap();
+        assert_eq!(row.state, fox_engine_protocol::AttemptState::Completed);
+        assert_eq!(row.start_confirmed, Some(true));
+        assert_eq!(row.terminal_state.as_deref(), Some("completed"));
+        let receipt = db.execution_receipt(&run_id, &dispatch_id).unwrap().unwrap();
+        assert_eq!(receipt.execution_started, TriState::True);
+        assert_eq!(receipt.stage, ExecutionStage::LaunchConfirmed);
+    }
+
+    #[test]
+    fn an_ok_structured_refusal_is_not_a_start_confirmation() {
+        // R1-01: a tool result can be Ok(json) with isError=true. That is a
+        // pre-execution refusal: nothing started, and the attempt is terminal.
+        let (db, _path, run_id, conversation_id, binding) = fixture();
+        let dispatch_id = issue_credential(
+            &db,
+            &binding,
+            &conversation_id,
+            "call-1",
+            "read",
+            "{\"path\":\"a.txt\"}",
+            fox_engine_protocol::ActionClass::Read,
+        );
+        let effect = effect_for("call-1", serde_json::json!({"path": "a.txt"}));
+        let result = execute_claimed_dispatch(
+            &db,
+            &binding,
+            &effect,
+            "read",
+            &serde_json::json!({"input": {"path": "a.txt"}}),
+            |_, _claim| {
+                (
+                    Ok(serde_json::json!({
+                        "isError": true,
+                        "content":[{"type":"text","text":"Local operation did not run: path escapes the authorized project root"}],
+                        "details":{"errorCode":"tool.permission_denied"}
+                    })),
+                    fox_engine_protocol::ExecutionEvidence::NotStarted,
+                    fox_engine_protocol::CallOutcome::Refused {
+                        code: "tool.permission_denied".to_owned(),
+                    },
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(result["isError"].as_bool(), Some(true));
+        let row = db.read_execution_attempt(&run_id, &dispatch_id).unwrap().unwrap();
+        assert_eq!(
+            row.state,
+            fox_engine_protocol::AttemptState::Refused {
+                code: "tool.permission_denied".to_owned()
+            },
+            "a structured pre-execution refusal must be terminal with its own code"
+        );
+        assert_eq!(row.start_confirmed, None);
+        let receipt = db.execution_receipt(&run_id, &dispatch_id).unwrap().unwrap();
+        assert_eq!(receipt.execution_started, TriState::False);
+        assert_eq!(receipt.reason_code.as_deref(), Some("tool.permission_denied"));
+    }
+
+    #[test]
+    fn the_same_is_error_shape_with_unknown_evidence_is_not_projected_to_false() {
+        // Result shape and call outcome do not decide the execution fact. The
+        // same isError payload stays Unknown when trusted evidence is Unknown.
+        let (db, _path, run_id, conversation_id, binding) = fixture();
+        let dispatch_id = issue_credential(
+            &db,
+            &binding,
+            &conversation_id,
+            "call-1",
+            "read",
+            "{\"path\":\"a.txt\"}",
+            fox_engine_protocol::ActionClass::Read,
+        );
+        let effect = effect_for("call-1", serde_json::json!({"path": "a.txt"}));
+        let result = execute_claimed_dispatch(
+            &db,
+            &binding,
+            &effect,
+            "read",
+            &serde_json::json!({"input": {"path": "a.txt"}}),
+            |_, _claim| (
+                Ok(serde_json::json!({
+                    "isError": true,
+                    "content":[{"type":"text","text":"Local operation did not run: path escapes the authorized project root"}],
+                    "details":{"errorCode":"tool.permission_denied"}
+                })),
+                fox_engine_protocol::ExecutionEvidence::Unknown,
+                fox_engine_protocol::CallOutcome::Failed {
+                    code: "tool.permission_denied".to_owned(),
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(result["isError"].as_bool(), Some(true));
+        let row = db.read_execution_attempt(&run_id, &dispatch_id).unwrap().unwrap();
+        assert_eq!(row.state, fox_engine_protocol::AttemptState::Unknown);
+        assert_eq!(row.start_confirmed, None, "Unknown must not collapse to false");
+        assert_eq!(row.terminal_state.as_deref(), Some("failed"));
+        assert_eq!(row.error_code.as_deref(), Some("tool.permission_denied"));
+        let receipt = db.execution_receipt(&run_id, &dispatch_id).unwrap().unwrap();
+        assert_eq!(receipt.execution_started, TriState::Unknown);
+        assert_ne!(receipt.execution_started, TriState::False);
+    }
+
+    #[test]
+    fn a_read_completion_never_claims_an_external_process_start() {
+        // R1-01: a successful read/query is a completed call, not a process start.
+        let (db, _path, run_id, conversation_id, binding) = fixture();
+        let dispatch_id = issue_credential(
+            &db,
+            &binding,
+            &conversation_id,
+            "call-1",
+            "read",
+            "{\"path\":\"a.txt\"}",
+            fox_engine_protocol::ActionClass::Read,
+        );
+        let effect = effect_for("call-1", serde_json::json!({"path": "a.txt"}));
+        let result = admit_and_execute_dispatch(
+            &db,
+            &binding,
+            &effect,
+            "read",
+            &serde_json::json!({"input": {"path": "a.txt"}}),
+            |_| (
+                Ok(serde_json::json!({"content":[{"type":"text","text":"file body"}]})),
+                fox_engine_protocol::ExecutionEvidence::NotStarted,
+            ),
+        )
+        .unwrap();
+        assert_eq!(result["isError"].as_bool(), None, "result: {result}");
+        let row = db.read_execution_attempt(&run_id, &dispatch_id).unwrap().unwrap();
+        assert_eq!(row.state, fox_engine_protocol::AttemptState::Completed);
+        assert_eq!(row.start_confirmed, Some(false));
+        assert_eq!(row.terminal_state.as_deref(), Some("completed"));
+        assert_eq!(row.error_code, None, "a successful read has no refusal code");
+        let receipt = db.execution_receipt(&run_id, &dispatch_id).unwrap().unwrap();
+        assert_eq!(receipt.execution_started, TriState::False);
+        assert_eq!(receipt.reason_code, None);
+    }
+
+    #[test]
+    fn a_manage_query_completion_is_not_a_start() {
+        // R1-01: status/output/cancel complete a management query; no external
+        // process is started by them.
+        let (db, _path, run_id, conversation_id, binding) = fixture();
+        let dispatch_id = issue_credential(
+            &db,
+            &binding,
+            &conversation_id,
+            "call-1",
+            "run_command",
+            "{\"action\":\"status\",\"jobId\":\"j\"}",
+            fox_engine_protocol::ActionClass::Manage,
+        );
+        db.with_connection(|c| {
+            c.execute(
+                "UPDATE kernel_tool_calls SET tool='run_command',
+                     canonical_input_json='{\"action\":\"status\",\"jobId\":\"j\"}'
+                  WHERE run_id=?1 AND tool_call_id='call-1'",
+                rusqlite::params![run_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let effect = effect_for("call-1", serde_json::json!({"action": "status", "jobId": "j"}));
+        let result = admit_and_execute_dispatch(
+            &db,
+            &binding,
+            &effect,
+            "run_command",
+            &serde_json::json!({"input": {"action": "status", "jobId": "j"}}),
+            |_| (
+                Ok(serde_json::json!({"content":[{"type":"text","text":"running"}]})),
+                fox_engine_protocol::ExecutionEvidence::NotStarted,
+            ),
+        )
+        .unwrap();
+        assert_eq!(result["isError"].as_bool(), None, "result: {result}");
+        let row = db.read_execution_attempt(&run_id, &dispatch_id).unwrap().unwrap();
+        assert_eq!(row.state, fox_engine_protocol::AttemptState::Completed);
+        assert_eq!(row.start_confirmed, Some(false));
+        assert_eq!(row.terminal_state.as_deref(), Some("completed"));
+        assert_eq!(row.error_code, None, "a successful query has no refusal code");
+        let receipt = db.execution_receipt(&run_id, &dispatch_id).unwrap().unwrap();
+        assert_eq!(receipt.execution_started, TriState::False);
+        assert_eq!(receipt.reason_code, None);
+    }
+
+    #[test]
+    fn an_error_after_a_real_start_stays_unknown_and_never_replays() {
+        // R1-01: an executor error may have happened after a real start. The
+        // Host must not claim "not started" and must not replay.
+        let (db, _path, run_id, conversation_id, binding) = fixture();
+        let dispatch_id = issue_credential(
+            &db,
+            &binding,
+            &conversation_id,
+            "call-1",
+            "read",
+            "{\"path\":\"a.txt\"}",
+            fox_engine_protocol::ActionClass::Read,
+        );
+        let effect = effect_for("call-1", serde_json::json!({"path": "a.txt"}));
+        let result = admit_and_execute_dispatch(
+            &db,
+            &binding,
+            &effect,
+            "read",
+            &serde_json::json!({"input": {"path": "a.txt"}}),
+            |_| (
+                Err("the child died oddly".to_owned()),
+                fox_engine_protocol::ExecutionEvidence::Unknown,
+            ),
+        )
+        .unwrap_err();
+        assert!(result.contains("child died"), "{result}");
+        let row = db.read_execution_attempt(&run_id, &dispatch_id).unwrap().unwrap();
+        assert_eq!(row.state, fox_engine_protocol::AttemptState::Unknown);
+        assert_eq!(row.start_confirmed, None, "no start may be invented");
+        // A repeat delivery is read-only and reports the uncertain fact.
+        let repeat = admit_and_execute_dispatch(
+            &db,
+            &binding,
+            &effect,
+            "read",
+            &serde_json::json!({"input": {"path": "a.txt"}}),
+            |_| (
+                Ok(serde_json::json!({"content":[]})),
+                fox_engine_protocol::ExecutionEvidence::Started,
+            ),
+        )
+        .unwrap();
+        assert_eq!(repeat["details"]["stage"], "interrupted");
+        assert_eq!(repeat["details"]["executionStarted"], "unknown");
+        assert_eq!(repeat["details"]["codeAlias"], "job.interrupted_unknown");
+        assert!(!repeat["details"]["allowReplay"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn a_confirmed_start_is_never_regressed_by_an_unknown_outcome() {
+        // R1-01: once evidence confirms a start, an unknown outcome keeps True.
+        let (db, _path, run_id, conversation_id, binding) = fixture();
+        let dispatch_id = issue_credential(
+            &db,
+            &binding,
+            &conversation_id,
+            "call-1",
+            "read",
+            "{\"path\":\"a.txt\"}",
+            fox_engine_protocol::ActionClass::Read,
+        );
+        let effect = effect_for("call-1", serde_json::json!({"path": "a.txt"}));
+        let error = execute_claimed_dispatch(
+            &db,
+            &binding,
+            &effect,
+            "read",
+            &serde_json::json!({"input": {"path": "a.txt"}}),
+            |_, _claim| (
+                Err("the confirmed child later failed".to_owned()),
+                fox_engine_protocol::ExecutionEvidence::Started,
+                fox_engine_protocol::CallOutcome::Failed {
+                    code: "tool.child_failed".to_owned(),
+                },
+            ),
+        )
+        .unwrap_err();
+        assert!(error.contains("confirmed child later failed"), "{error}");
+        // The real executor confirmed the start before reporting a failed call.
+        // Settlement makes the outcome unknown without erasing that start fact.
+        let row = db.read_execution_attempt(&run_id, &dispatch_id).unwrap().unwrap();
+        assert_eq!(row.state, fox_engine_protocol::AttemptState::Unknown);
+        assert_eq!(row.start_confirmed, Some(true));
+        assert_eq!(row.terminal_state.as_deref(), Some("failed"));
+        assert_eq!(row.error_code.as_deref(), Some("tool.child_failed"));
+        let receipt = db.execution_receipt(&run_id, &dispatch_id).unwrap().unwrap();
+        assert_eq!(receipt.execution_started, TriState::True);
+        assert!(receipt.clone().with_execution_started(TriState::False).is_err());
+    }
+
+    #[test]
+    fn same_tool_different_path_never_reaches_an_executor() {
+        let (db, _path, run_id, conversation_id, binding) = fixture();
+        let dispatch_id = issue_credential(
+            &db,
+            &binding,
+            &conversation_id,
+            "call-1",
+            "read",
+            "{\"path\":\"a.txt\"}",
+            fox_engine_protocol::ActionClass::Read,
+        );
+        // Same tool, substituted path in the payload.
+        let effect = effect_for("call-1", serde_json::json!({"path": "secrets.env"}));
+        let mut calls = 0usize;
+        let error = admit_and_execute_dispatch(
+            &db,
+            &binding,
+            &effect,
+            "read",
+            &serde_json::json!({"input": {"path": "secrets.env"}}),
+            |_| {
+                calls += 1;
+                (
+                    Ok(serde_json::json!({"content":[]})),
+                    fox_engine_protocol::ExecutionEvidence::Started,
+                )
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("payload input differs from the durable identity"),
+            "{error}"
+        );
+        assert_eq!(calls, 0, "no executor may run for a substituted payload");
+        // The mismatch is refused BEFORE the claim, so no attempt fact exists.
+        assert!(db.read_execution_attempt(&run_id, &dispatch_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_repeat_delivery_returns_the_real_receipt_and_never_replays() {
+        let (db, _path, run_id, conversation_id, binding) = fixture();
+        let dispatch_id = issue_credential(
+            &db,
+            &binding,
+            &conversation_id,
+            "call-1",
+            "read",
+            "{\"path\":\"a.txt\"}",
+            fox_engine_protocol::ActionClass::Read,
+        );
+        let effect = effect_for("call-1", serde_json::json!({"path": "a.txt"}));
+        let first = admit_and_execute_dispatch(
+            &db,
+            &binding,
+            &effect,
+            "read",
+            &serde_json::json!({"input": {"path": "a.txt"}}),
+            |_| (
+                Ok(serde_json::json!({"content":[{"type":"text","text":"ok"}]})),
+                fox_engine_protocol::ExecutionEvidence::Started,
+            ),
+        )
+        .unwrap();
+        assert_eq!(first["isError"].as_bool(), None, "first: {first}");
+        let mut calls = 0usize;
+        let repeat = admit_and_execute_dispatch(
+            &db,
+            &binding,
+            &effect,
+            "read",
+            &serde_json::json!({"input": {"path": "a.txt"}}),
+            |_| {
+                calls += 1;
+                (
+                    Ok(serde_json::json!({"content":[]})),
+                    fox_engine_protocol::ExecutionEvidence::Started,
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 0);
+        // The repeat reports the ACTUAL durable receipt, not a hard-coded one.
+        assert_eq!(repeat["details"]["stage"], "launch_confirmed");
+        assert_eq!(repeat["details"]["executionStarted"], true);
+        assert_eq!(repeat["details"]["dispatchId"], dispatch_id);
+    }
+
+    #[test]
+    fn safe_queries_stay_reachable_while_external_launches_stay_refused() {
+        let (db, path, run_id, conversation_id, binding) = fixture();
+        // A status query of an already-admitted job is safe management: it is
+        // admitted and executed through the real Host order.
+        let status_id = issue_credential(
+            &db,
+            &binding,
+            &conversation_id,
+            "call-1",
+            "run_command",
+            "{\"action\":\"status\",\"jobId\":\"j\"}",
+            fox_engine_protocol::ActionClass::Manage,
+        );
+        db.with_connection(|c| {
+            c.execute(
+                "UPDATE kernel_tool_calls SET tool='run_command',
+                     canonical_input_json='{\"action\":\"status\",\"jobId\":\"j\"}'
+                  WHERE run_id=?1 AND tool_call_id='call-1'",
+                rusqlite::params![run_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let status_effect = effect_for(
+            "call-1",
+            serde_json::json!({"action": "status", "jobId": "j"}),
+        );
+        let result = admit_and_execute_dispatch(
+            &db,
+            &binding,
+            &status_effect,
+            "run_command",
+            &serde_json::json!({"input": {"action": "status", "jobId": "j"}}),
+            |_| (
+                Ok(serde_json::json!({"content":[{"type":"text","text":"status ok"}]})),
+                fox_engine_protocol::ExecutionEvidence::NotStarted,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            result["isError"].as_bool(),
+            None,
+            "a safe query must not be refused by the backend gate: {result}"
+        );
+
+        // The same environment with an external start: refused, persisted, and
+        // no job row is fabricated to carry it.
+        let start_id = issue_credential(
+            &db,
+            &binding,
+            &conversation_id,
+            "call-2",
+            "run_command",
+            "{\"action\":\"start\",\"command\":\"echo hi\"}",
+            fox_engine_protocol::ActionClass::Execute,
+        );
+        db.with_connection(|c| {
+            c.execute(
+                "INSERT INTO kernel_tool_calls(run_id, tool_call_id, batch_id, tool, source_order,
+                     canonical_input_json, state, result_json, created_at, settled_at)
+                 VALUES (?1,'call-2','b1','run_command',1,'{\"action\":\"start\",\"command\":\"echo hi\"}','pending',NULL,1,NULL)",
+                rusqlite::params![run_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let start_effect = effect_for(
+            "call-2",
+            serde_json::json!({"action": "start", "command": "echo hi"}),
+        );
+        let mut calls = 0usize;
+        let refused = admit_and_execute_dispatch(
+            &db,
+            &binding,
+            &start_effect,
+            "run_command",
+            &serde_json::json!({"input": {"action": "start", "command": "echo hi"}}),
+            |_| {
+                calls += 1;
+                (
+                    Ok(serde_json::json!({"content":[]})),
+                    fox_engine_protocol::ExecutionEvidence::Started,
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 0);
+        assert_eq!(refused["isError"].as_bool(), Some(true), "refused: {refused}");
+        // An external launch is refused fail-closed. The requirement order puts
+        // the missing live policy version first; the missing backend is the
+        // next one and is reported by the same terminal refusal.
+        let code = refused["details"]["error"]["code"].as_str().unwrap().to_owned();
+        assert!(
+            code == "policy_version_unavailable" || code == "sandbox_unavailable",
+            "unexpected refusal code {code}"
+        );
+        assert_eq!(refused["details"]["executionStarted"], false);
+        let jobs: i64 = db
+            .with_connection(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM kernel_jobs WHERE run_id=?1",
+                    rusqlite::params![run_id],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(jobs, 0, "no job row may carry a refusal");
+        drop(db);
+        let reopened = Database::open(path).unwrap();
+        let row = reopened
+            .read_execution_attempt(&run_id, &start_id)
+            .unwrap()
+            .unwrap();
+        // The refusal is durable and terminal (the launch never happened).
+        assert_eq!(
+            row.state,
+            fox_engine_protocol::AttemptState::Refused {
+                code: "policy_version_unavailable".to_owned()
+            }
+        );
+        assert_eq!(row.start_confirmed, None);
+        // The safe query from earlier still resolved to a real durable success:
+        // it completed without fabricating an external process start.
+        let row = reopened
+            .read_execution_attempt(&run_id, &status_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.start_confirmed, Some(false));
+        assert_eq!(row.state, fox_engine_protocol::AttemptState::Completed);
+        assert_eq!(row.terminal_state.as_deref(), Some("completed"));
+        assert_eq!(row.error_code, None);
     }
 }

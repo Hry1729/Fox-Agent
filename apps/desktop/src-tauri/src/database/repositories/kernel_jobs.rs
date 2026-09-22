@@ -182,6 +182,26 @@ fn process_started_at() -> Option<i64> {
     crate::runtime_host::process_start_marker()
 }
 
+/// Host command keys carry a bounded, canonical dispatch identity. Other
+/// background job families retain their historical 200-byte key limit.
+fn validate_job_idempotency_key(run_id: &str, key: &str) -> Result<(), String> {
+    if key.starts_with("job:tool-dispatch") {
+        // 4 decimal digits are sufficient for the frozen 1024-byte component bound.
+        const MAX_HOST_KEY_BYTES: usize = "job:tool-dispatch:".len() + 4 + 1 + 1024 + 1 + 1024;
+        if key.len() > MAX_HOST_KEY_BYTES {
+            return Err("job idempotency key exceeds its bound".into());
+        }
+        let encoded = key.strip_prefix("job:").ok_or("invalid Host job identity")?;
+        let (encoded_run, call_id) = fox_engine_protocol::decode_dispatch_id(encoded)?;
+        if encoded_run != run_id || fox_engine_protocol::encode_dispatch_id(&encoded_run, &call_id)? != encoded {
+            return Err("credential_mismatch: Host job identity differs from its run".into());
+        }
+    } else if key.len() > 200 {
+        return Err("job idempotency key exceeds its bound".into());
+    }
+    Ok(())
+}
+
 impl Database {
     /// Start (or return) a background job.
     pub fn kernel_job_start(&self, request: &JobStartRequest) -> Result<JobStartOutcome, String> {
@@ -191,9 +211,10 @@ impl Database {
         {
             return Err("job identity fields must be non-empty".into());
         }
-        if request.kind.len() > 64 || request.idempotency_key.len() > 200 {
-            return Err("job kind or idempotency key exceeds its bound".into());
+        if request.kind.len() > 64 {
+            return Err("job kind exceeds its bound".into());
         }
+        validate_job_idempotency_key(&request.run_id, &request.idempotency_key)?;
         if request.deadline_ms.is_some_and(|deadline| deadline <= 0) {
             return Err("job deadline must be positive".into());
         }
@@ -665,6 +686,48 @@ mod tests {
             .unwrap();
         assert_eq!(settled.state, JobState::Cancelled);
         assert!(settled.result_ref.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn host_dispatch_keys_accept_the_full_utf8_bound_and_bind_the_run() {
+        let run = "r".repeat(1024);
+        let call = "c".repeat(1024);
+        let key = format!("job:{}", fox_engine_protocol::encode_dispatch_id(&run, &call).unwrap());
+        validate_job_idempotency_key(&run, &key).unwrap();
+        assert!(validate_job_idempotency_key("different-run", &key).is_err());
+        assert!(validate_job_idempotency_key("r", "job:tool-dispatch:01:r:c").is_err());
+        assert!(validate_job_idempotency_key("r", "job:tool-dispatch:1:r:").is_err());
+        assert!(validate_job_idempotency_key("r", &"legacy".repeat(40)).is_err());
+        validate_job_idempotency_key("r", &"x".repeat(200)).unwrap();
+
+        let (db, root, run_id) = database();
+        let key = format!("job:{}", fox_engine_protocol::encode_dispatch_id(&run_id, &"调用:".repeat(140)).unwrap());
+        let first = db.kernel_job_start(&start_request(&run_id, &key, json!({}))).unwrap();
+        let second = db.kernel_job_start(&start_request(&run_id, &key, json!({}))).unwrap();
+        assert!(matches!(first, JobStartOutcome::Created(_)));
+        assert!(matches!(second, JobStartOutcome::Existing(_)));
+        assert_eq!(first.snapshot().job_id, second.snapshot().job_id);
+
+        let job_id = first.snapshot().job_id.clone();
+        drop(db);
+        let reopened = Database::open(root.join("facts.db")).unwrap();
+        let after_reopen = reopened
+            .kernel_job_start(&start_request(&run_id, &key, json!({})))
+            .unwrap();
+        assert!(matches!(after_reopen, JobStartOutcome::Existing(_)));
+        assert_eq!(after_reopen.snapshot().job_id, job_id);
+        let v79_count: i64 = reopened
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT COUNT(*) FROM schema_migrations WHERE version=79",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(v79_count, 1);
+        drop(reopened);
         let _ = std::fs::remove_dir_all(root);
     }
 

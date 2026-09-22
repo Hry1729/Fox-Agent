@@ -38,6 +38,8 @@ mod kernel;
 mod kernel_compaction;
 pub(crate) mod kernel_authorization;
 pub(crate) mod kernel_continuation;
+pub(crate) mod kernel_execution_admission;
+pub(crate) mod kernel_execution_policy;
 pub(crate) mod kernel_jobs;
 mod kernel_job_execution;
 mod model_usage;

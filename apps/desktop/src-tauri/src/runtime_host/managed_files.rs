@@ -3,8 +3,8 @@
 //!
 //! Invariants:
 //! * Registration happens around a write that already passed every frozen
-//!   Kernel/Legacy admission check. Version bookkeeping is best-effort: a hash
-//!   or registry failure never undoes or fails an authorized write.
+//!   Host admission check. Admitted file writes register under the file lock;
+//!   a registration failure is visible and never causes automatic replay.
 //! * A registered **version is a content version**: `version_no`, the size and
 //!   hash shown in the UI, and the bytes a restore writes are the same content.
 //!   Each recorded write therefore keeps two Host-owned snapshots: the bytes
@@ -49,6 +49,9 @@ fn store_snapshot(backups_dir: &Path, source: &Path) -> Result<PathBuf, String> 
     let backup = backups_dir.join(format!("managed-{}.foxbak", uuid::Uuid::new_v4()));
     fs::copy(source, &backup)
         .map_err(|error| format!("failed to snapshot the managed file: {error}"))?;
+    fs::OpenOptions::new().write(true).open(&backup)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("failed to flush managed snapshot: {error}"))?;
     Ok(backup)
 }
 
@@ -61,6 +64,7 @@ pub(crate) struct BeforeCapture {
     pub before_hash: Option<String>,
     pub before_size: Option<i64>,
     pub backup_path: Option<PathBuf>,
+    pub expected_after_version: Option<String>,
 }
 
 pub(crate) fn capture_before(
@@ -73,6 +77,9 @@ pub(crate) fn capture_before(
         let (hash, size) = hash_file(target)
             .ok_or_else(|| "cannot hash the existing managed file".to_string())?;
         let backup = store_snapshot(backups_dir, target)?;
+        if hash_file(&backup) != Some((hash.clone(), size)) {
+            return Err("managed pre-image changed during capture; snapshot retained".into());
+        }
         (Some(hash), Some(size), Some(backup))
     } else {
         (None, None, None)
@@ -89,17 +96,18 @@ pub(crate) fn capture_before(
         before_hash,
         before_size,
         backup_path,
+        expected_after_version: None,
     })
 }
 
 /// Hash the post-write file, snapshot its content as this version's own bytes,
 /// and append the version row.
 ///
+/// The admitted file executor invokes this while holding the file lock.
 /// The content snapshot is what makes "restore version *n*" mean *this*
 /// content: `version n`'s bytes are kept next to `version n`'s row instead of
-/// being inferred from a neighbouring row's undo copy. Errors are returned so
-/// the caller can log them; callers must not fail the tool result because of
-/// bookkeeping.
+/// being inferred from a neighbouring row's undo copy. Registration errors are
+/// returned with the committed side-effect evidence; never replay the write.
 pub(crate) fn record_after(
     database: &Database,
     backups_dir: &Path,
@@ -112,9 +120,15 @@ pub(crate) fn record_after(
     let target = PathBuf::from(&capture.storage_path);
     let (after_hash, after_size) = hash_file(&target)
         .ok_or_else(|| "managed target is missing after the write".to_string())?;
+    if capture.expected_after_version.as_deref().is_some_and(|expected| expected != format!("sha256:{after_hash}")) {
+        return Err("managed target changed after commit; refusing to register external bytes".into());
+    }
     // A missing content snapshot must not silently degrade the row into
     // "unrestorable": fail the registration so the caller logs an honest gap.
     let after_backup = store_snapshot(backups_dir, &target)?;
+    if hash_file(&after_backup) != Some((after_hash.clone(), after_size)) {
+        return Err("managed target changed during post-write snapshot; materials retained".into());
+    }
     database.register_managed_file_version(
         &ManagedFileVersionInput {
             conversation_id,
@@ -403,6 +417,139 @@ pub(crate) struct ManagedExecutionContext<'a> {
     /// The Host's session store, used to resolve compute-artifact references in
     /// the managed-write pre-flight. `None` in unit tests.
     pub sessions_dir: Option<&'a Path>,
+}
+
+/// Canonical target resolver used by the credential issuance transaction.
+pub(crate) struct HostFileTargetResolver<'a> { pub project_root: &'a Path }
+impl crate::database::kernel_execution_admission::FileTargetResolver for HostFileTargetResolver<'_> {
+    fn resolve(&self, class: fox_engine_protocol::ActionClass,
+        canonical_input_json: &str) -> Option<String> {
+        use fox_engine_protocol::ActionClass;
+        if !matches!(class, ActionClass::Write | ActionClass::Destructive) { return None; }
+        let input: serde_json::Value = serde_json::from_str(canonical_input_json).ok()?;
+        crate::tool_host::canonical_file_identity(self.project_root, input.get("path")?.as_str()?).ok()
+    }
+}
+
+/// Construct an observation only from bytes actually read by the Host, never
+/// by reopening the file after the read (which could bind a different version).
+pub(crate) fn observation_from_read(root: &Path, path: &str, bytes: &[u8], tool_call_id: &str)
+    -> Result<fox_engine_protocol::HostObservation, String> {
+    Ok(fox_engine_protocol::HostObservation {
+        target_identity: crate::tool_host::canonical_file_identity(root, path)?,
+        version: crate::tool_host::file_version(bytes),
+        observed_by_tool_call_id: tool_call_id.into(),
+    })
+}
+
+/// Execute a real reader and persist only its private opened-file evidence.
+/// Both desktop and Kernel call this seam. A missing read keeps its original
+/// failure while a positively verified absent target establishes the baseline.
+pub(crate) fn execute_observed_reader(
+    database: &Database, binding: &fox_engine_protocol::RunControlBinding,
+    tool: &str, input: &serde_json::Value, tool_call_id: &str,
+    cancellation: &crate::kernel::CancellationToken, budget: std::time::Duration,
+) -> Result<serde_json::Value, String> {
+    let started = std::time::Instant::now();
+    let outcome = crate::resource_gateway::execute_with_observation_budget(
+        binding, tool, input, cancellation, budget);
+    match outcome {
+        Ok((result, observation)) => {
+            cancellation.check()?;
+            if let Some(observation) = observation {
+                database.record_host_observation(&binding.run_id, &binding.conversation_id,
+                    &observation.host_observation(tool_call_id))?;
+            }
+            Ok(result)
+        }
+        Err(error) => {
+            if tool == "read" && started.elapsed() < budget && cancellation.check().is_ok() {
+                if let Some(path) = input.get("path").and_then(serde_json::Value::as_str) {
+                    if let Ok(observation) = crate::resource_gateway::observe_missing_file(binding, path, cancellation) {
+                        database.record_host_observation(&binding.run_id, &binding.conversation_id,
+                            &observation.host_observation(tool_call_id))?;
+                    }
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+/// Called exclusively by the Host after its durable one-shot claim. All
+/// pre-image capture, snapshot verification, final revalidation, replacement
+/// and version registration execute while the file lock remains held.
+pub(crate) fn execute_admitted_file(
+    context: ManagedExecutionContext<'_>, tool: &str, input: &serde_json::Value,
+    tool_call_id: &str, credential: &fox_engine_protocol::ExecutionCredential,
+    cancellation: Option<&crate::kernel::CancellationToken>,
+    revalidate: &mut dyn FnMut() -> Result<(), String>,
+) -> (Result<serde_json::Value, String>, fox_engine_protocol::ExecutionEvidence) {
+    use fox_engine_protocol::{ExecutionCredential, ExecutionEvidence};
+    if credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(tool, &input.to_string()) {
+        return (Err("credential_mismatch: file payload differs from the admitted intent".into()), ExecutionEvidence::NotStarted);
+    }
+    struct Hooks<'a, 'b> {
+        context: ManagedExecutionContext<'a>, tool: &'b str, tool_call_id: &'b str,
+        credential: &'b ExecutionCredential, before: Option<BeforeCapture>,
+        evidence: ExecutionEvidence, directory_side_effect: bool, expected_after_version: String,
+        revalidate: &'b mut dyn FnMut() -> Result<(), String>,
+    }
+    impl crate::tool_host::FileCommitContext for Hooks<'_, '_> {
+        fn baseline(&self) -> &str { &self.credential.file_baseline.as_ref().expect("checked baseline").version }
+        fn dispatch_id(&self) -> &str { &self.credential.dispatch_id }
+        fn validate(&mut self, target: &Path) -> Result<(), String> {
+            self.context.database.verify_execution_credential(self.context.run_id, self.credential)?;
+            if self.credential.run_id != self.context.run_id
+                || self.credential.conversation_id != self.context.conversation_id {
+                return Err("credential_mismatch: file execution scope differs".into());
+            }
+            let baseline = self.credential.file_baseline.as_ref().ok_or("observation_incomplete")?;
+            let identity = crate::tool_host::canonical_file_identity(
+                Path::new(self.context.project_root.ok_or("file project root missing")?),
+                &target.to_string_lossy())?;
+            if baseline.target_identity != identity { return Err("credential_mismatch: file target differs".into()); }
+            (self.revalidate)()
+        }
+        fn capture_before(&mut self, target: &Path) -> Result<(), String> {
+            let mut capture = capture_before(self.context.backups_dir,
+                Path::new(self.context.project_root.ok_or("file project root missing")?), target)?;
+            capture.expected_after_version = Some(self.expected_after_version.clone());
+            self.before = Some(capture);
+            Ok(())
+        }
+        fn record_committed(&mut self, _target: &Path) -> Result<(), String> {
+            record_after(self.context.database, self.context.backups_dir,
+                self.context.conversation_id, self.context.run_id, Some(self.tool_call_id),
+                self.tool, self.before.take().ok_or("missing pre-write capture")?).map(|_| ())
+        }
+        fn mark_applying(&mut self) { self.evidence = ExecutionEvidence::Unknown; }
+        fn mark_committed(&mut self) { self.evidence = ExecutionEvidence::Started; }
+        fn mark_directory_creation(&mut self) {
+            self.directory_side_effect = true;
+            self.evidence = ExecutionEvidence::Unknown;
+        }
+        fn mark_not_applied(&mut self) {
+            self.evidence = if self.directory_side_effect { ExecutionEvidence::Unknown } else { ExecutionEvidence::NotStarted };
+        }
+    }
+    let Some(baseline) = credential.file_baseline.as_ref() else {
+        return (Err("observation_incomplete".into()), ExecutionEvidence::NotStarted);
+    };
+    let prepared = match crate::tool_host::prepare_admitted_file(tool, input,
+        context.project_root.unwrap_or_default(), &baseline.version) {
+        Ok(prepared) => prepared,
+        Err(error) => return (Err(error), ExecutionEvidence::NotStarted),
+    };
+    let expected_after_version = match &prepared {
+        crate::tool_host::PreparedToolAction::WriteFile { content, .. }
+        | crate::tool_host::PreparedToolAction::EditFile { content, .. } => crate::tool_host::file_version(content.as_bytes()),
+        _ => return (Err("file admission cannot execute a non-file action".into()), ExecutionEvidence::NotStarted),
+    };
+    let mut hooks = Hooks { context, tool, tool_call_id, credential, before: None,
+        evidence: ExecutionEvidence::NotStarted, directory_side_effect: false, expected_after_version, revalidate };
+    let result = crate::tool_host::execute_file_with_context(prepared, cancellation, &mut hooks);
+    (result, hooks.evidence)
 }
 
 /// Run one Host dispatch with managed-file bookkeeping around it.
@@ -1005,6 +1152,405 @@ mod tests {
 
     fn contents_of(path: &Path) -> String {
         fs::read_to_string(path).unwrap()
+    }
+
+    fn file_scope() -> crate::database::KernelHostScope {
+        crate::database::KernelHostScope {
+            schema_version: 1,
+            tool_names: ["write_file".to_owned()].into_iter().collect(),
+            mcp_server_hashes: Default::default(),
+            knowledge_reference_hashes: Default::default(),
+            knowledge_connection_hashes: Default::default(),
+            office_tools: Default::default(),
+            lifecycle_hooks: Vec::new(),
+        }
+    }
+
+    /// Build the A-side authority used by `execute_admitted_file`: a real
+    /// frozen binding supplies the budget and permission snapshot, while the
+    /// baseline comes from bytes the Host actually read and persisted.
+    fn admitted_file_authority(
+        harness: &Harness,
+        run_id: &str,
+        tool_call_id: &str,
+        relative: &str,
+        input: &serde_json::Value,
+    ) -> (
+        fox_engine_protocol::RunControlBinding,
+        fox_engine_protocol::ExecutionCredential,
+    ) {
+        harness.seed_run(run_id);
+        let root = harness.root.to_string_lossy().into_owned();
+        harness
+            .db
+            .with_connection(|connection| {
+                connection.execute(
+                    "UPDATE conversations SET project_root=?2 WHERE id=?1",
+                    rusqlite::params![harness.conversation.as_str(), root.as_str()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let initial_policy = harness
+            .db
+            .execution_policy(&harness.conversation)
+            .expect("read initial live policy");
+        if initial_policy.mode != "allow" {
+            harness
+                .db
+                .change_execution_policy(
+                    &harness.conversation,
+                    &format!("managed-file-authority-{run_id}"),
+                    initial_policy.version,
+                    "allow",
+                )
+                .expect("authorize the managed write through the live policy");
+        }
+        let mut budgets = fox_engine_protocol::TimeBudgets::default();
+        budgets.tool_execution_ms = 30_000;
+        let binding = harness
+            .db
+            .freeze_kernel_run_control(run_id, "durable", budgets)
+            .expect("freeze real run control");
+        assert_eq!(binding.permission.project_root.as_deref(), Some(root.as_str()));
+
+        let observed_bytes = fs::read(harness.target(relative)).expect("read Host baseline");
+        let observation = observation_from_read(
+            &harness.root,
+            relative,
+            &observed_bytes,
+            &format!("read-{tool_call_id}"),
+        )
+        .expect("construct Host observation from opened bytes");
+        harness
+            .db
+            .record_host_observation(run_id, &harness.conversation, &observation)
+            .expect("persist Host observation");
+
+        let canonical_input = serde_json::to_string(input).unwrap();
+        let policy = harness
+            .db
+            .execution_policy(&harness.conversation)
+            .expect("read live policy");
+        let credential = fox_engine_protocol::ExecutionCredential::new(
+            fox_engine_protocol::encode_dispatch_id(run_id, tool_call_id).unwrap(),
+            run_id.to_owned(),
+            harness.conversation.clone(),
+            crate::database::kernel_execution_admission::launch_params_hash(
+                "write_file",
+                &canonical_input,
+            ),
+            fox_engine_protocol::ActionClass::Write,
+            Some(observation),
+            binding.execution_profile_id.clone(),
+            binding.permission_snapshot_id.clone(),
+            Some(policy.version),
+            binding.budgets.tool_execution_ms,
+            None,
+            crate::database::kernel_execution_admission::unverified_backend_requirement(),
+        )
+        .expect("build write credential");
+        harness
+            .db
+            .issue_execution_credential(&credential)
+            .expect("persist authoritative credential");
+        harness
+            .db
+            .verify_execution_credential(run_id, &credential)
+            .expect("presented credential matches DB authority");
+        harness
+            .db
+            .revalidate_execution_credential(&credential)
+            .expect("credential initially passes live DB gates");
+        (binding, credential)
+    }
+
+    fn replace_journals(root: &Path) -> Vec<(PathBuf, serde_json::Value)> {
+        let mut records = fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                (name.starts_with(".fox-replace-journal-") && name.ends_with(".json"))
+                    .then(|| {
+                        let path = entry.path();
+                        let value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                        (path, value)
+                    })
+            })
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| left.0.cmp(&right.0));
+        records
+    }
+
+    /// A-side integration only: B's durable claim is tested at the Host seam.
+    /// This drives the real prepare, locked atomic replace and version registry
+    /// with a DB-authoritative credential and live revalidation.
+    #[test]
+    fn admitted_file_executes_atomic_replace_and_registers_exact_bytes() {
+        let harness = Harness::new();
+        let target = harness.write_file("admitted.txt", "old bytes");
+        let input = serde_json::json!({"path":"admitted.txt","content":"new bytes"});
+        let (binding, credential) = admitted_file_authority(
+            &harness,
+            "run-admitted",
+            "call-admitted",
+            "admitted.txt",
+            &input,
+        );
+        let scope = file_scope();
+        let root = harness.root.to_string_lossy().into_owned();
+        let context = ManagedExecutionContext {
+            database: &harness.db,
+            backups_dir: &harness.backups,
+            conversation_id: &harness.conversation,
+            run_id: &binding.run_id,
+            project_root: Some(root.as_str()),
+            permission_mode: binding.permission.mode.as_str(),
+            scope: &scope,
+            sessions_dir: None,
+        };
+        let revalidation_count = std::cell::Cell::new(0usize);
+        let mut revalidate = || {
+            revalidation_count.set(revalidation_count.get() + 1);
+            harness.db.revalidate_execution_credential(&credential)
+        };
+        let forged = serde_json::json!({"path":"admitted.txt","content":"forged same-target bytes"});
+        let (refusal, evidence) = execute_admitted_file(context, "write_file", &forged,
+            "call-admitted", &credential, None, &mut revalidate);
+        assert!(refusal.unwrap_err().contains("credential_mismatch"));
+        assert_eq!(evidence, fox_engine_protocol::ExecutionEvidence::NotStarted);
+        assert_eq!(contents_of(&target), "old bytes");
+        assert!(harness.versions(None).is_empty());
+        let (result, evidence) = execute_admitted_file(
+            context,
+            "write_file",
+            &input,
+            "call-admitted",
+            &credential,
+            None,
+            &mut revalidate,
+        );
+        let result = result.expect("admitted write commits");
+        assert_eq!(
+            evidence,
+            fox_engine_protocol::ExecutionEvidence::Started,
+            "only the committed atomic replacement may confirm execution"
+        );
+        assert_eq!(revalidation_count.get(), 3, "every real pre-commit gate must run");
+        assert_eq!(contents_of(&target), "new bytes");
+        assert_eq!(
+            result["details"]["readVersion"],
+            crate::tool_host::file_version(b"new bytes")
+        );
+
+        // The executor records the Host's canonical storage identity. Query the
+        // actual conversation row first, then compare that identity exactly;
+        // the fixture's joined `PathBuf` may omit Windows' canonical prefix.
+        let rows = harness.versions(None);
+        assert_eq!(rows.len(), 1, "the committed bytes get one version row");
+        let row = &rows[0];
+        assert_eq!(
+            row.storage_path,
+            crate::tool_host::canonical_file_identity(
+                &harness.root,
+                &target.to_string_lossy(),
+            )
+            .expect("canonical committed target identity")
+        );
+        assert_eq!(row.tool, "write_file");
+        assert_eq!(row.tool_call_id.as_deref(), Some("call-admitted"));
+        assert_eq!(row.change_kind, "modified");
+        assert!(row.source_verified);
+        assert_eq!(
+            row.before_hash.as_deref(),
+            Some(crate::tool_host::file_version(b"old bytes").trim_start_matches("sha256:"))
+        );
+        assert_eq!(
+            row.after_hash.as_deref(),
+            Some(crate::tool_host::file_version(b"new bytes").trim_start_matches("sha256:"))
+        );
+        assert_eq!(
+            contents_of(Path::new(row.backup_path.as_deref().expect("pre-image backup"))),
+            "old bytes"
+        );
+        assert_eq!(
+            contents_of(Path::new(
+                row.after_backup_path.as_deref().expect("committed snapshot")
+            )),
+            "new bytes"
+        );
+        let journals = replace_journals(&harness.root);
+        let settled = journals
+            .iter()
+            .find(|(path, _)| path.to_string_lossy().ends_with(".settled.json"))
+            .expect("atomic replace settlement journal");
+        assert_eq!(settled.1["status"], "committed");
+        assert!(
+            settled.1["note"]
+                .as_str()
+                .is_some_and(|note| note.contains(&credential.dispatch_id)),
+            "the real journal is bound to the admitted dispatch"
+        );
+    }
+
+    #[test]
+    fn admitted_file_second_execution_rejects_an_externally_changed_old_baseline() {
+        let harness = Harness::new();
+        let target = harness.write_file("stale.txt", "observed bytes");
+        let input = serde_json::json!({"path":"stale.txt","content":"proposed bytes"});
+        let (binding, credential) = admitted_file_authority(
+            &harness,
+            "run-stale",
+            "call-stale",
+            "stale.txt",
+            &input,
+        );
+        let scope = file_scope();
+        let root = harness.root.to_string_lossy().into_owned();
+        let context = ManagedExecutionContext {
+            database: &harness.db,
+            backups_dir: &harness.backups,
+            conversation_id: &harness.conversation,
+            run_id: &binding.run_id,
+            project_root: Some(root.as_str()),
+            permission_mode: binding.permission.mode.as_str(),
+            scope: &scope,
+            sessions_dir: None,
+        };
+        let revalidation_count = std::cell::Cell::new(0usize);
+        let mut revalidate = || {
+            revalidation_count.set(revalidation_count.get() + 1);
+            harness.db.revalidate_execution_credential(&credential)
+        };
+        let (first, first_evidence) = execute_admitted_file(
+            context,
+            "write_file",
+            &input,
+            "call-stale",
+            &credential,
+            None,
+            &mut revalidate,
+        );
+        first.expect("the first admitted write commits");
+        assert_eq!(first_evidence, fox_engine_protocol::ExecutionEvidence::Started);
+        assert_eq!(revalidation_count.get(), 3);
+        assert_eq!(contents_of(&target), "proposed bytes");
+        let journals_before_refusal = replace_journals(&harness.root);
+
+        // Reusing this A-side authority after an external edit exercises the
+        // stale baseline check. Preparation sees the drift and refuses before
+        // entering the file lock, revalidating again, or creating a journal.
+        // B's one-shot claim prevents this in the full Host; this test
+        // intentionally isolates A's pre-commit baseline gate.
+        fs::write(&target, "external bytes").unwrap();
+        let (result, evidence) = execute_admitted_file(
+            context,
+            "write_file",
+            &input,
+            "call-stale",
+            &credential,
+            None,
+            &mut revalidate,
+        );
+        let error = result.expect_err("the observed baseline is stale");
+        assert!(error.contains("tool.file_conflict"), "unexpected error: {error}");
+        assert_eq!(evidence, fox_engine_protocol::ExecutionEvidence::NotStarted);
+        assert_eq!(
+            revalidation_count.get(), 3,
+            "prepare rejects the stale baseline before any locked revalidation"
+        );
+        assert_eq!(contents_of(&target), "external bytes");
+        assert_eq!(
+            replace_journals(&harness.root),
+            journals_before_refusal,
+            "a prepare-time refusal creates no commit journal"
+        );
+        let rows = harness.versions(None);
+        assert_eq!(rows.len(), 1, "the refused second write adds no version");
+        assert_eq!(
+            rows[0].storage_path,
+            crate::tool_host::canonical_file_identity(
+                &harness.root,
+                &target.to_string_lossy(),
+            )
+            .expect("canonical committed target identity")
+        );
+        assert_eq!(
+            rows[0].after_hash.as_deref(),
+            Some(crate::tool_host::file_version(b"proposed bytes").trim_start_matches("sha256:"))
+        );
+    }
+
+    #[test]
+    fn final_revalidation_refusal_keeps_a_not_applied_journal() {
+        let harness = Harness::new();
+        let target = harness.write_file("revoked.txt", "original bytes");
+        let input = serde_json::json!({"path":"revoked.txt","content":"blocked bytes"});
+        let (binding, credential) = admitted_file_authority(
+            &harness,
+            "run-revoked",
+            "call-revoked",
+            "revoked.txt",
+            &input,
+        );
+        let scope = file_scope();
+        let root = harness.root.to_string_lossy().into_owned();
+        let context = ManagedExecutionContext {
+            database: &harness.db,
+            backups_dir: &harness.backups,
+            conversation_id: &harness.conversation,
+            run_id: &binding.run_id,
+            project_root: Some(root.as_str()),
+            permission_mode: binding.permission.mode.as_str(),
+            scope: &scope,
+            sessions_dir: None,
+        };
+        let revalidation_count = std::cell::Cell::new(0usize);
+        let mut revalidate = || {
+            revalidation_count.set(revalidation_count.get() + 1);
+            if revalidation_count.get() == 3 {
+                Err("policy revoked at final revalidation".to_owned())
+            } else {
+                harness.db.revalidate_execution_credential(&credential)
+            }
+        };
+        let (result, evidence) = execute_admitted_file(
+            context,
+            "write_file",
+            &input,
+            "call-revoked",
+            &credential,
+            None,
+            &mut revalidate,
+        );
+        let error = result.expect_err("the final live gate must refuse the write");
+        assert!(
+            error.contains("policy revoked at final revalidation"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(revalidation_count.get(), 3);
+        assert_eq!(evidence, fox_engine_protocol::ExecutionEvidence::NotStarted);
+        assert_eq!(contents_of(&target), "original bytes");
+        assert!(harness.versions(Some(&target)).is_empty());
+
+        let journals = replace_journals(&harness.root);
+        let applying = journals
+            .iter()
+            .find(|(path, _)| !path.to_string_lossy().ends_with(".settled.json"))
+            .expect("the applying journal remains for audit");
+        let settled = journals
+            .iter()
+            .find(|(path, _)| path.to_string_lossy().ends_with(".settled.json"))
+            .expect("final refusal has a durable settlement");
+        assert_eq!(applying.1["status"], "applying");
+        assert_eq!(settled.1["status"], "not_applied");
+        assert!(
+            settled.1["note"]
+                .as_str()
+                .is_some_and(|note| note.contains(&credential.dispatch_id)),
+            "the refusal journal remains bound to the admitted dispatch"
+        );
     }
 
     /// F2: the shared execution seam is what the desktop Host *and* the real-task

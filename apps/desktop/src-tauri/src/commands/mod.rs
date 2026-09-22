@@ -1385,15 +1385,42 @@ pub fn projects_list(state: State<'_, AppState>) -> ApiResponse<Vec<ProjectRecor
     }
 }
 
+/// Only the bundled main desktop document may mutate user authority. The
+/// Window is supplied by Tauri; no request field can assert this provenance.
+pub(crate) fn require_trusted_local_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let location = window.url().map_err(|_| "无法核验权限操作来源".to_owned())?;
+    if trusted_permission_origin(window.label(), &location, cfg!(debug_assertions)) {
+        Ok(())
+    } else {
+        Err("权限操作只能由 Fox 本地桌面主窗口发起".into())
+    }
+}
+
+fn trusted_permission_origin(label: &str, url: &url::Url, development: bool) -> bool {
+    if label != "main" || !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    let bundled = url.port().is_none() && match (url.scheme(), url.host_str()) {
+        ("tauri", Some("localhost")) => true,
+        ("http" | "https", Some("tauri.localhost")) => true,
+        _ => false,
+    };
+    // Exact development origins from tauri.conf.json and tauri.profile.conf.json.
+    let dev = development && url.scheme() == "http" && url.host_str() == Some("127.0.0.1")
+        && matches!(url.port(), Some(1421 | 1422));
+    bundled || dev
+}
+
 #[tauri::command]
 pub fn project_permission_update(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     request: UpdateProjectPermissionRequest,
 ) -> ApiResponse<ProjectRecord> {
-    match state
-        .database
-        .update_project_permission_mode(&request.project_id, &request.permission_mode)
-    {
+    if let Err(error) = require_trusted_local_window(&window) {
+        return ApiResponse::failure("permission.untrusted_window", error, false);
+    }
+    match state.database.update_project_permission_mode(&request.project_id, &request.permission_mode) {
         Ok(Some(project)) => ApiResponse::success(project),
         Ok(None) => ApiResponse::failure("project.not_found", "未找到项目", false),
         Err(error) => ApiResponse::failure("project.invalid_permission_mode", error, false),
@@ -1401,17 +1428,59 @@ pub fn project_permission_update(
 }
 
 #[tauri::command]
+pub fn conversation_permission_state(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    request: ConversationIdRequest,
+) -> ApiResponse<Value> {
+    if let Err(error) = require_trusted_local_window(&window) {
+        return ApiResponse::failure("permission.untrusted_window", error, false);
+    }
+    match state.database.execution_policy(&request.conversation_id) {
+        Ok(policy) => ApiResponse::success(json!({"version":policy.version,"mode":policy.mode})),
+        Err(error) => storage_error(error),
+    }
+}
+
+#[tauri::command]
 pub fn conversation_permission_update(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     request: UpdateConversationPermissionRequest,
-) -> ApiResponse<ConversationSummary> {
-    match state
-        .database
-        .update_conversation_permission_mode(&request.conversation_id, &request.permission_mode)
-    {
-        Ok(Some(conversation)) => ApiResponse::success(conversation),
-        Ok(None) => ApiResponse::failure("conversation.not_found", "未找到对话", false),
+) -> ApiResponse<Value> {
+    if let Err(error) = require_trusted_local_window(&window) {
+        return ApiResponse::failure("permission.untrusted_window", error, false);
+    }
+    if request.request_id.trim().is_empty() || request.request_id.len() > 200 {
+        return ApiResponse::failure("permission.invalid_request", "权限请求标识无效", false);
+    }
+    match state.database.change_execution_policy(&request.conversation_id, &request.request_id,
+        request.expected_version, &request.permission_mode) {
+        Ok(policy) => ApiResponse::success(json!({"version":policy.version,"mode":policy.mode})),
+        Err(error) if error.contains("policy_version_conflict") => ApiResponse::failure(
+            "permission.version_conflict", "权限已在其他操作中变更，请刷新后重新选择", false),
+        Err(error) if error.contains("policy_request_identity_conflict") => ApiResponse::failure(
+            "permission.request_identity_conflict", "同一权限请求标识不能用于不同请求", false),
         Err(error) => ApiResponse::failure("conversation.invalid_permission_mode", error, false),
+    }
+}
+
+#[cfg(test)]
+mod permission_window_tests {
+    use super::trusted_permission_origin;
+    #[test]
+    fn authority_changes_require_the_bundled_main_document() {
+        let permitted = |label, address, dev| trusted_permission_origin(label, &url::Url::parse(address).unwrap(), dev);
+        assert!(permitted("main", "tauri://localhost/index.html", false));
+        assert!(permitted("main", "http://tauri.localhost/", false));
+        assert!(permitted("main", "http://127.0.0.1:1421/", true));
+        assert!(permitted("main", "http://127.0.0.1:1422/", true));
+        assert!(!permitted("main", "http://127.0.0.1:1421/", false));
+        assert!(!permitted("main", "http://127.0.0.1:4321/", true));
+        assert!(!permitted("preview", "tauri://localhost/", false));
+        assert!(!permitted("main", "https://example.com/", false));
+        assert!(!permitted("main", "https://tauri.localhost.evil/", false));
+        assert!(!permitted("main", "http://user@tauri.localhost/", false));
     }
 }
 
@@ -2931,9 +3000,13 @@ fn legacy_knowledge_bindings(
 
 #[tauri::command]
 pub fn approval_resolve(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     request: ResolveApprovalRequest,
 ) -> ApiResponse<bool> {
+    if let Err(error) = require_trusted_local_window(&window) {
+        return ApiResponse::failure("permission.untrusted_origin", error, false);
+    }
     match state
         .runtime_host
         .resolve_approval(&request.approval_id, request.decision)

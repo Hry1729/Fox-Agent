@@ -170,6 +170,9 @@ pub enum PolicyDecision {
     RequireApproval,
     /// Out of policy / high risk; hard deny.
     Deny { reason: String },
+    /// Invalid parameters or stale resources: settle without dispatch or approval,
+    /// preserving a bounded, Host-sanitized result for the next model turn.
+    Reject { code: String, message: String },
 }
 
 /// Policy authority. In authoritative mode this is the single decision source;

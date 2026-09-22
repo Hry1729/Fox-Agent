@@ -126,6 +126,7 @@ pub(crate) struct KernelHostCommand {
     pub kind: String,
     pub tool_call_id: Option<String>,
     pub decision: Option<String>,
+    pub policy_version: Option<u64>,
 }
 
 impl Database {
@@ -434,7 +435,8 @@ impl Database {
         scope: &KernelHostScope,
     ) -> Result<(), String> {
         self.with_connection(|connection| {
-            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let tx =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             freeze_host_scope_in_tx(&tx, run_id, scope)?;
             tx.commit()
         })
@@ -486,7 +488,36 @@ impl Database {
         run_id: &str,
         approval: Option<(&str, &str)>,
     ) -> Result<bool, String> {
-        let (key, kind, tool, decision) = if let Some((tool, decision)) = approval {
+        self.queue_kernel_host_command_versioned(run_id, approval, None)
+    }
+
+    pub(crate) fn kernel_approval_identity(&self, run_id: &str, tool_call_id: &str) -> Result<String, String> {
+        let version: Option<u64> = self.with_connection(|c| c.query_row(
+            "SELECT policy_version FROM kernel_approvals WHERE run_id=?1 AND tool_call_id=?2",
+            rusqlite::params![run_id, tool_call_id], |r| r.get(0)))?;
+        let version = version.ok_or("stale_approval: ticket has no policy version")?;
+        Ok(format!("kernel-approval:{run_id}:{tool_call_id}:v{version}"))
+    }
+
+    pub(crate) fn queue_kernel_host_approval(
+        &self,
+        approval_id: &str,
+        decision: &str,
+    ) -> Result<bool, String> {
+        let ticket:Option<(String,String,u64)>=self.with_connection(|c|c.query_row(
+            "SELECT t.run_id,t.runtime_tool_call_id,k.policy_version FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id JOIN kernel_approvals k ON k.run_id=t.run_id AND k.tool_call_id=t.runtime_tool_call_id WHERE a.id=?1 AND k.policy_version IS NOT NULL AND a.id='kernel-approval:'||k.run_id||':'||k.tool_call_id||':v'||k.policy_version",
+            [approval_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional())?;
+        let (run, tool, version) = ticket.ok_or("stale_approval: ticket no longer current")?;
+        self.queue_kernel_host_command_versioned(&run, Some((&tool, decision)), Some(version))
+    }
+
+    fn queue_kernel_host_command_versioned(
+        &self,
+        run_id: &str,
+        approval: Option<(&str, &str)>,
+        ticket_version: Option<u64>,
+    ) -> Result<bool, String> {
+        let (mut key, kind, tool, decision) = if let Some((tool, decision)) = approval {
             if tool.trim().is_empty()
                 || tool.len() > 512
                 || !matches!(decision, "allow_once" | "allow_conversation" | "denied")
@@ -504,6 +535,15 @@ impl Database {
         };
         self.with_connection(|connection| {
             let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let policy_version:Option<u64>=if let Some(tool)=tool {
+                let stored:Option<u64>=tx.query_row("SELECT policy_version FROM kernel_approvals WHERE run_id=?1 AND tool_call_id=?2",params![run_id,tool],|r|r.get(0)).optional()?.flatten();
+                let current:Option<u64>=tx.query_row("SELECT p.version FROM kernel_execution_policies p JOIN runs r ON r.conversation_id=p.conversation_id WHERE r.id=?1",[run_id],|r|r.get(0)).optional()?;
+                if stored.is_none() || stored!=current || ticket_version.is_some_and(|version|Some(version)!=stored) {return Err(invalid("stale_approval: ticket policy version is not current"));}
+                let reissued:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM kernel_approval_history WHERE run_id=?1 AND tool_call_id=?2)",params![run_id,tool],|r|r.get(0))?;
+                if reissued && ticket_version.is_none() {return Err(invalid("stale_approval: reissued ticket requires its approval id"));}
+                key=format!("approval:{tool}:v{}",stored.unwrap_or_default());
+                stored
+            } else {None};
             let existing: Option<(String,Option<String>,Option<String>)> = tx.query_row(
                 "SELECT kind,tool_call_id,decision FROM kernel_host_commands WHERE run_id=?1 AND command_key=?2",
                 params![run_id,key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
@@ -538,8 +578,8 @@ impl Database {
                     return Err(invalid("Kernel approval is no longer actionable"));
                 }
             }
-            tx.execute("INSERT INTO kernel_host_commands(run_id,command_key,kind,tool_call_id,decision,created_at) VALUES(?1,?2,?3,?4,?5,?6)",
-                params![run_id,key,kind,tool,decision,now])?;
+            tx.execute("INSERT INTO kernel_host_commands(run_id,command_key,kind,tool_call_id,decision,created_at,policy_version) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![run_id,key,kind,tool,decision,now,policy_version])?;
             tx.commit()?;
             Ok(true)
         })
@@ -550,10 +590,10 @@ impl Database {
         run_id: &str,
     ) -> Result<Vec<KernelHostCommand>, String> {
         self.with_connection(|connection| {
-            let mut query = connection.prepare("SELECT command_seq,command_key,kind,tool_call_id,decision FROM kernel_host_commands
+            let mut query = connection.prepare("SELECT command_seq,command_key,kind,tool_call_id,decision,policy_version FROM kernel_host_commands
                 WHERE run_id=?1 AND status='pending' ORDER BY CASE kind WHEN 'cancel' THEN 0 ELSE 1 END,command_seq")?;
             let rows = query.query_map([run_id], |row| Ok(KernelHostCommand {
-                seq: row.get(0)?, key: row.get(1)?, kind: row.get(2)?, tool_call_id: row.get(3)?, decision: row.get(4)?,
+                seq: row.get(0)?, key: row.get(1)?, kind: row.get(2)?, tool_call_id: row.get(3)?, decision: row.get(4)?, policy_version: row.get(5)?,
             }))?.collect();
             rows
         })
@@ -571,6 +611,7 @@ impl Database {
                 WHERE run_id=?1 AND command_seq=?2 AND (
                     EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state IN ('completed','failed','cancelled','budget_exhausted','approval_expired'))
                     OR (kind='cancel' AND EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state='cancelling'))
+                    OR (kind='approval' AND EXISTS(SELECT 1 FROM kernel_execution_policies p JOIN runs r ON r.conversation_id=p.conversation_id WHERE r.id=?1 AND kernel_host_commands.policy_version IS NOT p.version))
                     OR (kind='approval' AND EXISTS(SELECT 1 FROM kernel_approvals a WHERE a.run_id=?1
                         AND a.tool_call_id=kernel_host_commands.tool_call_id
                         AND (a.state=kernel_host_commands.decision OR a.state IN ('expired','cancelled')))))",
@@ -581,21 +622,36 @@ impl Database {
     }
 }
 
-pub(super) fn freeze_host_scope_in_tx(tx: &rusqlite::Transaction<'_>, run_id: &str, scope: &KernelHostScope) -> rusqlite::Result<()> {
-        let body = scope_body(scope).map_err(invalid)?;
-            let model = read_model_config(&tx, run_id)?;
-            let names: BTreeSet<String> = model.proposal_tools.iter()
-                .filter_map(|tool| tool["name"].as_str().map(str::to_owned)).collect();
-            if names != scope.tool_names { return Err(invalid("Kernel scope differs from model tool catalog")); }
-            let existing: Option<(String,String)> = tx.query_row(
-                "SELECT scope_json,scope_hash FROM kernel_host_runs WHERE run_id=?1", [run_id],
-                |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
-            if let Some((stored, stored_hash)) = existing {
-                if stored != body || stored_hash != hash(&body) { return Err(invalid("immutable Kernel Host scope conflict")); }
-            } else {
-                tx.execute("INSERT INTO kernel_host_runs(run_id,scope_json,scope_hash,created_at) VALUES(?1,?2,?3,?4)",
+pub(super) fn freeze_host_scope_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    scope: &KernelHostScope,
+) -> rusqlite::Result<()> {
+    let body = scope_body(scope).map_err(invalid)?;
+    let model = read_model_config(&tx, run_id)?;
+    let names: BTreeSet<String> = model
+        .proposal_tools
+        .iter()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+        .collect();
+    if names != scope.tool_names {
+        return Err(invalid("Kernel scope differs from model tool catalog"));
+    }
+    let existing: Option<(String, String)> = tx
+        .query_row(
+            "SELECT scope_json,scope_hash FROM kernel_host_runs WHERE run_id=?1",
+            [run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((stored, stored_hash)) = existing {
+        if stored != body || stored_hash != hash(&body) {
+            return Err(invalid("immutable Kernel Host scope conflict"));
+        }
+    } else {
+        tx.execute("INSERT INTO kernel_host_runs(run_id,scope_json,scope_hash,created_at) VALUES(?1,?2,?3,?4)",
                     params![run_id,body,hash(&body),now_ms()])?;
-            }
+    }
     Ok(())
 }
 

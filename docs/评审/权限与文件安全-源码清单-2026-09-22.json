@@ -1,0 +1,313 @@
+{
+  "baseline": "13fcbcf9cad4d61c3e07f1bc0b2a039682586018",
+  "capturedAt": "2026-09-22T12:48:27.0998672+08:00",
+  "contractV16": "BE5B37C6DB9DF08DC8CC3720F701D4AF1C1553840B1C1D7EABCE2A6823CC74D9",
+  "note": "Tested working-tree source. gitBlob identifies normalized Git content; sha256 identifies the exact local bytes before commit.",
+  "sources": [
+    {
+      "path": "apps/desktop/src-tauri/src/commands/mod.rs",
+      "sha256": "A22EA6D42C0C7C021861EAB67ECEDB6BF3AD4625D2380958AF3B1247CF8B2572",
+      "gitBlob": "ef30748740d711512d8c77353bd6ba89f8d621a7"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/database/migrations.rs",
+      "sha256": "846AFCA1139C78B4D17115969FA21FAC148ED63FE762B425962523EF2676BDE3",
+      "gitBlob": "57552a8037dd24a1d36a03633ed47121002f1b90"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/database/mod.rs",
+      "sha256": "6546AFEDE16C0334CBAB797E62862E4251CD50F3B4906AC327CCB8FE71AECE35",
+      "gitBlob": "fafd97e0de3c9f3fceb83eb90bed46cfc4c9e86e"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/database/models.rs",
+      "sha256": "D0B8F1031ECD6F4F5D00FE87B4D9639E2E0F423BA2C8B1015C1D340765965365",
+      "gitBlob": "1f4b6ce14edc00aab925bef01fadd168c07c1ab5"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/database/repositories.rs",
+      "sha256": "F58E6E80E54710BBA464DA7F67BAD24392AC43C8469943185FFD12C81CBE6D00",
+      "gitBlob": "34f20786d5fa46b7fd198d79d78661478b139701"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/database/repositories/kernel_execution_admission.rs",
+      "sha256": "3BAD0155BE67A767626C8F9B475F5F8A11180F400E2EB14CC41E8C965A69A4F6",
+      "gitBlob": "4771c0ee51bb16fd984b40cac873f5d8dc179d45"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/database/repositories/kernel_execution_policy.rs",
+      "sha256": "7936AFCD2EEF72D21358F00A45FA8DAB92D03B078E96D9BEE457A0571949D20E",
+      "gitBlob": "5f40b48ca5f4643f1b85c167b7fe7f9eebd32e4c"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/database/repositories/kernel_host.rs",
+      "sha256": "572077CF9B875C97AB800DEC7225D1D31A9FF5988804142987918CD7CDA029BD",
+      "gitBlob": "f0739c29be2169884d2f820855696d90aa831cb8"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/database/repositories/kernel_job_execution.rs",
+      "sha256": "6B735DBAABE6C6946818999C1102995AAE038564C09118859A034EC72A759E17",
+      "gitBlob": "6c7c83ae32e78eddaea0cdf278cef781dcaf6588"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/database/repositories/kernel_jobs.rs",
+      "sha256": "5AE644D77ABC6B2FF63616A5F56DBF919A8803693F0573BB6BE3876AA8FE397E",
+      "gitBlob": "cb15e9d50eb3cc77124af1595a1c3516ebdd95ad"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/database/repositories/kernel_projection.rs",
+      "sha256": "906F803793B3E1649713D948444E5983B1565CD297B5FF9A32792D3DA425879F",
+      "gitBlob": "bcb4e635f2871efdbeda321b2d890acd61df3ada"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/database/repositories/kernel.rs",
+      "sha256": "523F8906AF6AFD661EF7A7A5500EC2EA5CC84DBC8033FD4F57DAAA0911CD9550",
+      "gitBlob": "801e0d45c2300c5ed41a681fdec75a19b6e3d7e2"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/database/repositories/work_graph.rs",
+      "sha256": "FC0DFA140E9AFA0AD2EE31B6B9F95CE47D50D95C773D3706EB1815B5B9DAF804",
+      "gitBlob": "3f33dd791f7b3713979ef813970f1abcf1975e0b"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/lib.rs",
+      "sha256": "28A3B0791CE97EEA7C083F5EE9A4B1B3621EED013B8B81EA5A920304C34E807E",
+      "gitBlob": "1568affeea012950535288cf61e962562980c1bb"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/process_jobs.rs",
+      "sha256": "F87710AD84F7CE3D9ED2E631668DBC4686F8E5C5209050EF495ACBE85CCD4FDB",
+      "gitBlob": "681597e0cf0f35966e6ca71117b7e7e7a3b73b64"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/resource_gateway.rs",
+      "sha256": "9CCB6E3F462C514A0C5A5A071E60E11DCB2B09DEB3AFCC17716C64EA9E1D7251",
+      "gitBlob": "f0d8592ee4e15245f09d873f815018bf68ec0857"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime_host/command_jobs_tests.rs",
+      "sha256": "771C5C299F1FE04FF6C97BCA829F242E93E7F1ADFECFF4C58EA65C347BEB8D0C",
+      "gitBlob": "8f693bd73f5602ef613f82836e065f19e5bb9b7c"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime_host/command_jobs.rs",
+      "sha256": "85DA0D3BB5D09FF56C17C0FF733C598E9F71137AD2900D5211B391392A10619B",
+      "gitBlob": "951bc08bfc63cdd897d7df96bd509cf717175047"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime_host/kernel_coordinator.rs",
+      "sha256": "E29D8341C78275F325ADAA3193722041E87158EBEE70C8C1FD5D8D1422C4166B",
+      "gitBlob": "cde27089e60c337866abb4d6a3fc5794470865c2"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime_host/kernel_coordinator/harness_security_tests.rs",
+      "sha256": "C5F96B5D7856F4CB652AF678BA92EA600D631896B43608FF939C43301842A70C",
+      "gitBlob": "9621988953b788411547acc037c95183d11bc6db"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime_host/kernel_coordinator/real_eval_tests.rs",
+      "sha256": "A08908FAE82D6511E392A36281B8FBF5ECF2125AE83851B4CE4CE41B72BE2596",
+      "gitBlob": "c6ddd470e535deb3ae2da53bbb497c5b3911f4c0"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime_host/kernel_coordinator/tests.rs",
+      "sha256": "8E4CF84265745E3678607530822657287075168F4CF303D5E7B00A3E22A2A2A2",
+      "gitBlob": "e9518d7afadcd374ccca92a5c34e2532d24d4a2e"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime_host/kernel_coordinator/tool_result_read_tests.rs",
+      "sha256": "90017A33BCC27D9B4C958A42EB9EC10E755635420679B9AEAADE709C1CC1E16A",
+      "gitBlob": "ca1a1314d2be062cbb0d3f6db3a7203d0e48f077"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime_host/kernel_gateway.rs",
+      "sha256": "D51E631C7803F40B723793391BA8783C8F45098F4D0702FC941389D06127BCE1",
+      "gitBlob": "eb0f5f5b85c02ea8583e7ee89aedd509fc73c6e8"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime_host/kernel_host.rs",
+      "sha256": "4B8659986BFDE6627F10B566B2F1B9575AACE9C9D4629598E4967FA4914211D3",
+      "gitBlob": "8f73046c851d5168093e1d2dcd3ac9dc6cb82f03"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime_host/managed_files.rs",
+      "sha256": "0A1CC9E998A9667EF6A905AE744A6BC652FB55409AC94D5D34BE0B32FC03532D",
+      "gitBlob": "940d0ad8123fd5ec0c1aa294b409ce190f9f0028"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime_host/mod.rs",
+      "sha256": "95C7DAEF17F3939BBC0BAEA5A58984124EFB5F57716DC3588BE61D2630365F31",
+      "gitBlob": "2fcfdc12b600a0006244e1fda7b394e2072384bf"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime_host/resource_gateway_tests.rs",
+      "sha256": "E31F77AAE15CFDD49144D5A048D430346A83A2D94FF96CF483AF9366C439E957",
+      "gitBlob": "94d29e494ae50b64aacab443e5a25ca354029596"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/runtime_host/shadow_reconcile.rs",
+      "sha256": "DEB41F33BEEB67AADCF061C4410170943029BAADD42CDBA87D6D9A564321BCCB",
+      "gitBlob": "26af1861566053e800dcdd9d88485f30ff08e432"
+    },
+    {
+      "path": "apps/desktop/src-tauri/src/tool_host.rs",
+      "sha256": "96AE3210C6860BD3DC0FD6FE6BE8EA1F981BB1EB24843F77C60E2723C3A1980E",
+      "gitBlob": "03a6aefe9b6f0a113cfbb3d961eadeef5ebdb6f4"
+    },
+    {
+      "path": "apps/desktop/src-tauri/tests/harness_process_jobs.rs",
+      "sha256": "066645B1DFE4A404B526DB23F218D79E464E3EC2806FAA93C2BC3F2BDB1948A2",
+      "gitBlob": "92cf7e34c62c6ea08781e85e382ce2c8deede9c6"
+    },
+    {
+      "path": "apps/desktop/src/features/chat/execution-receipt.ts",
+      "sha256": "B0026371EAFA5D5449767356D3A373705410D01A458CB50238A5006606A0C63F",
+      "gitBlob": "c86e3726ae0599ccdf7bd5241e03be0db3ca5ff4"
+    },
+    {
+      "path": "apps/desktop/src/features/chat/workbench.tsx",
+      "sha256": "D372C42758AA818CC7FFED497796188932AE798CF8328CA5B69D7948F9A93FBF",
+      "gitBlob": "925ccc5ef8cda51155f7669ad4d6bbabf80d7aea"
+    },
+    {
+      "path": "apps/desktop/src/features/conversations/api/desktop-client.ts",
+      "sha256": "1699D13B8CFEAA07574B2381CCA674C0B0DB6933E8E245D5B0AA1193467A53F0",
+      "gitBlob": "2082a347a380715cbdd33f35b68168945af7e1cd"
+    },
+    {
+      "path": "apps/desktop/tests/execution-receipt.test.ts",
+      "sha256": "1980CE6FB085D72AB41C502C236F346A5F8BC6F55F132E1B792BC56A4E60B21E",
+      "gitBlob": "b3f0fab137ae6de35b86903d72b9cc0b330ca9e8"
+    },
+    {
+      "path": "crates/fox-agent-kernel/src/controller.rs",
+      "sha256": "D1DEE04B2B9C90ACBCF1CDF5D39C8FADB9B8744B1D5E9A9720BCDFF40F5845C5",
+      "gitBlob": "325d2429082a1fe631b20777a1207a701abe0100"
+    },
+    {
+      "path": "crates/fox-agent-kernel/src/lib.rs",
+      "sha256": "3C4A9F6CAE8D49B6572E1AE362D67BE02DA4D1DE8E9CFC970436CC40BD818400",
+      "gitBlob": "4c0d0fd957aea0a1d0b59557348c2f4d95578875"
+    },
+    {
+      "path": "crates/fox-agent-kernel/src/ports.rs",
+      "sha256": "DB37CB9254FB85103FEF649A85F8FD6FF3F9D847433402C20E605B742F9FE35C",
+      "gitBlob": "cc86545b86b6b1d4db7c3ecfaf8eb15da8b136b2"
+    },
+    {
+      "path": "crates/fox-agent-kernel/src/shadow.rs",
+      "sha256": "D600FABC4388A3B82E2CBA8344FD9F982EEC8279F3EDE3E16964BA168D9D3B51",
+      "gitBlob": "93402f38d7d79565d3ae4e2198881081010e0681"
+    },
+    {
+      "path": "crates/fox-engine-protocol/src/execution.rs",
+      "sha256": "D0322865654E05C4DAD65EC753FE9D98B564CCDFBB373F5F2C81479F7A43FB2D",
+      "gitBlob": "e2b2610ec589bf5f51b87282480fb487bb7d04a8"
+    },
+    {
+      "path": "crates/fox-engine-protocol/src/lib.rs",
+      "sha256": "09C91E4328C84CF8F67EB92ADDF9357ECCAD6B03BFA59D53F462F22D8C7EB0CD",
+      "gitBlob": "f9f31fd1a914eae3dd6771bc7ebb86b1706200b6"
+    },
+    {
+      "path": "packages/fox-engine-protocol/index.d.ts",
+      "sha256": "DF1FC78ACCF6CB28CF988FDF30DE58D3C8F01C800311479483062CBC35AC0FC3",
+      "gitBlob": "49601bd774130de4942ab88a5f8221a2f9b54cd4"
+    },
+    {
+      "path": "packages/fox-engine-protocol/index.mjs",
+      "sha256": "470669AB41ED382382E0B402E7B1972FA0D423ADB5DACD4D7358575617959A3A",
+      "gitBlob": "110637ab5ea02c2abefba67e027d32e3b113053b"
+    },
+    {
+      "path": "packages/fox-engine-protocol/schema.json",
+      "sha256": "A371390424D85022CB5A867472055EDD36DDDC6F54E074C998CE0C7408FBFBA3",
+      "gitBlob": "f75950af6246b257c18dfd5e07428872acd083bf"
+    },
+    {
+      "path": "services/agent-runtime/src/host-tools.mjs",
+      "sha256": "19686BE9D50C77CBB6BA2B2AC7DF0757E4321CB370EDA68F2FEB8762C134D96B",
+      "gitBlob": "2a683330e504e125da106b1b162cb9b3318521e3"
+    },
+    {
+      "path": "services/agent-runtime/src/read-only-tool-executors.mjs",
+      "sha256": "1F46E6A4447CF0EBBAF26DC0E53F57BDE231B014834209417BBE0973E484DB17",
+      "gitBlob": "8d8caaa420dc7a1699f6baf4398f44d55b6c7b1e"
+    },
+    {
+      "path": "services/agent-runtime/test/read-only-tools.test.mjs",
+      "sha256": "5F8B04BA932E561B42147CB759A8F3A6490C186A9AF0CB14DE35711AF43129EA",
+      "gitBlob": "8b966cbe500d0fb7358e37bae234af33d6a5efe4"
+    }
+  ],
+  "validationLogs": [
+    {
+      "file": "permission-final-kernel.log",
+      "sha256": "A02D1776B26B7DC0D56867302364E5D12CF89AA395F04A6CF092B0C5C689BF16"
+    },
+    {
+      "file": "permission-check-final.log",
+      "sha256": "63F9A3373105A1E2E6912BFB8B1A673C5CF5C3C7488E4643D2E3E85328F16346"
+    },
+    {
+      "file": "permission-build-final.log",
+      "sha256": "053652069C607632622D5FDBE2C652776CD0E0E4B94B42CC5DEF2714F61697DE"
+    },
+    {
+      "file": "permission-final-managed_files.log",
+      "sha256": "7989B522BB5468D0FDDBBA7DBE533AB19FC00E497800A81DE80B4E4E78A5E6BB"
+    },
+    {
+      "file": "permission-final-command_jobs.log",
+      "sha256": "C77ECA0E1D9F0BED944CD304BE05E617DCB889228D0121A571170D3D6F5E73C0"
+    },
+    {
+      "file": "permission-final-resource_gateway.log",
+      "sha256": "2CEF3D4E7D161250F1751DA4779DB8DBA65BE2A27D6297EEF4320C6026F13D43"
+    },
+    {
+      "file": "permission-final-tool_host.log",
+      "sha256": "6DD7F9429DD296C82BD6A1E22A895590F05EB4FF3D43F3E1BA893F9A5A5BED17"
+    },
+    {
+      "file": "permission-final-approval-clock.log",
+      "sha256": "33BBEA9622D26F3FAA4C42A42166CAAF283A4510C357FC3EC34356EBC06DD7A3"
+    },
+    {
+      "file": "permission-process-harness-test.log",
+      "sha256": "B27BA4C52072018ACF84BAC4C2F0B8CCA48B76974F89C0EC7A80C9731BB76F0E"
+    },
+    {
+      "file": "permission-kernel-crate-final.log",
+      "sha256": "18B8702C5E24FC1130E5AD1C0BB7319DC6358C50AFE0A117DA1D44004F94FD58"
+    },
+    {
+      "file": "permission-protocol-rust-final.log",
+      "sha256": "391549221A5E6A4429E361C58124A255312C9FBF4217A4D9FE34A58E92E0F296"
+    },
+    {
+      "file": "permission-protocol-final.log",
+      "sha256": "A4C9E6FB136CC94733C9364C5E89CF5DAF54826B2B0AAD513DAFE65597C0BA98"
+    },
+    {
+      "file": "permission-js-final.log",
+      "sha256": "9ACE77BE0006190A7E326ACE547D80280ABAEC1BC5D7BC8BCA87BBB8B5D2A008"
+    },
+    {
+      "file": "permission-frontend-final.log",
+      "sha256": "24D4137B54906FE1B2FCC442F33C4C1159F0114DB2944124B62E63775D9732DD"
+    },
+    {
+      "file": "permission-tsc-final.log",
+      "sha256": "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+    },
+    {
+      "file": "permission-test10-migration_79.log",
+      "sha256": "1B427A00F768E09E9F3160E0C5FBB60C228454B55BCC104BDB15DE35322CB91F"
+    },
+    {
+      "file": "permission-test10-host_dispatch_keys.log",
+      "sha256": "39AE2D2FE8297E2A30C0EE9B7A331637056053936D256C32C2180D1D8D63F152"
+    }
+  ]
+}

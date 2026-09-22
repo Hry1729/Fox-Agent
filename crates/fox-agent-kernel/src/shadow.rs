@@ -697,7 +697,7 @@ impl ShadowContext {
                 } if event_type == "tool.failed" => {
                     if let Ok(payload) = serde_json::from_str::<serde_json::Value>(payload_json) {
                         if payload.get("code").and_then(|c| c.as_str())
-                            == Some("kernel.policy_denied")
+                            == Some("kernel.policy_denied") || payload["executionStarted"] == false
                         {
                             if let Some(id) = payload.get("toolCallId").and_then(|v| v.as_str()) {
                                 let obs = by_id(id);

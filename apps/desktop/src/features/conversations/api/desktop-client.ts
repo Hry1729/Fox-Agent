@@ -650,8 +650,10 @@ export const desktopClient = {
   openExternalUrl: (url: string) => command<boolean>('external_url_open', { url }),
   updateProjectPermission: (projectId: string, permissionMode: ProjectRecord['permissionMode']) =>
     command<ProjectRecord>('project_permission_update', { projectId, permissionMode }),
-  updateConversationPermission: (conversationId: string, permissionMode: ProjectRecord['permissionMode']) =>
-    command<ConversationSummary>('conversation_permission_update', { conversationId, permissionMode }),
+  conversationPermissionState: (conversationId: string) =>
+    command<{ version: number; mode: ProjectRecord['permissionMode'] }>('conversation_permission_state', { conversationId }),
+  updateConversationPermission: (conversationId: string, permissionMode: ProjectRecord['permissionMode'], requestId: string, expectedVersion: number) =>
+    command<{ version: number; mode: ProjectRecord['permissionMode'] }>('conversation_permission_update', { conversationId, permissionMode, requestId, expectedVersion }),
   deleteProject: (projectId: string) => command<boolean>('project_delete', { projectId }),
   createConversation: (request: { agentId: string; expertId?: string; title?: string; projectRoot?: string; permissionMode?: ProjectRecord['permissionMode'] }) =>
     command<ConversationSummary>('conversation_create', request),

@@ -5,6 +5,7 @@ import { ExpertPickerDialog } from '@/features/agents/ExpertPickerDialog'
 import { HtmlFilePreview } from './html-file-preview'
 import { KernelReconciliationPanel } from './kernel-reconciliation-panel'
 import { runtimeProcessActivity } from './runtime-process-activity'
+import { executionReceiptPresentation, type ExecutionReceiptPresentation } from './execution-receipt'
 import { lazy, memo, Profiler, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction, type ChangeEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { subscribeNotificationRefresh } from '../notification-subscriptions'
 import {
@@ -2371,7 +2372,8 @@ function LiveReasoning({ detail, active }: { detail: string; active: boolean }) 
 }
 
 function RuntimeToolItem({ tool, active, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer }: { tool: RuntimeToolStep; active: boolean; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
-  const ToolIcon = tool.isError
+  const execution = executionReceiptPresentation(tool.output)
+  const ToolIcon = tool.isError || execution?.requiresAttention
     ? AlertTriangle
     : tool.awaitingUser
       ? CircleHelp
@@ -2382,6 +2384,13 @@ function RuntimeToolItem({ tool, active, attachmentNames, onOpenFileInSidebar, o
   const suffix = path ? ` · ${path}` : ''
   const pathIsClickable = Boolean(path && suffix && label.endsWith(suffix) && (onOpenFileInSidebar || onRevealFileInExplorer))
   const openPathInSidebar = () => onOpenFileInSidebar?.(path)
+  const executionError = execution?.requiresAttention
+    ? `${execution.statusLabel}${execution.code ? `（${execution.code}）` : ''}`
+    : tool.isError && execution
+      ? `${execution.statusLabel} · 工具执行失败`
+      : tool.isError
+        ? '工具执行失败'
+        : undefined
   return <RuntimeProcessRow
     icon={<ToolIcon className="fox-runtime-step-icon-glyph" />}
     label={label}
@@ -2416,7 +2425,7 @@ function RuntimeToolItem({ tool, active, attachmentNames, onOpenFileInSidebar, o
     status={tool.awaitingUser ? 'pending' : active ? 'active' : 'complete'}
   >
     <AIToolInput className="fox-runtime-tool-detail" input={tool.input as never} />
-    {tool.completed && <AIToolOutput className="fox-runtime-tool-detail" output={tool.output as never} errorText={tool.isError ? '工具执行失败' : undefined} />}
+    {tool.completed && <AIToolOutput className="fox-runtime-tool-detail" output={tool.output as never} errorText={executionError} />}
   </RuntimeProcessRow>
 }
 
@@ -3111,6 +3120,15 @@ function toolResultDetails(tool: ToolCallRecord) {
   return { result, details }
 }
 
+function toolExecutionStatus(tool: ToolCallRecord): ExecutionReceiptPresentation | null {
+  return executionReceiptPresentation(tool.result)
+}
+
+function toolStatusLabel(tool: ToolCallRecord, execution = toolExecutionStatus(tool)) {
+  if (execution) return execution.statusLabel
+  return tool.status === 'completed' ? '已完成' : tool.status === 'failed' ? '失败' : '处理中'
+}
+
 function commandOutput(tool: ToolCallRecord) {
   const { result, details } = toolResultDetails(tool)
   const input = tool.input && typeof tool.input === 'object' && !Array.isArray(tool.input)
@@ -3124,7 +3142,7 @@ function commandOutput(tool: ToolCallRecord) {
   const duration = tool.completedAt !== null
     ? Math.max(0, tool.completedAt - tool.startedAt)
     : null
-  return { output, exitCode: typeof exitCode === 'number' ? exitCode : null, cwd, duration }
+  return { output, exitCode: typeof exitCode === 'number' ? exitCode : null, cwd, duration, execution: toolExecutionStatus(tool) }
 }
 
 function readStoredSeenChanges() {
@@ -4519,18 +4537,19 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, onOpenFile, o
     const isCommand = Boolean(activeChange && isCommandTool(activeChange.toolName))
     const diffLines = activeChange && !isCommand ? toolDiff(activeChange, detail?.approvals ?? []).split('\n').map((line) => [line.startsWith('+') ? 'added' : line.startsWith('-') ? 'removed' : line.startsWith('@@') ? 'meta' : 'context', line]) : []
     const command = activeChange && isCommand ? commandOutput(activeChange) : null
+    const activeExecution = activeChange ? toolExecutionStatus(activeChange) : null
     const linkedEvidence = activeChange ? (detail?.evidence ?? []).filter((evidence) => evidence.refKind === 'tool_call' && (evidence.refId === activeChange.id || evidence.refId === activeChange.runtimeToolCallId)) : []
     if (!changeFiles.length) return <div className="fox-empty-panel"><FileEdit size={29} /><strong>当前会话没有文件更改或命令</strong><span>Fox 的写入、编辑和命令记录会显示在这里。</span></div>
     return (
       <div className="fox-change-panel">
         <div className="fox-change-list">
-          {changeFiles.map((item) => <button type="button" key={item.id} className={activeChange?.id === item.id ? 'is-active' : ''} onClick={() => setSelectedChange(item.id)}>{isCommandTool(item.toolName) ? <Terminal size={14} /> : <FileEdit size={14} />}<span><strong>{isCommandTool(item.toolName) ? item.toolName : toolTarget(item)}</strong><small>{item.toolName} · {item.status === 'completed' ? '已完成' : item.status === 'failed' ? '失败' : '处理中'}</small></span></button>)}
+          {changeFiles.map((item) => <button type="button" key={item.id} className={activeChange?.id === item.id ? 'is-active' : ''} onClick={() => setSelectedChange(item.id)}>{isCommandTool(item.toolName) ? <Terminal size={14} /> : <FileEdit size={14} />}<span><strong>{isCommandTool(item.toolName) ? item.toolName : toolTarget(item)}</strong><small>{item.toolName} · {toolStatusLabel(item)}</small></span></button>)}
         </div>
         <div className="fox-diff-view">
-          <div className="fox-diff-head">{isCommand ? <Terminal size={14} /> : <FileEdit size={14} />}<strong>{activeChange ? (isCommand ? activeChange.toolName : toolTarget(activeChange)) : '更改详情'}</strong><span><Badge variant={activeChange?.status === 'failed' ? 'destructive' : 'outline'}>{activeChange?.status ?? '未知'}</Badge>{linkedEvidence.length > 0 && <Badge variant="secondary">{linkedEvidence.length} 条证据</Badge>}</span></div>
+          <div className="fox-diff-head">{isCommand ? <Terminal size={14} /> : <FileEdit size={14} />}<strong>{activeChange ? (isCommand ? activeChange.toolName : toolTarget(activeChange)) : '更改详情'}</strong><span><Badge variant={activeChange?.status === 'failed' || activeExecution?.requiresAttention ? 'destructive' : 'outline'}>{activeChange ? toolStatusLabel(activeChange, activeExecution) : '未知'}</Badge>{linkedEvidence.length > 0 && <Badge variant="secondary">{linkedEvidence.length} 条证据</Badge>}</span></div>
           {linkedEvidence.length > 0 && <div className="fox-linked-evidence">{linkedEvidence.map((evidence) => <button type="button" key={evidence.id} disabled={!onOpenEvidence} onClick={() => onOpenEvidence?.(evidence)}><ShieldCheck size={12} /><span>{evidence.summary}</span><small>{evidence.validityStatus}</small></button>)}</div>}
           {isCommand && activeChange && command ? <div className="fox-command-detail">
-            <div className="fox-command-facts"><span>退出码 <b>{command.exitCode === null ? '—' : command.exitCode}</b></span><span>耗时 <b>{command.duration === null ? '进行中' : `${command.duration} ms`}</b></span>{command.cwd && <span title={command.cwd}>目录 <b>{command.cwd}</b></span>}</div>
+            <div className="fox-command-facts">{command.execution && <span title={command.execution.statusLabel}>执行 <b>{command.execution.statusLabel}</b></span>}{command.execution?.code && <span title={command.execution.rawCodes.join(' / ')}>原因 <b>{command.execution.code}</b></span>}<span>退出码 <b>{command.exitCode === null ? '—' : command.exitCode}</b></span><span>耗时 <b>{command.duration === null ? '进行中' : `${command.duration} ms`}</b></span>{command.cwd && <span title={command.cwd}>目录 <b>{command.cwd}</b></span>}</div>
             <ScrollArea className="fox-command-output"><pre>{command.output || activeChange.errorMessage || '命令没有返回输出。'}</pre></ScrollArea>
           </div> : <ScrollArea className="fox-diff-scroll"><code>{diffLines.map(([tone, line], index) => <span key={index} className={`is-${tone}`}><i>{index + 1}</i><b>{line || ' '}</b></span>)}</code></ScrollArea>}
         </div>
@@ -5241,31 +5260,29 @@ export function Workbench() {
     toast.success(`项目“${selected.split(/[\\/]/).filter(Boolean).at(-1) ?? selected}”已加入当前对话`)
   }
   const changeProjectPermission = async (permissionMode: ProjectRecord['permissionMode']) => {
-    desktopConversation.setDraftPermission(permissionMode)
+    const conversationId = desktopConversation.detail?.conversation.id
     const projectId = desktopConversation.detail?.conversation.projectId ?? activeProject?.id
-    if (projectId) {
-      setProjects((current) => current.map((project) => project.id === projectId ? { ...project, permissionMode } : project))
-      try {
+    try {
+      if (conversationId) {
+        // A conversation (including project-backed conversations) changes policy
+        // through a versioned local-user request. Conflicts never auto-retry.
+        const policy = await desktopClient.conversationPermissionState(conversationId)
+        await desktopClient.updateConversationPermission(
+          conversationId, permissionMode, crypto.randomUUID(), policy.version,
+        )
+        await desktopConversation.openConversation(conversationId)
+        if (projectId) setProjects(await desktopClient.listProjects())
+      } else if (projectId) {
         const updated = await desktopClient.updateProjectPermission(projectId, permissionMode)
         setProjects((current) => current.some((project) => project.id === updated.id)
           ? current.map((project) => project.id === updated.id ? updated : project)
           : [...current, updated])
-      } catch (cause) {
-        void desktopClient.listProjects().then(setProjects).catch(() => undefined)
-        toast.error(cause instanceof Error ? cause.message : String(cause))
-        return
       }
-    } else if (desktopConversation.detail?.conversation.id) {
-      try {
-        await desktopClient.updateConversationPermission(
-          desktopConversation.detail.conversation.id,
-          permissionMode,
-        )
-        await desktopConversation.openConversation(desktopConversation.detail.conversation.id)
-      } catch (cause) {
-        toast.error(cause instanceof Error ? cause.message : String(cause))
-        return
-      }
+      desktopConversation.setDraftPermission(permissionMode)
+    } catch (cause) {
+      // Keep the displayed authority unchanged on a rejected CAS. The user
+      // decides whether to refresh and submit a new logical request.
+      toast.error(cause instanceof Error ? cause.message : String(cause))
     }
   }
   const saveKnowledgeBindings = async (references: KnowledgeReference[], names: Record<string, string>, closeDialog = true) => {

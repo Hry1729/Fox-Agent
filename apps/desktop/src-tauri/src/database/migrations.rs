@@ -6977,6 +6977,64 @@ fn run_transaction(connection: &mut Connection, now: i64) -> Result<()> {
     }
     apply_migration(&transaction, 72, MIGRATION_72, now)?;
     apply_migration(&transaction, 73, MIGRATION_73, now)?;
+    apply_migration(&transaction, 74, MIGRATION_74, now)?;
+    let v75_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 75)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !v75_applied {
+        transaction.execute_batch(MIGRATION_75)?;
+        for (table, column, definition) in MIGRATION_75_ATTEMPTS_COLUMNS {
+            ensure_column_if_missing(&transaction, table, column, definition)?;
+        }
+        // A v74 database created by the original (pre-Manage) migration still
+        // carries the OLD credentials CHECK, and `apply_migration` never reruns
+        // a recorded version. Rebuild the constraint additively so a Manage
+        // credential can be issued on upgraded databases too. Historical rows
+        // are copied byte-for-byte; nothing is backfilled.
+        rebuild_credentials_check(&transaction)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (75, ?1)",
+            [now],
+        )?;
+    }
+    let v76_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 76)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !v76_applied {
+        // A completed read/query is a terminal SUCCESS state, distinct from a
+        // refusal. The CHECK must allow it on databases created before this
+        // state existed (a forward rebuild, never an edit of a recorded
+        // migration).
+        rebuild_attempts_state_check(&transaction)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (76, ?1)",
+            [now],
+        )?;
+    }
+    transaction.execute_batch(MIGRATION_77)?;
+    transaction.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (77, ?1)", [now])?;
+    ensure_column_if_missing(&transaction, "kernel_approvals", "policy_version", "INTEGER")?;
+    ensure_column_if_missing(&transaction, "kernel_host_commands", "policy_version", "INTEGER")?;
+    transaction.execute_batch("CREATE TRIGGER IF NOT EXISTS execution_approval_version AFTER INSERT ON kernel_approvals BEGIN
+      UPDATE kernel_approvals SET policy_version=(SELECT p.version FROM kernel_execution_policies p JOIN runs r ON r.conversation_id=p.conversation_id WHERE r.id=NEW.run_id) WHERE run_id=NEW.run_id AND tool_call_id=NEW.tool_call_id;
+    END;")?;
+    transaction.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (78, ?1)", [now])?;
+    let v79_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 79)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !v79_applied {
+        rebuild_kernel_jobs_idempotency_check(&transaction)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (79, ?1)",
+            [now],
+        )?;
+    }
     let violations: i64 = transaction.query_row(
         "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))?;
     if violations != 0 {
@@ -7077,6 +7135,134 @@ fn ensure_column_if_missing(
             [],
         )?;
     }
+    Ok(())
+}
+
+/// B1a-R2 (migration 75): rebuild the `kernel_execution_credentials` action_class
+/// CHECK so an upgraded v74 database can hold the `manage` class. Editing the
+/// historical MIGRATION_74 text cannot help: `apply_migration` never reruns a
+/// recorded version and `CREATE TABLE IF NOT EXISTS` never alters an existing
+/// table, so this must be an additive, controlled rebuild.
+///
+/// Historical rows are copied unchanged (no backfill, no re-signing); the table
+/// is recreated with the SAME primary key and column order.
+fn rebuild_credentials_check(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
+    // Skip when the constraint already allows `manage` (fresh v75 databases).
+    let constraint: String = transaction.query_row(
+        "SELECT COALESCE(
+            (SELECT sql FROM sqlite_master
+              WHERE type='table' AND name='kernel_execution_credentials'),
+            '')",
+        [],
+        |row| row.get(0),
+    )?;
+    if constraint.contains("'manage'") {
+        return Ok(());
+    }
+    transaction.execute_batch(
+        "CREATE TABLE kernel_execution_credentials_v75 (
+             run_id TEXT NOT NULL,
+             dispatch_id TEXT NOT NULL,
+             conversation_id TEXT NOT NULL,
+             intent_digest TEXT NOT NULL,
+             action_class TEXT NOT NULL CHECK(action_class IN ('read','write','execute','destructive','sensitive_egress','manage')),
+             file_baseline TEXT,
+             resolved_profile TEXT NOT NULL,
+             policy_snapshot_id TEXT NOT NULL,
+             backend_required TEXT NOT NULL,
+             backend_evidence_digest TEXT,
+             credential_digest TEXT NOT NULL,
+             credential_json TEXT NOT NULL,
+             created_at INTEGER NOT NULL,
+             PRIMARY KEY(run_id, dispatch_id)
+         );
+         INSERT INTO kernel_execution_credentials_v75
+             (run_id, dispatch_id, conversation_id, intent_digest, action_class, file_baseline,
+              resolved_profile, policy_snapshot_id, backend_required, backend_evidence_digest,
+              credential_digest, credential_json, created_at)
+         SELECT run_id, dispatch_id, conversation_id, intent_digest, action_class, file_baseline,
+                resolved_profile, policy_snapshot_id, backend_required, backend_evidence_digest,
+                credential_digest, credential_json, created_at
+           FROM kernel_execution_credentials;
+         DROP TABLE kernel_execution_credentials;
+         ALTER TABLE kernel_execution_credentials_v75 RENAME TO kernel_execution_credentials;",
+    )?;
+    Ok(())
+}
+
+/// Migration 79 widens only the database guard for canonical Host dispatch job
+/// keys. Legacy/model job families retain the historical 200-character branch;
+/// the Rust admission path separately enforces the tighter 200-byte legacy
+/// bound and the canonical Host encoding, run binding, and 2072-byte ceiling.
+/// The Host branch casts to BLOB before `length`, so the database ceiling is in
+/// bytes for UTF-8 keys too; Rust remains the authority for their exact shape.
+///
+/// The v69 table plus the four v70 columns are recreated verbatim. Foreign keys
+/// are disabled by `run` before its atomic migration transaction, and the
+/// runner checks the whole database before recording success.
+fn rebuild_kernel_jobs_idempotency_check(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<()> {
+    transaction.execute_batch(
+        r#"
+CREATE TABLE kernel_jobs_v79 (
+    job_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(length(trim(kind)) BETWEEN 1 AND 64),
+    idempotency_key TEXT NOT NULL CHECK(
+        length(trim(idempotency_key)) BETWEEN 1 AND 200
+        OR (
+            idempotency_key GLOB 'job:tool-dispatch:*'
+            AND length(CAST(idempotency_key AS BLOB)) <= 2072
+        )
+    ),
+    params_hash TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('queued','running','paused','cancelled','failed','completed')),
+    cursor TEXT,
+    progress_done INTEGER NOT NULL DEFAULT 0,
+    progress_total INTEGER,
+    result_ref TEXT,
+    result_bytes INTEGER,
+    result_sha256 TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    deadline_ms INTEGER,
+    owner_pid INTEGER,
+    owner_started_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    cancel_requested_at INTEGER,
+    cancel_acknowledged_at INTEGER,
+    cancelled_by TEXT,
+    uncertain_at INTEGER,
+    UNIQUE(run_id, idempotency_key)
+);
+INSERT INTO kernel_jobs_v79 (
+    job_id, run_id, conversation_id, kind, idempotency_key, params_hash,
+    params_json, state, cursor, progress_done, progress_total, result_ref,
+    result_bytes, result_sha256, error_code, error_message, attempts,
+    deadline_ms, owner_pid, owner_started_at, created_at, updated_at,
+    finished_at, cancel_requested_at, cancel_acknowledged_at, cancelled_by,
+    uncertain_at
+)
+SELECT
+    job_id, run_id, conversation_id, kind, idempotency_key, params_hash,
+    params_json, state, cursor, progress_done, progress_total, result_ref,
+    result_bytes, result_sha256, error_code, error_message, attempts,
+    deadline_ms, owner_pid, owner_started_at, created_at, updated_at,
+    finished_at, cancel_requested_at, cancel_acknowledged_at, cancelled_by,
+    uncertain_at
+FROM kernel_jobs;
+DROP TABLE kernel_jobs;
+ALTER TABLE kernel_jobs_v79 RENAME TO kernel_jobs;
+CREATE INDEX idx_kernel_jobs_run ON kernel_jobs(run_id, state);
+CREATE INDEX idx_kernel_jobs_conversation ON kernel_jobs(conversation_id, created_at);
+"#,
+    )?;
     Ok(())
 }
 
@@ -13422,6 +13608,269 @@ CREATE INDEX idx_kernel_tool_calls_state ON kernel_tool_calls(run_id, state);
         assert_eq!(config_hash, "hash-live");
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn migration_79_widens_only_host_job_keys_and_reopens_idempotently() {
+        const JOB_COLUMNS: &[&str] = &[
+            "job_id",
+            "run_id",
+            "conversation_id",
+            "kind",
+            "idempotency_key",
+            "params_hash",
+            "params_json",
+            "state",
+            "cursor",
+            "progress_done",
+            "progress_total",
+            "result_ref",
+            "result_bytes",
+            "result_sha256",
+            "error_code",
+            "error_message",
+            "attempts",
+            "deadline_ms",
+            "owner_pid",
+            "owner_started_at",
+            "created_at",
+            "updated_at",
+            "finished_at",
+            "cancel_requested_at",
+            "cancel_acknowledged_at",
+            "cancelled_by",
+            "uncertain_at",
+        ];
+
+        let root = std::env::temp_dir().join(format!("fox-v78-jobs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("scratch dir");
+        let path = root.join("facts.db");
+
+        // Start from a database produced by the real opening path, then narrow
+        // only kernel_jobs back to its v78 CHECK and remove the v79 marker.
+        {
+            let database = crate::database::Database::open(path.clone()).expect("open fixture");
+            let agent_id = database.default_agent_id().to_string();
+            database
+                .with_connection(|connection| {
+                    connection.execute(
+                        "INSERT INTO conversations(id,agent_id,title,status,created_at,updated_at)
+                         VALUES('conv-v79',?1,'fixture','active',1,1)",
+                        [agent_id],
+                    )?;
+                    connection.execute(
+                        "INSERT INTO runs(id,conversation_id,status,model,created_at)
+                         VALUES('run-v79','conv-v79','completed','fixture',1)",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .expect("seed parent facts");
+        }
+
+        let before = {
+            let mut connection = Connection::open(&path).expect("open v78 fixture");
+            connection
+                .pragma_update(None, "foreign_keys", "OFF")
+                .expect("foreign keys off");
+            let transaction = connection.transaction().expect("begin narrowing");
+            transaction
+                .execute_batch(
+                    r#"
+CREATE TABLE kernel_jobs_v78 (
+    job_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(length(trim(kind)) BETWEEN 1 AND 64),
+    idempotency_key TEXT NOT NULL CHECK(length(trim(idempotency_key)) BETWEEN 1 AND 200),
+    params_hash TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('queued','running','paused','cancelled','failed','completed')),
+    cursor TEXT,
+    progress_done INTEGER NOT NULL DEFAULT 0,
+    progress_total INTEGER,
+    result_ref TEXT,
+    result_bytes INTEGER,
+    result_sha256 TEXT,
+    error_code TEXT,
+    error_message TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    deadline_ms INTEGER,
+    owner_pid INTEGER,
+    owner_started_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    cancel_requested_at INTEGER,
+    cancel_acknowledged_at INTEGER,
+    cancelled_by TEXT,
+    uncertain_at INTEGER,
+    UNIQUE(run_id, idempotency_key)
+);
+DROP TABLE kernel_jobs;
+ALTER TABLE kernel_jobs_v78 RENAME TO kernel_jobs;
+CREATE INDEX idx_kernel_jobs_run ON kernel_jobs(run_id, state);
+CREATE INDEX idx_kernel_jobs_conversation ON kernel_jobs(conversation_id, created_at);
+INSERT INTO kernel_jobs(
+    job_id,run_id,conversation_id,kind,idempotency_key,params_hash,params_json,
+    state,cursor,progress_done,progress_total,result_ref,result_bytes,result_sha256,
+    error_code,error_message,attempts,deadline_ms,owner_pid,owner_started_at,
+    created_at,updated_at,finished_at,cancel_requested_at,cancel_acknowledged_at,
+    cancelled_by,uncertain_at
+) VALUES(
+    'job-v78','run-v79','conv-v79','command','legacy-key','params-hash','{"old":true}',
+    'completed','cursor-v78',7,9,'result-ref',123,'result-sha','old-code','old message',
+    3,999,44,55,1,2,3,4,5,'user',6
+);
+DELETE FROM schema_migrations WHERE version=79;
+"#,
+                )
+                .expect("create v78 jobs schema and data");
+            transaction.commit().expect("commit v78 fixture");
+            connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys on");
+
+            let version: i64 = connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
+                .expect("v78 version");
+            assert_eq!(version, 78);
+            assert!(connection
+                .execute(
+                    "UPDATE kernel_jobs SET idempotency_key=?1 WHERE job_id='job-v78'",
+                    ["x".repeat(201)],
+                )
+                .is_err());
+            table_fingerprint(&connection, "kernel_jobs", JOB_COLUMNS, "job_id")
+        };
+        assert_eq!(before.0, 1, "the old-database fixture must contain a job");
+
+        let after_first = {
+            let database = crate::database::Database::open(path.clone()).expect("upgrade v78 fixture");
+            database
+                .with_connection(|connection| {
+                    let version: i64 = connection.query_row(
+                        "SELECT MAX(version) FROM schema_migrations",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(version, DATABASE_SCHEMA_VERSION);
+                    let v79_count: i64 = connection.query_row(
+                        "SELECT COUNT(*) FROM schema_migrations WHERE version=79",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(v79_count, 1);
+
+                    let columns = {
+                        let mut statement =
+                            connection.prepare("SELECT name FROM pragma_table_info('kernel_jobs') ORDER BY cid")?;
+                        let values = statement
+                            .query_map([], |row| row.get::<_, String>(0))?
+                            .collect::<Result<Vec<_>>>()?;
+                        values
+                    };
+                    let expected_columns = JOB_COLUMNS
+                        .iter()
+                        .map(|column| (*column).to_owned())
+                        .collect::<Vec<_>>();
+                    assert_eq!(columns, expected_columns);
+                    let indexes: i64 = connection.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='index'
+                          AND name IN ('idx_kernel_jobs_run','idx_kernel_jobs_conversation')",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(indexes, 2);
+                    let unique_indexes: i64 = connection.query_row(
+                        "SELECT COUNT(*) FROM pragma_index_list('kernel_jobs') WHERE origin='u'",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(unique_indexes, 1, "the run/key unique index must survive");
+                    let foreign_keys: i64 = connection.query_row(
+                        "SELECT COUNT(*) FROM pragma_foreign_key_list('kernel_jobs')",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(foreign_keys, 0, "v69-v78 kernel_jobs declared no foreign keys");
+                    let violations: i64 = connection.query_row(
+                        "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(violations, 0);
+                    let fingerprint =
+                        table_fingerprint(connection, "kernel_jobs", JOB_COLUMNS, "job_id");
+                    assert_eq!(fingerprint, before);
+
+                    let host_key = format!(
+                        "job:{}",
+                        fox_engine_protocol::encode_dispatch_id(
+                            "run-v79",
+                            &"调用:".repeat(140),
+                        )
+                        .expect("canonical dispatch id")
+                    );
+                    assert!(host_key.chars().count() > 200);
+                    connection.execute_batch("SAVEPOINT widened_key_check")?;
+                    connection.execute(
+                        "UPDATE kernel_jobs SET idempotency_key=?1 WHERE job_id='job-v78'",
+                        [host_key],
+                    )?;
+                    let ceiling_key = format!(
+                        "job:tool-dispatch:{}",
+                        "x".repeat(2072 - "job:tool-dispatch:".len())
+                    );
+                    assert_eq!(ceiling_key.len(), 2072);
+                    connection.execute(
+                        "UPDATE kernel_jobs SET idempotency_key=?1 WHERE job_id='job-v78'",
+                        [ceiling_key],
+                    )?;
+                    let oversized_host_key = format!(
+                        "job:tool-dispatch:{}",
+                        "x".repeat(2073 - "job:tool-dispatch:".len())
+                    );
+                    assert!(connection
+                        .execute(
+                            "UPDATE kernel_jobs SET idempotency_key=?1 WHERE job_id='job-v78'",
+                            [oversized_host_key],
+                        )
+                        .is_err());
+                    assert!(connection
+                        .execute(
+                            "UPDATE kernel_jobs SET idempotency_key=?1 WHERE job_id='job-v78'",
+                            ["x".repeat(201)],
+                        )
+                        .is_err());
+                    connection.execute_batch("ROLLBACK TO widened_key_check; RELEASE widened_key_check")?;
+                    Ok(fingerprint)
+                })
+                .expect("inspect upgraded database")
+        };
+        assert_eq!(after_first, before);
+
+        // A second production reopen must neither rebuild the table nor append
+        // another version row.
+        {
+            let database = crate::database::Database::open(path.clone()).expect("reopen upgraded database");
+            database
+                .with_connection(|connection| {
+                    assert_eq!(
+                        table_fingerprint(connection, "kernel_jobs", JOB_COLUMNS, "job_id"),
+                        before
+                    );
+                    let v79_count: i64 = connection.query_row(
+                        "SELECT COUNT(*) FROM schema_migrations WHERE version=79",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(v79_count, 1);
+                    Ok(())
+                })
+                .expect("idempotent reopen");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[cfg(test)]
@@ -13556,4 +14005,131 @@ CREATE TABLE IF NOT EXISTS deliverable_placements (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY(conversation_id, project_key)
 );
+"#;
+
+/// Frozen execution credentials and single-claim execution attempts.
+///
+/// `kernel_execution_credentials` holds the authoritative snapshot issued once
+/// per dispatch inside the final admission transaction; a second issue for the
+/// same (run_id, dispatch_id) must be byte-identical, so a dispatch can never
+/// be re-signed with different fixed fields. Rows created before this table
+/// simply do not exist: an old dispatch without a credential cannot start, and
+/// no backfill may invent authorization.
+///
+/// `kernel_execution_attempts` is the persistent single claim: the first
+/// execution attempt of a dispatch is won by exactly one caller across
+/// independent connections (`PRIMARY KEY(run_id, dispatch_id)` plus the
+/// claimed-state CAS in the repository). `start_confirmed` is NULL while the
+/// start fact is unknown, 0/1 once known, and can never be regressed from 1
+/// to 0.
+const MIGRATION_74: &str = r#"
+CREATE TABLE IF NOT EXISTS kernel_execution_credentials (
+    run_id TEXT NOT NULL,
+    dispatch_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    intent_digest TEXT NOT NULL,
+    action_class TEXT NOT NULL CHECK(action_class IN ('read','write','execute','destructive','sensitive_egress','manage')),
+    file_baseline TEXT,
+    resolved_profile TEXT NOT NULL,
+    policy_snapshot_id TEXT NOT NULL,
+    backend_required TEXT NOT NULL,
+    backend_evidence_digest TEXT,
+    credential_digest TEXT NOT NULL,
+    credential_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id, dispatch_id)
+);
+CREATE TABLE IF NOT EXISTS kernel_execution_attempts (
+    run_id TEXT NOT NULL,
+    dispatch_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    params_hash TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('claimed','refused','launched','unknown')),
+    refusal_code TEXT,
+    start_confirmed INTEGER CHECK(start_confirmed IN (0,1)),
+    terminal_state TEXT CHECK(terminal_state IN ('completed','failed','cancelled')),
+    error_code TEXT,
+    claimed_by TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id, dispatch_id)
+);
+"#;
+
+/// B1a-R1: authoritative Host file observations (a model-declared
+/// `expectedVersion` is never an observation), plus the attempt columns that
+/// carry the frozen dynamic requirements (operation class, live policy
+/// version, budget ceiling, parent revocation generation) so a receipt can
+/// project the right execution family and the executor can re-verify against
+/// what was actually bound. Additive only.
+const MIGRATION_75: &str = r#"
+CREATE TABLE IF NOT EXISTS kernel_host_observations (
+    run_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    target_identity TEXT NOT NULL,
+    version TEXT NOT NULL,
+    observed_by_tool_call_id TEXT NOT NULL,
+    observed_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id, target_identity)
+);
+"#;
+
+/// Column additions applied once under migration 75 (idempotent helper).
+const MIGRATION_75_ATTEMPTS_COLUMNS: &[(&str, &str, &str)] = &[
+    ("kernel_execution_attempts", "action_class", "TEXT"),
+    ("kernel_execution_attempts", "policy_version", "INTEGER"),
+    ("kernel_execution_attempts", "budget_ceiling_ms", "INTEGER"),
+    ("kernel_execution_attempts", "parent_generation", "INTEGER"),
+];
+
+
+fn rebuild_attempts_state_check(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
+    let sql: String = transaction.query_row("SELECT sql FROM sqlite_master WHERE type='table' AND name='kernel_execution_attempts'", [], |r| r.get(0))?;
+    if sql.contains("'completed','unknown'") { return Ok(()); }
+    transaction.execute_batch("CREATE TABLE kernel_execution_attempts_v76 (
+        run_id TEXT NOT NULL, dispatch_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+        params_hash TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('claimed','refused','launched','completed','unknown')),
+        refusal_code TEXT, start_confirmed INTEGER CHECK(start_confirmed IN (0,1)),
+        terminal_state TEXT CHECK(terminal_state IN ('completed','failed','cancelled')),
+        error_code TEXT, claimed_by TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        action_class TEXT, policy_version INTEGER, budget_ceiling_ms INTEGER, parent_generation INTEGER,
+        PRIMARY KEY(run_id, dispatch_id));
+        INSERT INTO kernel_execution_attempts_v76 SELECT run_id,dispatch_id,conversation_id,params_hash,state,refusal_code,start_confirmed,terminal_state,error_code,claimed_by,created_at,updated_at,action_class,policy_version,budget_ceiling_ms,parent_generation FROM kernel_execution_attempts;
+        DROP TABLE kernel_execution_attempts;
+        ALTER TABLE kernel_execution_attempts_v76 RENAME TO kernel_execution_attempts;")
+}
+
+const MIGRATION_77: &str = r#"
+CREATE TABLE IF NOT EXISTS kernel_execution_policies (
+ conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+ version INTEGER NOT NULL CHECK(version>=1), mode TEXT NOT NULL CHECK(mode IN ('read_only','ask','allow'))
+);
+INSERT OR IGNORE INTO kernel_execution_policies SELECT c.id,1,COALESCE(p.permission_mode,c.permission_mode,'ask') FROM conversations c LEFT JOIN projects p ON p.id=c.project_id;
+CREATE TABLE IF NOT EXISTS kernel_policy_requests (
+ conversation_id TEXT NOT NULL, request_id TEXT NOT NULL, request_digest TEXT NOT NULL,
+ result_version INTEGER NOT NULL, result_mode TEXT NOT NULL, PRIMARY KEY(conversation_id,request_id)
+);
+CREATE TABLE IF NOT EXISTS kernel_parent_generations (run_id TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0);
+CREATE TRIGGER IF NOT EXISTS execution_policy_new_conversation AFTER INSERT ON conversations BEGIN
+ INSERT INTO kernel_execution_policies VALUES(NEW.id,1,COALESCE((SELECT permission_mode FROM projects WHERE id=NEW.project_id),NEW.permission_mode,'ask'));
+END;
+CREATE TRIGGER IF NOT EXISTS execution_policy_conversation_change AFTER UPDATE OF permission_mode,project_id ON conversations
+WHEN OLD.permission_mode IS NOT NEW.permission_mode OR OLD.project_id IS NOT NEW.project_id BEGIN
+ UPDATE kernel_execution_policies SET version=version+1,mode=COALESCE((SELECT permission_mode FROM projects WHERE id=NEW.project_id),NEW.permission_mode,'ask') WHERE conversation_id=NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS execution_policy_project_change AFTER UPDATE OF permission_mode ON projects WHEN OLD.permission_mode IS NOT NEW.permission_mode BEGIN
+ UPDATE kernel_execution_policies SET version=version+1,mode=NEW.permission_mode WHERE conversation_id IN (SELECT id FROM conversations WHERE project_id=NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS execution_policy_invalidate AFTER UPDATE OF version ON kernel_execution_policies WHEN NEW.version<>OLD.version BEGIN
+ UPDATE kernel_approvals SET state='expired' WHERE state IN ('pending','allow_once','allow_conversation') AND run_id IN (SELECT id FROM runs WHERE conversation_id=NEW.conversation_id)
+ AND NOT EXISTS(SELECT 1 FROM kernel_effect_outbox o WHERE o.run_id=kernel_approvals.run_id AND o.tool_call_id=kernel_approvals.tool_call_id AND o.effect_type='dispatch_tool');
+END;
+CREATE TRIGGER IF NOT EXISTS execution_grant_revoked AFTER UPDATE OF revoked_at ON kernel_authorization_grants WHEN OLD.revoked_at IS NULL AND NEW.revoked_at IS NOT NULL BEGIN
+ UPDATE kernel_execution_policies SET version=version+1 WHERE conversation_id=NEW.conversation_id;
+ INSERT INTO kernel_parent_generations(run_id,generation) SELECT id,1 FROM runs WHERE conversation_id=NEW.conversation_id
+ ON CONFLICT(run_id) DO UPDATE SET generation=generation+1;
+END;
+CREATE TRIGGER IF NOT EXISTS execution_parent_cancel AFTER UPDATE OF status ON runs WHEN NEW.status='cancelled' AND OLD.status<>'cancelled' BEGIN
+ INSERT INTO kernel_parent_generations(run_id,generation) VALUES(NEW.id,1) ON CONFLICT(run_id) DO UPDATE SET generation=generation+1;
+END;
 "#;

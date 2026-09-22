@@ -2310,7 +2310,8 @@ impl RuntimeHost {
             }
             None => {
                 let executor = match std::env::var("FOX_RESOURCE_GATEWAY_READS") {
-                    Err(std::env::VarError::NotPresent) => fox_engine_protocol::ResourceExecutor::Runtime,
+                    // New runs need Host observations for guarded file writes. Existing frozen runs retain their executor.
+                    Err(std::env::VarError::NotPresent) => fox_engine_protocol::ResourceExecutor::Rust,
                     Ok(value) if value == "runtime" => fox_engine_protocol::ResourceExecutor::Runtime,
                     Ok(value) if value == "rust" => fox_engine_protocol::ResourceExecutor::Rust,
                     _ => return Err("FOX_RESOURCE_GATEWAY_READS must be runtime or rust".into()),
@@ -3446,13 +3447,13 @@ impl RuntimeHost {
         approval_id: &str,
         decision: ApprovalDecision,
     ) -> Result<bool, String> {
-        if let Some((run_id, tool_id)) = self.database.kernel_host_approval_target(approval_id)? {
+        if self.database.kernel_host_approval_target(approval_id)?.is_some() {
             let decision = match decision {
                 ApprovalDecision::AllowOnce => "allow_once",
                 ApprovalDecision::AllowConversation => "allow_conversation",
                 ApprovalDecision::Deny => "denied",
             };
-            return self.database.queue_kernel_host_command(&run_id, Some((&tool_id, decision)));
+            return self.database.queue_kernel_host_approval(approval_id, decision);
         }
         let resolved = self.database.resolve_approval(approval_id, decision)?;
         let Some(approval) = resolved else {
@@ -9335,13 +9336,24 @@ fn execute_host_tool_request(
     let (project_root, permission_mode) = database
         .conversation_project_access(conversation_id)?
         .ok_or_else(|| "this conversation has no authorized project folder".to_owned())?;
-    if permission_mode == "read_only" {
+    let manage_command = tool == "run_command" && matches!(input["action"].as_str(), Some("status" | "output" | "cancel"));
+    if permission_mode == "read_only" && !manage_command {
         return Err(format!("tool {tool} is blocked in read-only mode"));
     }
 
-    let prepared = crate::tool_host::prepare(tool, &input, &project_root)?;
-    let mut managed_capture: Option<managed_files::BeforeCapture> = None;
-    let mut managed_backups: Option<std::path::PathBuf> = None;
+    let file_policy = if matches!(tool, "write_file" | "edit_file") {
+        let binding = database.run_control_binding(run_id)?.ok_or("file write requires a frozen Run")?;
+        if binding.conversation_id != conversation_id || binding.permission.project_root.as_deref() != Some(project_root.as_str()) {
+            return Err("credential_mismatch: file project binding changed".into());
+        }
+        let policy = database.execution_policy(conversation_id)?;
+        let target = crate::tool_host::canonical_file_identity(Path::new(&project_root), input["path"].as_str().ok_or("missing file path")?)?;
+        let observation = database.host_observation_for(run_id, &target)?.ok_or("[tool.file_conflict] Read the target before writing; no Host observation exists")?;
+        Some((policy.version, observation))
+    } else { None };
+    let prepared = if let Some((_, baseline)) = &file_policy {
+        crate::tool_host::prepare_admitted_file(tool, &input, &project_root, &baseline.version)?
+    } else { crate::tool_host::prepare(tool, &input, &project_root)? };
     let permission_scope = host_permission_scope(tool, prepared.preview());
     let has_conversation_permission = match permission_scope.as_deref() {
         Some(scope) => {
@@ -9350,7 +9362,8 @@ fn execute_host_tool_request(
         None => false,
     };
     let requires_approval = hook_decision.requires_approval
-        || ((permission_mode == "ask" || tool == "run_command") && !has_conversation_permission);
+        || (file_policy.is_some() && permission_mode == "ask")
+        || (!manage_command && (permission_mode == "ask" || tool == "run_command") && !has_conversation_permission);
     let approval_permission_scope = if hook_decision.requires_approval {
         None
     } else {
@@ -9419,22 +9432,12 @@ fn execute_host_tool_request(
             claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
         }
 
-        if matches!(tool, "write_file" | "edit_file") {
-            if let Some(target) = prepared.target_path() {
-                use tauri::Manager;
-                managed_backups = Some(
-                    app.state::<crate::app_state::AppState>()
-                        .runtime_host
-                        .managed_files_dir()
-                        .to_path_buf(),
-                );
-                managed_capture = managed_files::capture_before(
-                    managed_backups.as_deref().expect("backup directory"),
-                    Path::new(&project_root),
-                    target,
-                )
-                .ok();
-            }
+        if let Some((version, baseline)) = &file_policy {
+            use tauri::Manager;
+            let app_state = app.state::<crate::app_state::AppState>();
+            return execute_legacy_admitted_file(database, app_state.runtime_host.managed_files_dir(),
+                run_id, conversation_id, tool_call_id, tool, &input, &project_root,
+                *version, baseline, &cancellation);
         }
         if let crate::tool_host::PreparedToolAction::CommandJob {root,input,..} = &prepared {
             let binding=database.run_control_binding(run_id)?.ok_or("command job needs a frozen Run")?;
@@ -9444,25 +9447,6 @@ fn execute_host_tool_request(
             crate::tool_host::execute_with_cancellation(prepared, Some(&cancellation))
         }
     })();
-    if let (Ok(result), Some(capture), Some(backups_dir)) =
-        (&outcome, managed_capture, managed_backups.as_deref())
-    {
-        if result.get("isError").and_then(Value::as_bool) != Some(true) {
-            if let Err(error) = managed_files::record_after(
-                database,
-                backups_dir,
-                conversation_id,
-                run_id,
-                Some(tool_call_id),
-                tool,
-                capture,
-            ) {
-                eprintln!(
-                    "managed-file version registration failed after {tool} {tool_call_id}: {error}"
-                );
-            }
-        }
-    }
     finalize_host_tool_execution(
         database,
         run_id,
@@ -9472,6 +9456,57 @@ fn execute_host_tool_request(
         hook_decision.annotations,
         outcome,
     )
+}
+
+/// Legacy transport shares the same durable file admission and A commit seam.
+/// The transport never supplies a credential or a file-version authority.
+fn execute_legacy_admitted_file(
+    database: &Database, backups_dir: &Path, run_id: &str, conversation_id: &str,
+    tool_call_id: &str, tool: &str, input: &Value, project_root: &str,
+    policy_version: u64, observed: &fox_engine_protocol::HostObservation,
+    token: &crate::kernel::CancellationToken,
+) -> Result<Value, String> {
+    let durable = database.get_runtime_tool_call(run_id, tool_call_id)?
+        .ok_or("credential_mismatch: durable Host tool call is missing")?;
+    if durable.tool_name != tool || durable.input != *input {
+        return Err("credential_mismatch: file input differs from the durable intent".into());
+    }
+    // The executor consumes the persisted input, never a caller-held replacement.
+    let tool = durable.tool_name.as_str();
+    let input = &durable.input;
+    let credential = database.issue_legacy_file_credential(run_id, tool_call_id, policy_version)?;
+    if credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(tool, &input.to_string()) {
+        return Err("credential_mismatch: file credential input binding differs".into());
+    }
+    if credential.file_baseline.as_ref() != Some(observed) {
+        return Err("observation_conflict: file observation changed during approval".into());
+    }
+    let outcome = database.claim_execution_attempt(run_id, conversation_id, &credential,
+        &credential.intent_digest, &format!("legacy-host:{tool_call_id}"))?;
+    if outcome != fox_engine_protocol::AttemptOutcome::Claimed {
+        return kernel_host::execution_receipt_result(database, run_id, &credential.dispatch_id, tool, None);
+    }
+    let scope = crate::database::KernelHostScope {
+        schema_version: 1, tool_names: [tool.to_owned()].into_iter().collect(),
+        mcp_server_hashes: Default::default(), knowledge_reference_hashes: Default::default(),
+        knowledge_connection_hashes: Default::default(), office_tools: Default::default(), lifecycle_hooks: vec![],
+    };
+    let mut revalidate = || {
+        token.check()?;
+        database.revalidate_execution_credential(&credential)?;
+        let (current_root, mode) = database.conversation_project_access(conversation_id)?.ok_or("project grant revoked")?;
+        if current_root != project_root || mode == "read_only" { return Err("project grant revoked".into()); }
+        Ok(())
+    };
+    let mode = database.execution_policy(conversation_id)?.mode;
+    let (result, evidence) = managed_files::execute_admitted_file(managed_files::ManagedExecutionContext {
+        database, backups_dir, conversation_id, run_id, project_root: Some(project_root),
+        permission_mode: &mode, scope: &scope, sessions_dir: None,
+    }, tool, input, tool_call_id, &credential, Some(token), &mut revalidate);
+    let call_outcome = kernel_host::call_outcome(&result);
+    kernel_host::settle_execution_outcome(database, run_id, &credential.dispatch_id, &result, evidence, &call_outcome)?;
+    let value = match result { Ok(value) => value, Err(error) => kernel_host::resource_failure_result(tool, &error) };
+    kernel_host::with_execution_receipt(database, run_id, &credential.dispatch_id, value)
 }
 
 /// Shared production executor seam. Admission is checked again here, before
@@ -9501,7 +9536,9 @@ fn execute_rust_reader_request(
             let approved = crate::tool_guard::approve_read_only_tool(tool, &original, binding.permission.project_root.as_deref())?;
             if approved.input != input { return Err("reader prepared input differs from the frozen source arguments".into()); }
         }
-        crate::resource_gateway::execute(&binding, tool, &input, cancellation)
+        managed_files::execute_observed_reader(database, &binding, tool, &input,
+            tool_call_id, cancellation,
+            std::time::Duration::from_millis(binding.budgets.tool_execution_ms as u64))
     })();
     finalize_host_tool_execution(database, &binding.run_id, tool_call_id, tool, &record_input, Vec::new(), outcome)
 }
@@ -9654,7 +9691,8 @@ fn ensure_plan_approved_before_mutation(
     tool: &str,
     input: &Value,
 ) -> Result<(), String> {
-    let mutates_project = matches!(tool, "write_file" | "edit_file" | "run_command")
+    let mutates_project = matches!(tool, "write_file" | "edit_file")
+        || (tool == "run_command" && !matches!(input["action"].as_str(), Some("status" | "output" | "cancel")))
         || (tool == "format_code" && input.get("mode").and_then(Value::as_str) == Some("write"))
         || (tool == "call_mcp_tool" && input["serverId"] == crate::office::SERVER_ID
             && matches!(

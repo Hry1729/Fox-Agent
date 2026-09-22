@@ -1993,6 +1993,8 @@ pub struct UpdateProjectPermissionRequest {
 pub struct UpdateConversationPermissionRequest {
     pub conversation_id: String,
     pub permission_mode: String,
+    pub request_id: String,
+    pub expected_version: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -19,8 +19,12 @@ impl Database {
     pub(crate) fn kernel_command_job_checkpoint(&self,id:&str,attempt:u32,value:&Value)->Result<(),String> {
         self.with_connection(|conn| {
             let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            if owned(&tx,id,attempt)?.kind!="command" {return Err(invalid("not a command job"));}
-            tx.execute("UPDATE kernel_jobs SET cursor=?2,updated_at=?3 WHERE job_id=?1",params![id,value.to_string(),now_ms()])?;
+            let row=owned(&tx,id,attempt)?;
+            if row.kind!="command" {return Err(invalid("not a command job"));}
+            let body=value.to_string();
+            if row.cursor.as_deref()!=Some(body.as_str()) {
+                tx.execute("UPDATE kernel_jobs SET cursor=?2,updated_at=?3 WHERE job_id=?1",params![id,body,now_ms()])?;
+            }
             tx.commit()
         })
     }
@@ -46,6 +50,14 @@ impl Database {
                 params![id,state,format!("fox-job-result://{id}"),body.len() as i64,sha,body_value["errorCode"].as_str(),body_value["errorMessage"].as_str(),now_ms()])?;
             tx.commit()
         })
+    }
+    /// Supervision must not reload the potentially large output cursor every tick.
+    pub(crate) fn kernel_command_job_stop_requested(&self, id: &str) -> Result<bool, String> {
+        self.with_connection(|conn| conn.query_row(
+            "SELECT j.cancel_requested_at IS NOT NULL OR j.state <> 'running'
+                OR r.status IN ('completed','failed','cancelled','interrupted')
+             FROM kernel_jobs j JOIN runs r ON r.id=j.run_id WHERE j.job_id=?1",
+            [id], |row| row.get(0)))
     }
     pub(crate) fn kernel_job_parent_stopped(&self, id: &str) -> Result<bool, String> {
         self.with_connection(|conn| conn.query_row(

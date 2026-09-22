@@ -394,7 +394,7 @@ fn restart_approval_dispatches_real_reads_once_and_preserves_batch_order() {
     for id in ["read-b", "read-a"] {
         assert!(coordinator
             .dispatch_tool(id, "reader-owner", |binding, effect, token| {
-                assert_eq!(effect.idempotency_key, kernel::dispatch_idempotency_key(id));
+                assert_eq!(effect.idempotency_key, kernel::dispatch_idempotency_key(&binding.run_id, id));
                 let payload: Value = serde_json::from_str(&effect.payload_json).unwrap();
                 Ok((
                     true,
@@ -2620,6 +2620,10 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
 
     let root = std::env::temp_dir().join(format!("fox-grant-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
+    let target = root.join("a.txt");
+    let other = root.join("other.txt");
+    std::fs::write(&target, "observed target bytes").unwrap();
+    std::fs::write(&other, "observed out-of-scope bytes").unwrap();
     let db = Database::open(root.join("facts.db")).unwrap();
     let conversation = db
         .create_conversation(db.default_agent_id(), None, Some(root.to_str().unwrap()), Some("ask"))
@@ -2705,6 +2709,47 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
     };
     db.freeze_kernel_host_scope(&run_id, &scope).unwrap();
 
+    // Drive the real Host reader for both paths. The write proposal gate must
+    // consume only this durable opened-file evidence; the model cannot provide
+    // or synthesize its own baseline. Observing `other` lets the final check
+    // reach the permission decision and prove it is out of the approved scope.
+    let cancellation = CancellationRegistry::default();
+    cancellation.register_run(&run_id).unwrap();
+    for (tool_call_id, path) in [("read-target", &target), ("read-other", &other)] {
+        let token = cancellation.tool_token(&run_id, tool_call_id).unwrap();
+        super::super::managed_files::execute_observed_reader(
+            &db,
+            &binding,
+            "read",
+            &json!({"path": path.to_string_lossy()}),
+            tool_call_id,
+            &token,
+            std::time::Duration::from_secs(5),
+        )
+        .expect("the real Host reader records the opened file version");
+    }
+    let input_from_observation = |path: &std::path::Path| {
+        let identity = crate::tool_host::canonical_file_identity(
+            &root,
+            &path.to_string_lossy(),
+        )
+        .expect("canonical observed target");
+        let observation = db
+            .host_observation_for(&run_id, &identity)
+            .unwrap()
+            .expect("the real Host read persisted its exact version");
+        json!({
+            "path": path.to_string_lossy(),
+            "content": "x",
+            // This is the reader's returned version, not model authority. The
+            // Gateway independently replaces it with the durable observation
+            // before validating the proposal.
+            "expectedVersion": observation.version,
+        })
+    };
+    let target_input = input_from_observation(&target);
+    let other_input = input_from_observation(&other);
+
     // The decided approval the grant is derived from, exactly as production
     // records it before the tool dispatches.
     db.with_connection(|connection| {
@@ -2722,7 +2767,7 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
              (run_id, tool_call_id, batch_id, tool, source_order, canonical_input_json,
               state, result_json, created_at, settled_at, dispatch_idempotency_key)
              VALUES (?1, 'g-write-1', 'gb', 'write_file', 0, ?2, 'running', NULL, 0, 0, NULL)",
-            params![run_id, json!({"path": root.join("a.txt").to_string_lossy()}).to_string()],
+            params![run_id, target_input.to_string()],
         )?;
         connection.execute(
             "INSERT INTO kernel_approvals(run_id, tool_call_id, state, created_at, decided_at)
@@ -2733,9 +2778,8 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
     })
     .unwrap();
 
-    let asks = |policy: &super::super::kernel_gateway::GatewayPolicy, path: &std::path::Path| {
-        let input = json!({"path": path.to_string_lossy(), "content": "x"}).to_string();
-        policy.decide(&run_id, "perm", "write_file", &input)
+    let asks = |policy: &super::super::kernel_gateway::GatewayPolicy, input: &serde_json::Value| {
+        policy.decide(&run_id, "perm", "write_file", &input.to_string())
     };
     let policy = || super::super::kernel_gateway::GatewayPolicy {
         binding: db.run_control_binding(&run_id).unwrap().unwrap(),
@@ -2744,10 +2788,29 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
         sessions_dir: None, artifacts_dir: None,
     };
 
-    let target = root.join("a.txt");
-    let other = root.join("other.txt");
     // Nothing is authorized yet: the first real write asks.
-    assert!(matches!(asks(&policy(), &target), PolicyDecision::RequireApproval));
+    assert!(matches!(asks(&policy(), &target_input), PolicyDecision::RequireApproval));
+    let scope_with_version = super::super::shadow_reconcile::tool_operation_scope(
+        "write_file",
+        &target_input,
+        Some(root.to_str().unwrap()),
+    )
+    .expect("the observed target has a nameable grant scope");
+    let mut target_without_version = target_input.clone();
+    target_without_version
+        .as_object_mut()
+        .unwrap()
+        .remove("expectedVersion");
+    let scope_without_version = super::super::shadow_reconcile::tool_operation_scope(
+        "write_file",
+        &target_without_version,
+        Some(root.to_str().unwrap()),
+    )
+    .expect("the target scope does not depend on a model version field");
+    assert_eq!(
+        scope_with_version, scope_without_version,
+        "grant identity names the canonical target; Host version authority is validated separately"
+    );
     // The human answers "for this conversation"; the Host records the scope.
     let registered = db
         .kernel_register_authorization_grant(
@@ -2755,19 +2818,17 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
             "g-write-1",
             "allow_conversation",
             "write_file",
-            super::super::shadow_reconcile::tool_operation_scope(
-                "write_file",
-                &json!({"path": target.to_string_lossy(), "content": "x"}),
-                Some(root.to_str().unwrap()),
-            )
-            .as_deref(),
+            Some(scope_with_version.as_str()),
         )
         .unwrap();
-    assert!(matches!(registered, crate::database::GrantRegistration::Registered { .. }));
+    assert!(
+        matches!(registered, crate::database::GrantRegistration::Registered { .. }),
+        "real observed scope must register, got {registered:?}"
+    );
     // A second write of the SAME operation is covered: no second question.
-    assert_eq!(asks(&policy(), &target), PolicyDecision::Allow);
+    assert_eq!(asks(&policy(), &target_input), PolicyDecision::Allow);
     // A different path is a different operation and still asks.
-    assert!(matches!(asks(&policy(), &other), PolicyDecision::RequireApproval));
+    assert!(matches!(asks(&policy(), &other_input), PolicyDecision::RequireApproval));
     // The reuse is auditable, not silent.
     let uses: i64 = db
         .with_connection(|connection| {
@@ -2782,7 +2843,7 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
     // Withdrawing permission takes effect immediately.
     db.kernel_revoke_authorization_grants(&conversation.id, "user_withdrew_permission")
         .unwrap();
-    assert!(matches!(asks(&policy(), &target), PolicyDecision::RequireApproval));
+    assert!(matches!(asks(&policy(), &target_input), PolicyDecision::RequireApproval));
     // The frozen snapshot itself was never rewritten by any of this.
     assert!(db
         .run_control_binding(&run_id)
@@ -3258,4 +3319,206 @@ fn an_approved_effect_waits_for_other_approvals_instead_of_failing_admission() {
     }
     assert_eq!(executions.load(Ordering::SeqCst), 2);
     assert!(coordinator.snapshot().unwrap().tool_calls.iter().all(|call| call.state == "completed"));
+}
+
+#[test]
+fn r1_rejected_input_survives_sqlite_reopen_and_reaches_model_resume_frame() {
+    struct Invalid;
+    impl PolicyDecisionPort for Invalid {
+        fn decide(&self,_:&str,_:&str,_:&str,_:&str)->PolicyDecision {
+            PolicyDecision::Reject {code:"tool.invalid_input".into(),message:"oldText was not found; read the file again".into()}
+        }
+    }
+    let clock=TestClock::new(1000);
+    let cancellation=CancellationRegistry::default();
+    let (db,_root,run_id)=fixture(&clock);
+    let coordinator=KernelCoordinator::reopen(&db,&clock,&run_id,&cancellation).unwrap();
+    coordinator.propose_tools("rejected",vec![kernel::ToolCallRequest {
+        tool_call_id:"bad-edit".into(),tool:"edit_file".into(),
+        canonical_input_json:json!({"path":"proof.txt","oldText":"absent","newText":"x"}).to_string(),source_order:0
+    }],&Invalid).unwrap();
+    drop(coordinator);
+    let coordinator=KernelCoordinator::reopen(&db,&clock,&run_id,&cancellation).unwrap();
+    let snapshot=coordinator.snapshot().unwrap();
+    assert!(snapshot.tool_calls[0].approval_state.is_none());
+    assert!(!snapshot.pending_effects.iter().any(|e|e.kind==kernel::OutboxEffectKind::DispatchTool));
+    let frame=coordinator.prepare_batch_resume("rejected",vec![json!({"role":"user","content":"edit"})],
+        json!({"role":"assistant","stopReason":"toolUse","content":[
+            {"type":"toolCall","id":"bad-edit","name":"edit_file","arguments":{"path":"proof.txt","oldText":"absent","newText":"x"}}
+        ]}),vec![]).unwrap();
+    assert_eq!(frame.tools[0].result["details"]["code"],"tool.invalid_input");
+    assert_eq!(frame.tools[0].result["details"]["executionStarted"],false);
+    assert!(frame.tools[0].result["content"][0]["text"].as_str().unwrap().contains("oldText was not found"));
+}
+
+#[test]
+fn permission_change_reevaluates_original_intent_atomically_and_rejects_old_ticket() {
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let (db, _root, run_id) = fixture(&clock);
+    let binding = db.run_control_binding(&run_id).unwrap().unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.propose_tools("policy-change", calls(), &Ask).unwrap();
+    let old_version = db.execution_policy(&binding.conversation_id).unwrap().version;
+    db.change_execution_policy(&binding.conversation_id, "mode-change", old_version, "allow").unwrap();
+    coordinator.reevaluate_tool("read-a", &Allow).unwrap();
+    let snapshot = coordinator.snapshot().unwrap();
+    assert_eq!(snapshot.tool_calls.iter().filter(|c| c.tool_call_id == "read-a").count(), 1);
+    assert_eq!(snapshot.pending_effects.iter().filter(|e| e.kind == kernel::OutboxEffectKind::DispatchTool && e.tool_call_id.as_deref() == Some("read-a")).count(), 1);
+    assert!(coordinator.resolve_approval_at_version("read-a", kernel::ApprovalDecision::AllowOnce, old_version).is_err());
+    assert!(coordinator.reevaluate_tool("read-a", &Allow).is_err(), "issued dispatch must never be reissued");
+    let credential = db.read_execution_credential(&run_id, &fox_engine_protocol::encode_dispatch_id(&run_id,"read-a").unwrap()).unwrap().unwrap();
+    assert_eq!(credential.policy_version, Some(old_version + 1));
+}
+
+#[test]
+fn permission_change_ask_to_ask_reissues_only_a_current_ticket() {
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let (db, _root, run_id) = fixture(&clock);
+    let binding = db.run_control_binding(&run_id).unwrap().unwrap();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+
+    coordinator.propose_tools("policy-change-ask", calls(), &Ask).unwrap();
+    let old_version = db.execution_policy(&binding.conversation_id).unwrap().version;
+    let old_ticket: (String, Option<u64>) = db
+        .with_connection(|connection| {
+            connection.query_row(
+                "SELECT state, policy_version FROM kernel_approvals
+                  WHERE run_id=?1 AND tool_call_id='read-a'",
+                rusqlite::params![run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .unwrap();
+    assert_eq!(old_ticket, ("pending".to_owned(), Some(old_version)));
+
+    let current = db
+        .change_execution_policy(
+            &binding.conversation_id,
+            "mode-change-ask-to-ask",
+            old_version,
+            "ask",
+        )
+        .unwrap();
+    assert_eq!(current.version, old_version + 1);
+    coordinator.reevaluate_tool("read-a", &Ask).unwrap();
+
+    let snapshot = coordinator.snapshot().unwrap();
+    let call = snapshot
+        .tool_calls
+        .iter()
+        .find(|call| call.tool_call_id == "read-a")
+        .expect("the original logical intent remains present exactly once");
+    assert_eq!(
+        snapshot
+            .tool_calls
+            .iter()
+            .filter(|call| call.tool_call_id == "read-a")
+            .count(),
+        1
+    );
+    assert_eq!(call.state, "waiting_approval");
+    assert_eq!(call.approval_state.as_deref(), Some("pending"));
+
+    let dispatch_id = fox_engine_protocol::encode_dispatch_id(&run_id, "read-a").unwrap();
+    let facts = db
+        .with_connection(|connection| {
+            let ticket: (String, Option<u64>) = connection.query_row(
+                "SELECT state, policy_version FROM kernel_approvals
+                  WHERE run_id=?1 AND tool_call_id='read-a'",
+                rusqlite::params![run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let history: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM kernel_approval_history
+                  WHERE run_id=?1 AND tool_call_id='read-a'",
+                rusqlite::params![run_id],
+                |row| row.get(0),
+            )?;
+            let dispatches: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM kernel_effect_outbox
+                  WHERE run_id=?1 AND tool_call_id='read-a' AND effect_type='dispatch_tool'",
+                rusqlite::params![run_id],
+                |row| row.get(0),
+            )?;
+            let credentials: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM kernel_execution_credentials
+                  WHERE run_id=?1 AND dispatch_id=?2",
+                rusqlite::params![run_id, dispatch_id],
+                |row| row.get(0),
+            )?;
+            let attempts: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM kernel_execution_attempts
+                  WHERE run_id=?1 AND dispatch_id=?2",
+                rusqlite::params![run_id, dispatch_id],
+                |row| row.get(0),
+            )?;
+            Ok((ticket, history, dispatches, credentials, attempts))
+        })
+        .unwrap();
+    assert_eq!(facts.0, ("pending".to_owned(), Some(current.version)));
+    assert_eq!(facts.1, 1, "exactly the old ticket moves to history");
+    assert_eq!((facts.2, facts.3, facts.4), (0, 0, 0));
+
+    let stale = coordinator
+        .resolve_approval_at_version(
+            "read-a",
+            kernel::ApprovalDecision::AllowOnce,
+            old_version,
+        )
+        .expect_err("the superseded ticket version must never resolve");
+    assert!(stale.contains("stale_approval"), "unexpected error: {stale}");
+    let still_unexecuted: (i64, i64, i64) = db
+        .with_connection(|connection| {
+            Ok((
+                connection.query_row(
+                    "SELECT COUNT(*) FROM kernel_effect_outbox
+                      WHERE run_id=?1 AND tool_call_id='read-a' AND effect_type='dispatch_tool'",
+                    rusqlite::params![run_id],
+                    |row| row.get(0),
+                )?,
+                connection.query_row(
+                    "SELECT COUNT(*) FROM kernel_execution_credentials
+                      WHERE run_id=?1 AND dispatch_id=?2",
+                    rusqlite::params![run_id, dispatch_id],
+                    |row| row.get(0),
+                )?,
+                connection.query_row(
+                    "SELECT COUNT(*) FROM kernel_execution_attempts
+                      WHERE run_id=?1 AND dispatch_id=?2",
+                    rusqlite::params![run_id, dispatch_id],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(still_unexecuted, (0, 0, 0));
+
+    coordinator
+        .resolve_approval_at_version(
+            "read-a",
+            kernel::ApprovalDecision::AllowOnce,
+            current.version,
+        )
+        .expect("the current ticket version resolves");
+    let resolved = coordinator.snapshot().unwrap();
+    let call = resolved
+        .tool_calls
+        .iter()
+        .find(|call| call.tool_call_id == "read-a")
+        .unwrap();
+    assert_eq!(call.state, "running");
+    assert_eq!(call.approval_state.as_deref(), Some("allow_once"));
+    let credential = db
+        .read_execution_credential(&run_id, &dispatch_id)
+        .unwrap()
+        .expect("resolution issues the current credential with its dispatch");
+    assert_eq!(credential.policy_version, Some(current.version));
+    assert!(
+        db.read_execution_attempt(&run_id, &dispatch_id)
+            .unwrap()
+            .is_none(),
+        "resolving approval does not execute or claim the tool"
+    );
 }

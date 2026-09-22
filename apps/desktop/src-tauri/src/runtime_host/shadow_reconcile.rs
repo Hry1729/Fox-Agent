@@ -85,10 +85,17 @@ pub(crate) fn kernel_tool_policy(tool: &str) -> PolicyDecision {
 /// cover it. Exposed so an approval-time grant is registered against exactly the
 /// key the policy will later compare.
 pub(super) fn tool_operation_scope(tool: &str, input: &Value, project_root: Option<&str>) -> Option<String> {
-    if matches!(tool, "write_file" | "edit_file" | "run_command") {
+    if matches!(tool, "write_file" | "edit_file") {
         let root = project_root?;
-        let prepared = crate::tool_host::prepare(tool, input, root).ok()?;
-        super::host_permission_scope(tool, prepared.preview())
+        // A grant names a target, not a read version or an edit match. Those
+        // independent preconditions are checked against Host observations at
+        // admission and again at commit. Model version fields cannot determine
+        // whether an otherwise identical target grant can be named.
+        let target = crate::tool_host::canonical_file_identity(
+            std::path::Path::new(root), input.get("path")?.as_str()?).ok()?;
+        Some(super::permission_scope_hash("host-target", format!("{tool}\0{target}").as_bytes()))
+    } else if tool == "run_command" {
+        None
     } else if tool == "call_mcp_tool" {
         super::mcp_permission_scope(tool, input)
     } else {

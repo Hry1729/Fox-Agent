@@ -454,10 +454,10 @@ fn legacy_read_result(
     .unwrap();
     let dispatched = crate::runtime_host::execute_rust_reader_request(&db, &envelope, &token)
         .expect("the Legacy read must execute and persist");
-    let stored = dispatched["result"]["content"][0]["text"]
-        .as_str()
-        .expect("the dispatched read returns text")
-        .to_owned();
+    let stored = dispatched["result"]["content"].as_array().unwrap().iter()
+        .filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n");
+    assert_eq!(dispatched["result"]["details"]["readVersion"],
+        crate::tool_host::file_version(text.as_bytes()));
     (
         db,
         root,
@@ -485,10 +485,12 @@ fn real_pi_jsonl_reads_a_persisted_result_through_read_tool_result() {
     // The storage fact is trusted (this fixture persisted the result and reads
     // it back below); without it the projection would publish every byte.
     let stored_whole = crate::kernel_compaction::ToolResultStorage::whole(stored.len());
+    let persisted_content = db.get_runtime_tool_call(&first_run, "read-once").unwrap().unwrap()
+        .result.unwrap()["content"].clone();
     let bounded = crate::kernel_compaction::bound_tool_result_content_with_storage(
         "read",
         false,
-        &json!([{ "type": "text", "text": stored }]),
+        &persisted_content,
         Some(&reference),
         &stored_whole,
     )
@@ -723,7 +725,8 @@ fn real_pi_jsonl_reads_a_persisted_result_through_read_tool_result() {
         .unwrap();
     assert_eq!(original.status, "completed");
     assert_eq!(
-        original.result.unwrap()["content"][0]["text"].as_str().unwrap(),
+        original.result.unwrap()["content"].as_array().unwrap().iter()
+            .filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n"),
         stored
     );
     println!(

@@ -1,9 +1,8 @@
 //! JOB-v1 integration tests — real OS processes, real pipes, real signals.
 //!
-//! The module under test (`src/process_jobs.rs`) is **not declared in `lib.rs`**
-//! yet: it is still `module_ready`, not `integration_ready`. It is pulled in
-//! here with an explicit `#[path]` so it can be exercised as a real compiled
-//! target without registering anything in the product.
+//! The product module (`src/process_jobs.rs`) is also compiled here with an
+//! explicit `#[path]`. This test crate enables `cfg(test)`, permitting explicit
+//! per-instance test proofs that cannot be constructed in production.
 //!
 //! What these tests add over the unit tests: unit tests script the child, so
 //! they prove the *decision logic*. These prove the parts that only exist once a
@@ -11,18 +10,18 @@
 //! from a real shell, terminating a real process tree, and pid identity from the
 //! real process table.
 //!
-//! Scope note: nothing here is wired into the product. No Host tool, no
-//! `run_command`, no database, no Run. Authorization is out of scope by
-//! construction — this module must be handed an already-authorized Run.
+//! Scope: this target exercises the process layer rather than the Host/database
+//! chain. A passing test proves temporary-process behavior, not OS isolation
+//! or availability of a production execution backend.
 
 #[path = "../src/process_jobs.rs"]
 mod process_jobs;
 
 use process_jobs::{
-    EnvMode, IdentityProbe, JobRunState, Liveness, ManagerConfig, OutputWindow, OwnerStatus,
-    PersistedJobRecord, ProcessIdentity, ProcessJobManager, RecoveryReason, SpawnSpec,
-    StartOutcome, StartRequest, Stream, SystemClock, SystemIdentityProbe, SystemSpawner,
-    TerminateOutcome,
+    AvailableInTests, BackendCapabilityProof, EnvMode, IdentityProbe, JobRunState, Liveness,
+    ManagerConfig, OutputWindow, OwnerStatus, PersistedJobRecord, ProcessIdentity,
+    ProcessJobManager, RecoveryReason, SpawnSpec, StartOutcome, StartRequest, Stream, SystemClock,
+    SystemIdentityProbe, SystemSpawner, TerminateOutcome,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -59,12 +58,32 @@ fn fixture(tag: &str) -> PathBuf {
     dir
 }
 
+/// The execution decision this harness injects into every manager it builds.
+///
+/// Production constructs managers with `HostVerifiedBackend`, which refuses on
+/// this Host because no confinement backend is verified (batch C0, NO-GO). This
+/// module exists to exercise the *lifecycle* machinery against real OS
+/// processes, so it must hand each manager an authorizing proof explicitly.
+///
+/// The injection is per manager instance. An earlier revision used a
+/// process-global proof installed by the unit tests, which made this target
+/// depend on test execution order and made the first real integration test fail
+/// with `SandboxUnavailable`. Passing the proof as a value removes that
+/// coupling: this file never reads or writes global backend state, and neither
+/// does the manager it builds.
+fn harness_proof() -> Arc<dyn BackendCapabilityProof> {
+    Arc::new(AvailableInTests::host_user_unconfined(
+        "harness-process-jobs-integration",
+    ))
+}
+
 fn manager(config: ManagerConfig) -> Arc<ProcessJobManager> {
-    Arc::new(ProcessJobManager::new(
+    Arc::new(ProcessJobManager::with_backend_proof(
         Arc::new(SystemClock),
         Arc::new(SystemSpawner),
         Arc::new(SystemIdentityProbe),
         config,
+        harness_proof(),
     ))
 }
 
@@ -1191,11 +1210,12 @@ fn terminate_fields(view: &process_jobs::JobStatusView) -> (String, Option<i32>,
 
 #[cfg(windows)]
 fn matrix_manager(flags: u32, grace: Duration) -> Arc<ProcessJobManager> {
-    Arc::new(ProcessJobManager::new(
+    Arc::new(ProcessJobManager::with_backend_proof(
         Arc::new(SystemClock),
         Arc::new(process_jobs::SystemSpawnerFlags { creation_flags: flags }),
         Arc::new(SystemIdentityProbe),
         ManagerConfig { reader_grace: grace, ..ManagerConfig::default() },
+        harness_proof(),
     ))
 }
 

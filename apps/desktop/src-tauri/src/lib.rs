@@ -319,6 +319,7 @@ pub fn run() {
             commands::artifact_inspect,
             commands::artifact_action,
             commands::project_permission_update,
+            commands::conversation_permission_state,
             commands::conversation_permission_update,
             commands::conversation_create,
             commands::conversation_expert_bind,

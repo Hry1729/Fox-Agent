@@ -284,7 +284,8 @@ fn run_evaluation_process(
     extra_environment: &[(&str, &str)],
 ) -> Result<std::process::ExitStatus, String> {
     let test_name = evaluation_test_name(name);
-    let mut command = std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut command = std::process::Command::new(&executable);
     command.args(["--exact", &test_name, "--include-ignored", "--nocapture", "--test-threads=1"])
         .env(EVAL_CHILD_TEST, &test_name)
         .envs(extra_environment.iter().copied())
@@ -292,6 +293,21 @@ fn run_evaluation_process(
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        // A Cargo-launched libtest can resolve native test dependencies from
+        // target/debug while its directly spawned copy cannot. Preserve the
+        // inherited search path and add only the executable's own debug root.
+        let debug_dir = executable
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or("evaluation executable is not under target/debug/deps")?;
+        let mut search_path = vec![debug_dir.to_path_buf()];
+        if let Some(inherited) = std::env::var_os("PATH") {
+            search_path.extend(std::env::split_paths(&inherited));
+        }
+        command.env(
+            "PATH",
+            std::env::join_paths(search_path).map_err(|error| error.to_string())?,
+        );
         command.creation_flags(0x08000000);
     }
     let mut child = EvaluationChild(command.spawn().map_err(|e| e.to_string())?);
@@ -2627,7 +2643,9 @@ fn prepare_eval_run_with_budgets(
         None
     };
     // The scripted tier's *calibrated* contract, applied only when the tier is
-    // not using the production description.
+    // not using the production description. A focused fixture may explicitly
+    // append a tool to the template; preserve that addition while keeping the
+    // three calibrated tools and their order stable for every ordinary run.
     //
     // Its model is a loopback provider replaying a fixed script, so its tool
     // surface is part of the fixture: the scenario's scripted proposals name
@@ -2640,7 +2658,14 @@ fn prepare_eval_run_with_budgets(
     // tier ever ends up with a contract this small.
     let scripted_config = if described.is_none() {
         let mut scripted = config.clone();
-        scripted.proposal_tools = scripted_provider_tool_contract();
+        let mut proposal_tools = scripted_provider_tool_contract();
+        for tool in &config.proposal_tools {
+            let Some(name) = tool["name"].as_str() else { continue };
+            if !proposal_tools.iter().any(|existing| existing["name"].as_str() == Some(name)) {
+                proposal_tools.push(tool.clone());
+            }
+        }
+        scripted.proposal_tools = proposal_tools;
         Some(scripted)
     } else {
         None
@@ -6292,22 +6317,45 @@ fn panic_outcome(
 fn exercise_eval_approval_clock(approve: bool) {
     let root = std::env::temp_dir().join(format!("fox-eval-clock-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("proof.txt"), "observed before approval").unwrap();
+    let expected_version = crate::tool_host::file_version(b"observed before approval");
+    let proposed_version = expected_version.clone();
     let provider = spawn_provider(move |index, _| {
         if index == 0 {
             // Deliberately exceed the approval window before an approval exists:
             // each later proposal must receive a fresh window, not the Run start.
             if approve { std::thread::sleep(Duration::from_millis(1_000)); }
             (Reply::Tool { id: "write-proof".into(), name: "write_file".into(),
-                arguments: json!({"path":"proof.txt","content":"authorized once"}) }, true)
+                arguments: json!({"path":"proof.txt","content":"authorized once",
+                    "expectedVersion": proposed_version}) }, true)
         } else { (Reply::Stop, true) }
     });
     let mut config = eval_model_config(provider.address);
     config.proposal_tools.push(json!({"name":"write_file","description":"Write a project file",
-        "parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},
-        "required":["path","content"]}}));
+        "parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},
+        "expectedVersion":{"type":"string"}},"required":["path","content","expectedVersion"]}}));
     let (db, run_id) = prepare_eval_run_with_budgets(&root, "Perform the requested operation.",
         &config, "clock-regression", PermissionMode::Ask, false,
         TimeBudgets { approval_wait_ms: 600, ..TimeBudgets::default() }).unwrap();
+    // The write gate consumes only Host-opened file evidence. Drive the same
+    // reader seam as production so this fixture reaches Ask instead of being
+    // correctly rejected for a missing observation.
+    let binding = db.run_control_binding(&run_id).unwrap().unwrap();
+    let cancellation = CancellationRegistry::default();
+    cancellation.register_run(&run_id).unwrap();
+    let token = cancellation.tool_token(&run_id, "clock-observe-proof").unwrap();
+    let observed = crate::runtime_host::managed_files::execute_observed_reader(
+        &db,
+        &binding,
+        "read",
+        &json!({"path":"proof.txt"}),
+        "clock-observe-proof",
+        &token,
+        Duration::from_secs(5),
+    )
+    .expect("the real Host reader records the approval target baseline");
+    assert_eq!(observed["content"][0]["text"], "observed before approval");
+    assert_eq!(observed["details"]["readVersion"], expected_version);
     let observed = drive_real_run_with_approvals(&db, &root, &run_id,
         ProviderSession::from_handle(provider), EVAL_API_KEY,
         Arc::new(Mutex::new(EvalState::default())), approve);
@@ -6321,7 +6369,11 @@ fn exercise_eval_approval_clock(approve: bool) {
     } else {
         assert_eq!(observed.state, "approval_expired");
         assert_eq!(observed.approvals, 0);
-        assert!(!root.join("proof.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("proof.txt")).unwrap(),
+            "observed before approval",
+            "an expired approval must leave the observed target unchanged",
+        );
         assert!(db.queue_kernel_host_command(&run_id, Some(("write-proof", "allow_once"))).is_err());
         assert!(db.queue_kernel_host_command(&run_id, None).is_err());
     }
@@ -6436,6 +6488,49 @@ fn dispatch_host_tool(
         HostToolCallExecution::Execute(_) => {
             let outcome = crate::tool_host::execute_with_cancellation(prepared, Some(&token));
             finalize_host_tool_execution(db, run_id, tool_call_id, tool, input, Vec::new(), outcome)
+        }
+    }
+}
+
+/// E-T-01 measures command diagnostics, not production backend availability.
+/// Its authorization is an explicit cfg(test)-only dependency, so the shipped
+/// Host remains fail-closed while this low-level fixture can run a real child.
+fn dispatch_command_with_test_backend(
+    db: &Database,
+    root: &std::path::Path,
+    run_id: &str,
+    input: &Value,
+    tool_call_id: &str,
+) -> Result<Value, String> {
+    let prepared = crate::tool_host::prepare(
+        "run_command",
+        input,
+        root.to_str().ok_or("the project root is not valid UTF-8")?,
+    )?;
+    match create_fresh_host_tool_call(
+        db,
+        run_id,
+        tool_call_id,
+        "run_command",
+        input,
+        "running",
+        false,
+    )? {
+        HostToolCallExecution::Replay(response) => Ok(response),
+        HostToolCallExecution::Execute(_) => {
+            let proof = crate::process_jobs::AvailableInTests::host_user_unconfined(
+                "real-eval-command-fixture",
+            );
+            let outcome = crate::tool_host::execute_command_with_test_backend(prepared, &proof);
+            finalize_host_tool_execution(
+                db,
+                run_id,
+                tool_call_id,
+                "run_command",
+                input,
+                Vec::new(),
+                outcome,
+            )
         }
     }
 }
@@ -6767,7 +6862,13 @@ fn real_eval_command_stdout_only_non_zero_exit_preserves_diagnostics() {
     #[cfg(not(windows))]
     let command = format!("printf '{marker}' > side-effect.txt; printf '{marker}'; exit 7");
     let input = json!({ "command": command, "timeoutSeconds": 20 });
-    let outcome = dispatch_host_tool(&db, &root, &run_id, "run_command", &input, "cmd-stdout-only");
+    let outcome = dispatch_command_with_test_backend(
+        &db,
+        &root,
+        &run_id,
+        &input,
+        "cmd-stdout-only",
+    );
     let receipt = model_receipt(&outcome);
     let blob = receipt.to_string();
 
@@ -6934,7 +7035,9 @@ fn real_eval_edit_file_allows_deleting_matched_text_to_empty() {
 fn real_eval_read_outside_the_frozen_project_root_is_denied_and_re_readable() {
     let mut checks = CheckResults::default();
     let (db, root, conversation, run_id) = rust_host_run("out-of-root", "read_only");
-    std::fs::write(root.join("allowed.txt"), "authorized content").unwrap();
+    let allowed_content = "authorized content";
+    let allowed_version = crate::tool_host::file_version(allowed_content.as_bytes());
+    std::fs::write(root.join("allowed.txt"), allowed_content).unwrap();
     // A file outside the frozen root: a sibling directory, never a child.
     let outside_dir = root
         .parent()
@@ -6949,7 +7052,9 @@ fn real_eval_read_outside_the_frozen_project_root_is_denied_and_re_readable() {
     let inside = dispatch_reader(&db, &run_id, "read", "allowed.txt", "read-inside");
     let inside_ok = inside.as_ref().is_ok_and(|value| {
         !receipt_reports_failure(value)
-            && value["result"]["content"][0]["text"].as_str() == Some("authorized content")
+            && value["result"]["content"][0]["text"].as_str() == Some(allowed_content)
+            && value["result"]["details"]["readVersion"].as_str()
+                == Some(allowed_version.as_str())
     });
     checks.check(
         "et05:in-root-read-succeeds",
@@ -6969,9 +7074,12 @@ fn real_eval_read_outside_the_frozen_project_root_is_denied_and_re_readable() {
     );
     let inside_reference = format!("fox-result://{run_id}/read-inside");
     let inside_re_read = db.tool_result_range(&inside_reference, &conversation, 0, 65_536);
+    let expected_readback = format!(
+        "{allowed_content}\nreadVersion: {allowed_version}. Use this as expectedVersion for write_file/edit_file."
+    );
     checks.check(
         "et05:in-root-read-is-re-readable-by-reference",
-        inside_re_read.as_ref().is_ok_and(|range| range.content == "authorized content"),
+        inside_re_read.as_ref().is_ok_and(|range| range.content == expected_readback),
         match &inside_re_read {
             Ok(range) => format!("content={:?} bytes={}", range.content, range.returned_bytes),
             Err(error) => format!("re-read failed: {error}"),

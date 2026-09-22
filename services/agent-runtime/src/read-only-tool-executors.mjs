@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { readFile, readdir } from 'node:fs/promises'
 
 const DEFAULT_LIMITS = Object.freeze({
@@ -83,7 +84,8 @@ function textResult(text, details = {}, maxOutputChars = DEFAULT_LIMITS.maxOutpu
   // navigation from the actually returned text.
   const bounded = sliceUtf16Budget(source, maxOutputChars)
   return {
-    content: [{ type: 'text', text: bounded }],
+    content: [{ type: 'text', text: bounded }, ...(details.readVersion
+      ? [{ type: 'text', text: `readVersion: ${details.readVersion}. Use this as expectedVersion for write_file/edit_file.` }] : [])],
     details: { ...details, outputTruncated: details.outputTruncated === true || bounded.length < source.length },
   }
 }
@@ -267,7 +269,9 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
   const limits = normalizedLimits(requestedLimits)
   throwIfAborted(signal)
   if (tool === 'read') {
-    const contents = await readFile(input.path, 'utf8')
+    const bytes = await readFile(input.path)
+    const readVersion = `sha256:${createHash('sha256').update(bytes).digest('hex')}`
+    const contents = bytes.toString('utf8')
     // B03: line-mode parameters are mutually exclusive with offset/limit.
     const hasLineMode = input.startLine !== undefined || input.lineCount !== undefined
     const hasCharMode = input.offset !== undefined || input.limit !== undefined
@@ -288,7 +292,7 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
       const totalLines = lines.length
       if (startLine > totalLines) {
         return textResult('', {
-          path: input.path, truncated: false,
+          path: input.path, readVersion, truncated: false,
           startLine, lineCount, totalLines,
           pageComplete: true, scanComplete: true, readMode: 'lines',
         }, limits.maxOutputChars)
@@ -307,7 +311,7 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
       const truncated = bounded.length < selected.length
       const deliveredLines = (bounded.match(/\n/g) || []).length
       return textResult(bounded, {
-        path: input.path, truncated,
+        path: input.path, readVersion, truncated,
         startLine, lineCount, totalLines,
         pageComplete: endLine === totalLines && !truncated, scanComplete: true, readMode: 'lines',
         nextOffset: truncated ? selectedStart + bounded.length : null,
@@ -339,7 +343,7 @@ export async function executeReadOnlyTool(tool, input, { signal, limits: request
     return textResult(
       finalText,
       {
-        path: input.path, truncated, readMode: 'utf16',
+        path: input.path, readVersion, truncated, readMode: 'utf16',
         offset: page.start,
         nextOffset: fullyDelivered ? null : coveredEnd,
         returnedUnits: finalText.length, totalUnits,

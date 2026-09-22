@@ -282,6 +282,18 @@ impl PolicyDecisionPort for GatewayProposalPolicy<'_> {
 }
 
 impl GatewayPolicy {
+    fn current_mode(&self) -> Result<PermissionMode, String> {
+        match &self.database {
+            Some(db) => match db.execution_policy(&self.binding.conversation_id)?.mode.as_str() {
+                "ask" => Ok(PermissionMode::Ask),
+                "allow" => Ok(PermissionMode::Allow),
+                "read_only" => Ok(PermissionMode::ReadOnly),
+                _ => Err("invalid live permission mode".into()),
+            },
+            None => Ok(self.binding.permission.mode),
+        }
+    }
+
     /// Trusted Office authorization derived solely from the frozen Run binding:
     /// the model contributes only the artifact id, never the conversation.
     /// Production sets both fields; policy unit tests that freeze only a scope
@@ -317,7 +329,7 @@ impl GatewayPolicy {
         )
     }
 
-    fn remaining_budget(&self, database: &Database) -> Result<std::time::Duration, String> {
+    pub(super) fn remaining_budget(&self, database: &Database) -> Result<std::time::Duration, String> {
         let elapsed = database
             .kernel_build_full_snapshot(&self.binding.run_id)?
             .running_elapsed_ms;
@@ -343,7 +355,7 @@ impl GatewayPolicy {
             return Err("tool is outside the frozen Kernel resource catalog".into());
         }
         if !input.is_object() {
-            return Err("tool input must be an object".into());
+            return Err("[tool.invalid_input] tool input must be an object".into());
         }
         if self.scope.lifecycle_hooks.iter().any(|hook| {
             hook.event == "before_tool"
@@ -371,7 +383,7 @@ impl GatewayPolicy {
                 input,
                 self.binding.permission.project_root.as_deref(),
             )?;
-            if self.binding.permission.mode == PermissionMode::ReadOnly
+            if self.current_mode()? == PermissionMode::ReadOnly
                 && (action.blocked_in_read_only()
                     || matches!(&action, super::capability_tools::PreparedCapabilityTool::HttpRequest { method, .. } if !matches!(method.as_str(),"GET"|"HEAD")))
             {
@@ -411,7 +423,7 @@ impl GatewayPolicy {
                 // Same Host-resolved authorization as execution, so an
                 // artifactId import is accepted and integrity-checked here.
                 self.prepare_office(remote_tool, &input["arguments"])?;
-            } else if self.binding.permission.mode == PermissionMode::ReadOnly {
+            } else if self.current_mode()? == PermissionMode::ReadOnly {
                 return Err("unclassified external MCP calls are unavailable under frozen read-only permission".into());
             }
             return Ok(());
@@ -423,10 +435,22 @@ impl GatewayPolicy {
             .as_deref()
             .ok_or("tool requires a frozen project root")?;
         if !crate::resource_gateway::is_reader(tool) {
-            if self.binding.permission.mode == PermissionMode::ReadOnly {
-                return Err("frozen project permission is read-only".into());
+            if self.current_mode()? == PermissionMode::ReadOnly
+                && crate::database::kernel_execution_admission::operation_class(tool, &input.to_string()) != fox_engine_protocol::ActionClass::Manage {
+                return Err("project permission is read-only".into());
             }
-            crate::tool_host::prepare(tool, input, root)?;
+            let mut checked = input.clone();
+            if matches!(tool, "write_file" | "edit_file") {
+                if let Some(db) = &self.database {
+                    let target = crate::tool_host::canonical_file_identity(std::path::Path::new(root),
+                        input["path"].as_str().ok_or("[tool.invalid_input] missing file path")?)?;
+                    let baseline = db.host_observation_for(&self.binding.run_id, &target)?
+                        .ok_or("[tool.file_conflict] Read the target before writing; no Host observation exists")?;
+                    checked["expectedVersion"] = json!(baseline.version);
+                    checked.as_object_mut().map(|o| o.remove("readVersion"));
+                }
+            }
+            crate::tool_host::prepare(tool, &checked, root)?;
         }
         Ok(())
     }
@@ -581,7 +605,7 @@ impl GatewayPolicy {
                 &self.binding.conversation_id,
                 &self.binding.run_id,
                 &projected_id,
-                &format!("kernel-approval:{}:{tool_id}", self.binding.run_id),
+                &database.kernel_approval_identity(&self.binding.run_id, tool_id)?,
                 input,
             )
         } else {
@@ -746,6 +770,22 @@ impl GatewayPolicy {
         })
     }
 
+    pub(super) fn execute_reader(
+        &self, database: &Database, tool: &str, input: &Value,
+        tool_call_id: &str, token: &CancellationToken,
+    ) -> Result<Value, String> {
+        token.check()?;
+        if !crate::resource_gateway::is_reader(tool) { return Err("not a reader tool".into()); }
+        if database.run_control_binding(&self.binding.run_id)?.as_ref() != Some(&self.binding)
+            || database.kernel_host_scope(&self.binding.run_id)? != self.scope {
+            return Err("frozen Kernel resource identity changed".into());
+        }
+        self.validate(tool, input)?;
+        database.kernel_validate_resource_acquisition_for(&self.binding.run_id, Some(tool))?;
+        super::managed_files::execute_observed_reader(database, &self.binding, tool, input,
+            tool_call_id, token, self.remaining_budget(database)?)
+    }
+
     pub(super) fn execute(
         &self,
         database: &Database,
@@ -777,13 +817,10 @@ impl GatewayPolicy {
             return self.execute_mcp(database, tool, input, token);
         }
         if crate::resource_gateway::is_reader(tool) {
-            crate::resource_gateway::execute_with_budget(
-                &self.binding,
-                tool,
-                input,
-                token,
-                self.remaining_budget(database)?,
-            )
+            // Callers with a durable tool identity use execute_reader directly.
+            // Other Host-owned reader operations get their own observation id.
+            self.execute_reader(database, tool, input,
+                &format!("host-read:{}", uuid::Uuid::new_v4()), token)
         } else {
             let mut action = crate::tool_host::prepare(
                 tool,
@@ -890,15 +927,25 @@ impl GatewayPolicy {
 impl PolicyDecisionPort for GatewayPolicy {
     fn decide(&self, run_id: &str, _tool_id: &str, tool: &str, input_json: &str) -> PolicyDecision {
         let input = serde_json::from_str::<Value>(input_json);
-        if run_id != self.binding.run_id
-            || input
-                .as_ref()
-                .ok()
-                .is_none_or(|input| self.validate(tool, input).is_err())
-        {
+        if run_id != self.binding.run_id {
             return PolicyDecision::Deny {
-                reason: "tool parameters or scope were rejected by the frozen resource policy"
-                    .into(),
+                reason: "Run identity differs from the frozen resource policy".into(),
+            };
+        }
+        let validation = input.as_ref()
+            .map_err(|_| "[tool.invalid_input] Tool input must be valid JSON".to_owned())
+            .and_then(|input| self.validate(tool, input));
+        if let Err(error) = validation {
+            if matches!(crate::tool_host::ToolErrorCode::classify(&error),
+                Some(crate::tool_host::ToolErrorCode::InvalidInput | crate::tool_host::ToolErrorCode::Conflict))
+            {
+                return PolicyDecision::Reject {
+                    code: crate::tool_host::ToolErrorCode::classify(&error).unwrap().as_str().into(),
+                    message: super::redact_execution_diagnostic(&error, 2000),
+                };
+            }
+            return PolicyDecision::Deny {
+                reason: "Tool is not permitted by the frozen resource policy".into(),
             };
         }
         if tool == "task_repair_escalate_start" {
@@ -910,6 +957,9 @@ impl PolicyDecisionPort for GatewayPolicy {
                 && crate::lifecycle_hooks::matcher_matches(&hook.matcher, tool)
         }) {
             return PolicyDecision::RequireApproval;
+        }
+        if tool == "run_command" && crate::database::kernel_execution_admission::operation_class(tool, input_json) == fox_engine_protocol::ActionClass::Manage {
+            return PolicyDecision::Allow;
         }
         if tool == "call_mcp_tool"
             && input.as_ref().unwrap()["serverId"] == crate::office::SERVER_ID
@@ -954,7 +1004,7 @@ impl PolicyDecisionPort for GatewayPolicy {
         }
         let decision = super::shadow_reconcile::frozen_kernel_tool_policy(
             &json!({
-                "mode": self.binding.permission.mode.as_str(), "projectRoot": self.binding.permission.project_root,
+                "mode": self.current_mode().unwrap_or(PermissionMode::ReadOnly).as_str(), "projectRoot": self.binding.permission.project_root,
                 "grants": grants,
             }),
             tool,
@@ -992,5 +1042,48 @@ impl GatewayPolicy {
             input,
             self.binding.permission.project_root.as_deref(),
         )
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+    #[test]
+    fn r1_matching_errors_are_repairable_but_scope_denials_remain_denials() {
+        use fox_engine_protocol::{FrozenPermission, TimeBudgets, ExecutionAuthority, ResourceExecutor};
+        let root=std::env::temp_dir().join(format!("fox-r1-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"),"hello hello").unwrap();
+        let permission=FrozenPermission {mode:PermissionMode::Ask,project_root:Some(root.to_string_lossy().into_owned()),grants:vec![]};
+        let mut policy=GatewayPolicy {
+            binding:RunControlBinding {schema_version:1,run_id:"r".into(),conversation_id:"c".into(),engine_id:"pi".into(),
+                execution_profile_id:"legacy".into(),authority:ExecutionAuthority::Authoritative,read_only_executor:ResourceExecutor::Rust,
+                permission_snapshot_id:Database::run_control_permission_hash(&permission).unwrap(),permission,budgets:TimeBudgets::default()},
+            scope:KernelHostScope {schema_version:1,tool_names:["edit_file".into()].into_iter().collect(),
+                mcp_server_hashes:Default::default(),knowledge_reference_hashes:Default::default(),
+                knowledge_connection_hashes:Default::default(),office_tools:Default::default(),lifecycle_hooks:vec![]},
+            database:None,sessions_dir:None,artifacts_dir:None,
+        };
+        for old in ["absent","hello"] {
+            let input=json!({"path":"a.txt","oldText":old,"newText":"x"}).to_string();
+            let PolicyDecision::Reject {code,message}=policy.decide("r","t","edit_file",&input) else {panic!("match error must not become permission denial")};
+            assert_eq!(code,"tool.invalid_input");
+            assert!(message.contains(if old=="absent" {"not found"} else {"occurs 2 times"}));
+        }
+        let input=json!({"path":"a.txt","oldText":"hello hello","newText":"fixed",
+            "expectedVersion":crate::tool_host::file_version(b"hello hello")}).to_string();
+        assert!(matches!(policy.decide("r","t","edit_file",&input),PolicyDecision::RequireApproval));
+        assert!(matches!(policy.decide("wrong","t","edit_file",&input),PolicyDecision::Deny {..}));
+        policy.binding.permission.mode = PermissionMode::ReadOnly;
+        policy.binding.permission_snapshot_id = Database::run_control_permission_hash(&policy.binding.permission).unwrap();
+        policy.scope.tool_names.insert("run_command".into());
+        for action in ["status", "output", "cancel"] {
+            assert!(matches!(policy.decide("r", "manage", "run_command", &json!({"action":action,"jobId":"owned-job"}).to_string()), PolicyDecision::Allow));
+        }
+        assert!(matches!(policy.decide("r", "start", "run_command", &json!({"action":"start","command":"echo no"}).to_string()), PolicyDecision::Deny { .. }));
+        policy.scope.tool_names.clear();
+        assert!(matches!(policy.decide("r","t","edit_file",&input),PolicyDecision::Deny {..}));
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(),"hello hello");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

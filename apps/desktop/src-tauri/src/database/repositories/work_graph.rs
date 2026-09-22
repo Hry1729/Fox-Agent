@@ -957,7 +957,9 @@ impl Database {
                     JOIN kernel_effect_outbox o ON o.run_id=t.run_id AND o.tool_call_id=t.tool_call_id
                     JOIN kernel_runs k ON k.run_id=t.run_id
                     WHERE t.run_id=?1 AND 'kernel-tool:'||t.run_id||':'||t.tool_call_id=?2
-                      AND 'kernel-approval:'||t.run_id||':'||t.tool_call_id=?3
+                      AND 'kernel-approval:'||t.run_id||':'||t.tool_call_id||':v'||a.policy_version=?3
+                      AND a.policy_version=(SELECT p.version FROM kernel_execution_policies p
+                        JOIN runs r ON r.conversation_id=p.conversation_id WHERE r.id=t.run_id)
                       AND t.tool='task_repair_escalate_start' AND t.state='running'
                       AND a.state='allow_once' AND o.effect_type='dispatch_tool' AND o.status='leased'
                       AND k.state='running' AND NOT EXISTS(SELECT 1 FROM kernel_host_commands c
@@ -6683,7 +6685,8 @@ mod tests {
         let input=StartTaskRepairOverrideInput {
             attempt_id:"kernel-repair-attempt".into(),task_id:fixture.task.id.clone(),run_id:fixture.run_id.clone(),
             conversation_id:fixture.conversation_id.clone(),tool_call_id:format!("kernel-tool:{}:repair",fixture.run_id),
-            approval_id:format!("kernel-approval:{}:repair",fixture.run_id),expected_task_version:fixture.task.version,
+            approval_id:format!("kernel-approval:{}:repair:v{}",fixture.run_id,
+                database.execution_policy(&fixture.conversation_id).unwrap().version),expected_task_version:fixture.task.version,
             root_cause:"operator confirmed root cause".into(),finding_ids:vec![fixture.finding.id.clone()],
             escalation_reason:"Authorize one bounded repair after the normal budget is exhausted.".into(),
         };

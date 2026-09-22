@@ -90,8 +90,10 @@ pub fn dispatch_effect_key(tool_call_id: &str) -> String {
     format!("dispatch:{tool_call_id}")
 }
 /// Stable external idempotency key for a tool dispatch (unique within a run).
-pub fn dispatch_idempotency_key(tool_call_id: &str) -> String {
-    format!("tool-dispatch:{tool_call_id}")
+pub fn dispatch_idempotency_key(run_id: &str, tool_call_id: &str) -> String {
+    // Both components are byte-bounded at start/proposal/rehydration. No
+    // delimiter restriction: the byte length makes colons unambiguous.
+    format!("tool-dispatch:{}:{run_id}:{tool_call_id}",run_id.len())
 }
 /// Stable outbox effect key for an approval prompt.
 pub fn approval_effect_key(tool_call_id: &str) -> String {
@@ -286,7 +288,7 @@ impl RunController {
         clock: &dyn Clock,
     ) -> Result<(RunController, Vec<Effect>), KernelError> {
         Self::validate_config(&config)?;
-        if run_id.trim().is_empty() || turn_id.trim().is_empty() {
+        if run_id.trim().is_empty() || run_id.len()>1024 || turn_id.trim().is_empty() {
             return Err(KernelError::FailClosed(
                 "run id and turn id must be non-empty".into(),
             ));
@@ -419,7 +421,7 @@ impl RunController {
                 ));
             }
         }
-        if data.run_id.trim().is_empty() || data.turn_id.trim().is_empty() {
+        if data.run_id.trim().is_empty() || data.run_id.len()>1024 || data.turn_id.trim().is_empty() {
             return Err(KernelError::FailClosed(
                 "rehydrated run id and turn id must be non-empty".into(),
             ));
@@ -504,7 +506,7 @@ impl RunController {
 
         let mut seen_tools = BTreeSet::new();
         for tool in &data.tools {
-            if tool.tool_call_id.trim().is_empty()
+            if tool.tool_call_id.trim().is_empty() || tool.tool_call_id.len()>1024
                 || tool.tool.trim().is_empty()
                 || tool.batch_id.trim().is_empty()
                 || !seen_tools.insert(tool.tool_call_id.clone())
@@ -826,7 +828,7 @@ impl RunController {
         let mut call_ids = BTreeSet::new();
         let mut source_orders = BTreeSet::new();
         for call in &calls {
-            if call.tool_call_id.trim().is_empty() || call.tool.trim().is_empty() {
+            if call.tool_call_id.trim().is_empty() || call.tool_call_id.len()>1024 || call.tool.trim().is_empty() {
                 return Err(KernelError::FailClosed(
                     "tool call id and tool name must be non-empty".into(),
                 ));
@@ -952,6 +954,20 @@ impl RunController {
                         input_json: call.canonical_input_json.clone(),
                     });
                 }
+                crate::ports::PolicyDecision::Reject { code, message } => {
+                    let result = serde_json::json!({
+                        "isError": true,
+                        "content": [{"type":"text", "text":message}],
+                        "details": {"code":code, "errorCode":code, "executionStarted":false}
+                    });
+                    let tool = self.tools.get_mut(&call.tool_call_id).unwrap();
+                    tool.state = ToolCallState::Failed;
+                    tool.result_json = Some(result.to_string());
+                    effects.push(self.append_event("tool.failed", serde_json::json!({
+                        "toolCallId":call.tool_call_id, "tool":call.tool,
+                        "code":code, "message":message, "executionStarted":false
+                    })));
+                }
                 crate::ports::PolicyDecision::Deny { reason } => {
                     self.tools.get_mut(&call.tool_call_id).unwrap().state = ToolCallState::Failed;
                     effects.push(self.append_event(
@@ -989,6 +1005,79 @@ impl RunController {
         // is settled. It re-arms on the next turn dispatch (batch delivery to
         // the following model request).
         self.settle_model_request();
+        effects.push(Effect::PublishSnapshot);
+        Ok(effects)
+    }
+
+    /// Re-decide the SAME unconsumed intent after a policy change. Never append
+    /// a second tool or resurrect a dispatched/terminal call. The adapter must
+    /// persist `tool.reevaluated` and the replacement decision atomically with
+    /// superseding its old approval/outbox fact.
+    pub fn reevaluate_tool(
+        &mut self, policy: &dyn PolicyDecisionPort, tool_call_id: &str,
+        expected_policy_version: u64, now_monotonic_ms: i64, now_wall_ms: i64,
+    ) -> Result<Vec<Effect>, KernelError> {
+        self.ensure_live()?;
+        if !matches!(self.state, RunState::Running | RunState::WaitingApproval) {
+            return Err(KernelError::IllegalTransition { from: self.state.as_str(), to: "tool_reevaluated" });
+        }
+        let tool = self.tools.get(tool_call_id)
+            .ok_or_else(|| KernelError::UnknownToolCall(tool_call_id.into()))?;
+        if !matches!(tool.state, ToolCallState::Pending | ToolCallState::WaitingApproval)
+            || tool.started_at_mono_ms.is_some() || tool.result_json.is_some()
+            || self.batches.iter().any(|batch| batch.batch_id == tool.batch_id && batch.barrier_emitted) {
+            return Err(KernelError::FailClosed("intent_consumed_or_terminal".into()));
+        }
+        let tool_name = tool.tool.clone();
+        let input_json = tool.input_json.clone();
+        let decision = policy.decide(&self.run_id, &self.config.permission_snapshot_id, &tool_name, &input_json);
+        let mut effects = vec![self.append_event("tool.reevaluated", serde_json::json!({
+            "toolCallId": tool_call_id, "tool": tool_name, "expectedPolicyVersion": expected_policy_version,
+        }))];
+        match decision {
+            crate::ports::PolicyDecision::Allow => {
+                let tool = self.tools.get_mut(tool_call_id).unwrap();
+                tool.state = ToolCallState::Running;
+                tool.started_at_mono_ms = Some(now_monotonic_ms);
+                effects.push(Effect::DispatchTool { tool_call_id: tool_call_id.into(), tool: tool_name, input_json });
+            }
+            crate::ports::PolicyDecision::RequireApproval => {
+                self.tools.get_mut(tool_call_id).unwrap().state = ToolCallState::WaitingApproval;
+                effects.push(Effect::RequestApproval { tool_call_id: tool_call_id.into(), tool: tool_name, input_json });
+            }
+            crate::ports::PolicyDecision::Deny { reason } => {
+                let result = serde_json::json!({"isError":true,"content":[{"type":"text","text":reason}],
+                    "details":{"errorCode":"kernel.policy_denied","executionStarted":false}});
+                let tool = self.tools.get_mut(tool_call_id).unwrap();
+                tool.state = ToolCallState::Failed;
+                tool.result_json = Some(result.to_string());
+                effects.push(self.append_event("tool.failed", serde_json::json!({
+                    "toolCallId":tool_call_id,"tool":tool_name,"code":"kernel.policy_denied","message":reason,
+                    "executionStarted":false})));
+            }
+            crate::ports::PolicyDecision::Reject { code, message } => {
+                let result = serde_json::json!({"isError":true,"content":[{"type":"text","text":message}],
+                    "details":{"errorCode":code,"executionStarted":false}});
+                let tool = self.tools.get_mut(tool_call_id).unwrap();
+                tool.state = ToolCallState::Failed;
+                tool.result_json = Some(result.to_string());
+                effects.push(self.append_event("tool.failed", serde_json::json!({
+                    "toolCallId":tool_call_id,"tool":tool_name,"code":code,"message":message,"executionStarted":false})));
+            }
+        }
+        if self.tools.values().any(|tool| tool.state == ToolCallState::WaitingApproval) {
+            if self.state == RunState::Running { self.suspend_running_clock(now_monotonic_ms); }
+            self.state = RunState::WaitingApproval;
+            self.approval_deadline_wall_ms = Some(now_wall_ms.saturating_add(self.config.approval_wait_timeout_ms));
+            effects.push(self.append_event("run.waiting_approval", serde_json::json!({
+                "approvalWaitTimeoutMs":self.config.approval_wait_timeout_ms,
+                "approvalDeadlineWallMs":self.approval_deadline_wall_ms})));
+        } else if self.state == RunState::WaitingApproval {
+            self.state = RunState::Running;
+            self.running_since_mono_ms = Some(now_monotonic_ms);
+            self.approval_deadline_wall_ms = None;
+        }
+        effects.extend(self.maybe_barrier_effects());
         effects.push(Effect::PublishSnapshot);
         Ok(effects)
     }
@@ -2356,7 +2445,7 @@ impl RunController {
                 } => outbox.push(PersistOutboxEffect {
                     effect_key: dispatch_effect_key(tool_call_id),
                     kind: crate::ports::OutboxEffectKind::DispatchTool,
-                    idempotency_key: dispatch_idempotency_key(tool_call_id),
+                    idempotency_key: dispatch_idempotency_key(&self.run_id, tool_call_id),
                     tool_call_id: Some(tool_call_id.clone()),
                     batch_id: self.tools.get(tool_call_id).map(|t| t.batch_id.clone()),
                     payload_json: serde_json::json!({
@@ -2459,7 +2548,7 @@ impl RunController {
                 state: tool.state,
                 result_json: tool.result_json.clone(),
                 dispatch_idempotency_key: (tool.state == ToolCallState::Running)
-                    .then(|| dispatch_idempotency_key(&tool.tool_call_id)),
+                    .then(|| dispatch_idempotency_key(&self.run_id, &tool.tool_call_id)),
             })
             .collect();
         KernelPersistCommand {
@@ -2478,5 +2567,57 @@ impl RunController {
             approval_resolutions,
             settled_dispatch_tool_call_ids,
         }
+    }
+}
+
+#[cfg(test)]
+mod reevaluate_tests {
+    use super::*;
+    fn waiting() -> RunController {
+        let clock = crate::TestClock::new(0);
+        let (mut controller, _) = RunController::start("reeval-run", "turn", crate::test_config(), &clock).unwrap();
+        controller.propose_tool_batch("batch", vec![ToolCallRequest {
+            tool_call_id: "same-intent".into(), tool: "write_file".into(),
+            canonical_input_json: "{}".into(), source_order: 0,
+        }], &crate::TestPolicy { allow: vec![], deny: vec![] }, 0, 0).unwrap();
+        controller
+    }
+    #[test]
+    fn reevaluation_preserves_intent_and_dispatches_only_once() {
+        let mut controller = waiting();
+        let policy = crate::TestPolicy { allow: vec!["write_file"], deny: vec![] };
+        let effects = controller.reevaluate_tool(&policy, "same-intent", 2, 10, 10).unwrap();
+        assert_eq!(controller.tools.len(), 1);
+        assert_eq!(controller.batches.len(), 1);
+        assert_eq!(controller.tool_call_state("same-intent"), Some(ToolCallState::Running));
+        assert!(effects.iter().any(|effect| matches!(effect, Effect::DispatchTool { tool_call_id, .. } if tool_call_id == "same-intent")));
+        let command = controller.persist_command(&effects);
+        let event = command.events.iter().find(|event| event.event_type == "tool.reevaluated").unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&event.payload_json).unwrap()["expectedPolicyVersion"], 2);
+        assert!(controller.reevaluate_tool(&policy, "same-intent", 3, 20, 20).is_err());
+    }
+    #[test]
+    fn reevaluation_replaces_approval_or_refuses_without_new_tool() {
+        let mut controller = waiting();
+        let ask = crate::TestPolicy { allow: vec![], deny: vec![] };
+        let effects = controller.reevaluate_tool(&ask, "same-intent", 2, 10, 10).unwrap();
+        assert!(effects.iter().any(|effect| matches!(effect, Effect::RequestApproval { tool_call_id, .. } if tool_call_id == "same-intent")));
+        assert_eq!(controller.state(), RunState::WaitingApproval);
+        let deny = crate::TestPolicy { allow: vec![], deny: vec!["write_file"] };
+        let effects = controller.reevaluate_tool(&deny, "same-intent", 3, 20, 20).unwrap();
+        assert!(!effects.iter().any(|effect| matches!(effect, Effect::DispatchTool { .. })));
+        assert_eq!(controller.tool_call_state("same-intent"), Some(ToolCallState::Failed));
+        assert_eq!(controller.tools.len(), 1);
+        assert!(controller.reevaluate_tool(&ask, "same-intent", 4, 30, 30).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod dispatch_identity_tests {
+    #[test]
+    fn dispatch_identity_uses_utf8_byte_lengths_and_preserves_colons() {
+        assert_eq!(super::dispatch_idempotency_key("运行:a","call:b"),"tool-dispatch:8:运行:a:call:b");
+        assert_ne!(super::dispatch_idempotency_key("a:b","c"),super::dispatch_idempotency_key("a","b:c"));
     }
 }

@@ -51,6 +51,7 @@ fn checkpoint_hash(value: &Value) -> String {
 }
 
 enum DecisionLease<'a> {
+    Approval(u64),
     ModelRetry(&'a str, &'a str),
     Initial(&'a str),
     Continuation(&'a str, &'a str),
@@ -179,6 +180,8 @@ impl<'a> KernelCoordinator<'a> {
         let effects = action(&mut candidate, now).map_err(|error| error.to_string())?;
         let command = candidate.persist_command(&effects);
         match lease {
+            Some(DecisionLease::Approval(version)) => self.database.kernel_commit_decision_with_approval_version(
+                &self.binding.run_id, now.wall_ms, &command, version)?,
             Some(DecisionLease::ModelRetry(effect_key, owner)) => {
                 self.database.kernel_commit_model_retry(
                     &self.binding.run_id,
@@ -391,6 +394,22 @@ impl<'a> KernelCoordinator<'a> {
         Ok(frame)
     }
 
+    /// Reevaluate without a preliminary mutation transaction: superseding the
+    /// old approval and installing the new decision are one durable write-set.
+    /// Rehydration affects only apply()'s candidate; failure leaves memory intact.
+    pub(crate) fn reevaluate_tool(
+        &self, tool_call_id: &str, policy: &dyn PolicyDecisionPort,
+    ) -> Result<(), String> {
+        let version = self.database.execution_policy(&self.binding.conversation_id)?.version;
+        self.apply(Some(DecisionLease::Approval(version)), |controller, now| {
+            let data = self.database.kernel_rehydrate(&self.binding.run_id)
+                .map_err(KernelError::FailClosed)?
+                .ok_or_else(|| KernelError::FailClosed("missing durable run for reevaluation".into()))?;
+            *controller = RunController::rehydrate(data)?;
+            controller.reevaluate_tool(policy, tool_call_id, version, now.monotonic_ms, now.wall_ms)
+        })
+    }
+
     pub(crate) fn resolve_approval(
         &self,
         tool_call_id: &str,
@@ -398,6 +417,15 @@ impl<'a> KernelCoordinator<'a> {
     ) -> Result<(), String> {
         self.tick()?;
         self.apply(None, |controller, now| {
+            controller.resolve_approval(tool_call_id, decision, now.monotonic_ms)
+        })
+    }
+
+    pub(crate) fn resolve_approval_at_version(
+        &self, tool_call_id: &str, decision: kernel::ApprovalDecision, version: u64,
+    ) -> Result<(), String> {
+        self.tick()?;
+        self.apply(Some(DecisionLease::Approval(version)), |controller, now| {
             controller.resolve_approval(tool_call_id, decision, now.monotonic_ms)
         })
     }
@@ -1126,7 +1154,7 @@ impl<'a> KernelCoordinator<'a> {
             serde_json::from_str(&tool.input_json).map_err(|error| error.to_string())?;
         if effect.kind != kernel::OutboxEffectKind::DispatchTool
             || effect.tool_call_id.as_deref() != Some(tool_call_id)
-            || effect.idempotency_key != kernel::dispatch_idempotency_key(tool_call_id)
+            || effect.idempotency_key != kernel::dispatch_idempotency_key(&self.binding.run_id, tool_call_id)
             || payload.get("tool").and_then(Value::as_str) != Some(tool.tool.as_str())
             || payload.get("input") != Some(&expected_input)
         {

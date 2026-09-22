@@ -1,9 +1,9 @@
 //! JOB-v1 — independent long-process lifecycle (batch `C-MODULE-01`).
 //!
-//! **Status: NOT WIRED.** This module is intentionally *not* declared in
-//! `lib.rs`, is not registered as a Host tool, and is not reachable from
-//! `run_command`. It exists to make start / status / output / cancel / recovery
-//! verifiable *before* anything production consumes it.
+//! Used by the Host command-job adapter for start / status / output / cancel /
+//! recovery. Production starts still require a verified backend; the default
+//! Host proof refuses execution. Real temporary-process tests inject a proof
+//! per instance through types that exist only in test builds.
 //!
 //! ## Why a separate module
 //!
@@ -89,11 +89,17 @@ pub enum JobError {
         job_id: String,
     },
     InvalidRequest(String),
+    CredentialMismatch(String),
     Capacity {
         max_jobs: usize,
     },
     /// The process could not be started at all. Distinct from a non-zero exit.
     StartFailed(String),
+    /// No execution backend on this Host has been verified to confine the
+    /// process, so no process was created. This is a policy refusal, not a
+    /// launch failure: it must never be retried as-is, because retrying cannot
+    /// make a missing confinement boundary exist.
+    SandboxUnavailable(String),
 }
 
 impl JobError {
@@ -102,8 +108,10 @@ impl JobError {
             JobError::UnknownJob(_) => "job.unknown",
             JobError::IdempotencyConflict { .. } => "job.idempotency_conflict",
             JobError::InvalidRequest(_) => "job.invalid_request",
+            JobError::CredentialMismatch(_) => "credential_mismatch",
             JobError::Capacity { .. } => "job.capacity",
             JobError::StartFailed(_) => "job.start_failed",
+            JobError::SandboxUnavailable(_) => "sandbox_unavailable",
         }
     }
 
@@ -113,12 +121,428 @@ impl JobError {
             JobError::IdempotencyConflict { job_id } => format!(
                 "idempotency key already belongs to job '{job_id}' with a different request"
             ),
-            JobError::InvalidRequest(detail) => detail.clone(),
+            JobError::InvalidRequest(detail) | JobError::CredentialMismatch(detail) => detail.clone(),
             JobError::Capacity { max_jobs } => {
                 format!("job capacity reached (max {max_jobs} tracked jobs)")
             }
             JobError::StartFailed(detail) => detail.clone(),
+            JobError::SandboxUnavailable(detail) => detail.clone(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backend capability authority
+// ---------------------------------------------------------------------------
+//
+// Phase 0 result (batch C0, 2026-09-20): this Host has no execution backend
+// that has been verified to confine a process tree. The only spawner the
+// product wires up today (`SystemSpawner`) creates the child with the calling
+// user's token, at the same integrity level, with write access everywhere that
+// user can write and with unmediated egress. Measured, not inferred: see
+// `evidence/C/C0/logs/os-capability-baseline.json`.
+//
+// Therefore arbitrary execution is refused at two seams: the manager refuses
+// before publishing a job, and the spawner refuses before creating a process.
+// The refusal is an artifact-level property, deliberately not a setting:
+//
+//   * It is not read from the environment, a config file, a project directory
+//     or any model-supplied value, so no caller can grant itself execution by
+//     naming a different helper, backend, root list or handle.
+//   * `BackendAvailability` is only produced by a `BackendCapabilityProof`, and
+//     the proof is an **injected dependency** — a constructor argument or an
+//     instance field. There is no process-global proof. Production wiring passes
+//     `HostVerifiedBackend`, whose only answer on this Host is `Unavailable`.
+//   * Injection exists so tests and the `tests/` integration target can exercise
+//     the authorized path with a real child. The grant type `AvailableInTests`
+//     is `#[cfg(test)]`: that target pulls this module in with
+//     `#[path = "../src/process_jobs.rs"]`, and `rustc --test` enables `cfg(test)`
+//     for the whole test crate, so tests can inject without the type existing in
+//     a shipped build and without any feature flag or global switch.
+//   * Failure of a probe keeps execution refused rather than assuming it
+//     succeeded, so a broken or unreadable environment fails closed.
+
+/// Execution backends the product can spawn through. Recorded on every
+/// availability decision so an acceptance record names the thing that was
+/// actually tested, not the thing that was hoped for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionBackend {
+    /// The child runs as the caller. Lifecycle containment only (job object,
+    /// cancellation, tree teardown). **Not** a confinement boundary.
+    HostUserUnconfined,
+    /// `@anthropic-ai/sandbox-runtime` on Windows: a dedicated `srt-sandbox`
+    /// local account, a machine-wide WFP egress fence keyed on that account's
+    /// SID, and per-session explicit ACEs for the configured paths.
+    SrtWindows,
+}
+
+impl ExecutionBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HostUserUnconfined => "host_user_unconfined",
+            Self::SrtWindows => "srt_windows",
+        }
+    }
+}
+
+/// A property arbitrary execution requires, checked one at a time so a partial
+/// backend can never be reported as a passing one. Ordered as reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RequiredCapability {
+    /// Write is denied outside the granted roots.
+    FilesystemWriteConfinement,
+    /// Read is denied for the declared private regions.
+    FilesystemReadConfinement,
+    /// A distinct principal, so the child cannot open what the caller can.
+    DistinctExecutionIdentity,
+    /// Direct egress is blocked regardless of proxy environment variables.
+    NetworkEgressFence,
+    /// System resolver (`getaddrinfo`) is not usable as an exfiltration path.
+    SystemDnsFence,
+    /// Every descendant is terminated and its exit is confirmed.
+    ProcessTreeConfinement,
+}
+
+impl RequiredCapability {
+    pub const ALL: [Self; 6] = [
+        Self::FilesystemWriteConfinement,
+        Self::FilesystemReadConfinement,
+        Self::DistinctExecutionIdentity,
+        Self::NetworkEgressFence,
+        Self::SystemDnsFence,
+        Self::ProcessTreeConfinement,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FilesystemWriteConfinement => "filesystem_write_confinement",
+            Self::FilesystemReadConfinement => "filesystem_read_confinement",
+            Self::DistinctExecutionIdentity => "distinct_execution_identity",
+            Self::NetworkEgressFence => "network_egress_fence",
+            Self::SystemDnsFence => "system_dns_fence",
+            Self::ProcessTreeConfinement => "process_tree_confinement",
+        }
+    }
+}
+
+/// Why execution is refused. Each variant carries the evidence a reader needs
+/// to know what to fix; none of them is recoverable by retrying the same call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BackendRefusal {
+    /// No backend at all has been verified on this Host.
+    NoVerifiedBackend,
+    /// The backend decision no longer matches the admitted immutable snapshot.
+    CredentialMismatch,
+    /// A backend exists but failed specific required capabilities. The list is
+    /// echoed verbatim rather than collapsed into "not ready".
+    CapabilitiesNotMet {
+        backend: ExecutionBackend,
+        missing: Vec<RequiredCapability>,
+    },
+}
+
+impl BackendRefusal {
+    pub fn reason(&self) -> String {
+        match self {
+            Self::NoVerifiedBackend => {
+                "no execution backend on this Host has been verified to confine a process tree"
+                    .to_owned()
+            }
+            Self::CredentialMismatch => "credential_mismatch: backend evidence changed after admission".into(),
+            Self::CapabilitiesNotMet { backend, missing } => {
+                let names: Vec<&str> = missing.iter().map(|c| c.as_str()).collect();
+                format!(
+                    "backend '{}' has not been verified for: {}",
+                    backend.as_str(),
+                    names.join(", ")
+                )
+            }
+        }
+    }
+}
+
+/// What the Host knows about execution right now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BackendAvailability {
+    Available {
+        backend: ExecutionBackend,
+        /// Digest of the exact binary + configuration + policy generation that
+        /// was verified. Re-verification is required when this changes.
+        digest: String,
+    },
+    Unavailable(BackendRefusal),
+}
+
+impl BackendAvailability {
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available { .. })
+    }
+
+    /// `Ok(backend)` when execution may proceed, otherwise the refusal.
+    pub fn authorize(&self) -> Result<ExecutionBackend, BackendRefusal> {
+        match self {
+            Self::Available { backend, .. } => Ok(*backend),
+            Self::Unavailable(refusal) => Err(refusal.clone()),
+        }
+    }
+
+    /// The refusal this decision carries, for reporting.
+    pub fn refusal(&self) -> Option<&BackendRefusal> {
+        match self {
+            Self::Available { .. } => None,
+            Self::Unavailable(refusal) => Some(refusal),
+        }
+    }
+}
+
+/// Evidence that a *Host-controlled* check ran and produced an availability
+/// decision.
+///
+/// The proof is an **explicitly injected dependency**: every component that
+/// needs to decide whether execution is allowed receives one as a field or an
+/// argument, and there is deliberately no process-global proof to consult. An
+/// earlier revision kept a global `OnceLock<Mutex<Option<Box<dyn ..>>>>`; that
+/// made two tests in the same binary share one decision, so whichever test
+/// installed `Available` silently re-authorized — or de-authorized — every other
+/// test. Per-instance injection removes the shared mutable state instead of
+/// trying to schedule access to it.
+///
+/// Production passes [`HostVerifiedBackend`], whose only honest answer on this
+/// Host is `Unavailable`. A test passes [`AvailableInTests`]. Because the proof
+/// is an argument rather than a global, a test cannot change another test's
+/// decision, and the order in which tests run cannot change any of them.
+/// `Send + Sync` because a manager holding a proof is moved onto the supervision
+/// thread that starts and reaps jobs.
+pub trait BackendCapabilityProof: Send + Sync {
+    fn availability(&self) -> BackendAvailability;
+}
+
+/// The production proof. It exists so that wiring has a single, named place to
+/// consult, and it refuses because no verified backend is integrated.
+pub struct HostVerifiedBackend;
+
+impl BackendCapabilityProof for HostVerifiedBackend {
+    fn availability(&self) -> BackendAvailability {
+        // Deliberately unconditional. Phase 0 found no confinement backend in
+        // this build; when one is integrated, its probe result replaces this
+        // value and must carry the verified binary/config digest with it.
+        BackendAvailability::Unavailable(BackendRefusal::NoVerifiedBackend)
+    }
+}
+
+/// A proof that grants execution, for tests and conformance harnesses only.
+///
+/// `#[cfg(test)]`, so the type cannot be named by a shipped build at all. The
+/// `tests/` integration target reaches it because that target pulls this module
+/// in with `#[path = "../src/process_jobs.rs"]` and `rustc --test` enables
+/// `cfg(test)` for the whole test crate — verified in this project's actual
+/// path-module layout (`O/review1/c-cfg-test-probe`, `c-cfg-test-filter.log`).
+///
+/// So test authorization needs neither a Cargo feature nor a global switch nor a
+/// type visible in production. Production passes [`HostVerifiedBackend`], which
+/// refuses, and nothing here is reachable from model output, project files or
+/// environment variables.
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub struct AvailableInTests {
+    pub backend: ExecutionBackend,
+    pub digest: String,
+}
+
+#[cfg(test)]
+impl AvailableInTests {
+    /// The conventional authorized test backend, named once so harnesses do not
+    /// each invent a digest string.
+    pub fn host_user_unconfined(digest: impl Into<String>) -> Self {
+        Self {
+            backend: ExecutionBackend::HostUserUnconfined,
+            digest: digest.into(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl BackendCapabilityProof for AvailableInTests {
+    fn availability(&self) -> BackendAvailability {
+        BackendAvailability::Available {
+            backend: self.backend,
+            digest: self.digest.clone(),
+        }
+    }
+}
+
+/// The production decision, as a value.
+///
+/// This reads the production proof directly and is *not* consulted by
+/// [`ProcessJobManager::start`] or by the spawners — they each consult the proof
+/// they were given. Kept because the wiring layer, `command_jobs`, and the
+/// capability report need a way to ask "what does the shipped artifact do?".
+pub fn execution_availability() -> BackendAvailability {
+    HostVerifiedBackend.availability()
+}
+
+/// The production authorization seam: always refuses on this Host.
+///
+/// Callers that own no injectable proof use this, which keeps them fail-closed.
+/// Callers that can be injected should hold a proof instead.
+pub fn authorize_execution() -> Result<ExecutionBackend, BackendRefusal> {
+    execution_availability().authorize()
+}
+
+/// The refusal a `start` must return, in the shared error vocabulary. Kept as a
+/// small helper so the message cannot drift between call sites.
+fn sandbox_unavailable_error(refusal: &BackendRefusal) -> JobError {
+    if matches!(refusal, BackendRefusal::CredentialMismatch) {
+        return JobError::CredentialMismatch(refusal.reason());
+    }
+    JobError::SandboxUnavailable(format!(
+        "sandbox_unavailable: {}. No external process was started. Control-plane state is reported separately.",
+        refusal.reason()
+    ))
+}
+
+/// Raw facts about the Host's native confinement primitives.
+///
+/// This is a *probe report*, not a decision: it says what was found on the
+/// machine so a later verification batch has somewhere to record its result and
+/// so a support report can distinguish "no backend installed" from "backend
+/// installed but a capability missing". None of these booleans, alone or
+/// together, authorizes execution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeConfinementReport {
+    /// The `srt-sandbox` local account exists, i.e. a distinct execution
+    /// identity has been provisioned for the SRT Windows backend.
+    pub srt_sandbox_account_present: bool,
+    /// The current process is a member of `sandbox-runtime-users`, i.e. it may
+    /// ask the SRT broker to launch as that account.
+    pub caller_may_use_srt_sandbox: bool,
+    /// `HKLM\SOFTWARE\sandbox-runtime`, the machine-wide marker written by the
+    /// elevated `windows-install` step.
+    pub srt_machine_marker_present: bool,
+}
+
+impl NativeConfinementReport {
+    /// True when nothing about a confinement backend is present, which is the
+    /// expected phase-0 state and the reason execution is refused.
+    pub fn is_unprovisioned(&self) -> bool {
+        !self.srt_sandbox_account_present
+            && !self.caller_may_use_srt_sandbox
+            && !self.srt_machine_marker_present
+    }
+}
+
+/// Probes the native primitives without elevation and without changing
+/// anything. Every check is best-effort: an unreadable value reports as absent,
+/// which keeps the result on the refusing side.
+#[cfg(windows)]
+pub fn probe_native_confinement() -> NativeConfinementReport {
+    use std::os::windows::ffi::OsStrExt;
+
+    // Declared locally rather than through a feature-gated binding: the probe
+    // needs three read-only calls, and keeping them here means this file's
+    // confinement logic cannot be changed by altering a Cargo feature list.
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn LookupAccountNameW(
+            system_name: *const u16,
+            account_name: *const u16,
+            sid: *mut u8,
+            sid_len: *mut u32,
+            referenced_domain_name: *mut u16,
+            referenced_domain_len: *mut u32,
+            sid_use: *mut i32,
+        ) -> i32;
+        fn CheckTokenMembership(token: isize, sid_to_check: *const u8, is_member: *mut i32) -> i32;
+    }
+    const ERROR_SUCCESS: i32 = 0;
+
+    fn wide(value: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(value)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    /// Resolves a local account or group name to its SID bytes. `Ok(None)` means
+    /// the principal does not exist on this machine.
+    fn resolve_sid(name: &str) -> Result<Option<Vec<u8>>, ()> {
+        let name_w = wide(name);
+        let mut sid_len: u32 = 0;
+        let mut domain_len: u32 = 0;
+        let mut sid_use: i32 = 0;
+        // Sizing pass. Expected to fail with ERROR_INSUFFICIENT_BUFFER.
+        unsafe {
+            LookupAccountNameW(
+                std::ptr::null(),
+                name_w.as_ptr(),
+                std::ptr::null_mut(),
+                &mut sid_len,
+                std::ptr::null_mut(),
+                &mut domain_len,
+                &mut sid_use,
+            );
+        }
+        if sid_len == 0 {
+            return Ok(None);
+        }
+        let mut sid = vec![0u8; sid_len as usize];
+        let mut domain = vec![0u16; domain_len.max(1) as usize];
+        let ok = unsafe {
+            LookupAccountNameW(
+                std::ptr::null(),
+                name_w.as_ptr(),
+                sid.as_mut_ptr(),
+                &mut sid_len,
+                domain.as_mut_ptr(),
+                &mut domain_len,
+                &mut sid_use,
+            )
+        };
+        if ok == 0 {
+            // A name that cannot be resolved at all is absent, not an error we
+            // should treat as permission to proceed.
+            return Ok(None);
+        }
+        sid.truncate(sid_len as usize);
+        Ok(Some(sid))
+    }
+
+    fn present(name: &str) -> bool {
+        matches!(resolve_sid(name), Ok(Some(_)))
+    }
+
+    fn caller_in_group(group_name: &str) -> bool {
+        let Ok(Some(sid)) = resolve_sid(group_name) else {
+            return false;
+        };
+        let mut is_member: i32 = 0;
+        // A null token handle means "the current process's token".
+        let checked = unsafe { CheckTokenMembership(0, sid.as_ptr(), &mut is_member) };
+        checked == ERROR_SUCCESS && is_member != 0
+    }
+
+    // `%ProgramData%\sandbox-runtime` is the unprivileged proxy for the
+    // machine-wide install marker; the HKLM credential key next to it is not
+    // readable without elevation, so reading it would report a false negative.
+    let marker_present = std::env::var_os("ProgramData")
+        .map(std::path::PathBuf::from)
+        .map(|root| root.join("sandbox-runtime"))
+        .map(|path| path.exists())
+        .unwrap_or(false);
+
+    NativeConfinementReport {
+        srt_sandbox_account_present: present("srt-sandbox"),
+        caller_may_use_srt_sandbox: caller_in_group("sandbox-runtime-users"),
+        srt_machine_marker_present: marker_present,
+    }
+}
+
+#[cfg(not(windows))]
+pub fn probe_native_confinement() -> NativeConfinementReport {
+    NativeConfinementReport {
+        srt_sandbox_account_present: false,
+        caller_may_use_srt_sandbox: false,
+        srt_machine_marker_present: false,
     }
 }
 
@@ -881,7 +1305,27 @@ pub trait ChildHandle: Send {
 }
 
 pub trait ProcessSpawner: Send + Sync {
-    fn spawn(&self, spec: &SpawnSpec) -> io::Result<Box<dyn ChildHandle>>;
+    /// Creates a child, but only if `proof` authorizes execution.
+    ///
+    /// The proof is a parameter rather than a global so that the manager, the
+    /// spawner and any test each consult the decision they were given. A global
+    /// proof let one test's authorization change another test's result.
+    fn spawn(
+        &self,
+        proof: &dyn BackendCapabilityProof,
+        spec: &SpawnSpec,
+    ) -> io::Result<Box<dyn ChildHandle>>;
+}
+
+/// Reusable refusal for a spawner that was handed a refusing proof.
+fn refuse_spawn(refusal: &BackendRefusal) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "sandbox_unavailable: {}. No process was created.",
+            refusal.reason()
+        ),
+    )
 }
 
 /// Real spawner. Wiring should keep this only if A's executor does not already
@@ -912,7 +1356,23 @@ pub(crate) const CREATE_SUSPENDED_FLAG: u32 = 0x0000_0004;
 pub const DETACHED_PROCESS_FLAG: u32 = 0x0000_0008;
 
 impl ProcessSpawner for SystemSpawner {
-    fn spawn(&self, spec: &SpawnSpec) -> io::Result<Box<dyn ChildHandle>> {
+    fn spawn(
+        &self,
+        proof: &dyn BackendCapabilityProof,
+        spec: &SpawnSpec,
+    ) -> io::Result<Box<dyn ChildHandle>> {
+        // Second, independent check, at the lowest seam. `ProcessJobManager`
+        // already refuses, but the raw spawner is reachable on its own and a
+        // future wiring change must not be able to create an unconfined child
+        // just by reaching it directly. Refusing here means an unconfined
+        // process is never created, not that it is created and then reported on.
+        //
+        // The decision comes from the caller's proof, never from global state:
+        // production hands this the refusing proof, and a test that wants a real
+        // child hands it its own.
+        if let Err(refusal) = proof.availability().authorize() {
+            return Err(refuse_spawn(&refusal));
+        }
         #[cfg(windows)]
         {
             spawn_system_child(spec, CREATE_NO_WINDOW_FLAG)
@@ -934,7 +1394,16 @@ pub struct SystemSpawnerFlags {
 }
 
 impl ProcessSpawner for SystemSpawnerFlags {
-    fn spawn(&self, spec: &SpawnSpec) -> io::Result<Box<dyn ChildHandle>> {
+    fn spawn(
+        &self,
+        proof: &dyn BackendCapabilityProof,
+        spec: &SpawnSpec,
+    ) -> io::Result<Box<dyn ChildHandle>> {
+        // Same refusal as `SystemSpawner`: varying the console mode does not
+        // create a confinement boundary, so it cannot be used to reach one.
+        if let Err(refusal) = proof.availability().authorize() {
+            return Err(refuse_spawn(&refusal));
+        }
         spawn_system_child(spec, self.creation_flags)
     }
 }
@@ -1500,6 +1969,14 @@ pub struct ProcessJobManager {
     clock: Arc<dyn Clock>,
     spawner: Arc<dyn ProcessSpawner>,
     probe: Arc<dyn IdentityProbe>,
+    /// The execution decision this manager consults, supplied by its caller.
+    ///
+    /// An instance field, deliberately: a process-global proof meant two
+    /// managers in one process could not hold different decisions, so a test
+    /// that authorized execution changed the result of a test that asserted the
+    /// refusal. Production constructs its managers with [`HostVerifiedBackend`],
+    /// which refuses.
+    proof: Arc<dyn BackendCapabilityProof>,
     config: ManagerConfig,
     jobs: Mutex<BTreeMap<String, Arc<JobEntry>>>,
     keys: Mutex<BTreeMap<(String, String), KeyClaim>>,
@@ -1507,16 +1984,36 @@ pub struct ProcessJobManager {
 }
 
 impl ProcessJobManager {
+    /// Production constructor. Always refuses on this Host, because
+    /// [`HostVerifiedBackend`] always refuses.
     pub fn new(
         clock: Arc<dyn Clock>,
         spawner: Arc<dyn ProcessSpawner>,
         probe: Arc<dyn IdentityProbe>,
         config: ManagerConfig,
     ) -> Self {
+        Self::with_backend_proof(clock, spawner, probe, config, Arc::new(HostVerifiedBackend))
+    }
+
+    /// Constructor with an explicit execution decision.
+    ///
+    /// This is the injection point for tests and conformance harnesses: they
+    /// pass [`AvailableInTests`] to exercise the authorized path with a real
+    /// child. It is also where a future verified backend adapter is wired: the
+    /// adapter supplies a proof that reports `Available` with the verified
+    /// binary/config digest, and nothing else in this file changes.
+    pub fn with_backend_proof(
+        clock: Arc<dyn Clock>,
+        spawner: Arc<dyn ProcessSpawner>,
+        probe: Arc<dyn IdentityProbe>,
+        config: ManagerConfig,
+        proof: Arc<dyn BackendCapabilityProof>,
+    ) -> Self {
         Self {
             clock,
             spawner,
             probe,
+            proof,
             config,
             jobs: Mutex::new(BTreeMap::new()),
             keys: Mutex::new(BTreeMap::new()),
@@ -1547,6 +2044,18 @@ impl ProcessJobManager {
     ///    call is made before publication (for `created_at`/id), and the launch
     ///    below makes the next one, which is therefore always *after* the record
     ///    is visible.
+    /// Trusted Host entry: re-check the authoritative admission immediately
+    /// before this manager creates any state. The verifier is supplied by the
+    /// Host adapter, never from tool input; no credential enters the spawner.
+    pub(crate) fn start_authorized(
+        &self,
+        request: StartRequest,
+        verify: impl FnOnce(&StartRequest) -> Result<(), JobError>,
+    ) -> Result<StartOutcome, JobError> {
+        verify(&request)?;
+        self.start(request)
+    }
+
     pub fn start(&self, request: StartRequest) -> Result<StartOutcome, JobError> {
         if request.run_id.trim().is_empty() {
             return Err(JobError::InvalidRequest("runId must not be empty".into()));
@@ -1568,6 +2077,18 @@ impl ProcessJobManager {
                 "execution budget exceeds the {} s maximum",
                 self.config.max_execution_budget.as_secs()
             )));
+        }
+        // The confinement decision is checked before the job is published, so a
+        // refused request leaves no job record, no checkpoint and nothing a
+        // later call could mistake for work already in flight. It is also
+        // checked on every call rather than cached, so an availability change
+        // cannot be outrun by a caller holding an old answer.
+        //
+        // The decision comes from this instance's own proof, so a manager
+        // constructed with a refusing proof refuses regardless of what any other
+        // manager in the process was constructed with.
+        if let Err(refusal) = self.proof.availability().authorize() {
+            return Err(sandbox_unavailable_error(&refusal));
         }
 
         let canonical = request.canonical();
@@ -1679,7 +2200,7 @@ impl ProcessJobManager {
     /// already-finished job, and the process it eventually produces must not be
     /// published as `Running` — see the two branches below.
     fn launch(&self, entry: &Arc<JobEntry>) {
-        let spawned = self.spawner.spawn(&entry.spec);
+        let spawned = self.spawner.spawn(self.proof.as_ref(), &entry.spec);
         match spawned {
             Err(error) => {
                 let finished_at = self.clock.now_ms();
@@ -2375,6 +2896,268 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::mpsc;
 
+    // -- test authorization --------------------------------------------------
+    //
+    // Authorization is injected per manager instance via
+    // `ProcessJobManager::with_backend_proof`. There is no global proof to
+    // install, leak or restore, so no test can change another test's decision.
+
+    /// The lifecycle suites in this module are about manager semantics
+    /// (idempotency, capacity, cancellation, output cursors, recovery), all of
+    /// which sit behind the confinement decision, so they inject an authorizing
+    /// proof when they build their manager.
+    ///
+    /// Nothing global is touched: injection happens per manager instance in
+    /// [`ProcessJobManager::with_backend_proof`]. That is what lets a test in
+    /// this module authorize execution while another test in the same binary
+    /// simultaneously asserts the refusal.
+    fn lifecycle_proof() -> Arc<dyn BackendCapabilityProof> {
+        Arc::new(AvailableInTests::host_user_unconfined(
+            "process-jobs-lifecycle-tests",
+        ))
+    }
+
+    // -- backend capability authority ----------------------------------------
+
+    /// The production constructor must refuse, whether or not some other test in
+    /// this binary built an authorized manager.
+    #[test]
+    fn production_constructor_refuses_start_before_any_job_is_published() {
+        let spawner: Arc<ScriptedSpawner> = ScriptedSpawner::new(vec![]);
+        let manager = ProcessJobManager::new(
+            Arc::new(ManualClock::default()),
+            Arc::clone(&spawner) as Arc<dyn ProcessSpawner>,
+            Arc::new(ScriptedProbe::new(vec![])),
+            ManagerConfig::default(),
+        );
+        let error = manager
+            .start(request("denied", "echo nope"))
+            .expect_err("the production constructor must refuse");
+        assert_eq!(error.code(), "sandbox_unavailable");
+        assert!(
+            error.message().contains("sandbox_unavailable"),
+            "{error:?}"
+        );
+        assert_eq!(
+            spawner.spawn_count(),
+            0,
+            "a refused start must not reach the spawner at all"
+        );
+    }
+
+    /// Two managers alive at once must be able to hold *different* decisions.
+    /// This is the direct regression test for the global-proof defect: with one
+    /// process-global proof, whichever manager was built second decided for both.
+    #[test]
+    fn two_managers_in_one_process_keep_independent_decisions() {
+        let authorized_spawner: Arc<ScriptedSpawner> =
+            ScriptedSpawner::new(vec![scripted_plan(101, "ok")]);
+        let authorized = manager(
+            Arc::clone(&authorized_spawner),
+            Arc::new(ScriptedProbe::new(vec![(101, Liveness::Alive { start_marker: Some(1) })])),
+            Arc::new(ManualClock::default()),
+            ManagerConfig::default(),
+        );
+        let refusing_spawner_concrete: Arc<ScriptedSpawner> = ScriptedSpawner::new(vec![]);
+        let refusing_spawner: Arc<dyn ProcessSpawner> = refusing_spawner_concrete;
+        let refusing = ProcessJobManager::new(
+            Arc::new(ManualClock::default()),
+            refusing_spawner,
+            Arc::new(ScriptedProbe::new(vec![])),
+            ManagerConfig::default(),
+        );
+
+        // Order matters to the old defect: assert the refusing manager *after*
+        // the authorized one exists, and again in the other order below.
+        assert!(
+            refusing.start(request("k", "echo nope")).is_err(),
+            "the refusing manager must still refuse while an authorized manager exists"
+        );
+        assert!(
+            authorized.start(request("k", "echo ok")).is_ok(),
+            "the authorized manager must still be authorized"
+        );
+        // And the refusing manager is still refusing afterwards.
+        assert!(refusing.start(request("k2", "echo nope")).is_err());
+        assert_eq!(authorized_spawner.spawn_count(), 1);
+    }
+
+    /// Order-independent by construction: refuse first, then authorize, then
+    /// re-check the refusing manager.
+    #[test]
+    fn an_authorized_manager_never_opens_the_gate_for_a_refusing_one() {
+        let refusing_spawner_concrete: Arc<ScriptedSpawner> = ScriptedSpawner::new(vec![]);
+        let refusing: Arc<dyn ProcessSpawner> = refusing_spawner_concrete;
+        let refusing = ProcessJobManager::new(
+            Arc::new(ManualClock::default()),
+            refusing,
+            Arc::new(ScriptedProbe::new(vec![])),
+            ManagerConfig::default(),
+        );
+        assert!(refusing.start(request("a", "echo nope")).is_err());
+
+        let authorized_spawner: Arc<ScriptedSpawner> =
+            ScriptedSpawner::new(vec![scripted_plan(102, "ok")]);
+        let authorized = manager(
+            Arc::clone(&authorized_spawner),
+            Arc::new(ScriptedProbe::new(vec![(102, Liveness::Alive { start_marker: Some(1) })])),
+            Arc::new(ManualClock::default()),
+            ManagerConfig::default(),
+        );
+        assert!(authorized.start(request("b", "echo ok")).is_ok());
+
+        assert!(
+            refusing.start(request("c", "echo nope")).is_err(),
+            "authorizing a different manager must not open this one's gate"
+        );
+    }
+
+    /// A spawner handed a refusing proof must refuse even when called directly,
+    /// so reaching the low-level seam is not a way around the manager.
+    #[test]
+    fn system_spawner_refuses_when_handed_a_refusing_proof() {
+        let spec = SpawnSpec {
+            program: "cmd.exe".into(),
+            args: vec!["/C".into(), "echo unconfined".into()],
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            env: EnvMode::Inherit,
+        };
+        // `Box<dyn ChildHandle>` is not `Debug`, so match rather than expect_err.
+        match SystemSpawner.spawn(&HostVerifiedBackend, &spec) {
+            Ok(child) => panic!("the refusing proof must not create a child: pid {}", child.pid()),
+            Err(error) => {
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                assert!(error.to_string().contains("sandbox_unavailable"), "{error}");
+            }
+        }
+        // The same seam with an authorizing proof is allowed through, proving the
+        // refusal above came from the proof and not from something incidental.
+        assert!(SystemSpawner
+            .spawn(&AvailableInTests::host_user_unconfined("spawner-probe"), &spec)
+            .is_ok());
+    }
+
+    /// Stress the independence property: many authorized and refusing managers
+    /// created and used concurrently, every refusal must survive.
+    ///
+    /// This is the shape of the defect O reproduced against the previous
+    /// revision (a refusing guard was overridden by another test installing an
+    /// authorizing one). With per-instance injection there is no shared state to
+    /// race on, so this asserts the invariant rather than the mechanism: a
+    /// manager built with the refusing proof refuses, no matter how many
+    /// authorized managers exist at the same time.
+    #[test]
+    fn refusing_managers_stay_refusing_under_concurrent_authorized_managers() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handlers = Vec::new();
+
+        // Continuously build and use authorized managers, so an authorizing
+        // decision is always "live" while the refusals below are checked.
+        for index in 0..4 {
+            let stop = Arc::clone(&stop);
+            handlers.push(std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let spawner: Arc<ScriptedSpawner> =
+                        ScriptedSpawner::new(vec![scripted_plan(700 + index, "x")]);
+                    let authorized = manager(
+                        Arc::clone(&spawner),
+                        Arc::new(ScriptedProbe::new(vec![(
+                            700 + index,
+                            Liveness::Alive { start_marker: Some(1) },
+                        )])),
+                        Arc::new(ManualClock::default()),
+                        ManagerConfig::default(),
+                    );
+                    assert!(
+                        authorized.start(request("live", "echo x")).is_ok(),
+                        "an authorized manager must stay authorized"
+                    );
+                }
+            }));
+        }
+
+        // Meanwhile, refusals must be unaffected by all of that activity.
+        for _ in 0..200 {
+            let spawner: Arc<ScriptedSpawner> = ScriptedSpawner::new(vec![]);
+            let refusing = ProcessJobManager::new(
+                Arc::new(ManualClock::default()),
+                Arc::clone(&spawner) as Arc<dyn ProcessSpawner>,
+                Arc::new(ScriptedProbe::new(vec![])),
+                ManagerConfig::default(),
+            );
+            let error = refusing
+                .start(request("denied", "echo nope"))
+                .expect_err("a refusing manager must refuse while authorized ones are live");
+            assert_eq!(error.code(), "sandbox_unavailable");
+            assert_eq!(spawner.spawn_count(), 0);
+        }
+
+        stop.store(true, Ordering::SeqCst);
+        for handler in handlers {
+            handler.join().expect("authorized-manager thread panicked");
+        }
+    }
+
+    #[test]
+    fn every_required_capability_has_a_stable_name_and_no_duplicates() {
+        let mut names: Vec<&str> = RequiredCapability::ALL.iter().map(|c| c.as_str()).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "capability names must be unique");
+        assert!(names.contains(&"system_dns_fence"));
+        assert!(names.contains(&"filesystem_write_confinement"));
+    }
+
+    #[test]
+    fn capability_refusal_lists_the_missing_capabilities_verbatim() {
+        let refusal = BackendRefusal::CapabilitiesNotMet {
+            backend: ExecutionBackend::SrtWindows,
+            missing: vec![
+                RequiredCapability::SystemDnsFence,
+                RequiredCapability::DistinctExecutionIdentity,
+            ],
+        };
+        let reason = refusal.reason();
+        assert!(reason.contains("srt_windows"), "{reason}");
+        assert!(reason.contains("system_dns_fence"), "{reason}");
+        assert!(reason.contains("distinct_execution_identity"), "{reason}");
+    }
+
+    /// On this Host nothing is provisioned; the probe must say so rather than
+    /// assume a backend exists. Written so that a machine where SRT *is*
+    /// installed does not fail the suite spuriously.
+    #[test]
+    fn native_confinement_probe_reports_the_actual_machine_state() {
+        let report = probe_native_confinement();
+
+        // The production proof is what the shipped artifact behaves like, and it
+        // must refuse regardless of what the probe found. This is a pure value
+        // check against `HostVerifiedBackend`: no global state is involved, so
+        // no other test can influence it.
+        let production = HostVerifiedBackend.availability();
+        assert!(
+            !production.is_available(),
+            "the production backend must never report an available backend"
+        );
+        assert_eq!(
+            production.authorize().unwrap_err(),
+            BackendRefusal::NoVerifiedBackend
+        );
+
+        // Report the observed state for the log; it is not consulted by any
+        // assertion, because a probe result must never be the reason a step
+        // passes or fails on its own.
+        eprintln!("native confinement probe: {report:?}");
+
+        // A probe result is a diagnostic and must not, by itself, become a
+        // verification result.
+        assert!(
+            !HostVerifiedBackend.availability().is_available(),
+            "reading the probe report must not change the production decision"
+        );
+    }
+
     // -- fakes ---------------------------------------------------------------
 
     /// Clock that advances only when a test moves it.
@@ -2519,7 +3302,18 @@ mod tests {
     }
 
     impl ProcessSpawner for ScriptedSpawner {
-        fn spawn(&self, _spec: &SpawnSpec) -> io::Result<Box<dyn ChildHandle>> {
+        fn spawn(
+            &self,
+            proof: &dyn BackendCapabilityProof,
+            _spec: &SpawnSpec,
+        ) -> io::Result<Box<dyn ChildHandle>> {
+            // A scripted spawner stands in for the OS, so it must still honour
+            // the decision it was handed: a manager constructed with a refusing
+            // proof must not appear to have started anything. This keeps the
+            // lifecycle tests honest about which side of the gate they exercise.
+            if let Err(refusal) = proof.availability().authorize() {
+                return Err(refuse_spawn(&refusal));
+            }
             self.spawns.fetch_add(1, Ordering::SeqCst);
             let mut plan = lock(&self.plan);
             if plan.is_empty() {
@@ -2622,7 +3416,14 @@ mod tests {
     }
 
     impl ProcessSpawner for HeldPipeSpawner {
-        fn spawn(&self, _spec: &SpawnSpec) -> io::Result<Box<dyn ChildHandle>> {
+        fn spawn(
+            &self,
+            proof: &dyn BackendCapabilityProof,
+            _spec: &SpawnSpec,
+        ) -> io::Result<Box<dyn ChildHandle>> {
+            if let Err(refusal) = proof.availability().authorize() {
+                return Err(refuse_spawn(&refusal));
+            }
             Ok(Box::new(HeldPipeChild {
                 pid: self.pid,
                 terminated: Arc::clone(&self.terminated),
@@ -2729,7 +3530,14 @@ mod tests {
     }
 
     impl ProcessSpawner for ParkingSpawner {
-        fn spawn(&self, _spec: &SpawnSpec) -> io::Result<Box<dyn ChildHandle>> {
+        fn spawn(
+            &self,
+            proof: &dyn BackendCapabilityProof,
+            _spec: &SpawnSpec,
+        ) -> io::Result<Box<dyn ChildHandle>> {
+            if let Err(refusal) = proof.availability().authorize() {
+                return Err(refuse_spawn(&refusal));
+            }
             self.spawns.fetch_add(1, Ordering::SeqCst);
             self.entered.send(()).expect("the test is still listening");
             self.release
@@ -2765,7 +3573,10 @@ mod tests {
         clock: Arc<ManualClock>,
         config: ManagerConfig,
     ) -> ProcessJobManager {
-        ProcessJobManager::new(clock, spawner, probe, config)
+        // Lifecycle suites run on the authorized path, injected into this one
+        // manager; the refusal has its own tests using the production
+        // constructor. Nothing global is set, so this cannot affect them.
+        ProcessJobManager::with_backend_proof(clock, spawner, probe, config, lifecycle_proof())
     }
 
     fn request(key: &str, command: &str) -> StartRequest {
@@ -2897,6 +3708,21 @@ mod tests {
     }
 
     #[test]
+    fn admission_verifier_rejects_before_manager_state_or_spawn() {
+        let spawner = ScriptedSpawner::new(vec![]);
+        let manager = manager(Arc::clone(&spawner),
+            Arc::new(ScriptedProbe::new(vec![])), Arc::new(ManualClock::default()),
+            ManagerConfig::default());
+        let error = manager.start_authorized(request("host-dispatch", "echo nope"), |_| {
+            Err(JobError::CredentialMismatch("changed authoritative fields".into()))
+        }).unwrap_err();
+        assert_eq!(error.code(), "credential_mismatch");
+        assert_eq!(spawner.spawn_count(), 0);
+        assert!(lock(&manager.jobs).is_empty());
+        assert!(lock(&manager.keys).is_empty());
+    }
+
+    #[test]
     fn same_key_different_request_is_a_conflict_not_a_second_launch() {
         let spawner = ScriptedSpawner::new(vec![scripted_plan(100, "one"), scripted_plan(101, "two")]);
         let manager = manager(
@@ -3009,11 +3835,12 @@ mod tests {
         let clock: Arc<dyn Clock> = clock;
         let spawner_for_manager: Arc<dyn ProcessSpawner> = spawner.clone();
         let probe_for_manager: Arc<dyn IdentityProbe> = probe.clone();
-        let manager = Arc::new(ProcessJobManager::new(
+        let manager = Arc::new(ProcessJobManager::with_backend_proof(
             clock,
             spawner_for_manager,
             probe_for_manager,
             ManagerConfig::default(),
+            lifecycle_proof(),
         ));
 
         let worker = Arc::clone(&manager);
@@ -3077,11 +3904,12 @@ mod tests {
         });
         let spawner_for_manager: Arc<dyn ProcessSpawner> = spawner.clone();
         let probe_for_manager: Arc<dyn IdentityProbe> = probe.clone();
-        let manager = Arc::new(ProcessJobManager::new(
+        let manager = Arc::new(ProcessJobManager::with_backend_proof(
             Arc::new(ManualClock::default()),
             spawner_for_manager,
             probe_for_manager,
             ManagerConfig::default(),
+            lifecycle_proof(),
         ));
 
         let worker = Arc::clone(&manager);
@@ -3140,11 +3968,12 @@ mod tests {
         let plans = (0..4).map(|i| scripted_plan(910 + i, "x")).collect();
         let spawner = ScriptedSpawner::new(plans);
         let spawner_for_manager: Arc<dyn ProcessSpawner> = spawner.clone();
-        let manager = Arc::new(ProcessJobManager::new(
+        let manager = Arc::new(ProcessJobManager::with_backend_proof(
             Arc::new(ManualClock::default()),
             spawner_for_manager,
             Arc::new(ScriptedProbe::new(vec![])),
             ManagerConfig { max_jobs: 2, ..ManagerConfig::default() },
+            lifecycle_proof(),
         ));
 
         let barrier = Arc::new(std::sync::Barrier::new(4));
@@ -3242,11 +4071,12 @@ mod tests {
         let probe: Arc<dyn IdentityProbe> =
             Arc::new(ScriptedProbe::new(vec![(pid, Liveness::Alive { start_marker: Some(5) })]));
         let clock: Arc<dyn Clock> = Arc::new(ManualClock::default());
-        let manager = ProcessJobManager::new(
+        let manager = ProcessJobManager::with_backend_proof(
             clock,
             spawner,
             probe,
             ManagerConfig { reader_grace: Duration::from_millis(50), ..ManagerConfig::default() },
+            lifecycle_proof(),
         );
 
         let mut req = request("held", "echo held");
