@@ -275,17 +275,40 @@ impl Database {
         let binding = self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             let (conversation_id, mode, root): (String, String, Option<String>) = transaction.query_row(
-                "SELECT r.conversation_id, COALESCE(p.permission_mode,c.permission_mode,'ask'), COALESCE(p.root_path,c.project_root)
-                 FROM runs r JOIN conversations c ON c.id=r.conversation_id LEFT JOIN projects p ON p.id=c.project_id WHERE r.id=?1",
+                "SELECT r.conversation_id, COALESCE(kep.mode, c.permission_mode, 'ask'), COALESCE(p.root_path,c.project_root)
+                 FROM runs r JOIN conversations c ON c.id=r.conversation_id
+                 LEFT JOIN projects p ON p.id=c.project_id
+                 LEFT JOIN kernel_execution_policies kep ON kep.conversation_id=c.id
+                 WHERE r.id=?1",
                 [run_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
             let grants = {
-                let mut query = transaction.prepare("SELECT tool_name,scope_key FROM conversation_tool_permissions WHERE conversation_id=?1 ORDER BY tool_name,scope_key")?;
-                let rows = query.query_map([&conversation_id], |row| Ok(PermissionGrant { tool: row.get(0)?, scope: row.get(1)? }))?;
+                // Every row in this table is a reusable approval, so it is frozen
+                // as `ApprovalReuse` and re-checked live at each use: a Run that
+                // is already frozen must not outlive a withdrawn permission
+                // (REV-04). Revoked rows are not frozen at all.
+                let mut query = transaction.prepare("SELECT tool_name,scope_key FROM conversation_tool_permissions WHERE conversation_id=?1 AND revoked_at IS NULL ORDER BY tool_name,scope_key")?;
+                let rows = query.query_map([&conversation_id], |row| Ok(PermissionGrant {
+                    tool: row.get(0)?, scope: row.get(1)?,
+                    kind: fox_engine_protocol::GrantKind::ApprovalReuse,
+                }))?;
                 rows.collect::<Result<Vec<_>,_>>()?
             };
+            // The approval generation at freeze time. Every revocation advances
+            // it, so a reusable approval cannot outlive the generation that
+            // issued it — a later re-grant of the same scope is a DIFFERENT
+            // authorization and must not revive this Run's frozen one.
+            let approval_epoch: Option<u64> = transaction
+                .query_row(
+                    "SELECT version FROM kernel_execution_policies WHERE conversation_id=?1",
+                    [&conversation_id],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| e.to_string())
+                .map_err(rusqlite::Error::InvalidParameterName)?;
             let permission = FrozenPermission {
                 mode: serde_json::from_value(serde_json::json!(mode)).map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?,
-                project_root: root, grants,
+                project_root: root, grants, approval_epoch,
             };
             let permission_snapshot_id = Self::run_control_permission_hash(&permission).map_err(rusqlite::Error::InvalidParameterName)?;
             let binding = RunControlBinding {

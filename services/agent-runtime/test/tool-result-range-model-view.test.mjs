@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { canonicalPermission } from '../src/control-binding.mjs'
 import { prepareKernelBatchResume } from '../src/pi-kernel-batch-resume.mjs'
 import {
   RESULT_REF_TOOL,
@@ -77,7 +78,7 @@ function controlBinding() {
   return {
     schemaVersion: 1, runId: identity.runId, conversationId: identity.conversationId,
     engineId: 'pi', executionProfileId: identity.executionProfileId, authority: 'authoritative', readOnlyExecutor: 'rust',
-    permissionSnapshotId: `sha256:${sha256(JSON.stringify(permission))}`, permission,
+    permissionSnapshotId: `sha256:${sha256(JSON.stringify(canonicalPermission(permission)))}`, permission,
     budgets: { modelRequestMs: 120_000, toolExecutionMs: 600_000, runExecutionMs: 1_800_000, approvalWaitMs: 300_000 },
   }
 }

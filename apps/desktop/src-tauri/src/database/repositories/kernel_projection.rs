@@ -65,6 +65,13 @@ pub(super) fn project(
         WHERE a.run_id=?1 ON CONFLICT(tool_call_id) DO UPDATE SET id=excluded.id,request_json=excluded.request_json,requested_at=excluded.requested_at,status=excluded.status,
             decision_json=excluded.decision_json,resolved_at=excluded.resolved_at", [run_id])?;
 
+    // A whole-file replacement carries its OWN, purpose-specific request. The
+    // binding is written into the projected approval record HERE, in the same
+    // transaction as the Kernel facts, so the identity the user approves is the
+    // identity the later claim requires. An ordinary write approval gets no such
+    // block and can therefore never be read as a replacement authorization.
+    project_whole_file_replacement_requests(tx, run_id, &conversation)?;
+
     super::kernel_display::activity(tx, run_id, now)?;
     super::kernel_display::artifacts(tx, run_id, previous_seq, now)?;
 
@@ -443,3 +450,147 @@ mod tests {
         .unwrap();
     }
 }
+
+/// Bind the purpose-specific replacement request into every `write_file`
+/// approval projection of this Run that needs one, and propose the request.
+///
+/// The four-tuple is derived from durable Host facts only: the frozen project
+/// root, the canonical target, the Host observation the model's declared
+/// `expectedVersion` selects, and the candidate content. When the bound
+/// observation already delivered the whole content there is nothing to bind.
+fn project_whole_file_replacement_requests(
+    tx: &Transaction<'_>,
+    run_id: &str,
+    conversation_id: &str,
+) -> rusqlite::Result<()> {
+    let project_root: Option<String> = tx
+        .query_row(
+            "SELECT json_extract(b.binding_json,'$.permission.projectRoot')
+               FROM run_control_bindings b WHERE b.run_id=?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(project_root) = project_root.filter(|root| !root.trim().is_empty()) else {
+        return Ok(());
+    };
+    let rows: Vec<(String, String)> = tx
+        .prepare(
+            "SELECT t.tool_call_id, t.canonical_input_json
+               FROM kernel_tool_calls t
+              WHERE t.run_id=?1 AND t.tool='write_file'",
+        )?
+        .query_map([run_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+
+    for (tool_call_id, canonical_input_json) in rows {
+        let input: Value = match serde_json::from_str(&canonical_input_json) {
+            Ok(input) => input,
+            Err(_) => continue,
+        };
+        let Some(path) = input.get("path").and_then(Value::as_str) else {
+            continue;
+        };
+        let content = input.get("content").and_then(Value::as_str).unwrap_or_default();
+        let target = match crate::tool_host::canonical_file_identity(
+            std::path::Path::new(&project_root),
+            path,
+        ) {
+            Ok(target) => target,
+            Err(_) => continue,
+        };
+        let declared = input
+            .get("expectedVersion")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let baseline = match super::kernel_execution_admission::host_observation_for_version_in_tx(
+            tx,
+            run_id,
+            &target,
+            declared,
+        ) {
+            Ok(Some(baseline)) => baseline,
+            _ => continue,
+        };
+        if baseline.authorizes_whole_file_replacement() {
+            continue;
+        }
+        let binding = super::kernel_execution_admission::replace_request_binding(
+            conversation_id,
+            run_id,
+            &tool_call_id,
+            &target,
+            &baseline.version,
+            content,
+        );
+        // Propose the request (insert-only: never rewrites or revives a row).
+        if let Err(error) = super::kernel_execution_admission::propose_replace_grant_in_tx(
+            tx,
+            &format!("replace:{}", binding.request_digest),
+            conversation_id,
+            run_id,
+            &fox_engine_protocol::encode_dispatch_id(run_id, &tool_call_id)
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?,
+            &binding.target_identity,
+            &binding.version,
+            &binding.candidate_digest,
+            &binding.request_digest,
+            crate::database::now_ms(),
+        ) {
+            return Err(rusqlite::Error::InvalidParameterName(error));
+        }
+        // Bind it into the projected approval record's immutable request.
+        let approval_id = format!(
+            "kernel-approval:{run_id}:{tool_call_id}",
+        );
+        let updated = tx.execute(
+            "UPDATE approvals
+                SET request_json = json_set(request_json, '$.wholeFileReplacement',
+                        json_object(
+                            'purpose','整文件替换',
+                            'requestDigest',?3,
+                            'targetIdentity',?4,
+                            'baselineVersion',?5,
+                            'candidateDigest',?6,
+                            'availableDecisions', json_array('allow_once','deny')))
+              WHERE id=?1 AND json_type(request_json,'$.wholeFileReplacement') IS NULL",
+            params![
+                approval_id,
+                run_id,
+                binding.request_digest,
+                binding.target_identity,
+                binding.version,
+                binding.candidate_digest,
+            ],
+        )?;
+        if updated == 0 {
+            // The projection may name the approval with a policy-version suffix;
+            // fall back to the tool-call join so the binding is never lost.
+            tx.execute(
+                "UPDATE approvals
+                    SET request_json = json_set(request_json, '$.wholeFileReplacement',
+                            json_object(
+                                'purpose','整文件替换',
+                                'requestDigest',?3,
+                                'targetIdentity',?4,
+                                'baselineVersion',?5,
+                                'candidateDigest',?6,
+                                'availableDecisions', json_array('allow_once','deny')))
+                  WHERE tool_call_id = (SELECT id FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id=?2)
+                    AND json_type(request_json,'$.wholeFileReplacement') IS NULL",
+                params![
+                    run_id,
+                    tool_call_id,
+                    binding.request_digest,
+                    binding.target_identity,
+                    binding.version,
+                    binding.candidate_digest,
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+

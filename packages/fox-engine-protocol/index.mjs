@@ -49,17 +49,61 @@ export const SCHEMA_BUNDLE = {
         },
         "HostObservation": {
           "additionalProperties": false,
-          "description": "An authoritative Host observation of a file target: which durable Host read\nrecord saw which version of which target. A model-declared\n`expectedVersion` is a *precondition claim*, never an observation.",
+          "description": "An authoritative Host observation of a file target: which durable Host read\nrecord saw which version of which target. A model-declared\n`expectedVersion` is a *precondition claim*, never an observation.\n\nREV-05: the record also carries **what was actually delivered**. Reading one\nline establishes a line-range observation of that version, not a whole-file\none, and an extracted Office view is never the document's source text. The\nfields default to the most conservative values so an older persisted\ncredential (which predates them) can never gain whole-file replacement\neligibility it did not have.",
           "properties": {
+            "coveredWholeFile": {
+              "default": false,
+              "description": "True only when the Host delivered the entire content of `version`.",
+              "type": "boolean"
+            },
             "observedByToolCallId": {
               "description": "The durable Host tool-call record that produced this observation.",
               "type": "string"
             },
+            "rangeEnd": {
+              "default": null,
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "rangeStart": {
+              "default": null,
+              "description": "Delivered range in UTF-16 code units, the single coordinate system the\nread tool's `offset`/`limit`/`nextOffset` already use. `None` for views\nwith no text range (Office extract, missing file).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "targetIdentity": {
               "type": "string"
             },
+            "totalUnits": {
+              "default": null,
+              "description": "Size of the whole text of `version` in UTF-16 code units.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "truncated": {
+              "default": false,
+              "description": "The delivered page was itself cut short (output or read budget).",
+              "type": "boolean"
+            },
             "version": {
               "type": "string"
+            },
+            "viewKind": {
+              "$ref": "#/$defs/ObservationView",
+              "default": "legacy_unknown",
+              "description": "Classification label only. It never expresses coverage strength; the\nconcrete `range_start`/`range_end` and `covered_whole_file` do."
             }
           },
           "required": [
@@ -68,6 +112,41 @@ export const SCHEMA_BUNDLE = {
             "observedByToolCallId"
           ],
           "type": "object"
+        },
+        "ObservationView": {
+          "description": "What kind of view produced an observation. A label, not a coverage claim.",
+          "oneOf": [
+            {
+              "const": "full_file",
+              "description": "The Host delivered the whole file content for this version.",
+              "type": "string"
+            },
+            {
+              "const": "line_range",
+              "description": "A line range (`startLine`/`lineCount`).",
+              "type": "string"
+            },
+            {
+              "const": "unit_window",
+              "description": "A UTF-16 code-unit window (`offset`/`limit`).",
+              "type": "string"
+            },
+            {
+              "const": "office_extract",
+              "description": "Text extracted from a binary/Office container; not the source text.",
+              "type": "string"
+            },
+            {
+              "const": "legacy_unknown",
+              "description": "A row written before coverage tracking existed. Fail-closed.",
+              "type": "string"
+            },
+            {
+              "const": "missing",
+              "description": "A verified absent target.",
+              "type": "string"
+            }
+          ]
         },
         "RealtimeRequirement": {
           "description": "Real-time requirements the executor must re-verify before any side effect.\nA requirement whose authoritative source does not exist yet is *unsatisfied*\n(fail-closed); it is never silently treated as met.",
@@ -172,6 +251,24 @@ export const SCHEMA_BUNDLE = {
             "$ref": "#/$defs/RealtimeRequirement"
           },
           "type": "array"
+        },
+        "replaceCandidateDigest": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replaceRequestDigest": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requiresReplaceGrant": {
+          "default": false,
+          "type": "boolean"
         },
         "resolvedProfile": {
           "type": "string"
@@ -1270,6 +1367,16 @@ export const SCHEMA_BUNDLE = {
         "FrozenPermission": {
           "additionalProperties": false,
           "properties": {
+            "approvalEpoch": {
+              "default": null,
+              "description": "The approval generation this Run was frozen at.\n\nA reusable approval is bound to the generation that issued it: any\nrevocation advances the generation, so a Run frozen before it can never\nkeep using that approval — not even if the same (tool, scope) pair is\ngranted again afterwards. `None` means the binding predates the field\nand falls back to a per-grant liveness check only.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "grants": {
               "items": {
                 "$ref": "#/$defs/PermissionGrant"
@@ -1292,9 +1399,29 @@ export const SCHEMA_BUNDLE = {
           ],
           "type": "object"
         },
+        "GrantKind": {
+          "description": "What kind of authorization a frozen grant carries. A frozen Run must never\nbecome a way to keep using an approval the user has since withdrawn, so an\napproval-reuse grant is re-checked live at every use (REV-04).",
+          "oneOf": [
+            {
+              "const": "resource",
+              "description": "A resource grant (project root, read scope) frozen with the Run.",
+              "type": "string"
+            },
+            {
+              "const": "approval_reuse",
+              "description": "A reusable approval (`allow_conversation`). Subject to live revocation.",
+              "type": "string"
+            }
+          ]
+        },
         "PermissionGrant": {
           "additionalProperties": false,
           "properties": {
+            "kind": {
+              "$ref": "#/$defs/GrantKind",
+              "default": "approval_reuse",
+              "description": "Absent in bindings frozen before revocation tracking existed; see\n[`GrantKind::default`]."
+            },
             "scope": {
               "type": "string"
             },

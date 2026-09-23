@@ -47,13 +47,12 @@ function validateAdapterControl(request, executionProfileId, authority, allowAbs
   if (binding.permission.grants.some(grant => !knownTools.has(grant.tool) || !grant.scope.trim())) {
     throw new Error('Invalid frozen Run permission grant')
   }
-  // Field order matches Rust FrozenPermission / PermissionGrant serialization,
-  // independent of property order in the incoming JSON transport.
-  const permission = {
-    mode: binding.permission.mode,
-    projectRoot: binding.permission.projectRoot ?? null,
-    grants: binding.permission.grants.map(grant => ({ tool: grant.tool, scope: grant.scope })),
-  }
+  // Field order and field set match Rust `FrozenPermission` / `PermissionGrant`
+  // serialization exactly, independent of property order in the incoming JSON
+  // transport. `kind` and `approvalEpoch` are part of the canonical form: a
+  // grant without a kind is a revocable approval-reuse grant, and a binding
+  // without an epoch predates the field.
+  const permission = canonicalPermission(binding.permission)
   const hash = `sha256:${createHash('sha256').update(JSON.stringify(permission)).digest('hex')}`
   if (hash !== binding.permissionSnapshotId) throw new Error('Frozen Run permission hash mismatch')
   const project = request.payload?.projectContext
@@ -61,4 +60,20 @@ function validateAdapterControl(request, executionProfileId, authority, allowAbs
     throw new Error('Prompt project context disagrees with frozen Run permission')
   }
   return { projectRoot: permission.projectRoot, permissionMode: permission.mode }
+}
+
+/// The canonical `FrozenPermission` form, field-for-field in Rust serialization
+/// order. Both the validator and the test fixtures hash exactly this, so a
+/// fixture can never drift from what the Host actually signs.
+export function canonicalPermission(source) {
+  return {
+    mode: source.mode,
+    projectRoot: source.projectRoot ?? null,
+    grants: (source.grants ?? []).map(grant => ({
+      tool: grant.tool,
+      scope: grant.scope,
+      kind: grant.kind ?? 'approval_reuse',
+    })),
+    approvalEpoch: source.approvalEpoch ?? null,
+  }
 }

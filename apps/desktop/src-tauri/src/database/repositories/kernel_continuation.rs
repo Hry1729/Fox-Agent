@@ -324,7 +324,8 @@ impl Database {
                 };
                 let mut statement = connection.prepare(
                     "SELECT tool_name, scope_key FROM conversation_tool_permissions
-                      WHERE conversation_id = ?1 ORDER BY tool_name, scope_key",
+                      WHERE conversation_id = ?1 AND revoked_at IS NULL
+                      ORDER BY tool_name, scope_key",
                 )?;
                 let rows = statement.query_map(params![conversation_id], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -348,7 +349,12 @@ impl Database {
         // The frozen scope is never reused; the currently granted pairs are.
         permission.grants = live_grants
             .into_iter()
-            .map(|(tool, scope)| fox_engine_protocol::PermissionGrant { tool, scope })
+            .map(|(tool, scope)| fox_engine_protocol::PermissionGrant {
+                tool,
+                scope,
+                // These rows are reusable approvals, so they stay revocable.
+                kind: fox_engine_protocol::GrantKind::ApprovalReuse,
+            })
             .collect();
         let mut binding = source.clone();
         binding.permission = permission;

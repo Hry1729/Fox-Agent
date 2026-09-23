@@ -62,6 +62,8 @@ mod real_eval_tests;
 mod harness_security_tests;
 #[path = "kernel_artifact_gate_tests.rs"]
 mod kernel_artifact_gate_tests;
+#[path = "rev_repro_tests.rs"]
+mod rev_repro_tests;
 use crate::kernel::{CancellationRegistry, PolicyDecision, TestClock};
 use fox_engine_protocol::{FrozenPermission, PermissionMode, ResourceExecutor, TimeBudgets};
 use serde_json::json;
@@ -145,6 +147,7 @@ fn fixture_with_budgets_opt(clock: &TestClock, prompt_hash: &str, model: Option<
         mode: PermissionMode::ReadOnly,
         project_root: has_project.then(||root.to_string_lossy().into_owned()),
         grants: vec![],
+        approval_epoch: None,
     };
     let binding = RunControlBinding {
         schema_version: 1,
@@ -987,7 +990,11 @@ fn kernel_repair_override_cannot_be_auto_approved_or_prompt_for_ineligible_work(
     let mut binding=db.run_control_binding(&run_id).unwrap().unwrap();
     binding.execution_profile_id="durable_v2".into();
     binding.permission.mode=PermissionMode::Allow;
-    binding.permission.grants.push(fox_engine_protocol::PermissionGrant {tool:"task_repair_escalate_start".into(),scope:"project".into()});
+    binding.permission.grants.push(fox_engine_protocol::PermissionGrant {
+        tool: "task_repair_escalate_start".into(),
+        scope: "project".into(),
+        kind: fox_engine_protocol::GrantKind::Resource,
+    });
     binding.permission_snapshot_id=Database::run_control_permission_hash(&binding.permission).unwrap();
     let policy=super::super::kernel_gateway::GatewayPolicy {binding,scope, database: None, sessions_dir: None, artifacts_dir: None };
     let input=json!({"taskId":"missing-task","attemptId":"repair-attempt","expectedVersion":1,
@@ -2633,6 +2640,7 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
         mode: PermissionMode::Ask,
         project_root: Some(root.to_string_lossy().into_owned()),
         grants: vec![],
+        approval_epoch: None,
     };
     let mut model = worker_configuration();
     // The frozen host scope must agree with the model tool catalog.
@@ -2880,6 +2888,7 @@ fn expired_approval_is_never_executable_and_the_run_stays_continuable() {
         mode: PermissionMode::Ask,
         project_root: Some(root.to_string_lossy().into_owned()),
         grants: vec![],
+        approval_epoch: None,
     };
     let binding = RunControlBinding {
         schema_version: 1,
@@ -3084,7 +3093,8 @@ fn continuation_chain_is_one_way_and_one_successor_per_source() {
             mode: PermissionMode::Ask,
             project_root: Some(root.to_string_lossy().into_owned()),
             grants: vec![],
-        };
+        approval_epoch: None,
+    };
         let binding = RunControlBinding {
             schema_version: 1,
             run_id: legacy_run_id.clone(),

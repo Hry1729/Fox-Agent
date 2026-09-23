@@ -48,11 +48,32 @@ impl Database {
             }
             let version:u64=tx.query_row("SELECT version FROM kernel_execution_policies WHERE conversation_id=?1",[conversation_id],|r|r.get(0))?;
             if version!=expected_version { return Err(rusqlite::Error::InvalidParameterName("policy_version_conflict".into())); }
-            // Project-scoped mode remains shared by its conversations. SQL triggers
-            // increment every affected policy and expire unused approval decisions.
-            let project:Option<String>=tx.query_row("SELECT project_id FROM conversations WHERE id=?1",[conversation_id],|r|r.get(0))?;
-            if let Some(project)=project { tx.execute("UPDATE projects SET permission_mode=?2,updated_at=?3 WHERE id=?1",params![project,desired_mode,now_ms()])?; }
-            else { tx.execute("UPDATE conversations SET permission_mode=?2,updated_at=?3 WHERE id=?1",params![conversation_id,desired_mode,now_ms()])?; }
+            // REV-03: a conversation-level request writes the conversation's own
+            // effective policy. It never rewrites the project default (which is
+            // only copied into a conversation at creation), and the migration-80
+            // conversation trigger advances exactly this conversation's version.
+            tx.execute("UPDATE conversations SET permission_mode=?2,updated_at=?3 WHERE id=?1",
+                       params![conversation_id,desired_mode,now_ms()])?;
+            // REV-04: tightening must also withdraw the reusable write/execute
+            // approvals this conversation already issued, in the SAME
+            // transaction. Expiring only the pending approval cards leaves a
+            // previously granted session authorization alive, which resurrects
+            // itself as soon as the mode returns to `ask`.
+            let reason = format!("execution policy generation {expected_version} -> {desired_mode}");
+            tx.execute("UPDATE kernel_authorization_grants SET revoked_at=?2,revoke_reason=?3
+                         WHERE conversation_id=?1 AND revoked_at IS NULL",
+                       params![conversation_id,now_ms(),reason])?;
+            tx.execute("UPDATE conversation_tool_permissions SET revoked_at=?2,revoke_reason=?3
+                         WHERE conversation_id=?1 AND revoked_at IS NULL",
+                       params![conversation_id,now_ms(),reason])?;
+            // A standing whole-file-replacement authorization is a permission
+            // too: tightening the mode withdraws every unconsumed one
+            // (REV-04 / REV-05).
+            super::kernel_execution_admission::revoke_replace_grants_in_tx(&tx, conversation_id)
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e))?;
+            // Read the FINAL version: the grant-revocation triggers advance the
+            // policy generation and the parent generations too, and the recorded
+            // request must name the result a repeat request will observe.
             let result=tx.query_row("SELECT version,mode FROM kernel_execution_policies WHERE conversation_id=?1",[conversation_id],|r|Ok(ExecutionPolicyState{version:r.get(0)?,mode:r.get(1)?}))?;
             tx.execute("INSERT INTO kernel_policy_requests VALUES(?1,?2,?3,?4,?5)",params![conversation_id,request_id,digest,result.version,result.mode])?;
             tx.commit()?; Ok(result)

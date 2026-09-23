@@ -252,6 +252,18 @@ impl Database {
     }
 
     /// Create the durable kernel run row with its frozen configuration.
+    /// Runs the Kernel compatibility projection for one run. Production calls it
+    /// inside the same transaction as the Kernel facts; tests use it to drive the
+    /// projection without a worker.
+    #[cfg(test)]
+    pub(crate) fn kernel_project_for_test(&self, run_id: &str) -> Result<(), String> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            super::kernel_projection::project(&transaction, run_id, now_ms(), 0)?;
+            transaction.commit()
+        })
+    }
+
     pub fn kernel_create_run(
         &self,
         run_id: &str,
@@ -3827,7 +3839,9 @@ impl Database {
         let project = self.conversation_project_access(conversation_id)?;
         let grants = self.with_connection(|connection| {
             let mut query = connection.prepare(
-                "SELECT tool_name, scope_key FROM conversation_tool_permissions WHERE conversation_id=?1 ORDER BY tool_name, scope_key")?;
+                "SELECT tool_name, scope_key FROM conversation_tool_permissions
+                 WHERE conversation_id=?1 AND revoked_at IS NULL
+                 ORDER BY tool_name, scope_key")?;
             let rows = query.query_map(params![conversation_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
             rows.collect::<Result<Vec<_>, _>>()
         })?;

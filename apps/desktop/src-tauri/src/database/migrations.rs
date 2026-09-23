@@ -7035,6 +7035,92 @@ fn run_transaction(connection: &mut Connection, now: i64) -> Result<()> {
             [now],
         )?;
     }
+    let v80_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 80)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !v80_applied {
+        transaction.execute_batch(MIGRATION_80)?;
+        // columns go through the idempotent helper so a re-run on a database
+        // that already carries them is a no-op rather than a hard failure, and
+        // the revocation trigger is created only after they exist.
+        ensure_column_if_missing(
+            &transaction,
+            "conversation_tool_permissions",
+            "revoked_at",
+            "INTEGER",
+        )?;
+        ensure_column_if_missing(
+            &transaction,
+            "conversation_tool_permissions",
+            "revoke_reason",
+            "TEXT",
+        )?;
+        transaction.execute_batch(
+            "DROP TRIGGER IF EXISTS execution_legacy_grant_revoked;
+             CREATE TRIGGER execution_legacy_grant_revoked AFTER UPDATE OF revoked_at
+             ON conversation_tool_permissions
+             WHEN OLD.revoked_at IS NULL AND NEW.revoked_at IS NOT NULL BEGIN
+              UPDATE kernel_execution_policies SET version=version+1
+                WHERE conversation_id=NEW.conversation_id;
+              INSERT INTO kernel_parent_generations(run_id,generation)
+                SELECT id,1 FROM runs WHERE conversation_id=NEW.conversation_id
+                ON CONFLICT(run_id) DO UPDATE SET generation=generation+1;
+             END;",
+        )?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (80, ?1)",
+            [now],
+        )?;
+    }
+    let v81_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 81)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !v81_applied {
+        // REV-05 / coordinator M3: the purpose-specific whole-file-replacement
+        // authorization. Bound to the target, the observed version, the
+        // candidate content digest and the request digest, consumed exactly
+        // once, atomically with the persistent execution claim.
+        transaction.execute_batch(MIGRATION_81)?;
+        // The two digests travel with the credential row so the claim can bind
+        // them without re-deriving anything from tool input. `credential_json`
+        // keeps its own copy; these columns are nullable so a credential
+        // persisted before this migration stays valid.
+        ensure_column_if_missing(
+            &transaction,
+            "kernel_execution_credentials",
+            "replace_candidate_digest",
+            "TEXT",
+        )?;
+        ensure_column_if_missing(
+            &transaction,
+            "kernel_execution_credentials",
+            "replace_request_digest",
+            "TEXT",
+        )?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (81, ?1)",
+            [now],
+        )?;
+    }
+    let v82_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 82)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !v82_applied {
+        // Stable restore request identity: a repeated delivery of the SAME
+        // request is deduplicated against the recorded result instead of
+        // performing the file mutation twice (coordinator item 3).
+        transaction.execute_batch(MIGRATION_82)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (82, ?1)",
+            [now],
+        )?;
+    }
     let violations: i64 = transaction.query_row(
         "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))?;
     if violations != 0 {
@@ -13610,6 +13696,234 @@ CREATE INDEX idx_kernel_tool_calls_state ON kernel_tool_calls(run_id, state);
     }
 
     #[test]
+    /// REV-03/04/05 的迁移 80：旧库升级与新库初始化两条路径都必须成立，
+    /// 且升级不得静默扩大/收窄任何会话的有效权限。
+    #[test]
+    fn migration_80_upgrades_a_v79_database_without_changing_effective_modes() {
+        let root = std::env::temp_dir().join(format!("fox-v80-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("scratch dir");
+        let path = root.join("facts.db");
+
+        // --- 新库初始化：migration 80 直接在全新库上跑通。---
+        {
+            let database = crate::database::Database::open(path.clone()).expect("open fresh");
+            let version: i64 = database
+                .with_connection(|c| {
+                    c.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))
+                })
+                .expect("schema version");
+            assert_eq!(version, crate::database::DATABASE_SCHEMA_VERSION);
+            let conversation = database
+                .create_conversation(database.default_agent_id(), Some("v80"), None, None)
+                .expect("conversation");
+            database
+                .with_connection(|c| {
+                    c.execute(
+                        "INSERT INTO kernel_host_observations
+                            (observation_id, run_id, conversation_id, target_identity, version,
+                             observed_by_tool_call_id, observed_at, view_kind, covered_whole_file,
+                             range_start, range_end, total_units, truncated)
+                         VALUES ('obs-1','run-x',?1,'t','v','read-1',1,'full_file',1,0,3,3,0)",
+                        [&conversation.id],
+                    )?;
+                    c.execute(
+                        "INSERT INTO conversation_tool_permissions
+                            (conversation_id, tool_name, scope_key, granted_at, revoked_at)
+                         VALUES (?1,'write_file','host-target:sha256:abc',1,NULL)",
+                        [&conversation.id],
+                    )?;
+                    c.execute(
+                        "INSERT INTO kernel_whole_file_replace_grants(
+                            grant_id, conversation_id, run_id, dispatch_id, target_identity,
+                            version, candidate_digest, request_digest, state, created_at)
+                         VALUES ('g1', ?1, 'r', 'd', 't', 'v', 'c', 'q', 'approved', 1)",
+                        [&conversation.id],
+                    )?;
+                    c.execute(
+                        "INSERT INTO kernel_restore_requests(
+                            conversation_id, request_id, version_id, target_identity,
+                            baseline_version, dispatch_id, state, created_at)
+                         VALUES (?1, 'req-1', 'v1', 't', NULL, 'restore:req-1', 'running', 1)",
+                        [&conversation.id],
+                    )?;
+                    Ok(())
+                })
+                .expect("the new columns exist on a fresh database");
+        }
+
+        // --- 构造一个"停在 v79"的旧库：还原观察表与触发器的旧形状、删掉 80
+        //     标记，并让两处模式存储故意不一致。
+        {
+            let mut connection = Connection::open(&path).expect("open v79 fixture");
+            connection
+                .pragma_update(None, "foreign_keys", "OFF")
+                .expect("foreign keys off");
+            let transaction = connection.transaction().expect("begin narrowing");
+            transaction
+                .execute_batch(
+                    r#"
+DROP TABLE kernel_host_observations;
+CREATE TABLE kernel_host_observations (
+    run_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    target_identity TEXT NOT NULL,
+    version TEXT NOT NULL,
+    observed_by_tool_call_id TEXT NOT NULL,
+    observed_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id, target_identity)
+);
+INSERT INTO kernel_host_observations
+    (run_id, conversation_id, target_identity, version, observed_by_tool_call_id, observed_at)
+VALUES ('run-old','conv-old','target-old','v-old','read-old',1);
+DROP TRIGGER IF EXISTS execution_policy_conversation_change;
+CREATE TRIGGER execution_policy_conversation_change AFTER UPDATE OF permission_mode,project_id ON conversations
+WHEN OLD.permission_mode IS NOT NEW.permission_mode OR OLD.project_id IS NOT NEW.project_id BEGIN
+ UPDATE kernel_execution_policies SET version=version+1,mode=COALESCE((SELECT permission_mode FROM projects WHERE id=NEW.project_id),NEW.permission_mode,'ask') WHERE conversation_id=NEW.id;
+END;
+CREATE TRIGGER IF NOT EXISTS execution_policy_project_change AFTER UPDATE OF permission_mode ON projects WHEN OLD.permission_mode IS NOT NEW.permission_mode BEGIN
+ UPDATE kernel_execution_policies SET version=version+1,mode=NEW.permission_mode WHERE conversation_id IN (SELECT id FROM conversations WHERE project_id=NEW.id);
+END;
+DROP TABLE IF EXISTS kernel_whole_file_replace_grants;
+DROP TABLE IF EXISTS kernel_restore_requests;
+ALTER TABLE kernel_execution_credentials DROP COLUMN replace_candidate_digest;
+ALTER TABLE kernel_execution_credentials DROP COLUMN replace_request_digest;
+DELETE FROM schema_migrations WHERE version IN (80,81,82);
+"#,
+                )
+                .expect("narrow to a v79-shaped database");
+            transaction.commit().expect("commit narrowing");
+            connection
+                .pragma_update(None, "foreign_keys", "ON")
+                .expect("foreign keys on");
+            let version: i64 = connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))
+                .expect("version");
+            assert_eq!(version, 79, "the fixture must be a v79 database");
+            // The v81/v82 objects are really gone, so the upgrade has to
+            // recreate them rather than find them already present.
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE name='kernel_whole_file_replace_grants'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .expect("replace grants table"),
+                0,
+                "the fixture must not already carry the v81 table"
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE name='kernel_restore_requests'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .expect("restore requests table"),
+                0,
+                "the fixture must not already carry the v82 table"
+            );
+        }
+
+        // --- 升级：旧观察行保留且不给覆盖资格，项目联动触发器已删除，
+        //     两处模式存储一致。
+        {
+            let database = crate::database::Database::open(path.clone()).expect("upgrade v79");
+            database
+                .with_connection(|c| {
+                    let observations: i64 = c
+                        .query_row("SELECT COUNT(*) FROM kernel_host_observations", [], |r| r.get(0))
+                        .expect("observations");
+                    assert_eq!(observations, 1, "historical observations must survive");
+                    let view: String = c
+                        .query_row(
+                            "SELECT view_kind FROM kernel_host_observations WHERE run_id='run-old'",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .expect("migrated row");
+                    assert_eq!(view, "legacy_unknown", "an old row gains no coverage claim");
+                    let whole: i64 = c
+                        .query_row(
+                            "SELECT covered_whole_file FROM kernel_host_observations WHERE run_id='run-old'",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .expect("migrated coverage");
+                    assert_eq!(whole, 0, "an old row must not authorize a whole-file replacement");
+                    let project_trigger: i64 = c
+                        .query_row(
+                            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='execution_policy_project_change'",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .expect("project trigger");
+                    assert_eq!(
+                        project_trigger, 0,
+                        "a project change must not reach existing conversations"
+                    );
+                    let drift: i64 = c
+                        .query_row(
+                            "SELECT COUNT(*) FROM conversations c JOIN kernel_execution_policies p
+                               ON p.conversation_id=c.id
+                              WHERE p.mode <> COALESCE(c.permission_mode,'ask')",
+                            [],
+                            |r| r.get(0),
+                        )
+                        .expect("policy drift");
+                    assert_eq!(drift, 0, "the column and the policy row must agree after upgrade");
+                    for table in ["kernel_whole_file_replace_grants", "kernel_restore_requests"] {
+                        let present: i64 = c
+                            .query_row(
+                                "SELECT COUNT(*) FROM sqlite_master WHERE name=?1",
+                                [table],
+                                |r| r.get(0),
+                            )
+                            .expect("table presence");
+                        assert_eq!(present, 1, "{table} must exist after the upgrade");
+                    }
+                    // The two nullable credential columns are additive: an old
+                    // row keeps working and simply carries no replacement
+                    // authorization.
+                    c.execute_batch(
+                        "INSERT INTO kernel_execution_credentials(
+                            run_id, dispatch_id, conversation_id, intent_digest, action_class,
+                            file_baseline, resolved_profile, policy_snapshot_id, backend_required,
+                            backend_evidence_digest, credential_digest, credential_json, created_at)
+                         VALUES ('r','d','c','i','write',NULL,'p','s','none',NULL,'dg','{}',1)",
+                    )?;
+                    Ok(())
+                })
+                .expect("upgrade assertions");
+            let version: i64 = database
+                .with_connection(|c| {
+                    c.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))
+                })
+                .expect("version after upgrade");
+            assert_eq!(version, crate::database::DATABASE_SCHEMA_VERSION);
+        }
+
+        // --- 重开幂等。---
+        {
+            let database = crate::database::Database::open(path.clone()).expect("reopen");
+            database
+                .with_connection(|c| {
+                    let observations: i64 = c
+                        .query_row("SELECT COUNT(*) FROM kernel_host_observations", [], |r| r.get(0))
+                        .expect("observations");
+                    assert_eq!(observations, 1, "reopening must not duplicate observations");
+                    Ok(())
+                })
+                .expect("reopen assertions");
+            let version: i64 = database
+                .with_connection(|c| {
+                    c.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))
+                })
+                .expect("version after reopen");
+            assert_eq!(version, crate::database::DATABASE_SCHEMA_VERSION);
+        }
+    }
+
     fn migration_79_widens_only_host_job_keys_and_reopens_idempotently() {
         const JOB_COLUMNS: &[&str] = &[
             "job_id",
@@ -14071,6 +14385,139 @@ CREATE TABLE IF NOT EXISTS kernel_host_observations (
     observed_by_tool_call_id TEXT NOT NULL,
     observed_at INTEGER NOT NULL,
     PRIMARY KEY(run_id, target_identity)
+);
+"#;
+
+/// v80（协调者复审 REV-01/02/03/04/05）：
+///
+/// * **REV-03**：会话有效模式不再从项目动态继承。项目默认只在**新会话创建时**
+///   复制一次；此后每个会话独立保存。因此删除把项目变更传播到既有会话的触发器，
+///   并把会话触发器的模式取值从"项目优先"改为"会话自身值"。
+///   升级时先把每个现存会话的**当前有效值**写回 `conversations.permission_mode`，
+///   使该列与 `kernel_execution_policies.mode` 一致——升级瞬间没有任何会话被
+///   扩大或收窄，也不是"一律按新默认扩大权限"。
+/// * **REV-04**：Legacy 可复用审批（`conversation_tool_permissions`，其行全部由
+///   `allow_conversation` 解决写入）需要可撤销，否则收紧策略后旧授权仍放行。
+/// * **REV-01/05**：Host 观察改为不可变、可引用，并记录**实际交付范围**，
+///   使"读多少才能改什么"可判定；`view_kind` 只作分类标签，不表示覆盖强弱。
+/// * 旧观察行一律标为 `legacy_unknown` + `covered_whole_file=0`：升级后需重读
+///   或走显式授权，不冒充完整观察。
+const MIGRATION_80: &str = r#"
+-- 1) 数据对齐：列与策略行一致（REV-03 / 协调者 M4 两处存储一致）。
+UPDATE conversations
+   SET permission_mode = COALESCE(
+         (SELECT p.permission_mode FROM projects p WHERE p.id = conversations.project_id),
+         conversations.permission_mode, 'ask')
+ WHERE id IN (SELECT conversation_id FROM kernel_execution_policies);
+
+-- 2) 会话级变更只推进本会话，模式取会话自身值（REV-03）。
+DROP TRIGGER IF EXISTS execution_policy_conversation_change;
+CREATE TRIGGER execution_policy_conversation_change AFTER UPDATE OF permission_mode ON conversations
+WHEN OLD.permission_mode IS NOT NEW.permission_mode BEGIN
+ UPDATE kernel_execution_policies
+    SET version = version + 1,
+        mode = COALESCE(NEW.permission_mode, 'ask')
+  WHERE conversation_id = NEW.id;
+END;
+
+-- 3) 项目默认变化不得改既有会话（v1.1：项目默认只用于新会话初始化）。
+DROP TRIGGER IF EXISTS execution_policy_project_change;
+
+-- 3b) 新会话把项目默认**复制**进自己的两处存储：先写列（此刻策略行还不存在，
+--     因此会话触发器影响 0 行、不推进版本），再以版本 1 建立策略行。复制之后
+--     两者独立，项目默认再变也不会波及它（协调者 M4：两处存储保持一致）。
+DROP TRIGGER IF EXISTS execution_policy_new_conversation;
+CREATE TRIGGER execution_policy_new_conversation AFTER INSERT ON conversations BEGIN
+  UPDATE conversations
+     SET permission_mode = COALESCE((SELECT permission_mode FROM projects WHERE id=NEW.project_id),
+                                    NEW.permission_mode, 'ask')
+   WHERE id = NEW.id;
+  INSERT INTO kernel_execution_policies
+    VALUES(NEW.id, 1, COALESCE((SELECT permission_mode FROM projects WHERE id=NEW.project_id),
+                               NEW.permission_mode, 'ask'));
+END;
+
+-- 5) Host 观察：不可变、可引用、带实际交付范围（REV-01 / REV-05）。
+DROP TABLE IF EXISTS kernel_host_observations_v80;
+CREATE TABLE kernel_host_observations_v80 (
+    observation_id     TEXT PRIMARY KEY,
+    run_id             TEXT NOT NULL,
+    conversation_id    TEXT NOT NULL,
+    target_identity    TEXT NOT NULL,
+    version            TEXT NOT NULL,
+    observed_by_tool_call_id TEXT NOT NULL,
+    observed_at        INTEGER NOT NULL,
+    view_kind          TEXT NOT NULL CHECK(view_kind IN
+        ('full_file','line_range','unit_window','office_extract','legacy_unknown','missing')),
+    covered_whole_file INTEGER NOT NULL CHECK(covered_whole_file IN (0,1)),
+    -- 统一坐标：UTF-16 code unit 的 [range_start, range_end)。
+    range_start        INTEGER,
+    range_end          INTEGER,
+    total_units        INTEGER,
+    truncated          INTEGER NOT NULL CHECK(truncated IN (0,1))
+);
+INSERT INTO kernel_host_observations_v80
+    (observation_id, run_id, conversation_id, target_identity, version,
+     observed_by_tool_call_id, observed_at, view_kind, covered_whole_file,
+     range_start, range_end, total_units, truncated)
+SELECT 'obs-legacy-' || run_id || '-' || replace(target_identity, ':', '_'),
+       run_id, conversation_id, target_identity, version,
+       observed_by_tool_call_id, observed_at,
+       'legacy_unknown', 0, NULL, NULL, NULL, 0
+  FROM kernel_host_observations;
+DROP TABLE kernel_host_observations;
+ALTER TABLE kernel_host_observations_v80 RENAME TO kernel_host_observations;
+CREATE UNIQUE INDEX idx_host_observations_identity
+    ON kernel_host_observations(run_id, target_identity, version, observed_by_tool_call_id);
+CREATE INDEX idx_host_observations_lookup
+    ON kernel_host_observations(run_id, target_identity, version);
+"#;
+
+/// v81（REV-05 / 协调者 M3）：整文件替换的**专用**批准。
+///
+/// 与普通审批分离：`allow_once` 与可复用 Grant 都不得冒充它。一行绑定
+/// 目标 + 观察版本 + 候选内容摘要 + 请求摘要，四元组任一不符即拒；
+/// `approved → consumed` 一次一用，与持久领取在同一 `IMMEDIATE` 事务内完成。
+const MIGRATION_81: &str = r#"
+CREATE TABLE IF NOT EXISTS kernel_whole_file_replace_grants (
+    grant_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    dispatch_id TEXT NOT NULL,
+    target_identity TEXT NOT NULL,
+    version TEXT NOT NULL,
+    candidate_digest TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('pending','approved','denied','expired','consumed')),
+    created_at INTEGER NOT NULL,
+    decided_at INTEGER,
+    consumed_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_replace_grants_dispatch
+    ON kernel_whole_file_replace_grants(run_id, dispatch_id);
+CREATE INDEX IF NOT EXISTS idx_replace_grants_conversation
+    ON kernel_whole_file_replace_grants(conversation_id, state);
+"#;
+
+/// v82（协调者 item 3）：恢复请求的稳定身份。
+///
+/// `(conversation_id, request_id)` 唯一。同一请求的重复投递读到已记录的结果，
+/// 不再执行第二次文件修改；`baseline_version` 是**确认时**绑定的基线，提交临界区
+/// 会复验它。
+const MIGRATION_82: &str = r#"
+CREATE TABLE IF NOT EXISTS kernel_restore_requests (
+    conversation_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    version_id TEXT NOT NULL,
+    target_identity TEXT NOT NULL,
+    baseline_version TEXT,
+    dispatch_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('running','committed','not_applied','recovery_required','indeterminate')),
+    result_version_id TEXT,
+    error TEXT,
+    created_at INTEGER NOT NULL,
+    settled_at INTEGER,
+    PRIMARY KEY(conversation_id, request_id)
 );
 "#;
 

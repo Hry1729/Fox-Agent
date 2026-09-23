@@ -69,6 +69,116 @@ pub(crate) struct ManagedFileVersionInput<'a> {
     pub source: ManagedFileSource,
 }
 
+/// One recorded restore request: its stable identity, the baseline bound at
+/// confirmation time, and the outcome it settled with.
+#[derive(Debug, Clone)]
+pub(crate) struct RestoreRequestRecord {
+    pub version_id: String,
+    pub target_identity: String,
+    pub baseline_version: Option<String>,
+    pub dispatch_id: String,
+    pub state: String,
+    pub result_version_id: Option<String>,
+    pub error: Option<String>,
+    pub display_name: String,
+}
+
+impl Database {
+    /// Record a restore request before its commit, binding the baseline the
+    /// Host read at confirmation time. `INSERT OR IGNORE` keeps a repeated
+    /// delivery from overwriting an already-settled request.
+    pub(crate) fn record_restore_request(
+        &self,
+        conversation_id: &str,
+        request_id: &str,
+        version_id: &str,
+        target_identity: &str,
+        baseline_version: Option<&str>,
+        dispatch_id: &str,
+    ) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT OR IGNORE INTO kernel_restore_requests(
+                        conversation_id, request_id, version_id, target_identity,
+                        baseline_version, dispatch_id, state, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7)",
+                    rusqlite::params![
+                        conversation_id,
+                        request_id,
+                        version_id,
+                        target_identity,
+                        baseline_version,
+                        dispatch_id,
+                        now_ms(),
+                    ],
+                )?;
+            Ok(())
+        })
+    }
+
+    /// The recorded state of one restore request, if it exists.
+    pub(crate) fn restore_request(
+        &self,
+        conversation_id: &str,
+        request_id: &str,
+    ) -> Result<Option<RestoreRequestRecord>, String> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT r.version_id, r.target_identity, r.baseline_version, r.dispatch_id,
+                            r.state, r.result_version_id, r.error, v.display_name
+                       FROM kernel_restore_requests r
+                       LEFT JOIN managed_file_versions v ON v.id = r.version_id
+                      WHERE r.conversation_id = ?1 AND r.request_id = ?2",
+                    rusqlite::params![conversation_id, request_id],
+                    |row| {
+                        Ok(RestoreRequestRecord {
+                            version_id: row.get(0)?,
+                            target_identity: row.get(1)?,
+                            baseline_version: row.get(2)?,
+                            dispatch_id: row.get(3)?,
+                            state: row.get(4)?,
+                            result_version_id: row.get(5)?,
+                            error: row.get(6)?,
+                            display_name: row.get::<_, Option<String>>(7)?
+                                .unwrap_or_else(|| "the file".to_owned()),
+                        })
+                    },
+                )
+                .optional()
+        })
+    }
+
+    /// Settle a restore request with the outcome the commit actually produced.
+    pub(crate) fn settle_restore_request(
+        &self,
+        conversation_id: &str,
+        request_id: &str,
+        state: &str,
+        result_version_id: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<(), String> {
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE kernel_restore_requests
+                        SET state = ?3, result_version_id = ?4, error = ?5, settled_at = ?6
+                      WHERE conversation_id = ?1 AND request_id = ?2",
+                    rusqlite::params![
+                        conversation_id,
+                        request_id,
+                        state,
+                        result_version_id,
+                        error,
+                        now_ms(),
+                    ],
+                )?;
+            Ok(())
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ManagedFileVersion {
     pub id: String,

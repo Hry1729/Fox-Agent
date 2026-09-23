@@ -5,14 +5,30 @@ import { fileURLToPath } from 'node:url'
 import { validatePromptControl } from '../src/control-binding.mjs'
 import { startRuntimeProcess } from './runtime-contract-suite.mjs'
 
+// The canonical permission form must mirror the Rust `FrozenPermission` /
+// `PermissionGrant` serialization field-for-field, including the defaults the
+// Host applies when a field is absent.
+function canonicalPermission(permission) {
+  return {
+    mode: permission.mode,
+    projectRoot: permission.projectRoot ?? null,
+    grants: (permission.grants ?? []).map(grant => ({
+      tool: grant.tool,
+      scope: grant.scope,
+      kind: grant.kind ?? 'approval_reuse',
+    })),
+    approvalEpoch: permission.approvalEpoch ?? null,
+  }
+}
+
 function requestFixture() {
-  const permission = { mode: 'ask', projectRoot: null, grants: [] }
+  const permission = { mode: 'ask', projectRoot: null, grants: [], approvalEpoch: null }
   return {
     runId: 'frozen-run', conversationId: 'frozen-conversation', runtimeSessionId: 'frozen-session',
     payload: { text: 'hello', controlBinding: {
       schemaVersion: 1, runId: 'frozen-run', conversationId: 'frozen-conversation',
       engineId: 'pi', executionProfileId: 'legacy', authority: 'legacy', readOnlyExecutor: 'runtime',
-      permissionSnapshotId: `sha256:${createHash('sha256').update(JSON.stringify(permission)).digest('hex')}`,
+      permissionSnapshotId: `sha256:${createHash('sha256').update(JSON.stringify(canonicalPermission(permission))).digest('hex')}`,
       permission,
       budgets: { modelRequestMs: 120_000, toolExecutionMs: 600_000, runExecutionMs: 1_800_000, approvalWaitMs: 300_000 },
     } },

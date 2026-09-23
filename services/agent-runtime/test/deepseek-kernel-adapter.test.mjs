@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
+import { canonicalPermission } from '../src/control-binding.mjs'
 import { runDeepSeekKernelModel, deepSeekHistory } from '../src/deepseek-kernel-adapter.mjs'
 import { createKernelWorker } from '../src/pi-kernel-worker.mjs'
 import { createEnvelope } from '../src/protocol.mjs'
@@ -70,7 +71,7 @@ test('shared worker binds Harness identity, returns wire response and rejects re
   assert.equal(output.pop().type, 'kernel.ready')
   const permission = { mode: 'read_only', projectRoot: null, grants: [] }
   const binding = { schemaVersion: 1, ...identity, engineId: 'deepseek_harness', executionProfileId: 'legacy', authority: 'authoritative', readOnlyExecutor: 'rust',
-    permissionSnapshotId: `sha256:${createHash('sha256').update(JSON.stringify(permission)).digest('hex')}`, permission,
+    permissionSnapshotId: `sha256:${createHash('sha256').update(JSON.stringify(canonicalPermission(permission))).digest('hex')}`, permission,
     budgets: { modelRequestMs: 30000, toolExecutionMs: 30000, runExecutionMs: 60000, approvalWaitMs: 60000 } }
   delete binding.runtimeSessionId
   const payload = { controlBinding: binding, initialModel: { schemaVersion: 1, idempotencyKey: 'initial-model-delivery', checkpointSeq: 2,

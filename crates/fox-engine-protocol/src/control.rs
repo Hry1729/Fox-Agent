@@ -22,9 +22,46 @@ impl PermissionMode {
     }
 }
 
+/// What kind of authorization a frozen grant carries. A frozen Run must never
+/// become a way to keep using an approval the user has since withdrawn, so an
+/// approval-reuse grant is re-checked live at every use (REV-04).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GrantKind {
+    /// A resource grant (project root, read scope) frozen with the Run.
+    Resource,
+    /// A reusable approval (`allow_conversation`). Subject to live revocation.
+    ApprovalReuse,
+}
+
+impl Default for GrantKind {
+    /// An older `binding_json` carries no kind. Defaulting to the *revocable*
+    /// kind is the safe direction: such a grant is re-checked live instead of
+    /// being trusted forever.
+    fn default() -> Self {
+        Self::ApprovalReuse
+    }
+}
+
+impl GrantKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Resource => "resource",
+            Self::ApprovalReuse => "approval_reuse",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PermissionGrant { pub tool: String, pub scope: String }
+pub struct PermissionGrant {
+    pub tool: String,
+    pub scope: String,
+    /// Absent in bindings frozen before revocation tracking existed; see
+    /// [`GrantKind::default`].
+    #[serde(default)]
+    pub kind: GrantKind,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -32,6 +69,15 @@ pub struct FrozenPermission {
     pub mode: PermissionMode,
     pub project_root: Option<String>,
     pub grants: Vec<PermissionGrant>,
+    /// The approval generation this Run was frozen at.
+    ///
+    /// A reusable approval is bound to the generation that issued it: any
+    /// revocation advances the generation, so a Run frozen before it can never
+    /// keep using that approval — not even if the same (tool, scope) pair is
+    /// granted again afterwards. `None` means the binding predates the field
+    /// and falls back to a per-grant liveness check only.
+    #[serde(default)]
+    pub approval_epoch: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]

@@ -211,12 +211,16 @@ fn glob_match(glob: &str, name: &str, check: impl Fn() -> Result<(), String>) ->
 }
 
 // Slice UTF-16 code units without splitting a surrogate pair. Units stay
-// UTF-16 (contract). Returns (text, safe_end): `safe_end` is the exclusive
-// UTF-16 end index actually returned, so sequential pages advance by real
-// length (no overlap, no gap). A trailing high surrogate whose low half is
-// outside the window is dropped; the next page starts at `safe_end` and
-// re-reads the pair whole. Never returns a lone surrogate.
-fn slice_utf16_range(text: &str, offset: usize, limit: usize) -> (String, usize) {
+// UTF-16 (contract). Returns (text, actual_start, safe_end):
+// `actual_start` is the UTF-16 index the returned text really begins at (it
+// steps back one unit when `offset` lands on a low surrogate half), and
+// `safe_end` is the exclusive UTF-16 end index actually returned. Callers must
+// derive navigation from BOTH: using the requested `offset` instead of
+// `actual_start` skips the character whose low half sat at `offset`.
+// A trailing high surrogate whose low half is outside the window is dropped;
+// the next page starts at `safe_end` and re-reads the pair whole. Never returns
+// a lone surrogate.
+fn slice_utf16_range(text: &str, offset: usize, limit: usize) -> (String, usize, usize) {
     let units: Vec<u16> = text.encode_utf16().collect();
     let total = units.len();
     let mut start = offset.min(total);
@@ -242,7 +246,7 @@ fn slice_utf16_range(text: &str, offset: usize, limit: usize) -> (String, usize)
             safe_end += 1;
         }
     }
-    (String::from_utf16_lossy(&units[start..safe_end]), safe_end)
+    (String::from_utf16_lossy(&units[start..safe_end]), start, safe_end)
 }
 
 // Surrogate-pair-safe prefix cut to a UTF-16 unit budget (O-REVIEW-03 item 2).
@@ -388,12 +392,39 @@ pub fn execute(binding: &RunControlBinding, tool: &str, input: &Value, cancellat
 pub(crate) struct VerifiedReadObservation {
     target_identity: String,
     version: String,
+    view_kind: fox_engine_protocol::ObservationView,
+    covered_whole_file: bool,
+    range_start: Option<u64>,
+    range_end: Option<u64>,
+    total_units: Option<u64>,
+    truncated: bool,
 }
 impl VerifiedReadObservation {
     pub(crate) fn host_observation(&self, tool_call_id: &str) -> fox_engine_protocol::HostObservation {
         fox_engine_protocol::HostObservation {
-            target_identity: self.target_identity.clone(), version: self.version.clone(),
+            target_identity: self.target_identity.clone(),
+            version: self.version.clone(),
             observed_by_tool_call_id: tool_call_id.into(),
+            view_kind: self.view_kind,
+            covered_whole_file: self.covered_whole_file,
+            range_start: self.range_start,
+            range_end: self.range_end,
+            total_units: self.total_units,
+            truncated: self.truncated,
+        }
+    }
+
+    /// A read that delivered nothing usable establishes no coverage at all.
+    fn empty(target_identity: String, version: String, total_units: u64) -> Self {
+        Self {
+            target_identity,
+            version,
+            view_kind: fox_engine_protocol::ObservationView::UnitWindow,
+            covered_whole_file: false,
+            range_start: None,
+            range_end: None,
+            total_units: Some(total_units),
+            truncated: true,
         }
     }
 }
@@ -425,7 +456,16 @@ pub(crate) fn observe_missing_file(binding: &RunControlBinding, path: &str,
     match fs::symlink_metadata(&identity) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             cancellation.check()?;
-            Ok(VerifiedReadObservation { target_identity: identity, version: "missing".into() })
+            Ok(VerifiedReadObservation {
+                target_identity: identity,
+                version: "missing".into(),
+                view_kind: fox_engine_protocol::ObservationView::Missing,
+                covered_whole_file: false,
+                range_start: None,
+                range_end: None,
+                total_units: None,
+                truncated: false,
+            })
         },
         _ => Err("target is not a verified missing file".into()),
     }
@@ -452,13 +492,12 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
     if tool == "read" {
         let (bytes, opened_identity) = gateway.bytes_observed(&path)?;
         let version = crate::tool_host::file_version(&bytes);
-        if let Some(observation) = observation {
-            *observation = Some(VerifiedReadObservation {
-                target_identity: opened_identity.to_string_lossy().into_owned(), version: version.clone(),
-            });
-        }
-        let text = crate::local_knowledge_import::extract_office_text(&bytes, &path.to_string_lossy())?
-            .unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
+        let identity = opened_identity.to_string_lossy().into_owned();
+        // An extracted Office view is text derived from a container, never the
+        // document's source text: it can never authorize a whole-file
+        // replacement (REV-05).
+        let extracted = crate::local_knowledge_import::extract_office_text(&bytes, &path.to_string_lossy())?;
+        let text = extracted.clone().unwrap_or_else(|| String::from_utf8_lossy(&bytes).into_owned());
         gateway.check()?;
         // B03: line-mode parameters are mutually exclusive with offset/limit.
         let has_line_mode = input.get("startLine").is_some() || input.get("lineCount").is_some();
@@ -466,6 +505,27 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
         if has_line_mode && has_char_mode {
             return Err("startLine/lineCount and offset/limit are mutually exclusive; use one mode only".into());
         }
+        let total_units = text.encode_utf16().count() as u64;
+        // Record the coverage of what is ACTUALLY delivered, in the single
+        // UTF-16 code-unit coordinate system the read tool already uses.
+        let record = |view: fox_engine_protocol::ObservationView,
+                      whole: bool,
+                      from: Option<u64>,
+                      to: Option<u64>,
+                      cut: bool| {
+            if let Some(slot) = observation {
+                *slot = Some(VerifiedReadObservation {
+                    target_identity: identity.clone(),
+                    version: version.clone(),
+                    view_kind: view,
+                    covered_whole_file: whole,
+                    range_start: from,
+                    range_end: to,
+                    total_units: Some(total_units),
+                    truncated: cut,
+                });
+            }
+        };
         if has_line_mode {
             // RD-v1: startLine/lineCount must be paired positive integers.
             let start_line = input.get("startLine").and_then(Value::as_u64)
@@ -478,6 +538,15 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
             let lines: Vec<&str> = text.split_inclusive('\n').collect();
             let total_lines = lines.len();
             if start_line > total_lines {
+                // An out-of-range page delivers nothing: it establishes a version
+                // fact but no coverage at all (REV-05).
+                record(
+                    fox_engine_protocol::ObservationView::UnitWindow,
+                    false,
+                    None,
+                    None,
+                    true,
+                );
                 return Ok(result(String::new(), json!({
                     "path": path, "readVersion": version, "truncated": false,
                     "startLine": start_line, "lineCount": line_count,
@@ -508,6 +577,26 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
             } else {
                 Value::Null
             };
+            let range_from = selected_start as u64;
+            let range_to = (selected_start + delivered_utf16) as u64;
+            let whole = !extracted.is_some()
+                && !truncated
+                && start_line == 1
+                && end_line == total_lines
+                && range_to >= total_units;
+            record(
+                if whole {
+                    fox_engine_protocol::ObservationView::FullFile
+                } else if extracted.is_some() {
+                    fox_engine_protocol::ObservationView::OfficeExtract
+                } else {
+                    fox_engine_protocol::ObservationView::LineRange
+                },
+                whole,
+                Some(range_from),
+                Some(range_to),
+                truncated,
+            );
             return Ok(result(bounded, json!({
                 "path": path, "readVersion": version, "truncated": truncated,
                 "startLine": start_line, "lineCount": line_count,
@@ -521,19 +610,39 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
         }
         // Legacy UTF-16 code-unit mode: surrogate-pair safe, with nextOffset
         // derived from the ACTUALLY RETURNED text after the output budget
-        // (O-REVIEW-03 item 2).
+        // (O-REVIEW-03 item 2), and from the ACTUALLY STARTED index — using the
+        // requested offset when it landed on a low surrogate half would skip the
+        // character that half belongs to (REV-06).
         let offset = input.get("offset").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as usize;
         let limit = input.get("limit").and_then(Value::as_f64).filter(|v| *v != 0.0).unwrap_or(limits.read_chars as f64).clamp(1.0, limits.read_chars as f64) as usize;
         let total_units = text.encode_utf16().count();
-        let (page_text, safe_end) = slice_utf16_range(&text, offset, limit);
+        let (page_text, actual_start, safe_end) = slice_utf16_range(&text, offset, limit);
         let final_text = bounded_nonempty_utf16(&page_text, limits.output_chars)?;
         let final_units = final_text.encode_utf16().count();
         let page_units = page_text.encode_utf16().count();
         let output_cut = final_units < page_units;
         let source_exhausted = safe_end >= total_units;
-        let start = offset.min(total_units);
+        // The delivered range is [actual_start, actual_start + final_units);
+        // navigation continues from its exclusive end, never from the request.
+        let start = actual_start;
         let fully_delivered = source_exhausted && !output_cut;
         let next_offset = if fully_delivered { Value::Null } else { json!(start + final_units) };
+        let range_from = start as u64;
+        let range_to = (start + final_units) as u64;
+        let whole = !extracted.is_some() && fully_delivered && range_from == 0 && range_to >= total_units as u64;
+        record(
+            if whole {
+                fox_engine_protocol::ObservationView::FullFile
+            } else if extracted.is_some() {
+                fox_engine_protocol::ObservationView::OfficeExtract
+            } else {
+                fox_engine_protocol::ObservationView::UnitWindow
+            },
+            whole,
+            Some(range_from),
+            Some(range_to),
+            !fully_delivered,
+        );
         return Ok(result(final_text, json!({
             "path": path, "readVersion": version, "truncated": !source_exhausted || output_cut,
             "readMode": "utf16",
@@ -709,7 +818,7 @@ fn execute_observed_with_budget(binding: &RunControlBinding, tool: &str, input: 
                 stop = true;
                 break;
             }
-            let (bounded_line, _) = slice_utf16_range(line, 0, limits.line_chars);
+            let (bounded_line, _, _) = slice_utf16_range(line, 0, limits.line_chars);
             let formatted = format!("{}:{}:{}", entry.path.display(), line_index + 1, bounded_line);
             let candidate = if text.is_empty() { formatted } else { format!("{}\n{}", text, formatted) };
             if candidate.encode_utf16().count() > limits.output_chars {
@@ -761,7 +870,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("fox-gateway-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/note.txt"), "A😀Fox\r\nsecond Fox line\n").unwrap();
-        let permission = FrozenPermission { mode: PermissionMode::ReadOnly, project_root: Some(root.to_string_lossy().into_owned()), grants: vec![] };
+        let permission = FrozenPermission { mode: PermissionMode::ReadOnly, project_root: Some(root.to_string_lossy().into_owned()), grants: vec![],
+                approval_epoch: None,
+            };
         let binding = RunControlBinding {
             schema_version: 1, run_id: "gateway-run".into(), conversation_id: "gateway-conversation".into(), engine_id: "pi".into(),
             execution_profile_id: "test-profile".into(), authority: ExecutionAuthority::Legacy, read_only_executor: ResourceExecutor::Rust,

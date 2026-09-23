@@ -3311,6 +3311,15 @@ pub struct ManagedFileRestoreRequest {
     /// Overwrite a file that changed outside the recorded task history. The
     /// current bytes are still backed up before the overwrite.
     pub force: Option<bool>,
+    /// Stable identity of this restore request.
+    ///
+    /// Repeating the SAME identity is deduplicated: the Host returns the
+    /// recorded result instead of performing the file mutation a second time.
+    /// The desktop UI must supply one stable value per user action (and reuse
+    /// it when retrying the same action); when it is absent the Host mints a
+    /// fresh one, which is correct for a genuinely new action but gives no
+    /// deduplication.
+    pub request_id: Option<String>,
 }
 
 /// Restore one registered version via a pure Host file copy. Never replays
@@ -3320,12 +3329,20 @@ pub fn managed_file_restore(
     state: State<'_, AppState>,
     request: ManagedFileRestoreRequest,
 ) -> ApiResponse<ManagedFileVersionDto> {
-    match crate::runtime_host::managed_files::restore_version(
+    // The request identity travels with the action, so a repeated delivery of
+    // the same restore is recognized instead of writing the file twice.
+    let request_id = request
+        .request_id
+        .clone()
+        .unwrap_or_else(|| format!("restore-{}", uuid::Uuid::new_v4().simple()));
+    match crate::runtime_host::managed_files::restore_version_with_seam(
         &state.database,
         state.runtime_host.managed_files_dir(),
         &request.conversation_id,
         &request.version_id,
         request.force.unwrap_or(false),
+        &request_id,
+        &crate::runtime_host::managed_files::NoRestoreFault,
     ) {
         Ok(row) => {
             let latest = row.after_hash.clone();

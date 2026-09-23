@@ -71,7 +71,7 @@ fn conservative_evidence(
 /// failures, a read/query completing is not the start of an external process,
 /// and a failure after a real start must stay uncertain. The Host therefore
 /// settles ONLY from the executor's evidence value.
-fn execute_claimed_dispatch(
+pub(super) fn execute_claimed_dispatch(
     database: &Database,
     binding: &RunControlBinding,
     effect: &kernel::OutboxEffect,
@@ -393,13 +393,31 @@ fn register_approval_grant(
     // Only a call the frozen policy still asks about can be covered by a grant.
     // Everything else (frozen read-only, an out-of-catalog tool, a lifecycle
     // hook, an already-granted scope) refuses without registering anything.
+    // The same live re-check the decision path uses: a reusable approval the
+    // user has since withdrawn must not make the frozen policy look "already
+    // granted", because that is what would let a new grant be registered
+    // without a fresh human decision (REV-04).
+    let live_grants: Vec<serde_json::Value> = binding
+        .permission
+        .grants
+        .iter()
+        .filter(|grant| match grant.kind {
+            fox_engine_protocol::GrantKind::Resource => true,
+            fox_engine_protocol::GrantKind::ApprovalReuse => database
+                .conversation_tool_permission_granted(
+                    &binding.conversation_id,
+                    &grant.tool,
+                    &grant.scope,
+                )
+                .unwrap_or(false),
+        })
+        .map(|grant| serde_json::json!([grant.tool, grant.scope]))
+        .collect();
     if super::shadow_reconcile::frozen_kernel_tool_policy(
         &serde_json::json!({
             "mode": binding.permission.mode.as_str(),
             "projectRoot": binding.permission.project_root,
-            "grants": binding.permission.grants.iter()
-                .map(|grant| serde_json::json!([grant.tool, grant.scope]))
-                .collect::<Vec<_>>(),
+            "grants": live_grants,
         }),
         &tool,
         &input_json,

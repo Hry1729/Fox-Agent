@@ -271,13 +271,108 @@ pub fn requirements_for(class: ActionClass) -> Vec<RealtimeRequirement> {
 /// An authoritative Host observation of a file target: which durable Host read
 /// record saw which version of which target. A model-declared
 /// `expectedVersion` is a *precondition claim*, never an observation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+///
+/// REV-05: the record also carries **what was actually delivered**. Reading one
+/// line establishes a line-range observation of that version, not a whole-file
+/// one, and an extracted Office view is never the document's source text. The
+/// fields default to the most conservative values so an older persisted
+/// credential (which predates them) can never gain whole-file replacement
+/// eligibility it did not have.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HostObservation {
     pub target_identity: String,
     pub version: String,
     /// The durable Host tool-call record that produced this observation.
     pub observed_by_tool_call_id: String,
+    /// Classification label only. It never expresses coverage strength; the
+    /// concrete `range_start`/`range_end` and `covered_whole_file` do.
+    #[serde(default)]
+    pub view_kind: ObservationView,
+    /// True only when the Host delivered the entire content of `version`.
+    #[serde(default)]
+    pub covered_whole_file: bool,
+    /// Delivered range in UTF-16 code units, the single coordinate system the
+    /// read tool's `offset`/`limit`/`nextOffset` already use. `None` for views
+    /// with no text range (Office extract, missing file).
+    #[serde(default)]
+    pub range_start: Option<u64>,
+    #[serde(default)]
+    pub range_end: Option<u64>,
+    /// Size of the whole text of `version` in UTF-16 code units.
+    #[serde(default)]
+    pub total_units: Option<u64>,
+    /// The delivered page was itself cut short (output or read budget).
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// What kind of view produced an observation. A label, not a coverage claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationView {
+    /// The Host delivered the whole file content for this version.
+    FullFile,
+    /// A line range (`startLine`/`lineCount`).
+    LineRange,
+    /// A UTF-16 code-unit window (`offset`/`limit`).
+    UnitWindow,
+    /// Text extracted from a binary/Office container; not the source text.
+    OfficeExtract,
+    /// A row written before coverage tracking existed. Fail-closed.
+    LegacyUnknown,
+    /// A verified absent target.
+    Missing,
+}
+
+impl Default for ObservationView {
+    fn default() -> Self {
+        Self::LegacyUnknown
+    }
+}
+
+impl ObservationView {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FullFile => "full_file",
+            Self::LineRange => "line_range",
+            Self::UnitWindow => "unit_window",
+            Self::OfficeExtract => "office_extract",
+            Self::LegacyUnknown => "legacy_unknown",
+            Self::Missing => "missing",
+        }
+    }
+
+    /// Parse a stored label. Unknown labels are `LegacyUnknown` (fail-closed)
+    /// rather than an error, so an upgraded database never gains eligibility.
+    pub fn from_str(value: &str) -> Result<Self, String> {
+        Ok(match value {
+            "full_file" => Self::FullFile,
+            "line_range" => Self::LineRange,
+            "unit_window" => Self::UnitWindow,
+            "office_extract" => Self::OfficeExtract,
+            "legacy_unknown" => Self::LegacyUnknown,
+            "missing" => Self::Missing,
+            _ => Self::LegacyUnknown,
+        })
+    }
+}
+
+impl HostObservation {
+    /// Whether this observation can authorize a whole-file replacement on its
+    /// own. Only a full-content delivery of the same version can.
+    pub fn authorizes_whole_file_replacement(&self) -> bool {
+        self.covered_whole_file && self.view_kind == ObservationView::FullFile
+    }
+
+    /// Whether the delivered range covers `[start, end)` in UTF-16 code units.
+    /// A missing or unknown range covers nothing.
+    pub fn covers_units(&self, start: u64, end: u64) -> bool {
+        match (self.range_start, self.range_end) {
+            (Some(from), Some(to)) => from <= start && end <= to,
+            _ => false,
+        }
+    }
 }
 
 /// What the executor reports about the target operation it just ran. This is
@@ -396,6 +491,22 @@ pub struct ExecutionCredential {
     pub realtime_requirements: Vec<RealtimeRequirement>,
     pub backend_requirement: BackendRequirement,
     pub credential_digest: String,
+    // --- Whole-file-replacement authorization (REV-05 / coordinator M3) ---
+    //
+    // A `write_file` that replaces the whole file is a stronger operation than a
+    // precise edit. When the bound observation did not deliver the whole
+    // content, this dispatch additionally requires the purpose-specific
+    // replacement authorization, consumed atomically with the persistent claim.
+    //
+    // All three fields are `#[serde(default)]` and are deliberately EXCLUDED
+    // from `recompute_digest`, so a credential row persisted before they
+    // existed still deserializes and still passes its digest check.
+    #[serde(default)]
+    pub requires_replace_grant: bool,
+    #[serde(default)]
+    pub replace_candidate_digest: Option<String>,
+    #[serde(default)]
+    pub replace_request_digest: Option<String>,
 }
 
 impl ExecutionCredential {
@@ -450,6 +561,9 @@ impl ExecutionCredential {
             parent_revocation_generation,
             realtime_requirements: requirements_for(action_class),
             backend_requirement,
+            requires_replace_grant: false,
+            replace_candidate_digest: None,
+            replace_request_digest: None,
         };
         credential.credential_digest = credential.recompute_digest();
         Ok(credential)
@@ -509,6 +623,18 @@ impl ExecutionCredential {
         ])
     }
 
+    /// Bind the purpose-specific whole-file-replacement authorization to this
+    /// dispatch. Called at issuance from durable Host facts only: the target,
+    /// the observed version, the candidate content digest and the request
+    /// digest. An ordinary one-shot approval or a reusable grant can never
+    /// substitute for it.
+    pub fn with_replace_grant(mut self, candidate_digest: String, request_digest: String) -> Self {
+        self.requires_replace_grant = true;
+        self.replace_candidate_digest = Some(candidate_digest);
+        self.replace_request_digest = Some(request_digest);
+        self
+    }
+
     /// Field-level equality against the authoritative snapshot is normative;
     /// the digest is an optimization, never the only check.
     pub fn verify_against(&self, stored: &ExecutionCredential) -> Result<(), String> {
@@ -525,6 +651,13 @@ impl ExecutionCredential {
             || self.parent_revocation_generation != stored.parent_revocation_generation
             || self.realtime_requirements != stored.realtime_requirements
             || self.backend_requirement != stored.backend_requirement
+            // The whole-file-replacement authorization is part of the
+            // authoritative snapshot. Without this comparison a presented
+            // credential could clear the flag (or swap either digest) and skip
+            // the dedicated authorization entirely.
+            || self.requires_replace_grant != stored.requires_replace_grant
+            || self.replace_candidate_digest != stored.replace_candidate_digest
+            || self.replace_request_digest != stored.replace_request_digest
         {
             return Err("credential_mismatch: differs from the authoritative issued snapshot".into());
         }
@@ -789,6 +922,7 @@ mod tests {
             target_identity: "a.txt".into(),
             version: "v7".into(),
             observed_by_tool_call_id: "read-1".into(),
+            ..Default::default()
         };
         let credential = ExecutionCredential::new(
             encode_dispatch_id("run-a", "call-1").unwrap(),

@@ -733,8 +733,20 @@ export const desktopClient = {
       conversationId,
       storagePath: storagePath ?? null,
     }),
-  restoreManagedFileVersion: (conversationId: string, versionId: string, force = false) =>
-    command<ManagedFileVersion>('managed_file_restore', { conversationId, versionId, force }),
+  // `requestId` is the stable identity of ONE user restore action. Reusing it
+  // on a resend lets the Host deduplicate instead of writing the file twice.
+  restoreManagedFileVersion: (
+    conversationId: string,
+    versionId: string,
+    force = false,
+    requestId?: string,
+  ) =>
+    command<ManagedFileVersion>('managed_file_restore', {
+      conversationId,
+      versionId,
+      force,
+      requestId: requestId ?? null,
+    }),
   reconciliationLoad: (request: ReconciliationRequest) => command<ReconciliationView>('kernel_reconciliation_load', request),
   reconciliationOptions: (request: ReconciliationRequest) => command<ReconciliationOptions>('kernel_reconciliation_options', request),
   reconciliationQuery: (request: ReconciliationRequest) => command<ReconciliationView>('kernel_reconciliation_query', request),

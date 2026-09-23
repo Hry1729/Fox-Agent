@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { canonicalPermission } from '../src/control-binding.mjs'
 import { createEnvelope } from '../src/protocol.mjs'
 import { createServer } from 'node:http'
 import { readFile, writeFile } from 'node:fs/promises'
@@ -420,7 +421,7 @@ function resumePayload() {
   const permission = { mode: 'read_only', projectRoot: null, grants: [] }
   return { controlBinding: { schemaVersion: 1, runId: identity.runId, conversationId: identity.conversationId,
     engineId: 'pi', executionProfileId: 'legacy', authority: 'authoritative', readOnlyExecutor: 'rust', permission,
-    permissionSnapshotId: `sha256:${createHash('sha256').update(JSON.stringify(permission)).digest('hex')}`,
+    permissionSnapshotId: `sha256:${createHash('sha256').update(JSON.stringify(canonicalPermission(permission))).digest('hex')}`,
     budgets: { modelRequestMs: 120000, toolExecutionMs: 600000, runExecutionMs: 1800000, approvalWaitMs: 300000 } },
     batchResume: { schemaVersion: 1, turnId: 'turn-k', batchId: 'batch-k', idempotencyKey: 'tool-batch-delivery:batch-k', checkpointSeq: 8,
       history: [{ role: 'user', content: 'Read the file', timestamp: 1 }],

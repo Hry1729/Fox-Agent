@@ -698,16 +698,26 @@ fn atomic_write(root: &Path, path: &Path, bytes: &[u8], expected: &str,
     atomic_write_with_context(root, path, bytes, expected, cancellation, None)
 }
 
-fn atomic_write_with_context(root: &Path, path: &Path, bytes: &[u8], expected: &str,
+/// The one file-commit critical section every mutating path shares: tool writes,
+/// admitted file dispatches and user restores alike. `binary` selects how the
+/// current version is computed — from the raw bytes (restore of a snapshot that
+/// may not be UTF-8) or from the decoded text (`write_file` / `edit_file`).
+pub(crate) fn atomic_write_with_context(root: &Path, path: &Path, bytes: &[u8], expected: &str,
     cancellation: Option<&crate::kernel::CancellationToken>,
-    mut context: Option<&mut dyn FileCommitContext>) -> Result<(), String> {
+    context: Option<&mut dyn FileCommitContext>) -> Result<(), String> {
+    atomic_write_with_context_mode(root, path, bytes, expected, cancellation, context, false)
+}
+
+pub(crate) fn atomic_write_with_context_mode(root: &Path, path: &Path, bytes: &[u8], expected: &str,
+    cancellation: Option<&crate::kernel::CancellationToken>,
+    mut context: Option<&mut dyn FileCommitContext>, binary: bool) -> Result<(), String> {
     use std::io::Write;
     let _guard = FILE_WRITE_LOCK.lock().map_err(|_| ToolErrorCode::Unknown.error("file write lock poisoned"))?;
     revalidate_target(root, path, None)?;
     if let Some(context) = context.as_deref_mut() {
         context.validate(path)?;
-        let current = read_optional_text(path)?;
-        write_precondition(&json!({"expectedVersion":expected}), current.as_deref())?;
+        let current = current_version_of(path, binary)?;
+        ensure_unchanged(expected, current.as_deref())?;
         context.capture_before(path)?;
     }
     let staging = path.parent().ok_or("missing write parent")?
@@ -741,8 +751,8 @@ fn atomic_write_with_context(root: &Path, path: &Path, bytes: &[u8], expected: &
     drop(file);
     check_cancellation(cancellation)?;
     revalidate_target(root, path, None)?;
-    let current = read_optional_text(path)?;
-    write_precondition(&json!({"expectedVersion":expected}), current.as_deref())?;
+    let current = current_version_of(path, binary)?;
+    ensure_unchanged(expected, current.as_deref())?;
     if current.is_none() {
         // Atomic create without replacing a file created since the check.
         let staging_path = staging.path().to_path_buf();
@@ -2123,6 +2133,34 @@ fn read_optional_text(path: &Path) -> Result<Option<String>, String> {
     } else {
         Ok(None)
     }
+}
+
+/// The version the commit critical section compares against. `binary` hashes the
+/// raw bytes so a snapshot that is not valid UTF-8 still gets an exact,
+/// non-lossy precondition instead of a decode failure. Both modes return the
+/// `sha256:<hex>` version string, never raw content.
+fn current_version_of(path: &Path, binary: bool) -> Result<Option<String>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    if binary {
+        let bytes = fs::read(path).map_err(|error| error.to_string())?;
+        Ok(Some(file_version(&bytes)))
+    } else {
+        Ok(read_optional_text(path)?.map(|text| file_version(text.as_bytes())))
+    }
+}
+
+/// The in-lock precondition: the target must still be exactly the version the
+/// caller read. A mismatch is a recoverable conflict, never a silent overwrite.
+fn ensure_unchanged(expected: &str, current_version: Option<&str>) -> Result<(), String> {
+    let version = current_version.unwrap_or("missing");
+    if expected != version {
+        return Err(ToolErrorCode::Conflict.error(
+            "File changed since read (or was created/deleted). Read it again, reconcile your change,              and retry with its readVersion; no additional authorization is needed.",
+        ));
+    }
+    Ok(())
 }
 
 fn line_diff(old: &str, new: &str, path: &Path) -> String {

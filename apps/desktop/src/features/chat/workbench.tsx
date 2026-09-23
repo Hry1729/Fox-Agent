@@ -1,6 +1,7 @@
 import { UserMessageBubble } from './components/UserMessageBubble'
 import { RunSteeringStrip } from './components/RunSteeringStrip'
 import { ManagedFilesPanel } from './components/ManagedFilesPanel'
+import { RuntimeApprovalPrompt } from './components/RuntimeApprovalPrompt'
 import { ExpertPickerDialog } from '@/features/agents/ExpertPickerDialog'
 import { HtmlFilePreview } from './html-file-preview'
 import { KernelReconciliationPanel } from './kernel-reconciliation-panel'
@@ -237,7 +238,6 @@ import { useKnowledgeBases } from '@/features/knowledge/use-knowledge'
 import { latestMessage, runIsActive, useDesktopConversation } from '@/features/conversations/hooks/use-desktop-conversation'
 import { conversationRunState } from '@/features/conversations/model/kernel-snapshot'
 import { pendingRuntimeQuestion } from '@/features/conversations/model/pending-interactions'
-import { allowedApprovalDecisions, isRepairOverrideApproval, repairOverrideApprovalDetails, resolveAllowedApprovalDecision } from '@/features/conversations/model/approval-decision-policy'
 import type { RuntimeQuestion, RuntimeQuestionRequest } from '@/features/conversations/model/pending-interactions'
 import type { AgentRecord, AppNotificationRecord, ApprovalDecision, ApprovalRecord, ArtifactActionResponse, ArtifactApplication, ArtifactRecord, ArtifactInspectResponse, AttachmentRecord, ChildRunRecord, ConversationDetail, ConversationMessage, ConversationSummary, DesktopErrorDetails, GlobalSearchRecord, KnowledgeBaseRecord, KnowledgeBindingRecord, KnowledgeReference, ModelServiceRecord, NotificationPreferencesRecord, ProjectFileActionResponse, ProjectFileEntry, ProjectFilePreview, ProjectRecord, RunEventRecord, RunRecord, TaskEvidenceRecord, ToolCallRecord, YuxiModelRecord, YuxiUserRecord } from '@/features/conversations/model/types'
 import {
@@ -267,7 +267,6 @@ import { normalizeAssistantMarkdown } from '@/features/conversations/model/assis
 import { UserProfileDialog, useUserProfile, type UserProfile } from '@/features/profile/user-profile'
 import { childRunIsActive, childRunStatusLabel, formatDurationMs, isWebToolCall, latestConversationContextUsage, normalizeBrowserUrl, webActivitySummary, type ConversationUsage } from './sidebar-model'
 import { EMPTY_RUNTIME_ARTIFACTS, EMPTY_RUNTIME_EVENTS, groupRuntimeRecords, latestRunAssistantId, groupAssistantContinuations } from './runtime-timeline-performance'
-import { approvalPresentation } from '../conversations/model/approval-presentation'
 import { deriveRunTerminalStates, type RunFailure } from '../conversations/model/run-failure'
 
 const OnboardingPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.OnboardingPage })))
@@ -1626,48 +1625,6 @@ function ApprovalPrompt({ onApprove, onDeny }: { onApprove: () => void; onDeny: 
         <ConfirmationActions className="fox-confirmation-actions">
           <ConfirmationAction variant="ghost" onClick={onDeny}>拒绝</ConfirmationAction>
           <ConfirmationAction onClick={onApprove}>允许一次</ConfirmationAction>
-        </ConfirmationActions>
-      </ConfirmationRequest>
-    </Confirmation>
-  )
-}
-
-function RuntimeApprovalPrompt({ approval, onResolve }: { approval: ApprovalRecord; onResolve: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean> }) {
-  const request = approval.request
-  const presentation = approvalPresentation(approval)
-  const allowedDecisions = allowedApprovalDecisions(request)
-  const repairOverride = isRepairOverrideApproval(request)
-  const repairDetails = repairOverrideApprovalDetails(request)
-  const [submitting, setSubmitting] = useState(false)
-  const submittingRef = useRef(false)
-  const resolve = async (decision: ApprovalDecision) => {
-    if (submittingRef.current) return
-    submittingRef.current = true
-    setSubmitting(true)
-    const resolved = await resolveAllowedApprovalDecision(approval, decision, onResolve)
-    if (!resolved) {
-      submittingRef.current = false
-      setSubmitting(false)
-    }
-  }
-  return (
-    <Confirmation approval={{ id: approval.id }} state="approval-requested" className="fox-confirmation fox-runtime-confirmation">
-      <ConfirmationRequest>
-        <div className="fox-confirmation-body">
-          <div className="fox-confirmation-content"><ConfirmationTitle>{presentation.title}</ConfirmationTitle><p><code>{presentation.target}</code></p><small>{presentation.summary}</small></div>
-        </div>
-        {repairOverride && <div className={`fox-approval-context ${repairDetails ? '' : 'is-invalid'}`}>
-          {repairDetails
-            ? <><p><strong>为什么还要再修一次：</strong>{repairDetails.rootCause}</p><p><strong>关联的审查问题：</strong>{repairDetails.findingIds.join('、')}</p></>
-            : <p><strong>审批详情不完整。</strong>请先拒绝，并让 Fox 带上根因和关联审查问题重新发起。</p>}
-        </div>}
-        {presentation.command && <div className="fox-approval-command"><Terminal size={13} /><code>{presentation.command}</code></div>}
-        {presentation.diff && <pre className="fox-approval-diff" aria-label="拟修改差异"><code>{presentation.diff}</code></pre>}
-        {presentation.content !== undefined && <div className="fox-approval-context"><strong>拟写入内容</strong><pre className="fox-approval-diff" aria-label="拟写入内容"><code>{presentation.content || '（空文件）'}</code></pre></div>}
-        <ConfirmationActions className="fox-confirmation-actions">
-          <ConfirmationAction variant="ghost" disabled={submitting} onClick={() => void resolve('deny')}>拒绝</ConfirmationAction>
-          {allowedDecisions.includes('allow_once') && <ConfirmationAction variant="outline" disabled={submitting} onClick={() => void resolve('allow_once')}>只允许这一次</ConfirmationAction>}
-          {allowedDecisions.includes('allow_conversation') && <ConfirmationAction disabled={submitting} onClick={() => void resolve('allow_conversation')}>{submitting ? '处理中…' : '本次对话始终允许'}</ConfirmationAction>}
         </ConfirmationActions>
       </ConfirmationRequest>
     </Confirmation>

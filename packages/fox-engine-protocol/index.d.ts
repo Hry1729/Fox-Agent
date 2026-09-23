@@ -1,9 +1,10 @@
 // Generated from fox-engine-protocol Rust DTOs. Do not edit; run node scripts/generate-engine-protocol.mjs.
 export type ActionClass = ("read" | "write" | "execute" | "destructive" | "sensitive_egress" | "manage")
 export type BackendRequirement = { "evidenceDigest"?: (string | null); "required": string; }
-export type HostObservation = { "observedByToolCallId": string; "targetIdentity": string; "version": string; }
+export type HostObservation = { "coveredWholeFile"?: boolean; "observedByToolCallId": string; "rangeEnd"?: (number | null); "rangeStart"?: (number | null); "targetIdentity": string; "totalUnits"?: (number | null); "truncated"?: boolean; "version": string; "viewKind"?: ObservationView; }
+export type ObservationView = ("full_file" | "line_range" | "unit_window" | "office_extract" | "legacy_unknown" | "missing")
 export type RealtimeRequirement = ("policy_version" | "parent_revocation" | "resource_grant" | "cancellation" | "backend_evidence" | "host_observation")
-export type ExecutionCredential = { "actionClass": ActionClass; "backendRequirement": BackendRequirement; "budgetCeilingMs": number; "conversationId": string; "credentialDigest": string; "dispatchId": string; "fileBaseline"?: (HostObservation | null); "intentDigest": string; "parentRevocationGeneration"?: (number | null); "policySnapshotId": string; "policyVersion"?: (number | null); "realtimeRequirements": Array<RealtimeRequirement>; "resolvedProfile": string; "runId": string; }
+export type ExecutionCredential = { "actionClass": ActionClass; "backendRequirement": BackendRequirement; "budgetCeilingMs": number; "conversationId": string; "credentialDigest": string; "dispatchId": string; "fileBaseline"?: (HostObservation | null); "intentDigest": string; "parentRevocationGeneration"?: (number | null); "policySnapshotId": string; "policyVersion"?: (number | null); "realtimeRequirements": Array<RealtimeRequirement>; "replaceCandidateDigest"?: (string | null); "replaceRequestDigest"?: (string | null); "requiresReplaceGrant"?: boolean; "resolvedProfile": string; "runId": string; }
 export type ExecutionEvidence = ("not_started" | "started" | "unknown")
 export type ControlPlaneState = "none" | "prepared" | "applying" | "committed" | "not_applied" | "uncertain" | "unknown"
 export type ExecutionKind = "process" | "file"
@@ -33,8 +34,9 @@ export type KernelToolSnapshot = { "approvalState"?: (string | null); "batchId":
 export type KernelRunSnapshot = { "approvalDeadlineWallMs"?: (number | null); "compactions": number; "engineId": string; "lastEventSeq": string; "providerAttempts": number; "retryDueWallMs"?: (number | null); "runId": string; "runningElapsedMs": number; "schemaVersion": number; "state": string; "terminalWritten": boolean; "tools": Array<KernelToolSnapshot>; "turnAttempts": number; "turnId": string; }
 export type KernelStateInvalidation = { "schemaVersion": number; }
 export type ExecutionAuthority = "legacy" | "authoritative"
-export type FrozenPermission = { "grants": Array<PermissionGrant>; "mode": PermissionMode; "projectRoot"?: (string | null); }
-export type PermissionGrant = { "scope": string; "tool": string; }
+export type FrozenPermission = { "approvalEpoch"?: (number | null); "grants": Array<PermissionGrant>; "mode": PermissionMode; "projectRoot"?: (string | null); }
+export type GrantKind = ("resource" | "approval_reuse")
+export type PermissionGrant = { "kind"?: GrantKind; "scope": string; "tool": string; }
 export type PermissionMode = "ask" | "read_only" | "allow"
 export type ResourceExecutor = "runtime" | "rust"
 export type TimeBudgets = { "approvalWaitMs": number; "modelFirstResponseMs"?: number; "modelIdleMs"?: number; "modelRequestMs": number; "runExecutionLimited"?: boolean; "runExecutionMs": number; "toolExecutionMs": number; }

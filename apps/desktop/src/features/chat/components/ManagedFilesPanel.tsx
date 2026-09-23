@@ -23,6 +23,7 @@ import {
   type ManagedFileVersion,
 } from '@/features/conversations/api/desktop-client'
 import { managedFileVersionPresentation } from './managed-file-presentation'
+import { RestoreRequestIdentities, restoreActionKey } from './restore-request-identity'
 
 const KIND_COPY: Record<string, string> = {
   created: '新建',
@@ -66,6 +67,13 @@ export function ManagedFilesPanel({ conversationId }: { conversationId?: string 
   const [error, setError] = useState<string | null>(null)
   const [forceHint, setForceHint] = useState<Record<string, string>>({})
   const conversationIdRef = useRef<string | undefined>(conversationId)
+  // Identities of restore actions that are still UNDETERMINED, keyed by the
+  // action itself. While a request is in flight (or has failed without a definite
+  // end) the same identity is reused, so a double click or a timeout resend is
+  // deduplicated by the Host. Once the request reaches a definite end — success,
+  // or a rejection the user has seen and answered — the entry is released and
+  // the NEXT confirmation mints a new identity.
+  const restoreIdentities = useRef<RestoreRequestIdentities>(new RestoreRequestIdentities())
   conversationIdRef.current = conversationId
 
   const load = useCallback(async (silent = false) => {
@@ -146,7 +154,25 @@ export function ManagedFilesPanel({ conversationId }: { conversationId?: string 
       setBusyId(version.id)
       setError(null)
       try {
-        const restored = await desktopClient.restoreManagedFileVersion(id, version.id, force)
+        // The action is "restore THIS version, with or without force". Whether
+        // the same version was restored before is irrelevant: each confirmation
+        // is a new action once the previous one has ended.
+        const actionKey = restoreActionKey(version.id, force)
+        const requestId = restoreIdentities.current.acquire(
+          actionKey,
+          () =>
+            globalThis.crypto?.randomUUID?.() ??
+            `restore-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        )
+        const restored = await desktopClient.restoreManagedFileVersion(
+          id,
+          version.id,
+          force,
+          requestId,
+        )
+        // Definite end: release the identity so the next confirmation is a new
+        // action rather than a resend of this one.
+        restoreIdentities.current.release(actionKey)
         setForceHint((value) => {
           const next = { ...value }
           delete next[version.id]

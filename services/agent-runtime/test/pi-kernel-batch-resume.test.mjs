@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { prepareKernelModelResponse, prepareKernelBatchResume } from '../src/pi-kernel-batch-resume.mjs'
-import { validatePromptControl } from '../src/control-binding.mjs'
+import { canonicalPermission, validatePromptControl } from '../src/control-binding.mjs'
 
 const identity = { runId: 'kernel-run', conversationId: 'kernel-conversation', runtimeSessionId: 'kernel-session', executionProfileId: 'legacy' }
 
@@ -50,7 +50,7 @@ function fixture() {
     controlBinding: {
       schemaVersion: 1, runId: identity.runId, conversationId: identity.conversationId,
       engineId: 'pi', executionProfileId: identity.executionProfileId, authority: 'authoritative', readOnlyExecutor: 'rust',
-      permissionSnapshotId: `sha256:${createHash('sha256').update(JSON.stringify(permission)).digest('hex')}`, permission,
+      permissionSnapshotId: `sha256:${createHash('sha256').update(JSON.stringify(canonicalPermission(permission))).digest('hex')}`, permission,
       budgets: { modelRequestMs: 120_000, toolExecutionMs: 600_000, runExecutionMs: 1_800_000, approvalWaitMs: 300_000 },
     },
     batchResume: {

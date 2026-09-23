@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { canonicalPermission } from '../src/control-binding.mjs'
 import { prepareKernelCompaction } from '../src/pi-kernel-compaction.mjs'
 import { createEnvelope } from '../src/protocol.mjs'
 import { createHash } from 'node:crypto'
@@ -9,7 +10,7 @@ function request() {
   const permission={mode:'read_only',projectRoot:null,grants:[]}
   return createEnvelope('request','kernel.compact_context',{...identity,payload:{
     controlBinding:{schemaVersion:1,runId:'r',conversationId:'c',engineId:'pi',executionProfileId:'legacy',
-      authority:'authoritative',readOnlyExecutor:'rust',permissionSnapshotId:`sha256:${createHash('sha256').update(JSON.stringify(permission)).digest('hex')}`,
+      authority:'authoritative',readOnlyExecutor:'rust',permissionSnapshotId:`sha256:${createHash('sha256').update(JSON.stringify(canonicalPermission(permission))).digest('hex')}`,
       permission,
       budgets:{approvalWaitMs:1000,modelRequestMs:1000,toolExecutionMs:1000,runExecutionMs:10000}},
     compaction:{schemaVersion:1,runId:'r',turnId:'t',compactionId:'job',inputHash:`sha256:${'a'.repeat(64)}`,

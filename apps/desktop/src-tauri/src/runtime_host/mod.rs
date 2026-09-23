@@ -3453,8 +3453,18 @@ impl RuntimeHost {
                 ApprovalDecision::AllowConversation => "allow_conversation",
                 ApprovalDecision::Deny => "denied",
             };
-            return self.database.queue_kernel_host_approval(approval_id, decision);
+            // Enqueueing is only a queue command: the durable Kernel decision is
+            // applied by the consumer. The dedicated replacement request is
+            // therefore settled when the consumer acknowledges the command —
+            // `complete_kernel_host_command`, in the same transaction as the
+            // durable transition — so an ordinary decision, the dedicated
+            // authorization and an executable dispatch can never disagree.
+            let queued = self.database.queue_kernel_host_approval(approval_id, decision)?;
+            return Ok(queued);
         }
+        // B) `resolve_approval` settles the ordinary decision AND the dedicated
+        // whole-file replacement authorization in ONE transaction, so the waiting
+        // executor below is only released once both facts are durably visible.
         let resolved = self.database.resolve_approval(approval_id, decision)?;
         let Some(approval) = resolved else {
             return Ok(false);
@@ -6752,6 +6762,7 @@ mod deliverable_placement_tests {
                 mode,
                 project_root: Some(project.to_string_lossy().into_owned()),
                 grants: Vec::new(),
+                approval_epoch: None,
             }
         }
 
@@ -9348,10 +9359,30 @@ fn execute_host_tool_request(
         }
         let policy = database.execution_policy(conversation_id)?;
         let target = crate::tool_host::canonical_file_identity(Path::new(&project_root), input["path"].as_str().ok_or("missing file path")?)?;
-        let observation = database.host_observation_for(run_id, &target)?.ok_or("[tool.file_conflict] Read the target before writing; no Host observation exists")?;
+        // REV-01: the model's declared `expectedVersion` is a precondition claim.
+        // It selects the observation it was based on and is never silently
+        // upgraded to the newest one, so a stale candidate cannot ride a later
+        // read of the same target.
+        let declared = input
+            .get("expectedVersion")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let observation = database
+            .host_observation_for_version(run_id, &target, declared)?
+            .ok_or_else(|| match declared {
+                Some(version) => format!(
+                    "[tool.file_conflict] No Host observation of {version} exists in this Run; \
+                     read the target again and retry with its readVersion"
+                ),
+                None => "[tool.file_conflict] Read the target before writing; no Host observation exists".to_owned(),
+            })?;
         Some((policy.version, observation))
     } else { None };
     let prepared = if let Some((_, baseline)) = &file_policy {
+        // `baseline.version` is the observation the DECLARED precondition
+        // selected, so binding it here preserves the claim instead of
+        // replacing it with the newest observation.
         crate::tool_host::prepare_admitted_file(tool, &input, &project_root, &baseline.version)?
     } else { crate::tool_host::prepare(tool, &input, &project_root)? };
     let permission_scope = host_permission_scope(tool, prepared.preview());
@@ -9386,11 +9417,64 @@ fn execute_host_tool_request(
         HostToolCallExecution::Replay(response) => return Ok(response),
     };
 
+    // A whole-file replacement is authorized by its OWN, purpose-specific
+    // confirmation. The immutable request identity and its four-tuple are bound
+    // into the approval record HERE, when the request is created — so what the
+    // user approves is exactly what the later claim will require, and an
+    // ordinary write approval can never be read as a replacement authorization.
+    let replace_binding = match (&file_policy, tool) {
+        (Some((_, baseline)), "write_file")
+            if crate::database::kernel_execution_admission::needs_replace_grant(baseline) =>
+        {
+            let target = crate::tool_host::canonical_file_identity(
+                Path::new(&project_root),
+                input["path"].as_str().unwrap_or_default(),
+            )
+            .ok();
+            let content = input.get("content").and_then(Value::as_str).unwrap_or_default();
+            target.map(|target| {
+                crate::database::kernel_execution_admission::replace_request_binding(
+                    conversation_id,
+                    run_id,
+                    tool_call_id,
+                    &target,
+                    &baseline.version,
+                    content,
+                )
+            })
+        }
+        _ => None,
+    };
+    if let (Some(binding), Some(baseline)) = (&replace_binding, file_policy.as_ref().map(|(_, b)| b))
+    {
+        // Propose the request now, in `pending`, so the authorization exists
+        // before the human is asked and the confirmation has something to bind.
+        let _ = database.propose_whole_file_replacement(
+            conversation_id,
+            run_id,
+            tool_call_id,
+            binding,
+        );
+        let _ = baseline;
+    }
+
     let outcome = (|| -> Result<Value, String> {
         if requires_approval {
             let mut request =
                 serde_json::to_value(prepared.preview()).map_err(|error| error.to_string())?;
             attach_permission_scope(&mut request, approval_permission_scope);
+            if let Some(binding) = &replace_binding {
+                // Immutable part of the approval record: purpose, target,
+                // observed baseline and candidate digest.
+                request["wholeFileReplacement"] = json!({
+                    "purpose": "整文件替换",
+                    "requestDigest": binding.request_digest,
+                    "targetIdentity": binding.target_identity,
+                    "baselineVersion": binding.version,
+                    "candidateDigest": binding.candidate_digest,
+                    "availableDecisions": ["allow_once", "deny"],
+                });
+            }
             let approval =
                 database.create_approval(&tool_call.id, &prepared.preview().summary, &request)?;
             let (sender, receiver) = mpsc::channel();

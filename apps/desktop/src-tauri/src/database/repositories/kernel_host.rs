@@ -129,6 +129,23 @@ pub(crate) struct KernelHostCommand {
     pub policy_version: Option<u64>,
 }
 
+/// The run's own conversation, read inside the caller's transaction so the
+/// confirmation binds to the same scope the claim will enforce.
+fn conversation_of(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+) -> Result<String, rusqlite::Error> {
+    transaction
+        .query_row(
+            "SELECT COALESCE((SELECT conversation_id FROM run_control_bindings WHERE run_id=?1),
+                             (SELECT conversation_id FROM runs WHERE id=?1))",
+            [run_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())
+        .map_err(rusqlite::Error::InvalidParameterName)
+}
+
 impl Database {
     pub(crate) fn pending_kernel_host_action_ids(
         &self,
@@ -429,6 +446,166 @@ impl Database {
             [approval_id], |row| Ok((row.get(0)?,row.get(1)?))).optional())
     }
 
+    /// Confirm the purpose-specific whole-file-replacement authorization bound
+    /// to one resolved approval.
+    ///
+    /// The four-tuple is read from the APPROVAL RECORD's immutable request, not
+    /// from the authorization row: an ordinary write approval (which carries no
+    /// `wholeFileReplacement` block) can never be read as a replacement
+    /// authorization, and a tampered or drifted binding is refused. A valid
+    /// approval decision is required — `pending` confirms nothing.
+    ///
+    /// Returns `Ok(true)` when a request was confirmed, `Ok(false)` when the
+    /// approved call has no replacement request at all.
+    pub(crate) fn confirm_replace_grant_for_approval(
+        &self,
+        approval_id: &str,
+    ) -> Result<bool, String> {
+        // 1) The approval record: its decision and its immutable binding.
+        let record: Option<(String, String, String, String, Option<String>)> =
+            self.with_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT t.run_id, t.runtime_tool_call_id, a.status, t.tool_name,
+                                a.request_json
+                           FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
+                          WHERE a.id = ?1",
+                        [approval_id],
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
+                    )
+                    .optional()
+                    .map_err(|e| e.to_string())
+                    .map_err(rusqlite::Error::InvalidParameterName)
+            })?;
+        let Some((run_id, tool_call_id, status, tool_name, request_json)) = record else {
+            return Ok(false);
+        };
+        if tool_name != "write_file" {
+            return Ok(false);
+        }
+        // 2) A valid approval decision is mandatory.
+        if status != "approved" {
+            return Err(format!(
+                "replace_grant_required: the approval is '{status}'; only an approved decision \
+                 can confirm a whole-file replacement"
+            ));
+        }
+        // 3) The immutable binding travels with the approval record.
+        let request: serde_json::Value = request_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or(serde_json::Value::Null);
+        let binding_value = request.get("wholeFileReplacement").cloned();
+        let Some(binding_value) = binding_value else {
+            // An ordinary write approval must never implicitly grant the
+            // dedicated authorization.
+            return Ok(false);
+        };
+        let target_identity = binding_value
+            .get("targetIdentity")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let version = binding_value
+            .get("baselineVersion")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let candidate_digest = binding_value
+            .get("candidateDigest")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let request_digest = binding_value
+            .get("requestDigest")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if target_identity.is_empty()
+            || version.is_empty()
+            || candidate_digest.is_empty()
+            || request_digest.is_empty()
+        {
+            return Err("replace_grant_mismatch: the approval record carries an incomplete \
+                        replacement binding"
+                .into());
+        }
+
+        // 4) Flip `pending -> approved` only when the recorded request matches
+        //    the bound identity exactly.
+        let dispatch_id = fox_engine_protocol::encode_dispatch_id(&run_id, &tool_call_id)
+            .map_err(|error| error.to_string())?;
+        self.with_connection(|connection| {
+            let transaction = connection.transaction_with_behavior(
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            crate::database::kernel_execution_admission::approve_replace_grant_in_tx(
+                &transaction,
+                &run_id,
+                &dispatch_id,
+                &conversation_of(&transaction, &run_id)?,
+                &target_identity,
+                &version,
+                &candidate_digest,
+                &request_digest,
+                crate::database::now_ms(),
+            )
+            .map_err(|error| rusqlite::Error::InvalidParameterName(error))?;
+            transaction.commit()?;
+            Ok(true)
+        })
+    }
+
+    /// Withdraw the whole-file replacement request bound to one DENIED approval,
+    /// immediately and permanently.
+    pub(crate) fn withdraw_whole_file_replacements_for_call(
+        &self,
+        approval_id: &str,
+    ) -> Result<bool, String> {
+        let target: Option<(String, String)> = self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT t.run_id, t.runtime_tool_call_id
+                       FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
+                      WHERE a.id = ?1",
+                    [approval_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())
+                .map_err(rusqlite::Error::InvalidParameterName)
+        })?;
+        let Some((run_id, tool_call_id)) = target else {
+            return Ok(false);
+        };
+        let dispatch_id = fox_engine_protocol::encode_dispatch_id(&run_id, &tool_call_id)
+            .map_err(|error| error.to_string())?;
+        self.with_connection(|connection| {
+            let transaction = connection.transaction_with_behavior(
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let withdrawn = transaction
+                .execute(
+                    "UPDATE kernel_whole_file_replace_grants
+                        SET state='expired'
+                      WHERE run_id=?1 AND dispatch_id=?2 AND state IN ('pending','approved')",
+                    params![run_id, dispatch_id],
+                )
+                .map_err(|e| e.to_string())
+                .map_err(rusqlite::Error::InvalidParameterName)?;
+            transaction.commit()?;
+            Ok(withdrawn > 0)
+        })
+    }
+
     pub(crate) fn freeze_kernel_host_scope(
         &self,
         run_id: &str,
@@ -599,27 +776,154 @@ impl Database {
         })
     }
 
-    /// Called after the corresponding durable Kernel transition. On recovery,
-    /// the owner first observes the stored decision/terminal before acknowledging.
+    /// Acknowledges one queued Host command.
+    ///
+    /// This is the point where the ordinary approval decision and the dedicated
+    /// whole-file replacement authorization become visible TOGETHER: the command
+    /// is only acknowledged once the durable Kernel transition
+    /// (`kernel_approvals.state == decision`) is already committed, and the
+    /// replacement request is settled in the SAME transaction. A consumer that
+    /// runs early simply cannot acknowledge yet, so it can never dispatch on a
+    /// half-applied decision.
     pub(crate) fn complete_kernel_host_command(
         &self,
         run_id: &str,
         seq: i64,
     ) -> Result<(), String> {
         self.with_connection(|connection| {
-            let changed = connection.execute("UPDATE kernel_host_commands SET status='completed',completed_at=?3
-                WHERE run_id=?1 AND command_seq=?2 AND (
-                    EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state IN ('completed','failed','cancelled','budget_exhausted','approval_expired'))
-                    OR (kind='cancel' AND EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state='cancelling'))
-                    OR (kind='approval' AND EXISTS(SELECT 1 FROM kernel_execution_policies p JOIN runs r ON r.conversation_id=p.conversation_id WHERE r.id=?1 AND kernel_host_commands.policy_version IS NOT p.version))
-                    OR (kind='approval' AND EXISTS(SELECT 1 FROM kernel_approvals a WHERE a.run_id=?1
-                        AND a.tool_call_id=kernel_host_commands.tool_call_id
-                        AND (a.state=kernel_host_commands.decision OR a.state IN ('expired','cancelled')))))",
-                params![run_id,seq,now_ms()])?;
-            if changed != 1 { return Err(invalid("Kernel command has no durable matching outcome")); }
-            Ok(())
+            let transaction = connection.transaction_with_behavior(
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            // `tool_call_id` is NULL for a cancel command.
+            let command: Option<(String, Option<String>, Option<String>, Option<u64>)> = transaction
+                .query_row(
+                    "SELECT kind,tool_call_id,decision,policy_version FROM kernel_host_commands
+                      WHERE run_id=?1 AND command_seq=?2 AND status='pending'",
+                    params![run_id, seq],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())
+                .map_err(rusqlite::Error::InvalidParameterName)?;
+            let Some((kind, tool_call_id, decision, command_policy)) = command else {
+                return Err(invalid("Kernel command is not pending"));
+            };
+            // The durable gate: the corresponding Kernel transition must already
+            // be visible, otherwise there is nothing to acknowledge.
+            let changed = transaction
+                .execute(
+                    "UPDATE kernel_host_commands SET status='completed',completed_at=?3
+                      WHERE run_id=?1 AND command_seq=?2 AND (
+                        EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state IN ('completed','failed','cancelled','budget_exhausted','approval_expired'))
+                        OR (kind='cancel' AND EXISTS(SELECT 1 FROM kernel_runs r WHERE r.run_id=?1 AND r.state='cancelling'))
+                        OR (kind='approval' AND EXISTS(SELECT 1 FROM kernel_execution_policies p JOIN runs r ON r.conversation_id=p.conversation_id WHERE r.id=?1 AND kernel_host_commands.policy_version IS NOT p.version))
+                        OR (kind='approval' AND EXISTS(SELECT 1 FROM kernel_approvals a WHERE a.run_id=?1
+                            AND a.tool_call_id=kernel_host_commands.tool_call_id
+                            AND (a.state=kernel_host_commands.decision OR a.state IN ('expired','cancelled')))))",
+                    params![run_id, seq, now_ms()],
+                )
+                .map_err(|e| e.to_string())
+                .map_err(rusqlite::Error::InvalidParameterName)?;
+            if changed != 1 {
+                return Err(invalid("Kernel command has no durable matching outcome"));
+            }
+            // Settle the dedicated replacement request in the SAME transaction.
+            //
+            // The ack gate above answers "has this command been processed?" — it
+            // deliberately also accepts a cancellation, an expiry, a stale policy
+            // generation and a terminal Run, because the command must not stay
+            // stuck in the queue. That is a DIFFERENT question from "is the
+            // approval still in force, so the replacement may be granted?".
+            // Deciding the second from the first (as an earlier revision did,
+            // branching only on the original `decision`) let a command queued as
+            // `allow_once` reach the confirmation path after the approval had
+            // been cancelled or had expired, which failed the whole transaction
+            // and left the command pending forever.
+            //
+            // So the authoritative facts are re-read here, inside the same
+            // transaction, and only a genuinely valid approval confirms.
+            if let (true, Some(tool_call_id)) = (kind == "approval", tool_call_id.as_deref()) {
+                let in_force = approval_still_in_force(
+                    &transaction,
+                    run_id,
+                    tool_call_id,
+                    command_policy,
+                )? && decision.as_deref() != Some("denied");
+                if in_force {
+                    super::kernel_execution_admission::confirm_replace_grant_from_approval_in_tx(
+                        &transaction,
+                        run_id,
+                        tool_call_id,
+                        now_ms(),
+                    )
+                    .map_err(|e| rusqlite::Error::InvalidParameterName(e))?;
+                } else {
+                    // Cancelled, expired, superseded by a newer policy generation,
+                    // a denial, or a terminal Run: the request is withdrawn and
+                    // the durable rows above remain the audit trail.
+                    super::kernel_execution_admission::withdraw_replace_grant_in_tx(
+                        &transaction,
+                        run_id,
+                        tool_call_id,
+                    )
+                    .map_err(|e| rusqlite::Error::InvalidParameterName(e))?;
+                }
+            }
+            transaction.commit()
         })
     }
+}
+
+
+/// Whether the approval behind one queued command is STILL in force right now.
+///
+/// Read inside the caller's transaction so the ack and the settlement can never
+/// observe different commit points. A missing approval row is not in force
+/// (fail-closed); a stale policy generation, a cancellation, an expiry and a
+/// terminal Run are all not in force.
+fn approval_still_in_force(
+    transaction: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    tool_call_id: &str,
+    command_policy: Option<u64>,
+) -> Result<bool, rusqlite::Error> {
+    let row: Option<(String, Option<u64>, String)> = transaction
+        .query_row(
+            "SELECT a.state,
+                      (SELECT p.version FROM kernel_execution_policies p
+                         JOIN runs r ON r.conversation_id = p.conversation_id
+                        WHERE r.id = ?1),
+                      COALESCE(r.state, legacy.status)
+                 FROM kernel_approvals a
+                 JOIN run_control_bindings b ON b.run_id = a.run_id
+                 JOIN runs legacy ON legacy.id = a.run_id
+        LEFT JOIN kernel_runs r ON r.run_id = a.run_id
+                WHERE a.run_id = ?1 AND a.tool_call_id = ?2",
+            params![run_id, tool_call_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+        .map_err(rusqlite::Error::InvalidParameterName)?;
+    let Some((state, current_policy, run_state)) = row else {
+        return Ok(false);
+    };
+    if !matches!(state.as_str(), "allow_once" | "allow_conversation") {
+        return Ok(false);
+    }
+    // The command must carry the generation it was queued under, and that
+    // generation must still be the live one.
+    match (command_policy, current_policy) {
+        (Some(queued), Some(current)) if queued == current => {}
+        _ => return Ok(false),
+    }
+    if matches!(
+        run_state.as_str(),
+        "completed" | "failed" | "cancelled" | "budget_exhausted" | "approval_expired" | "cancelling"
+    ) {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 pub(super) fn freeze_host_scope_in_tx(

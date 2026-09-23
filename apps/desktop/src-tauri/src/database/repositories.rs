@@ -1499,10 +1499,11 @@ impl Database {
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at,
-                        COALESCE(p.permission_mode, c.permission_mode, 'ask')
+                        COALESCE(kep.mode, c.permission_mode, 'ask')
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
+                 LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
                  WHERE c.conversation_kind = 'primary' AND c.archived = 0 AND c.trashed_at IS NULL
                  ORDER BY c.pinned DESC, COALESCE(c.last_message_at, c.created_at) DESC",
             )?;
@@ -1520,10 +1521,11 @@ impl Database {
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at,
-                        COALESCE(p.permission_mode, c.permission_mode, 'ask')
+                        COALESCE(kep.mode, c.permission_mode, 'ask')
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
+                 LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
                  WHERE c.conversation_kind = 'primary' AND c.archived = 1 AND c.trashed_at IS NULL
                  ORDER BY COALESCE(c.archived_at, c.updated_at) DESC",
             )?;
@@ -1541,10 +1543,11 @@ impl Database {
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at,
-                        COALESCE(p.permission_mode, c.permission_mode, 'ask')
+                        COALESCE(kep.mode, c.permission_mode, 'ask')
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
+                 LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
                  WHERE c.conversation_kind = 'primary' AND c.trashed_at IS NOT NULL
                  ORDER BY c.trashed_at DESC",
             )?;
@@ -1781,10 +1784,11 @@ impl Database {
                         c.parent_conversation_id, c.forked_from_message_id,
                         COALESCE(c.lineage_root_id, c.id),
                         c.created_at, c.updated_at, c.last_message_at,
-                        COALESCE(p.permission_mode, c.permission_mode, 'ask')
+                        COALESCE(kep.mode, c.permission_mode, 'ask')
                  FROM conversations c
                  JOIN agents a ON a.id = c.agent_id
                  LEFT JOIN projects p ON p.id = c.project_id
+                 LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
                  WHERE c.conversation_kind = 'primary' AND c.archived = 0 AND c.trashed_at IS NULL AND (
                        c.title LIKE ?1 ESCAPE '\\'
                     OR COALESCE(p.root_path, c.project_root, '') LIKE ?1 ESCAPE '\\'
@@ -3765,9 +3769,10 @@ impl Database {
             connection
                 .query_row(
                     "SELECT COALESCE(p.root_path, c.project_root),
-                            COALESCE(p.permission_mode, c.permission_mode, 'ask')
+                            COALESCE(kep.mode, c.permission_mode, 'ask')
                      FROM conversations c
                      LEFT JOIN projects p ON p.id = c.project_id
+                     LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
                      WHERE c.id = ?1
                        AND COALESCE(p.root_path, c.project_root) IS NOT NULL",
                     [id],
@@ -3780,9 +3785,10 @@ impl Database {
     pub fn conversation_permission_mode(&self, id: &str) -> Result<String, String> {
         self.with_connection(|connection| {
             connection.query_row(
-                "SELECT COALESCE(p.permission_mode, c.permission_mode, 'ask')
+                "SELECT COALESCE(kep.mode, c.permission_mode, 'ask')
                  FROM conversations c
                  LEFT JOIN projects p ON p.id = c.project_id
+                 LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
                  WHERE c.id = ?1",
                 [id],
                 |row| row.get(0),
@@ -4557,11 +4563,18 @@ impl Database {
             if approved && decision == super::ApprovalDecision::AllowConversation {
                 let scope_key = permission_scope.expect("validated conversation permission scope");
                 transaction.execute(
+                    // A fresh conversation-level approval RE-ACTIVATES the row:
+                    // leaving a previous `revoked_at` in place would make the new
+                    // grant dead on arrival. The revocation generation has
+                    // already advanced, so a Run frozen before it still cannot
+                    // use this new authorization.
                     "INSERT INTO conversation_tool_permissions(
-                         conversation_id, tool_name, scope_key, granted_at
-                     ) VALUES (?1, ?2, ?3, ?4)
+                         conversation_id, tool_name, scope_key, granted_at,
+                         revoked_at, revoke_reason
+                     ) VALUES (?1, ?2, ?3, ?4, NULL, NULL)
                      ON CONFLICT(conversation_id, tool_name, scope_key)
-                     DO UPDATE SET granted_at = excluded.granted_at",
+                     DO UPDATE SET granted_at = excluded.granted_at,
+                                   revoked_at = NULL, revoke_reason = NULL",
                     params![
                         &approval.conversation_id,
                         &approval.tool_name,
@@ -4570,9 +4583,51 @@ impl Database {
                     ],
                 )?;
             }
+            // B) The dedicated whole-file replacement authorization is settled in
+            // the SAME transaction as the ordinary decision, so a waiting
+            // executor can only ever observe both facts together. A denial
+            // withdraws the request immediately and terminally.
+            if existing.request.get("wholeFileReplacement").is_some() {
+                let call_id = Self::tool_call_id_of(&transaction, &approval.tool_call_id)?;
+                let settled = if approved {
+                    super::kernel_execution_admission::confirm_replace_grant_from_approval_in_tx(
+                        &transaction,
+                        &approval.run_id,
+                        &call_id,
+                        now,
+                    )
+                    .map(|_| ())
+                } else {
+                    super::kernel_execution_admission::withdraw_replace_grant_in_tx(
+                        &transaction,
+                        &approval.run_id,
+                        &call_id,
+                    )
+                    .map(|_| ())
+                };
+                if let Err(error) = settled {
+                    // A settlement failure must not leave a half-applied decision:
+                    // roll the whole transaction back rather than approving the
+                    // ordinary decision while the dedicated request stays pending.
+                    return Err(rusqlite::Error::InvalidParameterName(error));
+                }
+            }
             transaction.commit()?;
             Ok(Some(approval))
         })
+    }
+
+    /// The durable Host tool-call identity of one `tool_calls` row, read inside
+    /// the caller's transaction (never a second connection).
+    fn tool_call_id_of(
+        transaction: &rusqlite::Transaction<'_>,
+        tool_call_row_id: &str,
+    ) -> Result<String, rusqlite::Error> {
+        transaction.query_row(
+            "SELECT runtime_tool_call_id FROM tool_calls WHERE id=?1",
+            [tool_call_row_id],
+            |row| row.get(0),
+        )
     }
 
     pub fn claim_approved_tool_call(
@@ -4669,6 +4724,7 @@ impl Database {
                 "SELECT EXISTS(
                     SELECT 1 FROM conversation_tool_permissions
                     WHERE conversation_id = ?1 AND tool_name = ?2 AND scope_key = ?3
+                      AND revoked_at IS NULL
                  )",
                 params![conversation_id, tool_name, scope_key],
                 |row| row.get(0),
@@ -7007,10 +7063,11 @@ fn query_conversation(connection: &Connection, id: &str) -> rusqlite::Result<Con
                 c.parent_conversation_id, c.forked_from_message_id,
                 COALESCE(c.lineage_root_id, c.id),
                 c.created_at, c.updated_at, c.last_message_at,
-                COALESCE(p.permission_mode, c.permission_mode, 'ask')
+                COALESCE(kep.mode, c.permission_mode, 'ask')
          FROM conversations c
          JOIN agents a ON a.id = c.agent_id
          LEFT JOIN projects p ON p.id = c.project_id
+         LEFT JOIN kernel_execution_policies kep ON kep.conversation_id = c.id
          WHERE c.id = ?1",
         [id],
         map_conversation,
@@ -12959,13 +13016,39 @@ mod tests {
             .expect("update permission")
             .expect("project exists");
         assert_eq!(updated.permission_mode, "allow");
+        // REV-03: the project default is copied into a conversation at creation
+        // and never reaches an existing one afterwards. The existing
+        // conversation keeps its own effective mode...
         assert_eq!(
             database
                 .load_conversation(&conversation.id)
                 .expect("reload project conversation")
                 .conversation
                 .permission_mode,
-            "allow"
+            "ask",
+            "a project-default change must not rewrite an existing conversation"
+        );
+        assert_eq!(
+            database
+                .conversation_permission_mode(&conversation.id)
+                .expect("effective mode"),
+            "ask"
+        );
+        // ...while a conversation created afterwards starts from the new default.
+        let later = database
+            .create_conversation(DEFAULT_AGENT_ID, None, root.to_str(), Some("allow"))
+            .expect("create a later project conversation");
+        assert_eq!(
+            database
+                .conversation_permission_mode(&later.id)
+                .expect("the later conversation's effective mode"),
+            "allow",
+            "a conversation created after the default changed starts from it"
+        );
+        assert_eq!(
+            database.execution_policy(&later.id).expect("policy").version,
+            1,
+            "a brand-new conversation's policy starts at generation 1"
         );
         assert!(database
             .update_project_permission_mode(project_id, "unrestricted")

@@ -252,19 +252,34 @@ pub fn issue_dispatch_credential_with_resolver_in_tx(
     // write-class action without an observation stays `None` and is refused at
     // claim time.
     let action_class = operation_class(tool, canonical_input_json);
+    // REV-01: the dispatch's declared `expectedVersion` selects the observation
+    // it was based on. It is never replaced by the newest observation of the
+    // same target, so a stale candidate cannot ride a later read.
+    let declared_version: Option<String> = serde_json::from_str::<serde_json::Value>(canonical_input_json)
+        .ok()
+        .and_then(|input| {
+            input
+                .get("expectedVersion")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        });
     let file_baseline: Option<HostObservation> = match file_target_resolver
         .resolve(action_class, canonical_input_json)
     {
-        Some(target_identity) => host_observation_for_in_tx(transaction, run_id, &target_identity)?,
+        Some(target_identity) => {
+            host_observation_for_version_in_tx(transaction, run_id, &target_identity, declared_version.as_deref())?
+        }
         None => None,
     };
-    let credential = ExecutionCredential::new(
+    let mut credential = ExecutionCredential::new(
         encode_dispatch_id(run_id, tool_call_id)?,
         run_id.to_owned(),
-        conversation_id,
+        conversation_id.clone(),
         launch_params_hash(tool, canonical_input_json),
         action_class,
-        file_baseline,
+        file_baseline.clone(),
         resolved_profile,
         policy_snapshot_id,
         policy_version,
@@ -272,6 +287,44 @@ pub fn issue_dispatch_credential_with_resolver_in_tx(
         parent_generation,
         unverified_backend_requirement(),
     )?;
+    // REV-05: a whole-file replacement whose bound observation did not deliver
+    // the whole content carries its own, purpose-specific authorization,
+    // recorded here in the SAME transaction as the credential so the two can
+    // never disagree.
+    if tool == "write_file" {
+        if let Some(baseline) = file_baseline.as_ref() {
+            if !baseline.authorizes_whole_file_replacement() {
+                let input: serde_json::Value = serde_json::from_str(canonical_input_json)
+                    .map_err(|error| format!("invalid file input: {error}"))?;
+                let content = input
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let candidate = format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())));
+                let request = fox_engine_protocol::canonical_digest(&[
+                    ("conversation", &conversation_id),
+                    ("run", run_id),
+                    ("dispatch", &credential.dispatch_id),
+                    ("target", &baseline.target_identity),
+                    ("version", &baseline.version),
+                    ("candidate", &candidate),
+                ]);
+                propose_replace_grant_in_tx(
+                    transaction,
+                    &format!("replace:{}", credential.dispatch_id),
+                    &conversation_id,
+                    run_id,
+                    &credential.dispatch_id,
+                    &baseline.target_identity,
+                    &baseline.version,
+                    &candidate,
+                    &request,
+                    now,
+                )?;
+                credential = credential.with_replace_grant(candidate, request);
+            }
+        }
+    }
     if has_parent {
         let mut credential = credential;
         if !credential
@@ -328,8 +381,9 @@ pub fn issue_execution_credential_in_tx(
             "INSERT INTO kernel_execution_credentials
                 (run_id, dispatch_id, conversation_id, intent_digest, action_class, file_baseline,
                  resolved_profile, policy_snapshot_id, backend_required, backend_evidence_digest,
-                 credential_digest, credential_json, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 credential_digest, credential_json, created_at,
+                 replace_candidate_digest, replace_request_digest)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 credential.run_id,
                 credential.dispatch_id,
@@ -344,10 +398,465 @@ pub fn issue_execution_credential_in_tx(
                 credential.credential_digest,
                 json,
                 now,
+                credential.replace_candidate_digest,
+                credential.replace_request_digest,
             ],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Whole-file-replacement authorization (REV-05 / coordinator M3).
+//
+// A `write_file` that replaces the whole file needs its own, purpose-specific
+// authorization when the bound observation did not deliver the whole content.
+// An ordinary one-shot approval and a reusable conversation grant can never
+// stand in for it: the grant row is bound to the target, the observed version,
+// the candidate content digest and the request digest, and it is consumed
+// exactly once, inside the same transaction as the persistent claim.
+// ---------------------------------------------------------------------------
+
+/// The immutable identity of one whole-file replacement, derived from durable
+/// Host facts only (never from model text): the canonical target, the observed
+/// version, the candidate content digest and the request digest.
+///
+/// The same value is computed when the approval REQUEST is created and when the
+/// credential is ISSUED, so the two can be compared byte for byte.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceRequestBinding {
+    pub target_identity: String,
+    pub version: String,
+    pub candidate_digest: String,
+    pub request_digest: String,
+}
+
+/// Compute the binding for a `write_file` proposal, or `None` when the bound
+/// observation already delivered the whole content (an ordinary write needs no
+/// dedicated authorization) or the target/observation cannot be resolved.
+pub fn replace_request_binding(
+    conversation_id: &str,
+    run_id: &str,
+    tool_call_id: &str,
+    target_identity: &str,
+    version: &str,
+    content: &str,
+) -> ReplaceRequestBinding {
+    let candidate = format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())));
+    let dispatch_id = encode_dispatch_id(run_id, tool_call_id)
+        .unwrap_or_else(|_| format!("tool-dispatch:0:{run_id}:{tool_call_id}"));
+    let request = fox_engine_protocol::canonical_digest(&[
+        ("conversation", conversation_id),
+        ("run", run_id),
+        ("dispatch", &dispatch_id),
+        ("target", target_identity),
+        ("version", version),
+        ("candidate", &candidate),
+    ]);
+    ReplaceRequestBinding {
+        target_identity: target_identity.to_owned(),
+        version: version.to_owned(),
+        candidate_digest: candidate,
+        request_digest: request,
+    }
+}
+
+/// Whether a `write_file` proposal needs the dedicated authorization at all.
+pub fn needs_replace_grant(baseline: &HostObservation) -> bool {
+    !baseline.authorizes_whole_file_replacement()
+}
+
+/// Propose the purpose-specific whole-file-replacement authorization.
+///
+/// This only records the REQUEST, in `pending`. It never authorizes anything:
+/// the transition to `approved` happens exclusively through
+/// [`approve_replace_grant_in_tx`], which is driven by an explicit human
+/// confirmation. Insert-only (`ON CONFLICT DO NOTHING`) so a repeated proposal
+/// can neither rewrite a pending request nor resurrect a withdrawn one.
+pub fn propose_replace_grant_in_tx(
+    transaction: &Transaction<'_>,
+    grant_id: &str,
+    conversation_id: &str,
+    run_id: &str,
+    dispatch_id: &str,
+    target_identity: &str,
+    version: &str,
+    candidate_digest: &str,
+    request_digest: &str,
+    now: i64,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO kernel_whole_file_replace_grants
+                (grant_id, conversation_id, run_id, dispatch_id, target_identity, version,
+                 candidate_digest, request_digest, state, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', ?9)
+             ON CONFLICT(run_id, dispatch_id) DO NOTHING",
+            params![
+                grant_id,
+                conversation_id,
+                run_id,
+                dispatch_id,
+                target_identity,
+                version,
+                candidate_digest,
+                request_digest,
+                now,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// The ONLY way a whole-file-replacement authorization becomes `approved`: an
+/// explicit human confirmation of this exact request.
+///
+/// A `pending` request transitions to `approved`. Every other state is
+/// terminal — an `expired`, `consumed` or `denied` authorization is never
+/// revived, not even for the same target, version, candidate and request.
+pub fn approve_replace_grant_in_tx(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    dispatch_id: &str,
+    conversation_id: &str,
+    target_identity: &str,
+    version: &str,
+    candidate_digest: &str,
+    request_digest: &str,
+    now: i64,
+) -> Result<(), String> {
+    let row: Option<(String, String, String, String, String, String)> = transaction
+        .query_row(
+            "SELECT state, conversation_id, target_identity, version, candidate_digest, request_digest
+               FROM kernel_whole_file_replace_grants
+              WHERE run_id=?1 AND dispatch_id=?2",
+            params![run_id, dispatch_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((state, stored_conversation, stored_target, stored_version, stored_candidate, stored_request)) =
+        row
+    else {
+        return Err("replace_grant_required: no whole-file replacement request exists for \
+                    this dispatch"
+            .into());
+    };
+    if state != "pending" {
+        return Err(format!(
+            "replace_grant_required: the whole-file replacement request is '{state}' and \
+             cannot be approved"
+        ));
+    }
+    if stored_conversation != conversation_id
+        || stored_target != target_identity
+        || stored_version != version
+        || stored_candidate != candidate_digest
+        || stored_request != request_digest
+    {
+        return Err("replace_grant_mismatch: the confirmation does not match the request".into());
+    }
+    let updated = transaction
+        .execute(
+            "UPDATE kernel_whole_file_replace_grants
+                SET state='approved', decided_at=?3
+              WHERE run_id=?1 AND dispatch_id=?2 AND state='pending'",
+            params![run_id, dispatch_id, now],
+        )
+        .map_err(|error| error.to_string())?;
+    if updated != 1 {
+        return Err("replace_grant_required: the request was not pending".into());
+    }
+    Ok(())
+}
+
+/// Consume the replacement authorization for one dispatch, atomically with the
+/// persistent claim. Exactly one caller across all connections wins; every
+/// other request reads the already-consumed fact.
+pub fn consume_replace_grant_in_tx(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    dispatch_id: &str,
+    conversation_id: &str,
+    target_identity: &str,
+    version: &str,
+    candidate_digest: &str,
+    request_digest: &str,
+    now: i64,
+) -> Result<(), String> {
+    let row: Option<(String, String, String, String, String, String)> = transaction
+        .query_row(
+            "SELECT state, conversation_id, target_identity, version, candidate_digest, request_digest
+               FROM kernel_whole_file_replace_grants
+              WHERE run_id=?1 AND dispatch_id=?2",
+            params![run_id, dispatch_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((state, stored_conversation, stored_target, stored_version, stored_candidate, stored_request)) =
+        row
+    else {
+        return Err("replace_grant_required: no whole-file replacement authorization exists \
+                    for this dispatch"
+            .into());
+    };
+    if state != "approved" {
+        return Err(format!(
+            "replace_grant_required: the whole-file replacement authorization is '{state}'"
+        ));
+    }
+    if stored_conversation != conversation_id
+        || stored_target != target_identity
+        || stored_version != version
+        || stored_candidate != candidate_digest
+        || stored_request != request_digest
+    {
+        return Err("replace_grant_mismatch: the authorization does not match this exact \
+                    conversation, target, version, candidate and request"
+            .into());
+    }
+    transaction
+        .execute(
+            "UPDATE kernel_whole_file_replace_grants
+                SET state='consumed', consumed_at=?3
+              WHERE run_id=?1 AND dispatch_id=?2 AND state='approved'",
+            params![run_id, dispatch_id, now],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Confirm the replacement request bound to one approval record, inside the
+/// caller's transaction.
+///
+/// The four-tuple is read from the APPROVAL RECORD's immutable request — never
+/// from the authorization row — and a valid `approved` decision is mandatory, so
+/// an ordinary write approval can never be read as a replacement authorization.
+/// Returns `Ok(true)` when a request was confirmed, `Ok(false)` when the call has
+/// no replacement request at all.
+pub fn confirm_replace_grant_from_approval_in_tx(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    tool_call_id: &str,
+    now: i64,
+) -> Result<bool, String> {
+    // The immutable binding travels on the projected approval record; the
+    // DECISION is the durable Kernel fact when one exists, and the projected
+    // status only for a Legacy run. The projection is refreshed after the
+    // transition, so it may still read `pending` at acknowledgement time.
+    let record: Option<(String, Option<String>, String, Option<String>)> = transaction
+        .query_row(
+            "SELECT t.tool_name, a.request_json, a.status,
+                    (SELECT k.state FROM kernel_approvals k
+                      WHERE k.run_id=t.run_id AND k.tool_call_id=t.runtime_tool_call_id)
+               FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
+              WHERE t.run_id=?1 AND t.runtime_tool_call_id=?2",
+            params![run_id, tool_call_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((tool_name, request_json, projected_status, kernel_state)) = record else {
+        return Ok(false);
+    };
+    if tool_name != "write_file" {
+        return Ok(false);
+    }
+    let decision = kernel_state.as_deref().unwrap_or(projected_status.as_str());
+    if !matches!(decision, "allow_once" | "allow_conversation" | "approved") {
+        return Err(format!(
+            "replace_grant_required: the approval is '{decision}'; only an approved decision \
+             can confirm a whole-file replacement"
+        ));
+    }
+    let request: serde_json::Value = request_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let Some(binding) = request.get("wholeFileReplacement") else {
+        // An ordinary write approval must never implicitly grant the dedicated
+        // authorization.
+        return Ok(false);
+    };
+    let text = |key: &str| {
+        binding
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let (Some(target_identity), Some(version), Some(candidate_digest), Some(request_digest)) = (
+        text("targetIdentity"),
+        text("baselineVersion"),
+        text("candidateDigest"),
+        text("requestDigest"),
+    ) else {
+        return Err(
+            "replace_grant_mismatch: the approval record carries an incomplete replacement binding"
+                .into(),
+        );
+    };
+    let conversation_id = transaction
+        .query_row(
+            "SELECT COALESCE((SELECT conversation_id FROM run_control_bindings WHERE run_id=?1),
+                             (SELECT conversation_id FROM runs WHERE id=?1))",
+            [run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let dispatch_id = encode_dispatch_id(run_id, tool_call_id).map_err(|e| e.to_string())?;
+    approve_replace_grant_in_tx(
+        transaction,
+        run_id,
+        &dispatch_id,
+        &conversation_id,
+        &target_identity,
+        &version,
+        &candidate_digest,
+        &request_digest,
+        now,
+    )?;
+    Ok(true)
+}
+
+/// Withdraw the replacement request bound to one DENIED approval, inside the
+/// caller's transaction.
+pub fn withdraw_replace_grant_in_tx(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    tool_call_id: &str,
+) -> Result<bool, String> {
+    let dispatch_id = encode_dispatch_id(run_id, tool_call_id).map_err(|e| e.to_string())?;
+    let withdrawn = transaction
+        .execute(
+            "UPDATE kernel_whole_file_replace_grants
+                SET state='expired'
+              WHERE run_id=?1 AND dispatch_id=?2 AND state IN ('pending','approved')",
+            params![run_id, dispatch_id],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(withdrawn > 0)
+}
+
+/// Withdraw every unconsumed replacement authorization in a conversation. A
+/// user tightening the permission mode must not leave a standing whole-file
+/// replacement permission behind (REV-04 / REV-05).
+pub fn revoke_replace_grants_in_tx(
+    transaction: &Transaction<'_>,
+    conversation_id: &str,
+) -> Result<usize, String> {
+    transaction
+        .execute(
+            "UPDATE kernel_whole_file_replace_grants
+                SET state='expired'
+              WHERE conversation_id=?1 AND state IN ('approved','pending')",
+            params![conversation_id],
+        )
+        .map_err(|error| error.to_string())
+}
+
+impl Database {
+    /// Propose a whole-file replacement from an immutable binding. Insert-only:
+    /// a row that is already `approved` or `consumed` is never rewritten, and a
+    /// withdrawn one is never revived.
+    pub fn propose_whole_file_replacement(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+        tool_call_id: &str,
+        binding: &ReplaceRequestBinding,
+    ) -> Result<(), String> {
+        let dispatch_id = fox_engine_protocol::encode_dispatch_id(run_id, tool_call_id)
+            .map_err(|error| error.to_string())?;
+        self.with_connection(|connection| {
+            let transaction = connection.transaction_with_behavior(
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            propose_replace_grant_in_tx(
+                &transaction,
+                &format!("replace:{dispatch_id}"),
+                conversation_id,
+                run_id,
+                &dispatch_id,
+                &binding.target_identity,
+                &binding.version,
+                &binding.candidate_digest,
+                &binding.request_digest,
+                now_ms(),
+            )
+            .map_err(|error| rusqlite::Error::InvalidParameterName(error))?;
+            transaction.commit()
+        })
+    }
+
+    /// Withdraw every unconsumed replacement request in a conversation
+    /// immediately (a `deny`, or a tightening of the permission mode).
+    pub fn withdraw_whole_file_replacements(
+        &self,
+        conversation_id: &str,
+    ) -> Result<usize, String> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction_with_behavior(
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let withdrawn = revoke_replace_grants_in_tx(&transaction, conversation_id)
+                .map_err(|error| rusqlite::Error::InvalidParameterName(error))?;
+            transaction.commit()?;
+            Ok(withdrawn)
+        })
+    }
+
+    /// The explicit human confirmation of one whole-file replacement. The only
+    /// path that turns a `pending` request into an `approved` authorization.
+    pub fn approve_whole_file_replacement(
+        &self,
+        run_id: &str,
+        dispatch_id: &str,
+        conversation_id: &str,
+        target_identity: &str,
+        version: &str,
+        candidate_digest: &str,
+        request_digest: &str,
+    ) -> Result<(), String> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction_with_behavior(
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            approve_replace_grant_in_tx(
+                &transaction,
+                run_id,
+                dispatch_id,
+                conversation_id,
+                target_identity,
+                version,
+                candidate_digest,
+                request_digest,
+                now_ms(),
+            )
+            .map_err(|error| rusqlite::Error::InvalidParameterName(error))?;
+            transaction.commit()
+        })
+    }
 }
 
 fn read_credential_in_tx(
@@ -450,6 +959,34 @@ impl Database {
     }
 
     /// Issue (or idempotently re-read) the authoritative credential.
+    /// Issue (or re-read) the authoritative credential for one dispatch, in its
+    /// own `IMMEDIATE` transaction. The caller supplies only durable identity:
+    /// the run, the tool call, the tool and the canonical input.
+    pub fn issue_dispatch_credential(
+        &self,
+        run_id: &str,
+        tool_call_id: &str,
+        tool: &str,
+        canonical_input_json: &str,
+    ) -> Result<Option<ExecutionCredential>, String> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction_with_behavior(
+                rusqlite::TransactionBehavior::Immediate,
+            )?;
+            let credential = issue_dispatch_credential_in_tx(
+                &transaction,
+                run_id,
+                tool_call_id,
+                tool,
+                canonical_input_json,
+                now_ms(),
+            )
+            .map_err(|error| rusqlite::Error::InvalidParameterName(error))?;
+            transaction.commit()?;
+            Ok(credential)
+        })
+    }
+
     pub fn issue_execution_credential(
         &self,
         credential: &ExecutionCredential,
@@ -615,6 +1152,54 @@ impl Database {
                     return Ok(AttemptOutcome::AlreadyRefused {
                         code: code.to_string(),
                     });
+                }
+                // 3b) A whole-file replacement consumes its purpose-specific
+                //     authorization HERE, in the same IMMEDIATE transaction as
+                //     the persistent claim. Exactly one caller wins both; a
+                //     missing, already-consumed or mismatching authorization is
+                //     a persistent terminal refusal, never a silent proceed.
+                if presented.requires_replace_grant {
+                    let baseline = presented.file_baseline.as_ref().ok_or_else(|| {
+                        rusqlite::Error::InvalidParameterName(
+                            "replace_grant_required: a replacement dispatch has no file baseline"
+                                .into(),
+                        )
+                    })?;
+                    let candidate = presented.replace_candidate_digest.clone().ok_or_else(|| {
+                        rusqlite::Error::InvalidParameterName(
+                            "replace_grant_required: the dispatch carries no candidate digest".into(),
+                        )
+                    })?;
+                    let request = presented.replace_request_digest.clone().ok_or_else(|| {
+                        rusqlite::Error::InvalidParameterName(
+                            "replace_grant_required: the dispatch carries no request digest".into(),
+                        )
+                    })?;
+                    if let Err(error) = consume_replace_grant_in_tx(
+                        &transaction,
+                        run_id,
+                        &presented.dispatch_id,
+                        conversation_id,
+                        &baseline.target_identity,
+                        &baseline.version,
+                        &candidate,
+                        &request,
+                        now,
+                    ) {
+                        let code = error
+                            .split(':')
+                            .next()
+                            .unwrap_or("replace_grant_required")
+                            .to_owned();
+                        transaction.execute(
+                            "UPDATE kernel_execution_attempts
+                                SET state='refused', refusal_code=?3, updated_at=?4
+                              WHERE run_id=?1 AND dispatch_id=?2 AND state='claimed'",
+                            params![run_id, presented.dispatch_id, code, now],
+                        )?;
+                        transaction.commit()?;
+                        return Ok(AttemptOutcome::AlreadyRefused { code });
+                    }
                 }
                 transaction.commit()?;
                 return Ok(AttemptOutcome::Claimed);
@@ -829,6 +1414,39 @@ impl Database {
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             host_observation_for_in_tx(&transaction, run_id, target_identity)
+                .map_err(|error| rusqlite::Error::InvalidParameterName(error))
+        })
+    }
+
+    /// Resolve the observation a request is bound to.
+    ///
+    /// REV-01: `Some(version)` selects the record that observed exactly that
+    /// version — the model's declared precondition. It is never replaced by a
+    /// newer observation. `None` means the request declared nothing, and the
+    /// most recent record for the target is used.
+    pub fn host_observation_for_version(
+        &self,
+        run_id: &str,
+        target_identity: &str,
+        version: Option<&str>,
+    ) -> Result<Option<HostObservation>, String> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            host_observation_for_version_in_tx(&transaction, run_id, target_identity, version)
+                .map_err(|error| rusqlite::Error::InvalidParameterName(error))
+        })
+    }
+
+    /// Every observation of one target in this run, newest first (REV-05
+    /// fragment-coverage checks and append-only assertions).
+    pub fn host_observations_for_target(
+        &self,
+        run_id: &str,
+        target_identity: &str,
+    ) -> Result<Vec<HostObservation>, String> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            host_observations_for_target_in_tx(&transaction, run_id, target_identity)
                 .map_err(|error| rusqlite::Error::InvalidParameterName(error))
         })
     }
@@ -1148,8 +1766,19 @@ fn issue_legacy_file_credential_in_tx(
     let target_identity = resolver
         .resolve(action_class, &canonical_input_json)
         .ok_or_else(|| "legacy file credential target is invalid".to_owned())?;
-    let file_baseline = host_observation_for_in_tx(transaction, run_id, &target_identity)?
-        .ok_or_else(|| "observation_incomplete".to_owned())?;
+    let declared_version: Option<String> = serde_json::from_str::<serde_json::Value>(&canonical_input_json)
+        .ok()
+        .and_then(|input| {
+            input
+                .get("expectedVersion")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        });
+    let file_baseline =
+        host_observation_for_version_in_tx(transaction, run_id, &target_identity, declared_version.as_deref())?
+            .ok_or_else(|| "observation_incomplete".to_owned())?;
     if file_baseline.observed_by_tool_call_id.trim().is_empty() {
         return Err("observation_incomplete".into());
     }
@@ -1165,13 +1794,13 @@ fn issue_legacy_file_credential_in_tx(
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let credential = ExecutionCredential::new(
+    let mut credential = ExecutionCredential::new(
         encode_dispatch_id(run_id, runtime_tool_call_id)?,
         run_id.to_owned(),
-        conversation_id,
+        conversation_id.clone(),
         launch_params_hash(&tool, &canonical_input_json),
         action_class,
-        Some(file_baseline),
+        Some(file_baseline.clone()),
         binding.execution_profile_id,
         binding.permission_snapshot_id,
         Some(current_policy_version),
@@ -1179,6 +1808,38 @@ fn issue_legacy_file_credential_in_tx(
         parent_generation,
         unverified_backend_requirement(),
     )?;
+    // REV-05: same purpose-specific authorization as the Kernel path, recorded
+    // in the same transaction so credential and grant can never disagree.
+    if tool == "write_file" && !file_baseline.authorizes_whole_file_replacement() {
+        let input: serde_json::Value = serde_json::from_str(&canonical_input_json)
+            .map_err(|error| format!("invalid file input: {error}"))?;
+        let content = input
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let candidate = format!("sha256:{}", hex::encode(Sha256::digest(content.as_bytes())));
+        let request = fox_engine_protocol::canonical_digest(&[
+            ("conversation", &conversation_id),
+            ("run", run_id),
+            ("dispatch", &credential.dispatch_id),
+            ("target", &file_baseline.target_identity),
+            ("version", &file_baseline.version),
+            ("candidate", &candidate),
+        ]);
+        propose_replace_grant_in_tx(
+            transaction,
+            &format!("replace:{}", credential.dispatch_id),
+            &conversation_id,
+            run_id,
+            &credential.dispatch_id,
+            &file_baseline.target_identity,
+            &file_baseline.version,
+            &candidate,
+            &request,
+            now,
+        )?;
+        credential = credential.with_replace_grant(candidate, request);
+    }
     issue_execution_credential_in_tx(transaction, &credential, now)?;
     read_credential_in_tx(transaction, run_id, &credential.dispatch_id)?
         .ok_or_else(|| "legacy credential was not persisted".to_owned())
@@ -1367,22 +2028,31 @@ pub fn record_host_observation_in_tx(
     {
         return Err("invalid Host observation scope or identity".into());
     }
+    // Append-only: each durable read is its own immutable record. A later read
+    // never overwrites an earlier one, so a request that declared an older
+    // version can still find the fact it was based on (REV-01).
     transaction
         .execute(
             "INSERT INTO kernel_host_observations
-                (run_id, conversation_id, target_identity, version, observed_by_tool_call_id, observed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(run_id, target_identity) DO UPDATE SET
-                version=excluded.version,
-                observed_by_tool_call_id=excluded.observed_by_tool_call_id,
-                observed_at=excluded.observed_at",
+                (observation_id, run_id, conversation_id, target_identity, version,
+                 observed_by_tool_call_id, observed_at, view_kind, covered_whole_file,
+                 range_start, range_end, total_units, truncated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(observation_id) DO NOTHING",
             params![
+                format!("obs:{}:{}", run_id, observation.observed_by_tool_call_id),
                 run_id,
                 conversation_id,
                 observation.target_identity,
                 observation.version,
                 observation.observed_by_tool_call_id,
                 now,
+                observation.view_kind.as_str(),
+                i64::from(observation.covered_whole_file),
+                observation.range_start,
+                observation.range_end,
+                observation.total_units,
+                i64::from(observation.truncated),
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -1392,27 +2062,107 @@ pub fn record_host_observation_in_tx(
 /// Read the authoritative observation for one target identity. The caller
 /// (A1) supplies the canonical target identity computed by the Host file
 /// layer; this module never canonicalizes paths itself.
+///
+/// REV-01: selection is by an explicit version reference, never "the newest".
+/// When several reads observed the same version, the caller decides which one
+/// a request is bound to; this helper only resolves one concrete record.
 pub fn host_observation_for_in_tx(
     transaction: &Transaction<'_>,
     run_id: &str,
     target_identity: &str,
 ) -> Result<Option<HostObservation>, String> {
-    transaction
-        .query_row(
-            "SELECT target_identity, version, observed_by_tool_call_id
+    host_observation_for_version_in_tx(transaction, run_id, target_identity, None)
+}
+
+/// Resolve the observation a request is bound to: the one that observed exactly
+/// `version` (the model's declared precondition), or — only when the request
+/// declared nothing — the most recent record for the target. A declared version
+/// with no matching record is a conflict the caller must report, never a reason
+/// to silently upgrade to a newer observation.
+pub fn host_observation_for_version_in_tx(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    target_identity: &str,
+    version: Option<&str>,
+) -> Result<Option<HostObservation>, String> {
+    let sql = match version {
+        Some(_) => {
+            "SELECT observation_id, target_identity, version, observed_by_tool_call_id,
+                    view_kind, covered_whole_file, range_start, range_end, total_units, truncated
                FROM kernel_host_observations
-              WHERE run_id=?1 AND target_identity=?2",
-            params![run_id, target_identity],
-            |row| {
-                Ok(HostObservation {
-                    target_identity: row.get(0)?,
-                    version: row.get(1)?,
-                    observed_by_tool_call_id: row.get(2)?,
-                })
-            },
+              WHERE run_id=?1 AND target_identity=?2 AND version=?3
+              ORDER BY covered_whole_file DESC, observed_at DESC, observation_id ASC
+              LIMIT 1"
+        }
+        None => {
+            "SELECT observation_id, target_identity, version, observed_by_tool_call_id,
+                    view_kind, covered_whole_file, range_start, range_end, total_units, truncated
+               FROM kernel_host_observations
+              WHERE run_id=?1 AND target_identity=?2
+              ORDER BY observed_at DESC, observation_id ASC
+              LIMIT 1"
+        }
+    };
+    let row = |r: &rusqlite::Row<'_>| {
+        Ok(HostObservation {
+            target_identity: r.get(1)?,
+            version: r.get(2)?,
+            observed_by_tool_call_id: r.get(3)?,
+            view_kind: fox_engine_protocol::ObservationView::from_str(&r.get::<_, String>(4)?)
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e))?,
+            covered_whole_file: r.get::<_, i64>(5)? != 0,
+            range_start: r.get(6)?,
+            range_end: r.get(7)?,
+            total_units: r.get(8)?,
+            truncated: r.get::<_, i64>(9)? != 0,
+        })
+    };
+    match version {
+        Some(version) => transaction
+            .query_row(sql, params![run_id, target_identity, version], row)
+            .optional()
+            .map_err(|e| e.to_string()),
+        None => transaction
+            .query_row(sql, params![run_id, target_identity], row)
+            .optional()
+            .map_err(|e| e.to_string()),
+    }
+}
+
+/// Every observation of one target in this run, newest first. Used by the
+/// fragment-coverage check (REV-05) and by tests that assert the registry is
+/// append-only.
+pub fn host_observations_for_target_in_tx(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    target_identity: &str,
+) -> Result<Vec<HostObservation>, String> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT observation_id, target_identity, version, observed_by_tool_call_id,
+                    view_kind, covered_whole_file, range_start, range_end, total_units, truncated
+               FROM kernel_host_observations
+              WHERE run_id=?1 AND target_identity=?2
+              ORDER BY observed_at DESC, observation_id ASC",
         )
-        .optional()
-        .map_err(|error| error.to_string())
+        .map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map(params![run_id, target_identity], |r| {
+            Ok(HostObservation {
+                target_identity: r.get(1)?,
+                version: r.get(2)?,
+                observed_by_tool_call_id: r.get(3)?,
+                view_kind: fox_engine_protocol::ObservationView::from_str(&r.get::<_, String>(4)?)
+                    .map_err(|e| rusqlite::Error::InvalidParameterName(e))?,
+                covered_whole_file: r.get::<_, i64>(5)? != 0,
+                range_start: r.get(6)?,
+                range_end: r.get(7)?,
+                total_units: r.get(8)?,
+                truncated: r.get::<_, i64>(9)? != 0,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1500,6 +2250,7 @@ mod tests {
                 target_identity,
                 version: "sha256:before".into(),
                 observed_by_tool_call_id: "read-before-write".into(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1648,6 +2399,7 @@ mod tests {
                 target_identity: "notes/a.txt".into(),
                 version: "v7".into(),
                 observed_by_tool_call_id: "read-9".into(),
+            ..Default::default()
             },
         )
         .unwrap();
@@ -1674,10 +2426,34 @@ mod tests {
             .with_connection(|c| {
                 let transaction =
                     c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                // The declared precondition names the version the Run actually
+                // observed. It is a *reference*, never the baseline itself.
                 let issued = issue_dispatch_credential_with_resolver_in_tx(
                     &transaction,
                     &run,
                     "call-1",
+                    "write_file",
+                    "{\"path\":\"a.txt\",\"expectedVersion\":\"v7\"}",
+                    1,
+                    &NotesResolver,
+                )
+                .map_err(|error| rusqlite::Error::InvalidParameterName(error))?;
+                transaction.commit()?;
+                Ok(issued)
+            })
+            .unwrap()
+            .expect("a write with a resolvable target is issued");
+        // A declared version this Run never observed has NO baseline, so the
+        // dispatch cannot be claimed (fail-closed) instead of riding the newest
+        // observation.
+        let unobserved = db
+            .with_connection(|c| {
+                let transaction =
+                    c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let issued = issue_dispatch_credential_with_resolver_in_tx(
+                    &transaction,
+                    &run,
+                    "call-3",
                     "write_file",
                     "{\"path\":\"a.txt\",\"expectedVersion\":\"v1-model-claim\"}",
                     1,
@@ -1688,7 +2464,11 @@ mod tests {
                 Ok(issued)
             })
             .unwrap()
-            .expect("a write with a resolvable target is issued");
+            .expect("issuance itself succeeds");
+        assert_eq!(
+            unobserved.file_baseline, None,
+            "a never-observed declared version must not resolve to a baseline"
+        );
         // The baseline is the HOST OBSERVATION, never the model's declared version.
         assert_eq!(
             issued.file_baseline,
@@ -1696,6 +2476,7 @@ mod tests {
                 target_identity: "notes/a.txt".into(),
                 version: "v7".into(),
                 observed_by_tool_call_id: "read-9".into(),
+            ..Default::default()
             })
         );
         assert_ne!(
@@ -1766,7 +2547,7 @@ mod tests {
                 &issued,
                 &launch_params_hash(
                     "write_file",
-                    "{\"path\":\"a.txt\",\"expectedVersion\":\"v1-model-claim\"}",
+                    "{\"path\":\"a.txt\",\"expectedVersion\":\"v7\"}",
                 ),
                 "owner-a",
             )
@@ -1785,6 +2566,7 @@ mod tests {
             target_identity: "notes/a.txt".into(),
             version: "v8".into(),
             observed_by_tool_call_id: "read-10".into(),
+            ..Default::default()
         });
         tampered.credential_digest = tampered.recompute_digest();
         assert!(db.issue_execution_credential(&tampered).is_err());
@@ -1822,7 +2604,7 @@ mod tests {
             connection
                 .execute_batch(
                     "DROP TABLE kernel_execution_credentials;
-                     DELETE FROM schema_migrations WHERE version = 75;",
+                     DELETE FROM schema_migrations WHERE version >= 75;",
                 )
                 .unwrap();
             connection.execute_batch(V74_CREDENTIALS_TABLE).unwrap();
@@ -2337,6 +3119,7 @@ mod tests {
                 target_identity: "a.txt".into(),
                 version: "v1".into(),
                 observed_by_tool_call_id: "read-1".into(),
+            ..Default::default()
             }),
             None,
         );
@@ -2504,6 +3287,7 @@ mod tests {
             target_identity: "a.txt".into(),
             version: "v7".into(),
             observed_by_tool_call_id: "read-9".into(),
+            ..Default::default()
         };
         db.record_host_observation(&run, &conversation, &observation)
             .unwrap();

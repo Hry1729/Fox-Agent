@@ -36,6 +36,7 @@ fn artifact_gate_fixture() -> (Database, PathBuf, String, String, std::path::Pat
         mode: PermissionMode::Allow,
         project_root: Some(root.to_string_lossy().into_owned()),
         grants: vec![],
+        approval_epoch: None,
     };
     let binding = RunControlBinding {
         schema_version: 1,

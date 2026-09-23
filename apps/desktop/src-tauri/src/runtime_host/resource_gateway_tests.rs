@@ -19,9 +19,16 @@ fn legacy_file_read_claim_commit_and_duplicate_use_the_real_host_chain() {
     execute_rust_reader_request(&db, &request(&binding,"read-source"), &read_token).unwrap();
     // Read the exact Host-persisted authority, never a model version claim.
     let resolver = managed_files::HostFileTargetResolver { project_root: &root };
-    let input = json!({"path":"note.txt","content":"committed","expectedVersion":"model-forgery"});
-    let identity = crate::database::kernel_execution_admission::FileTargetResolver::resolve(&resolver, fox_engine_protocol::ActionClass::Write, &input.to_string()).unwrap();
+    let identity = crate::database::kernel_execution_admission::FileTargetResolver::resolve(
+        &resolver,
+        fox_engine_protocol::ActionClass::Write,
+        &json!({"path":"note.txt","content":"committed"}).to_string(),
+    )
+    .unwrap();
     let observed = db.host_observation_for(&run.id, &identity).unwrap().unwrap();
+    // The model's declared precondition REFERENCES the observed version; the
+    // baseline still comes from the Host record, never from the claim.
+    let input = json!({"path":"note.txt","content":"committed","expectedVersion":observed.version});
     create_fresh_host_tool_call(&db, &run.id, "write-once", "write_file", &input, "running", false).unwrap();
     let token = registry.tool_token(&run.id, "write-once").unwrap();
     let version = db.execution_policy(&conversation.id).unwrap().version;

@@ -294,8 +294,62 @@ impl GatewayPolicy {
         }
     }
 
+    /// The frozen grants that are still in force *right now*.
+    ///
+    /// REV-04 / M2: a grant frozen into an already-running Run must not outlive
+    /// the approval it came from. `ApprovalReuse` grants are therefore
+    /// re-checked against the live authorization rows on every use, so a user
+    /// who tightens the permission mode (or revokes the approval) immediately
+    /// stops a Run that was frozen before the change. `Resource` grants are
+    /// facts about the Run itself and are never re-queried.
+    pub(super) fn live_frozen_grants(&self) -> Vec<fox_engine_protocol::PermissionGrant> {
+        let Some(database) = self.database.as_ref() else {
+            return self.binding.permission.grants.clone();
+        };
+        // A reusable approval is bound to the generation that issued it.
+        //
+        // * `Some(frozen)` and the generation still matches: the approval may
+        //   still be in force, subject to the per-grant liveness check below.
+        // * `Some(frozen)` and the generation has moved on: a revocation
+        //   happened, so this Run's approval-reuse grants are dead — even if the
+        //   identical (tool, scope) was granted again afterwards.
+        // * `None`: the binding predates the field, so the original approval
+        //   identity CANNOT be proven. An approval-reuse entry must not
+        //   authorize; a NEW explicit approval still works because it produces a
+        //   fresh binding with a recorded generation.
+        //
+        // Only `ApprovalReuse` entries are affected. `Resource` entries are
+        // facts about the Run itself and are never filtered.
+        let epoch_matches = match self.binding.permission.approval_epoch {
+            Some(frozen) => database
+                .execution_policy(&self.binding.conversation_id)
+                .ok()
+                .map(|policy| policy.version)
+                == Some(frozen),
+            None => false,
+        };
+        self.binding
+            .permission
+            .grants
+            .iter()
+            .filter(|grant| match grant.kind {
+                fox_engine_protocol::GrantKind::Resource => true,
+                fox_engine_protocol::GrantKind::ApprovalReuse => {
+                    epoch_matches
+                        && database
+                            .conversation_tool_permission_granted(
+                                &self.binding.conversation_id,
+                                &grant.tool,
+                                &grant.scope,
+                            )
+                            .unwrap_or(false)
+                }
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Trusted Office authorization derived solely from the frozen Run binding:
-    /// the model contributes only the artifact id, never the conversation.
     /// Production sets both fields; policy unit tests that freeze only a scope
     /// get `None` and keep the inline-only preparation path.
     fn office_call_context(&self) -> Option<crate::office::OfficeCallContext<'_>> {
@@ -442,17 +496,158 @@ impl GatewayPolicy {
             let mut checked = input.clone();
             if matches!(tool, "write_file" | "edit_file") {
                 if let Some(db) = &self.database {
-                    let target = crate::tool_host::canonical_file_identity(std::path::Path::new(root),
-                        input["path"].as_str().ok_or("[tool.invalid_input] missing file path")?)?;
-                    let baseline = db.host_observation_for(&self.binding.run_id, &target)?
-                        .ok_or("[tool.file_conflict] Read the target before writing; no Host observation exists")?;
+                    let path_text = input["path"].as_str().ok_or("[tool.invalid_input] missing file path")?;
+                    let target = crate::tool_host::canonical_file_identity(std::path::Path::new(root), path_text)?;
+                    // REV-01: the model's declared `expectedVersion` is a
+                    // *precondition claim*. It is verified against this Run's
+                    // observations and never silently upgraded to the newest
+                    // one, so a stale candidate cannot ride a later read.
+                    let declared = input
+                        .get("expectedVersion")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    let baseline = db
+                        .host_observation_for_version(&self.binding.run_id, &target, declared)?
+                        .ok_or_else(|| match declared {
+                            Some(version) => format!(
+                                "[tool.file_conflict] No Host observation of {version} exists in this Run; \
+                                 read the target again and retry with its readVersion"
+                            ),
+                            None => "[tool.file_conflict] Read the target before writing; no Host observation exists".to_owned(),
+                        })?;
                     checked["expectedVersion"] = json!(baseline.version);
                     checked.as_object_mut().map(|o| o.remove("readVersion"));
+                    // REV-05: a precise edit may rest on a partial read, but the
+                    // fragment it replaces must itself have been delivered.
+                    if tool == "edit_file" {
+                        self.require_observed_fragment(db, &baseline, &input)?;
+                    }
                 }
             }
             crate::tool_host::prepare(tool, &checked, root)?;
         }
         Ok(())
+    }
+
+    /// REV-05 fragment coverage: the `oldText` an `edit_file` replaces must lie
+    /// inside a range this Run actually delivered for the bound version. The
+    /// Host locates the fragment in that version's own text, so a model cannot
+    /// claim coverage it never received.
+    #[allow(clippy::too_many_arguments)]
+    fn require_observed_fragment(
+        &self,
+        db: &Database,
+        baseline: &fox_engine_protocol::HostObservation,
+        input: &Value,
+    ) -> Result<(), String> {
+        let old_text = input
+            .get("oldText")
+            .and_then(Value::as_str)
+            .ok_or("[tool.invalid_input] edit_file requires a string oldText")?;
+        if old_text.is_empty() {
+            return Err("[tool.invalid_input] oldText must not be empty".to_owned());
+        }
+        let root = self
+            .binding
+            .permission
+            .project_root
+            .as_deref()
+            .ok_or("tool requires a frozen project root")?;
+        let target = crate::tool_host::canonical_file_identity(std::path::Path::new(root), input["path"].as_str().unwrap_or_default())?;
+        // The version's own text, read back by the Host and re-hashed, so the
+        // fragment is located against exactly the bytes the observation named.
+        let bytes = std::fs::read(&target).map_err(|error| format!("[tool.file_conflict] cannot re-read the target: {error}"))?;
+        if crate::tool_host::file_version(&bytes) != baseline.version {
+            return Err(crate::tool_host::ToolErrorCode::Conflict.error(
+                "File changed since the bound observation; read it again and retry",
+            ));
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let needle: Vec<u16> = old_text.encode_utf16().collect();
+        if needle.is_empty() || needle.len() > units.len() {
+            return Err(crate::tool_host::ToolErrorCode::Conflict.error(
+                "the replaced fragment was not delivered by any read in this Run",
+            ));
+        }
+        // Every occurrence the edit will touch. `replaceAll` replaces all of
+        // them, so each one must have been delivered; a single-match edit only
+        // needs its own occurrence covered.
+        let replace_all = input
+            .get("replaceAll")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mut occurrences: Vec<(u64, u64)> = units
+            .windows(needle.len())
+            .enumerate()
+            .filter(|(_, window)| *window == needle.as_slice())
+            .map(|(index, _)| (index as u64, index as u64 + needle.len() as u64))
+            .collect();
+        if occurrences.is_empty() {
+            return Err(crate::tool_host::ToolErrorCode::Conflict.error(
+                "the replaced fragment is not present in the observed version",
+            ));
+        }
+        if !replace_all {
+            occurrences.truncate(1);
+        }
+        let observed = db.host_observations_for_target(&self.binding.run_id, &target)?;
+        for (start, end) in occurrences {
+            let covered = observed
+                .iter()
+                .filter(|observation| observation.version == baseline.version)
+                .any(|observation| observation.covers_units(start, end));
+            if !covered {
+                return Err(crate::tool_host::ToolErrorCode::Conflict.error(
+                    "the replaced fragment was not delivered by any read in this Run",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// REV-05 whole-file replacement: `write_file` replaces the entire content,
+    /// so it needs either a full-content observation of the bound version or an
+    /// explicit, purpose-specific replacement authorization. Returns the reason
+    /// a dedicated approval is required, or `None` when the read already
+    /// delivered the whole file.
+    fn whole_file_replacement_gap(&self, tool: &str, input: &Value) -> Result<Option<String>, String> {
+        if tool != "write_file" {
+            return Ok(None);
+        }
+        let Some(db) = &self.database else {
+            return Ok(None);
+        };
+        let root = self
+            .binding
+            .permission
+            .project_root
+            .as_deref()
+            .ok_or("tool requires a frozen project root")?;
+        let Some(path_text) = input["path"].as_str() else {
+            return Ok(None);
+        };
+        let target = match crate::tool_host::canonical_file_identity(std::path::Path::new(root), path_text) {
+            Ok(target) => target,
+            Err(_) => return Ok(None),
+        };
+        let declared = input
+            .get("expectedVersion")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let observation = db.host_observation_for_version(&self.binding.run_id, &target, declared)?;
+        match observation {
+            Some(observation) if observation.authorizes_whole_file_replacement() => Ok(None),
+            Some(_) => Ok(Some(
+                "whole-file replacement needs a complete same-version read or an explicit \
+                 replacement confirmation"
+                    .to_owned(),
+            )),
+            // No observation at all: `validate` already refuses with a conflict.
+            None => Ok(None),
+        }
     }
 
     pub(super) fn execute_context_resource(
@@ -961,6 +1156,14 @@ impl PolicyDecisionPort for GatewayPolicy {
         if tool == "run_command" && crate::database::kernel_execution_admission::operation_class(tool, input_json) == fox_engine_protocol::ActionClass::Manage {
             return PolicyDecision::Allow;
         }
+        // REV-05: a whole-file replacement is a different, stronger operation
+        // than a precise edit. It never rides on a partial read, and it never
+        // rides on an ordinary one-shot approval or a reusable grant: it needs
+        // the purpose-specific replacement authorization (see
+        // `kernel_whole_file_replace_grants`).
+        if let Ok(Some(_reason)) = self.whole_file_replacement_gap(tool, input.as_ref().unwrap_or(&Value::Null)) {
+            return PolicyDecision::RequireApproval;
+        }
         if tool == "call_mcp_tool"
             && input.as_ref().unwrap()["serverId"] == crate::office::SERVER_ID
         {
@@ -990,9 +1193,7 @@ impl PolicyDecisionPort for GatewayPolicy {
             })
             .unwrap_or_default();
         let mut grants: Vec<Value> = self
-            .binding
-            .permission
-            .grants
+            .live_frozen_grants()
             .iter()
             .map(|grant| json!([grant.tool, grant.scope]))
             .collect();
@@ -1054,7 +1255,9 @@ mod revision_tests {
         let root=std::env::temp_dir().join(format!("fox-r1-{}",uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.txt"),"hello hello").unwrap();
-        let permission=FrozenPermission {mode:PermissionMode::Ask,project_root:Some(root.to_string_lossy().into_owned()),grants:vec![]};
+        let permission=FrozenPermission {mode:PermissionMode::Ask,project_root:Some(root.to_string_lossy().into_owned()),grants:vec![],
+        approval_epoch: None,
+    };
         let mut policy=GatewayPolicy {
             binding:RunControlBinding {schema_version:1,run_id:"r".into(),conversation_id:"c".into(),engine_id:"pi".into(),
                 execution_profile_id:"legacy".into(),authority:ExecutionAuthority::Authoritative,read_only_executor:ResourceExecutor::Rust,

@@ -2606,6 +2606,7 @@ fn prepare_eval_run_with_budgets(
         mode: permission_mode,
         project_root: Some(scenario_root.to_string_lossy().into_owned()),
         grants: vec![],
+        approval_epoch: None,
     };
     let binding = RunControlBinding {
         schema_version: 1,

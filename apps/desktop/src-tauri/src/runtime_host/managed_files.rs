@@ -435,10 +435,20 @@ impl crate::database::kernel_execution_admission::FileTargetResolver for HostFil
 /// by reopening the file after the read (which could bind a different version).
 pub(crate) fn observation_from_read(root: &Path, path: &str, bytes: &[u8], tool_call_id: &str)
     -> Result<fox_engine_protocol::HostObservation, String> {
+    let target = crate::tool_host::canonical_file_identity(root, path)?;
+    let total_units = String::from_utf8_lossy(bytes).encode_utf16().count() as u64;
     Ok(fox_engine_protocol::HostObservation {
-        target_identity: crate::tool_host::canonical_file_identity(root, path)?,
+        target_identity: target,
         version: crate::tool_host::file_version(bytes),
         observed_by_tool_call_id: tool_call_id.into(),
+        // A read that returns the whole file establishes full-content coverage of
+        // that version. Callers that deliver only a page pass their own range.
+        view_kind: fox_engine_protocol::ObservationView::FullFile,
+        covered_whole_file: true,
+        range_start: Some(0),
+        range_end: Some(total_units),
+        total_units: Some(total_units),
+        truncated: false,
     })
 }
 
@@ -776,6 +786,19 @@ fn resolve_restore_source_inner(
 }
 
 /// Result of a successful restore: the newly registered `restored` row.
+///
+/// REV-02: a restore is a file mutation with a precise baseline and a precise
+/// candidate, so it goes through the SAME commit critical section a tool write
+/// uses (`tool_host::atomic_write_with_context`): the same write lock, the same
+/// version precondition re-checked inside the lock, the same replace journal and
+/// the same verified-layout settlement. It never re-executes the original tool
+/// and never bypasses the lock with a plain `fs::copy`.
+///
+/// The request carries its own identity (`restore:<version_id>:<nonce>`), so a
+/// restore is auditable as itself rather than as the dispatch that produced the
+/// version. `force` decides how *known drift* is handled; it never skips target
+/// identity, the commit critical section, the in-lock baseline re-check or the
+/// failure classification.
 pub(crate) fn restore_version(
     database: &Database,
     backups_dir: &Path,
@@ -783,6 +806,84 @@ pub(crate) fn restore_version(
     version_id: &str,
     force: bool,
 ) -> Result<ManagedFileVersion, String> {
+    // A caller that supplies no request identity gets a fresh one; a retry that
+    // repeats the SAME identity is deduplicated against the recorded result.
+    let request_id = format!("restore-{}", uuid::Uuid::new_v4().simple());
+    restore_version_with_seam(
+        database,
+        backups_dir,
+        conversation_id,
+        version_id,
+        force,
+        &request_id,
+        &NoRestoreFault,
+    )
+}
+
+/// Deterministic fault injection point for the restore path. Production passes
+/// [`NoRestoreFault`]; tests inject a fault at an exact stage. Like
+/// `BackendCapabilityProof`, the proof is an argument, so no environment
+/// variable, Cargo feature or global switch can turn a test behaviour into a
+/// shipped one.
+pub(crate) trait RestoreFaultSeam: Send + Sync {
+    fn before_capture(&self) -> Result<(), String> {
+        Ok(())
+    }
+    /// Runs INSIDE the commit critical section, after the baseline was captured
+    /// and before the replacement. A concurrent write landing here is exactly
+    /// the case the in-lock re-check must refuse.
+    fn after_capture(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn after_replace(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+pub(crate) struct NoRestoreFault;
+impl RestoreFaultSeam for NoRestoreFault {}
+
+pub(crate) fn restore_version_with_seam(
+    database: &Database,
+    backups_dir: &Path,
+    conversation_id: &str,
+    version_id: &str,
+    force: bool,
+    request_id: &str,
+    seam: &dyn RestoreFaultSeam,
+) -> Result<ManagedFileVersion, String> {
+    if request_id.trim().is_empty() || request_id.len() > 200 {
+        return Err("restore request identity must be a non-empty short string".into());
+    }
+    // Stable dedup: a repeated delivery of the SAME request reads the recorded
+    // result instead of performing the file mutation a second time.
+    if let Some(row) = database.restore_request(conversation_id, request_id)? {
+        if let Some(result) = row.result_version_id {
+            return database
+                .managed_file_version(&result)?
+                .ok_or_else(|| "recorded restore result vanished".to_string());
+        }
+        return Err(match row.state.as_str() {
+            "recovery_required" => format!(
+                "{} was left in an uncertain state during restore; recovery materials are retained",
+                row.display_name
+            ),
+            "indeterminate" => format!(
+                "{} could not be verified as restored; the result is unknown and must not be retried \
+                 with the same request identity",
+                row.display_name
+            ),
+            _ => format!(
+                "{} was not restored; the target was left untouched{}",
+                row.display_name,
+                row.error
+                    .as_deref()
+                    .map(|error| format!(" ({error})"))
+                    .unwrap_or_default()
+            ),
+        });
+    }
+
     let version = database
         .managed_file_version(version_id)?
         .ok_or_else(|| "managed file version not found".to_string())?;
@@ -792,13 +893,28 @@ pub(crate) fn restore_version(
     // The exact bytes this version records, verified against its own hash. A
     // version is never restored by copying some other version's backup.
     let source = resolve_restore_source(database, &version)?;
+    let candidate = fs::read(&source.path)
+        .map_err(|error| format!("cannot read the selected version snapshot: {error}"))?;
+    // `RestoreSource.sha256` is the raw hex digest; `file_version` is the
+    // `sha256:<hex>` form used as a version string. Compare like with like.
+    if hash_bytes(&candidate).0 != source.sha256 {
+        return Err("selected version snapshot does not match its recorded hash".into());
+    }
 
     let target = PathBuf::from(&version.storage_path);
     let latest = database.latest_managed_file_version(conversation_id, &version.storage_path)?;
-    let current = hash_file(&target);
+    // The baseline is the Host's OWN read of the target, taken at confirmation
+    // time and re-checked inside the commit critical section. It is never the
+    // registry's `after_hash` and never a value supplied by the request.
+    let current_raw = if target.exists() {
+        Some(hash_bytes(&fs::read(&target).map_err(|error| error.to_string())?).0)
+    } else {
+        None
+    };
+    let baseline = current_raw.as_ref().map(|hash| format!("sha256:{hash}"));
     if !force {
-        match (&latest, &current) {
-            (Some(latest), Some((hash, _))) if Some(hash.as_str()) == latest.after_hash.as_deref() => {}
+        match (&latest, &current_raw) {
+            (Some(latest), Some(hash)) if Some(hash.as_str()) == latest.after_hash.as_deref() => {}
             (Some(_), None) => {
                 return Err(format!(
                     "{} was deleted after the last recorded change; re-select it with force to restore anyway",
@@ -814,100 +930,313 @@ pub(crate) fn restore_version(
             }
         }
     }
+    seam.before_capture()?;
 
-    // The current bytes always get their own safety backup before overwrite.
-    let safety_backup = if let Some((ref hash, ref size)) = current {
-        let safety = store_snapshot(backups_dir, &target)?;
-        Some((safety, hash.clone(), *size))
-    } else {
-        None
+    // The request's own identity. It is stable for a given `request_id`, so a
+    // restore is auditable as itself rather than as the dispatch that produced
+    // the version, and a repeat delivery is recognisable.
+    let dispatch_id = format!("restore:{request_id}");
+    database.record_restore_request(
+        conversation_id,
+        request_id,
+        &version.id,
+        &version.storage_path,
+        baseline.as_deref(),
+        &dispatch_id,
+    )?;
+
+    let mut hooks = RestoreCommitHooks {
+        database,
+        backups_dir,
+        conversation_id,
+        run_id: None,
+        tool_call_id: None,
+        tool: "restore",
+        display_name: &version.display_name,
+        dispatch_id: &dispatch_id,
+        restored_from_id: &version.id,
+        source_sha256: &source.sha256,
+        source_size: source.size,
+        before: None,
+        directory_side_effect: false,
+        evidence: fox_engine_protocol::ExecutionEvidence::NotStarted,
+        outcome: RestoreOutcome::NotApplied,
+        registered_version_id: None,
+        seam,
     };
-
+    let root = target
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("cannot recreate the target folder: {error}"))?;
     }
-    fs::copy(&source.path, &target).map_err(|error| {
-        format!("failed to write the restored contents: {error}")
-    })?;
-    let (after_hash, after_size) = hash_file(&target)
-        .ok_or_else(|| "restored target is unreadable".to_string())?;
-    // Post-condition: the file now holds exactly the selected content version.
-    if after_hash != source.sha256 || after_size != source.size {
-        return Err(
-            "restored file does not match the selected version; the copy was not applied".into(),
-        );
-    }
-    // Restored content is itself a version of this file: snapshot it so this
-    // restore is selectable (and re-restorable) like any other version.
-    let after_backup = store_snapshot(backups_dir, &target)?;
+    let expected = baseline.clone().unwrap_or_else(|| "missing".to_owned());
+    let commit = crate::tool_host::atomic_write_with_context_mode(
+        &root,
+        &target,
+        &candidate,
+        &expected,
+        None,
+        Some(&mut hooks),
+        true,
+    );
+    // A fault injected after the replacement must NOT return early: the write
+    // already happened, so its outcome still has to be observed, classified,
+    // settled and registered. Skipping that would leave a real side effect with
+    // no recovery material and no honest receipt.
+    let after_replace_fault = seam.after_replace().err();
 
-    let (safety_path, safety_hash, safety_size) = match &safety_backup {
-        Some((path, hash, size)) => (
-            Some(path.to_string_lossy().into_owned()),
-            Some(hash.clone()),
-            Some(*size),
-        ),
-        None => (None, None, None),
+    // Classify from the verified state of the target, not from "the result hash
+    // differs" (REV-02). A restore that reported an error is only `not_applied`
+    // when the target still holds exactly the bytes the Host read as its
+    // baseline; anything else is uncertain and keeps its recovery materials.
+    let observed = if target.exists() {
+        hash_file(&target).map(|(hash, size)| (hash, size))
+    } else {
+        None
     };
-    // Content this restore is about to overwrite gets its own content version,
-    // not just a backup file: otherwise bytes the registry never knew about (a
-    // user edit made outside any recorded task, another program's write) could
-    // never be brought back through the product, because every version row
-    // resolves its *own* content. The row is `replaced` — the content this
-    // restore replaced — and it is registered before the restored row so the
-    // per-path version order stays chronological. The append-only registry is
-    // untouched: this only appends.
-    if let (Some(path), Some(hash), Some(size)) = (&safety_path, &safety_hash, &safety_size) {
-        if let Err(error) = database.register_managed_file_version(
-            &ManagedFileVersionInput {
+    let observed_raw = observed.as_ref().map(|(hash, _)| hash.clone());
+    let committed = commit.is_ok() && observed_raw.as_deref() == Some(source.sha256.as_str());
+    let baseline_intact = observed_raw.is_none() && baseline.is_none()
+        || observed_raw.as_deref() == current_raw.as_deref();
+    if !committed {
+        hooks.outcome = if commit.is_ok() {
+            // The commit reported success but the bytes are not the selected
+            // version's: the outcome is genuinely unknown.
+            RestoreOutcome::Indeterminate
+        } else if baseline_intact {
+            RestoreOutcome::NotApplied
+        } else {
+            RestoreOutcome::RecoveryRequired
+        };
+    }
+    match hooks.outcome {
+        RestoreOutcome::Committed => {
+            let new_id = hooks
+                .registered_version_id
+                .clone()
+                .ok_or_else(|| "restore committed but no version was registered".to_string())?;
+            let row = database
+                .managed_file_version(&new_id)?
+                .ok_or_else(|| "restored version row vanished".to_string())?;
+            database.settle_restore_request(
                 conversation_id,
-                run_id: None,
-                tool_call_id: None,
-                tool: "restore",
-                storage_path: &version.storage_path,
-                display_name: &version.display_name,
-                change_kind: "replaced",
-                before_hash: None,
-                before_size: None,
-                after_hash: Some(hash.as_str()),
-                after_size: Some(*size),
-                backup_path: None,
-                after_backup_path: Some(path.as_str()),
-                restored_from_id: None,
-                source: ManagedFileSource::Restore,
-            },
-            now_ms(),
-        ) {
-            eprintln!(
-                "managed-file registration of the replaced content failed for {}: {error}",
-                version.display_name
+                request_id,
+                "committed",
+                Some(&new_id),
+                None,
+            )?;
+            return Ok(row);
+        }
+        RestoreOutcome::RecoveryRequired
+        | RestoreOutcome::NotApplied
+        | RestoreOutcome::Indeterminate => {}
+    }
+    let state = match hooks.outcome {
+        RestoreOutcome::RecoveryRequired => "recovery_required",
+        RestoreOutcome::Indeterminate => "indeterminate",
+        _ => "not_applied",
+    };
+    let mut error = commit.err();
+    if error.is_none() {
+        error = after_replace_fault;
+    }
+    let message = match hooks.outcome {
+        RestoreOutcome::RecoveryRequired => format!(
+            "{} was left in an uncertain state during restore; recovery materials are retained \
+             next to the target",
+            version.display_name
+        ),
+        RestoreOutcome::Indeterminate => format!(
+            "{} could not be verified as restored; the result is unknown and must not be retried \
+             with the same request identity",
+            version.display_name
+        ),
+        _ => format!(
+            "{} was not restored; the target was left untouched{}",
+            version.display_name,
+            error
+                .as_ref()
+                .map(|error| format!(" ({error})"))
+                .unwrap_or_default()
+        ),
+    };
+    database.settle_restore_request(conversation_id, request_id, state, None, error.as_deref())?;
+    Err(message)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreOutcome {
+    NotApplied,
+    RecoveryRequired,
+    Indeterminate,
+    Committed,
+}
+
+/// The restore's own commit context. It reuses the same capture/registration
+/// helpers an admitted file dispatch uses, so a restored version is a first-class
+/// version rather than a bare backup file.
+struct RestoreCommitHooks<'a> {
+    database: &'a Database,
+    backups_dir: &'a Path,
+    conversation_id: &'a str,
+    run_id: Option<&'a str>,
+    tool_call_id: Option<&'a str>,
+    tool: &'a str,
+    display_name: &'a str,
+    dispatch_id: &'a str,
+    restored_from_id: &'a str,
+    /// The bytes this restore writes, already hash-verified against the
+    /// selected version's own record.
+    source_sha256: &'a str,
+    source_size: i64,
+    before: Option<BeforeCapture>,
+    directory_side_effect: bool,
+    evidence: fox_engine_protocol::ExecutionEvidence,
+    outcome: RestoreOutcome,
+    /// Set inside the commit critical section, so the registry can never
+    /// describe content the file does not hold.
+    registered_version_id: Option<String>,
+    seam: &'a dyn RestoreFaultSeam,
+}
+
+impl crate::tool_host::FileCommitContext for RestoreCommitHooks<'_> {
+    fn baseline(&self) -> &str {
+        // The Host read the target itself before entering the critical section;
+        // `atomic_write_with_context` re-checks it inside the lock.
+        self.before
+            .as_ref()
+            .map(|capture| capture.before_hash.as_deref().unwrap_or("missing"))
+            .unwrap_or("missing")
+    }
+
+    fn dispatch_id(&self) -> &str {
+        self.dispatch_id
+    }
+
+    fn validate(&mut self, target: &Path) -> Result<(), String> {
+        if !target.is_file() && target.exists() {
+            return Err("restore target is not a regular file".to_owned());
+        }
+        Ok(())
+    }
+
+    fn capture_before(&mut self, target: &Path) -> Result<(), String> {
+        self.seam.before_capture()?;
+        self.before = Some(capture_before(
+            self.backups_dir,
+            target.parent().unwrap_or(target),
+            target,
+        )?);
+        self.seam.after_capture()?;
+        Ok(())
+    }
+
+    fn record_committed(&mut self, target: &Path) -> Result<(), String> {
+        // Registration happens inside the commit critical section: the version
+        // row is written while the write lock is still held and the target is
+        // known to hold exactly the selected bytes, so the registry can never
+        // describe content the file does not hold.
+        let (after_hash, after_size) = hash_file(target)
+            .ok_or_else(|| "restored target is unreadable after commit".to_string())?;
+        if after_hash != self.source_sha256 || after_size != self.source_size {
+            // Do not register bytes that are not the selected version's.
+            self.outcome = RestoreOutcome::Indeterminate;
+            return Ok(());
+        }
+        let after_backup = store_snapshot(self.backups_dir, target)?;
+        let (safety_path, safety_hash, safety_size) = match &self.before {
+            Some(capture) => (
+                capture.backup_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                capture.before_hash.clone(),
+                capture.before_size,
+            ),
+            None => (None, None, None),
+        };
+        // The content this restore replaced gets its own version row, so bytes
+        // the registry never knew about stay recoverable through the product.
+        if let (Some(path), Some(hash), Some(size)) = (&safety_path, &safety_hash, safety_size) {
+            let _ = self.database.register_managed_file_version(
+                &ManagedFileVersionInput {
+                    conversation_id: self.conversation_id,
+                    run_id: self.run_id,
+                    tool_call_id: self.tool_call_id,
+                    tool: self.tool,
+                    storage_path: &target.to_string_lossy().to_owned(),
+                    display_name: self.display_name,
+                    change_kind: "replaced",
+                    before_hash: None,
+                    before_size: None,
+                    after_hash: Some(hash.as_str()),
+                    after_size: Some(size),
+                    backup_path: None,
+                    after_backup_path: Some(path.as_str()),
+                    restored_from_id: None,
+                    source: ManagedFileSource::Restore,
+                },
+                now_ms(),
             );
         }
+        let new_id = self
+            .database
+            .register_managed_file_version(
+                &ManagedFileVersionInput {
+                    conversation_id: self.conversation_id,
+                    run_id: self.run_id,
+                    tool_call_id: self.tool_call_id,
+                    tool: self.tool,
+                    storage_path: &target.to_string_lossy().to_owned(),
+                    display_name: self.display_name,
+                    change_kind: "restored",
+                    before_hash: safety_hash.as_deref(),
+                    before_size: safety_size,
+                    after_hash: Some(&after_hash),
+                    after_size: Some(after_size),
+                    backup_path: safety_path.as_deref(),
+                    after_backup_path: after_backup.to_str(),
+                    restored_from_id: Some(self.restored_from_id),
+                    source: ManagedFileSource::Restore,
+                },
+                now_ms(),
+            )
+            .map_err(|error| {
+                // A registration failure must not be reported as "nothing
+                // happened": the write is committed and the materials exist.
+                self.outcome = RestoreOutcome::Indeterminate;
+                error
+            })?;
+        self.registered_version_id = Some(new_id);
+        Ok(())
     }
-    let new_id = database.register_managed_file_version(
-        &ManagedFileVersionInput {
-            conversation_id,
-            run_id: None,
-            tool_call_id: None,
-            tool: "restore",
-            storage_path: &version.storage_path,
-            display_name: &version.display_name,
-            change_kind: "restored",
-            before_hash: safety_hash.as_deref(),
-            before_size: safety_size,
-            after_hash: Some(&after_hash),
-            after_size: Some(after_size),
-            backup_path: safety_path.as_deref(),
-            after_backup_path: after_backup.to_str(),
-            restored_from_id: Some(&version.id),
-            source: ManagedFileSource::Restore,
-        },
-        now_ms(),
-    )?;
-    database
-        .managed_file_version(&new_id)?
-        .ok_or_else(|| "restored version row vanished".to_string())
+
+    fn mark_applying(&mut self) {
+        self.evidence = fox_engine_protocol::ExecutionEvidence::Unknown;
+    }
+
+    fn mark_directory_creation(&mut self) {
+        self.directory_side_effect = true;
+        self.evidence = fox_engine_protocol::ExecutionEvidence::Unknown;
+    }
+
+    fn mark_committed(&mut self) {
+        self.evidence = fox_engine_protocol::ExecutionEvidence::Started;
+        self.outcome = RestoreOutcome::Committed;
+    }
+
+    fn mark_not_applied(&mut self) {
+        self.evidence = if self.directory_side_effect {
+            fox_engine_protocol::ExecutionEvidence::Unknown
+        } else {
+            fox_engine_protocol::ExecutionEvidence::NotStarted
+        };
+        self.outcome = if self.directory_side_effect {
+            RestoreOutcome::Indeterminate
+        } else {
+            RestoreOutcome::NotApplied
+        };
+    }
 }
 
 /// The bytes a Host-verified write can be registered from: everything the Host
