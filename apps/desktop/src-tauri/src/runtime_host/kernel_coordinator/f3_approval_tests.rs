@@ -328,3 +328,59 @@ fn f3_live_cancel_wins_over_approval_in_same_host_batch() {
     let approval = snapshot.tool_calls.iter().find(|call| call.tool_call_id == "f1-write").unwrap();
     assert_eq!(approval.approval_state.as_deref(), Some("pending"));
 }
+
+#[test]
+fn f3_outer_host_cancel_acks_queued_approval_without_consuming_it() {
+    let version = Arc::new(Mutex::new(None));
+    let provider = LocalProvider::start(version.clone());
+    let run = run_fixture_with_mode("f3-outer-cancel-priority", SMALL, model(provider.address), "ask");
+    let writes = AtomicUsize::new(0);
+    let queued = AtomicBool::new(false);
+    let visits = AtomicUsize::new(0);
+    let cancellation = CancellationRegistry::default();
+    let worker = real_worker_command();
+    let gateway = policy(&run);
+    let preview = |_: &fox_engine_protocol::KernelModelPreview| {};
+    let execute = |binding: &RunControlBinding,
+                   effect: &kernel::OutboxEffect,
+                   token: &kernel::CancellationToken| {
+        execute_real(&run, &version, &writes, binding, effect, token)
+    };
+    let settle = |_: bool| {
+        let snapshot = run.db.kernel_build_full_snapshot(&run.id)?;
+        assert_ne!(snapshot.state, "cancelled", "child settlement cannot run again after parent terminal");
+        if visits.fetch_add(1, Ordering::SeqCst) > 30 {
+            return Err("outer Host did not reach the approval barrier".into());
+        }
+        if snapshot.tool_calls.iter().any(|call| call.tool_call_id == "f1-write"
+            && call.state == "waiting_approval") && !queued.swap(true, Ordering::SeqCst) {
+            let card = run.db.kernel_approval_identity(&run.id, "f1-write")?;
+            assert!(run.db.queue_kernel_host_approval(&card, "allow_once")?);
+            assert!(run.db.queue_kernel_host_command(&run.id, None)?);
+        }
+        Ok(())
+    };
+    let ownership = super::super::super::super::kernel_host::acquire(&run.root, &run.id).unwrap();
+    let after_commit = |_: &str| Ok(());
+    super::super::super::super::kernel_host::drive_with_actions_per_round(
+        &ownership, &run.db, &run.clock, &cancellation, &run.id, &worker,
+        "local-test-only", &gateway, &execute, &after_commit, &settle, &preview,
+    ).unwrap();
+    let requests = provider.finish();
+    assert_eq!(requests.len(), 2, "real Node proposed read then write before cancellation");
+    assert!(queued.load(Ordering::SeqCst));
+    assert_eq!(run.db.kernel_build_full_snapshot(&run.id).unwrap().state, "cancelled");
+    assert_eq!(writes.load(Ordering::SeqCst), 0);
+    assert_eq!(std::fs::read_to_string(run.root.join("target.txt")).unwrap(), SMALL);
+    assert_eq!(version_count(&run), 0);
+    assert!(run.db.pending_kernel_host_commands(&run.id).unwrap().is_empty());
+    let approval_status: (String, String) = run.db.with_connection(|connection| connection.query_row(
+        "SELECT c.status,a.state FROM kernel_host_commands c JOIN kernel_approvals a
+         ON a.run_id=c.run_id AND a.tool_call_id=c.tool_call_id
+         WHERE c.run_id=?1 AND c.kind='approval'", [&run.id],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    )).unwrap();
+    assert_eq!(approval_status.0, "completed", "terminal gate acknowledges the stale queued command");
+    assert_ne!(approval_status.1, "allow_once", "queued decision was never applied");
+    assert!(run.db.kernel_effective_authorization_grants(&run.id, crate::database::now_ms()).unwrap().is_empty());
+}

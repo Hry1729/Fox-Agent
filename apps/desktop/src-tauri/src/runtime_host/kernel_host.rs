@@ -791,7 +791,11 @@ fn drive_with_actions_transport(
             // in flight once control has returned to this point.
             coordinator.settle_cancellation()?;
             database.complete_kernel_host_command(run_id, cancel_seq)?;
-            continue;
+            // The Run is terminal now. Acknowledge any approval queued in the
+            // same batch under the terminal gate, without applying its decision
+            // or calling child cleanup again after parent cancellation.
+            consume_approval_step(&coordinator, database, run_id, policy)?;
+            return Ok(());
         }
         coordinator.tick()?;
         let snapshot = coordinator.snapshot()?;
