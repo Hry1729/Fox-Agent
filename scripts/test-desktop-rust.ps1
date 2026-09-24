@@ -8,7 +8,7 @@
 # existing isolated one-thread check. Executable only launches an already built
 # test binary: it does not recompile SQLite or change that binary's MEMSTATUS.
 # LIBSQLITE3_FLAGS and DLL search path are scoped to this PowerShell process.
-#requires -Version 7.0
+#requires -Version 7.4
 param(
     [ValidateSet('Suite', 'Performance', 'Executable')]
     [string]$Mode = 'Suite',
@@ -160,6 +160,16 @@ function Invoke-TestProcess([string]$phase, [string]$file, [string[]]$arguments)
         RedirectStandardError = $stderr
         WindowStyle = 'Hidden'
         PassThru = $true
+        # Start-Process must receive the modified script environment explicitly:
+        # PATH locates the real Zvec DLL and Cargo receives the SQLite build flag.
+        Environment = @{
+            PATH = $env:PATH
+            FOX_DATA_DIR = $env:FOX_DATA_DIR
+            TMP = $env:TMP
+            TEMP = $env:TEMP
+            CARGO_TARGET_DIR = $env:CARGO_TARGET_DIR
+            LIBSQLITE3_FLAGS = $env:LIBSQLITE3_FLAGS
+        }
     }
     if ($argumentLine) { $start.ArgumentList = $argumentLine }
     $process = Start-Process @start
