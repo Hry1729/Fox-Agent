@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 // 这里已经过 REV 审查的真实夹具与执行缝，而不是另写一套替身。
 #[path = "f1_model_delivery_tests.rs"]
 mod f1_model_delivery_tests;
+#[path = "f2_restore_lifecycle_tests.rs"]
+mod f2_restore_lifecycle_tests;
 
 // ---------------------------------------------------------------------------
 // 夹具：真实 Database + 真实项目绑定 + 冻结 Legacy(Rust executor) 绑定
