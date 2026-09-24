@@ -265,6 +265,79 @@ fn real_host_to_local_provider_delivers_notice_once_in_live_and_single_round() {
 }
 
 #[test]
+fn real_node_live_and_single_round_park_then_wake_with_one_typed_notice() {
+    for live in [true,false] {
+        // The provider is a bounded local HTTP fixture; the production Pi
+        // worker/transport and durable model leases run unchanged.
+        let (address,server)=start_http_model_fixture(vec![
+            json!({"role":"assistant","content":"The compute Job is running."}),
+            json!({"role":"assistant","content":"The completed result is acknowledged."}),
+        ]);
+        let mut config=worker_configuration();
+        config.model_service=json!({"apiType":"openai-completions","modelId":"kernel-http-test",
+            "baseUrl":format!("http://{address}/v1")});
+        let clock=crate::runtime_host::shadow_reconcile::ReconcilerClock;
+        let cancellation=CancellationRegistry::default();
+        let (db,_root,run)=fixture_with_retry_opt(&clock,&config.hash().unwrap(),Some(&config),true,true,(0,1));
+        enable_notices(&db,&run);
+        freeze_host_scope(&db,&run);
+        let conversation=db.run_control_binding(&run).unwrap().unwrap().conversation_id;
+        let job=db.kernel_job_start(&JobStartRequest {run_id:run.clone(),kind:"attachment_compute".into(),
+            idempotency_key:format!("park-{live}"),params:json!({"input":"local fixture"}),
+            deadline_ms:Some(crate::database::now_ms()+60_000),progress_total:None})
+            .unwrap().snapshot().job_id.clone();
+        db.kernel_job_claim_attempt(&job,1).unwrap();
+        let sink=|_:&fox_engine_protocol::KernelModelPreview|{};
+        let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation)
+            .unwrap().with_preview(&sink);
+        if live {
+            coordinator.dispatch_initial_live("park-live",&Allow,&real_worker_command(),"local-test-only",
+                &|_,_,_|panic!("a parked Job must not execute a tool twice"),&|_|Ok(()),&|_|Ok(())).unwrap();
+        } else {
+            coordinator.dispatch_initial_with_worker("park-round",&Allow,&real_worker_command(),
+                "local-test-only").unwrap();
+        }
+        assert_eq!(coordinator.snapshot().unwrap().state,"waiting_jobs");
+        let first_count:i64=db.with_connection(|conn|conn.query_row(
+            "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='engine.initial_response'",
+            [&run],|row|row.get(0))).unwrap();
+        assert_eq!(first_count,1);
+        drop(coordinator);
+        db.kernel_job_complete_attempt(&job,1,&conversation,&json!({"answer":"ready"})).unwrap();
+        let coordinator=KernelCoordinator::reopen(&db,&clock,&run,&cancellation).unwrap()
+            .with_preview(&sink);
+        assert!(coordinator.wake_waiting_jobs_now().unwrap());
+        let snapshot=coordinator.snapshot().unwrap();
+        let effect=snapshot.pending_effects.iter().find(|effect|
+            effect.kind==kernel::OutboxEffectKind::ContinuationModel
+                && effect.status==kernel::OutboxStatus::Pending).unwrap();
+        let key=effect.effect_key.clone();
+        if live {
+            coordinator.dispatch_continuation_live(&key,"wake-live",&Allow,&real_worker_command(),
+                "local-test-only",&|_,_,_|panic!("wake must not replay a tool"),
+                &|_|Ok(()),&|_|Ok(())).unwrap();
+        } else {
+            coordinator.dispatch_continuation_with_worker(&key,"wake-round",&Allow,
+                &real_worker_command(),"local-test-only").unwrap();
+        }
+        let requests=server.join().unwrap();
+        assert_eq!(requests.len(),2);
+        let first_wire=requests[0]["messages"].to_string();
+        let second_wire=requests[1]["messages"].to_string();
+        assert!(!first_wire.contains("FOX_HOST_JOB_NOTICE_V1"));
+        assert_eq!(second_wire.matches("FOX_HOST_JOB_NOTICE_V1").count(),1);
+        assert!(second_wire.contains(&job));
+        let (parks,wakes,continuations):(i64,i64,i64)=db.with_connection(|conn|conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.waiting_jobs'),
+                    (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.jobs_woken'),
+                    (SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='continuation_model')",
+            [&run],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
+        assert_eq!((parks,wakes,continuations),(1,1,1));
+        assert_eq!(db.kernel_build_full_snapshot(&run).unwrap().state,"completed");
+    }
+}
+
+#[test]
 fn unknown_model_response_reopens_without_replaying_bound_notice_or_job() {
     let (db,root,run,clock,cancellation,conversation)=notice_host_fixture("b2a-unknown");
     let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
