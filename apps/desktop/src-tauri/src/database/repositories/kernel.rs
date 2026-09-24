@@ -230,7 +230,7 @@ fn validate_job_wait_decision(
             && serde_json::from_str::<serde_json::Value>(&o.payload_json)
                 .ok().is_some_and(|v| v["lane"] == "job_notice")
     }).collect();
-    if !frozen.experimental_compute_job_notice {
+    if !frozen.experimental_compute_job_notice || frozen.kernel_mode != "authoritative" {
         if old_state == "waiting_jobs" || cmd.run_state == crate::kernel::RunState::WaitingJobs
             || !park_events.is_empty() || !account_events.is_empty() || !wake_events.is_empty()
             || !notice_outbox.is_empty() || cmd.wait_deadline_wall_ms.is_some()
@@ -291,17 +291,19 @@ fn validate_job_wait_decision(
         let conversation: String = tx.query_row(
             "SELECT conversation_id FROM runs WHERE id=?1", [run], |row| row.get(0))?;
         let mut statement = tx.prepare(
-            "SELECT job_id,attempts,deadline_ms FROM kernel_jobs
+            "SELECT job_id,attempts,deadline_ms,kind FROM kernel_jobs
               WHERE run_id=?1 AND conversation_id=?2 AND state IN ('queued','running','paused')
               ORDER BY job_id")?;
         let actual = statement.query_map(params![run,conversation], |row| {
-            Ok((row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,Option<i64>>(2)?))
+            Ok((row.get::<_,String>(0)?, row.get::<_,i64>(1)?,
+                row.get::<_,Option<i64>>(2)?, row.get::<_,String>(3)?))
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
         if actual.len() != expected.len() { return Err(kernel_err("job wait set changed before park")); }
         let mut max_job_deadline = 0_i64;
-        for (fact, (job_id, attempt, deadline)) in expected.drain(..).zip(actual) {
+        for (fact, (job_id, attempt, deadline, kind)) in expected.drain(..).zip(actual) {
             if fact.job_id != job_id || fact.attempt != attempt
-                || deadline != Some(fact.deadline_wall_ms) || fact.deadline_wall_ms <= now {
+                || deadline != Some(fact.deadline_wall_ms) || fact.deadline_wall_ms <= now
+                || kind != "attachment_compute" {
                 return Err(kernel_err("job wait identity or original deadline changed"));
             }
             max_job_deadline = max_job_deadline.max(fact.deadline_wall_ms);
@@ -741,6 +743,9 @@ impl Database {
                 params![run_id],
                 |row| row.get::<_, String>(0),
             )?;
+            if current == "waiting_jobs" {
+                return Ok(Some("waiting_jobs cannot use the legacy state writer".into()));
+            }
             if current == state {
                 transaction.commit()?;
                 return Ok(None);
@@ -1740,10 +1745,6 @@ impl Database {
                     || continuation_lease.is_some_and(|(_, _, response)| response)
                     || batch_response_lease.is_some(),
             )?;
-            if current == "waiting_jobs" {
-                return Ok(Some("waiting_jobs cannot use the legacy state writer".into()));
-            }
-
             super::kernel_compaction::validate_decision(&transaction, run_id, wall_now_ms, persisted_last_seq, cmd)?;
             // 1. Append events. Exact replays are accepted, but every new event
             // must continue the durable sequence without a gap.

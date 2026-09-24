@@ -805,6 +805,7 @@ impl RunController {
     ) -> Result<Vec<Effect>, KernelError> {
         if self.state != RunState::Running
             || !self.config.experimental_compute_job_notice
+            || self.config.kernel_mode != "authoritative"
             || self.model_request_in_flight
             || self.retry.model_dispatch_pending
             || self.approval_deadline_wall_ms.is_some()
@@ -887,6 +888,9 @@ impl RunController {
             return Err(KernelError::FailClosed("job wait wall clock moved backwards".into()));
         }
         let through = wall_ms.min(deadline);
+        if through == accounted && wall_ms < deadline {
+            return Ok(Vec::new());
+        }
         let mut effects = Vec::new();
         if through > accounted {
             self.running_elapsed_ms = self.running_elapsed_ms.checked_add(through - accounted)
