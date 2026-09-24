@@ -59,6 +59,9 @@ fn response_identity_mismatch(request: &Value, response: &Value) -> Option<Strin
 }/// Transport-only time for the worker to report its already expired model round.
 /// Late model output is rejected by Host; this does not extend generation budget.
 pub(super) const MODEL_SETTLE_GRACE_MS: i64 = 1_000;
+/// A finite worker handshake window, independent of a model request that has
+/// not yet been durably dispatched. The same limit applies to describe.
+pub(super) const WORKER_READY_TIMEOUT_MS: i64 = 30_000;
 pub(super) const MODEL_WINDOW_EXPIRED: &str = "Kernel model window expired before response commit";
 
 #[cfg(windows)]
@@ -100,7 +103,7 @@ pub(super) fn describe(
         request,
         "kernel.description",
         token,
-        Instant::now() + Duration::from_secs(30),
+        Instant::now() + Duration::from_millis(WORKER_READY_TIMEOUT_MS as u64),
     )?;
     if result["schemaVersion"] != 1 || result["executionProfileId"] != binding.execution_profile_id
     {

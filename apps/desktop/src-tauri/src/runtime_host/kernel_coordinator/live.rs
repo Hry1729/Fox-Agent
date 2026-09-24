@@ -220,13 +220,30 @@ impl KernelCoordinator<'_> {
         Ok(Instant::now() + Duration::from_millis(remaining.max(1) as u64))
     }
 
+    /// Initializing the worker precedes the durable model dispatch. Bound it
+    /// by the remaining Run budget and a finite handshake limit, not by a model
+    /// request window that has not started yet.
+    fn live_ready_deadline(&self) -> Result<Instant, String> {
+        let now = self.clock.read();
+        let facts = self.controller.lock().map_err(|_| "Kernel coordinator lock poisoned")?
+            .shadow_checkpoint(now.monotonic_ms);
+        let remaining = self.binding.budgets.limit_operation_ms(
+            super::super::kernel_model_worker::WORKER_READY_TIMEOUT_MS,
+            facts.running_elapsed_ms,
+        );
+        if remaining <= 0 {
+            return Err("Kernel Run execution budget exhausted".into());
+        }
+        Ok(Instant::now() + Duration::from_millis(remaining as u64))
+    }
+
     /// Remaining budget for the next blocking transport wait, in milliseconds.
     /// This is the live-loop counterpart of the per-round formula: the minimum
     /// of the remaining whole-Run execution budget and the active model-request
     /// window. Recomputed before every worker wait so the bound tracks durable
-    /// Host facts (and naturally pauses across approvals). When no model
-    /// request is armed (for example during startup) only the Run budget applies.
-    /// A bounded transport drain follows model expiry; late output cannot commit.
+    /// Host facts (and naturally pauses across approvals). Worker initialization
+    /// uses `live_ready_deadline` before any model request is armed. A bounded
+    /// transport drain follows model expiry; late output cannot commit.
     /// Whether this Run was frozen with at least one tool that can actually
     /// change something. A conversational/read-only Run can be complete after a
     /// single answer, so the bounded stop-review (#17) must not spend a round on
@@ -1251,7 +1268,7 @@ impl KernelCoordinator<'_> {
             api_key,
             &self.binding,
             &token,
-            self.live_deadline()?,
+            self.live_ready_deadline()?,
         )?;
         session.observe_usage(self.database);
         self.tick()?;
