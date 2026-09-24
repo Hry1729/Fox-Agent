@@ -1689,6 +1689,9 @@ impl Database {
         expected_approval_policy_version: Option<u64>,
         model_input: Option<&ModelNoticeInput<'_>>,
     ) -> Result<(), String> {
+        let settling_model_response=initial_lease.is_some_and(|(_,response)|response)
+            || continuation_lease.is_some_and(|(_,_,response)|response)
+            || batch_response_lease.is_some();
         if !valid_run_state(cmd.run_state.as_str()) {
             return Err(format!(
                 "unsupported kernel run state: {}",
@@ -2057,9 +2060,7 @@ impl Database {
                 &transaction, &self.data_root_id, run_id, wall_now_ms,
                 &current_state, persisted_last_seq, old_elapsed,
                 old_wait_deadline, old_wait_accounted, &frozen, cmd,
-                initial_lease.is_some_and(|(_, response)| response)
-                    || continuation_lease.is_some_and(|(_, _, response)| response)
-                    || batch_response_lease.is_some(),
+                settling_model_response,
             )?;
             super::kernel_compaction::validate_decision(&transaction, run_id, wall_now_ms, persisted_last_seq, cmd)?;
             // 1. Append events. Exact replays are accepted, but every new event
