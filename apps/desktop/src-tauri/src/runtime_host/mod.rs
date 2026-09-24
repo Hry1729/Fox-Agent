@@ -1493,8 +1493,14 @@ impl RuntimeHost {
                 || error == kernel_run_lock::KERNEL_RUN_ALREADY_OWNED {
                 return result;
             }
+            let kernel_run = self.database.kernel_host_run_state(&started.run.id)
+                .ok().flatten().is_some();
+            let retire = !kernel_run || kernel_host::kernel_scope_should_retire(
+                &self.database, &started.run.id);
             if let Ok(mut state) = self.state.lock() {
-                state.cancellation.retire_run(&started.run.id);
+                if retire {
+                    state.cancellation.retire_run(&started.run.id);
+                }
                 if let Some(worker) = state.worker.as_mut() {
                     if worker.active_run_id.as_deref() == Some(&started.run.id) {
                         worker.active_run_id = None;

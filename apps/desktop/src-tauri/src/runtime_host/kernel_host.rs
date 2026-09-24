@@ -755,6 +755,16 @@ pub(super) enum KernelDriveOutcome {
     Parked,
 }
 
+/// A transient Host preparation error must not cancel a still-waiting child
+/// Job. The durable Run state, not the stack's return value, decides when its
+/// already-issued cancellation tokens may be retired.
+pub(super) fn kernel_scope_should_retire(database: &Database, run_id: &str) -> bool {
+    database.kernel_host_run_state(run_id).ok().flatten()
+        .is_some_and(|state| terminal(&state) || state == "cancelling")
+        || database.pending_kernel_host_commands(run_id).ok()
+            .is_some_and(|commands| commands.iter().any(|command| command.kind == "cancel"))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn drive_with_actions_transport(
     _ownership: &KernelRunLock,
@@ -792,7 +802,12 @@ pub(super) fn drive_with_actions_transport(
         }
         settle_children(false)?;
         if let Some(cancel_seq) = consume_approval_step(&coordinator, database, run_id, policy)? {
-            coordinator.cancel()?;
+            if coordinator.snapshot()?.state == "waiting_jobs" {
+                // Cancellation wins over a simultaneous wait-budget breach.
+                coordinator.cancel_waiting_jobs_now()?;
+            } else {
+                coordinator.cancel()?;
+            }
             // This loop executes resources synchronously; no resource is still
             // in flight once control has returned to this point.
             coordinator.settle_cancellation()?;
@@ -803,16 +818,21 @@ pub(super) fn drive_with_actions_transport(
             consume_approval_step(&coordinator, database, run_id, policy)?;
             return Ok(KernelDriveOutcome::Terminal);
         }
+        if coordinator.snapshot()?.state == "waiting_jobs" {
+            // Ordinary tick does not debit the waiting wall interval; its DB
+            // guard correctly rejects that unaccounted projection. Account the
+            // original fixed deadline first, then leave the Pi/RPC stack.
+            coordinator.account_waiting_jobs_now()?;
+            return Ok(if terminal(&coordinator.snapshot()?.state) {
+                KernelDriveOutcome::Terminal
+            } else {
+                KernelDriveOutcome::Parked
+            });
+        }
         coordinator.tick()?;
         let snapshot = coordinator.snapshot()?;
         if terminal(&snapshot.state) {
             return Ok(KernelDriveOutcome::Terminal);
-        }
-        if snapshot.state == "waiting_jobs" {
-            // The model response and wait decision have already committed. The
-            // owning stack must now unwind so the OS Run lock is released. The
-            // background Job still holds the parent's uncancelled token.
-            return Ok(KernelDriveOutcome::Parked);
         }
         if snapshot.state == "cancelling" {
             coordinator.settle_cancellation()?;
@@ -1099,35 +1119,30 @@ impl super::RuntimeHost {
 
     pub(crate) fn recover_kernel_runs_detached(&self) -> Result<(), String> {
         let runs = self.database.kernel_host_recoverable_runs()?;
-        let newly_owned = {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_| "runtime state lock poisoned")?;
-            if state.shutting_down {
-                return Err("Runtime Host is shutting down".into());
-            }
-            // A second recovery call must never spawn a lock loser that later
-            // removes the first owner's active marker or retires its Job token.
-            let fresh: Vec<_> = runs.into_iter()
-                .filter(|run_id| !state.kernel_active_runs.contains(run_id))
-                .collect();
-            for run_id in &fresh {
-                state.cancellation.register_run(run_id)?;
-            }
-            if !fresh.is_empty() {
+        for run_id in runs {
+            // A normal start already holds this OS lock before it registers its
+            // active marker. Claiming the lock first closes that small window:
+            // a duplicate recovery never registers, drives, or clears its owner.
+            let ownership = match acquire(&self.sessions_dir, &run_id) {
+                Ok(ownership) => ownership,
+                Err(error) if error == super::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED => continue,
+                Err(error) => return Err(error),
+            };
+            {
+                let mut state = self.state.lock().map_err(|_| "runtime state lock poisoned")?;
+                if state.shutting_down {
+                    return Err("Runtime Host is shutting down".into());
+                }
+                if state.kernel_active_runs.contains(&run_id) {
+                    continue;
+                }
+                state.cancellation.register_run(&run_id)?;
+                state.kernel_active_runs.insert(run_id.clone());
                 state.state = "recovering".into();
             }
-            for run_id in &fresh {
-                state.kernel_active_runs.insert(run_id.clone());
-            }
-            fresh
-        };
-        for run_id in newly_owned {
             let host = self.clone();
             std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
                 let result = (|| {
-                    let ownership = acquire(&host.sessions_dir, &run_id)?;
                     let binding = host
                         .database
                         .run_control_binding(&run_id)?
@@ -1141,24 +1156,21 @@ impl super::RuntimeHost {
                     let runtime = host.runtime_command()?;
                     host.drive_kernel_run(ownership, &binding, &runtime, &cancellation)
                 })();
-                if result.as_ref().err().map(String::as_str) != Some(super::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED)
-                    && result.is_err() {
+                if result.is_err() {
                     // Failure recording reacquires ownership; it cannot terminate
                     // a Run currently held by another process.
                     let _ = host.record_kernel_start_failure(&run_id);
                 }
+                let retire = kernel_scope_should_retire(&host.database, &run_id);
                 if let Ok(mut state) = host.state.lock() {
                     state.kernel_active_runs.remove(&run_id);
-                    if result.as_ref() != Ok(&KernelDriveOutcome::Parked)
-                        && result.as_ref().err().map(String::as_str) != Some(super::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED) {
+                    if retire {
                         state.cancellation.retire_run(&run_id);
                     }
                     if state.kernel_active_runs.is_empty() {
                         state.state = "ready".into();
                     }
-                    if result.is_err()
-                        && result.as_ref().err().map(String::as_str)
-                            != Some(super::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED) {
+                    if result.is_err() {
                         state.last_error = Some(
                             "A Kernel Run could not be recovered; no fallback execution was used."
                                 .into(),
@@ -1173,6 +1185,13 @@ impl super::RuntimeHost {
 
     pub(super) fn record_kernel_start_failure(&self, run_id: &str) -> Result<(), String> {
         let _ownership = acquire(&self.sessions_dir, run_id)?;
+        if self.database.kernel_host_run_state(run_id)?.as_deref() == Some("waiting_jobs")
+            && !self.database.pending_kernel_host_commands(run_id)?
+                .iter().any(|command| command.kind == "cancel") {
+            // The first model response is already settled. A failure to reopen
+            // the Host cannot turn a parked Run into a false execution failure.
+            return Ok(());
+        }
         if self.database.kernel_fail_before_aggregate(run_id)? {
             return Ok(());
         }
@@ -1218,7 +1237,11 @@ impl super::RuntimeHost {
             .iter()
             .any(|command| command.kind == "cancel")
         {
-            coordinator.cancel()?;
+            if coordinator.snapshot()?.state == "waiting_jobs" {
+                coordinator.cancel_waiting_jobs_now()?;
+            } else {
+                coordinator.cancel()?;
+            }
             coordinator.settle_cancellation()?;
         } else {
             coordinator.fail("kernel.preparation_failed", "The frozen Kernel preparation or recovery could not be validated; no fallback was used.")?;
@@ -1256,12 +1279,17 @@ impl super::RuntimeHost {
             state.cancellation.clone()
         };
         let result = (|| {
-            let runtime = self.runtime_command()?;
-            if self
+            let existing = self
                 .database
-                .kernel_host_run_state(&binding.run_id)?
-                .is_some()
-            {
+                .kernel_host_run_state(&binding.run_id)?;
+            // Waiting has no model dispatch. It must be able to release the
+            // Host even when Node runtime startup is unavailable.
+            let runtime = if existing.as_deref() == Some("waiting_jobs") {
+                RuntimeCommand { program: String::new(), script: None }
+            } else {
+                self.runtime_command()?
+            };
+            if existing.is_some() {
                 // A pre-existing aggregate must use all of its persisted inputs.
                 return self.drive_kernel_run(ownership, binding, &runtime, &cancellation);
             }
@@ -1330,9 +1358,10 @@ impl super::RuntimeHost {
                 .freeze_kernel_host_scope(&binding.run_id, &scope)?;
             self.drive_kernel_run(ownership, binding, &runtime, &cancellation)
         })();
+        let retire = kernel_scope_should_retire(&self.database, &binding.run_id);
         if let Ok(mut state) = self.state.lock() {
             state.kernel_active_runs.remove(&binding.run_id);
-            if result.as_ref() != Ok(&KernelDriveOutcome::Parked) {
+            if retire {
                 state.cancellation.retire_run(&binding.run_id);
             }
             if state.kernel_active_runs.is_empty() {

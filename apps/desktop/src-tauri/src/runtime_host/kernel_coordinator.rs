@@ -287,6 +287,20 @@ impl<'a> KernelCoordinator<'a> {
         self.tick_budgets(false)
     }
 
+    pub(crate) fn account_waiting_jobs_now(&self) -> Result<(), String> {
+        let park_seq = self.database.kernel_waiting_park_seq(&self.binding.run_id)?;
+        self.apply(None, |controller, now| {
+            controller.account_waiting_jobs(park_seq, now.wall_ms)
+        })
+    }
+
+    pub(crate) fn cancel_waiting_jobs_now(&self) -> Result<(), String> {
+        let park_seq = self.database.kernel_waiting_park_seq(&self.binding.run_id)?;
+        self.apply(None, |controller, now| {
+            controller.cancel_waiting_jobs(park_seq, now.wall_ms)
+        })
+    }
+
     fn tick_settled_model(&self) -> Result<(), String> {
         self.tick_budgets(true)
     }

@@ -550,6 +550,15 @@ pub struct KernelRunRecovery {
 }
 
 impl Database {
+    pub(crate) fn kernel_waiting_park_seq(&self, run_id: &str) -> Result<u64, String> {
+        self.with_connection(|connection| {
+            let seq: i64 = connection.query_row(
+                "SELECT seq FROM kernel_events WHERE run_id=?1 AND event_type='run.waiting_jobs'
+                   ORDER BY seq DESC LIMIT 1", [run_id], |row| row.get(0))?;
+            u64::try_from(seq).map_err(|_| kernel_err("invalid job wait park sequence"))
+        })
+    }
+
     /// Host-only identity for freezing a wait event. The decision transaction
     /// independently compares it with this handle's canonical data-root ID.
     pub(crate) fn kernel_data_root_id(&self) -> &str {
