@@ -20,6 +20,9 @@ const LEGACY_WORKFLOW_MUTATORS = [
 
 function startRuntime() {
   const child = spawn(process.execPath, [runtimePath], { stdio: ['pipe', 'pipe', 'pipe'] })
+  const childClosed = new Promise((resolve) => child.once('close', resolve))
+  // A spawn error still emits close, but must not become an unhandled event.
+  child.on('error', () => {})
   const messages = []
   const waiters = []
   const output = createInterface({ input: child.stdout, crlfDelay: Infinity })
@@ -60,15 +63,59 @@ function startRuntime() {
         waiters.push(check)
       })
     },
-    close() { output.close(); child.kill() },
+    async close() {
+      output.close()
+      if (child.exitCode === null && child.signalCode === null) child.kill()
+      let timer
+      try {
+        await Promise.race([
+          childClosed,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('Pi runtime did not close within 5 seconds')), 5_000)
+          }),
+        ])
+      } finally {
+        clearTimeout(timer)
+      }
+    },
   }
 }
 
+async function closeRuntimeAndRemoveDirectory(runtime, directory, remove = rm) {
+  try {
+    await runtime?.close()
+  } finally {
+    await remove(directory, { recursive: true, force: true })
+  }
+}
+
+function registerRuntimeCleanup(context, runtime, directory) {
+  context.after(() => closeRuntimeAndRemoveDirectory(runtime, directory))
+}
+
+test('runtime cleanup closes the child even when directory removal fails', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-pi-cleanup-failure-'))
+  const runtime = startRuntime()
+  try {
+    await assert.rejects(
+      closeRuntimeAndRemoveDirectory(runtime, directory, async () => {
+        assert.ok(runtime.child.exitCode !== null || runtime.child.signalCode !== null,
+          'directory removal must start only after the real child exits')
+        throw new Error('forced directory removal failure')
+      }),
+      /forced directory removal failure/,
+    )
+    assert.ok(runtime.child.exitCode !== null || runtime.child.signalCode !== null)
+  } finally {
+    await runtime.close()
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('runs the real Pi Agent loop through Fox JSONL with a faux provider', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-runtime-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
-  context.after(() => runtime.close())
+  registerRuntimeCleanup(context, runtime, directory)
 
   const initialize = runtime.send('initialize', {
     payload: { modelService: { baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 4096, maxOutputTokens: 512 } },
@@ -107,9 +154,8 @@ test('runs the real Pi Agent loop through Fox JSONL with a faux provider', async
 for (const referenceForm of ['object-array', 'serialized-object']) {
 test(`projectless knowledge question reaches Host search and preserves evidence (${referenceForm})`, async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-knowledge-routing-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
-  context.after(() => runtime.close())
+  registerRuntimeCleanup(context, runtime, directory)
   const reference = { source: 'remote', connectionId: 'yuxi-primary', id: 'kb-crane' }
   const initialize = runtime.send('initialize', { payload: { modelService: {
     baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 16384, maxOutputTokens: 512,
@@ -152,9 +198,8 @@ test(`projectless knowledge question reaches Host search and preserves evidence 
 
 test('keeps every structured Host result visible when one model turn calls multiple tools', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-parallel-results-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
-  context.after(() => runtime.close())
+  registerRuntimeCleanup(context, runtime, directory)
 
   const initialize = runtime.send('initialize', {
     payload: {
@@ -237,9 +282,8 @@ test('keeps every structured Host result visible when one model turn calls multi
 
 test('applies bounded correction on consecutive no-progress calls and never re-executes them', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-tool-budget-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
-  context.after(() => runtime.close())
+  registerRuntimeCleanup(context, runtime, directory)
 
   // The model proposes the identical search every turn. With the legacy
   // maxIdenticalToolCalls:1 override (now the no-progress streak limit), the
@@ -320,9 +364,8 @@ test('applies bounded correction on consecutive no-progress calls and never re-e
 
 test('a 7th productive web search is allowed; only no-evidence repeats are corrected', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-web-search-budget-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
-  context.after(() => runtime.close())
+  registerRuntimeCleanup(context, runtime, directory)
 
   const initialize = runtime.send('initialize', {
     payload: {
@@ -388,9 +431,8 @@ test('a 7th productive web search is allowed; only no-evidence repeats are corre
 
 test('polling with changing results and read-after-write continue past the old fixed count', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-polling-progress-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
-  context.after(() => runtime.close())
+  registerRuntimeCleanup(context, runtime, directory)
 
   // Same input every turn, but the result keeps changing (state advanced,
   // e.g. a file rewritten between reads): every call is real progress and
@@ -456,9 +498,8 @@ test('real progress from a wait-semantic tool disarms the no-progress ladder for
   // same read again. The productive result must clear the streak and the
   // correction ladder so the next read executes and observes the new state.
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-progress-after-wait-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
-  context.after(() => runtime.close())
+  registerRuntimeCleanup(context, runtime, directory)
 
   const initialize = runtime.send('initialize', {
     payload: {
@@ -540,9 +581,8 @@ test('a stuck loop after real progress is still bounded and idle polls cannot do
   // between must NOT clear the streak (otherwise a model could dodge the
   // bound by interleaving empty polls).
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-stuck-rearm-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
-  context.after(() => runtime.close())
+  registerRuntimeCleanup(context, runtime, directory)
 
   const initialize = runtime.send('initialize', {
     payload: {
@@ -623,9 +663,8 @@ test('a stuck loop after real progress is still bounded and idle polls cannot do
 
 test('wait-semantic polls with unchanged state are never corrected', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-wait-semantics-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
-  context.after(() => runtime.close())
+  registerRuntimeCleanup(context, runtime, directory)
 
   const initialize = runtime.send('initialize', {
     payload: {
@@ -687,9 +726,8 @@ test('wait-semantic polls with unchanged state are never corrected', async (cont
 
 test('records tool and prompt diagnostics while allowing a text-only run with no tools', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-no-tools-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
-  context.after(() => runtime.close())
+  registerRuntimeCleanup(context, runtime, directory)
 
   const initialize = runtime.send('initialize', {
     payload: {
@@ -757,9 +795,8 @@ test('records tool and prompt diagnostics while allowing a text-only run with no
 
 test('validates Execution Profile at startup and snapshots a side-effect-free shadow surface per Run', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-profile-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
-  context.after(() => runtime.close())
+  registerRuntimeCleanup(context, runtime, directory)
 
   const invalid = runtime.send('initialize', {
     payload: {
@@ -931,9 +968,8 @@ test('validates Execution Profile at startup and snapshots a side-effect-free sh
 
 test('keeps a forced Planner session separate from the Executor transcript', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-planner-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
   const runtime = startRuntime()
-  context.after(() => runtime.close())
+  registerRuntimeCleanup(context, runtime, directory)
 
   const initialize = runtime.send('initialize', {
     payload: {
@@ -985,7 +1021,8 @@ test('keeps a forced Planner session separate from the Executor transcript', asy
 
 test('maps Anthropic thinking blocks separately from the final answer', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-anthropic-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
+  let runtime
+  context.after(() => closeRuntimeAndRemoveDirectory(runtime, directory))
   const server = createServer((request, response) => {
     assert.equal(request.url, '/v1/messages')
     response.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -1009,8 +1046,7 @@ test('maps Anthropic thinking blocks separately from the final answer', async (c
   const address = server.address()
   assert.ok(address && typeof address === 'object')
 
-  const runtime = startRuntime()
-  context.after(() => runtime.close())
+  runtime = startRuntime()
   const initialize = runtime.send('initialize', {
     payload: { modelService: { baseUrl: `http://127.0.0.1:${address.port}`, modelId: 'MiniMax-M3', apiType: 'anthropic-messages', apiKey: 'test-key', contextWindow: 4096, maxOutputTokens: 512 } },
   })
@@ -1032,7 +1068,8 @@ test('maps Anthropic thinking blocks separately from the final answer', async (c
 
 test('streams OpenAI-compatible reasoning_content separately from the final answer', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-pi-openai-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
+  let runtime
+  context.after(() => closeRuntimeAndRemoveDirectory(runtime, directory))
   const server = createServer((request, response) => {
     assert.equal(request.url, '/v1/chat/completions')
     response.writeHead(200, { 'content-type': 'text/event-stream' })
@@ -1050,8 +1087,7 @@ test('streams OpenAI-compatible reasoning_content separately from the final answ
   const address = server.address()
   assert.ok(address && typeof address === 'object')
 
-  const runtime = startRuntime()
-  context.after(() => runtime.close())
+  runtime = startRuntime()
   const initialize = runtime.send('initialize', {
     payload: { modelService: { baseUrl: `http://127.0.0.1:${address.port}/v1`, modelId: 'MiniMax-M3', apiType: 'openai-completions', apiKey: 'test-key', contextWindow: 4096, maxOutputTokens: 512 } },
   })
