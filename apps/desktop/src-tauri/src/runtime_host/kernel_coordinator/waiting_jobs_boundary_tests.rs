@@ -255,3 +255,201 @@ fn shutdown_owned_wake(live: bool) {
     drop(host);
     drop(app);
 }
+
+#[test]
+fn parked_job_wake_rechecks_current_read_only_policy_on_both_pi_transports() {
+    let selected = std::env::var("FOX_TEST_AUTO_WAKE_POLICY_CHILD").ok();
+    let Some(mode) = selected else {
+        for mode in ["live", "round"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("parked_job_wake_rechecks_current_read_only_policy_on_both_pi_transports")
+                .arg("--test-threads=1")
+                .env("FOX_TEST_AUTO_WAKE_POLICY_CHILD", mode)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(55);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{mode} current-policy wake exceeded 55 seconds");
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{mode} stdout: {}\n{mode} stderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr));
+        }
+        return;
+    };
+    assert!(mode == "live" || mode == "round");
+    parked_job_policy_switch(mode == "live");
+}
+
+fn parked_job_policy_switch(live: bool) {
+    use fox_engine_protocol::{ExecutionAuthority, FrozenPermission, PermissionMode,
+        ResourceExecutor, RunControlBinding, TimeBudgets};
+    use std::sync::atomic::Ordering;
+
+    let write_input = json!({"path":"denied.txt", "content":"must not land", "expectedVersion":"missing"});
+    let arguments = json!({"idempotencyKey":"policy-switch-compute",
+        "params":{"processing":"chunked",
+            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).to_string();
+    // The first real batch also reads the absent target. This produces a
+    // verified missing-file observation, so the later write would pass the
+    // ordinary Allow gateway gate; no F1 or missing-baseline refusal can
+    // masquerade as the current read-only decision.
+    let (address, requests, stop_provider, server) = counted_local_provider(vec![
+        json!({"role":"assistant","tool_calls":[
+            {"index":0,"id":"job-start","type":"function","function":{
+                "name":"compute_job_start","arguments":arguments}},
+            {"index":1,"id":"read-absent","type":"function","function":{
+                "name":"read","arguments":json!({"path":"denied.txt"}).to_string()}}
+        ]}),
+        json!({"role":"assistant","content":"The Job remains in progress."}),
+        json!({"role":"assistant","tool_calls":[{"index":0,"id":"write-after-park",
+            "type":"function","function":{"name":"write_file",
+                "arguments":write_input.to_string()}}]}),
+        json!({"role":"assistant","content":"The current policy refused the proposed write."}),
+    ]);
+    let mut model = worker_configuration();
+    model.model_service = json!({"apiType":"openai-completions","modelId":"kernel-http-test",
+        "baseUrl":format!("http://{address}/v1")});
+    model.proposal_tools = vec![
+        json!({"name":"compute_job_start","description":"Start a bounded background compute Job",
+            "parameters":{"type":"object","properties":{"idempotencyKey":{"type":"string"},
+                "params":{"type":"object"}},"required":["idempotencyKey","params"]}}),
+        json!({"name":"read","description":"Read a project file",
+            "parameters":{"type":"object","properties":{"path":{"type":"string"}},
+                "required":["path"]}}),
+        json!({"name":"write_file","description":"Write a project file",
+            "parameters":{"type":"object","properties":{"path":{"type":"string"},
+                "content":{"type":"string"},"expectedVersion":{"type":"string"}},
+                "required":["path","content"]}}),
+    ];
+    let root = std::env::temp_dir().join(format!("fox-b2b3-policy-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(!root.join("denied.txt").exists());
+    let db = Database::open(root.join("facts.db")).unwrap();
+    let conversation = db.create_conversation(db.default_agent_id(), None,
+        Some(root.to_str().unwrap()), Some("allow")).unwrap();
+    let run = db.create_run(&conversation.id, "policy switch after park", None).unwrap().run.id;
+    let permission = FrozenPermission { mode: PermissionMode::Allow,
+        project_root: Some(root.to_string_lossy().into_owned()), grants: vec![], approval_epoch: None };
+    let binding = RunControlBinding { schema_version: 1, run_id: run.clone(),
+        conversation_id: conversation.id.clone(), engine_id: "pi".into(),
+        execution_profile_id: "legacy".into(), authority: ExecutionAuthority::Authoritative,
+        read_only_executor: ResourceExecutor::Rust,
+        permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+        permission, budgets: TimeBudgets::default() };
+    db.freeze_run_control(&binding).unwrap();
+    let hash = model.hash().unwrap();
+    let config = kernel::RunFrozenConfig { engine_id: "pi".into(), kernel_mode: "authoritative".into(),
+        capability_manifest_version: 2, capability_manifest_hash: "coordinator-test-manifest".into(),
+        permission_snapshot_id: binding.permission_snapshot_id.clone(),
+        execution_profile_id: binding.execution_profile_id.clone(), prompt_config_hash: hash.clone(),
+        model_request_timeout_ms: binding.budgets.model_request_ms,
+        model_first_response_ms: binding.budgets.model_first_response_ms,
+        model_idle_ms: binding.budgets.model_idle_ms,
+        tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
+        run_execution_budget_ms: binding.budgets.run_execution_ms,
+        run_execution_limited: binding.budgets.run_execution_limited,
+        approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
+        provider_max_retries: 0, turn_max_retries: 1, experimental_compute_job_notice: true };
+    db.kernel_create_run(&run, "pi", "authoritative", 2, &binding.permission_snapshot_id,
+        "legacy", &hash, &serde_json::to_string(&config).unwrap()).unwrap();
+    db.freeze_kernel_model_config(&run, &model).unwrap();
+    db.freeze_kernel_initial_input(&initial_input(&run, &hash)).unwrap();
+    let scope = crate::database::KernelHostScope { schema_version: 1,
+        tool_names: ["compute_job_start".into(), "read".into(), "write_file".into()]
+            .into_iter().collect(), mcp_server_hashes: Default::default(),
+        knowledge_reference_hashes: Default::default(),
+        knowledge_connection_hashes: Default::default(), office_tools: Default::default(),
+        lifecycle_hooks: vec![] };
+    db.freeze_kernel_host_scope(&run, &scope).unwrap();
+    assert!(db.compute_job_notice_enabled(&run).unwrap());
+    std::fs::create_dir_all(root.join("attachments")).unwrap();
+    std::fs::create_dir_all(root.join("skills")).unwrap();
+    let mut context = tauri::generate_context!();
+    for window in &mut context.config_mut().app.windows { window.create = false; }
+    let app = tauri::Builder::default().any_thread().build(context).unwrap();
+    let host = crate::runtime_host::RuntimeHost::new(app.handle().clone(), db.clone(), root.clone(),
+        root.join("attachments"), root.join("skills"), crate::yuxi::YuxiClient::new().unwrap());
+    if !live { host.force_auto_wake_round_for_test(&run); }
+    let parent_token = {
+        let state = host.state.lock().unwrap();
+        state.cancellation.register_run(&run).unwrap();
+        state.cancellation.tool_token(&run, "job-start").unwrap()
+    };
+    let (at_settle_tx, at_settle_rx) = std::sync::mpsc::channel();
+    let (job_release_tx, job_release_rx) = std::sync::mpsc::channel();
+    crate::runtime_host::attachment_compute::jobs::test_hooks::set_at_settle(Some(Box::new(move || {
+        at_settle_tx.send(()).unwrap();
+        job_release_rx.recv_timeout(Duration::from_secs(20))
+            .expect("the policy fixture never released the Job after park");
+    })));
+    let ownership = crate::runtime_host::kernel_host::acquire(&root, &run).unwrap();
+    if live { host.start_kernel_run(ownership, &binding, Value::Null, Value::Null).unwrap(); }
+    else { host.start_kernel_run_forced_round_for_test(ownership, &binding, Value::Null, Value::Null)
+        .unwrap(); }
+    assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(), Some("waiting_jobs"));
+    at_settle_rx.recv_timeout(Duration::from_secs(20))
+        .expect("real QuickJS Job never reached its terminal transaction");
+    assert_eq!(requests.load(Ordering::SeqCst), 2);
+    let jobs = db.kernel_jobs_for_run(&run).unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].state.as_str(), "running");
+    assert_eq!(jobs[0].attempts, 1);
+    assert!(!parent_token.is_cancelled());
+    let observed = db.host_observation_for(&run,
+        &crate::tool_host::canonical_file_identity(&root, "denied.txt").unwrap())
+        .unwrap().expect("real read of absent target did not store its missing baseline");
+    assert_eq!(observed.version, "missing");
+    assert_eq!(observed.observed_by_tool_call_id, "read-absent");
+    let gateway = crate::runtime_host::kernel_gateway::GatewayPolicy {
+        binding: binding.clone(), scope: scope.clone(), database: Some(db.clone()),
+        sessions_dir: Some(root.clone()), artifacts_dir: Some(root.join("attachments")) };
+    assert!(gateway.validate("write_file", &write_input).is_ok(),
+        "valid new-file input and frozen scope must pass the Allow gateway");
+    let old_policy = db.execution_policy(&conversation.id).unwrap();
+    assert_eq!(old_policy.mode, "allow");
+    let changed = db.change_execution_policy(&conversation.id, "policy-after-park",
+        old_policy.version, "read_only").unwrap();
+    assert_eq!(changed.mode, "read_only");
+    assert!(changed.version > old_policy.version);
+    assert_eq!(db.run_control_binding(&run).unwrap().unwrap().permission.mode,
+        PermissionMode::Allow, "policy change must not rewrite the frozen binding");
+    assert_eq!(gateway.validate("write_file", &write_input).unwrap_err(),
+        "project permission is read-only");
+    assert!(!root.join("denied.txt").exists());
+    job_release_tx.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(25);
+    loop {
+        let state = db.kernel_host_run_state(&run).unwrap();
+        if state.as_deref() == Some("completed") { break; }
+        assert!(Instant::now() < deadline, "policy wake did not finish: state={state:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    crate::runtime_host::attachment_compute::jobs::test_hooks::set_at_settle(None);
+    assert_eq!(db.kernel_job_snapshot(&jobs[0].job_id).unwrap().state.as_str(), "completed");
+    let (parks, wakes, denied): (i64, i64, i64) = db.with_connection(|conn| conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.waiting_jobs'),
+                (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.jobs_woken'),
+                (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='tool.failed'
+                    AND json_extract(payload_json,'$.toolCallId')='write-after-park'
+                    AND json_extract(payload_json,'$.code')='kernel.policy_denied')",
+        [&run], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))).unwrap();
+    assert_eq!((parks, wakes, denied), (1, 1, 1));
+    assert_eq!(crate::runtime_host::kernel_host::waiting_wake_test_hooks::take_continuation_transports_for_test(&run),
+        if live { vec!["live"] } else { vec!["per_round"] });
+    assert!(!root.join("denied.txt").exists(), "read-only policy allowed a new file to land");
+    assert_eq!(requests.load(Ordering::SeqCst), 4,
+        "notice and refused write should still reach the real local Provider once each");
+    assert!(db.kernel_job_notice(&conversation.id, &run, &jobs[0].job_id).unwrap().is_some());
+    stop_provider.store(true, Ordering::SeqCst);
+    server.join().unwrap();
+    drop(host);
+    drop(app);
+}
