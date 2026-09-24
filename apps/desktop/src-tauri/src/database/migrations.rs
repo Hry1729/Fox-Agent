@@ -6831,9 +6831,16 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     run_with_target(connection, now, MigrationTarget::Latest)
 }
 
+#[cfg(test)]
+pub(crate) fn run_to_v74_for_test(connection: &mut Connection, now: i64) -> Result<()> {
+    run_with_target(connection, now, MigrationTarget::V74)
+}
+
 #[derive(Clone, Copy)]
 enum MigrationTarget {
     Latest,
+    #[cfg(test)]
+    V74,
     #[cfg(test)]
     V79,
     #[cfg(test)]
@@ -6991,6 +6998,10 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     apply_migration(&transaction, 72, MIGRATION_72, now)?;
     apply_migration(&transaction, 73, MIGRATION_73, now)?;
     apply_migration(&transaction, 74, MIGRATION_74, now)?;
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V74) {
+        return finish_transaction(transaction);
+    }
     let v75_applied = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 75)",
         [],

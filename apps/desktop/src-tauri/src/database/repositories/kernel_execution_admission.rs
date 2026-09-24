@@ -2576,9 +2576,9 @@ mod tests {
         credential_for(run_id, conversation_id, call, ActionClass::Read, None, None)
     }
 
-    /// The ORIGINAL B1a v74 credential table (pre-Manage CHECK), recreated
-    /// exactly as MIGRATION_74 defined it, plus a recorded schema_migrations
-    /// row at version 74 so the upgrade path is the real one.
+    /// The original deployed v74 CHECK before the historical migration text
+    /// was widened. The test runs the real chain through v74, then restores
+    /// only this original table definition before seeding its old row.
     const V74_CREDENTIALS_TABLE: &str = "CREATE TABLE IF NOT EXISTS kernel_execution_credentials (
         run_id TEXT NOT NULL,
         dispatch_id TEXT NOT NULL,
@@ -2815,25 +2815,33 @@ mod tests {
         // historical rows stay byte-identical and gain no authorization.
         let path =
             std::env::temp_dir().join(format!("fox-v74-upgrade-{}.db", uuid::Uuid::new_v4()));
-        let (conversation_id, run_id) = {
-            let db = Database::open(path.clone()).unwrap();
-            let conversation = db
-                .create_conversation("fox-general", Some("v74 upgrade"), None, None)
-                .unwrap();
-            let run = db.create_run(&conversation.id, "v74 run", None).unwrap();
-            (conversation.id, run.run.id)
-        };
-        // Downgrade the credentials table to the exact v74 definition and mark
-        // version 74 as applied (dropping 75) — the real pre-R2 database state.
+        let conversation_id = "v74-conversation".to_owned();
+        let run_id = "v74-run".to_owned();
+        // Build the real 1..74 chain. The recorded MIGRATION_74 text has since
+        // widened its CHECK, so restore just the original deployed constraint;
+        // future tables and version rows must never be created in this fixture.
         {
-            let connection = rusqlite::Connection::open(&path).unwrap();
-            connection
-                .execute_batch(
-                    "DROP TABLE kernel_execution_credentials;
-                     DELETE FROM schema_migrations WHERE version >= 75;",
-                )
-                .unwrap();
+            let mut connection = rusqlite::Connection::open(&path).unwrap();
+            crate::database::migrations::run_to_v74_for_test(&mut connection, 1).unwrap();
+            connection.execute_batch("DROP TABLE kernel_execution_credentials;").unwrap();
             connection.execute_batch(V74_CREDENTIALS_TABLE).unwrap();
+            connection.execute_batch(
+                "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
+                 VALUES ('v74-agent','V74 Agent','','pi','','model',1,1);
+                 INSERT INTO conversations(id,agent_id,title,status,created_at,updated_at)
+                 VALUES ('v74-conversation','v74-agent','v74 upgrade','active',1,1);
+                 INSERT INTO runs(id,conversation_id,status,model,created_at)
+                 VALUES ('v74-run','v74-conversation','running','model',1);",
+            ).unwrap();
+            let version: i64 = connection.query_row(
+                "SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(version, 74);
+            let future_notice_table: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='kernel_job_notices'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(future_notice_table, 0);
             // A historical (pre-R2) credential row, exactly as v74 stored it.
             let historical = read_credential(&run_id, &conversation_id, "legacy-call");
             connection
