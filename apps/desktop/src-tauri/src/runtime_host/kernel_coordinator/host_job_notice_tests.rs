@@ -296,6 +296,55 @@ fn batch_model_lease_rejects_forged_durable_middle_in_both_transports() {
         "SELECT state FROM kernel_model_notice_inputs WHERE run_id=?1 AND dispatch_key=?2",
         rusqlite::params![run,kernel::INITIAL_MODEL_IDEMPOTENCY_KEY],|row|row.get(0))).unwrap();
     assert_eq!(initial_state,"acknowledged","the valid initial lease remains durable");
+
+    // A valid old batch A is not proof for the *current* batch B lease. All
+    // fields in A's directive/history below agree with A's durable checkpoint;
+    // only the outbox being claimed belongs to B.
+    coordinator.dispatch_batch(&batch,"settle-first-batch",&Allow,|binding,frame,_| Ok(
+        fox_engine_protocol::KernelModelResponse {
+            schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.turn_id.clone(),
+            batch_id:frame.batch_id.clone(),checkpoint_seq:frame.checkpoint_seq,
+            assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[
+                {"type":"toolCall","id":"second-read","name":"read",
+                 "arguments":{"path":"second.txt"}}]}),
+        })).unwrap();
+    coordinator.dispatch_tool("second-read","second-tool-owner",|_,_,_|Ok((true,
+        json!({"content":[{"type":"text","text":"second durable result"}]})))).unwrap();
+    let second_batch=coordinator.snapshot().unwrap().tool_calls.iter()
+        .find(|tool|tool.tool_call_id=="second-read").unwrap().batch_id.clone();
+    let second_frame=coordinator.prepare_stored_batch_resume(&second_batch).unwrap();
+    let second_command={
+        let mut controller=RunController::rehydrate(db.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
+        let effects=controller.begin_batch_model_request(&second_batch,
+            clock.now_monotonic_ms(),clock.now_wall_ms()).unwrap();
+        controller.persist_command(&effects)
+    };
+    let old_directive=fox_engine_protocol::KernelRoundDirective {
+        schema_version:1,kind:fox_engine_protocol::KernelRoundDirectiveKind::Batch,
+        batch_id:Some(batch.clone()),checkpoint_seq:Some(second_frame.checkpoint_seq),
+        preview_seq:None,tools:frame.tools.clone(),prompt:None,
+        steering:vec![],host_job_notices:vec![],
+    };
+    old_directive.validate().unwrap();
+    let old_payload=serde_json::to_value(&old_directive).unwrap();
+    let old_history=bound_batch_live_history(&run,&frame.history,
+        &frame.assistant_message,&frame.tools,&[]);
+    let old_binding=crate::database::ModelNoticeInput {
+        payload:&old_payload,delivered_history:&old_history,
+        live_history:Some(&old_history),checkpoint_seq:second_frame.checkpoint_seq,
+        history_start:old_history.len(),historical_bytes:0,
+    };
+    let error=db.kernel_commit_batch_dispatch(&run,clock.now_wall_ms(),&second_command,
+        &second_batch,"second-batch-owner",Some(&old_binding)).unwrap_err();
+    assert!(error.contains("bound live batch differs from its leased dispatch"),"{error}");
+    let (leased_second,pending_second):(i64,i64)=db.with_connection(|conn|conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM kernel_model_notice_inputs WHERE run_id=?1 AND dispatch_key=?2),
+                (SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND batch_id=?3
+                  AND effect_type='deliver_tool_batch' AND status='pending')",
+        rusqlite::params![run,kernel::batch_delivery_idempotency_key(&second_batch),second_batch],
+        |row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+    assert_eq!((leased_second,pending_second),(0,1),
+        "B must retain its own pending outbox rather than lease A's history");
 }
 
 #[test]
