@@ -5128,14 +5128,104 @@ fn try_write_report(
 // Tests
 // ---------------------------------------------------------------------------
 
+/// A tiny in-memory XLSX for the fast contracts. Real evaluation still stages
+/// the operator's workbook through `source_workbook_path()` in the ignored run.
+fn synthetic_agv_workbook() -> Vec<u8> {
+    use std::io::Write;
+    use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+
+    let mut dedup = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>"#,
+    );
+    let rows = [
+        ("sample-001", "卸船", 10, "重车"),
+        ("sample-002", "装船", 25, "空车"),
+        ("sample-003", "卸船", 45, "重车"),
+        ("sample-004", "装船", 75, "空车"),
+    ];
+    let text_cell = |column: &str, row: usize, text: &str| {
+        format!("<c r=\"{column}{row}\" t=\"inlineStr\"><is><t>{text}</t></is></c>")
+    };
+    dedup.push_str("<row r=\"1\">");
+    for (column, title) in [
+        ("A", "ORDERID"),
+        ("B", "任务类型"),
+        ("C", "等待时长"),
+        ("D", "AGV状态"),
+    ] {
+        dedup.push_str(&text_cell(column, 1, title));
+    }
+    dedup.push_str("</row>");
+    for (index, (order, task, wait, status)) in rows.iter().enumerate() {
+        let row = index + 2;
+        dedup.push_str(&format!("<row r=\"{row}\">"));
+        dedup.push_str(&text_cell("A", row, order));
+        dedup.push_str(&text_cell("B", row, task));
+        dedup.push_str(&format!("<c r=\"C{row}\"><v>{wait}</v></c>"));
+        dedup.push_str(&text_cell("D", row, status));
+        dedup.push_str("</row>");
+    }
+    dedup.push_str("</sheetData></worksheet>");
+
+    let exception = r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+<row r="1"><c r="A1" t="inlineStr"><is><t>ORDERID</t></is></c><c r="B1" t="inlineStr"><is><t>任务类型</t></is></c><c r="C1" t="inlineStr"><is><t>等待时长</t></is></c><c r="D1" t="inlineStr"><is><t>AGV状态</t></is></c><c r="E1" t="inlineStr"><is><t>区域</t></is></c><c r="F1" t="inlineStr"><is><t>备注</t></is></c><c r="G1" t="inlineStr"><is><t>超时原因</t></is></c></row>
+<row r="2"><c r="A2" t="inlineStr"><is><t>sample-004</t></is></c><c r="B2" t="inlineStr"><is><t>装船</t></is></c><c r="G2" t="inlineStr"><is><t>合成超时</t></is></c></row>
+</sheetData></worksheet>"#;
+    let files = [
+        (
+            "[Content_Types].xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+        ),
+        (
+            "_rels/.rels",
+            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/workbook.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="去重" sheetId="1" r:id="rId1"/><sheet name="悬臂" sheetId="2" r:id="rId2"/></sheets></workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+        ),
+        ("xl/worksheets/sheet1.xml", dedup.as_str()),
+        ("xl/worksheets/sheet2.xml", exception),
+    ];
+    let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    for (name, contents) in files {
+        archive.start_file(name, options).expect("start synthetic XLSX part");
+        archive
+            .write_all(contents.as_bytes())
+            .expect("write synthetic XLSX part");
+    }
+    archive.finish().expect("finish synthetic XLSX").into_inner()
+}
+
 /// Fast contract layer: expectations are derived, not hardcoded.
 #[test]
 fn real_eval_derives_current_expectations_without_historical_constants() {
-    let bytes = std::fs::read(source_workbook_path()).unwrap();
+    let bytes = synthetic_agv_workbook();
     let expected = derive_expectations(&bytes).unwrap();
     assert_eq!(expected.dedup_sheet, "去重");
     assert_eq!(expected.exception_sheet.as_deref(), Some("悬臂"));
-    assert!(expected.total > 0, "current source must have records");
+    assert_eq!(expected.total, 4, "the synthetic source has four records");
+    assert_eq!(expected.exception_total, 1);
+    assert_eq!(expected.task_counts.as_slice(), &[("卸船".into(), 2), ("装船".into(), 2)]);
+    assert_eq!(expected.status_counts.as_slice(), &[("重车".into(), 2), ("空车".into(), 2)]);
+    assert_eq!(expected.exception_tasks.as_slice(), &[("装船".into(), 1)]);
+    assert_eq!(expected.wait_min, 10);
+    assert_eq!(expected.wait_max, 75);
+    assert_eq!(expected.wait_avg, 38.75);
+    assert_eq!(
+        expected.buckets.as_slice(),
+        &[
+            ("≤20分钟".into(), 0, 20, 1),
+            ("21-30分钟".into(), 21, 30, 1),
+            ("31-60分钟".into(), 31, 60, 1),
+            (">60分钟".into(), 61, i64::MAX, 1),
+        ]
+    );
     let task_sum: u64 = expected.task_counts.iter().map(|(_, count)| *count).sum();
     let status_sum: u64 = expected.status_counts.iter().map(|(_, count)| *count).sum();
     let bucket_sum: u64 = expected.buckets.iter().map(|(_, _, _, count)| *count).sum();
@@ -5180,7 +5270,7 @@ fn real_eval_derives_current_expectations_without_historical_constants() {
 
 #[test]
 fn real_eval_plan_is_deterministic_and_carries_charts_sections_and_derived_values() {
-    let bytes = std::fs::read(source_workbook_path()).unwrap();
+    let bytes = synthetic_agv_workbook();
     let expected = derive_expectations(&bytes).unwrap();
     let first = serde_json::to_value(agv_script(&expected).iter().collect::<Vec<_>>()).unwrap();
     let second = serde_json::to_value(agv_script(&expected).iter().collect::<Vec<_>>()).unwrap();
