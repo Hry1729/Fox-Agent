@@ -494,6 +494,76 @@ export const SCHEMA_BUNDLE = {
     },
     "KernelBatchResumeFrame": {
       "$defs": {
+        "HostJobNotice": {
+          "additionalProperties": false,
+          "description": "A Host-owned terminal fact. A model or a user-shaped message cannot mint\none: the Host checks every identity against the durable notice ledger.",
+          "properties": {
+            "attempt": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "dataRootId": {
+              "type": "string"
+            },
+            "errorCode": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "finishedAt": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "jobId": {
+              "type": "string"
+            },
+            "resultBytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "resultRef": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resultSha256": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "runId": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "terminalState": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "dataRootId",
+            "conversationId",
+            "runId",
+            "jobId",
+            "attempt",
+            "terminalState",
+            "finishedAt"
+          ],
+          "type": "object"
+        },
         "KernelSettledToolResult": {
           "additionalProperties": false,
           "properties": {
@@ -570,6 +640,12 @@ export const SCHEMA_BUNDLE = {
         "history": {
           "description": "Complete prior history. Engines must reject rather than synthesize missing results.",
           "items": true,
+          "type": "array"
+        },
+        "hostJobNotices": {
+          "items": {
+            "$ref": "#/$defs/HostJobNotice"
+          },
           "type": "array"
         },
         "idempotencyKey": {
@@ -723,6 +799,76 @@ export const SCHEMA_BUNDLE = {
     },
     "KernelInitialModelFrame": {
       "$defs": {
+        "HostJobNotice": {
+          "additionalProperties": false,
+          "description": "A Host-owned terminal fact. A model or a user-shaped message cannot mint\none: the Host checks every identity against the durable notice ledger.",
+          "properties": {
+            "attempt": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "dataRootId": {
+              "type": "string"
+            },
+            "errorCode": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "finishedAt": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "jobId": {
+              "type": "string"
+            },
+            "resultBytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "resultRef": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resultSha256": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "runId": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "terminalState": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "dataRootId",
+            "conversationId",
+            "runId",
+            "jobId",
+            "attempt",
+            "terminalState",
+            "finishedAt"
+          ],
+          "type": "object"
+        },
         "KernelInitialModelInput": {
           "additionalProperties": false,
           "description": "Host-owned initial prompt snapshot, not a dispatch request or permission.\nA separate durable dispatch intent is required before invoking an engine.",
@@ -770,6 +916,12 @@ export const SCHEMA_BUNDLE = {
             "string",
             "null"
           ]
+        },
+        "hostJobNotices": {
+          "items": {
+            "$ref": "#/$defs/HostJobNotice"
+          },
+          "type": "array"
         },
         "idempotencyKey": {
           "type": "string"
@@ -1063,6 +1215,76 @@ export const SCHEMA_BUNDLE = {
     },
     "KernelRoundDirective": {
       "$defs": {
+        "HostJobNotice": {
+          "additionalProperties": false,
+          "description": "A Host-owned terminal fact. A model or a user-shaped message cannot mint\none: the Host checks every identity against the durable notice ledger.",
+          "properties": {
+            "attempt": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "conversationId": {
+              "type": "string"
+            },
+            "dataRootId": {
+              "type": "string"
+            },
+            "errorCode": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "finishedAt": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "jobId": {
+              "type": "string"
+            },
+            "resultBytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "resultRef": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resultSha256": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "runId": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "terminalState": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "dataRootId",
+            "conversationId",
+            "runId",
+            "jobId",
+            "attempt",
+            "terminalState",
+            "finishedAt"
+          ],
+          "type": "object"
+        },
         "KernelRoundDirectiveKind": {
           "enum": [
             "batch",
@@ -1147,6 +1369,12 @@ export const SCHEMA_BUNDLE = {
             "integer",
             "null"
           ]
+        },
+        "hostJobNotices": {
+          "items": {
+            "$ref": "#/$defs/HostJobNotice"
+          },
+          "type": "array"
         },
         "kind": {
           "$ref": "#/$defs/KernelRoundDirectiveKind"
