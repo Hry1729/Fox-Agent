@@ -6828,6 +6828,19 @@ CREATE TABLE IF NOT EXISTS conversation_tool_permissions (
 "#;
 
 pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
+    run_with_target(connection, now, MigrationTarget::Latest)
+}
+
+#[derive(Clone, Copy)]
+enum MigrationTarget {
+    Latest,
+    #[cfg(test)]
+    V79,
+    #[cfg(test)]
+    V83,
+}
+
+fn run_with_target(connection: &mut Connection, now: i64, target: MigrationTarget) -> Result<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "busy_timeout", 5_000)?;
@@ -6835,13 +6848,13 @@ pub fn run(connection: &mut Connection, now: i64) -> Result<()> {
     // SQLite table replacement needs FK enforcement off before BEGIN. All
     // changes, the integrity check, and the version record remain atomic.
     connection.pragma_update(None, "foreign_keys", "OFF")?;
-    let result = run_transaction(connection, now);
+    let result = run_transaction(connection, now, target);
     let restored = connection.pragma_update(None, "foreign_keys", "ON");
     result?;
     restored
 }
 
-fn run_transaction(connection: &mut Connection, now: i64) -> Result<()> {
+fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarget) -> Result<()> {
     let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     transaction.execute_batch(MIGRATION_1)?;
     transaction.execute(
@@ -7035,6 +7048,10 @@ fn run_transaction(connection: &mut Connection, now: i64) -> Result<()> {
             [now],
         )?;
     }
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V79) {
+        return finish_transaction(transaction);
+    }
     let v80_applied = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 80)",
         [],
@@ -7146,7 +7163,15 @@ fn run_transaction(connection: &mut Connection, now: i64) -> Result<()> {
             [now],
         )?;
     }
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V83) {
+        return finish_transaction(transaction);
+    }
     apply_migration(&transaction, 84, MIGRATION_84, now)?;
+    finish_transaction(transaction)
+}
+
+fn finish_transaction(transaction: rusqlite::Transaction<'_>) -> Result<()> {
     let violations: i64 = transaction.query_row(
         "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))?;
     if violations != 0 {
@@ -13784,18 +13809,18 @@ CREATE INDEX idx_kernel_tool_calls_state ON kernel_tool_calls(run_id, state);
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
     /// REV-03/04/05 的迁移 80：旧库升级与新库初始化两条路径都必须成立，
     /// 且升级不得静默扩大/收窄任何会话的有效权限。
     #[test]
     fn migration_80_upgrades_a_v79_database_without_changing_effective_modes() {
         let root = std::env::temp_dir().join(format!("fox-v80-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("scratch dir");
-        let path = root.join("facts.db");
+        let fresh_path = root.join("fresh.db");
+        let path = root.join("v79.db");
 
         // --- 新库初始化：migration 80 直接在全新库上跑通。---
         {
-            let database = crate::database::Database::open(path.clone()).expect("open fresh");
+            let database = crate::database::Database::open(fresh_path).expect("open fresh");
             let version: i64 = database
                 .with_connection(|c| {
                     c.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))
@@ -13840,78 +13865,47 @@ CREATE INDEX idx_kernel_tool_calls_state ON kernel_tool_calls(run_id, state);
                 .expect("the new columns exist on a fresh database");
         }
 
-        // --- 构造一个"停在 v79"的旧库：还原观察表与触发器的旧形状、删掉 80
-        //     标记，并让两处模式存储故意不一致。
+        // --- Build a real v79 database with the historical 1..79 chain.
+        // A project default and the conversation column intentionally differ;
+        // the v79 policy row follows the project, and v80 must reconcile them.
         {
             let mut connection = Connection::open(&path).expect("open v79 fixture");
-            connection
-                .pragma_update(None, "foreign_keys", "OFF")
-                .expect("foreign keys off");
-            let transaction = connection.transaction().expect("begin narrowing");
-            transaction
-                .execute_batch(
-                    r#"
-DROP TABLE kernel_host_observations;
-CREATE TABLE kernel_host_observations (
-    run_id TEXT NOT NULL,
-    conversation_id TEXT NOT NULL,
-    target_identity TEXT NOT NULL,
-    version TEXT NOT NULL,
-    observed_by_tool_call_id TEXT NOT NULL,
-    observed_at INTEGER NOT NULL,
-    PRIMARY KEY(run_id, target_identity)
-);
+            run_with_target(&mut connection, 1, MigrationTarget::V79)
+                .expect("run historical migrations through v79");
+            connection.execute_batch(r#"
+INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
+VALUES ('agent-old','Old Agent','','pi','','model',1,1);
+INSERT INTO projects(id,name,root_path,permission_mode,status,created_at,updated_at)
+VALUES ('project-old','Old Project','C:/fox-v79-fixture','allow','active',1,1);
+INSERT INTO conversations(id,agent_id,title,status,created_at,updated_at,project_id,permission_mode)
+VALUES ('conv-old','agent-old','Old Conversation','active',1,1,'project-old','ask');
+INSERT INTO runs(id,conversation_id,status,model,created_at)
+VALUES ('run-old','conv-old','running','model',1);
 INSERT INTO kernel_host_observations
-    (run_id, conversation_id, target_identity, version, observed_by_tool_call_id, observed_at)
+    (run_id,conversation_id,target_identity,version,observed_by_tool_call_id,observed_at)
 VALUES ('run-old','conv-old','target-old','v-old','read-old',1);
-DROP TRIGGER IF EXISTS execution_policy_conversation_change;
-CREATE TRIGGER execution_policy_conversation_change AFTER UPDATE OF permission_mode,project_id ON conversations
-WHEN OLD.permission_mode IS NOT NEW.permission_mode OR OLD.project_id IS NOT NEW.project_id BEGIN
- UPDATE kernel_execution_policies SET version=version+1,mode=COALESCE((SELECT permission_mode FROM projects WHERE id=NEW.project_id),NEW.permission_mode,'ask') WHERE conversation_id=NEW.id;
-END;
-CREATE TRIGGER IF NOT EXISTS execution_policy_project_change AFTER UPDATE OF permission_mode ON projects WHEN OLD.permission_mode IS NOT NEW.permission_mode BEGIN
- UPDATE kernel_execution_policies SET version=version+1,mode=NEW.permission_mode WHERE conversation_id IN (SELECT id FROM conversations WHERE project_id=NEW.id);
-END;
-DROP TABLE IF EXISTS kernel_whole_file_replace_grants;
-DROP TABLE IF EXISTS kernel_restore_requests;
-ALTER TABLE kernel_execution_credentials DROP COLUMN replace_candidate_digest;
-ALTER TABLE kernel_execution_credentials DROP COLUMN replace_request_digest;
-DELETE FROM schema_migrations WHERE version IN (80,81,82,83);
-"#,
-                )
-                .expect("narrow to a v79-shaped database");
-            transaction.commit().expect("commit narrowing");
-            connection
-                .pragma_update(None, "foreign_keys", "ON")
-                .expect("foreign keys on");
+"#).expect("seed historical v79 rows");
             let version: i64 = connection
                 .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))
                 .expect("version");
             assert_eq!(version, 79, "the fixture must be a v79 database");
-            // The v81/v82 objects are really gone, so the upgrade has to
-            // recreate them rather than find them already present.
-            assert_eq!(
-                connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM sqlite_master WHERE name='kernel_whole_file_replace_grants'",
-                        [],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    .expect("replace grants table"),
-                0,
-                "the fixture must not already carry the v81 table"
-            );
-            assert_eq!(
-                connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM sqlite_master WHERE name='kernel_restore_requests'",
-                        [],
-                        |r| r.get::<_, i64>(0),
-                    )
-                    .expect("restore requests table"),
-                0,
-                "the fixture must not already carry the v82 table"
-            );
+            let drift: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM conversations c JOIN kernel_execution_policies p
+                 ON p.conversation_id=c.id WHERE p.mode<>c.permission_mode",
+                [], |r| r.get(0),
+            ).expect("historical mode drift");
+            assert_eq!(drift, 1, "the fixture must exercise the v80 reconciliation");
+            for table in ["kernel_whole_file_replace_grants", "kernel_restore_requests", "kernel_job_notices"] {
+                let present: i64 = connection.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table], |r| r.get(0),
+                ).expect("future table absence");
+                assert_eq!(present, 0, "{table} must not exist in v79");
+            }
+            let violations: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0),
+            ).expect("v79 foreign keys");
+            assert_eq!(violations, 0);
         }
 
         // --- 升级：旧观察行保留且不给覆盖资格，项目联动触发器已删除，
@@ -14321,6 +14315,97 @@ DELETE FROM schema_migrations WHERE version=79;
             }).expect("preserved historical request and v83 shape");
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migration_84_upgrades_real_v83_jobs_and_reopens_idempotently() {
+        use sha2::Digest;
+        let root = std::env::temp_dir().join(format!("fox-v84-from-v83-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("scratch dir");
+        let path = root.join("facts.db");
+        let body = serde_json::json!({"legacy":"result"}).to_string();
+        let sha = format!("sha256:{}", hex::encode(Sha256::digest(body.as_bytes())));
+        {
+            let mut connection = Connection::open(&path).expect("open historical fixture");
+            run_with_target(&mut connection, 1, MigrationTarget::V83)
+                .expect("run historical migrations through v83");
+            connection.execute_batch(
+                "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
+                 VALUES ('agent-v83','Old Agent','','pi','','model',1,1);
+                 INSERT INTO conversations(id,agent_id,title,status,created_at,updated_at)
+                 VALUES ('conv-v83','agent-v83','Old Conversation','active',1,1);
+                 INSERT INTO runs(id,conversation_id,status,model,created_at)
+                 VALUES ('run-v83','conv-v83','running','model',1);
+                 INSERT INTO kernel_jobs(job_id,run_id,conversation_id,kind,idempotency_key,
+                    params_hash,params_json,state,attempts,deadline_ms,created_at,updated_at)
+                 VALUES ('queued-v83','run-v83','conv-v83','attachment_compute',
+                    'queued-key','sha256:queued','{}','queued',0,100000,1,1);",
+            ).expect("seed old Run and queued Job");
+            connection.execute(
+                "INSERT INTO tool_call_result_blobs(sha256,body_json,byte_size,created_at)
+                 VALUES(?1,?2,?3,1)",
+                rusqlite::params![&sha,&body,body.len() as i64],
+            ).expect("old result blob");
+            connection.execute(
+                "INSERT INTO kernel_jobs(job_id,run_id,conversation_id,kind,idempotency_key,
+                    params_hash,params_json,state,attempts,result_ref,result_bytes,result_sha256,
+                    created_at,updated_at,finished_at)
+                 VALUES ('completed-v83','run-v83','conv-v83','attachment_compute',
+                    'completed-key','sha256:completed','{}','completed',1,
+                    'fox-job-result://completed-v83',?1,?2,1,2,2)",
+                rusqlite::params![body.len() as i64,&sha],
+            ).expect("old completed Job");
+            let version: i64 = connection.query_row(
+                "SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0),
+            ).expect("historical version");
+            assert_eq!(version, 83);
+            let notice_table: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='kernel_job_notices'",
+                [], |row| row.get(0),
+            ).expect("historical notice absence");
+            assert_eq!(notice_table, 0);
+            let violations: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0),
+            ).expect("historical FK check");
+            assert_eq!(violations, 0);
+        }
+        for _ in 0..2 {
+            let database = crate::database::Database::open(path.clone())
+                .expect("upgrade or reopen v83 fixture");
+            database.with_connection(|connection| {
+                let version: i64 = connection.query_row(
+                    "SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0),
+                )?;
+                let old_run: (String,String) = connection.query_row(
+                    "SELECT conversation_id,status FROM runs WHERE id='run-v83'", [],
+                    |row| Ok((row.get(0)?,row.get(1)?)),
+                )?;
+                let queued: (String,i64) = connection.query_row(
+                    "SELECT state,attempts FROM kernel_jobs WHERE job_id='queued-v83'", [],
+                    |row| Ok((row.get(0)?,row.get(1)?)),
+                )?;
+                let notices: i64 = connection.query_row(
+                    "SELECT COUNT(*) FROM kernel_job_notices", [], |row| row.get(0),
+                )?;
+                let violations: i64 = connection.query_row(
+                    "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0),
+                )?;
+                let integrity: String = connection.query_row(
+                    "PRAGMA integrity_check", [], |row| row.get(0),
+                )?;
+                assert_eq!(version, DATABASE_SCHEMA_VERSION);
+                assert_eq!(old_run, ("conv-v83".into(),"running".into()));
+                assert_eq!(queued, ("queued".into(),0));
+                assert_eq!(notices, 0, "historical jobs are not retroactively notified");
+                assert_eq!(violations, 0);
+                assert_eq!(integrity, "ok");
+                Ok(())
+            }).expect("preserve old Run/Job data and integrity");
+            assert_eq!(database.kernel_job_result_value("conv-v83","completed-v83").unwrap(),
+                serde_json::json!({"legacy":"result"}));
+            drop(database);
+        }
+        std::fs::remove_dir_all(root).expect("remove scratch fixture");
     }
 }
 

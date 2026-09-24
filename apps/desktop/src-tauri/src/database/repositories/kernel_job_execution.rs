@@ -660,32 +660,12 @@ mod notice_tests {
     }
 
     #[test]
-    fn schema_84_upgrades_v83_shape_and_memory_instances_are_distinct() {
+    fn memory_instances_are_distinct_and_root_setting_is_immutable() {
         let first=Database::open(PathBuf::from(":memory:")).unwrap();
         let clone=first.clone();
         let second=Database::open(PathBuf::from(":memory:")).unwrap();
         assert_eq!(first.data_root_id,clone.data_root_id);
         assert_ne!(first.data_root_id,second.data_root_id);
         assert!(first.set_app_setting(super::super::DATA_ROOT_INSTANCE_UUID_KEY,"replacement").is_err());
-
-        let root=std::env::temp_dir().join(format!("fox-b1-v83-{}",Uuid::new_v4()));
-        std::fs::create_dir_all(&root).unwrap();
-        let path=root.join("facts.db");
-        let db=Database::open(path.clone()).unwrap();
-        db.with_connection(|conn| conn.execute_batch(
-            "DROP TABLE kernel_job_notices; DELETE FROM schema_migrations WHERE version=84;"
-        )).unwrap();
-        drop(db);
-        for _ in 0..2 {
-            let reopened=Database::open(path.clone()).unwrap();
-            reopened.with_connection(|conn| {
-                let version: i64=conn.query_row("SELECT MAX(version) FROM schema_migrations",[],|r|r.get(0))?;
-                let violations: i64=conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check",[],|r|r.get(0))?;
-                assert_eq!(version,84);assert_eq!(violations,0);
-                Ok(())
-            }).unwrap();
-            drop(reopened);
-        }
-        std::fs::remove_dir_all(root).unwrap();
     }
 }
