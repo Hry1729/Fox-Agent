@@ -210,6 +210,236 @@ fn run_transition_allowed(from: &str, to: &str) -> bool {
         )
 }
 
+/// Guard the wait projection before the generic event/outbox writer runs. The
+/// IMMEDIATE transaction makes the old projection, Job rows, event stream and
+/// next outbox one serializable decision. An adapter cannot invent a wake by
+/// merely setting `run_state` or supplying a `job_notice` lane.
+fn validate_job_wait_decision(
+    tx: &rusqlite::Transaction<'_>, root: &str, run: &str, now: i64,
+    old_state: &str, old_seq: i64, old_elapsed: i64,
+    old_deadline: Option<i64>, old_accounted: Option<i64>,
+    frozen: &crate::kernel::RunFrozenConfig,
+    cmd: &crate::kernel::KernelPersistCommand,
+    settling_model_response: bool,
+) -> rusqlite::Result<()> {
+    let park_events: Vec<_> = cmd.events.iter().filter(|e| e.event_type == "run.waiting_jobs").collect();
+    let account_events: Vec<_> = cmd.events.iter().filter(|e| e.event_type == "run.jobs_wait_accounted").collect();
+    let wake_events: Vec<_> = cmd.events.iter().filter(|e| e.event_type == "run.jobs_woken").collect();
+    let notice_outbox: Vec<_> = cmd.outbox.iter().filter(|o| {
+        o.kind == crate::kernel::OutboxEffectKind::ContinuationModel
+            && serde_json::from_str::<serde_json::Value>(&o.payload_json)
+                .ok().is_some_and(|v| v["lane"] == "job_notice")
+    }).collect();
+    if !frozen.experimental_compute_job_notice {
+        if old_state == "waiting_jobs" || cmd.run_state == crate::kernel::RunState::WaitingJobs
+            || !park_events.is_empty() || !account_events.is_empty() || !wake_events.is_empty()
+            || !notice_outbox.is_empty() || cmd.wait_deadline_wall_ms.is_some()
+            || cmd.wait_accounted_until_wall_ms.is_some() {
+            return Err(kernel_err("job wait requires frozen experimental flag"));
+        }
+        return Ok(());
+    }
+    if park_events.len() > 1 || account_events.len() > 1 || wake_events.len() > 1
+        || notice_outbox.len() > 1 {
+        return Err(kernel_err("duplicate job wait decision fact"));
+    }
+    if old_state != "waiting_jobs" {
+        if old_deadline.is_some() || old_accounted.is_some() {
+            return Err(kernel_err("non-waiting Run retains job wait projection"));
+        }
+        if cmd.run_state != crate::kernel::RunState::WaitingJobs {
+            if cmd.wait_deadline_wall_ms.is_some() || cmd.wait_accounted_until_wall_ms.is_some()
+                || !park_events.is_empty() || !account_events.is_empty() || !wake_events.is_empty()
+                || !notice_outbox.is_empty() {
+                return Err(kernel_err("job wait fact outside waiting transition"));
+            }
+            return Ok(());
+        }
+        if old_state != "running" || park_events.len() != 1
+            || !account_events.is_empty() || !wake_events.is_empty() || !notice_outbox.is_empty()
+            || !cmd.outbox.is_empty()
+            || !settling_model_response || cmd.model_request_since_wall_ms.is_some()
+            || cmd.terminal_written || now <= 0 || cmd.running_elapsed_ms < old_elapsed {
+            return Err(kernel_err("job wait lacks settled response or legal transition"));
+        }
+        let event = park_events[0];
+        if i64::try_from(event.seq).ok() != Some(old_seq + cmd.events.len() as i64)
+            || cmd.events.last().map(|e| e.seq) != Some(event.seq) {
+            return Err(kernel_err("invalid job wait event sequence"));
+        }
+        let payload: serde_json::Value = serde_json::from_str(&event.payload_json)
+            .map_err(|_| kernel_err("invalid job wait event"))?;
+        let response_seq = payload["settledResponseSeq"].as_u64()
+            .ok_or_else(|| kernel_err("job wait has no settled response cursor"))?;
+        let response = cmd.events.iter().find(|e| e.seq == response_seq && matches!(
+            e.event_type.as_str(), "engine.initial_response" | "engine.batch_response" | "engine.continuation_response"
+        )).ok_or_else(|| kernel_err("job wait response is not in the leased decision"))?;
+        let response_payload: serde_json::Value = serde_json::from_str(&response.payload_json)
+            .map_err(|_| kernel_err("invalid settled response event"))?;
+        if response.seq >= event.seq || response_payload["response"] != payload["response"]
+            || !payload["history"].is_array() || event.payload_json.len() > 1_048_576
+            || payload["dataRootId"] != root || payload["parkedAtWallMs"] != now
+            || payload["runningElapsedMs"] != cmd.running_elapsed_ms {
+            return Err(kernel_err("job wait response, history, root or clock changed"));
+        }
+        let mut expected: Vec<crate::kernel::WaitingJobFact> =
+            serde_json::from_value(payload["jobs"].clone())
+                .map_err(|_| kernel_err("invalid frozen Job wait set"))?;
+        if expected.is_empty() || expected.windows(2).any(|pair| pair[0].job_id >= pair[1].job_id) {
+            return Err(kernel_err("job wait set is empty or unordered"));
+        }
+        let conversation: String = tx.query_row(
+            "SELECT conversation_id FROM runs WHERE id=?1", [run], |row| row.get(0))?;
+        let mut statement = tx.prepare(
+            "SELECT job_id,attempts,deadline_ms FROM kernel_jobs
+              WHERE run_id=?1 AND conversation_id=?2 AND state IN ('queued','running','paused')
+              ORDER BY job_id")?;
+        let actual = statement.query_map(params![run,conversation], |row| {
+            Ok((row.get::<_,String>(0)?, row.get::<_,i64>(1)?, row.get::<_,Option<i64>>(2)?))
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        if actual.len() != expected.len() { return Err(kernel_err("job wait set changed before park")); }
+        let mut max_job_deadline = 0_i64;
+        for (fact, (job_id, attempt, deadline)) in expected.drain(..).zip(actual) {
+            if fact.job_id != job_id || fact.attempt != attempt
+                || deadline != Some(fact.deadline_wall_ms) || fact.deadline_wall_ms <= now {
+                return Err(kernel_err("job wait identity or original deadline changed"));
+            }
+            max_job_deadline = max_job_deadline.max(fact.deadline_wall_ms);
+        }
+        let expected_deadline = if frozen.run_execution_limited {
+            let remaining = frozen.run_execution_budget_ms - cmd.running_elapsed_ms;
+            if remaining <= 0 { return Err(kernel_err("job wait Run budget already exhausted")); }
+            now.checked_add(remaining).ok_or_else(|| kernel_err("job wait deadline overflow"))?
+                .min(max_job_deadline)
+        } else { max_job_deadline };
+        if payload["waitDeadlineWallMs"] != expected_deadline
+            || cmd.wait_deadline_wall_ms != Some(expected_deadline)
+            || cmd.wait_accounted_until_wall_ms != Some(now) {
+            return Err(kernel_err("job wait deadline or accounting cursor changed"));
+        }
+        return Ok(());
+    }
+
+    // Every waiting decision is fenced by the event sequence of its original
+    // park and by the old accounting cursor. A copied DB has a different root.
+    let park: (i64, String) = tx.query_row(
+        "SELECT seq,payload_json FROM kernel_events
+          WHERE run_id=?1 AND event_type='run.waiting_jobs' ORDER BY seq DESC LIMIT 1",
+        [run], |row| Ok((row.get(0)?,row.get(1)?)))?;
+    let parked: serde_json::Value = serde_json::from_str(&park.1)
+        .map_err(|_| kernel_err("invalid stored job wait event"))?;
+    if parked["dataRootId"] != root || old_deadline.is_none() || old_accounted.is_none()
+        || old_deadline != parked["waitDeadlineWallMs"].as_i64()
+        || !park_events.is_empty() {
+        return Err(kernel_err("job wait root, deadline or event identity changed"));
+    }
+    let deadline = old_deadline.unwrap();
+    let accounted = old_accounted.unwrap();
+    if now < accounted || accounted <= 0 || deadline < accounted {
+        return Err(kernel_err("job wait wall clock moved backwards"));
+    }
+    let through = now.min(deadline);
+    let next_elapsed = old_elapsed.checked_add(through - accounted)
+        .ok_or_else(|| kernel_err("job wait elapsed overflow"))?;
+    if cmd.running_elapsed_ms != next_elapsed {
+        return Err(kernel_err("job wait interval was skipped or double charged"));
+    }
+    if through > accounted {
+        if account_events.len() != 1 { return Err(kernel_err("job wait debit has no event")); }
+        let debit: serde_json::Value = serde_json::from_str(&account_events[0].payload_json)
+            .map_err(|_| kernel_err("invalid job wait debit event"))?;
+        if debit["parkSeq"] != park.0 || debit["fromWallMs"] != accounted
+            || debit["throughWallMs"] != through || debit["runningElapsedMs"] != next_elapsed {
+            return Err(kernel_err("job wait debit identity changed"));
+        }
+    } else if !account_events.is_empty() {
+        return Err(kernel_err("job wait was debited twice"));
+    }
+    if cmd.run_state == crate::kernel::RunState::WaitingJobs {
+        if !wake_events.is_empty() || !notice_outbox.is_empty()
+            || !cmd.outbox.is_empty() || through == deadline
+            || cmd.wait_deadline_wall_ms != Some(deadline)
+            || cmd.wait_accounted_until_wall_ms != Some(through)
+            || frozen.run_execution_limited && next_elapsed >= frozen.run_execution_budget_ms {
+            return Err(kernel_err("job wait projection or budget changed"));
+        }
+        return Ok(());
+    }
+    if cmd.wait_deadline_wall_ms.is_some() || cmd.wait_accounted_until_wall_ms.is_some() {
+        return Err(kernel_err("departed job wait retains accounting projection"));
+    }
+    if cmd.run_state == crate::kernel::RunState::Completed {
+        return Err(kernel_err("waiting Jobs cannot complete before a durable wake"));
+    }
+    if frozen.run_execution_limited && next_elapsed >= frozen.run_execution_budget_ms {
+        if !matches!(cmd.run_state,
+                crate::kernel::RunState::BudgetExhausted | crate::kernel::RunState::Cancelling)
+            || !wake_events.is_empty() || !notice_outbox.is_empty() {
+            return Err(kernel_err("exhausted job wait cannot request another model"));
+        }
+        return Ok(());
+    }
+    if cmd.run_state != crate::kernel::RunState::Running {
+        if !wake_events.is_empty() || !notice_outbox.is_empty() {
+            return Err(kernel_err("terminal job wait cannot request another model"));
+        }
+        return Ok(()); // cancellation/failure is handled by its existing state guard
+    }
+    if now > deadline || wake_events.len() != 1 || notice_outbox.len() != 1
+        || cmd.outbox.len() != 1 {
+        return Err(kernel_err("job wake requires one in-deadline notice outbox"));
+    }
+    let wake = wake_events[0];
+    let wake_payload: serde_json::Value = serde_json::from_str(&wake.payload_json)
+        .map_err(|_| kernel_err("invalid job wake event"))?;
+    let outbox = notice_outbox[0];
+    let outbox_payload: serde_json::Value = serde_json::from_str(&outbox.payload_json)
+        .map_err(|_| kernel_err("invalid job wake outbox"))?;
+    if wake_payload["parkSeq"] != park.0 || wake_payload["fromWallMs"] != accounted
+        || wake_payload["throughWallMs"] != through
+        || wake_payload["runningElapsedMs"] != next_elapsed
+        || outbox.effect_key != format!("continuation:{}", wake.seq)
+        || outbox_payload["effectKey"] != outbox.effect_key
+        || !cmd.events.iter().any(|event| event.event_type == "engine.continuation_requested"
+            && event.payload_json == outbox.payload_json) {
+        return Err(kernel_err("job wake/outbox identity mismatch"));
+    }
+    let conversation: String = tx.query_row(
+        "SELECT conversation_id FROM runs WHERE id=?1", [run], |row| row.get(0))?;
+    let frozen_jobs: Vec<crate::kernel::WaitingJobFact> =
+        serde_json::from_value(parked["jobs"].clone())
+            .map_err(|_| kernel_err("invalid frozen Job wait set"))?;
+    for job in frozen_jobs {
+        let actual: Option<(String,i64,Option<i64>,String)> = tx.query_row(
+            "SELECT state,attempts,deadline_ms,conversation_id FROM kernel_jobs WHERE run_id=?1 AND job_id=?2",
+            params![run,job.job_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))
+        ).optional()?;
+        if actual.is_none_or(|(state,attempt,job_deadline,owner)| {
+            !matches!(state.as_str(), "completed"|"failed"|"cancelled")
+                || attempt != job.attempt || job_deadline != Some(job.deadline_wall_ms)
+                || owner != conversation
+        }) { return Err(kernel_err("frozen Job identity or terminal state changed")); }
+        let notice_owned: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM kernel_job_notices
+              WHERE data_root_id=?1 AND conversation_id=?2 AND run_id=?3 AND job_id=?4)",
+            params![root,conversation,run,job.job_id], |row| row.get(0))?;
+        if !notice_owned { return Err(kernel_err("frozen terminal Job has no scoped Host notice")); }
+    }
+    let unfinished: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM kernel_jobs WHERE run_id=?1 AND conversation_id=?2
+          AND state IN ('queued','running','paused')",
+        params![run,conversation], |row| row.get(0))?;
+    if unfinished != 0 { return Err(kernel_err("job wake still has unfinished Jobs")); }
+    let pending: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM kernel_job_notices n
+          LEFT JOIN kernel_job_notice_deliveries d ON d.job_id=n.job_id
+          WHERE n.data_root_id=?1 AND n.conversation_id=?2 AND n.run_id=?3
+            AND (d.job_id IS NULL OR d.state!='acknowledged')",
+        params![root,conversation,run], |row| row.get(0))?;
+    if pending <= 0 { return Err(kernel_err("job wake has no pending Host notice")); }
+    Ok(())
+}
+
 fn valid_tool_state(state: &str) -> bool {
     matches!(
         state,
@@ -495,6 +725,9 @@ impl Database {
     pub fn kernel_update_run_state(&self, run_id: &str, state: &str) -> Result<(), String> {
         if !valid_run_state(state) {
             return Err(format!("unsupported kernel run state: {state}"));
+        }
+        if state == "waiting_jobs" {
+            return Err("waiting_jobs requires the atomic Kernel decision transaction".into());
         }
         let now = now_ms();
         let terminal = matches!(
@@ -1380,6 +1613,9 @@ impl Database {
                 frozen_config_json,
                 manifest_hash,
                 approval_deadline,
+                old_elapsed,
+                old_wait_deadline,
+                old_wait_accounted,
             ): (
                 String,
                 i64,
@@ -1393,12 +1629,16 @@ impl Database {
                 String,
                 Option<String>,
                 Option<i64>,
+                i64,
+                Option<i64>,
+                Option<i64>,
             ) = transaction.query_row(
                 "SELECT state, last_event_seq, turn_id, engine_id, kernel_mode,
                         capability_manifest_version, permission_snapshot_id,
                         execution_profile_id, prompt_config_hash,
                         frozen_config_json, capability_manifest_hash,
-                        approval_deadline_wall_ms
+                        approval_deadline_wall_ms, running_elapsed_ms,
+                        wait_deadline_wall_ms, wait_accounted_until_wall_ms
                    FROM kernel_runs WHERE run_id = ?1",
                 params![run_id],
                 |row| {
@@ -1415,6 +1655,9 @@ impl Database {
                         row.get(9)?,
                         row.get(10)?,
                         row.get(11)?,
+                        row.get(12)?,
+                        row.get(13)?,
+                        row.get(14)?,
                     ))
                 },
             )?;
@@ -1487,6 +1730,18 @@ impl Database {
                     current_state,
                     cmd.run_state.as_str()
                 )));
+            }
+
+            validate_job_wait_decision(
+                &transaction, &self.data_root_id, run_id, wall_now_ms,
+                &current_state, persisted_last_seq, old_elapsed,
+                old_wait_deadline, old_wait_accounted, &frozen, cmd,
+                initial_lease.is_some_and(|(_, response)| response)
+                    || continuation_lease.is_some_and(|(_, _, response)| response)
+                    || batch_response_lease.is_some(),
+            )?;
+            if current == "waiting_jobs" {
+                return Ok(Some("waiting_jobs cannot use the legacy state writer".into()));
             }
 
             super::kernel_compaction::validate_decision(&transaction, run_id, wall_now_ms, persisted_last_seq, cmd)?;
@@ -3115,6 +3370,39 @@ impl Database {
             }
             let state = crate::kernel::RunState::parse(&state_str)
                 .ok_or_else(|| kernel_err(format!("unknown persisted run state: {state_str}")))?;
+            if state == crate::kernel::RunState::WaitingJobs {
+                let (park_seq, park_json): (i64,String) = transaction.query_row(
+                    "SELECT seq,payload_json FROM kernel_events
+                      WHERE run_id=?1 AND event_type='run.waiting_jobs' ORDER BY seq DESC LIMIT 1",
+                    [run_id], |row| Ok((row.get(0)?,row.get(1)?)))?;
+                let park: serde_json::Value = serde_json::from_str(&park_json)
+                    .map_err(|_| kernel_err("invalid durable job wait event"))?;
+                let woke_after_park: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM kernel_events WHERE run_id=?1
+                      AND seq>?2 AND event_type='run.jobs_woken')",
+                    params![run_id,park_seq], |row| row.get(0))?;
+                if park["dataRootId"] != self.data_root_id
+                    || wait_deadline_wall_ms != park["waitDeadlineWallMs"].as_i64()
+                    || wait_accounted_until_wall_ms.is_none_or(|accounted|
+                        accounted < park["parkedAtWallMs"].as_i64().unwrap_or(i64::MAX)
+                        || accounted > wait_deadline_wall_ms.unwrap_or(0))
+                    || elapsed < park["runningElapsedMs"].as_i64().unwrap_or(i64::MAX)
+                    || woke_after_park {
+                    return Err(kernel_err("job wait root, cursor or wake history changed"));
+                }
+                let jobs: Vec<crate::kernel::WaitingJobFact> =
+                    serde_json::from_value(park["jobs"].clone())
+                        .map_err(|_| kernel_err("invalid frozen waiting Job identities"))?;
+                for job in jobs {
+                    let current: Option<(i64,Option<i64>)> = transaction.query_row(
+                        "SELECT attempts,deadline_ms FROM kernel_jobs WHERE run_id=?1 AND job_id=?2",
+                        params![run_id,job.job_id], |row| Ok((row.get(0)?,row.get(1)?))
+                    ).optional()?;
+                    if current != Some((job.attempt,Some(job.deadline_wall_ms))) {
+                        return Err(kernel_err("frozen Job attempt or deadline changed on reopen"));
+                    }
+                }
+            }
 
             let mut batch_statement = transaction.prepare(
                 "SELECT batch_id, ordered_tool_call_ids_json, barrier_emitted

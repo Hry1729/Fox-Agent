@@ -887,16 +887,18 @@ impl RunController {
             return Err(KernelError::FailClosed("job wait wall clock moved backwards".into()));
         }
         let through = wall_ms.min(deadline);
-        if through == accounted { return Ok(Vec::new()); }
-        self.running_elapsed_ms = self.running_elapsed_ms.checked_add(through - accounted)
-            .ok_or_else(|| KernelError::FailClosed("job wait elapsed overflow".into()))?;
-        self.wait_accounted_until_wall_ms = Some(through);
-        let mut effects = vec![self.append_event("run.jobs_wait_accounted", serde_json::json!({
-            "parkSeq": park_seq,
-            "fromWallMs": accounted,
-            "throughWallMs": through,
-            "runningElapsedMs": self.running_elapsed_ms,
-        }))];
+        let mut effects = Vec::new();
+        if through > accounted {
+            self.running_elapsed_ms = self.running_elapsed_ms.checked_add(through - accounted)
+                .ok_or_else(|| KernelError::FailClosed("job wait elapsed overflow".into()))?;
+            self.wait_accounted_until_wall_ms = Some(through);
+            effects.push(self.append_event("run.jobs_wait_accounted", serde_json::json!({
+                "parkSeq": park_seq,
+                "fromWallMs": accounted,
+                "throughWallMs": through,
+                "runningElapsedMs": self.running_elapsed_ms,
+            })));
+        }
         if self.config.run_execution_limited
             && self.running_elapsed_ms >= self.config.run_execution_budget_ms {
             effects.extend(self.terminate(RunOutcome::BudgetExhausted {
@@ -904,9 +906,80 @@ impl RunController {
                 message: format!("Run exceeded its {}ms execution budget while waiting for Jobs.",
                     self.config.run_execution_budget_ms),
             }));
+        } else if wall_ms >= deadline {
+            // B2b-3 will reconcile/expire the Jobs before selecting wake or
+            // this honest stop. The persistence kernel itself never waits
+            // forever if the original Job deadline arrives first.
+            effects.extend(self.terminate(RunOutcome::Failed {
+                code: "kernel.job_wait_deadline_reached".into(),
+                message: "Original child Job deadline elapsed before a deliverable notice was ready.".into(),
+            }));
         } else {
             effects.push(Effect::PublishSnapshot);
         }
+        Ok(effects)
+    }
+
+    /// Prepare one wake and its one continuation intent. B2b-2 supplies the
+    /// actual typed-notice input; B2b-1 only freezes the atomic identity. The
+    /// repository verifies the still-pending Host notice and frozen Job facts.
+    pub fn wake_waiting_jobs(
+        &mut self,
+        park_seq: u64,
+        wall_ms: i64,
+        continuation_payload_json: &str,
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::WaitingJobs || park_seq == 0
+            || self.model_request_in_flight || continuation_payload_json.len() > 1_048_576 {
+            return Err(KernelError::FailClosed("job wake has no settled waiting Run".into()));
+        }
+        let (Some(deadline), Some(accounted)) =
+            (self.wait_deadline_wall_ms, self.wait_accounted_until_wall_ms) else {
+            return Err(KernelError::FailClosed("job wake cursor is missing".into()));
+        };
+        if wall_ms < accounted || wall_ms > deadline {
+            return Err(KernelError::FailClosed("job wake is outside the frozen wait window".into()));
+        }
+        let elapsed = self.running_elapsed_ms.checked_add(wall_ms - accounted)
+            .ok_or_else(|| KernelError::FailClosed("job wake elapsed overflow".into()))?;
+        if self.config.run_execution_limited && elapsed >= self.config.run_execution_budget_ms {
+            return Err(KernelError::FailClosed("job wake Run budget is exhausted".into()));
+        }
+        let next_wake_seq = self.seq + u64::from(wall_ms > accounted) + 1;
+        let effect_key = format!("continuation:{next_wake_seq}");
+        let payload: serde_json::Value = serde_json::from_str(continuation_payload_json)
+            .map_err(|_| KernelError::FailClosed("invalid job wake continuation".into()))?;
+        if payload["lane"] != "job_notice" || payload["effectKey"] != effect_key
+            || payload["turnId"] != self.turn_id || payload["input"]["runId"] != self.run_id
+            || payload["input"]["turnId"] != self.turn_id
+            || payload["input"]["promptConfigHash"] != self.config.prompt_config_hash {
+            return Err(KernelError::FailClosed("job wake continuation identity changed".into()));
+        }
+        let mut effects = Vec::new();
+        if wall_ms > accounted {
+            self.running_elapsed_ms = elapsed;
+            self.wait_accounted_until_wall_ms = Some(wall_ms);
+            effects.push(self.append_event("run.jobs_wait_accounted", serde_json::json!({
+                "parkSeq": park_seq,
+                "fromWallMs": accounted,
+                "throughWallMs": wall_ms,
+                "runningElapsedMs": elapsed,
+            })));
+        }
+        self.state = RunState::Running;
+        self.running_since_mono_ms = None; // next active tick anchors the new process domain
+        self.wait_deadline_wall_ms = None;
+        self.wait_accounted_until_wall_ms = None;
+        effects.push(self.append_event("run.jobs_woken", serde_json::json!({
+            "parkSeq": park_seq,
+            "fromWallMs": accounted,
+            "throughWallMs": wall_ms,
+            "runningElapsedMs": elapsed,
+        })));
+        let payload_json = payload.to_string();
+        effects.push(self.append_event("engine.continuation_requested", payload));
+        effects.push(Effect::RequestContinuationModel { effect_key, payload_json });
+        effects.push(Effect::PublishSnapshot);
         Ok(effects)
     }
 
@@ -1401,6 +1474,11 @@ impl RunController {
 
     /// User/host requests cancellation. Run-scoped only.
     pub fn request_cancel(&mut self) -> Vec<Effect> {
+        if self.state == RunState::WaitingJobs {
+            return vec![Effect::Audit {
+                message: "waiting Jobs require wall-clock accounting before cancellation".into(),
+            }];
+        }
         if self.terminal_written || self.state.is_terminal() {
             return vec![Effect::Audit {
                 message: "cancel ignored; run already terminal".into(),
@@ -1442,6 +1520,39 @@ impl RunController {
         }
         effects.push(Effect::PublishSnapshot);
         effects
+    }
+
+    /// Cancellation has priority over a simultaneous Run budget expiry, but
+    /// the elapsed wait interval is still charged exactly once before clearing
+    /// the wait projection. Job process cancellation is a later Host action.
+    pub fn cancel_waiting_jobs(&mut self, park_seq: u64, wall_ms: i64)
+        -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::WaitingJobs || park_seq == 0 {
+            return Err(KernelError::FailClosed("Run is not waiting on Jobs".into()));
+        }
+        let (Some(deadline), Some(accounted)) =
+            (self.wait_deadline_wall_ms, self.wait_accounted_until_wall_ms) else {
+            return Err(KernelError::FailClosed("job wait cursor is missing".into()));
+        };
+        if wall_ms < accounted {
+            return Err(KernelError::FailClosed("job wait wall clock moved backwards".into()));
+        }
+        let through = wall_ms.min(deadline);
+        let elapsed = self.running_elapsed_ms.checked_add(through - accounted)
+            .ok_or_else(|| KernelError::FailClosed("job wait elapsed overflow".into()))?;
+        let mut effects = Vec::new();
+        self.running_elapsed_ms = elapsed;
+        if through > accounted {
+            effects.push(self.append_event("run.jobs_wait_accounted", serde_json::json!({
+                "parkSeq": park_seq, "fromWallMs": accounted,
+                "throughWallMs": through, "runningElapsedMs": elapsed,
+            })));
+        }
+        self.wait_deadline_wall_ms = None;
+        self.wait_accounted_until_wall_ms = None;
+        self.state = RunState::Running;
+        effects.extend(self.request_cancel());
+        Ok(effects)
     }
 
     pub fn settle_cancellation(&mut self) -> Vec<Effect> {
@@ -1514,6 +1625,11 @@ impl RunController {
         }
         if matches!(outcome, RunOutcome::Cancelled) {
             return self.settle_cancellation();
+        }
+        if self.state == RunState::WaitingJobs && matches!(outcome, RunOutcome::Completed) {
+            return vec![Effect::Audit {
+                message: "run.completed ignored while child Job facts await a durable wake".into(),
+            }];
         }
         if matches!(outcome, RunOutcome::Completed)
             && self.tools.values().any(|tool| !tool.state.is_terminal())

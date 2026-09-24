@@ -139,6 +139,62 @@ fn test_config() -> RunFrozenConfig {
 mod tests {
     use super::*;
 
+    fn parked_compute_run(run_budget: i64, limited: bool, job_deadline: i64) -> RunController {
+        let mut config = test_config();
+        config.experimental_compute_job_notice = true;
+        config.run_execution_budget_ms = run_budget;
+        config.run_execution_limited = limited;
+        let (mut run, _) = RunController::start("waiting-run", "turn", config, &TestClock::new(0)).unwrap();
+        assert!(run.tick(4_000, 1_000).is_empty());
+        let response = run.record_initial_model_response("{\"role\":\"assistant\"}").unwrap();
+        assert!(has_event(&[response], "engine.initial_response"));
+        let parked = run.park_waiting_jobs(4_000, 1_000, "root-id", 2,
+            "{\"role\":\"assistant\"}", "[]",
+            &[WaitingJobFact { job_id: "job-1".into(), attempt: 1,
+                deadline_wall_ms: job_deadline }]).unwrap();
+        assert!(has_event(&parked, "run.waiting_jobs"));
+        run
+    }
+
+    #[test]
+    fn waiting_jobs_budget_charges_wall_once_across_reopen_and_never_ticks_active_clock() {
+        let mut run = parked_compute_run(5_000, true, 6_000);
+        assert_eq!(run.wait_deadline_wall_ms(), Some(2_000));
+        assert_eq!(run.running_elapsed_ms(), 4_000);
+        assert!(run.tick(50_000, 1_000).is_empty());
+        assert_eq!(run.running_elapsed_ms(), 4_000);
+        let park_seq = run.last_event_seq();
+        let first = run.account_waiting_jobs(park_seq, 1_500).unwrap();
+        assert!(has_event(&first, "run.jobs_wait_accounted"));
+        assert_eq!(run.running_elapsed_ms(), 4_500);
+        let mut recovered = RunController::rehydrate(run.shadow_checkpoint(50_000)).unwrap();
+        assert_eq!(recovered.wait_deadline_wall_ms(), Some(2_000));
+        assert!(recovered.account_waiting_jobs(park_seq, 1_500).unwrap().is_empty());
+        assert!(recovered.account_waiting_jobs(park_seq, 1_499).is_err());
+        let exhausted = recovered.account_waiting_jobs(park_seq, 2_100).unwrap();
+        assert!(has_event(&exhausted, "run.budget_exhausted"));
+        assert_eq!(recovered.running_elapsed_ms(), 5_000);
+        assert_eq!(recovered.state(), RunState::BudgetExhausted);
+        assert_eq!(recovered.wait_deadline_wall_ms(), None);
+    }
+
+    #[test]
+    fn waiting_jobs_never_completes_and_original_job_deadline_is_bounded() {
+        let mut run = parked_compute_run(20_000, true, 1_500);
+        assert_eq!(run.wait_deadline_wall_ms(), Some(1_500));
+        assert!(!has_event(&run.terminate(RunOutcome::Completed), "run.completed"));
+        assert_eq!(run.state(), RunState::WaitingJobs);
+        let park_seq = run.last_event_seq();
+        let stopped = run.account_waiting_jobs(park_seq, 1_500).unwrap();
+        assert!(has_event(&stopped, "run.failed"));
+        assert_eq!(run.running_elapsed_ms(), 4_500);
+        let mut unlimited = parked_compute_run(5_000, false, 1_500);
+        assert_eq!(unlimited.wait_deadline_wall_ms(), Some(1_500));
+        let park_seq = unlimited.last_event_seq();
+        assert!(has_event(&unlimited.account_waiting_jobs(park_seq, 2_000).unwrap(), "run.failed"));
+        assert_eq!(unlimited.running_elapsed_ms(), 4_500);
+    }
+
     #[test]
     fn historical_frozen_run_defaults_compute_notice_off() {
         let config=test_config();
