@@ -51,11 +51,16 @@ fn kernel_read_result(db: &Database, run_id: &str, call: &str) -> Value {
     serde_json::from_str(&raw).expect("durable Kernel result json")
 }
 
+/// 一条已结算结果的 durable 行：权威 Kernel 记在 `kernel_tool_calls`，Legacy 记在
+/// `tool_calls`，两者按构造互斥。
 fn durable_result_json(db: &Database, run_id: &str, call: &str) -> Value {
     let raw: String = db
         .with_connection(|c| {
             c.query_row(
-                "SELECT result_json FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2",
+                "SELECT result_json FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id=?2
+                 UNION ALL
+                 SELECT result_json FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id=?2
+                 LIMIT 1",
                 rusqlite::params![run_id, call],
                 |r| r.get(0),
             )
@@ -660,5 +665,154 @@ fn f1_office_extract_view_kind_never_authorizes_replacement() {
     assert!(
         !observation.authorizes_whole_file_replacement(),
         "Office 提取视图永远不构成源全文"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Legacy 可达入口：同一交付规则必须拦住 Legacy 发证路径
+// ---------------------------------------------------------------------------
+
+/// 经**Legacy 生产入口**读一次：真实 `tool_calls` 行 + 真实观察登记。
+fn legacy_durable_read(
+    db: &Database,
+    binding: &fox_engine_protocol::RunControlBinding,
+    input: &Value,
+    call: &str,
+) -> Value {
+    let registry = CancellationRegistry::default();
+    registry.register_run(&binding.run_id).expect("register run");
+    let token = registry
+        .tool_token(&binding.run_id, call)
+        .expect("tool token");
+    crate::runtime_host::create_fresh_host_tool_call(
+        db,
+        &binding.run_id,
+        call,
+        "read",
+        input,
+        "running",
+        false,
+    )
+    .expect("a fresh Host read ToolCall");
+    let outcome = managed_files::execute_observed_reader(
+        db,
+        binding,
+        "read",
+        input,
+        call,
+        &token,
+        std::time::Duration::from_millis(600_000),
+    );
+    let envelope = crate::runtime_host::finalize_host_tool_execution(
+        db,
+        &binding.run_id,
+        call,
+        "read",
+        input,
+        Vec::new(),
+        outcome,
+    )
+    .expect("finalize the Host read");
+    envelope.get("result").cloned().unwrap_or(envelope)
+}
+
+/// Legacy（非权威 Kernel）入口仍然可达，因此必须有独立用例证明同一交付规则
+/// 在它的发证路径上生效——不能拿 Authoritative 的结果代替。
+///
+/// 这里走 `Database::issue_legacy_file_credential`，也就是桌面 Host 写路径
+/// （`runtime_host::execute_host_tool_call`）用的那条发证入口：
+///  * 30 KB 全文读取 + 被裁剪的模型视图 → `requires_replace_grant == true`，
+///    并留下 pending 的专门替换请求；
+///  * 小文件全文交付 → 不额外要求专门确认，避免"一律禁写"。
+#[test]
+fn f1_legacy_entry_requires_the_replacement_grant_for_an_undelivered_whole_read() {
+    // --- 大文件：Host 读到全文，模型只收到头尾 ---
+    let (db, root, conversation, run) = rev_fixture("f1-legacy-big", "allow");
+    let binding = db.run_control_binding(&run).expect("binding").expect("frozen");
+    let body = f1_big_body();
+    std::fs::write(root.join("big.txt"), body.as_bytes()).expect("write");
+    let read_input = json!({"path":"big.txt"});
+    let read = legacy_durable_read(&db, &binding, &read_input, "read-big");
+    let version = read_version(&read);
+    let observation = observation(&db, &run, &root, "big.txt", &version);
+    assert!(
+        observation.authorizes_whole_file_replacement(),
+        "源事实必须成立：Legacy 读取确实交付了全文"
+    );
+    let view = model_visible_tool_result(&db, &run, "read-big", "read", &read_input);
+    assert!(
+        !view[0]["text"].as_str().expect("text").contains(F1_MARKER),
+        "Legacy 模型视图同样被生产投影裁剪"
+    );
+
+    let policy_version = db
+        .execution_policy(&conversation)
+        .expect("execution policy")
+        .version;
+    let write_input = json!({"path":"big.txt","content":body,"expectedVersion":version});
+    crate::runtime_host::create_fresh_host_tool_call(
+        &db,
+        &run,
+        "write-1",
+        "write_file",
+        &write_input,
+        "running",
+        false,
+    )
+    .expect("a fresh Host write ToolCall");
+    let credential = db
+        .issue_legacy_file_credential(&run, "write-1", policy_version)
+        .expect("the Legacy issuance entry");
+    assert!(
+        credential.requires_replace_grant,
+        "Legacy 入口同样必须要求专门替换确认"
+    );
+    assert!(credential.replace_candidate_digest.is_some());
+    assert!(credential.replace_request_digest.is_some());
+    assert_eq!(
+        f1_replace_grant_state(&db, &run).as_deref(),
+        Some("pending"),
+        "Legacy 发证只能提出请求，不能自行授权"
+    );
+    assert_eq!(
+        std::fs::read(root.join("big.txt")).expect("target"),
+        body.as_bytes(),
+        "未确认的整文件替换不得改写目标"
+    );
+
+    // --- 小文件：完整交付，不得被一律禁写 ---
+    let (db, root, conversation, run) = rev_fixture("f1-legacy-small", "allow");
+    let binding = db.run_control_binding(&run).expect("binding").expect("frozen");
+    let small = "alpha\nbeta\ngamma\n";
+    std::fs::write(root.join("small.txt"), small.as_bytes()).expect("write");
+    let read_input = json!({"path":"small.txt"});
+    let read = legacy_durable_read(&db, &binding, &read_input, "read-small");
+    let version = read_version(&read);
+    let policy_version = db
+        .execution_policy(&conversation)
+        .expect("execution policy")
+        .version;
+    let write_input = json!({"path":"small.txt","content":"ALPHA\nBETA\nGAMMA\n","expectedVersion":version});
+    crate::runtime_host::create_fresh_host_tool_call(
+        &db,
+        &run,
+        "write-1",
+        "write_file",
+        &write_input,
+        "running",
+        false,
+    )
+    .expect("a fresh Host write ToolCall");
+    let credential = db
+        .issue_legacy_file_credential(&run, "write-1", policy_version)
+        .expect("the Legacy issuance entry");
+    assert!(
+        !credential.requires_replace_grant,
+        "完整交付的小文件不得被一律禁写"
+    );
+    assert_eq!(
+        f1_replace_grant_state(&db, &run),
+        None,
+        "不需要专门替换确认时不得留下请求记录"
     );
 }
