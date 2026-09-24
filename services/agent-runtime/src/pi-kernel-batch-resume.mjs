@@ -193,6 +193,7 @@ export function prepareKernelInitialModel(request, identity) {
   if (Buffer.byteLength(JSON.stringify(request), 'utf8') > 1_048_576) fail('initial frame is too large')
   const frame = request.payload?.initialModel
   const continuationKey = frame?.continuationKey ?? undefined
+  const continuationLane = frame?.continuationLane ?? undefined
   if (continuationKey !== undefined && (typeof continuationKey !== 'string'
       || !/^continuation:[1-9][0-9]*$/.test(continuationKey)
       || !Number.isSafeInteger(Number(continuationKey.slice('continuation:'.length))))) fail('invalid continuation identity')
@@ -200,8 +201,11 @@ export function prepareKernelInitialModel(request, identity) {
   if (validateWireValue('KernelInitialModelFrame', frame).length || frame.schemaVersion !== 1
       || frame.idempotencyKey !== expectedKey || !Number.isSafeInteger(frame.checkpointSeq) || frame.checkpointSeq < 1) fail('invalid initial frame')
   const input = frame.input
+  const hostNotices = validateHostJobNotices(frame.hostJobNotices)
+  if (continuationLane !== undefined && continuationLane !== 'job_notice'
+      || continuationLane === 'job_notice' && (continuationKey === undefined || !hostNotices.length)) fail('invalid Job notice continuation lane')
   if (input.schemaVersion !== 1 || input.runId !== request.runId || !nonempty(input.turnId) || !nonempty(input.promptConfigHash)
-      || !input.messages.length || input.messages.at(-1)?.role !== 'user') fail('invalid initial input')
+      || !input.messages.length || input.messages.at(-1)?.role !== (continuationLane === 'job_notice' ? 'assistant' : 'user')) fail('invalid initial input')
   assertCompleteHistory(input.messages)
   for (const message of input.messages) {
     const calls = Array.isArray(message.content) && message.content.some(block => block?.type === 'toolCall')
@@ -214,7 +218,6 @@ export function prepareKernelInitialModel(request, identity) {
       fail('unsupported initial content')
     }
   }
-  const hostNotices = validateHostJobNotices(frame.hostJobNotices)
   validateHostJobNotices([...historicalHostNotices(input.messages), ...hostNotices])
   const all = [...input.messages, ...hostNotices.map(hostJobNoticeMarker)]
   return { messages: preparePiReplayHistory(materializeHostJobHistory(all)),

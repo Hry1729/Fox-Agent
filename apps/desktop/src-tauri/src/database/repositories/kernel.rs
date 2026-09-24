@@ -1358,6 +1358,12 @@ impl Database {
 
     pub(crate) fn kernel_continuation_input(&self, run_id: &str, effect_key: &str)
         -> Result<fox_engine_protocol::KernelInitialModelInput, String> {
+        self.kernel_continuation_input_with_lane(run_id,effect_key).map(|(input,_,_)|input)
+    }
+
+    pub(crate) fn kernel_continuation_input_with_lane(&self, run_id: &str, effect_key: &str)
+        -> Result<(fox_engine_protocol::KernelInitialModelInput,Option<String>,
+            Vec<fox_engine_protocol::HostJobNotice>), String> {
         let body = self.with_connection(|connection| {
             connection.query_row("SELECT o.payload_json FROM kernel_effect_outbox o
                 JOIN kernel_events e ON e.run_id=o.run_id AND e.event_type='engine.continuation_requested'
@@ -1368,13 +1374,25 @@ impl Database {
         let payload: serde_json::Value = serde_json::from_str(&body).map_err(|_| "invalid continuation payload")?;
         let input: fox_engine_protocol::KernelInitialModelInput = serde_json::from_value(payload["input"].clone())
             .map_err(|_| "invalid stored continuation input")?;
-        input.validate()?;
+        let lane = payload["lane"].as_str().map(str::to_owned);
+        let mut frozen_notices=Vec::new();
+        if lane.as_deref() == Some("job_notice") {
+            input.validate_job_notice()?;
+            frozen_notices = serde_json::from_value(
+                payload["hostJobNotices"].clone()).map_err(|_|"job_notice has no typed Host facts")?;
+            fox_engine_protocol::validate_host_job_notices(&frozen_notices)?;
+            if frozen_notices.is_empty() || payload["prompt"] != "" {
+                return Err("job_notice has no bounded typed Host fact or used a synthetic prompt".into());
+            }
+        } else {
+            input.validate()?;
+        }
         let original = self.kernel_initial_input(run_id)?;
         if input.run_id != run_id || input.turn_id != original.turn_id
             || input.prompt_config_hash != original.prompt_config_hash || payload["effectKey"] != effect_key {
             return Err("continuation frozen input changed".into());
         }
-        Ok(input)
+        Ok((input,lane,frozen_notices))
     }
 
     pub(crate) fn kernel_commit_continuation_model(&self, run_id: &str, wall_now_ms: i64,

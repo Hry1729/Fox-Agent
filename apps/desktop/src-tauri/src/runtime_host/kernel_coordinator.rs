@@ -840,6 +840,7 @@ impl<'a> KernelCoordinator<'a> {
                 input,
                 idempotency_key: kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into(),
                 continuation_key: None,
+                continuation_lane: None,
                 checkpoint_seq: guard.last_event_seq(),
                 host_job_notices: new_notices,
             };

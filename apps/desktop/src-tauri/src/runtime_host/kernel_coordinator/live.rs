@@ -633,7 +633,13 @@ impl KernelCoordinator<'_> {
                             response_json: response_json.clone(), jobs: wait_jobs,
                         }
                     } else {
-                    let promised_but_unstarted = !looks_like_final_answer(&draft);
+                    // Preserve the original bounded review and jobs_pending
+                    // guard when the experiment is off (or this is not one of
+                    // its durable compute Jobs).
+                    let pending_jobs=self.database.kernel_jobs_for_run(&self.binding.run_id)?
+                        .iter().any(|job| !job.state.is_terminal());
+                    if pending_jobs && !review_budget_left {return Err("kernel.jobs_pending".into());}
+                    let promised_but_unstarted = pending_jobs || !looks_like_final_answer(&draft);
                     // Never while tools are still in flight: an unresolved call is
                     // not a promise, and the barrier (not this lane) owns it.
                     let no_tool_in_flight = self
@@ -1201,9 +1207,16 @@ impl KernelCoordinator<'_> {
         self.tick()?;
         self.database
             .kernel_validate_resource_acquisition(&self.binding.run_id)?;
-        let mut input = if let Some(key) = continuation_key { self.stored_continuation_input(key)? }
-            else { self.database.kernel_initial_input(&self.binding.run_id)? };
-        input.messages = self.model_retry_context(context_key, self.context_view(context_key, &input.messages)?)?;
+        let (mut input, continuation_lane, frozen_job_notices) = if let Some(key) = continuation_key {
+            self.database.kernel_continuation_input_with_lane(&self.binding.run_id,key)?
+        } else {(self.database.kernel_initial_input(&self.binding.run_id)?,None,Vec::new())};
+        let view=self.context_view(context_key, &input.messages)?;
+        input.messages = if continuation_lane.as_deref() == Some("job_notice") {
+            // A retry cannot invent a user-shaped completion prompt for a
+            // Host notice; the original settled assistant response remains
+            // the frozen tail of this lane.
+            view
+        } else {self.model_retry_context(context_key,view)?};
         // Consume accepted mid-run additions at the model-dispatch boundary:
         // every active row (new `received` plus rows already delivered to a
         // failed attempt of this same dispatch) is spliced into the frozen
@@ -1214,9 +1227,14 @@ impl KernelCoordinator<'_> {
             Some(key) => format!("continuation-delivery:{key}"),
             None => kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.to_string(),
         };
-        let steering_rows = self
-            .database
-            .deliver_steering_for_dispatch(&self.binding.run_id, &steering_dispatch_key)?;
+        let steering_rows = if continuation_lane.as_deref() == Some("job_notice") {
+            // Keep new user input received during a wake queued for the next
+            // round. Appending it here would replace the assistant tail and
+            // misrepresent the durable Job notice as a user demand.
+            Vec::new()
+        } else {
+            self.database.deliver_steering_for_dispatch(&self.binding.run_id, &steering_dispatch_key)?
+        };
         let steering_messages: Vec<Value> = steering_rows
             .iter()
             .map(super::steering::steering_user_message)
@@ -1241,6 +1259,9 @@ impl KernelCoordinator<'_> {
         let notice_mode = self.database.compute_job_notice_enabled(&self.binding.run_id)?;
         let historical_notice_bytes = fox_engine_protocol::historical_host_job_notice_bytes(&input.messages)?;
         let new_notices = self.pending_host_job_notices(&input.messages)?;
+        if continuation_lane.as_deref() == Some("job_notice") && new_notices != frozen_job_notices {
+            return Err("job_notice facts changed after durable wake".into());
+        }
         token.check()?;
         let frame = {
             let mut guard = self
@@ -1261,6 +1282,8 @@ impl KernelCoordinator<'_> {
                 idempotency_key: continuation_key.map(|key| format!("continuation-delivery:{key}"))
                     .unwrap_or_else(|| kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into()),
                 continuation_key: continuation_key.map(str::to_owned),
+                continuation_lane: (continuation_lane.as_deref() == Some("job_notice"))
+                    .then(||"job_notice".into()),
                 checkpoint_seq: guard.last_event_seq(),
                 host_job_notices: new_notices,
             };

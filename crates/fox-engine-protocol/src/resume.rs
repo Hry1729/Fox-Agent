@@ -241,6 +241,10 @@ pub struct KernelInitialModelFrame {
     /// Present when a fresh worker restores a durably leased continuation input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_key: Option<String>,
+    /// Only a durable Job wake may use this lane. Ordinary initial and other
+    /// continuation frames retain the current-user tail requirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_lane: Option<String>,
 }
 
 impl KernelInitialModelFrame {
@@ -249,7 +253,12 @@ impl KernelInitialModelFrame {
         if historical_host_job_notice_bytes(&self.input.messages)?
             .saturating_add(host_job_notice_bytes(&self.host_job_notices)?)
             > 16 * 1024 { return Err("Host job notice input exceeds total limit".into()); }
-        self.input.validate()?;
+        match self.continuation_lane.as_deref() {
+            None => self.input.validate()?,
+            Some("job_notice") if self.continuation_key.is_some()
+                && !self.host_job_notices.is_empty() => self.input.validate_job_notice()?,
+            _ => return Err("invalid Job notice continuation lane".into()),
+        }
         let expected_key = match &self.continuation_key {
             Some(key) if key.strip_prefix("continuation:").is_some_and(|seq|
                 seq.parse::<u64>().is_ok_and(|n| n > 0 && n <= 9_007_199_254_740_991 && n.to_string() == seq)) => format!("continuation-delivery:{key}"),
@@ -386,14 +395,27 @@ pub struct KernelInitialModelInput {
 
 impl KernelInitialModelInput {
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_history(true)
+    }
+
+    /// A Host Job notice resumes a settled assistant stop, not a new user
+    /// demand. This only relaxes the final role in the dedicated frame lane.
+    pub fn validate_job_notice(&self) -> Result<(), String> {
+        self.validate_history(false)
+    }
+
+    fn validate_history(&self, require_user_tail: bool) -> Result<(), String> {
         if self.schema_version != 1 || self.run_id.trim().is_empty() || self.turn_id.trim().is_empty()
             || self.prompt_config_hash.trim().is_empty() || self.messages.is_empty()
             || serde_json::to_vec(self).map_err(|_| "invalid initial input")?.len() > 1_048_576 {
             return Err("invalid Kernel initial input identity or size".into());
         }
         validate_kernel_history(&self.messages)?;
-        if self.messages.last().is_none_or(|message| message["role"] != "user") {
-            return Err("Kernel initial input must end with the current user message".into());
+        if self.messages.last().is_none_or(|message| message["role"]
+            != if require_user_tail { "user" } else { "assistant" }) {
+            return Err(if require_user_tail {
+                "Kernel initial input must end with the current user message"
+            } else { "Job notice history must end with the settled assistant response" }.into());
         }
         // Accept only adapter-supported blocks. In particular a user message
         // cannot smuggle tool calls/results into the model's input history.
@@ -418,6 +440,41 @@ impl KernelInitialModelInput {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod job_notice_lane_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_scoped_job_notice_continuation_accepts_settled_assistant_tail() {
+        let input=KernelInitialModelInput {schema_version:1,run_id:"run".into(),
+            turn_id:"turn".into(),prompt_config_hash:"hash".into(),messages:vec![
+                json!({"role":"user","content":[{"type":"text","text":"analyze"}]}),
+                json!({"role":"assistant","stopReason":"stop",
+                    "content":[{"type":"text","text":"waiting"}]}),
+            ]};
+        assert!(input.validate().is_err(),"ordinary initial still needs a user tail");
+        let notice=HostJobNotice {source:"fox_kernel_host".into(),data_root_id:"root".into(),
+            conversation_id:"conversation".into(),run_id:"run".into(),job_id:"job".into(),
+            attempt:1,terminal_state:"completed".into(),finished_at:42,
+            result_ref:Some("attachment:result".into()),result_sha256:Some(format!("sha256:{}","a".repeat(64))),
+            result_bytes:Some(1),error_code:None};
+        let mut frame=KernelInitialModelFrame {schema_version:1,input,
+            idempotency_key:"continuation-delivery:continuation:4".into(),
+            checkpoint_seq:4,continuation_key:Some("continuation:4".into()),
+            continuation_lane:Some("job_notice".into()),host_job_notices:vec![notice]};
+        frame.validate().unwrap();
+        frame.host_job_notices.clear();
+        assert!(frame.validate().is_err(),"empty Job notice cannot relax the user tail");
+        frame.host_job_notices.push(HostJobNotice {source:"fox_kernel_host".into(),
+            data_root_id:"root".into(),conversation_id:"conversation".into(),run_id:"run".into(),
+            job_id:"job".into(),attempt:1,terminal_state:"failed".into(),finished_at:42,
+            result_ref:None,result_sha256:None,result_bytes:None,error_code:Some("failed".into())});
+        frame.continuation_key=Some("continuation:5".into());
+        assert!(frame.validate().is_err(),"wrong continuation identity is rejected");
     }
 }
 
@@ -764,7 +821,7 @@ mod tests {
         }
         let initial=|history:Vec<Value>,new:Vec<HostJobNotice>| KernelInitialModelFrame {
             schema_version:1,idempotency_key:"initial-model-delivery".into(),checkpoint_seq:2,
-            continuation_key:None,host_job_notices:new,
+            continuation_key:None,continuation_lane:None,host_job_notices:new,
             input:KernelInitialModelInput {schema_version:1,run_id:"run".into(),turn_id:"turn".into(),
                 prompt_config_hash:"hash".into(),messages:[vec![json!({"role":"user","content":"old"})],
                     history,vec![json!({"role":"user","content":"continue"})]].concat()},
@@ -804,7 +861,7 @@ mod tests {
 fn restored_continuation_has_a_distinct_validated_delivery_identity() {
     let mut frame = KernelInitialModelFrame {
         schema_version: 1, idempotency_key: "initial-model-delivery".into(), checkpoint_seq: 2,
-        continuation_key: None, host_job_notices: vec![],
+        continuation_key: None, continuation_lane: None, host_job_notices: vec![],
         input: KernelInitialModelInput { schema_version: 1, run_id: "r".into(), turn_id: "t".into(),
             prompt_config_hash: "frozen".into(), messages: vec![serde_json::json!({"role":"user","content":"continue"})] },
     };

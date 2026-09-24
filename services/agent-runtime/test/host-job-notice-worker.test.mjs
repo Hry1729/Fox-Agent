@@ -6,6 +6,7 @@ import { createServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { canonicalPermission } from '../src/control-binding.mjs'
 import { createEnvelope } from '../src/protocol.mjs'
+import { prepareKernelInitialModel } from '../src/pi-kernel-batch-resume.mjs'
 
 const identity = { runId: 'notice-run', conversationId: 'notice-conversation', runtimeSessionId: 'notice-session' }
 const marker = 'FOX_HOST_JOB_NOTICE_V1\n'
@@ -31,6 +32,25 @@ function initial(notices = []) {
     input: { schemaVersion: 1, runId: identity.runId, turnId: 'notice-turn', promptConfigHash: 'frozen-hash',
       messages: [{ role: 'user', content: 'Continue from Host facts.', timestamp: 1 }] } } }
 }
+
+test('job_notice is the only initial frame lane allowed to resume an assistant tail', () => {
+  const payload = initial([fact('job')])
+  const frame = payload.initialModel
+  frame.input.messages.push({ role: 'assistant', stopReason: 'stop',
+    content: [{ type: 'text', text: 'The Job is still running.' }] })
+  const request = () => createEnvelope('request', 'kernel.start_initial', { ...identity, payload })
+  assert.throws(() => prepareKernelInitialModel(request(), identity), /invalid initial input/)
+  frame.continuationKey = 'continuation:4'
+  frame.idempotencyKey = 'continuation-delivery:continuation:4'
+  frame.continuationLane = 'job_notice'
+  const prepared = prepareKernelInitialModel(request(), identity)
+  assert.equal(prepared.messages.at(-1).role, 'user', 'typed Host notice is projected after the settled assistant')
+  frame.hostJobNotices = []
+  assert.throws(() => prepareKernelInitialModel(request(), identity), /invalid Job notice continuation lane/)
+  frame.hostJobNotices = [fact('job')]
+  frame.continuationKey = 'continuation:5'
+  assert.throws(() => prepareKernelInitialModel(request(), identity), /invalid initial frame/)
+})
 
 function batch(historical, notices) {
   return { controlBinding: binding(), batchResume: { schemaVersion: 1, turnId: 'notice-turn',

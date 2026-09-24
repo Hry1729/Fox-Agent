@@ -46,7 +46,8 @@ fn parked_job_fixture_with_inputs(mutation: Option<&str>, history_override: Opti
     let input = db.kernel_initial_input(&run).unwrap();
     let frame = fox_engine_protocol::KernelInitialModelFrame {
         schema_version: 1, input, idempotency_key: kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into(),
-        continuation_key: None, checkpoint_seq: controller.last_event_seq(),
+        continuation_key: None, continuation_lane: None,
+        checkpoint_seq: controller.last_event_seq(),
         host_job_notices: Vec::new(),
     };
     frame.validate().unwrap();
@@ -120,7 +121,8 @@ fn waiting_jobs_model_lease_rejects_forged_initial_delivery_history() {
     let input=db.kernel_initial_input(&run).unwrap();
     let frame=fox_engine_protocol::KernelInitialModelFrame {
         schema_version:1,input,idempotency_key:kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into(),
-        continuation_key:None,checkpoint_seq:controller.last_event_seq(),host_job_notices:vec![],
+        continuation_key:None,continuation_lane:None,
+        checkpoint_seq:controller.last_event_seq(),host_job_notices:vec![],
     };
     frame.validate().unwrap();
     let payload=serde_json::to_value(&frame).unwrap();
@@ -374,12 +376,24 @@ fn waiting_jobs_created_start_error_still_retires_and_records_kernel_failure() {
         // runtime_command reads a process-wide override. Isolate the negative
         // from parallel tests so no other Run observes the missing executable.
         let missing=std::env::temp_dir().join(format!("fox-missing-runtime-{}",uuid::Uuid::new_v4()));
-        let output=std::process::Command::new(std::env::current_exe().unwrap())
+        let mut child=std::process::Command::new(std::env::current_exe().unwrap())
             .arg("waiting_jobs_created_start_error_still_retires_and_records_kernel_failure")
             .arg("--test-threads=1")
             .env("FOX_TEST_CREATED_START_FAILURE_CHILD","1")
             .env("FOX_RUNTIME_EXECUTABLE",&missing)
-            .output().unwrap();
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn().unwrap();
+        let started=std::time::Instant::now();
+        while child.try_wait().unwrap().is_none() {
+            if started.elapsed()>std::time::Duration::from_secs(15) {
+                let _=child.kill();
+                let _=child.wait();
+                panic!("isolated created-start failure test exceeded 15 seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let output=child.wait_with_output().unwrap();
         assert!(output.status.success(),"child stdout: {}\nchild stderr: {}",
             String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
         return;
