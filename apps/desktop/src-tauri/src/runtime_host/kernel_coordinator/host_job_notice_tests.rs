@@ -2,17 +2,22 @@ use super::*;
 use crate::database::JobStartRequest;
 use sha2::{Digest, Sha256};
 
-fn notice_host_fixture(tag: &str) -> (Database, PathBuf, String, TestClock, CancellationRegistry, String) {
+fn notice_host_fixture(_tag: &str) -> (Database, PathBuf, String, TestClock, CancellationRegistry, String) {
     let clock = TestClock::new(crate::database::now_ms());
     let cancellation = CancellationRegistry::default();
-    let (db, root, run) = fixture_with_start_opt(&clock, tag, None, true, true);
-    db.with_connection(|conn| conn.execute(
-        "UPDATE kernel_runs SET frozen_config_json=json_set(frozen_config_json,
-          '$.experimental_compute_job_notice',json('true')) WHERE run_id=?1", [&run],
-    )).unwrap();
+    let config=worker_configuration();
+    let (db, root, run) = fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    enable_notices(&db,&run);
     freeze_host_scope(&db, &run);
     let conversation = db.run_control_binding(&run).unwrap().unwrap().conversation_id;
     (db, root, run, clock, cancellation, conversation)
+}
+
+fn enable_notices(db:&Database,run:&str) {
+    db.with_connection(|conn| conn.execute(
+        "UPDATE kernel_runs SET frozen_config_json=json_set(frozen_config_json,
+          '$.experimental_compute_job_notice',json('true')) WHERE run_id=?1", [run],
+    )).unwrap();
 }
 
 fn finished_compute(db: &Database, run: &str, conversation: &str, key: &str) -> String {
