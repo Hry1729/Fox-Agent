@@ -2450,6 +2450,53 @@ impl RunController {
         self.request_host_followup(prompt, input_json, Some("steering"))
     }
 
+    /// Continue from one settled assistant response when terminal child Jobs
+    /// already have pending Host notices. No user-shaped prompt is created.
+    /// The persistence adapter must authenticate the response lease, its
+    /// delivered history and the exact current typed notice set atomically.
+    pub fn request_job_notice_followup(
+        &mut self,
+        input_json: &str,
+        notices_json: &str,
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Running
+            || !self.config.experimental_compute_job_notice
+            || self.config.kernel_mode != "authoritative"
+            || self.model_request_in_flight
+            || self.retry.model_dispatch_pending
+            || self.approval_deadline_wall_ms.is_some()
+            || self.tools.values().any(|tool| !tool.state.is_terminal())
+            || self.batches.iter().any(|batch| !batch.barrier_emitted)
+            || input_json.len() > 1_048_576
+            || notices_json.len() > 16 * 1024
+        {
+            return Err(KernelError::FailClosed("job notice has no settled model response".into()));
+        }
+        let input: serde_json::Value = serde_json::from_str(input_json)
+            .map_err(|_| KernelError::FailClosed("invalid job notice continuation input".into()))?;
+        let notices: serde_json::Value = serde_json::from_str(notices_json)
+            .map_err(|_| KernelError::FailClosed("invalid job notice facts".into()))?;
+        if input["runId"] != self.run_id || input["turnId"] != self.turn_id
+            || input["promptConfigHash"] != self.config.prompt_config_hash
+            || !input["messages"].as_array().is_some_and(|messages|
+                messages.last().is_some_and(|message| message["role"] == "assistant"))
+            || !notices.as_array().is_some_and(|facts| !facts.is_empty())
+        {
+            return Err(KernelError::FailClosed("job notice continuation identity changed".into()));
+        }
+        let effect_key = format!("continuation:{}", self.last_event_seq() + 1);
+        let payload = serde_json::json!({
+            "turnId": self.turn_id, "effectKey": effect_key,
+            "lane": "job_notice", "prompt": "", "input": input,
+            "hostJobNotices": notices,
+        });
+        let payload_json = payload.to_string();
+        Ok(vec![
+            self.append_event("engine.continuation_requested", payload),
+            Effect::RequestContinuationModel { effect_key, payload_json },
+        ])
+    }
+
     fn request_host_followup(
         &mut self,
         prompt: &str,

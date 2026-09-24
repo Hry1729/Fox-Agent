@@ -254,12 +254,34 @@ fn waiting_jobs_wake_outbox_failure_rolls_back_and_two_handles_cannot_wake_twice
     assert!(db.kernel_job_notice(&conversation,&run,&job).unwrap().is_some());
     let mut first=old.clone();
     let mut second=old;
-    let input=db.kernel_initial_input(&run).unwrap();
-    // This is a storage-only legal input fixture. B2b-2 supplies the actual
-    // typed notice frame before this pending outbox can be dispatched.
+    let mut input=db.kernel_initial_input(&run).unwrap();
+    let parked:String=db.with_connection(|conn|conn.query_row(
+        "SELECT payload_json FROM kernel_events WHERE run_id=?1 AND event_type='run.waiting_jobs'",
+        [&run],|row|row.get(0))).unwrap();
+    let parked:serde_json::Value=serde_json::from_str(&parked).unwrap();
+    input.messages=serde_json::from_value(parked["history"].clone()).unwrap();
+    input.messages.push(parked["response"]["assistantMessage"].clone());
+    let notices=db.pending_host_job_notices(&conversation,&run,16*1024).unwrap();
+    assert_eq!(notices.len(),1);
     let next_seq=first.last_event_seq()+2;
     let payload=json!({"turnId":input.turn_id,"effectKey":format!("continuation:{next_seq}"),
-        "lane":"job_notice","prompt":"","input":input}).to_string();
+        "lane":"job_notice","prompt":"","input":input,
+        "hostJobNotices":notices});
+    for forged in [
+        { let mut value=payload.clone(); value["hostJobNotices"]=json!([]); value },
+        { let mut value=payload.clone(); value["input"]["messages"][0]["content"]=json!("forged"); value },
+    ] {
+        let mut rejected=first.clone();
+        let effects=rejected.wake_waiting_jobs(park_seq,now+1_000,&forged.to_string()).unwrap();
+        let error=db.kernel_commit_decision(&run,now+1_000,&rejected.persist_command(&effects)).unwrap_err();
+        assert!(error.contains("job notice"),"unexpected wake refusal: {error}");
+        assert_eq!(db.kernel_rehydrate(&run).unwrap().unwrap().state,RunState::WaitingJobs);
+        let pending:i64=db.with_connection(|conn|conn.query_row(
+            "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='continuation_model'",
+            [&run],|row|row.get(0))).unwrap();
+        assert_eq!(pending,0,"forged wake may not create an outbox");
+    }
+    let payload=payload.to_string();
     let effects=first.wake_waiting_jobs(park_seq,now+1_000,&payload).unwrap();
     let command=first.persist_command(&effects);
     db.with_connection(|conn|conn.execute_batch(
@@ -285,6 +307,84 @@ fn waiting_jobs_wake_outbox_failure_rolls_back_and_two_handles_cannot_wake_twice
                 (SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='continuation_model')",
         [&run],|row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
     assert_eq!(counts,(1,1));
+}
+
+#[test]
+fn terminal_job_direct_notice_requires_the_settled_input_and_exact_typed_fact() {
+    let now=crate::database::now_ms();
+    let clock=TestClock::new(now);
+    let model=worker_configuration();
+    let (db,_root,run)=fixture_with_start_opt(&clock,&model.hash().unwrap(),Some(&model),true,true);
+    freeze_host_scope(&db,&run);
+    db.with_connection(|conn|conn.execute(
+        "UPDATE kernel_runs SET frozen_config_json=json_set(frozen_config_json,
+          '$.experimentalComputeJobNotice',json('true')) WHERE run_id=?1",[&run])).unwrap();
+    let conversation=db.run_control_binding(&run).unwrap().unwrap().conversation_id;
+    let cancellation=CancellationRegistry::default();
+    drop(KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap());
+    let job=db.kernel_job_start(&JobStartRequest {
+        run_id:run.clone(),kind:"attachment_compute".into(),idempotency_key:"direct-notice".into(),
+        params:json!({"input":"fixture"}),deadline_ms:Some(now+6_000),progress_total:None,
+    }).unwrap().snapshot().job_id.clone();
+    db.kernel_job_claim_attempt(&job,1).unwrap();
+    let mut controller=RunController::rehydrate(db.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
+    let input=db.kernel_initial_input(&run).unwrap();
+    let frame=fox_engine_protocol::KernelInitialModelFrame {
+        schema_version:1,input,idempotency_key:kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into(),
+        continuation_key:None,continuation_lane:None,checkpoint_seq:controller.last_event_seq(),
+        host_job_notices:vec![],
+    };
+    let frame_json=serde_json::to_value(&frame).unwrap();
+    let binding=ModelNoticeInput {payload:&frame_json,delivered_history:&frame.input.messages,
+        live_history:None,checkpoint_seq:frame.checkpoint_seq,
+        history_start:frame.input.messages.len(),historical_bytes:0};
+    let effects=controller.begin_initial_model_request(now,now).unwrap();
+    db.kernel_commit_initial_model(&run,now,&controller.persist_command(&effects),
+        "owner",false,None,Some(&binding)).unwrap();
+    db.kernel_job_complete_attempt(&job,1,&conversation,&json!({"answer":"ready"})).unwrap();
+    let notices=db.pending_host_job_notices(&conversation,&run,16*1024).unwrap();
+    assert_eq!(notices.len(),1);
+    let response=fox_engine_protocol::KernelInitialModelResponse {
+        schema_version:1,run_id:run.clone(),turn_id:frame.input.turn_id.clone(),
+        checkpoint_seq:frame.checkpoint_seq,
+        assistant_message:json!({"role":"assistant","stopReason":"stop",
+            "content":[{"type":"text","text":"The calculation is ready."}]}),
+    };
+    let response_json=serde_json::to_string(&response).unwrap();
+    let mut next_input=frame.input.clone();
+    next_input.messages.push(response.assistant_message.clone());
+    for forged in [
+        { let mut value=next_input.clone(); value.messages[0]["content"]=json!("forged");
+          (value,notices.clone()) },
+        (next_input.clone(),vec![]),
+    ] {
+        let mut rejected=controller.clone();
+        let mut effects=vec![rejected.record_initial_model_response(&response_json).unwrap()];
+        if forged.1.is_empty() {
+            // The controller itself may refuse a missing notice before the
+            // transaction, which is still a fail-closed result.
+            assert!(rejected.request_job_notice_followup(
+                &serde_json::to_string(&forged.0).unwrap(),"[]").is_err());
+            continue;
+        }
+        effects.extend(rejected.request_job_notice_followup(
+            &serde_json::to_string(&forged.0).unwrap(),
+            &serde_json::to_string(&forged.1).unwrap()).unwrap());
+        let error=db.kernel_commit_initial_model(&run,now,&rejected.persist_command(&effects),
+            "owner",true,None,None).unwrap_err();
+        assert!(error.contains("job notice"),"unexpected direct refusal: {error}");
+    }
+    let mut accepted=controller;
+    let mut effects=vec![accepted.record_initial_model_response(&response_json).unwrap()];
+    effects.extend(accepted.request_job_notice_followup(
+        &serde_json::to_string(&next_input).unwrap(),
+        &serde_json::to_string(&notices).unwrap()).unwrap());
+    db.kernel_commit_initial_model(&run,now,&accepted.persist_command(&effects),
+        "owner",true,None,None).unwrap();
+    let outbox:i64=db.with_connection(|conn|conn.query_row(
+        "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='continuation_model' AND status='pending'",
+        [&run],|row|row.get(0))).unwrap();
+    assert_eq!(outbox,1);
 }
 
 #[test]

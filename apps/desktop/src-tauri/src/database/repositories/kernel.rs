@@ -223,6 +223,93 @@ fn run_transition_allowed(from: &str, to: &str) -> bool {
         )
 }
 
+/// Recheck a Job-notice continuation against the exact scoped facts visible
+/// in this write transaction. A caller's payload alone is never authority to
+/// wake a Run or ask the model another question.
+fn checked_job_notice_input(
+    tx: &rusqlite::Transaction<'_>, root: &str, conversation: &str, run: &str,
+    turn: &str, frozen: &crate::kernel::RunFrozenConfig,
+    payload: &serde_json::Value, expected_history: &[serde_json::Value],
+) -> rusqlite::Result<()> {
+    let input: fox_engine_protocol::KernelInitialModelInput =
+        serde_json::from_value(payload["input"].clone())
+            .map_err(|_| kernel_err("job notice has no valid frozen model input"))?;
+    input.validate_job_notice().map_err(kernel_err)?;
+    let supplied: Vec<fox_engine_protocol::HostJobNotice> =
+        serde_json::from_value(payload["hostJobNotices"].clone())
+            .map_err(|_| kernel_err("job notice continuation omitted typed facts"))?;
+    fox_engine_protocol::validate_host_job_notices(&supplied).map_err(kernel_err)?;
+    if payload["lane"] != "job_notice" || payload["prompt"] != ""
+        || input.run_id != run || input.turn_id != turn
+        || input.prompt_config_hash != frozen.prompt_config_hash
+        || input.messages != expected_history || supplied.is_empty() {
+        return Err(kernel_err("job notice continuation changed history, identity or prompt"));
+    }
+    let historical = fox_engine_protocol::historical_host_job_notice_bytes(&input.messages)
+        .map_err(kernel_err)?;
+    let expected = super::kernel_job_execution::pending_model_facts(
+        tx, root, conversation, run, (16 * 1024usize).saturating_sub(historical),
+    )?;
+    if supplied != expected {
+        return Err(kernel_err("job notice continuation differs from current typed Host facts"));
+    }
+    let unfinished: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM kernel_jobs WHERE run_id=?1 AND conversation_id=?2
+          AND state IN ('queued','running','paused')", params![run,conversation], |row| row.get(0))?;
+    if unfinished != 0 { return Err(kernel_err("job notice continuation still has unfinished Jobs")); }
+    let received: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM run_steering_messages WHERE run_id=?1 AND status='received'",
+        [run], |row| row.get(0))?;
+    if received != 0 {
+        return Err(kernel_err(format!("{}{received}", crate::kernel::STEERING_COMPETITION)));
+    }
+    Ok(())
+}
+
+fn settled_model_delivery_history(
+    tx: &rusqlite::Transaction<'_>, run: &str,
+    response: &crate::kernel::PersistEvent,
+) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let payload: serde_json::Value = serde_json::from_str(&response.payload_json)
+        .map_err(|_| kernel_err("invalid settled model response for job notice"))?;
+    let checkpoint = payload["response"]["checkpointSeq"].as_i64()
+        .ok_or_else(|| kernel_err("job notice response has no model checkpoint"))?;
+    let mut statement = tx.prepare("SELECT dispatch_key,input_hash,input_json FROM kernel_model_notice_inputs
+        WHERE run_id=?1 AND state='acknowledged'
+          AND json_extract(input_json,'$.checkpointSeq')=?2 LIMIT 2")?;
+    let bound = statement.query_map(params![run,checkpoint], |row| {
+        Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    if bound.len() != 1 { return Err(kernel_err("job notice has no unique settled model input")); }
+    let (dispatch_key,input_hash,input_json) = &bound[0];
+    if format!("sha256:{}",hex::encode(Sha256::digest(input_json.as_bytes()))) != *input_hash {
+        return Err(kernel_err("job notice settled model input hash changed"));
+    }
+    let bound: serde_json::Value = serde_json::from_str(input_json)
+        .map_err(|_| kernel_err("invalid settled model input for job notice"))?;
+    let model_input = &bound["modelInput"];
+    let right_dispatch = match response.event_type.as_str() {
+        "engine.initial_response" => dispatch_key == crate::kernel::INITIAL_MODEL_IDEMPOTENCY_KEY,
+        "engine.batch_response" => dispatch_key == &crate::kernel::batch_delivery_idempotency_key(
+            payload["batchId"].as_str().unwrap_or_default()),
+        "engine.continuation_response" => model_input["continuationKey"].as_str()
+            .is_some_and(|key| dispatch_key == &format!("continuation-delivery:{key}")),
+        _ => false,
+    };
+    if !right_dispatch || model_input["idempotencyKey"] != *dispatch_key {
+        return Err(kernel_err("job notice response differs from its settled dispatch"));
+    }
+    let mut history: Vec<serde_json::Value> = serde_json::from_value(bound["deliveredHistory"].clone())
+        .map_err(|_| kernel_err("job notice settled delivery history is invalid"))?;
+    let assistant = payload["response"]["assistantMessage"].clone();
+    if assistant["role"] != "assistant" || assistant["stopReason"] != "stop" {
+        return Err(kernel_err("job notice has no settled assistant stop"));
+    }
+    history.push(assistant);
+    Ok(history)
+}
+
 /// Guard the wait projection before the generic event/outbox writer runs. The
 /// IMMEDIATE transaction makes the old projection, Job rows, event stream and
 /// next outbox one serializable decision. An adapter cannot invent a wake by
@@ -238,6 +325,9 @@ fn validate_job_wait_decision(
     let park_events: Vec<_> = cmd.events.iter().filter(|e| e.event_type == "run.waiting_jobs").collect();
     let account_events: Vec<_> = cmd.events.iter().filter(|e| e.event_type == "run.jobs_wait_accounted").collect();
     let wake_events: Vec<_> = cmd.events.iter().filter(|e| e.event_type == "run.jobs_woken").collect();
+    let notice_events: Vec<_> = cmd.events.iter().filter(|e| e.event_type == "engine.continuation_requested"
+        && serde_json::from_str::<serde_json::Value>(&e.payload_json)
+            .ok().is_some_and(|v| v["lane"] == "job_notice")).collect();
     let notice_outbox: Vec<_> = cmd.outbox.iter().filter(|o| {
         o.kind == crate::kernel::OutboxEffectKind::ContinuationModel
             && serde_json::from_str::<serde_json::Value>(&o.payload_json)
@@ -246,14 +336,14 @@ fn validate_job_wait_decision(
     if !frozen.experimental_compute_job_notice || frozen.kernel_mode != "authoritative" {
         if old_state == "waiting_jobs" || cmd.run_state == crate::kernel::RunState::WaitingJobs
             || !park_events.is_empty() || !account_events.is_empty() || !wake_events.is_empty()
-            || !notice_outbox.is_empty() || cmd.wait_deadline_wall_ms.is_some()
+            || !notice_outbox.is_empty() || !notice_events.is_empty() || cmd.wait_deadline_wall_ms.is_some()
             || cmd.wait_accounted_until_wall_ms.is_some() {
             return Err(kernel_err("job wait requires frozen experimental flag"));
         }
         return Ok(());
     }
     if park_events.len() > 1 || account_events.len() > 1 || wake_events.len() > 1
-        || notice_outbox.len() > 1 {
+        || notice_outbox.len() > 1 || notice_events.len() > 1 {
         return Err(kernel_err("duplicate job wait decision fact"));
     }
     if old_state != "waiting_jobs" {
@@ -261,15 +351,41 @@ fn validate_job_wait_decision(
             return Err(kernel_err("non-waiting Run retains job wait projection"));
         }
         if cmd.run_state != crate::kernel::RunState::WaitingJobs {
+            if notice_outbox.len() == 1 && notice_events.len() == 1 {
+                let response = cmd.events.iter().find(|event| matches!(event.event_type.as_str(),
+                    "engine.initial_response" | "engine.batch_response" | "engine.continuation_response"))
+                    .ok_or_else(|| kernel_err("direct job notice has no settled response"))?;
+                let event = notice_events[0];
+                let outbox = notice_outbox[0];
+                if old_state != "running" || cmd.run_state != crate::kernel::RunState::Running
+                    || !settling_model_response || cmd.model_request_since_wall_ms.is_some()
+                    || cmd.events.len() != 2 || cmd.outbox.len() != 1
+                    || response.seq != (old_seq + 1) as u64 || event.seq != response.seq + 1
+                    || outbox.effect_key != format!("continuation:{}", event.seq)
+                    || event.payload_json != outbox.payload_json {
+                    return Err(kernel_err("direct job notice must settle one response and arm one continuation"));
+                }
+                let conversation: String = tx.query_row(
+                    "SELECT conversation_id FROM runs WHERE id=?1", [run], |row| row.get(0))?;
+                let history = settled_model_delivery_history(tx,run,response)?;
+                let payload: serde_json::Value = serde_json::from_str(&outbox.payload_json)
+                    .map_err(|_| kernel_err("invalid direct job notice continuation"))?;
+                if payload["turnId"] != cmd.turn_id || payload["effectKey"] != outbox.effect_key {
+                    return Err(kernel_err("direct job notice continuation identity changed"));
+                }
+                checked_job_notice_input(tx,root,&conversation,run,&cmd.turn_id,frozen,&payload,&history)?;
+                return Ok(());
+            }
             if cmd.wait_deadline_wall_ms.is_some() || cmd.wait_accounted_until_wall_ms.is_some()
                 || !park_events.is_empty() || !account_events.is_empty() || !wake_events.is_empty()
-                || !notice_outbox.is_empty() {
+                || !notice_outbox.is_empty() || !notice_events.is_empty() {
                 return Err(kernel_err("job wait fact outside waiting transition"));
             }
             return Ok(());
         }
         if old_state != "running" || park_events.len() != 1
             || !account_events.is_empty() || !wake_events.is_empty() || !notice_outbox.is_empty()
+            || !notice_events.is_empty()
             || !cmd.outbox.is_empty()
             || !settling_model_response || cmd.model_request_since_wall_ms.is_some()
             || cmd.terminal_written || now <= 0 || cmd.running_elapsed_ms < old_elapsed {
@@ -452,6 +568,7 @@ fn validate_job_wait_decision(
         return Ok(()); // cancellation/failure is handled by its existing state guard
     }
     if now > deadline || wake_events.len() != 1 || notice_outbox.len() != 1
+        || notice_events.len() != 1
         || cmd.outbox.len() != 1 {
         return Err(kernel_err("job wake requires one in-deadline notice outbox"));
     }
@@ -466,8 +583,7 @@ fn validate_job_wait_decision(
         || wake_payload["runningElapsedMs"] != next_elapsed
         || outbox.effect_key != format!("continuation:{}", wake.seq)
         || outbox_payload["effectKey"] != outbox.effect_key
-        || !cmd.events.iter().any(|event| event.event_type == "engine.continuation_requested"
-            && event.payload_json == outbox.payload_json) {
+        || notice_events[0].payload_json != outbox.payload_json {
         return Err(kernel_err("job wake/outbox identity mismatch"));
     }
     let conversation: String = tx.query_row(
@@ -496,13 +612,16 @@ fn validate_job_wait_decision(
           AND state IN ('queued','running','paused')",
         params![run,conversation], |row| row.get(0))?;
     if unfinished != 0 { return Err(kernel_err("job wake still has unfinished Jobs")); }
-    let pending: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM kernel_job_notices n
-          LEFT JOIN kernel_job_notice_deliveries d ON d.job_id=n.job_id
-          WHERE n.data_root_id=?1 AND n.conversation_id=?2 AND n.run_id=?3
-            AND (d.job_id IS NULL OR d.state!='acknowledged')",
-        params![root,conversation,run], |row| row.get(0))?;
-    if pending <= 0 { return Err(kernel_err("job wake has no pending Host notice")); }
+    let mut expected_history: Vec<serde_json::Value> =
+        serde_json::from_value(parked["history"].clone())
+            .map_err(|_| kernel_err("job wake has invalid frozen history"))?;
+    let response = parked["response"]["assistantMessage"].clone();
+    if response["role"] != "assistant" || response["stopReason"] != "stop" {
+        return Err(kernel_err("job wake has no frozen settled assistant"));
+    }
+    expected_history.push(response);
+    checked_job_notice_input(tx,root,&conversation,run,&cmd.turn_id,frozen,
+        &outbox_payload,&expected_history)?;
     Ok(())
 }
 
