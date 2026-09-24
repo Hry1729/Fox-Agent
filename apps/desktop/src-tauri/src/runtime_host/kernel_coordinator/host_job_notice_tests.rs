@@ -395,6 +395,8 @@ fn real_runtime_host_job_start_parks_and_wakes_on_both_pi_transports() {
         knowledge_connection_hashes:Default::default(),office_tools:Default::default(),
         lifecycle_hooks:vec![],
     }).unwrap();
+    std::fs::create_dir_all(root.join("attachments")).unwrap();
+    std::fs::create_dir_all(root.join("skills")).unwrap();
     let mut context=tauri::generate_context!();
     for window in &mut context.config_mut().app.windows {window.create=false;}
     let app=tauri::Builder::default().any_thread().build(context).unwrap();
