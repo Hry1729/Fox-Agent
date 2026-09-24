@@ -538,6 +538,12 @@ pub struct KernelRunRecovery {
 }
 
 impl Database {
+    /// Host-only identity for freezing a wait event. The decision transaction
+    /// independently compares it with this handle's canonical data-root ID.
+    pub(crate) fn kernel_data_root_id(&self) -> &str {
+        &self.data_root_id
+    }
+
     /// Read only durable rejection evidence for this exact model effect. A
     /// settled model retry never replays a completed tool or another batch.
     pub(crate) fn kernel_model_retry_needs_completion(&self, run_id: &str, effect_key: &str) -> Result<bool, String> {

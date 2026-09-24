@@ -1,0 +1,144 @@
+//! B2b-1 storage tests. These use a real SQLite Run, model lease and Job
+//! settlement; they do not claim that the detached Host/wake loop is wired.
+use super::*;
+use crate::database::{JobStartRequest, ModelNoticeInput};
+use crate::kernel::{RunState, WaitingJobFact};
+use serde_json::json;
+
+fn parked_job_fixture() -> (Database, PathBuf, String, String, String, RunController, u64, i64) {
+    let now = crate::database::now_ms();
+    let clock = TestClock::new(now);
+    let model = worker_configuration();
+    let (db, root, run) = fixture_with_start_opt(
+        &clock, &model.hash().unwrap(), Some(&model), true, true);
+    db.with_connection(|conn| conn.execute(
+        "UPDATE kernel_runs SET frozen_config_json=json_set(frozen_config_json,
+          '$.experimentalComputeJobNotice',json('true')) WHERE run_id=?1", [&run],
+    )).unwrap();
+    assert!(db.compute_job_notice_enabled(&run).unwrap());
+    let conversation = db.run_control_binding(&run).unwrap().unwrap().conversation_id;
+    let cancellation = CancellationRegistry::default();
+    drop(KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap());
+
+    let job = db.kernel_job_start(&JobStartRequest {
+        run_id: run.clone(), kind: "attachment_compute".into(),
+        idempotency_key: "waiting-storage".into(), params: json!({"input":"fixture"}),
+        deadline_ms: Some(now+6_000), progress_total: None,
+    }).unwrap().snapshot().job_id.clone();
+    db.kernel_job_claim_attempt(&job,1).unwrap();
+
+    let mut controller = RunController::rehydrate(db.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
+    let input = db.kernel_initial_input(&run).unwrap();
+    let frame = fox_engine_protocol::KernelInitialModelFrame {
+        schema_version: 1, input, idempotency_key: kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into(),
+        continuation_key: None, checkpoint_seq: controller.last_event_seq(),
+        host_job_notices: Vec::new(),
+    };
+    frame.validate().unwrap();
+    let frame_json = serde_json::to_value(&frame).unwrap();
+    let historical_bytes = fox_engine_protocol::historical_host_job_notice_bytes(&frame.input.messages).unwrap();
+    let binding = ModelNoticeInput {
+        payload: &frame_json, live_history: None, checkpoint_seq: frame.checkpoint_seq,
+        history_start: frame.input.messages.len(), historical_bytes,
+    };
+    let dispatched = controller.begin_initial_model_request(now,now).unwrap();
+    db.kernel_commit_initial_model(&run,now,&controller.persist_command(&dispatched),
+        "owner",false,None,Some(&binding)).unwrap();
+
+    let response = fox_engine_protocol::KernelInitialModelResponse {
+        schema_version: 1, run_id: run.clone(), turn_id: frame.input.turn_id.clone(),
+        checkpoint_seq: frame.checkpoint_seq,
+        assistant_message: json!({"role":"assistant","stopReason":"stop",
+            "content":[{"type":"text","text":"The child Job is still running."}]}),
+    };
+    response.validate().unwrap();
+    let response_json = serde_json::to_string(&response).unwrap();
+    let settled = controller.record_initial_model_response(&response_json).unwrap();
+    let response_seq = controller.last_event_seq();
+    let mut effects = vec![settled];
+    effects.extend(controller.park_waiting_jobs(now,now,db.kernel_data_root_id(),
+        response_seq,&response_json,&serde_json::to_string(&frame.input.messages).unwrap(),
+        &[WaitingJobFact {job_id: job.clone(),attempt:1,deadline_wall_ms:now+6_000}]).unwrap());
+    db.kernel_commit_initial_model(&run,now,&controller.persist_command(&effects),
+        "owner",true,None,None).unwrap();
+    let park_seq = controller.last_event_seq();
+    assert_eq!(db.kernel_rehydrate(&run).unwrap().unwrap().state,RunState::WaitingJobs);
+    (db,root,run,conversation,job,controller,park_seq,now)
+}
+
+#[test]
+fn waiting_jobs_park_is_atomic_rooted_and_accounted_once_after_reopen() {
+    let (db,root,run,_conversation,_job,_controller,park_seq,now)=parked_job_fixture();
+    assert!(db.kernel_update_run_state(&run,"completed").is_err());
+    let reopened=Database::open(root.join("facts.db")).unwrap();
+    let old=RunController::rehydrate(reopened.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
+    let mut first=old.clone();
+    let mut stale=old;
+    let debit=first.account_waiting_jobs(park_seq,now+1_000).unwrap();
+    reopened.kernel_commit_decision(&run,now+1_000,&first.persist_command(&debit)).unwrap();
+    let duplicate=stale.account_waiting_jobs(park_seq,now+1_000).unwrap();
+    assert!(db.kernel_commit_decision(&run,now+1_000,&stale.persist_command(&duplicate)).is_err());
+    let saved=db.kernel_rehydrate(&run).unwrap().unwrap();
+    assert_eq!(saved.running_elapsed_ms,1_000);
+    assert_eq!(saved.wait_accounted_until_wall_ms,Some(now+1_000));
+    assert_eq!(saved.wait_deadline_wall_ms,Some(now+6_000));
+    let count:i64=db.with_connection(|conn|conn.query_row(
+        "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.jobs_wait_accounted'",
+        [&run],|row|row.get(0))).unwrap();
+    assert_eq!(count,1);
+}
+
+#[test]
+fn waiting_jobs_wake_outbox_failure_rolls_back_and_two_handles_cannot_wake_twice() {
+    let (db,root,run,conversation,job,_controller,park_seq,now)=parked_job_fixture();
+    let other=Database::open(root.join("facts.db")).unwrap();
+    let old=RunController::rehydrate(other.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
+    db.kernel_job_complete_attempt(&job,1,&conversation,&json!({"answer":"ready"})).unwrap();
+    assert!(db.kernel_job_notice(&conversation,&run,&job).unwrap().is_some());
+    let mut first=old.clone();
+    let mut second=old;
+    let input=db.kernel_initial_input(&run).unwrap();
+    // This is a storage-only legal input fixture. B2b-2 supplies the actual
+    // typed notice frame before this pending outbox can be dispatched.
+    let next_seq=first.last_event_seq()+2;
+    let payload=json!({"turnId":input.turn_id,"effectKey":format!("continuation:{next_seq}"),
+        "lane":"job_notice","prompt":"","input":input}).to_string();
+    let effects=first.wake_waiting_jobs(park_seq,now+1_000,&payload).unwrap();
+    let command=first.persist_command(&effects);
+    db.with_connection(|conn|conn.execute_batch(
+        "CREATE TRIGGER reject_job_wake_outbox BEFORE INSERT ON kernel_effect_outbox
+          WHEN NEW.effect_type='continuation_model'
+          BEGIN SELECT RAISE(ABORT,'injected job wake outbox rollback'); END;"
+    )).unwrap();
+    assert!(db.kernel_commit_decision(&run,now+1_000,&command).is_err());
+    let still=db.kernel_rehydrate(&run).unwrap().unwrap();
+    assert_eq!(still.state,RunState::WaitingJobs);
+    assert_eq!(still.running_elapsed_ms,0);
+    let wake_count:i64=db.with_connection(|conn|conn.query_row(
+        "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.jobs_woken'",
+        [&run],|row|row.get(0))).unwrap();
+    assert_eq!(wake_count,0);
+    db.with_connection(|conn|conn.execute_batch("DROP TRIGGER reject_job_wake_outbox;")) .unwrap();
+    db.kernel_commit_decision(&run,now+1_000,&command).unwrap();
+    assert_eq!(db.kernel_rehydrate(&run).unwrap().unwrap().state,RunState::Running);
+    let stale=second.wake_waiting_jobs(park_seq,now+1_000,&payload).unwrap();
+    assert!(other.kernel_commit_decision(&run,now+1_000,&second.persist_command(&stale)).is_err());
+    let counts:(i64,i64)=db.with_connection(|conn|conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.jobs_woken'),
+                (SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='continuation_model')",
+        [&run],|row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+    assert_eq!(counts,(1,1));
+}
+
+#[test]
+fn waiting_jobs_copied_database_cannot_reopen_old_root_wait() {
+    let (db,root,run,_conversation,_job,_controller,_park_seq,_now)=parked_job_fixture();
+    let copied=std::env::temp_dir().join(format!("fox-wait-copy-{}",uuid::Uuid::new_v4()));
+    std::fs::create_dir(&copied).unwrap();
+    std::fs::copy(root.join("facts.db"),copied.join("facts.db")).unwrap();
+    assert!(db.kernel_rehydrate(&run).unwrap().is_some());
+    let foreign=Database::open(copied.join("facts.db")).unwrap();
+    assert_ne!(foreign.kernel_data_root_id(),db.kernel_data_root_id());
+    assert!(foreign.kernel_rehydrate(&run).is_err());
+    assert!(foreign.kernel_update_run_state(&run,"completed").is_err());
+}
