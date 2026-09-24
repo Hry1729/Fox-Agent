@@ -940,12 +940,13 @@ fn local_provider_deadline_preserves_the_original_error_and_its_timeline() {
     );
 }
 
-/// The suppression contract, exercised on the real method instead of a copy of
-/// its logic: with the timeline explicitly requested, two calls emit at most one
-/// line. The method never reads `thread::panicking()` on this path, so another
-/// test panicking concurrently cannot change the outcome.
+/// The suppression contract, exercised on the real method rather than a copy of
+/// its logic. It must hold in BOTH switch states, because the ordinary suite runs
+/// with the timeline off while a diagnostic run turns it on: at most one line
+/// per Provider, and the flag tracks whether a line was actually written.
 #[test]
 fn provider_diagnostics_emit_at_most_one_line_per_provider() {
+    let timeline_on = std::env::var_os("FOX_F1_TIMELINE").is_some();
     let version: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let mut provider = LocalProvider::start(version);
     let printed = provider.printed.clone();
@@ -953,16 +954,19 @@ fn provider_diagnostics_emit_at_most_one_line_per_provider() {
         !printed.load(Ordering::SeqCst),
         "a fresh Provider must not be marked as already printed"
     );
-    // The runner does not set the timeline switch; the healthy-run suppression
-    // is therefore the branch under test here and it must not consume the flag.
     provider.print_diagnostics();
-    assert!(
-        !printed.load(Ordering::SeqCst),
-        "a suppressed call must not retire the print-once flag"
+    let after_first = printed.load(Ordering::SeqCst);
+    provider.print_diagnostics();
+    let after_second = printed.load(Ordering::SeqCst);
+    assert_eq!(
+        after_first, after_second,
+        "a repeated call must not change whether anything was printed"
     );
-    // A second call stays suppressed, and the Provider is still usable.
-    provider.print_diagnostics();
-    assert!(!printed.load(Ordering::SeqCst));
+    assert_eq!(
+        after_first, timeline_on,
+        "the diagnostics print only when the timeline was requested: \
+         switch_on={timeline_on}"
+    );
     assert_eq!(provider.request_count(), 0);
 }
 
