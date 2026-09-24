@@ -696,6 +696,9 @@ fn call_model(
     // the worker must not open the live round loop on this path.
     initialization["execution"] = json!("once");
     initialization["usageRecords"] = json!(database.is_some());
+    // Diagnostic-only: the timeline measures spawn→ready cost. In a production
+    // build there is no timeline, so the instant itself must not exist.
+    #[cfg(test)]
     let spawn_started = Instant::now();
     let mut worker = Worker::spawn(runtime)?;
     #[cfg(test)]
@@ -729,7 +732,8 @@ fn call_model(
                 spawn_started.elapsed().as_millis()
             ),
         );
-    }    request_payload["streamPreview"] = json!(preview.is_some());
+    }
+    request_payload["streamPreview"] = json!(preview.is_some());
     let expected = if kind == "kernel.compact_context" {
         if ready["hostCompaction"] != true {
             return Err("Kernel worker lacks Host compaction capability".into());

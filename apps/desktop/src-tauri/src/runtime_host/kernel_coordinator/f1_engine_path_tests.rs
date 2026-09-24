@@ -981,15 +981,15 @@ fn provider_diagnostics_recover_from_a_poisoned_event_log() {
     lock_recover(&provider.events).push("recorded".into());
     assert_eq!(provider.event_log(), vec!["recorded".to_owned()]);
 
-    // Poison the log exactly the way a panicking worker would.
+    // Poison the log exactly the way a panicking worker would. The panic is
+    // caught so it does not fail the test; the hook is deliberately NOT
+    // replaced, so the panic output stays visible and this test cannot change
+    // the panic reporting of any other test in the process.
     let events = provider.events.clone();
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
     let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _guard = events.lock().unwrap();
         panic!("simulated worker panic while holding the event log");
     }));
-    std::panic::set_hook(hook);
     assert!(poisoned.is_err(), "the simulated worker panic must happen");
     assert!(
         events.is_poisoned(),
