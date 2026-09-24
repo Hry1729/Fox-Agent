@@ -353,6 +353,53 @@ fn bind_model_notices(
             || input.live_history != Some(expected.as_slice()) {
             return Err(notice_error("bound live batch differs from durable Host sources"));
         }
+    } else if input.live_history.is_some() && input.payload["kind"] == "continuation" {
+        let directive: fox_engine_protocol::KernelRoundDirective =
+            serde_json::from_value(input.payload.clone())
+                .map_err(|_| notice_error("invalid bound live continuation directive"))?;
+        directive.validate().map_err(|_| notice_error("invalid bound live continuation directive"))?;
+        let cursor = directive.preview_seq
+            .ok_or_else(|| notice_error("bound live continuation has no cursor"))?;
+        let effect_key = format!("continuation:{cursor}");
+        if dispatch_key != format!("continuation-delivery:{effect_key}") {
+            return Err(notice_error("bound live continuation differs from its leased dispatch"));
+        }
+        let body: String = tx.query_row(
+            "SELECT o.payload_json FROM kernel_effect_outbox o
+              JOIN kernel_events e ON e.run_id=o.run_id AND e.seq=?3
+                AND e.event_type='engine.continuation_requested'
+                AND e.payload_json=o.payload_json
+             WHERE o.run_id=?1 AND o.effect_key=?2
+               AND o.effect_type='continuation_model' AND o.status='leased'
+               AND o.idempotency_key=?4",
+            params![run,effect_key,cursor,dispatch_key], |row| row.get(0))?;
+        let durable: Value = serde_json::from_str(&body)
+            .map_err(|_| notice_error("invalid durable live continuation intent"))?;
+        let frozen: fox_engine_protocol::KernelInitialModelInput =
+            serde_json::from_value(durable["input"].clone())
+                .map_err(|_| notice_error("invalid durable live continuation input"))?;
+        frozen.validate().map_err(|_| notice_error("invalid durable live continuation history"))?;
+        let original = super::kernel_initial_input::read_input(tx,run)?;
+        if frozen.run_id != run || frozen.turn_id != original.turn_id
+            || frozen.prompt_config_hash != original.prompt_config_hash
+            || durable["effectKey"] != effect_key || durable["turnId"] != frozen.turn_id
+            || durable["prompt"] != directive.prompt.as_deref().unwrap_or("") {
+            return Err(notice_error("bound live continuation intent identity changed"));
+        }
+        let response_seq: i64 = tx.query_row(
+            "SELECT seq FROM kernel_events WHERE run_id=?1 AND seq<?2
+              AND event_type IN ('engine.initial_response','engine.batch_response',
+                                 'engine.continuation_response') ORDER BY seq DESC LIMIT 1",
+            params![run,cursor], |row| row.get(0))?;
+        let steering_key = format!("round-response:{response_seq}");
+        let steering = bound_batch_steering_on(tx,run,Some(&steering_key))?;
+        let mut expected = frozen.messages;
+        expected.extend(steering.iter().map(|notice|
+            crate::runtime_host::kernel_coordinator::bound_steering_user_message(
+                &notice.content,notice.received_at.unwrap_or(0))));
+        if directive.steering != steering || input.live_history != Some(expected.as_slice()) {
+            return Err(notice_error("bound live continuation differs from durable Host sources"));
+        }
     }
     Database::validate_host_job_notice_history_on(tx,root,conversation,run,history)?;
     let history_bytes = fox_engine_protocol::historical_host_job_notice_bytes(history)
