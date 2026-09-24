@@ -162,6 +162,90 @@ fn live_ready_delay_does_not_consume_the_unstarted_model_window() {
 }
 
 #[test]
+fn live_ready_cannot_outlast_the_original_run_budget() {
+    let config = worker_configuration();
+    let setup_clock = TestClock::new(crate::database::now_ms());
+    let budgets = TimeBudgets { run_execution_ms: 8_000, model_request_ms: 3_500,
+        model_first_response_ms: 3_500, model_idle_ms: 3_500, ..TimeBudgets::default() };
+    let (db, root, run_id) = fixture_with_budgets_opt(&setup_clock, &config.hash().unwrap(),
+        Some(&config), true, true, (0, 1), true, budgets);
+    freeze_host_scope(&db, &run_id);
+    let clock = AdvancingClock { base: setup_clock.get(), started: Instant::now() };
+    let cancellation = CancellationRegistry::default();
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    let runtime = delayed_ready_worker(&root, None);
+    let started = Instant::now();
+    let error = coordinator.dispatch_initial_live("budget-ready", &Allow, &runtime,
+        "local-test-only", &|_, _, _| panic!("no tools"), &|_| Ok(()), &|_| Ok(())).unwrap_err();
+    assert!(error.contains("deadline exceeded") || error.contains("execution budget exhausted"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(11), "ready exceeded the original Run budget");
+    assert_eq!(std::fs::read_to_string(root.join("ready-events")).unwrap().lines().collect::<Vec<_>>(),
+        vec!["initialize"]);
+    let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let outbox: (String, i64) = conn.query_row(
+        "SELECT status, attempts FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key='initial-model'",
+        [&run_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(outbox, ("pending".into(), 0));
+}
+
+#[test]
+fn live_ready_cancel_never_dispatches_a_model_request() {
+    let config = worker_configuration();
+    let setup_clock = TestClock::new(crate::database::now_ms());
+    let (db, root, run_id) = fixture_with_budgets_opt(&setup_clock, &config.hash().unwrap(),
+        Some(&config), true, true, (0, 1), true, TimeBudgets::default());
+    freeze_host_scope(&db, &run_id);
+    let clock = AdvancingClock { base: setup_clock.get(), started: Instant::now() };
+    let cancellation = CancellationRegistry::default();
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    let runtime = delayed_ready_worker(&root, None);
+    std::thread::scope(|scope| {
+        let delivery = scope.spawn(|| coordinator.dispatch_initial_live("cancel-ready", &Allow, &runtime,
+            "local-test-only", &|_, _, _| panic!("no tools"), &|_| Ok(()), &|_| Ok(())));
+        wait_ready_stage(&root, "initialize");
+        coordinator.cancel().unwrap();
+        assert!(delivery.join().unwrap().is_err());
+    });
+    assert_eq!(std::fs::read_to_string(root.join("ready-events")).unwrap().lines().collect::<Vec<_>>(),
+        vec!["initialize"]);
+    let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let attempts: i64 = conn.query_row(
+        "SELECT attempts FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key='initial-model'",
+        [&run_id], |row| row.get(0)).unwrap();
+    assert_eq!(attempts, 0);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='engine.initial_dispatched'",
+        [&run_id], |row| row.get::<_, i64>(0)).unwrap(), 0);
+}
+
+#[test]
+fn live_ready_has_a_finite_handshake_limit_without_a_run_limit() {
+    let config = worker_configuration();
+    let setup_clock = TestClock::new(crate::database::now_ms());
+    let budgets = TimeBudgets { run_execution_limited: false, model_request_ms: 3_500,
+        model_first_response_ms: 3_500, model_idle_ms: 3_500, ..TimeBudgets::default() };
+    let (db, root, run_id) = fixture_with_budgets_opt(&setup_clock, &config.hash().unwrap(),
+        Some(&config), true, true, (0, 1), true, budgets);
+    freeze_host_scope(&db, &run_id);
+    let clock = AdvancingClock { base: setup_clock.get(), started: Instant::now() };
+    let cancellation = CancellationRegistry::default();
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    let runtime = delayed_ready_worker(&root, None);
+    let started = Instant::now();
+    let error = coordinator.dispatch_initial_live("bounded-ready", &Allow, &runtime,
+        "local-test-only", &|_, _, _| panic!("no tools"), &|_| Ok(()), &|_| Ok(())).unwrap_err();
+    assert!(error.contains("deadline exceeded"), "{error}");
+    assert!(started.elapsed() >= Duration::from_secs(25) && started.elapsed() < Duration::from_secs(40),
+        "worker ready handshake did not observe its finite window");
+    assert_eq!(std::fs::read_to_string(root.join("ready-events")).unwrap().lines().collect::<Vec<_>>(),
+        vec!["initialize"]);
+    let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let outbox: (String, i64) = conn.query_row(
+        "SELECT status, attempts FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key='initial-model'",
+        [&run_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert_eq!(outbox, ("pending".into(), 0));
+}
+
+#[test]
 fn live_total_timeout_with_continuous_arguments_retries_initial_without_execution() {
     assert_live_total_retry(false);
 }
