@@ -70,6 +70,8 @@ mod f1_engine_path_tests;
 mod host_job_notice_tests;
 #[path = "waiting_jobs_storage_tests.rs"]
 mod waiting_jobs_storage_tests;
+#[path = "waiting_jobs_host_tests.rs"]
+mod waiting_jobs_host_tests;
 
 /// Record the durable settled result of one authoritative Kernel tool call.
 ///

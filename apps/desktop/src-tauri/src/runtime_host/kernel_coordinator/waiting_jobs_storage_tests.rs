@@ -6,7 +6,7 @@ use crate::kernel::{RunState, WaitingJobFact};
 use serde_json::json;
 use sha2::Digest;
 
-fn parked_job_fixture() -> (Database, PathBuf, String, String, String, RunController, u64, i64) {
+pub(super) fn parked_job_fixture() -> (Database, PathBuf, String, String, String, RunController, u64, i64) {
     parked_job_fixture_with_mutation(None)
 }
 
