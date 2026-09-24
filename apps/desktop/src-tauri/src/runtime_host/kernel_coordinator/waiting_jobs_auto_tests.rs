@@ -573,7 +573,13 @@ fn real_host_queued_run_dispatches_after_auto_wake_releases_ownership() {
     second_model.model_service["baseUrl"] = json!(format!("http://{second_address}/v1"));
     second_model.proposal_tools.clear();
     let second_hash = second_model.hash().unwrap();
-    let mut second_frozen = db.kernel_rehydrate(&first).unwrap().unwrap().config;
+    // The first Run is intentionally still `created` here; rehydration needs
+    // start-time retry events. Read the already frozen config row instead.
+    let first_frozen_json: String = db.with_connection(|conn| conn.query_row(
+        "SELECT frozen_config_json FROM kernel_runs WHERE run_id=?1",
+        [&first], |row| row.get(0))).unwrap();
+    let mut second_frozen: kernel::RunFrozenConfig =
+        serde_json::from_str(&first_frozen_json).unwrap();
     second_frozen.prompt_config_hash = second_hash.clone();
     second_frozen.experimental_compute_job_notice = false;
     db.kernel_create_run(&second, "pi", "authoritative", 2,
