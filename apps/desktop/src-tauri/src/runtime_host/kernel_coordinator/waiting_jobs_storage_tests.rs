@@ -397,6 +397,31 @@ fn waiting_deadline_accounting_cannot_overtake_an_already_queued_cancel() {
 }
 
 #[test]
+fn cancelled_wait_reopen_only_consumes_its_durable_cancel_command() {
+    let (db,_root,run,_conversation,_job,_controller,_park_seq,now)=parked_job_fixture();
+    let clock=TestClock::new(now+1_000);
+    let cancellation=CancellationRegistry::default();
+    cancellation.register_run(&run).unwrap();
+    cancellation.request_run_cancel(&run);
+    assert!(KernelCoordinator::reopen(&db,&clock,&run,&cancellation).is_err(),
+        "ordinary reopen must not revive the cancelled execution scope");
+    assert!(KernelCoordinator::reopen_cancelled_wait(&db,&clock,&run,&cancellation).is_err(),
+        "a cancelled token alone is not authority to settle a user command");
+    db.queue_kernel_host_command(&run,None).unwrap();
+    let coordinator=KernelCoordinator::reopen_cancelled_wait(&db,&clock,&run,&cancellation).unwrap();
+    coordinator.cancel_waiting_jobs_now().unwrap();
+    assert!(KernelCoordinator::reopen_cancelled_wait(&db,&clock,&run,&cancellation).is_err(),
+        "a pending command cannot reopen an already cancelling Run for execution");
+    coordinator.settle_cancellation().unwrap();
+    assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(),Some("cancelled"));
+    assert!(cancellation.run_token(&run).unwrap().is_cancelled());
+    let requests:i64=db.with_connection(|conn|conn.query_row(
+        "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='continuation_model'",
+        [&run],|row|row.get(0))).unwrap();
+    assert_eq!(requests,0,"cancel-only reconciliation may not create a model request");
+}
+
+#[test]
 fn terminal_job_direct_notice_requires_the_settled_input_and_exact_typed_fact() {
     let now=crate::database::now_ms();
     let clock=TestClock::new(now);

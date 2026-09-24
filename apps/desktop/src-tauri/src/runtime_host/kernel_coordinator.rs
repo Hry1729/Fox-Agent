@@ -227,6 +227,28 @@ impl<'a> KernelCoordinator<'a> {
         run_id: &str,
         cancellation: &'a CancellationRegistry,
     ) -> Result<Self, String> {
+        Self::reopen_with_scope(database, clock, run_id, cancellation, false)
+    }
+
+    /// Rehydrate solely to consume a durable parked cancel. The already
+    /// cancelled scope must exist; no usable execution token is registered or
+    /// revived, and the caller may only settle the persisted cancel command.
+    pub(crate) fn reopen_cancelled_wait(
+        database: &'a Database,
+        clock: &'a dyn Clock,
+        run_id: &str,
+        cancellation: &'a CancellationRegistry,
+    ) -> Result<Self, String> {
+        Self::reopen_with_scope(database, clock, run_id, cancellation, true)
+    }
+
+    fn reopen_with_scope(
+        database: &'a Database,
+        clock: &'a dyn Clock,
+        run_id: &str,
+        cancellation: &'a CancellationRegistry,
+        cancelled_wait_only: bool,
+    ) -> Result<Self, String> {
         let binding = database
             .run_control_binding(run_id)?
             .ok_or("authoritative Run has no frozen control binding")?;
@@ -253,7 +275,16 @@ impl<'a> KernelCoordinator<'a> {
             );
         }
         let controller = RunController::rehydrate(data).map_err(|error| error.to_string())?;
-        cancellation.register_run(run_id)?;
+        if cancelled_wait_only {
+            if controller.state() != kernel::RunState::WaitingJobs
+                || !database.pending_kernel_host_commands(run_id)?
+                    .iter().any(|command| command.kind == "cancel")
+                || !cancellation.run_token(run_id)?.is_cancelled() {
+                return Err("cancelled wait reconciliation has no matching scope and command".into());
+            }
+        } else {
+            cancellation.register_run(run_id)?;
+        }
         if controller.is_terminal() || controller.state() == kernel::RunState::Cancelling {
             cancellation.request_run_cancel(run_id);
         }

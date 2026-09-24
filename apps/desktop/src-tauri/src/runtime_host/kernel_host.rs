@@ -1387,10 +1387,25 @@ impl super::RuntimeHost {
         }
         let cancellation = self.state.lock()
             .map_err(|_| "runtime state lock poisoned")?.cancellation.clone();
-        let coordinator = KernelCoordinator::reopen(
-            &self.database, &super::shadow_reconcile::ReconcilerClock,
-            run_id, &cancellation,
-        )?;
+        let pending_cancel = self.database.pending_kernel_host_commands(run_id)?
+            .iter().any(|command| command.kind == "cancel");
+        let clock=super::shadow_reconcile::ReconcilerClock;
+        let coordinator = if pending_cancel {
+            cancellation.request_run_cancel(run_id);
+            KernelCoordinator::reopen_cancelled_wait(&self.database,&clock,run_id,&cancellation)?
+        } else {
+            match KernelCoordinator::reopen(&self.database,&clock,run_id,&cancellation) {
+                Err(error) if error == "Run was already cancelled" => {
+                    let newly_pending = self.database.pending_kernel_host_commands(run_id)?
+                        .iter().any(|command| command.kind == "cancel");
+                    if !newly_pending { return Err(error); }
+                    cancellation.request_run_cancel(run_id);
+                    KernelCoordinator::reopen_cancelled_wait(
+                        &self.database, &clock, run_id, &cancellation)?
+                }
+                other => other?,
+            }
+        };
         #[cfg(test)]
         waiting_wake_test_hooks::run_before_wake_account(run_id);
         // A persisted user cancellation wins even if the last Job completed at

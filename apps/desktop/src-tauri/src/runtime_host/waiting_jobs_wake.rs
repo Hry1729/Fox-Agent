@@ -4,6 +4,14 @@ use super::RuntimeHost;
 use std::{sync::{atomic::{AtomicUsize, Ordering}, mpsc, Arc, Weak}, time::Duration};
 use tokio::sync::Notify;
 
+fn safe_wake_error_kind(error: &str) -> &'static str {
+    if error.contains("cancelled wait reconciliation") { "cancel_scope_mismatch" }
+    else if error.contains("frozen") || error.contains("identity") { "frozen_identity_mismatch" }
+    else if error.contains("job notice") { "notice_unavailable" }
+    else if error.contains("shutting down") { "host_stopping" }
+    else { "durable_check_failed" }
+}
+
 pub(super) struct WakeSlot {
     pub park_seq: u64,
     pub notify: Weak<Notify>,
@@ -100,10 +108,17 @@ impl RuntimeHost {
                     lock_retry = (lock_retry * 2).min(Duration::from_secs(1));
                     pause
                 }
-                _ => {
+                Ok(Err(error)) => {
+                    eprintln!("Kernel WaitingJobs check for run {run_id} failed: {}",
+                        safe_wake_error_kind(&error));
                     // A malformed or uncertain durable fact stays fail-closed.
                     // A later committed notice may signal another check; the
                     // deadline still terminates this in-process watcher.
+                    if due == 0 { break; }
+                    Duration::from_millis(due)
+                }
+                Err(_) => {
+                    eprintln!("Kernel WaitingJobs check task for run {run_id} failed");
                     if due == 0 { break; }
                     Duration::from_millis(due)
                 }
