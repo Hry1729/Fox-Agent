@@ -13,7 +13,7 @@ fn notice_host_fixture(_tag: &str) -> (Database, PathBuf, String, TestClock, Can
     (db, root, run, clock, cancellation, conversation)
 }
 
-fn enable_notices(db:&Database,run:&str) {
+pub(super) fn enable_notices(db:&Database,run:&str) {
     db.with_connection(|conn| conn.execute(
         "UPDATE kernel_runs SET frozen_config_json=json_set(frozen_config_json,
           '$.experimentalComputeJobNotice',json('true')) WHERE run_id=?1", [run],
