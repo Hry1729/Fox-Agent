@@ -1972,13 +1972,13 @@ impl Database {
         steering: Option<&super::SteeringDecision>,
         model_input: Option<&ModelNoticeInput<'_>>,
     ) -> Result<(), String> {
-        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,dispatch_lease,batch_lease,batch_response_lease,initial_lease,model_retry_lease,continuation_lease,steering,None,None,model_input)
+        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,dispatch_lease,batch_lease,batch_response_lease,initial_lease,model_retry_lease,continuation_lease,steering,None,None,false,model_input)
     }
 
     /// The UI must send the policy version captured when this approval was
     /// displayed. Re-reading it while answering would revive an obsolete ticket.
     pub fn kernel_commit_decision_with_approval_version(&self,run_id:&str,wall_now_ms:i64,cmd:&crate::kernel::KernelPersistCommand,expected_policy_version:u64)->Result<(),String>{
-        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,None,None,None,None,None,None,None,Some(expected_policy_version),None,None)
+        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,None,None,None,None,None,None,None,Some(expected_policy_version),None,false,None)
     }
 
     /// An automatic Job wake may only consume the current permission generation.
@@ -1990,7 +1990,16 @@ impl Database {
             || cmd.events.iter().filter(|event|event.event_type=="run.jobs_woken").count()!=1 {
             return Err("automatic Job wake has no unique persistent intent".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,None,None,None,None,None,None,None,None,Some(expected_policy_version),None)
+        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,None,None,None,None,None,None,None,None,Some(expected_policy_version),false,None)
+    }
+
+    pub(crate) fn kernel_commit_waiting_account(&self,run_id:&str,wall_now_ms:i64,
+        cmd:&crate::kernel::KernelPersistCommand)->Result<(),String>{
+        if cmd.run_state!=crate::kernel::RunState::WaitingJobs && !cmd.run_state.is_terminal() {
+            return Err("waiting accounting left the parked state without a terminal".into());
+        }
+        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,
+            None,None,None,None,None,None,None,None,None,true,None)
     }
 
     fn kernel_commit_decision_with_dispatch_lease_and_policy(
@@ -2007,6 +2016,7 @@ impl Database {
         steering: Option<&super::SteeringDecision>,
         expected_approval_policy_version: Option<u64>,
         expected_wake_policy_version: Option<u64>,
+        waiting_account_no_cancel: bool,
         model_input: Option<&ModelNoticeInput<'_>>,
     ) -> Result<(), String> {
         let settling_model_response=initial_lease.is_some_and(|(_,response)|response)
@@ -2050,6 +2060,8 @@ impl Database {
                 if current!=Some(expected) {
                     return Err(kernel_err("job_wake_policy_changed: current permission version moved"));
                 }
+            }
+            if expected_wake_policy_version.is_some() || waiting_account_no_cancel {
                 let cancelled: bool=transaction.query_row(
                     "SELECT EXISTS(SELECT 1 FROM kernel_host_commands
                       WHERE run_id=?1 AND kind='cancel' AND status='pending')",

@@ -1841,6 +1841,7 @@ impl RuntimeHost {
                 return;
             };
             if state.shutting_down || state.dispatching_run_id.is_some() || !state.kernel_active_runs.is_empty()
+                || !state.kernel_wake_inflight.is_empty()
                 || state
                     .worker
                     .as_ref()
@@ -3411,6 +3412,11 @@ impl RuntimeHost {
             self.state.lock().map_err(|_| "runtime state lock poisoned")?.cancellation.request_run_cancel(run_id);
             for child_run_id in self.database.active_child_run_ids(run_id)? {
                 if child_run_id != run_id { let _ = self.cancel_child_runtime(&child_run_id); }
+            }
+            if let Err(error)=self.signal_waiting_run(run_id) {
+                // The command is already durable. Startup recovery and the
+                // original deadline still provide a bounded retry path.
+                eprintln!("Kernel WaitingJobs cancel signal failed: {error}");
             }
             return Ok(queued);
         }

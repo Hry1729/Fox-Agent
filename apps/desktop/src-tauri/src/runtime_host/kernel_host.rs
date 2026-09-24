@@ -873,7 +873,10 @@ pub(super) fn drive_with_actions_transport(
             // Ordinary tick does not debit the waiting wall interval; its DB
             // guard correctly rejects that unaccounted projection. Account the
             // original fixed deadline first, then leave the Pi/RPC stack.
-            coordinator.account_waiting_jobs_now()?;
+            match coordinator.account_waiting_jobs_now() {
+                Err(error) if error.contains("job_wake_cancel_pending") => continue,
+                other => other?,
+            }
             return Ok(if terminal(&coordinator.snapshot()?.state) {
                 KernelDriveOutcome::Terminal
             } else {
@@ -1143,6 +1146,23 @@ pub(super) fn initial_input(
 /// admits for this dispatch — never from a tool result. The classification
 /// itself lives in [`super::managed_files`], where it is unit-tested directly.
 impl super::RuntimeHost {
+    fn reconcile_terminal_compute_jobs(&self, run_id: &str) -> Result<(), String> {
+        if !self.database.compute_job_notice_enabled(run_id)? {
+            return Ok(());
+        }
+        if !self.database.kernel_host_run_state(run_id)?.as_deref().is_some_and(terminal) {
+            return Err("terminal Job reconciliation has no committed parent terminal".into());
+        }
+        let binding=self.database.run_control_binding(run_id)?
+            .ok_or("terminal Job reconciliation has no frozen Run")?;
+        if binding.authority!=fox_engine_protocol::ExecutionAuthority::Authoritative
+            || binding.run_id!=run_id {
+            return Err("terminal Job reconciliation crossed the frozen Run".into());
+        }
+        super::background_jobs::cancel_unfinished_for_terminal(
+            &self.database, run_id, &binding.conversation_id)
+    }
+
     pub(super) fn stop_kernel_runs(&self) -> Result<(), String> {
         let active = {
             let mut state = self
@@ -1265,9 +1285,8 @@ impl super::RuntimeHost {
     }
 
     /// A controlled wake owns the same OS Run lock as normal start/recovery.
-    /// The background Job has already outlived its Pi session; only durable
-    /// terminal notices may create the one continuation request. The automatic
-    /// scanner is intentionally a later batch.
+    /// Only durable terminal notices may create one continuation request;
+    /// queued cancellation and the original deadline take priority.
     pub(crate) fn wake_kernel_waiting_run(&self, run_id: &str) -> Result<bool, String> {
         self.wake_kernel_waiting_run_with_transport(run_id, None, false)
     }
@@ -1292,6 +1311,16 @@ impl super::RuntimeHost {
     }
 
     fn wake_kernel_waiting_run_with_transport(
+        &self, run_id: &str, expected_park_seq: Option<u64>, force_per_round: bool,
+    ) -> Result<bool, String> {
+        let result=self.wake_kernel_waiting_run_owned(run_id,expected_park_seq,force_per_round);
+        // The owned call has now dropped its OS lock and wake-inflight marker.
+        // A queued Run may start only after that entire admission boundary.
+        self.dispatch_next_queued_run();
+        result
+    }
+
+    fn wake_kernel_waiting_run_owned(
         &self, run_id: &str, expected_park_seq: Option<u64>, force_per_round: bool,
     ) -> Result<bool, String> {
         let ownership = acquire(&self.sessions_dir, run_id)?;
@@ -1339,8 +1368,26 @@ impl super::RuntimeHost {
             )?;
             return Ok(false);
         }
-        coordinator.account_waiting_jobs_now()?;
+        if let Err(error)=coordinator.account_waiting_jobs_now() {
+            if error.contains("job_wake_cancel_pending") {
+                drop(coordinator);
+                self.start_kernel_run_with_transport(
+                    ownership, &binding, Value::Null, Value::Null, force_per_round,
+                )?;
+                return Ok(false);
+            }
+            return Err(error);
+        }
         if coordinator.snapshot()?.state != "waiting_jobs" {
+            drop(coordinator);
+            if !self.database.kernel_host_run_state(run_id)?.as_deref().is_some_and(terminal) {
+                return Err("waiting accounting left a nonterminal Run".into());
+            }
+            let jobs=self.reconcile_terminal_compute_jobs(run_id);
+            if let Ok(mut state)=self.state.lock() {
+                state.cancellation.retire_run(run_id);
+            }
+            jobs?;
             return Ok(false);
         }
         if !coordinator.wake_waiting_jobs_at_policy_version(policy.version)? {
@@ -1565,6 +1612,9 @@ impl super::RuntimeHost {
                 state.state = "ready".into();
             }
         }
+        if parked || matches!(&result, Ok(KernelDriveOutcome::Terminal)) {
+            self.dispatch_next_queued_run();
+        }
         if parked {
             if let Err(error) = self.signal_waiting_run(&binding.run_id) {
                 eprintln!("Kernel WaitingJobs park signal failed: {error}");
@@ -1689,6 +1739,9 @@ impl super::RuntimeHost {
         );
         if result.is_err() {
             self.wait_kernel_action_children(binding, true)?;
+        }
+        if matches!(&result, Ok(KernelDriveOutcome::Terminal)) {
+            self.reconcile_terminal_compute_jobs(&binding.run_id)?;
         }
         #[cfg(test)]
         if matches!(&result, Ok(KernelDriveOutcome::Parked)) {

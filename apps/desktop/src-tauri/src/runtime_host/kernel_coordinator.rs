@@ -132,6 +132,7 @@ mod notice_lease_test_barrier {
 enum DecisionLease<'a> {
     Approval(u64),
     WaitingWakePolicy(u64),
+    WaitingAccount,
     ModelRetry(&'a str, &'a str),
     Initial(&'a str),
     Continuation(&'a str, &'a str),
@@ -314,6 +315,8 @@ impl<'a> KernelCoordinator<'a> {
                 &self.binding.run_id, now.wall_ms, &command, version)?,
             Some(DecisionLease::WaitingWakePolicy(version)) => self.database.kernel_commit_waiting_wake(
                 &self.binding.run_id, now.wall_ms, &command, version)?,
+            Some(DecisionLease::WaitingAccount) => self.database.kernel_commit_waiting_account(
+                &self.binding.run_id, now.wall_ms, &command)?,
             Some(DecisionLease::ModelRetry(effect_key, owner)) => {
                 self.database.kernel_commit_model_retry(
                     &self.binding.run_id,
@@ -390,7 +393,7 @@ impl<'a> KernelCoordinator<'a> {
 
     pub(crate) fn account_waiting_jobs_now(&self) -> Result<(), String> {
         let park_seq = self.database.kernel_waiting_park_seq(&self.binding.run_id)?;
-        self.apply(None, |controller, now| {
+        self.apply(Some(DecisionLease::WaitingAccount), |controller, now| {
             controller.account_waiting_jobs(park_seq, now.wall_ms)
         })
     }

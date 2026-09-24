@@ -7,6 +7,21 @@ use std::{path::Path, sync::{Arc, OnceLock}, time::{Duration, Instant}};
 pub(super) const TOOLS: &[&str] = &["compute_job_start", "compute_job_status", "compute_job_cancel", "compute_job_result"];
 fn registry() -> &'static JobTokenRegistry { static REGISTRY: OnceLock<JobTokenRegistry> = OnceLock::new(); REGISTRY.get_or_init(Default::default) }
 
+/// Parent terminalization requests cancellation for every unfinished compute
+/// Job owned by that exact Run. A running executor still owns its terminal
+/// write; this request never presents it as already stopped.
+pub(super) fn cancel_unfinished_for_terminal(database: &Database, run_id: &str,
+    conversation_id: &str) -> Result<(), String> {
+    for job in database.kernel_jobs_for_run(run_id)? {
+        if job.kind != "attachment_compute" || job.state.is_terminal() { continue; }
+        if job.run_id != run_id || job.conversation_id != conversation_id {
+            return Err("terminal Job reconciliation crossed the frozen Run".into());
+        }
+        host_lifecycle::cancel_host_job(database, registry(), &job.job_id)?;
+    }
+    Ok(())
+}
+
 fn allowed_fields(input: &Value, fields: &[&str]) -> Result<(), String> {
     let object=input.as_object().ok_or("job arguments must be an object")?;
     if object.keys().any(|k| !fields.contains(&k.as_str())) { return Err("unknown job argument; authorization fields cannot be supplied by the model".into()); }

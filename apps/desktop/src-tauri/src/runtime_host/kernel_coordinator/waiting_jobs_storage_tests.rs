@@ -376,6 +376,27 @@ fn automatic_waiting_wake_cannot_overtake_a_queued_cancel() {
 }
 
 #[test]
+fn waiting_deadline_accounting_cannot_overtake_an_already_queued_cancel() {
+    let (db,_root,run,_conversation,_job,_controller,park_seq,now)=parked_job_fixture();
+    let mut controller=RunController::rehydrate(db.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
+    let effects=controller.account_waiting_jobs(park_seq,now+6_000).unwrap();
+    assert_eq!(controller.state(),RunState::Failed,
+        "without a cancel, the original deadline would terminate the Run");
+    db.queue_kernel_host_command(&run,None).unwrap();
+    let rejected=db.kernel_commit_waiting_account(&run,now+6_000,
+        &controller.persist_command(&effects)).unwrap_err();
+    assert!(rejected.contains("job_wake_cancel_pending"),"{rejected}");
+    let saved=db.kernel_rehydrate(&run).unwrap().unwrap();
+    assert_eq!(saved.state,RunState::WaitingJobs);
+    assert_eq!(saved.wait_accounted_until_wall_ms,Some(now));
+    let terminal:i64=db.with_connection(|conn|conn.query_row(
+        "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type IN
+            ('run.failed','run.budget_exhausted','run.jobs_woken')",
+        [&run],|row|row.get(0))).unwrap();
+    assert_eq!(terminal,0,"cancel-first CAS must roll back the deadline terminal");
+}
+
+#[test]
 fn terminal_job_direct_notice_requires_the_settled_input_and_exact_typed_fact() {
     let now=crate::database::now_ms();
     let clock=TestClock::new(now);
