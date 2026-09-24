@@ -115,6 +115,21 @@ fn stage_windows_zvec_test_dll() {
 }
 
 fn main() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        // Tauri's binary targets receive the Common Controls v6 activation
+        // manifest, but Cargo's library test executable does not. A real
+        // AppHandle test pulls in TaskDialogIndirect, which is unavailable in
+        // the unactivated system comctl32 v5 and prevents the test executable
+        // from reaching its test harness at all. Keep this test-only: normal
+        // desktop binaries retain Tauri's existing resource/manifest path.
+        let manifest = Path::new(&env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest dir"))
+            .join("resources/tests/common-controls-v6.manifest");
+        println!("cargo:rerun-if-changed={}", manifest.display());
+        println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}", manifest.display());
+    }
     if env::var_os("CARGO_FEATURE_ZVEC").is_some()
         && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
     {

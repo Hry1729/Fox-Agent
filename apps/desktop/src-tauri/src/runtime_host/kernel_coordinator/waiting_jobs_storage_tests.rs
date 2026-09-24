@@ -218,7 +218,7 @@ fn waiting_jobs_real_host_start_and_recovery_lock_race_preserve_parent_token() {
     for window in &mut context.config_mut().app.windows {
         window.create=false;
     }
-    let app=tauri::Builder::default().build(context).unwrap();
+    let app=tauri::Builder::default().any_thread().build(context).unwrap();
     let host=super::super::super::RuntimeHost::new(
         app.handle().clone(),db.clone(),root.clone(),root.join("attachments"),
         root.join("skills"),crate::yuxi::YuxiClient::new().unwrap());
