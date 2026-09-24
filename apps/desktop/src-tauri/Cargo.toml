@@ -8,7 +8,7 @@ edition = "2021"
 
 [features]
 default = ["local-embedding", "zvec"]
-zvec = ["dep:zvec-rust"]
+zvec = ["dep:zvec-rust", "dep:zvec-rust-sys"]
 local-embedding = ["dep:ort", "dep:tokenizers"]
 kernel-acceptance = []
 kernel-default = []
@@ -57,7 +57,7 @@ tokio = { version = "1", features = ["fs", "io-util", "sync", "time"] }
 toml = "0.8.2"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-zvec-rust = { version = "0.6.0", optional = true }
+zvec-rust = { version = "=0.6.0", optional = true }
 ort = { version = "=2.0.0-rc.9", default-features = false, features = ["ndarray", "download-binaries"], optional = true }
 tokenizers = { version = "0.21.1", default-features = false, features = ["fancy-regex"], optional = true }
 calamine = { version = "0.36.1", default-features = false }
@@ -68,6 +68,7 @@ fox-agent-kernel = { path = "../../../crates/fox-agent-kernel", features = ["tes
 zip = { version = "8.6.0", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
+zvec-rust-sys = { version = "=0.6.0", optional = true, features = ["bundled"] }
 windows = { version = "0.61", features = [
   "Win32_Storage_FileSystem",
   "Win32_System_Com",

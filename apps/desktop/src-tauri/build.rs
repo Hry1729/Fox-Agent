@@ -1,7 +1,124 @@
 use std::env;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
+
+fn pe_machine(path: &Path) -> Result<u16, String> {
+    let mut file = fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut dos = [0u8; 64];
+    file.read_exact(&mut dos)
+        .map_err(|error| error.to_string())?;
+    if &dos[..2] != b"MZ" {
+        return Err(format!("{} has no DOS header", path.display()));
+    }
+    let pe_offset = u32::from_le_bytes(dos[0x3c..0x40].try_into().unwrap()) as u64;
+    file.seek(SeekFrom::Start(pe_offset))
+        .map_err(|error| error.to_string())?;
+    let mut header = [0u8; 6];
+    file.read_exact(&mut header)
+        .map_err(|error| error.to_string())?;
+    if &header[..4] != b"PE\0\0" {
+        return Err(format!("{} has no PE signature", path.display()));
+    }
+    Ok(u16::from_le_bytes([header[4], header[5]]))
+}
+
+fn stage_windows_zvec_test_dll() {
+    let target = env::var("TARGET").expect("Cargo TARGET");
+
+    // This metadata comes from the direct, feature-matched zvec-rust-sys native
+    // dependency. It names the directory actually selected for native linking.
+    let source_dir = env::var("DEP_ZVEC_C_API_LIB_DIR")
+        .expect("zvec-rust-sys did not expose its resolved lib_dir metadata");
+    let source_dir = Path::new(&source_dir)
+        .canonicalize()
+        .expect("canonical Zvec library directory");
+    let source = source_dir.join("zvec_c_api.dll");
+    let import_lib = source_dir.join("zvec_c_api.lib");
+    assert!(
+        source.is_file(),
+        "missing real Zvec DLL: {}",
+        source.display()
+    );
+    assert!(
+        import_lib.is_file(),
+        "missing matching Zvec import library: {}",
+        import_lib.display()
+    );
+    println!("cargo:rerun-if-changed={}", source.display());
+    println!("cargo:rerun-if-changed={}", import_lib.display());
+    println!("cargo:rerun-if-env-changed=ZVEC_LIB_DIR");
+
+    let expected_machine = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86_64") => 0x8664,
+        Ok("aarch64") => 0xaa64,
+        Ok("x86") => 0x014c,
+        other => panic!("unsupported Windows Zvec target architecture: {other:?}"),
+    };
+    let actual_machine = pe_machine(&source).expect("read Zvec DLL PE header");
+    assert_eq!(
+        actual_machine, expected_machine,
+        "Zvec DLL PE machine does not match target {target}"
+    );
+
+    // OUT_DIR is <profile>/build/fox-desktop-<hash>/out, including custom
+    // CARGO_TARGET_DIR and explicit target triples. Test executables are in deps.
+    let out_dir = env::var_os("OUT_DIR").expect("Cargo OUT_DIR");
+    let build_dir = Path::new(&out_dir)
+        .parent()
+        .and_then(Path::parent)
+        .expect("Fox build-script directory");
+    assert_eq!(
+        build_dir.file_name().and_then(|name| name.to_str()),
+        Some("build")
+    );
+    let deps_dir = build_dir
+        .parent()
+        .expect("Cargo profile directory")
+        .join("deps");
+    fs::create_dir_all(&deps_dir).expect("create Cargo deps directory");
+    let destination = deps_dir.join("zvec_c_api.dll");
+    let original = fs::read(&source).expect("read real Zvec DLL");
+    if destination.exists() {
+        assert!(
+            fs::read(&destination).expect("read existing app-local Zvec DLL") == original,
+            "{} differs from the selected build DLL {}; refusing to use or overwrite it",
+            destination.display(),
+            source.display()
+        );
+        return;
+    }
+    let temporary = deps_dir.join(format!(".zvec_c_api.{}.tmp", std::process::id()));
+    fs::copy(&source, &temporary).expect("stage real Zvec DLL beside test executables");
+    assert!(
+        fs::read(&temporary).expect("verify staged Zvec DLL") == original,
+        "staged Zvec DLL differs from the selected build DLL"
+    );
+    // Rename within deps publishes the verified bytes atomically. Never replace
+    // a different DLL that another build or running test may already be using.
+    if let Err(error) = fs::rename(&temporary, &destination) {
+        let _ = fs::remove_file(&temporary);
+        if destination.exists()
+            && fs::read(&destination)
+                .ok()
+                .is_some_and(|bytes| bytes == original)
+        {
+            return;
+        }
+        panic!("cannot publish {}: {error}", destination.display());
+    }
+    assert!(
+        fs::read(&destination).expect("verify app-local Zvec DLL") == original,
+        "app-local Zvec DLL differs from the selected build DLL"
+    );
+}
 
 fn main() {
+    if env::var_os("CARGO_FEATURE_ZVEC").is_some()
+        && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+    {
+        stage_windows_zvec_test_dll();
+    }
     // The zvec native DLL is only produced when the `zvec` feature is enabled
     // (zvec-rust-sys downloads/builds it into OUT_DIR). tauri.conf.json lists it
     // as a bundle resource glob; on a clean checkout built `--no-default-features`

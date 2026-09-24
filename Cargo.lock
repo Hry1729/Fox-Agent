@@ -1196,6 +1196,7 @@ dependencies = [
  "windows",
  "zip",
  "zvec-rust",
+ "zvec-rust-sys",
 ]
 
 [[package]]
@@ -5986,5 +5987,3 @@ dependencies = [
 [[package]]
 name = "zvec-rust-sys"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f89deb26358085908592b89a97af9155e8f91b88d78006289589a394931b7664"
