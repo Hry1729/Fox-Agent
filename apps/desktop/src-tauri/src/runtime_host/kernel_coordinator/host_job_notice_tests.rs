@@ -222,7 +222,8 @@ fn real_host_to_local_provider_delivers_notice_once_in_live_and_single_round() {
         enable_notices(&db,&run);
         freeze_host_scope(&db,&run);
         let conversation=db.run_control_binding(&run).unwrap().unwrap().conversation_id;
-        let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
+        let sink=|_:&fox_engine_protocol::KernelModelPreview|{};
+        let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap().with_preview(&sink);
         let job=finished_compute(&db,&run,&conversation,if live {"live"} else {"single"});
         if live {
             coordinator.dispatch_initial_live("real-live",&Allow,&real_worker_command(),"local-test-only",
