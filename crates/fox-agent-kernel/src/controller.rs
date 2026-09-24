@@ -122,6 +122,10 @@ pub const INITIAL_MODEL_IDEMPOTENCY_KEY: &str = "initial-model-delivery";
 /// logs. Emitting it as a plain error string would let the Host classify a
 /// normal "the user added a request just now" as an engine failure.
 pub const STEERING_COMPETITION: &str = "kernel.steering_competition:";
+/// A child Job changed state between the Host's read and the model-response
+/// write-set. Only this tagged, fully rolled-back refusal may re-plan the
+/// already-held response without another Provider request.
+pub const JOB_NOTICE_COMPETITION: &str = "kernel.job_notice_competition:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ToolCall {

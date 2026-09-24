@@ -148,6 +148,18 @@ fn waiting_jobs_model_lease_rejects_forged_initial_delivery_history() {
         "owner",false,None,Some(&forged_binding)).unwrap_err();
     assert!(error.contains("bound initial frame differs from frozen Host sources"),
         "synchronously forged frame and history were not checked against frozen source: {error}");
+    let mut foreign_frame=frame.clone();
+    foreign_frame.input.run_id="another-run".into();
+    foreign_frame.validate().unwrap();
+    let foreign_payload=serde_json::to_value(&foreign_frame).unwrap();
+    let foreign_binding=ModelNoticeInput {payload:&foreign_payload,
+        delivered_history:&foreign_frame.input.messages,live_history:None,
+        checkpoint_seq:foreign_frame.checkpoint_seq,
+        history_start:foreign_frame.input.messages.len(),historical_bytes:0};
+    let error=db.kernel_commit_initial_model(&run,now,&controller.persist_command(&effects),
+        "owner",false,None,Some(&foreign_binding)).unwrap_err();
+    assert!(error.contains("bound initial frame identity differs from frozen Host scope"),
+        "frame identity forged without changing history: {error}");
     let stored:i64=db.with_connection(|conn|conn.query_row(
         "SELECT COUNT(*) FROM kernel_model_notice_inputs WHERE run_id=?1",[&run],|row|row.get(0))).unwrap();
     assert_eq!(stored,0,"the forged frame must not be leased");
@@ -397,6 +409,50 @@ fn terminal_job_direct_notice_requires_the_settled_input_and_exact_typed_fact() 
         "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='continuation_model' AND status='pending'",
         [&run],|row|row.get(0))).unwrap();
     assert_eq!(outbox,1);
+}
+
+#[test]
+fn job_finishing_between_pre_read_and_response_commit_replans_without_model_replay() {
+    let now=crate::database::now_ms();
+    let clock=TestClock::new(now);
+    let model=worker_configuration();
+    let (db,_root,run)=fixture_with_start_opt(&clock,&model.hash().unwrap(),Some(&model),true,true);
+    freeze_host_scope(&db,&run);
+    db.with_connection(|conn|conn.execute(
+        "UPDATE kernel_runs SET frozen_config_json=json_set(frozen_config_json,
+          '$.experimentalComputeJobNotice',json('true')) WHERE run_id=?1",[&run])).unwrap();
+    let conversation=db.run_control_binding(&run).unwrap().unwrap().conversation_id;
+    let cancellation=CancellationRegistry::default();
+    let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
+    let job=db.kernel_job_start(&JobStartRequest {
+        run_id:run.clone(),kind:"attachment_compute".into(),idempotency_key:"finish-in-window".into(),
+        params:json!({"input":"fixture"}),deadline_ms:Some(now+6_000),progress_total:None,
+    }).unwrap().snapshot().job_id.clone();
+    db.kernel_job_claim_attempt(&job,1).unwrap();
+    let db_barrier=db.clone();
+    super::live::test_barrier::install(&run,Box::new(move || {
+        db_barrier.kernel_job_complete_attempt(&job,1,&conversation,&json!({"answer":"ready"}))
+            .expect("the child finishes after Host pre-read but before response commit");
+    }));
+    let model_calls=std::sync::atomic::AtomicUsize::new(0);
+    coordinator.dispatch_initial("owner",&Allow,|binding,frame,_| {
+        model_calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+        Ok(fox_engine_protocol::KernelInitialModelResponse {
+            schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),
+            checkpoint_seq:frame.checkpoint_seq,
+            assistant_message:json!({"role":"assistant","stopReason":"stop",
+                "content":[{"type":"text","text":"The calculation is running."}]}),
+        })
+    }).unwrap();
+    assert_eq!(model_calls.load(std::sync::atomic::Ordering::SeqCst),1,
+        "the held response must be replanned without another model request");
+    assert_eq!(coordinator.snapshot().unwrap().state,"running");
+    let (responses,continuations,parks):(i64,i64,i64)=db.with_connection(|conn|conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='engine.initial_response'),
+                (SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='continuation_model'),
+                (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.waiting_jobs')",
+        [&run],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
+    assert_eq!((responses,continuations,parks),(1,1,0));
 }
 
 #[test]

@@ -847,6 +847,45 @@ impl KernelCoordinator<'_> {
             ) {
                 Ok(next_batch) => break next_batch,
                 Err(error)
+                    if error.starts_with(kernel::JOB_NOTICE_COMPETITION)
+                        && attempts < STEERING_COMPETITION_ATTEMPTS =>
+                {
+                    attempts += 1;
+                    let arrived=self.database.pending_run_steering(&self.binding.run_id)?;
+                    if !arrived.is_empty() && self.database.kernel_count_steering_followups(
+                        &self.binding.run_id)? < STEERING_FOLLOWUP_LIMIT {
+                        let mut input=self.database.kernel_initial_input(&self.binding.run_id)?;
+                        input.messages=pre_history.clone();
+                        input.messages.push(output.clone());
+                        input.messages.push(json!({"role":"user","content":[{"type":"text",
+                            "text":STEERING_PROMPT}],"timestamp":0}));
+                        input.validate()?;
+                        pending_messages=arrived.iter().map(super::steering::steering_user_message).collect();
+                        pending_rows=arrived;
+                        stop_followup=StopFollowup::Steering(input);
+                        steering_decision=Some(crate::database::SteeringDecision {
+                            deliver_seqs:pending_rows.iter().map(|row|row.seq).collect(),
+                            dispatch_key:steering_dispatch_key.clone(),adopt_all_received:true,
+                        });
+                    } else {
+                        pending_messages.clear();
+                        pending_rows.clear();
+                        steering_decision=None;
+                        let jobs=self.unfinished_compute_wait_facts()?;
+                        stop_followup=if !jobs.is_empty() {
+                            StopFollowup::Park {
+                                history_json:serde_json::to_string(&pre_history)
+                                    .map_err(|_|"invalid parked live history")?,
+                                response_json:response_json.clone(),jobs,
+                            }
+                        } else if let Some((input,notices))=
+                            self.job_notice_followup_input(&pre_history,&output)? {
+                            StopFollowup::JobNotice {input,notices}
+                        } else {StopFollowup::Final};
+                    }
+                    delivery_outcome=None;
+                }
+                Err(error)
                     if error.starts_with(kernel::STEERING_COMPETITION)
                         && attempts < STEERING_COMPETITION_ATTEMPTS =>
                 {

@@ -132,6 +132,14 @@ fn bind_model_notices(
             serde_json::from_value(input.payload.clone())
                 .map_err(|_|notice_error("invalid bound initial model frame"))?;
         frame.validate().map_err(|_|notice_error("invalid bound initial model frame"))?;
+        let frozen=super::kernel_initial_input::read_input(tx,run)?;
+        if frame.input.run_id!=run || frame.input.turn_id!=frozen.turn_id
+            || frame.input.prompt_config_hash!=frozen.prompt_config_hash
+            || frame.idempotency_key!=dispatch_key
+            || frame.continuation_key.as_deref().map(|key|format!("continuation-delivery:{key}"))
+                .unwrap_or_else(||crate::kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into())!=dispatch_key {
+            return Err(notice_error("bound initial frame identity differs from frozen Host scope"));
+        }
         let expected=bound_initial_frame_messages_on(tx,run,
             frame.continuation_key.as_deref(),dispatch_key)?;
         if frame.input.messages!=expected {
@@ -340,12 +348,14 @@ fn checked_job_notice_input(
         tx, root, conversation, run, (16 * 1024usize).saturating_sub(historical),
     )?;
     if supplied != expected {
-        return Err(kernel_err("job notice continuation differs from current typed Host facts"));
+        return Err(kernel_err(format!("{}typed facts changed",
+            crate::kernel::JOB_NOTICE_COMPETITION)));
     }
     let unfinished: i64 = tx.query_row(
         "SELECT COUNT(*) FROM kernel_jobs WHERE run_id=?1 AND conversation_id=?2
           AND state IN ('queued','running','paused')", params![run,conversation], |row| row.get(0))?;
-    if unfinished != 0 { return Err(kernel_err("job notice continuation still has unfinished Jobs")); }
+    if unfinished != 0 { return Err(kernel_err(format!("{}unfinished Jobs changed",
+        crate::kernel::JOB_NOTICE_COMPETITION))); }
     let received: i64 = tx.query_row(
         "SELECT COUNT(*) FROM run_steering_messages WHERE run_id=?1 AND status='received'",
         [run], |row| row.get(0))?;
@@ -561,7 +571,8 @@ fn validate_job_wait_decision(
             Ok((row.get::<_,String>(0)?, row.get::<_,i64>(1)?,
                 row.get::<_,Option<i64>>(2)?, row.get::<_,String>(3)?))
         })?.collect::<rusqlite::Result<Vec<_>>>()?;
-        if actual.len() != expected.len() { return Err(kernel_err("job wait set changed before park")); }
+        if actual.len() != expected.len() { return Err(kernel_err(format!("{}wait set changed before park",
+            crate::kernel::JOB_NOTICE_COMPETITION))); }
         let mut max_job_deadline = 0_i64;
         for (fact, (job_id, attempt, deadline, kind)) in expected.drain(..).zip(actual) {
             if fact.job_id != job_id || fact.attempt != attempt
@@ -2994,8 +3005,6 @@ impl Database {
                 return Err(kernel_err(format!("kernel run disappeared during commit: {run_id}")));
             }
             if cmd.run_state==crate::kernel::RunState::Completed {
-                let pending:i64=transaction.query_row("SELECT COUNT(*) FROM kernel_jobs WHERE run_id=?1 AND state IN ('queued','running','paused')",[run_id],|r|r.get(0))?;
-                if pending>0 {return Err(kernel_err("kernel.jobs_pending"));}
                 let (conversation, frozen): (String,String) = transaction.query_row(
                     "SELECT r.conversation_id,k.frozen_config_json FROM kernel_runs k
                      JOIN runs r ON r.id=k.run_id WHERE k.run_id=?1",[run_id],
@@ -3003,6 +3012,14 @@ impl Database {
                 )?;
                 let config: crate::kernel::RunFrozenConfig = serde_json::from_str(&frozen)
                     .map_err(|_|kernel_err("invalid frozen model notice flag"))?;
+                let pending:i64=transaction.query_row("SELECT COUNT(*) FROM kernel_jobs WHERE run_id=?1 AND state IN ('queued','running','paused')",[run_id],|r|r.get(0))?;
+                if pending>0 {
+                    return Err(kernel_err(if config.experimental_compute_job_notice
+                        && settling_model_response {
+                        format!("{}unfinished Jobs arrived at Final",
+                            crate::kernel::JOB_NOTICE_COMPETITION)
+                    } else {"kernel.jobs_pending".into()}));
+                }
                 if config.experimental_compute_job_notice {
                     let unhandled: i64 = transaction.query_row(
                         "SELECT COUNT(*) FROM kernel_job_notices n
@@ -3011,7 +3028,12 @@ impl Database {
                            AND (n.data_root_id!=?1 OR d.job_id IS NULL OR d.state!='acknowledged')",
                         params![self.data_root_id,conversation,run_id],|row|row.get(0),
                     )?;
-                    if unhandled != 0 { return Err(kernel_err("kernel.jobs_pending")); }
+                    if unhandled != 0 {
+                        return Err(kernel_err(if settling_model_response {
+                            format!("{}pending Host notices arrived at Final",
+                                crate::kernel::JOB_NOTICE_COMPETITION)
+                        } else {"kernel.jobs_pending".into()}));
+                    }
                 }
             }
             // 7b. A run that stopped because a human had not answered, or because

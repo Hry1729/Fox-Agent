@@ -37,7 +37,7 @@ pub use controller::{
     dispatch_effect_key, dispatch_idempotency_key, persist_events, Effect, KernelPersistCommand,
     PersistApprovalResolution, PersistBatch, PersistEvent, PersistOutboxEffect, PersistTool,
     RehydratedBatch, RehydratedRun, RehydratedToolCall, RunController, WaitingJobFact, INITIAL_MODEL_EFFECT_KEY,
-    INITIAL_MODEL_IDEMPOTENCY_KEY, STEERING_COMPETITION,
+    INITIAL_MODEL_IDEMPOTENCY_KEY, STEERING_COMPETITION, JOB_NOTICE_COMPETITION,
 };
 pub use ports::{
     CancellationPort, Clock, ClockReading, CompactionState, EnginePort, EventStorePort,

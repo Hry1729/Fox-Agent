@@ -1012,7 +1012,7 @@ impl<'a> KernelCoordinator<'a> {
         } else {
             None
         };
-        let wait_jobs = if next.is_none() && steering_input.is_none() {
+        let mut wait_jobs = if next.is_none() && steering_input.is_none() {
             self.unfinished_compute_wait_facts()?
         } else { Vec::new() };
         let notice_followup = if next.is_none() && steering_input.is_none() && wait_jobs.is_empty() {
@@ -1093,6 +1093,21 @@ impl<'a> KernelCoordinator<'a> {
             });
             match outcome {
                 Ok(()) => return Ok(()),
+                Err(error) if error.starts_with(kernel::JOB_NOTICE_COMPETITION)
+                    && attempts < live::STEERING_COMPETITION_ATTEMPTS => {
+                    attempts+=1;
+                    steering_input=steering::steering_followup_input(&self.database,&self.binding,
+                        initial_history.clone(),response.assistant_message.clone())?;
+                    if steering_input.is_some() {
+                        wait_jobs.clear();
+                        notice_followup=None;
+                    } else {
+                        wait_jobs=self.unfinished_compute_wait_facts()?;
+                        notice_followup=if wait_jobs.is_empty() {
+                            self.job_notice_followup_input(&initial_history,&response.assistant_message)?
+                        } else {None};
+                    }
+                }
                 Err(error)
                     if error.starts_with(kernel::STEERING_COMPETITION)
                         && attempts < live::STEERING_COMPETITION_ATTEMPTS =>
@@ -1295,7 +1310,7 @@ impl<'a> KernelCoordinator<'a> {
         } else {
             None
         };
-        let wait_jobs = if next.is_none() && steering_input.is_none() {
+        let mut wait_jobs = if next.is_none() && steering_input.is_none() {
             self.unfinished_compute_wait_facts()?
         } else { Vec::new() };
         let notice_followup = if next.is_none() && steering_input.is_none() && wait_jobs.is_empty() {
@@ -1373,6 +1388,21 @@ impl<'a> KernelCoordinator<'a> {
             );
             match outcome {
                 Ok(()) => return Ok(()),
+                Err(error) if error.starts_with(kernel::JOB_NOTICE_COMPETITION)
+                    && attempts < live::STEERING_COMPETITION_ATTEMPTS => {
+                    attempts+=1;
+                    steering_input=steering::steering_followup_input(&self.database,&self.binding,
+                        batch_history.clone(),response.assistant_message.clone())?;
+                    if steering_input.is_some() {
+                        wait_jobs.clear();
+                        notice_followup=None;
+                    } else {
+                        wait_jobs=self.unfinished_compute_wait_facts()?;
+                        notice_followup=if wait_jobs.is_empty() {
+                            self.job_notice_followup_input(&batch_history,&response.assistant_message)?
+                        } else {None};
+                    }
+                }
                 Err(error)
                     if error.starts_with(kernel::STEERING_COMPETITION)
                         && attempts < live::STEERING_COMPETITION_ATTEMPTS =>
