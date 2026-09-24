@@ -880,7 +880,6 @@ fn existing_restore_result(
                 || version.restored_from_id.as_deref() != Some(row.version_id.as_str())
                 || version.change_kind != "restored"
                 || version.source != ManagedFileSource::Restore
-                || version.tool_call_id.as_deref() != Some(row.dispatch_id.as_str())
             {
                 return Err("in_progress_or_uncertain: recorded restore result identity is inconsistent".into());
             }
@@ -1211,7 +1210,7 @@ impl crate::tool_host::FileCommitContext for RestoreCommitHooks<'_> {
                 &ManagedFileVersionInput {
                     conversation_id: self.conversation_id,
                     run_id: self.run_id,
-                    tool_call_id: Some(self.dispatch_id),
+                    tool_call_id: self.tool_call_id,
                     tool: self.tool,
                     storage_path: &target.to_string_lossy().to_owned(),
                     display_name: self.display_name,
