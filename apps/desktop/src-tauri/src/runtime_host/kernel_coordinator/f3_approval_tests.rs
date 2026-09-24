@@ -122,16 +122,12 @@ fn f3_fixed_clock_expired_card_is_rejected_after_real_node_proposal() {
     assert!(run.db.pending_kernel_host_commands(&run.id).unwrap().is_empty());
 }
 
-/// Dump and clear the opt-in Host timeline for one Run. `anchor_ms` is the
-/// Provider's own start on the shared clock, so Provider-relative offsets
-/// (`absolute_ms - anchor_ms`) line up with these Host offsets explicitly.
-pub(super) fn dump_matrix_timeline(label: &str, run: &Run, anchor_ms: u128) {
-    take_and_print_timeline(label, &run.id, anchor_ms);
-}
-
 pub(super) fn take_and_print_timeline(label: &str, run_id: &str, anchor_ms: u128) {
     let entries = crate::runtime_host::kernel_model_worker::host_trace::take(run_id);
-    if entries.is_empty() {
+    // Print whenever the switch is on, not only when the case failed: a passing
+    // run is the control that a failing run's timings are read against, so the
+    // comparison would be impossible if only failures spoke.
+    if entries.is_empty() && !crate::runtime_host::kernel_model_worker::host_trace::enabled() {
         return;
     }
     eprintln!(

@@ -516,13 +516,13 @@ impl Drop for LocalProvider {
     }
 }
 
-/// Dump the opt-in Host timeline for one Run, taking (and thereby clearing) its
-/// entries so a finished Run leaves nothing behind. The Provider's own offsets
-/// are anchored to the same clock, so one line can be read against the other:
-/// `absolute_ms - anchor_ms` recovers the Provider-relative offset.
+/// Dump and clear the opt-in Host timeline for one Run, from every exit path.
+/// `anchor_ms` is this Provider's own start on the shared diagnostic clock, so
+/// Provider-relative offsets (`absolute_ms - anchor_ms`) line up with these Host
+/// offsets explicitly rather than by an assumed common zero.
 fn dump_host_timeline(label: &str, run_id: &str, anchor_ms: u128) {
     let entries = crate::runtime_host::kernel_model_worker::host_trace::take(run_id);
-    if entries.is_empty() {
+    if entries.is_empty() && !crate::runtime_host::kernel_model_worker::host_trace::enabled() {
         return;
     }
     eprintln!(
