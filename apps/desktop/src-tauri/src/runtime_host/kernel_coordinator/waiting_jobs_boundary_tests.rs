@@ -22,7 +22,7 @@ fn counted_local_provider(replies: Vec<Value>) -> (
     let worker_stop = stop.clone();
     let thread = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(50);
-        while !worker_stop.load(Ordering::SeqCst) {
+        'accept: while !worker_stop.load(Ordering::SeqCst) {
             assert!(Instant::now() < deadline, "local Provider fixture was not stopped");
             let mut stream = match listener.accept() {
                 Ok((stream, _)) => stream,
@@ -32,12 +32,21 @@ fn counted_local_provider(replies: Vec<Value>) -> (
                 }
                 Err(error) => panic!("local Provider accept failed: {error}"),
             };
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
             let mut bytes = Vec::new();
             let mut buffer = [0u8; 8192];
             let (header_end, length) = loop {
-                let read = stream.read(&mut buffer).unwrap();
-                assert!(read > 0, "Provider connection ended before its request");
+                let read = match stream.read(&mut buffer) {
+                    Ok(0) if bytes.is_empty() => continue 'accept,
+                    Err(error) if bytes.is_empty() && matches!(error.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+                        continue 'accept,
+                    Ok(0) => panic!("Provider request ended after {} bytes", bytes.len()),
+                    Ok(read) => read,
+                    Err(error) => panic!("Provider request failed after {} bytes: {error}", bytes.len()),
+                };
                 bytes.extend_from_slice(&buffer[..read]);
                 assert!(bytes.len() < 1_048_576);
                 if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
@@ -49,8 +58,9 @@ fn counted_local_provider(replies: Vec<Value>) -> (
                 }
             };
             while bytes.len() < header_end + length {
-                let read = stream.read(&mut buffer).unwrap();
-                assert!(read > 0);
+                let read = stream.read(&mut buffer)
+                    .unwrap_or_else(|error| panic!("Provider body failed after {} bytes: {error}", bytes.len()));
+                assert!(read > 0, "Provider body ended after {} bytes", bytes.len());
                 bytes.extend_from_slice(&buffer[..read]);
             }
             let _: Value = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
