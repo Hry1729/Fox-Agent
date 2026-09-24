@@ -16,6 +16,7 @@ use std::sync::Mutex;
 mod compaction;
 pub(super) mod live;
 mod receipt;
+pub(crate) use receipt::append_execution_receipt;
 mod steering;
 
 /// Returned by a model transport when a terminal decision lost a race with a
@@ -80,15 +81,8 @@ pub(crate) fn bound_model_delivery_history(
     let frame: fox_engine_protocol::KernelBatchResumeFrame =
         serde_json::from_value(payload.clone()).map_err(|_| "invalid bound batch frame")?;
     frame.validate()?;
-    let mut delivered = frame.history;
-    delivered.push(frame.assistant_message.clone());
-    delivered.extend(steering::settled_tool_result_messages(
-        run_id, &frame.tools, &frame.assistant_message));
-    delivered.extend(frame.steering.iter().map(|notice| serde_json::json!({
-        "role":"user","content":[{"type":"text",
-            "text":steering::steering_notice_text(&notice.content)}],
-        "timestamp":notice.received_at.unwrap_or(0),
-    })));
+    let mut delivered=bound_batch_live_history(run_id,&frame.history,
+        &frame.assistant_message,&frame.tools,&frame.steering);
     let start = delivered.len();
     delivered.extend(frame.host_job_notices.iter()
         .map(fox_engine_protocol::HostJobNotice::history_marker));
@@ -100,6 +94,21 @@ pub(crate) fn bound_model_delivery_history(
 pub(crate) fn bound_steering_user_message(content:&str, received_at:i64) -> Value {
     serde_json::json!({"role":"user","content":[{"type":"text",
         "text":steering::steering_notice_text(content)}],"timestamp":received_at})
+}
+
+/// The same middle segment is sent by replacement batch frames and live Pi
+/// directives, then replayed under the model lease inside SQLite.
+pub(crate) fn bound_batch_live_history(
+    run_id:&str,history:&[Value],assistant:&Value,
+    tools:&[fox_engine_protocol::KernelSettledToolResult],
+    steering:&[fox_engine_protocol::KernelSteeringNotice],
+) -> Vec<Value> {
+    let mut delivered=history.to_vec();
+    delivered.push(assistant.clone());
+    delivered.extend(steering::settled_tool_result_messages(run_id,tools,assistant));
+    delivered.extend(steering.iter().map(|notice|bound_steering_user_message(
+        &notice.content,notice.received_at.unwrap_or(0))));
+    delivered
 }
 
 #[cfg(test)]
@@ -657,7 +666,7 @@ impl<'a> KernelCoordinator<'a> {
         {
             return Err("durable batch delivery identity mismatch".into());
         }
-        let tools = self.project_settled_tools(&data, &snapshot, &batch.ordered)?;
+        let tools = self.project_settled_tools(batch_id, &batch.ordered)?;
         let frame = KernelBatchResumeFrame {
             schema_version: 1,
             turn_id: data.turn_id,
@@ -677,86 +686,9 @@ impl<'a> KernelCoordinator<'a> {
     /// Durable result projection shared by the replacement-session resume frame
     /// and live-session directives. Includes the execution receipt so the model
     /// sees Host-confirmed approval and execution facts either way.
-    fn project_settled_tools(
-        &self,
-        data: &kernel::RehydratedRun,
-        snapshot: &kernel::KernelSnapshot,
-        ordered: &[String],
-    ) -> Result<Vec<fox_engine_protocol::KernelSettledToolResult>, String> {
-        use fox_engine_protocol::{KernelSettledToolResult, KernelSettledToolState};
-        let mut tools = Vec::new();
-        for id in ordered {
-            let tool = data
-                .tools
-                .iter()
-                .find(|tool| &tool.tool_call_id == id)
-                .ok_or("batch tool fact is missing")?;
-            let state = match tool.state {
-                kernel::ToolCallState::Completed => KernelSettledToolState::Completed,
-                kernel::ToolCallState::Failed => KernelSettledToolState::Failed,
-                _ => return Err("unsettled or cancelled tool cannot resume the model".into()),
-            };
-            let raw: Value = match tool.result_json.as_deref() {
-                Some(value) => serde_json::from_str(value).map_err(|error| error.to_string())?,
-                // Policy denial is a durable failed fact, not an unknown result.
-                None if state == KernelSettledToolState::Failed => {
-                    serde_json::json!({"state":"failed","toolCallId":id,"outputRecorded":false})
-                }
-                None => return Err("completed tool has no durable result".into()),
-            };
-            let mut result = if raw.get("content").is_some() {
-                raw
-            } else {
-                serde_json::json!({"content":[{"type":"text","text":raw.to_string()}]})
-            };
-            let canonical_input: Value =
-                serde_json::from_str(&tool.input_json).map_err(|error| error.to_string())?;
-            // The directive that carries this to the worker is a protocol frame
-            // capped at 1 MiB, so the content sent must be the same *bounded*
-            // projection the Host keeps for its own history — never the complete
-            // durable payload. The durable row is untouched, and the reference
-            // below is what makes an omitted byte reachable through
-            // `read_tool_result`, so nothing is lost by not shipping it twice.
-            let reference =
-                crate::kernel_compaction::tool_result_ref(&self.binding.run_id, id);
-            let storage = self
-                .database
-                .tool_result_storage(&self.binding.run_id, id)
-                .unwrap_or_default();
-            if state == KernelSettledToolState::Completed {
-                if let Some(bounded) = crate::kernel_compaction::bound_tool_result_content_with_storage(
-                    live::effective_boundable_tool(&tool.tool, &canonical_input),
-                    false,
-                    &result["content"],
-                    reference.as_deref(),
-                    &storage,
-                ) {
-                    result["content"] = bounded;
-                }
-            }
-            let projected = snapshot.tool_calls.iter().find(|item| item.tool_call_id == *id)
-                .ok_or("missing durable tool approval projection")?;
-            receipt::append_execution_receipt(
-                &mut result,
-                &self.binding.run_id,
-                id,
-                &tool.tool,
-                state == KernelSettledToolState::Completed,
-                projected.approval_state.as_deref(),
-                &canonical_input,
-            )?;
-            tools.push(KernelSettledToolResult {
-                tool_call_id: id.clone(),
-                tool: tool.tool.clone(),
-                canonical_input,
-                source_order: u32::try_from(tool.source_order)
-                    .map_err(|error| error.to_string())?,
-                state,
-                storage: serde_json::to_value(self.database.tool_result_storage(&self.binding.run_id, id).unwrap_or_default()).ok(),
-                result,
-            });
-        }
-        Ok(tools)
+    fn project_settled_tools(&self, batch_id: &str, ordered: &[String])
+        -> Result<Vec<fox_engine_protocol::KernelSettledToolResult>, String> {
+        self.database.kernel_project_settled_tools(&self.binding.run_id,batch_id,ordered)
     }
 
     pub(super) fn dispatch_initial_with_worker(
@@ -1233,15 +1165,8 @@ impl<'a> KernelCoordinator<'a> {
         frame.host_job_notices = self.pending_host_job_notices(&frame.history)?;
         frame.validate()?;
         let notice_payload = serde_json::to_value(&frame).map_err(|_|"invalid batch model input")?;
-        let mut delivered_history = frame.history.clone();
-        delivered_history.push(frame.assistant_message.clone());
-        delivered_history.extend(steering::settled_tool_result_messages(
-            &self.binding.run_id, &frame.tools, &frame.assistant_message));
-        delivered_history.extend(frame.steering.iter().map(|notice| serde_json::json!({
-            "role":"user","content":[{"type":"text",
-                "text":steering::steering_notice_text(&notice.content)}],
-            "timestamp":notice.received_at.unwrap_or(0),
-        })));
+        let mut delivered_history=bound_batch_live_history(&self.binding.run_id,&frame.history,
+            &frame.assistant_message,&frame.tools,&frame.steering);
         let history_start = delivered_history.len();
         delivered_history.extend(frame.host_job_notices.iter().map(fox_engine_protocol::HostJobNotice::history_marker));
         let notice_binding = crate::database::ModelNoticeInput {
@@ -1302,17 +1227,8 @@ impl<'a> KernelCoordinator<'a> {
         // history and reconstruct prior results exclusively from durable facts.
         // The batch's own history is needed for both branches: the next tool
         // proposal and the steering follow-up must see the same rounds.
-        let mut batch_history = frame.history.clone();
-        batch_history.push(frame.assistant_message.clone());
-        batch_history.extend(steering::settled_tool_result_messages(
-            &self.binding.run_id,
-            &frame.tools,
-            &frame.assistant_message,
-        ));
-        batch_history.extend(frame.steering.iter().map(|notice| serde_json::json!({
-            "role":"user","content":[{"type":"text",
-                "text":steering::steering_notice_text(&notice.content)}],"timestamp":notice.received_at.unwrap_or(0),
-        })));
+        let mut batch_history=bound_batch_live_history(&self.binding.run_id,&frame.history,
+            &frame.assistant_message,&frame.tools,&frame.steering);
         batch_history.extend(frame.host_job_notices.iter().map(fox_engine_protocol::HostJobNotice::history_marker));
         let next = if response.assistant_message["stopReason"] == "toolUse" {
             let checkpoint = fox_engine_protocol::KernelEngineBatchCheckpoint {

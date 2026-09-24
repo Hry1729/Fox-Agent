@@ -26,6 +26,84 @@ pub(crate) struct ModelNoticeInput<'a> {
     pub historical_bytes: usize,
 }
 
+/// One canonical projection for both Host batch delivery and the transaction
+/// that leases its model input. The latter cannot call back into Database
+/// while holding a transaction, so both paths use this Connection-level seam.
+fn project_settled_tools_on(
+    conn: &rusqlite::Connection,
+    run: &str,
+    batch_id: &str,
+    ordered: &[String],
+) -> rusqlite::Result<Vec<fox_engine_protocol::KernelSettledToolResult>> {
+    use fox_engine_protocol::{KernelSettledToolResult, KernelSettledToolState};
+    let mut tools = Vec::with_capacity(ordered.len());
+    for (position, id) in ordered.iter().enumerate() {
+        let (name, order, state_name, input_json, result_json, approval):
+            (String, i64, String, String, Option<String>, Option<String>) = conn.query_row(
+            "SELECT t.tool,t.source_order,t.state,t.canonical_input_json,t.result_json,a.state
+               FROM kernel_tool_calls t LEFT JOIN kernel_approvals a
+                 ON a.run_id=t.run_id AND a.tool_call_id=t.tool_call_id
+              WHERE t.run_id=?1 AND t.batch_id=?2 AND t.tool_call_id=?3",
+            params![run, batch_id, id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?,
+                row.get(3)?, row.get(4)?, row.get(5)?)),
+        )?;
+        if order != position as i64 {
+            return Err(notice_error("settled tool source order changed"));
+        }
+        let state = match state_name.as_str() {
+            "completed" => KernelSettledToolState::Completed,
+            "failed" => KernelSettledToolState::Failed,
+            _ => return Err(notice_error("unsettled or cancelled tool cannot resume the model")),
+        };
+        let raw: serde_json::Value = match result_json {
+            Some(body) => serde_json::from_str(&body)
+                .map_err(|_| notice_error("invalid durable tool result"))?,
+            None if state == KernelSettledToolState::Failed => serde_json::json!(
+                {"state":"failed","toolCallId":id,"outputRecorded":false}),
+            None => return Err(notice_error("completed tool has no durable result")),
+        };
+        let mut result = if raw.get("content").is_some() { raw } else {
+            serde_json::json!({"content":[{"type":"text","text":raw.to_string()}]})
+        };
+        let canonical_input: serde_json::Value = serde_json::from_str(&input_json)
+            .map_err(|_| notice_error("invalid durable tool input"))?;
+        let reference = crate::kernel_compaction::tool_result_ref(run, id);
+        let storage = super::tool_result_storage_for(conn, run, id).unwrap_or_default();
+        if state == KernelSettledToolState::Completed {
+            if let Some(content) = crate::kernel_compaction::bound_tool_result_content_with_storage(
+                crate::kernel_compaction::effective_boundable_tool(&name, &canonical_input),
+                false, &result["content"], reference.as_deref(), &storage,
+            ) {
+                result["content"] = content;
+            }
+        }
+        crate::runtime_host::kernel_coordinator::append_execution_receipt(
+            &mut result, run, id, &name, state == KernelSettledToolState::Completed,
+            approval.as_deref(), &canonical_input,
+        ).map_err(|_| notice_error("invalid durable execution receipt"))?;
+        tools.push(KernelSettledToolResult {
+            tool_call_id: id.clone(),
+            tool: name,
+            canonical_input,
+            source_order: u32::try_from(order)
+                .map_err(|_| notice_error("settled tool source order overflow"))?,
+            state,
+            storage: serde_json::to_value(storage).ok(),
+            result,
+        });
+    }
+    Ok(tools)
+}
+
+impl Database {
+    pub(crate) fn kernel_project_settled_tools(
+        &self, run: &str, batch_id: &str, ordered: &[String],
+    ) -> Result<Vec<fox_engine_protocol::KernelSettledToolResult>, String> {
+        self.with_connection(|conn| project_settled_tools_on(conn, run, batch_id, ordered))
+    }
+}
+
 fn notice_error(message: &str) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.into())
 }

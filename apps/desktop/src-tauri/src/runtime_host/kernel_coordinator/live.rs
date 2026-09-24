@@ -307,22 +307,19 @@ impl KernelCoordinator<'_> {
         }
         let history =
             self.model_retry_context(batch_id, self.context_view(batch_id, &checkpoint.history)?)?;
-        let (data, snapshot) = {
+        let data = {
             let guard = self
                 .controller
                 .lock()
                 .map_err(|_| "Kernel coordinator lock poisoned")?;
-            (
-                guard.shadow_checkpoint(self.clock.now_monotonic_ms()),
-                self.snapshot()?,
-            )
+            guard.shadow_checkpoint(self.clock.now_monotonic_ms())
         };
         let batch = data
             .batches
             .iter()
             .find(|batch| batch.batch_id == batch_id && batch.barrier_emitted)
             .ok_or("batch result barrier has not committed")?;
-        let tools = self.project_settled_tools(&data, &snapshot, &batch.ordered)?;
+        let tools = self.project_settled_tools(batch_id, &batch.ordered)?;
         Ok((history, checkpoint.assistant_message, tools))
     }
 

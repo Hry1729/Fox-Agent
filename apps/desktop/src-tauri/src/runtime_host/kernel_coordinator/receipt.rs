@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-pub(super) fn append_execution_receipt(
+pub(crate) fn append_execution_receipt(
     result: &mut Value,
     run_id: &str,
     tool_id: &str,
