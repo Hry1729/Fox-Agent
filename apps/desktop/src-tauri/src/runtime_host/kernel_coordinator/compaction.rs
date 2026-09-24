@@ -18,7 +18,7 @@ impl KernelCoordinator<'_> {
             // reserved bytes. The durable source/compaction history is unchanged.
             view.push(serde_json::json!({
                 "role": "user",
-                "content": [{"type": "text", "text": "Fox 续答提示：上一条模型回复已经停止，但没有给出有效的最终答复。请根据原始用户请求、已有对话以及本轮已完成的工具结果，继续执行尚未完成的工作。不要重复已经完成的操作，不要只说明你将开始分析。需要更多操作时请直接调用可用工具；确实完成、遇到具体阻碍或需要补充信息时，给出有用的答复，并遵守系统提示中的最终答复格式。"}],
+                "content": [{"type": "text", "text": context::INCOMPLETE_MODEL_RETRY_PROMPT}],
                 "timestamp": 0,
             }));
         }

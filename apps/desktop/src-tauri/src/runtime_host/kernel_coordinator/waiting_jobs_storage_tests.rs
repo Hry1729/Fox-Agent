@@ -136,6 +136,18 @@ fn waiting_jobs_model_lease_rejects_forged_initial_delivery_history() {
     let error=db.kernel_commit_initial_model(&run,now,&controller.persist_command(&effects),
         "owner",false,None,Some(&binding)).unwrap_err();
     assert!(error.contains("bound model history"),"unexpected error: {error}");
+    let mut forged_frame=frame.clone();
+    forged_frame.input.messages[0]["content"]=json!("a different user request");
+    forged_frame.validate().unwrap();
+    let forged_payload=serde_json::to_value(&forged_frame).unwrap();
+    let forged_binding=ModelNoticeInput {payload:&forged_payload,
+        delivered_history:&forged_frame.input.messages,live_history:None,
+        checkpoint_seq:forged_frame.checkpoint_seq,
+        history_start:forged_frame.input.messages.len(),historical_bytes:0};
+    let error=db.kernel_commit_initial_model(&run,now,&controller.persist_command(&effects),
+        "owner",false,None,Some(&forged_binding)).unwrap_err();
+    assert!(error.contains("bound initial frame differs from frozen Host sources"),
+        "synchronously forged frame and history were not checked against frozen source: {error}");
     let stored:i64=db.with_connection(|conn|conn.query_row(
         "SELECT COUNT(*) FROM kernel_model_notice_inputs WHERE run_id=?1",[&run],|row|row.get(0))).unwrap();
     assert_eq!(stored,0,"the forged frame must not be leased");

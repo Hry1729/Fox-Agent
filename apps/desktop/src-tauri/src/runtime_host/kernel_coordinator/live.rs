@@ -1195,13 +1195,14 @@ impl KernelCoordinator<'_> {
         // the rows `deliver_steering_for_dispatch` returns below.
         let planned_steering_bytes = self.active_steering_bytes()?;
         let context_key = continuation_key.unwrap_or("initial");
-        self.ensure_context_with_worker(
-            context_key,
-            planned_steering_bytes.saturating_add(4096),
-            owner,
-            runtime,
-            api_key,
-        )?;
+        let job_notice_lane = if let Some(key)=continuation_key {
+            self.database.kernel_continuation_input_with_lane(&self.binding.run_id,key)?.1
+                .as_deref()==Some("job_notice")
+        } else {false};
+        if !job_notice_lane {
+            self.ensure_context_with_worker(context_key,
+                planned_steering_bytes.saturating_add(4096),owner,runtime,api_key)?;
+        }
         let config = self.database.kernel_model_config(&self.binding.run_id)?;
         let token = self.cancellation.run_token(&self.binding.run_id)?;
         token.check()?;
@@ -1223,13 +1224,6 @@ impl KernelCoordinator<'_> {
         let (mut input, continuation_lane, frozen_job_notices) = if let Some(key) = continuation_key {
             self.database.kernel_continuation_input_with_lane(&self.binding.run_id,key)?
         } else {(self.database.kernel_initial_input(&self.binding.run_id)?,None,Vec::new())};
-        let view=self.context_view(context_key, &input.messages)?;
-        input.messages = if continuation_lane.as_deref() == Some("job_notice") {
-            // A retry cannot invent a user-shaped completion prompt for a
-            // Host notice; the original settled assistant response remains
-            // the frozen tail of this lane.
-            view
-        } else {self.model_retry_context(context_key,view)?};
         // Consume accepted mid-run additions at the model-dispatch boundary:
         // every active row (new `received` plus rows already delivered to a
         // failed attempt of this same dispatch) is spliced into the frozen
@@ -1248,16 +1242,14 @@ impl KernelCoordinator<'_> {
         } else {
             self.database.deliver_steering_for_dispatch(&self.binding.run_id, &steering_dispatch_key)?
         };
-        let steering_messages: Vec<Value> = steering_rows
-            .iter()
-            .map(super::steering::steering_user_message)
-            .collect();
+        let _=steering_rows;
+        input.messages=self.database.kernel_bound_initial_frame_messages(
+            &self.binding.run_id,continuation_key,&steering_dispatch_key)?;
         // Post-compaction confirmation against the final assembled input. The
         // steering notices are already inside `planned_messages`, so only the
         // fixed per-request reserve is added here — counting them twice would
         // detach a request that does fit.
-        let mut planned_messages = input.messages.clone();
-        planned_messages.extend(steering_messages.iter().cloned());
+        let planned_messages = input.messages.clone();
         let config_for_budget = self.database.kernel_model_config(&self.binding.run_id)?;
         if !self.context_fits(
             &config_for_budget,
@@ -1268,7 +1260,6 @@ impl KernelCoordinator<'_> {
             // final request. Re-detaching the same input cannot make it smaller.
             return Err(crate::kernel_compaction::INSUFFICIENT.into());
         }
-        input.messages.extend(steering_messages);
         let notice_mode = self.database.compute_job_notice_enabled(&self.binding.run_id)?;
         let historical_notice_bytes = fox_engine_protocol::historical_host_job_notice_bytes(&input.messages)?;
         let new_notices = self.pending_host_job_notices(&input.messages)?;

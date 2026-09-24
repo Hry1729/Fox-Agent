@@ -95,6 +95,13 @@ pub(crate) fn bound_model_delivery_history(
     Ok((delivered,start))
 }
 
+/// Exact model text for a previously accepted steering row. The lease-side
+/// source replay and Host dispatch builder must use the same projection.
+pub(crate) fn bound_steering_user_message(content:&str, received_at:i64) -> Value {
+    serde_json::json!({"role":"user","content":[{"type":"text",
+        "text":steering::steering_notice_text(content)}],"timestamp":received_at})
+}
+
 #[cfg(test)]
 mod notice_lease_test_barrier {
     use std::collections::HashMap;
@@ -881,21 +888,15 @@ impl<'a> KernelCoordinator<'a> {
         let (mut input,continuation_lane,frozen_notices)=if let Some(key)=continuation_key {
             self.database.kernel_continuation_input_with_lane(&self.binding.run_id,key)?
         } else {(self.database.kernel_initial_input(&self.binding.run_id)?,None,Vec::new())};
-        let context_key=continuation_key.unwrap_or("initial");
-        if continuation_lane.as_deref()!=Some("job_notice") {
-            input.messages=self.model_retry_context(context_key,
-                self.context_view(context_key,&input.messages)?)?;
-        }
         // Same steering boundary as the live transport: collect all active
         // rows into this frozen initial dispatch before it is armed.
         let dispatch_key=continuation_key.map(|key|format!("continuation-delivery:{key}"))
             .unwrap_or_else(||kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into());
-        let steering_rows=if continuation_lane.as_deref()==Some("job_notice") {Vec::new()} else {
+        let _steering_rows=if continuation_lane.as_deref()==Some("job_notice") {Vec::new()} else {
             self.database.deliver_steering_for_dispatch(&self.binding.run_id,&dispatch_key)?
         };
-        input
-            .messages
-            .extend(steering_rows.iter().map(steering::steering_user_message));
+        input.messages=self.database.kernel_bound_initial_frame_messages(
+            &self.binding.run_id,continuation_key,&dispatch_key)?;
         let notice_mode = self.database.compute_job_notice_enabled(&self.binding.run_id)?;
         let historical_notice_bytes = fox_engine_protocol::historical_host_job_notice_bytes(&input.messages)?;
         let new_notices = self.pending_host_job_notices(&input.messages)?;

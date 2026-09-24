@@ -17,14 +17,7 @@ pub(super) fn steering_notice_text(content: &str) -> String {
 }
 
 pub(super) fn steering_user_message(row: &SteeringMessage) -> serde_json::Value {
-    serde_json::json!({
-        "role": "user",
-        "content": [{
-            "type": "text",
-            "text": steering_notice_text(&row.content),
-        }],
-        "timestamp": row.received_at,
-    })
+    super::bound_steering_user_message(&row.content,row.received_at)
 }
 
 pub(super) fn steering_notices(rows: &[SteeringMessage]) -> Vec<KernelSteeringNotice> {

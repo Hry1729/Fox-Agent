@@ -30,6 +30,84 @@ fn notice_error(message: &str) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.into())
 }
 
+/// Canonical source for an initial/replacement-session frame. The frame
+/// supplied to the lease is checked against this projection, never treated as
+/// proof of its own history. Every transform is justified by an immutable DB
+/// source: frozen input/continuation, completed compaction, retry evidence and
+/// steering rows bound to this dispatch.
+fn bound_initial_frame_messages_on(
+    tx:&rusqlite::Transaction<'_>, run:&str, continuation_key:Option<&str>,
+    dispatch_key:&str,
+) -> rusqlite::Result<Vec<serde_json::Value>> {
+    let target=continuation_key.unwrap_or("initial");
+    let (mut messages,job_notice_lane)=if let Some(key)=continuation_key {
+        let body:String=tx.query_row("SELECT o.payload_json FROM kernel_effect_outbox o
+            JOIN kernel_events e ON e.run_id=o.run_id AND e.event_type='engine.continuation_requested'
+                AND e.payload_json=o.payload_json
+            WHERE o.run_id=?1 AND o.effect_key=?2 AND o.effect_type='continuation_model'
+                AND o.status IN ('pending','leased')",params![run,key],|row|row.get(0))?;
+        let payload:serde_json::Value=serde_json::from_str(&body)
+            .map_err(|_|notice_error("invalid durable continuation source"))?;
+        let input:fox_engine_protocol::KernelInitialModelInput=
+            serde_json::from_value(payload["input"].clone())
+                .map_err(|_|notice_error("invalid durable continuation input"))?;
+        let notice=payload["lane"]=="job_notice";
+        if notice {input.validate_job_notice()} else {input.validate()}
+            .map_err(|_|notice_error("invalid durable continuation history"))?;
+        (input.messages,notice)
+    } else {
+        (super::kernel_initial_input::read_input(tx,run)?.messages,false)
+    };
+    if !job_notice_lane {
+        let model=super::kernel_model_config::read_model_config(tx,run)?;
+        let config_hash=model.hash().map_err(|_|notice_error("invalid model config hash"))?;
+        for (plan,result) in super::kernel_compaction::read_compaction_results_on(tx,run,target)? {
+            if plan.target!=target || plan.source!=messages || plan.config_hash!=config_hash {
+                return Err(notice_error("bound model compaction source changed"));
+            }
+            messages=result.view(&plan).map_err(|_|notice_error("invalid bound model compaction"))?;
+        }
+        let effect_key=continuation_key.unwrap_or(crate::kernel::INITIAL_MODEL_EFFECT_KEY);
+        let retry:bool=tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM kernel_events e JOIN kernel_runs r ON r.run_id=e.run_id
+              WHERE e.run_id=?1 AND e.event_type='engine.model_rejected'
+                AND json_extract(e.payload_json,'$.effectKey')=?2
+                AND json_extract(e.payload_json,'$.failure.category')='incomplete_response'
+                AND r.kernel_mode='authoritative')",params![run,effect_key],|row|row.get(0))?;
+        if retry {
+            messages.push(serde_json::json!({"role":"user","content":[{"type":"text",
+                "text":crate::kernel_compaction::INCOMPLETE_MODEL_RETRY_PROMPT}],"timestamp":0}));
+        }
+    }
+    let mut rows=tx.prepare("SELECT content,received_at,applied_dispatch_key
+        FROM run_steering_messages WHERE run_id=?1 AND status='delivered' ORDER BY seq")?;
+    let steering=rows.query_map([run],|row|Ok((row.get::<_,String>(0)?,
+        row.get::<_,i64>(1)?,row.get::<_,Option<String>>(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(rows);
+    for (content,received_at,key) in steering {
+        if job_notice_lane || key.as_deref()!=Some(dispatch_key) {
+            return Err(notice_error("bound model steering belongs to another dispatch"));
+        }
+        messages.push(crate::runtime_host::kernel_coordinator::bound_steering_user_message(
+            &content,received_at));
+    }
+    Ok(messages)
+}
+
+impl Database {
+    pub(crate) fn kernel_bound_initial_frame_messages(
+        &self,run:&str,continuation_key:Option<&str>,dispatch_key:&str,
+    ) -> Result<Vec<serde_json::Value>,String> {
+        self.with_connection(|conn| {
+            let tx=conn.transaction()?;
+            let messages=bound_initial_frame_messages_on(&tx,run,continuation_key,dispatch_key)?;
+            tx.commit()?;
+            Ok(messages)
+        })
+    }
+}
+
 fn bind_model_notices(
     tx: &rusqlite::Transaction<'_>, root: &str, conversation: &str, run: &str,
     dispatch_key: &str, owner: &str, input: &ModelNoticeInput<'_>, now: i64,
@@ -49,6 +127,17 @@ fn bind_model_notices(
     }
     let history = input.live_history.or_else(|| embedded_history.map(Vec::as_slice))
         .ok_or_else(|| notice_error("model notice history is missing"))?;
+    if input.live_history.is_none() && input.payload.get("input").is_some() {
+        let frame:fox_engine_protocol::KernelInitialModelFrame=
+            serde_json::from_value(input.payload.clone())
+                .map_err(|_|notice_error("invalid bound initial model frame"))?;
+        frame.validate().map_err(|_|notice_error("invalid bound initial model frame"))?;
+        let expected=bound_initial_frame_messages_on(tx,run,
+            frame.continuation_key.as_deref(),dispatch_key)?;
+        if frame.input.messages!=expected {
+            return Err(notice_error("bound initial frame differs from frozen Host sources"));
+        }
+    }
     Database::validate_host_job_notice_history_on(tx,root,conversation,run,history)?;
     let history_bytes = fox_engine_protocol::historical_host_job_notice_bytes(history)
         .map_err(|_| notice_error("invalid historical Host job notice"))?;

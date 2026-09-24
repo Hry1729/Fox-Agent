@@ -224,6 +224,18 @@ impl Database {
     ) -> Result<Vec<(CompactionPlan, CompactionResult)>, String> {
         self.with_connection(|connection| {
             let tx = connection.transaction()?;
+            let results=read_compaction_results_on(&tx,run_id,target)?;
+            tx.commit()?;
+            Ok(results)
+        })
+    }
+}
+
+/// Shared by the Host's model-frame builder and the model-lease verifier.
+/// Both sides replay the same persisted compaction chain from its source.
+pub(super) fn read_compaction_results_on(
+    tx:&Transaction<'_>, run_id:&str, target:&str,
+) -> rusqlite::Result<Vec<(CompactionPlan,CompactionResult)>> {
             let rows = {
                 let mut query = tx.prepare("SELECT r.payload_json FROM kernel_events r
                     JOIN kernel_events p ON p.run_id=r.run_id AND p.event_type='context.compaction.prepared'
@@ -238,15 +250,12 @@ impl Database {
             let mut results = Vec::new();
             for row in rows {
                 let payload: Value = serde_json::from_str(&row).map_err(|_|invalid("invalid compaction result event"))?;
-                let plan = read_plan(&tx, run_id, payload["id"].as_str().ok_or_else(||invalid("missing compaction id"))?)?;
+                let plan = read_plan(tx, run_id, payload["id"].as_str().ok_or_else(||invalid("missing compaction id"))?)?;
                 let result: CompactionResult = serde_json::from_value(payload["result"].clone()).map_err(|_|invalid("invalid compaction result"))?;
                 result.view(&plan).map_err(invalid)?;
                 results.push((plan,result));
             }
-            tx.commit()?;
             Ok(results)
-        })
-    }
 }
 
 /// Called inside the normal decision transaction BEFORE appending new events.
