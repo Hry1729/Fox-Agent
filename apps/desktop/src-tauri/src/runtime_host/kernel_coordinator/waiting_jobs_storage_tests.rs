@@ -4,12 +4,18 @@ use super::*;
 use crate::database::{JobStartRequest, ModelNoticeInput};
 use crate::kernel::{RunState, WaitingJobFact};
 use serde_json::json;
+use sha2::Digest;
 
 fn parked_job_fixture() -> (Database, PathBuf, String, String, String, RunController, u64, i64) {
     parked_job_fixture_with_mutation(None)
 }
 
 fn parked_job_fixture_with_mutation(mutation: Option<&str>)
+    -> (Database, PathBuf, String, String, String, RunController, u64, i64) {
+    parked_job_fixture_with_inputs(mutation,None)
+}
+
+fn parked_job_fixture_with_inputs(mutation: Option<&str>, history_override: Option<serde_json::Value>)
     -> (Database, PathBuf, String, String, String, RunController, u64, i64) {
     let now = crate::database::now_ms();
     let clock = TestClock::new(now);
@@ -47,7 +53,8 @@ fn parked_job_fixture_with_mutation(mutation: Option<&str>)
     let frame_json = serde_json::to_value(&frame).unwrap();
     let historical_bytes = fox_engine_protocol::historical_host_job_notice_bytes(&frame.input.messages).unwrap();
     let binding = ModelNoticeInput {
-        payload: &frame_json, live_history: None, checkpoint_seq: frame.checkpoint_seq,
+        payload: &frame_json, delivered_history: &frame.input.messages,
+        live_history: None, checkpoint_seq: frame.checkpoint_seq,
         history_start: frame.input.messages.len(), historical_bytes,
     };
     let dispatched = controller.begin_initial_model_request(now,now).unwrap();
@@ -65,13 +72,14 @@ fn parked_job_fixture_with_mutation(mutation: Option<&str>)
     let settled = controller.record_initial_model_response(&response_json).unwrap();
     let response_seq = controller.last_event_seq();
     let mut effects = vec![settled];
+    let parked_history = history_override.unwrap_or_else(||json!(frame.input.messages));
     effects.extend(controller.park_waiting_jobs(now,now,db.kernel_data_root_id(),
-        response_seq,&response_json,&serde_json::to_string(&frame.input.messages).unwrap(),
+        response_seq,&response_json,&parked_history.to_string(),
         &[WaitingJobFact {job_id: job.clone(),attempt:1,deadline_wall_ms:now+6_000}]).unwrap());
     let committed=db.kernel_commit_initial_model(&run,now,&controller.persist_command(&effects),
         "owner",true,None,None);
     let park_seq = controller.last_event_seq();
-    if mutation.is_none() {
+    if mutation.is_none() && parked_history == json!(frame.input.messages) {
         committed.unwrap();
         assert_eq!(db.kernel_rehydrate(&run).unwrap().unwrap().state,RunState::WaitingJobs);
     } else {
@@ -79,6 +87,21 @@ fn parked_job_fixture_with_mutation(mutation: Option<&str>)
         assert_eq!(db.kernel_rehydrate(&run).unwrap().unwrap().state,RunState::Running);
     }
     (db,root,run,conversation,job,controller,park_seq,now)
+}
+
+#[test]
+fn waiting_jobs_rejects_history_not_bound_to_the_settled_model_lease() {
+    let (db,_root,run,_conversation,_job,_controller,_park_seq,_now)=
+        parked_job_fixture_with_inputs(None,Some(json!([{"role":"user","content":[{"type":"text","text":"forged"}]}])));
+    let count:i64=db.with_connection(|conn|conn.query_row(
+        "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.waiting_jobs'",
+        [&run],|row|row.get(0))).unwrap();
+    assert_eq!(count,0,"a fabricated history must roll back response settlement and park");
+    let bound:(String,String,String)=db.with_connection(|conn|conn.query_row(
+        "SELECT input_json,input_hash,state FROM kernel_model_notice_inputs WHERE run_id=?1",
+        [&run],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
+    assert_eq!(bound.2,"bound","failed settlement must retain the original lease");
+    assert_eq!(bound.1,format!("sha256:{}",hex::encode(sha2::Sha256::digest(bound.0.as_bytes()))));
 }
 
 #[test]

@@ -14,6 +14,10 @@ use sha2::{Digest, Sha256};
 /// lease. The transaction re-reads its pending notice set before binding it.
 pub(crate) struct ModelNoticeInput<'a> {
     pub payload: &'a serde_json::Value,
+    /// Complete Host-assembled model history for this exact lease. It is
+    /// frozen even when there are no new notices, so a later Job park cannot
+    /// substitute arbitrary history for a response the model already gave.
+    pub delivered_history: &'a [serde_json::Value],
     /// Live directives omit transcript history; bind the Host's complete
     /// pre-notice model history alongside the directive in the same lease.
     pub live_history: Option<&'a [serde_json::Value]>,
@@ -66,8 +70,15 @@ fn bind_model_notices(
         tx, root, conversation, run, remaining,
     )?;
     if supplied != expected { return Err(notice_error("Host job notice set changed before model lease")); }
-    if supplied.is_empty() { return Ok(()); }
+    if input.history_start.checked_add(supplied.len()) != Some(input.delivered_history.len())
+        || input.delivered_history.get(..history.len()) != Some(history)
+        || input.delivered_history.get(input.history_start..)
+            != Some(&supplied.iter().map(fox_engine_protocol::HostJobNotice::history_marker)
+                .collect::<Vec<_>>()[..]) {
+        return Err(notice_error("bound model history does not match its Host frame"));
+    }
     let bound = serde_json::json!({"modelInput":input.payload,"modelHistory":input.live_history,
+        "deliveredHistory":input.delivered_history,
         "checkpointSeq":input.checkpoint_seq,"historyStart":input.history_start,
         "historicalHostNoticeBytes":input.historical_bytes});
     let input_json = bound.to_string();
@@ -281,6 +292,39 @@ fn validate_job_wait_decision(
             || payload["dataRootId"] != root || payload["parkedAtWallMs"] != now
             || payload["runningElapsedMs"] != cmd.running_elapsed_ms {
             return Err(kernel_err("job wait response, history, root or clock changed"));
+        }
+        // This row was written in the exact transaction that leased the Host
+        // model frame and acknowledged only while settling its response. It is
+        // stored even with zero notices: a caller-supplied history array is
+        // never itself proof of what the model actually received.
+        let checkpoint = response_payload["response"]["checkpointSeq"].as_i64()
+            .ok_or_else(|| kernel_err("job wait has no bound model checkpoint"))?;
+        let mut statement = tx.prepare("SELECT dispatch_key,input_hash,input_json FROM kernel_model_notice_inputs
+            WHERE run_id=?1 AND state='acknowledged'
+              AND json_extract(input_json,'$.checkpointSeq')=?2 LIMIT 2")?;
+        let bound_rows = statement.query_map(params![run,checkpoint], |row| {
+            Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?))
+        })?.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        if bound_rows.len() != 1 { return Err(kernel_err("job wait has no unique bound model input")); }
+        let (dispatch_key,input_hash,input_json) = &bound_rows[0];
+        if format!("sha256:{}",hex::encode(Sha256::digest(input_json.as_bytes()))) != *input_hash {
+            return Err(kernel_err("job wait bound model input hash changed"));
+        }
+        let bound: serde_json::Value = serde_json::from_str(input_json)
+            .map_err(|_| kernel_err("invalid bound model input for job wait"))?;
+        let model_input = &bound["modelInput"];
+        let right_dispatch = match response.event_type.as_str() {
+            "engine.initial_response" => dispatch_key == crate::kernel::INITIAL_MODEL_IDEMPOTENCY_KEY,
+            "engine.batch_response" => dispatch_key == &crate::kernel::batch_delivery_idempotency_key(
+                response_payload["batchId"].as_str().unwrap_or_default()),
+            "engine.continuation_response" => model_input["continuationKey"].as_str()
+                .is_some_and(|key| dispatch_key == &format!("continuation-delivery:{key}")),
+            _ => false,
+        };
+        if !right_dispatch || model_input["idempotencyKey"] != *dispatch_key
+            || bound["deliveredHistory"] != payload["history"] {
+            return Err(kernel_err("job wait history differs from bound Host model delivery"));
         }
         let mut expected: Vec<crate::kernel::WaitingJobFact> =
             serde_json::from_value(payload["jobs"].clone())

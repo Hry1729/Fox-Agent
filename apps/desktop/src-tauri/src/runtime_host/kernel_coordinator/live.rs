@@ -935,7 +935,8 @@ impl KernelCoordinator<'_> {
             directive.validate()?;
             let payload = serde_json::to_value(&directive).map_err(|_|"invalid live batch directive")?;
             let notice_binding = crate::database::ModelNoticeInput {
-                payload: &payload, history_start, historical_bytes: historical_notice_bytes,
+                payload: &payload, delivered_history: &batch_pre_history,
+                history_start, historical_bytes: historical_notice_bytes,
                 live_history: Some(&batch_pre_history[..history_start]), checkpoint_seq: cursor,
             };
             self.apply(
@@ -1001,7 +1002,8 @@ impl KernelCoordinator<'_> {
             directive.validate()?;
             let payload = serde_json::to_value(&directive).map_err(|_|"invalid live continuation directive")?;
             let notice_binding = crate::database::ModelNoticeInput {
-                payload: &payload, history_start, historical_bytes: historical_notice_bytes,
+                payload: &payload, delivered_history: &next_messages,
+                history_start, historical_bytes: historical_notice_bytes,
                 live_history: Some(&next_messages[..history_start]), checkpoint_seq: cursor,
             };
             self.apply(Some(DecisionLease::ContinuationDispatch(&effect_key, owner,
@@ -1251,8 +1253,11 @@ impl KernelCoordinator<'_> {
             };
             frame.validate()?;
             let payload = serde_json::to_value(&frame).map_err(|_|"invalid live initial frame")?;
+            let mut delivered_history = frame.input.messages.clone();
+            delivered_history.extend(frame.host_job_notices.iter().map(fox_engine_protocol::HostJobNotice::history_marker));
             let notice_binding = crate::database::ModelNoticeInput {
-                payload: &payload, history_start: frame.input.messages.len(),
+                payload: &payload, delivered_history: &delivered_history,
+                history_start: frame.input.messages.len(),
                 historical_bytes: historical_notice_bytes, live_history: None,
                 checkpoint_seq: frame.checkpoint_seq,
             };

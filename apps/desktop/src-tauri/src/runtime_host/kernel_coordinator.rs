@@ -792,8 +792,11 @@ impl<'a> KernelCoordinator<'a> {
             };
             frame.validate()?;
             let payload = serde_json::to_value(&frame).map_err(|_|"invalid initial model input")?;
+            let mut delivered_history = frame.input.messages.clone();
+            delivered_history.extend(frame.host_job_notices.iter().map(fox_engine_protocol::HostJobNotice::history_marker));
             let notice_binding = crate::database::ModelNoticeInput {
-                payload: &payload, history_start: frame.input.messages.len(),
+                payload: &payload, delivered_history: &delivered_history,
+                history_start: frame.input.messages.len(),
                 historical_bytes: historical_notice_bytes, live_history: None,
                 checkpoint_seq: frame.checkpoint_seq,
             };
@@ -1021,9 +1024,20 @@ impl<'a> KernelCoordinator<'a> {
         frame.host_job_notices = self.pending_host_job_notices(&frame.history)?;
         frame.validate()?;
         let notice_payload = serde_json::to_value(&frame).map_err(|_|"invalid batch model input")?;
+        let mut delivered_history = frame.history.clone();
+        delivered_history.push(frame.assistant_message.clone());
+        delivered_history.extend(steering::settled_tool_result_messages(
+            &self.binding.run_id, &frame.tools, &frame.assistant_message));
+        delivered_history.extend(frame.steering.iter().map(|notice| serde_json::json!({
+            "role":"user","content":[{"type":"text",
+                "text":steering::steering_notice_text(&notice.content)}],
+            "timestamp":notice.received_at.unwrap_or(0),
+        })));
+        let history_start = delivered_history.len();
+        delivered_history.extend(frame.host_job_notices.iter().map(fox_engine_protocol::HostJobNotice::history_marker));
         let notice_binding = crate::database::ModelNoticeInput {
-            payload: &notice_payload,
-            history_start: frame.history.len() + 1 + frame.tools.len() + frame.steering.len(),
+            payload: &notice_payload, delivered_history: &delivered_history,
+            history_start,
             historical_bytes: historical_notice_bytes, live_history: None,
             checkpoint_seq: frame.checkpoint_seq,
         };
