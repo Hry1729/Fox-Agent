@@ -1455,6 +1455,13 @@ fn settled_provider_rejection(run_id: &str, turn_id: &str, checkpoint_seq: u64) 
 }
 
 fn start_http_model_fixture(replies: Vec<Value>) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<Value>>) {
+    start_http_model_fixture_with_response_hook(replies,None)
+}
+
+fn start_http_model_fixture_with_response_hook(
+    replies: Vec<Value>,
+    response_hook: Option<(usize,Box<dyn FnOnce() + Send>)>,
+) -> (std::net::SocketAddr, std::thread::JoinHandle<Vec<Value>>) {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
@@ -1463,6 +1470,7 @@ fn start_http_model_fixture(replies: Vec<Value>) -> (std::net::SocketAddr, std::
     listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
         let mut requests = Vec::new();
+        let mut response_hook = response_hook;
         let deadline = Instant::now() + Duration::from_secs(45);
         while requests.len() < replies.len() {
             let mut stream = match listener.accept() {
@@ -1499,6 +1507,10 @@ fn start_http_model_fixture(replies: Vec<Value>) -> (std::net::SocketAddr, std::
             let delta = replies[requests.len()].clone();
             let finish = if delta["tool_calls"].is_array() { "tool_calls" } else { "stop" };
             requests.push(body);
+            if response_hook.as_ref().is_some_and(|(index,_)| *index == requests.len()-1) {
+                let (_,hook) = response_hook.take().unwrap();
+                hook();
+            }
             let chunks = [
                 json!({"id":"local-pilot-test","object":"chat.completion.chunk","created":1,"model":"kernel-http-test","choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
                 json!({"id":"local-pilot-test","object":"chat.completion.chunk","created":1,"model":"kernel-http-test","choices":[{"index":0,"delta":{},"finish_reason":finish}]}),

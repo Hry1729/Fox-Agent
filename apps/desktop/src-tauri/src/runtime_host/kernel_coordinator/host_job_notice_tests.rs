@@ -285,11 +285,17 @@ fn batch_model_lease_rejects_forged_durable_middle_in_both_transports() {
     let error = dispatch(&live_payload,&delivered,Some(&forged_history),start);
     assert!(error.contains("bound live batch differs from durable Host sources"),"{error}");
     let (bindings,leased):(i64,i64) = db.with_connection(|conn|conn.query_row(
-        "SELECT (SELECT COUNT(*) FROM kernel_model_notice_inputs WHERE run_id=?1),
+        "SELECT (SELECT COUNT(*) FROM kernel_model_notice_inputs
+                  WHERE run_id=?1 AND dispatch_key=?2),
                 (SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1
                   AND effect_type='deliver_tool_batch' AND status='leased')",
-        [&run],|row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+        rusqlite::params![run,kernel::batch_delivery_idempotency_key(&batch)],
+        |row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
     assert_eq!((bindings,leased),(0,0),"a rejected frame must roll back the whole lease");
+    let initial_state:String = db.with_connection(|conn|conn.query_row(
+        "SELECT state FROM kernel_model_notice_inputs WHERE run_id=?1 AND dispatch_key=?2",
+        rusqlite::params![run,kernel::INITIAL_MODEL_IDEMPOTENCY_KEY],|row|row.get(0))).unwrap();
+    assert_eq!(initial_state,"acknowledged","the valid initial lease remains durable");
 }
 
 #[test]
