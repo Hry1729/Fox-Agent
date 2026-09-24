@@ -2,17 +2,25 @@
 #   ./scripts/test-desktop-rust.ps1 -Mode Suite
 #   ./scripts/test-desktop-rust.ps1 -Mode Suite -DefaultFeatures
 #   ./scripts/test-desktop-rust.ps1 -Mode Executable -ExecutablePath <test-exe> -TargetDirectory <target-dir>
+#   ./scripts/test-desktop-rust.ps1 -Mode Executable -ExecutablePath <test-exe> -NoZvec
 #   ./scripts/test-desktop-rust.ps1 -Mode Executable -ExecutablePath <test-exe> -ScratchRoot <short-dir>
+# For an executable under <target>/<triple?>/<profile>/deps, its own profile is
+# authoritative for DLL lookup; -TargetDirectory/CARGO_TARGET_DIR are fallbacks
+# only when the executable is outside that Cargo layout.
 # Suite and Performance compile with --no-default-features unless -DefaultFeatures
 # is given. Suite keeps Rust's default test parallelism; Performance preserves its
 # existing isolated one-thread check. Executable only launches an already built
 # test binary: it does not recompile SQLite or change that binary's MEMSTATUS.
+# Executable mode defaults to the historical Zvec preflight. Pass -NoZvec only
+# when the selected binary was built without the zvec feature; dependency features
+# cannot be determined reliably from a prebuilt test executable.
 # LIBSQLITE3_FLAGS and DLL search path are scoped to this PowerShell process.
 #requires -Version 7.4
 param(
     [ValidateSet('Suite', 'Performance', 'Executable')]
     [string]$Mode = 'Suite',
     [switch]$DefaultFeatures,
+    [switch]$NoZvec,
     [string]$ExecutablePath,
     [string[]]$ExecutableArguments = @(),
     [string]$TargetDirectory,
@@ -25,22 +33,47 @@ $ErrorActionPreference = 'Stop'
 if ($Mode -eq 'Executable' -and -not $ExecutablePath) {
     throw 'Executable mode requires -ExecutablePath.'
 }
+if ($NoZvec -and $Mode -ne 'Executable') {
+    throw '-NoZvec is only valid in Executable mode.'
+}
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $manifest = 'apps/desktop/src-tauri/Cargo.toml'
-$targetDirectory = if ($TargetDirectory) {
+$selectedExecutable = $null
+$executableDirectory = $null
+$executableProfileDirectory = $null
+if ($Mode -eq 'Executable') {
+    $selectedExecutable = [System.IO.Path]::GetFullPath($ExecutablePath, $repoRoot)
+    if (-not (Test-Path -LiteralPath $selectedExecutable -PathType Leaf)) {
+        throw "Test executable is absent: $selectedExecutable"
+    }
+    $executableDirectory = Split-Path -Parent $selectedExecutable
+    if ((Split-Path -Leaf $executableDirectory) -eq 'deps') {
+        # Cargo test executables live at <target>/<triple?>/<profile>/deps.
+        # Use this exact profile for DLL discovery; CARGO_TARGET_DIR can refer to
+        # a different target tree when several builds are present.
+        $executableProfileDirectory = Split-Path -Parent $executableDirectory
+    }
+}
+$targetDirectory = if ($Mode -eq 'Executable' -and $executableProfileDirectory) {
+    Split-Path -Parent $executableProfileDirectory
+} elseif ($TargetDirectory) {
     [System.IO.Path]::GetFullPath($TargetDirectory, $repoRoot)
 } elseif ($env:CARGO_TARGET_DIR) {
     [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR, $repoRoot)
+} elseif ($Mode -eq 'Executable' -and $NoZvec) {
+    # No Cargo tree is needed to launch a binary explicitly declared Zvec-free.
+    $null
 } elseif ($Mode -eq 'Executable') {
-    $selectedParent = Split-Path -Parent ([System.IO.Path]::GetFullPath($ExecutablePath, $repoRoot))
-    $debugDirectory = Split-Path -Parent $selectedParent
-    if ((Split-Path -Leaf $selectedParent) -ne 'deps' -or
-        (Split-Path -Leaf $debugDirectory) -ne 'debug') {
-        throw 'Executable outside target/debug/deps: provide -TargetDirectory or CARGO_TARGET_DIR to select its Zvec build.'
-    }
-    Split-Path -Parent $debugDirectory
+    throw 'Cannot resolve the selected executable Cargo profile. Place it under <target>/<triple?>/<profile>/deps, or provide -TargetDirectory/CARGO_TARGET_DIR for Zvec DLL lookup.'
 } else {
     Join-Path $repoRoot 'apps/desktop/src-tauri/target'
+}
+$zvecBuildDirectory = if ($Mode -eq 'Executable' -and $executableProfileDirectory) {
+    Join-Path $executableProfileDirectory 'build'
+} elseif ($targetDirectory) {
+    Join-Path $targetDirectory 'debug/build'
+} else {
+    $null
 }
 $runId = [System.IO.Path]::GetRandomFileName().Substring(0, 8)
 $runDirectory = Join-Path $repoRoot ".test-target/rust-host-runs/$runId"
@@ -79,6 +112,14 @@ function Get-SqliteTestFlags([string]$previous) {
 }
 
 function Find-ZvecDllDirectory {
+    if ($Mode -eq 'Executable' -and $executableDirectory) {
+        $adjacentDll = Join-Path $executableDirectory 'zvec_c_api.dll'
+        if (Test-Path -LiteralPath $adjacentDll -PathType Leaf) {
+            # The app-local DLL staged next to this exact test binary is the
+            # runtime copy selected for its Cargo profile and the loader finds it first.
+            return $executableDirectory
+        }
+    }
     if ($env:ZVEC_LIB_DIR) {
         $explicit = [System.IO.Path]::GetFullPath($env:ZVEC_LIB_DIR, $repoRoot)
         if (-not (Test-Path -LiteralPath (Join-Path $explicit 'zvec_c_api.dll') -PathType Leaf)) {
@@ -86,7 +127,10 @@ function Find-ZvecDllDirectory {
         }
         return $explicit
     }
-    $buildDirectory = Join-Path $targetDirectory 'debug/build'
+    $buildDirectory = $zvecBuildDirectory
+    if (-not $buildDirectory) {
+        throw 'Cannot resolve the selected executable Zvec build directory. Provide -TargetDirectory/CARGO_TARGET_DIR or use a Cargo <profile>/deps executable.'
+    }
     $candidates = @()
     if (Test-Path -LiteralPath $buildDirectory -PathType Container) {
         $candidates = @(Get-ChildItem -LiteralPath $buildDirectory -Directory -Filter 'zvec-rust-sys-*' |
@@ -239,14 +283,23 @@ namespace FoxTest {
         }
         Invoke-TestProcess 'test' 'cargo' $cargoArguments
     } else {
-        $selectedExecutable = [System.IO.Path]::GetFullPath($ExecutablePath, $repoRoot)
-        if (-not (Test-Path -LiteralPath $selectedExecutable -PathType Leaf)) {
-            throw "Test executable is absent: $selectedExecutable"
+        $zvecDirectory = $null
+        if ($NoZvec) {
+            Write-Host 'Skipping Zvec DLL preflight: -NoZvec asserts this executable was built without the zvec feature.'
+        } else {
+            $zvecDirectory = Find-ZvecDllDirectory
+            Write-Host "Using built Zvec DLL directory: $zvecDirectory"
         }
-        $zvecDirectory = Find-ZvecDllDirectory
-        $depsDirectory = Join-Path $targetDirectory 'debug/deps'
-        $env:PATH = "$zvecDirectory;$depsDirectory;$($savedEnvironment['PATH'])"
-        Write-Host "Using built Zvec DLL directory: $zvecDirectory"
+        $depsDirectory = if ($executableProfileDirectory) {
+            Join-Path $executableProfileDirectory 'deps'
+        } elseif ($targetDirectory) {
+            Join-Path $targetDirectory 'debug/deps'
+        } else {
+            $null
+        }
+        $pathEntries = @($zvecDirectory, $executableDirectory, $depsDirectory) |
+            Where-Object { $_ } | Select-Object -Unique
+        $env:PATH = (@($pathEntries + @($savedEnvironment['PATH'])) | Where-Object { $_ }) -join ';'
         Invoke-TestProcess 'test' $selectedExecutable $ExecutableArguments
     }
 } finally {
