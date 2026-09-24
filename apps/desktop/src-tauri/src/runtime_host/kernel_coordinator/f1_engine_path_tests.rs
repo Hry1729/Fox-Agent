@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 const MIDDLE: &str = "F1-REAL-PROVIDER-MIDDLE-9f82c0";
 const SMALL: &str = "alpha\nbeta\ngamma\n";
 const CANDIDATE: &str = "ALPHA\nBETA\nGAMMA\n";
+const SECOND_CANDIDATE: &str = "Alpha\nBeta\nGamma\n";
 
 fn big_body() -> String {
     format!("{}{}{}", "H".repeat(15_000), MIDDLE, "T".repeat(15_000))
@@ -232,6 +233,10 @@ struct LocalProvider {
 
 impl LocalProvider {
     fn start(version: Arc<Mutex<Option<String>>>) -> Self {
+        Self::start_with_repeated_write(version, false)
+    }
+
+    fn start_with_repeated_write(version: Arc<Mutex<Option<String>>>, repeat_write: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -371,6 +376,23 @@ impl LocalProvider {
                         .to_string();
                         (
                             json!({"role":"assistant","tool_calls":[{"index":0,"id":"f1-write",
+                            "type":"function","function":{"name":"write_file",
+                            "arguments":arguments}}]}),
+                            "tool_calls",
+                        )
+                    }
+                    2 if repeat_write => (
+                        json!({"role":"assistant","tool_calls":[{"index":0,"id":"f3-read-2",
+                        "type":"function","function":{"name":"read",
+                        "arguments":"{\"path\":\"target.txt\"}"}}]}),
+                        "tool_calls",
+                    ),
+                    3 if repeat_write => {
+                        let expected = version.lock().unwrap().clone().expect("second read settled");
+                        let arguments = json!({"path":"target.txt","content":SECOND_CANDIDATE,
+                            "expectedVersion":expected}).to_string();
+                        (
+                            json!({"role":"assistant","tool_calls":[{"index":0,"id":"f3-write-2",
                             "type":"function","function":{"name":"write_file",
                             "arguments":arguments}}]}),
                             "tool_calls",

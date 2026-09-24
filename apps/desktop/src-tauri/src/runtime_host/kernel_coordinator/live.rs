@@ -378,6 +378,7 @@ impl KernelCoordinator<'_> {
         &self,
         owner: &str,
         batch_id: &str,
+        policy: &dyn kernel::PolicyDecisionPort,
         execute: ExecuteFn,
         after_commit: AfterCommitFn,
         settle_children: SettleChildrenFn,
@@ -387,33 +388,12 @@ impl KernelCoordinator<'_> {
                 after_commit(&tool_id)?;
             }
             settle_children(false)?;
-            for command in self.database.pending_kernel_host_commands(&self.binding.run_id)? {
-                if command.kind == "cancel" {
-                    // Leave the durable command for the drive loop; it owns the
-                    // cancel transition and the worker cleanup.
-                    return Err(LIVE_CANCEL.to_string());
-                }
-                let current = self.snapshot()?;
-                let tool_id = command
-                    .tool_call_id
-                    .as_deref()
-                    .ok_or("missing queued approval tool")?;
-                if current.tool_calls.iter().any(|tool| {
-                    tool.tool_call_id == tool_id
-                        && tool.approval_state.as_deref() == Some("pending")
-                }) {
-                    let decision = match command.decision.as_deref() {
-                        Some("allow_once") => kernel::ApprovalDecision::AllowOnce,
-                        Some("allow_conversation") => {
-                            kernel::ApprovalDecision::AllowConversation
-                        }
-                        Some("denied") => kernel::ApprovalDecision::Deny,
-                        _ => return Err("invalid durable approval decision".into()),
-                    };
-                    self.resolve_approval(tool_id, decision)?;
-                }
-                self.database
-                    .complete_kernel_host_command(&self.binding.run_id, command.seq)?;
+            if super::super::kernel_host::consume_approval_step(
+                self, self.database, &self.binding.run_id, policy,
+            )?.is_some() {
+                // Leave the durable cancel for the owning drive loop. No
+                // approval or expired intent was consumed ahead of it.
+                return Err(LIVE_CANCEL.to_string());
             }
             self.tick()?;
             let snapshot = self.snapshot()?;
@@ -922,7 +902,7 @@ impl KernelCoordinator<'_> {
         if let Some((batch_id, _checkpoint)) = next_batch {
             // Drive the just-proposed batch to the durable barrier, hand the
             // settled results to the live session and arm the next round.
-            self.drive_batch_to_barrier(owner, &batch_id, execute, after_commit, settle_children)?;
+            self.drive_batch_to_barrier(owner, &batch_id, policy, execute, after_commit, settle_children)?;
             let (history, assistant, tools) = self.stored_batch_parts(&batch_id)?;
             let config = self.database.kernel_model_config(&self.binding.run_id)?;
             // The budget must cover the bytes this request really sends: the

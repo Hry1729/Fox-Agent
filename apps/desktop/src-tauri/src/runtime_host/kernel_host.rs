@@ -444,6 +444,90 @@ fn register_approval_grant(
         .map(|_| ())
 }
 
+/// Consume policy changes and queued approval decisions at either Host model
+/// boundary. A cancel remains owned by the caller, but is returned before any
+/// expired intent can be reopened or any tool dispatched. The caller decides
+/// whether to settle cancellation (outer loop) or detach its live worker.
+pub(super) fn consume_approval_step(
+    coordinator: &KernelCoordinator<'_>,
+    database: &Database,
+    run_id: &str,
+    policy: &dyn PolicyDecisionPort,
+) -> Result<Option<i64>, String> {
+    let commands = database.pending_kernel_host_commands(run_id)?;
+    let snapshot = coordinator.snapshot()?;
+    if terminal(&snapshot.state) {
+        for command in commands {
+            database.complete_kernel_host_command(run_id, command.seq)?;
+        }
+        return Ok(None);
+    }
+    if snapshot.state == "cancelling" {
+        return Ok(None);
+    }
+    if let Some(command) = commands.iter().find(|command| command.kind == "cancel") {
+        return Ok(Some(command.seq));
+    }
+    for call in &snapshot.tool_calls {
+            if call.approval_state.as_deref() == Some("expired")
+                && matches!(call.state.as_str(), "pending" | "waiting_approval")
+            {
+                match coordinator.reevaluate_tool(&call.tool_call_id, policy) {
+                    Ok(()) => {},
+                    Err(error) if error.contains("policy_version") || error.contains("stale_approval") => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+    }
+    for command in commands {
+        coordinator.tick()?;
+        let current = coordinator.snapshot()?;
+        if !terminal(&current.state) && current.state != "cancelling" {
+            let tool_id = command
+                .tool_call_id
+                .as_deref()
+                .ok_or("missing queued approval tool")?;
+            let decision = match command.decision.as_deref() {
+                Some("allow_once") => kernel::ApprovalDecision::AllowOnce,
+                Some("allow_conversation") => kernel::ApprovalDecision::AllowConversation,
+                Some("denied") => kernel::ApprovalDecision::Deny,
+                _ => return Err("invalid durable approval decision".into()),
+            };
+            let version = command.policy_version.ok_or("approval has no frozen policy version")?;
+            let pending = current.tool_calls.iter().any(|tool| {
+                tool.tool_call_id == tool_id
+                    && tool.approval_state.as_deref() == Some("pending")
+            });
+            if pending {
+                if let Err(error) = coordinator.resolve_approval_at_version(tool_id, decision, version) {
+                    if error.contains("stale_approval") || error.contains("policy_version") {
+                        database.complete_kernel_host_command(run_id, command.seq)?;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+            // A process can stop after resolving the approval but before grant
+            // registration or command ack. Retry only the matching current
+            // decision; the database registration checks its version atomically.
+            let matching_decision = pending || current.tool_calls.iter().any(|tool| {
+                tool.tool_call_id == tool_id
+                    && tool.approval_state.as_deref() == Some(decision.as_str())
+            });
+            let conversation_id = database.run_control_binding(run_id)?
+                .ok_or("missing frozen run binding")?
+                .conversation_id;
+            if matching_decision
+                && database.execution_policy(&conversation_id)?.version == version
+            {
+                register_approval_grant(database, run_id, tool_id, decision)?;
+            }
+        }
+        database.complete_kernel_host_command(run_id, command.seq)?;
+    }
+    Ok(None)
+}
+
 pub(crate) fn resource_failure_result(tool: &str, error: &str) -> Value {
     // Reader errors describe only the authorized path operation (missing path,
     // nonexistent file, OS access failure, scope escape). Keep them actionable.
@@ -639,6 +723,48 @@ pub(super) fn drive_with_actions(
     settle_children: impl Fn(bool) -> Result<(), String>,
     preview: &super::kernel_model_worker::PreviewSink,
 ) -> Result<(), String> {
+    drive_with_actions_transport(_ownership, database, clock, cancellation, run_id, runtime,
+        api_key, policy, execute, after_commit, settle_children, preview, false)
+}
+
+/// Test-only transport selection exercises the owning Host's complete
+/// per-round drive with the real Pi Node worker. Production always selects
+/// the normal live-first behavior through `drive_with_actions` above.
+#[cfg(test)]
+pub(super) fn drive_with_actions_per_round(
+    ownership: &KernelRunLock,
+    database: &Database,
+    clock: &dyn Clock,
+    cancellation: &CancellationRegistry,
+    run_id: &str,
+    runtime: &RuntimeCommand,
+    api_key: &str,
+    policy: &dyn PolicyDecisionPort,
+    execute: impl Fn(&RunControlBinding, &kernel::OutboxEffect, &kernel::CancellationToken) -> Result<(bool, Value), String> + Sync,
+    after_commit: impl Fn(&str) -> Result<(), String>,
+    settle_children: impl Fn(bool) -> Result<(), String>,
+    preview: &super::kernel_model_worker::PreviewSink,
+) -> Result<(), String> {
+    drive_with_actions_transport(ownership, database, clock, cancellation, run_id, runtime,
+        api_key, policy, execute, after_commit, settle_children, preview, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_with_actions_transport(
+    _ownership: &KernelRunLock,
+    database: &Database,
+    clock: &dyn Clock,
+    cancellation: &CancellationRegistry,
+    run_id: &str,
+    runtime: &RuntimeCommand,
+    api_key: &str,
+    policy: &dyn PolicyDecisionPort,
+    execute: impl Fn(&RunControlBinding, &kernel::OutboxEffect, &kernel::CancellationToken) -> Result<(bool, Value), String> + Sync,
+    after_commit: impl Fn(&str) -> Result<(), String>,
+    settle_children: impl Fn(bool) -> Result<(), String>,
+    preview: &super::kernel_model_worker::PreviewSink,
+    force_per_round: bool,
+) -> Result<(), String> {
     // Validate all frozen inputs before any recovery dispatch. Never reconstruct
     // a missing input/scope/model from current settings.
     database.kernel_host_scope(run_id)?;
@@ -659,64 +785,13 @@ pub(super) fn drive_with_actions(
             after_commit(&tool_id)?;
         }
         settle_children(false)?;
-        // A policy change expires tickets durably. Re-evaluate the original
-        // unconsumed intent through the same controller/transaction boundary.
-        let changed = coordinator.snapshot()?;
-        if !terminal(&changed.state) && changed.state != "cancelling" {
-            for call in &changed.tool_calls {
-                if call.approval_state.as_deref() == Some("expired")
-                    && matches!(call.state.as_str(), "pending" | "waiting_approval") {
-                    match coordinator.reevaluate_tool(&call.tool_call_id, policy) {
-                        Ok(()) => {},
-                        Err(error) if error.contains("policy_version") || error.contains("stale_approval") => continue,
-                        Err(error) => return Err(error),
-                    }
-                }
-            }
-        }
-        let commands = database.pending_kernel_host_commands(run_id)?;
-        for command in commands {
-            let snapshot = coordinator.snapshot()?;
-            if !terminal(&snapshot.state) {
-                if command.kind == "cancel" {
-                    coordinator.cancel()?;
-                    // This loop executes resources synchronously; no resource is
-                    // still in flight once control has returned to this point.
-                    coordinator.settle_cancellation()?;
-                } else {
-                    coordinator.tick()?;
-                    let current = coordinator.snapshot()?;
-                    let tool_id = command
-                        .tool_call_id
-                        .as_deref()
-                        .ok_or("missing queued approval tool")?;
-                    if current.tool_calls.iter().any(|tool| {
-                        tool.tool_call_id == tool_id
-                            && tool.approval_state.as_deref() == Some("pending")
-                    }) {
-                        let decision = match command.decision.as_deref() {
-                            Some("allow_once") => kernel::ApprovalDecision::AllowOnce,
-                            Some("allow_conversation") => {
-                                kernel::ApprovalDecision::AllowConversation
-                            }
-                            Some("denied") => kernel::ApprovalDecision::Deny,
-                            _ => return Err("invalid durable approval decision".into()),
-                        };
-                        let version = command.policy_version.ok_or("approval has no frozen policy version")?;
-                        if let Err(error) = coordinator.resolve_approval_at_version(tool_id, decision, version) {
-                            if error.contains("stale_approval") || error.contains("policy_version") {
-                                database.complete_kernel_host_command(run_id, command.seq)?;
-                                continue;
-                            }
-                            return Err(error);
-                        }
-                        // #5: a conversation-level allow becomes an auditable
-                        // additional grant; allow_once never does.
-                        register_approval_grant(database, run_id, tool_id, decision)?;
-                    }
-                }
-            }
-            database.complete_kernel_host_command(run_id, command.seq)?;
+        if let Some(cancel_seq) = consume_approval_step(&coordinator, database, run_id, policy)? {
+            coordinator.cancel()?;
+            // This loop executes resources synchronously; no resource is still
+            // in flight once control has returned to this point.
+            coordinator.settle_cancellation()?;
+            database.complete_kernel_host_command(run_id, cancel_seq)?;
+            continue;
         }
         coordinator.tick()?;
         let snapshot = coordinator.snapshot()?;
@@ -781,7 +856,7 @@ pub(super) fn drive_with_actions(
                     let binding = database
                         .run_control_binding(run_id)?
                         .ok_or("authoritative Run has no frozen control binding")?;
-                    if binding.engine_id == "pi" {
+                    if binding.engine_id == "pi" && !force_per_round {
                         // Loop-capable engine session: the worker drives the
                         // engine's own tool loop and the Host services each
                         // round output durably. Old runtimes fall back to the
