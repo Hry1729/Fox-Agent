@@ -1,8 +1,9 @@
 # Controlled launcher regression fixture; no Cargo build or downloaded DLLs.
 # Run from the repository root with: pwsh -NoProfile -File ./scripts/test-desktop-rust-executable.test.ps1
 # It copies the Windows cmd.exe into a temporary Cargo-shaped tree, then removes
-# only that unique temporary tree. Runner logs and this transcript stay under
-# .test-target for review.
+# only that unique temporary tree. It gives each runner call a short scratch
+# root under buildtmp so the test does not depend on the caller's TMP path.
+# Runner logs and this transcript stay under .test-target for review.
 #requires -Version 7.4
 $ErrorActionPreference = 'Stop'
 
@@ -19,6 +20,18 @@ foreach ($requiredPath in @($runner, $pwshPath, $cmdPath)) {
 $evidenceDirectory = Join-Path $repoRoot '.test-target/test-desktop-rust-fixtures'
 New-Item -ItemType Directory -Path $evidenceDirectory -Force | Out-Null
 $evidencePath = Join-Path $evidenceDirectory "executable-fixture-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')).log"
+$scratchWorkspaceRoot = Split-Path -Parent (Split-Path -Parent $repoRoot)
+$buildTmpRoot = Join-Path $scratchWorkspaceRoot 'buildtmp'
+$shortScratchRoot = Join-Path $buildTmpRoot "rf-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+$scratchWorkspacePrefix = [System.IO.Path]::GetFullPath($scratchWorkspaceRoot).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+$shortScratchRoot = [System.IO.Path]::GetFullPath($shortScratchRoot)
+if (-not $shortScratchRoot.StartsWith($scratchWorkspacePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to use fixture scratch outside the workspace: $shortScratchRoot"
+}
+$scratchProbe = Join-Path $shortScratchRoot 'fxr-12345678'
+if ((Join-Path $scratchProbe 'd').Length -gt 64 -or (Join-Path $scratchProbe 't').Length -gt 64) {
+    throw "Fixture scratch root exceeds the runner's 64-character limit: $shortScratchRoot"
+}
 $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) "FoxRustLauncherFixture-$([Guid]::NewGuid().ToString('N'))"
 $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
 $fixtureRoot = [System.IO.Path]::GetFullPath($fixtureRoot)
@@ -53,7 +66,7 @@ try {
 
     function Invoke-LauncherFixture([string]$name, [string]$runnerArguments) {
         Write-Host "=== $name ==="
-        $runnerCommand = "& $(ConvertTo-PowerShellLiteral $runner) -Mode Executable -ExecutablePath $(ConvertTo-PowerShellLiteral $selectedExecutable) $runnerArguments"
+        $runnerCommand = "& $(ConvertTo-PowerShellLiteral $runner) -Mode Executable -ExecutablePath $(ConvertTo-PowerShellLiteral $selectedExecutable) -ScratchRoot $(ConvertTo-PowerShellLiteral $shortScratchRoot) $runnerArguments"
         $output = & $pwshPath -NoLogo -NoProfile -Command $runnerCommand 2>&1
         $exitCode = $LASTEXITCODE
         $text = ($output | ForEach-Object { $_.ToString() }) -join "`n"
@@ -115,6 +128,13 @@ try {
             throw "Refusing to remove fixture outside the temp directory: $resolvedFixtureRoot"
         }
         Remove-Item -LiteralPath $resolvedFixtureRoot -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $shortScratchRoot) {
+        $resolvedScratchRoot = [System.IO.Path]::GetFullPath($shortScratchRoot)
+        if (-not $resolvedScratchRoot.StartsWith($scratchWorkspacePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove fixture scratch outside the workspace: $resolvedScratchRoot"
+        }
+        Remove-Item -LiteralPath $resolvedScratchRoot -Recurse -Force
     }
     Stop-Transcript | Out-Null
 }
