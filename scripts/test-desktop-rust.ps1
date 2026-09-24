@@ -166,7 +166,7 @@ function Invoke-TestProcess([string]$phase, [string]$file, [string[]]$arguments)
 }
 
 $savedEnvironment = @{}
-foreach ($name in @('LIBSQLITE3_FLAGS', 'PATH', 'FOX_DATA_DIR', 'TMP', 'TEMP')) {
+foreach ($name in @('LIBSQLITE3_FLAGS', 'CARGO_TARGET_DIR', 'PATH', 'FOX_DATA_DIR', 'TMP', 'TEMP')) {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 try {
@@ -176,6 +176,7 @@ try {
     New-Item -ItemType Directory -Path $env:FOX_DATA_DIR -Force | Out-Null
 
     if ($Mode -ne 'Executable') {
+        $env:CARGO_TARGET_DIR = $targetDirectory
         $env:LIBSQLITE3_FLAGS = Get-SqliteTestFlags $savedEnvironment['LIBSQLITE3_FLAGS']
         $cargoArguments = @('test', '--manifest-path', $manifest, '--locked')
         if (-not $DefaultFeatures) { $cargoArguments += '--no-default-features' }
