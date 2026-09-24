@@ -406,22 +406,34 @@ fn run_parked_stop(live: bool, expire: bool) {
     loop {
         let job = db.kernel_job_snapshot(&job_id).unwrap();
         let stopped = job.cancel_requested_at.is_some() || parent_token.is_cancelled();
-        if stopped && (!expire || crate::database::now_ms() >= original_deadline) { break; }
+        let run_state = db.kernel_host_run_state(&run).unwrap();
+        let terminal = if expire {
+            matches!(run_state.as_deref(), Some("failed" | "budget_exhausted"))
+        } else { run_state.as_deref() == Some("cancelled") };
+        if terminal && stopped && (!expire || crate::database::now_ms() >= original_deadline) {
+            break;
+        }
         assert_eq!(job.state.as_str(), "running", "Job settled naturally before stop reconciliation");
         assert!(Instant::now() < signal_deadline,
-            "parked {} did not signal the still-running Job",
+            "parked {} did not terminalize while the Job was still running: run={run_state:?}",
             if expire { "deadline" } else { "cancel" });
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(db.kernel_job_snapshot(&job_id).unwrap().state.as_str(), "running");
-    assert_ne!(db.kernel_host_run_state(&run).unwrap().as_deref(), Some("completed"));
+    let before_release: (i64, i64) = db.with_connection(|conn| conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.jobs_woken'),
+                (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='engine.continuation_requested')",
+        [&run], |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
+    assert_eq!(before_release, (0, 0), "terminal stop incorrectly dispatched a model before Job ack");
     release_tx.send(()).unwrap();
     let terminal_deadline = Instant::now() + Duration::from_secs(10);
-    let expected = if expire { "budget_exhausted" } else { "cancelled" };
     loop {
         let run_state = db.kernel_host_run_state(&run).unwrap();
         let job = db.kernel_job_snapshot(&job_id).unwrap();
-        if run_state.as_deref() == Some(expected) && job.state.is_terminal() { break; }
+        let terminal = if expire {
+            matches!(run_state.as_deref(), Some("failed" | "budget_exhausted"))
+        } else { run_state.as_deref() == Some("cancelled") };
+        if terminal && job.state.is_terminal() { break; }
         assert!(Instant::now() < terminal_deadline,
             "parked stop did not settle: run={run_state:?} job={}", job.state.as_str());
         std::thread::sleep(Duration::from_millis(20));
