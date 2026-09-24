@@ -154,6 +154,10 @@ pub(super) fn pending_model_facts(
     connection: &rusqlite::Connection, root: &str, conversation: &str, run: &str,
     max_bytes: usize,
 ) -> rusqlite::Result<Vec<fox_engine_protocol::HostJobNotice>> {
+    let foreign_root: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM kernel_job_notices WHERE conversation_id=?1 AND run_id=?2
+         AND data_root_id!=?3",params![conversation,run,root],|row|row.get(0))?;
+    if foreign_root != 0 { return Err(invalid("compute notice belongs to another data root")); }
     let mut statement = connection.prepare(
         "SELECT n.job_id FROM kernel_job_notices n
          JOIN kernel_jobs j ON j.job_id=n.job_id AND j.kind='attachment_compute'
@@ -430,44 +434,62 @@ impl Database {
     /// binding. A model-produced string or a copied database cannot mint it.
     pub(crate) fn validate_host_job_notice_history(&self, conversation:&str, run:&str,
         history:&[serde_json::Value]) -> Result<(),String> {
-        fox_engine_protocol::validate_kernel_history(history)?;
-        self.with_connection(|conn| {
+        self.with_connection(|conn| Self::validate_host_job_notice_history_on(conn,&self.data_root_id,conversation,run,history))
+    }
+
+    /// Also run this against the model-lease transaction: the input hash may
+    /// only bind historical markers still backed by acknowledged Host facts.
+    pub(super) fn validate_host_job_notice_history_on(conn:&rusqlite::Connection, root:&str,
+        conversation:&str, run:&str, history:&[serde_json::Value]) -> rusqlite::Result<()> {
+        fox_engine_protocol::validate_kernel_history(history).map_err(|_|invalid("invalid historical model history"))?;
             let mut seen = std::collections::HashSet::new();
-            for (position, marker) in history.iter().enumerate() {
+            let mut last_order: Option<(u64,usize)> = None;
+            for marker in history {
                 if marker["role"] != "hostJobNotice" { continue; }
                 let fact: fox_engine_protocol::HostJobNotice = serde_json::from_value(marker["notice"].clone())
                     .map_err(|_|invalid("invalid historical Host notice"))?;
                 if !seen.insert(fact.job_id.clone()) { return Err(invalid("duplicate historical Host notice")); }
-                let stored = read_notice(conn,&self.data_root_id,conversation,run,&fact.job_id)?
+                let stored = read_notice(conn,root,conversation,run,&fact.job_id)?
                     .ok_or_else(||invalid("historical Host notice has no scoped terminal fact"))?;
                 if stored.model_fact()!=fact { return Err(invalid("historical Host notice fact changed")); }
-                let binding: Option<(String,String,i64,String,String,String)> = conn.query_row(
-                    "SELECT d.input_hash,m.input_hash,d.history_position,m.input_json,d.state,m.state
+                let binding: Option<(String,String,i64,i64,String,String,String)> = conn.query_row(
+                    "SELECT d.input_hash,m.input_hash,d.history_position,m.history_start,m.input_json,d.state,m.state
                      FROM kernel_job_notice_deliveries d
                      JOIN kernel_model_notice_inputs m ON m.run_id=?1 AND m.dispatch_key=d.dispatch_key
                      WHERE d.job_id=?2",
-                    params![run,fact.job_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,
-                        row.get(3)?,row.get(4)?,row.get(5)?)),
+                    params![run,fact.job_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,
+                        row.get(4)?,row.get(5)?,row.get(6)?)),
                 ).optional()?;
-                let Some((delivery_hash,input_hash,bound_position,input_json,delivery_state,input_state))=binding else {
+                let Some((delivery_hash,input_hash,bound_position,history_start,input_json,delivery_state,input_state))=binding else {
                     return Err(invalid("historical Host notice lacks durable model binding"));
                 };
                 if delivery_state!="acknowledged" || input_state!="acknowledged"
-                    || delivery_hash!=input_hash || bound_position!=position as i64
+                    || delivery_hash!=input_hash || bound_position<history_start
                     || format!("sha256:{}",hex::encode(Sha256::digest(input_json.as_bytes())))!=input_hash {
                     return Err(invalid("historical Host notice binding changed"));
                 }
+                let original: serde_json::Value=serde_json::from_str(&input_json)
+                    .map_err(|_|invalid("historical Host notice input is invalid"))?;
+                let order=usize::try_from(bound_position-history_start)
+                    .map_err(|_|invalid("historical Host notice original position is invalid"))?;
+                let checkpoint=original["checkpointSeq"].as_u64()
+                    .ok_or_else(||invalid("historical Host notice dispatch cursor is missing"))?;
+                if original["historyStart"].as_i64()!=Some(history_start)
+                    || original["modelInput"]["hostJobNotices"].get(order)!=Some(&marker["notice"])
+                    || last_order.is_some_and(|prior| prior >= (checkpoint,order)) {
+                    return Err(invalid("historical Host notice original order or input changed"));
+                }
+                last_order=Some((checkpoint,order));
             }
             let expected:i64=conn.query_row(
                 "SELECT COUNT(*) FROM kernel_job_notice_deliveries d
                  JOIN kernel_job_notices n ON n.job_id=d.job_id
                  WHERE n.data_root_id=?1 AND n.conversation_id=?2 AND n.run_id=?3
                    AND d.state='acknowledged'",
-                params![self.data_root_id,conversation,run],|row|row.get(0),
+                params![root,conversation,run],|row|row.get(0),
             )?;
             if expected != seen.len() as i64 { return Err(invalid("acknowledged Host notice missing from model history")); }
             Ok(())
-        })
     }
 
     /// Terminalize an expired job that has no executor. B2 will decide when to

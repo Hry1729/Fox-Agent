@@ -14,6 +14,10 @@ use sha2::{Digest, Sha256};
 /// lease. The transaction re-reads its pending notice set before binding it.
 pub(crate) struct ModelNoticeInput<'a> {
     pub payload: &'a serde_json::Value,
+    /// Live directives omit transcript history; bind the Host's complete
+    /// pre-notice model history alongside the directive in the same lease.
+    pub live_history: Option<&'a [serde_json::Value]>,
+    pub checkpoint_seq: u64,
     pub history_start: usize,
     pub historical_bytes: usize,
 }
@@ -33,13 +37,29 @@ fn bind_model_notices(
     };
     fox_engine_protocol::validate_host_job_notices(&supplied)
         .map_err(|_| notice_error("invalid model Host job notice bounds"))?;
-    let history = input.payload.pointer("/input/messages")
+    let embedded_history = input.payload.pointer("/input/messages")
         .or_else(|| input.payload.get("history"))
         .and_then(serde_json::Value::as_array);
-    let history_bytes = history.map(|value| fox_engine_protocol::historical_host_job_notice_bytes(value))
-        .transpose().map_err(|_| notice_error("invalid historical Host job notice"))?.unwrap_or(0);
-    if input.historical_bytes < history_bytes {
-        return Err(notice_error("Host notice historical size was understated"));
+    if input.live_history.is_some() == embedded_history.is_some() {
+        return Err(notice_error("model notice history must have one Host source"));
+    }
+    let history = input.live_history.or_else(|| embedded_history.map(Vec::as_slice))
+        .ok_or_else(|| notice_error("model notice history is missing"))?;
+    Database::validate_host_job_notice_history_on(tx,root,conversation,run,history)?;
+    let history_bytes = fox_engine_protocol::historical_host_job_notice_bytes(history)
+        .map_err(|_| notice_error("invalid historical Host job notice"))?;
+    if input.historical_bytes != history_bytes {
+        return Err(notice_error("Host notice historical size changed"));
+    }
+    let persisted_seq: i64 = tx.query_row("SELECT last_event_seq FROM kernel_runs WHERE run_id=?1",[run],|row|row.get(0))?;
+    if u64::try_from(persisted_seq).ok() != Some(input.checkpoint_seq)
+        || input.payload.get("checkpointSeq").and_then(serde_json::Value::as_u64)
+            .or_else(||input.payload.get("previewSeq").and_then(serde_json::Value::as_u64))
+            != Some(input.checkpoint_seq) {
+        return Err(notice_error("model notice checkpoint changed before lease"));
+    }
+    if input.live_history.is_some() && input.history_start != history.len() {
+        return Err(notice_error("live Host notice position is not the transcript tail"));
     }
     let remaining = (16 * 1024usize).saturating_sub(input.historical_bytes);
     let expected = super::kernel_job_execution::pending_model_facts(
@@ -47,7 +67,8 @@ fn bind_model_notices(
     )?;
     if supplied != expected { return Err(notice_error("Host job notice set changed before model lease")); }
     if supplied.is_empty() { return Ok(()); }
-    let bound = serde_json::json!({"modelInput":input.payload,"historyStart":input.history_start,
+    let bound = serde_json::json!({"modelInput":input.payload,"modelHistory":input.live_history,
+        "checkpointSeq":input.checkpoint_seq,"historyStart":input.history_start,
         "historicalHostNoticeBytes":input.historical_bytes});
     let input_json = bound.to_string();
     let input_hash = format!("sha256:{}", hex::encode(Sha256::digest(input_json.as_bytes())));
@@ -2407,8 +2428,8 @@ impl Database {
                     let unhandled: i64 = transaction.query_row(
                         "SELECT COUNT(*) FROM kernel_job_notices n
                          LEFT JOIN kernel_job_notice_deliveries d ON d.job_id=n.job_id
-                         WHERE n.data_root_id=?1 AND n.conversation_id=?2 AND n.run_id=?3
-                           AND (d.job_id IS NULL OR d.state!='acknowledged')",
+                         WHERE n.conversation_id=?2 AND n.run_id=?3
+                           AND (n.data_root_id!=?1 OR d.job_id IS NULL OR d.state!='acknowledged')",
                         params![self.data_root_id,conversation,run_id],|row|row.get(0),
                     )?;
                     if unhandled != 0 { return Err(kernel_err("kernel.jobs_pending")); }

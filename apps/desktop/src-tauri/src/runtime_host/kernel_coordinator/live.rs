@@ -936,6 +936,7 @@ impl KernelCoordinator<'_> {
             let payload = serde_json::to_value(&directive).map_err(|_|"invalid live batch directive")?;
             let notice_binding = crate::database::ModelNoticeInput {
                 payload: &payload, history_start, historical_bytes: historical_notice_bytes,
+                live_history: Some(&batch_pre_history[..history_start]), checkpoint_seq: cursor,
             };
             self.apply(
                 Some(DecisionLease::BatchDispatch(&batch_id, owner, notice_mode.then_some(&notice_binding))),
@@ -1001,6 +1002,7 @@ impl KernelCoordinator<'_> {
             let payload = serde_json::to_value(&directive).map_err(|_|"invalid live continuation directive")?;
             let notice_binding = crate::database::ModelNoticeInput {
                 payload: &payload, history_start, historical_bytes: historical_notice_bytes,
+                live_history: Some(&next_messages[..history_start]), checkpoint_seq: cursor,
             };
             self.apply(Some(DecisionLease::ContinuationDispatch(&effect_key, owner,
                 notice_mode.then_some(&notice_binding))), |controller, now|
@@ -1251,7 +1253,8 @@ impl KernelCoordinator<'_> {
             let payload = serde_json::to_value(&frame).map_err(|_|"invalid live initial frame")?;
             let notice_binding = crate::database::ModelNoticeInput {
                 payload: &payload, history_start: frame.input.messages.len(),
-                historical_bytes: historical_notice_bytes,
+                historical_bytes: historical_notice_bytes, live_history: None,
+                checkpoint_seq: frame.checkpoint_seq,
             };
             let mut candidate = guard.clone();
             let now = self.clock.read();

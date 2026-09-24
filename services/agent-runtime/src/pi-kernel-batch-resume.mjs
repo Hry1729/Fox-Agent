@@ -99,6 +99,10 @@ function assertCompleteHistory(history) {
   if (pending.size) fail('incomplete historical tool batch')
 }
 
+function historicalHostNotices(history) {
+  return history.filter(message => message.role === 'hostJobNotice').map(message => message.notice)
+}
+
 function resultContent(result) {
   if (!record(result) || !Array.isArray(result.content)) fail('missing durable tool result content')
   for (const block of result.content) {
@@ -175,9 +179,10 @@ export function prepareKernelBatchResume(request, identity) {
   // All results were checked before the normal provider projection; no synthetic
   // recovery failures may be inserted to fill a missing result here.
   const hostNotices = validateHostJobNotices(frame.hostJobNotices)
+  validateHostJobNotices([...historicalHostNotices(frame.history), ...hostNotices])
   const messages = preparePiReplayHistory(materializeHostJobHistory(
     [...frame.history, assistant, ...results, ...steeringMessages, ...hostNotices.map(hostJobNoticeMarker)]))
-  return { messages, hostJobNoticeIds: hostNotices.map(item => item.jobId), runId: request.runId, turnId: frame.turnId,
+  return { messages, hostJobNoticeIds: [...historicalHostNotices(frame.history), ...hostNotices].map(item => item.jobId), runId: request.runId, turnId: frame.turnId,
     idempotencyKey: frame.idempotencyKey, batchId: frame.batchId, checkpointSeq: frame.checkpointSeq }
 }
 
@@ -210,9 +215,10 @@ export function prepareKernelInitialModel(request, identity) {
     }
   }
   const hostNotices = validateHostJobNotices(frame.hostJobNotices)
+  validateHostJobNotices([...historicalHostNotices(input.messages), ...hostNotices])
   const all = [...input.messages, ...hostNotices.map(hostJobNoticeMarker)]
   return { messages: preparePiReplayHistory(materializeHostJobHistory(all)),
-    hostJobNoticeIds: hostNotices.map(item => item.jobId), runId: input.runId, turnId: input.turnId,
+    hostJobNoticeIds: [...historicalHostNotices(input.messages), ...hostNotices].map(item => item.jobId), runId: input.runId, turnId: input.turnId,
     idempotencyKey: frame.idempotencyKey, checkpointSeq: frame.checkpointSeq, initial: true }
 }
 

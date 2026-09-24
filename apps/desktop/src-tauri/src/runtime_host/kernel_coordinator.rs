@@ -762,7 +762,8 @@ impl<'a> KernelCoordinator<'a> {
             let payload = serde_json::to_value(&frame).map_err(|_|"invalid initial model input")?;
             let notice_binding = crate::database::ModelNoticeInput {
                 payload: &payload, history_start: frame.input.messages.len(),
-                historical_bytes: historical_notice_bytes,
+                historical_bytes: historical_notice_bytes, live_history: None,
+                checkpoint_seq: frame.checkpoint_seq,
             };
             let mut candidate = guard.clone();
             let now = self.clock.read();
@@ -989,7 +990,8 @@ impl<'a> KernelCoordinator<'a> {
         let notice_binding = crate::database::ModelNoticeInput {
             payload: &notice_payload,
             history_start: frame.history.len() + 1 + frame.tools.len() + frame.steering.len(),
-            historical_bytes: historical_notice_bytes,
+            historical_bytes: historical_notice_bytes, live_history: None,
+            checkpoint_seq: frame.checkpoint_seq,
         };
         self.database.kernel_validate_resource_acquisition(&self.binding.run_id)?;
         let token = self.cancellation.run_token(&self.binding.run_id)?;

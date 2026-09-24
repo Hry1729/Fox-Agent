@@ -66,6 +66,8 @@ mod kernel_artifact_gate_tests;
 mod rev_repro_tests;
 #[path = "f1_engine_path_tests.rs"]
 mod f1_engine_path_tests;
+#[path = "host_job_notice_tests.rs"]
+mod host_job_notice_tests;
 
 /// Record the durable settled result of one authoritative Kernel tool call.
 ///
