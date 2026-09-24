@@ -773,12 +773,28 @@ pub(crate) mod waiting_wake_test_hooks {
         static SLOT: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
         SLOT.get_or_init(|| Mutex::new(None))
     }
+    fn wake_account_slot() -> &'static Mutex<Option<Hook>> {
+        static SLOT: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+        SLOT.get_or_init(|| Mutex::new(None))
+    }
     pub(crate) fn set_before_park_unlock(run_id: &str, hook: Arc<dyn Fn() + Send + Sync>) {
         *slot().lock().unwrap() = Some((run_id.to_owned(), hook));
     }
     pub(crate) fn run_before_park_unlock(run_id: &str) {
         let hook = {
             let mut stored = slot().lock().unwrap();
+            if stored.as_ref().is_some_and(|(id, _)| id == run_id) {
+                stored.take().map(|(_, hook)| hook)
+            } else { None }
+        };
+        if let Some(hook) = hook { hook(); }
+    }
+    pub(crate) fn set_before_wake_account(run_id: &str, hook: Arc<dyn Fn() + Send + Sync>) {
+        *wake_account_slot().lock().unwrap() = Some((run_id.to_owned(), hook));
+    }
+    pub(crate) fn run_before_wake_account(run_id: &str) {
+        let hook = {
+            let mut stored = wake_account_slot().lock().unwrap();
             if stored.as_ref().is_some_and(|(id, _)| id == run_id) {
                 stored.take().map(|(_, hook)| hook)
             } else { None }
@@ -1375,6 +1391,8 @@ impl super::RuntimeHost {
             &self.database, &super::shadow_reconcile::ReconcilerClock,
             run_id, &cancellation,
         )?;
+        #[cfg(test)]
+        waiting_wake_test_hooks::run_before_wake_account(run_id);
         // A persisted user cancellation wins even if the last Job completed at
         // the same instant. The ordinary drive consumes that command without
         // opening a model transport.
