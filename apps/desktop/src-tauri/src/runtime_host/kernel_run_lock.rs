@@ -3,7 +3,6 @@
 use sha2::{Digest, Sha256};
 use std::{
     fs::{File, OpenOptions},
-    io::ErrorKind,
     path::Path,
 };
 
@@ -30,12 +29,9 @@ impl KernelRunLock {
             .truncate(false)
             .open(directory.join(filename))
             .map_err(|error| format!("Kernel lock file: {error}"))?;
-        file.try_lock().map_err(|error| {
-            if error.kind() == ErrorKind::WouldBlock {
-                KERNEL_RUN_ALREADY_OWNED.to_owned()
-            } else {
-                format!("Kernel Run cannot be locked: {error}")
-            }
+        file.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => KERNEL_RUN_ALREADY_OWNED.to_owned(),
+            other => format!("Kernel Run cannot be locked: {other}"),
         })?;
         Ok(Self { _file: file })
     }
