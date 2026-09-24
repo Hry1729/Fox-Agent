@@ -925,6 +925,13 @@ export const SCHEMA_BUNDLE = {
             "null"
           ]
         },
+        "continuationLane": {
+          "description": "Only a durable Job wake may use this lane. Ordinary initial and other\ncontinuation frames retain the current-user tail requirement.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "hostJobNotices": {
           "items": {
             "$ref": "#/$defs/HostJobNotice"
