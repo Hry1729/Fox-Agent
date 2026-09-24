@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 
 use crate::database::{
     now_ms, Database, ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput,
+    RestoreClaim, RestoreRequestRecord,
 };
 
 pub(crate) fn hash_file(path: &Path) -> Option<(String, i64)> {
@@ -826,6 +827,9 @@ pub(crate) fn restore_version(
 /// variable, Cargo feature or global switch can turn a test behaviour into a
 /// shipped one.
 pub(crate) trait RestoreFaultSeam: Send + Sync {
+    /// Observability seam immediately after the durable claim and before the
+    /// file commit. Production's implementation is inert.
+    fn after_claim(&self) {}
     fn before_capture(&self) -> Result<(), String> {
         Ok(())
     }
@@ -843,6 +847,62 @@ pub(crate) trait RestoreFaultSeam: Send + Sync {
 pub(crate) struct NoRestoreFault;
 impl RestoreFaultSeam for NoRestoreFault {}
 
+fn restore_intent_digest(conversation_id: &str, version_id: &str, force: bool) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"fox.restore.intent.v1");
+    for value in [conversation_id, version_id] {
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value.as_bytes());
+    }
+    hasher.update([u8::from(force)]);
+    hex::encode(hasher.finalize())
+}
+
+fn existing_restore_result(
+    database: &Database,
+    conversation_id: &str,
+    row: RestoreRequestRecord,
+    intent_digest: &str,
+) -> Result<ManagedFileVersion, String> {
+    // NULL is a v82 row: that schema never recorded `force`, so the intent
+    // cannot be reconstructed safely even when its version_id happens to match.
+    if row.intent_digest.as_deref() != Some(intent_digest) {
+        return Err("identity_conflict: restore request id belongs to another or unverifiable intent".into());
+    }
+    match row.state.as_str() {
+        "committed" => {
+            let result = row.result_version_id.ok_or_else(||
+                "in_progress_or_uncertain: committed restore receipt has no result identity".to_string())?;
+            let version = database.managed_file_version(&result)?
+                .ok_or_else(|| "in_progress_or_uncertain: recorded restore result vanished".to_string())?;
+            if version.conversation_id != conversation_id
+                || version.storage_path != row.target_identity
+                || version.restored_from_id.as_deref() != Some(row.version_id.as_str())
+                || version.change_kind != "restored"
+                || version.source != ManagedFileSource::Restore
+                || version.tool_call_id.as_deref() != Some(row.dispatch_id.as_str())
+            {
+                return Err("in_progress_or_uncertain: recorded restore result identity is inconsistent".into());
+            }
+            Ok(version)
+        }
+        "running" => Err(format!(
+            "in_progress_or_uncertain: {} has a claimed restore; its side effect must not be replayed",
+            row.display_name
+        )),
+        "not_applied" => Err(format!(
+            "not_applied: no restore commit was recorded for {}{}",
+            row.display_name,
+            row.error.as_deref().map(|error| format!(" ({error})")).unwrap_or_default()
+        )),
+        "recovery_required" | "indeterminate" => Err(format!(
+            "in_progress_or_uncertain: {} has an uncertain restore outcome; recovery materials are retained",
+            row.display_name
+        )),
+        _ => Err("in_progress_or_uncertain: unrecognized restore request state".into()),
+    }
+}
+
 pub(crate) fn restore_version_with_seam(
     database: &Database,
     backups_dir: &Path,
@@ -855,33 +915,11 @@ pub(crate) fn restore_version_with_seam(
     if request_id.trim().is_empty() || request_id.len() > 200 {
         return Err("restore request identity must be a non-empty short string".into());
     }
-    // Stable dedup: a repeated delivery of the SAME request reads the recorded
-    // result instead of performing the file mutation a second time.
+    let intent_digest = restore_intent_digest(conversation_id, version_id, force);
+    // Fast path for a durable prior claim. The IMMEDIATE transaction below is
+    // still authoritative if two first deliveries race through this read.
     if let Some(row) = database.restore_request(conversation_id, request_id)? {
-        if let Some(result) = row.result_version_id {
-            return database
-                .managed_file_version(&result)?
-                .ok_or_else(|| "recorded restore result vanished".to_string());
-        }
-        return Err(match row.state.as_str() {
-            "recovery_required" => format!(
-                "{} was left in an uncertain state during restore; recovery materials are retained",
-                row.display_name
-            ),
-            "indeterminate" => format!(
-                "{} could not be verified as restored; the result is unknown and must not be retried \
-                 with the same request identity",
-                row.display_name
-            ),
-            _ => format!(
-                "{} was not restored; the target was left untouched{}",
-                row.display_name,
-                row.error
-                    .as_deref()
-                    .map(|error| format!(" ({error})"))
-                    .unwrap_or_default()
-            ),
-        });
+        return existing_restore_result(database, conversation_id, row, &intent_digest);
     }
 
     let version = database
@@ -936,14 +974,19 @@ pub(crate) fn restore_version_with_seam(
     // restore is auditable as itself rather than as the dispatch that produced
     // the version, and a repeat delivery is recognisable.
     let dispatch_id = format!("restore:{request_id}");
-    database.record_restore_request(
+    let attempt_owner = match database.claim_restore_request(
         conversation_id,
         request_id,
         &version.id,
         &version.storage_path,
         baseline.as_deref(),
         &dispatch_id,
-    )?;
+        &intent_digest,
+    )? {
+        RestoreClaim::Claimed { attempt_owner } => attempt_owner,
+        RestoreClaim::Existing(row) => return existing_restore_result(database, conversation_id, row, &intent_digest),
+    };
+    seam.after_claim();
 
     let mut hooks = RestoreCommitHooks {
         database,
@@ -954,6 +997,8 @@ pub(crate) fn restore_version_with_seam(
         tool: "restore",
         display_name: &version.display_name,
         dispatch_id: &dispatch_id,
+        request_id,
+        attempt_owner: &attempt_owner,
         restored_from_id: &version.id,
         source_sha256: &source.sha256,
         source_size: source.size,
@@ -969,8 +1014,15 @@ pub(crate) fn restore_version_with_seam(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("cannot recreate the target folder: {error}"))?;
+        if let Err(error) = fs::create_dir_all(parent) {
+            let message = format!("cannot recreate the target folder: {error}");
+            database.settle_restore_request(
+                conversation_id, request_id, &attempt_owner, "indeterminate", Some(&message),
+            ).map_err(|settle| format!(
+                "in_progress_or_uncertain: restore setup and settlement failed: {message}; {settle}"
+            ))?;
+            return Err(message);
+        }
     }
     let expected = baseline.clone().unwrap_or_else(|| "missing".to_owned());
     let commit = crate::tool_host::atomic_write_with_context_mode(
@@ -988,32 +1040,10 @@ pub(crate) fn restore_version_with_seam(
     // no recovery material and no honest receipt.
     let after_replace_fault = seam.after_replace().err();
 
-    // Classify from the verified state of the target, not from "the result hash
-    // differs" (REV-02). A restore that reported an error is only `not_applied`
-    // when the target still holds exactly the bytes the Host read as its
-    // baseline; anything else is uncertain and keeps its recovery materials.
-    let observed = if target.exists() {
-        hash_file(&target).map(|(hash, size)| (hash, size))
-    } else {
-        None
-    };
-    let observed_raw = observed.as_ref().map(|(hash, _)| hash.clone());
-    let committed = commit.is_ok() && observed_raw.as_deref() == Some(source.sha256.as_str());
-    let baseline_intact = observed_raw.is_none() && baseline.is_none()
-        || observed_raw.as_deref() == current_raw.as_deref();
-    if !committed {
-        hooks.outcome = if commit.is_ok() {
-            // The commit reported success but the bytes are not the selected
-            // version's: the outcome is genuinely unknown.
-            RestoreOutcome::Indeterminate
-        } else if baseline_intact {
-            RestoreOutcome::NotApplied
-        } else {
-            RestoreOutcome::RecoveryRequired
-        };
-    }
-    match hooks.outcome {
-        RestoreOutcome::Committed => {
+    // The only success receipt is the version plus request row committed by
+    // record_committed while the file lock was held. A later legitimate write
+    // may change the target; a lock-external hash cannot revise that receipt.
+    if commit.is_ok() && hooks.outcome == RestoreOutcome::Committed {
             let new_id = hooks
                 .registered_version_id
                 .clone()
@@ -1021,41 +1051,31 @@ pub(crate) fn restore_version_with_seam(
             let row = database
                 .managed_file_version(&new_id)?
                 .ok_or_else(|| "restored version row vanished".to_string())?;
-            database.settle_restore_request(
-                conversation_id,
-                request_id,
-                "committed",
-                Some(&new_id),
-                None,
-            )?;
             return Ok(row);
-        }
-        RestoreOutcome::RecoveryRequired
-        | RestoreOutcome::NotApplied
-        | RestoreOutcome::Indeterminate => {}
     }
-    let state = match hooks.outcome {
-        RestoreOutcome::RecoveryRequired => "recovery_required",
-        RestoreOutcome::Indeterminate => "indeterminate",
-        _ => "not_applied",
+    let state = match (hooks.outcome, hooks.evidence, commit.is_ok()) {
+        (RestoreOutcome::NotApplied, fox_engine_protocol::ExecutionEvidence::NotStarted, false) =>
+            "not_applied",
+        (RestoreOutcome::Indeterminate, _, _) | (_, _, true) => "indeterminate",
+        _ => "recovery_required",
     };
     let mut error = commit.err();
     if error.is_none() {
         error = after_replace_fault;
     }
-    let message = match hooks.outcome {
-        RestoreOutcome::RecoveryRequired => format!(
+    let message = match state {
+        "recovery_required" => format!(
             "{} was left in an uncertain state during restore; recovery materials are retained \
              next to the target",
             version.display_name
         ),
-        RestoreOutcome::Indeterminate => format!(
+        "indeterminate" => format!(
             "{} could not be verified as restored; the result is unknown and must not be retried \
              with the same request identity",
             version.display_name
         ),
         _ => format!(
-            "{} was not restored; the target was left untouched{}",
+            "{} was not restored by this attempt{}",
             version.display_name,
             error
                 .as_ref()
@@ -1063,7 +1083,11 @@ pub(crate) fn restore_version_with_seam(
                 .unwrap_or_default()
         ),
     };
-    database.settle_restore_request(conversation_id, request_id, state, None, error.as_deref())?;
+    database.settle_restore_request(
+        conversation_id, request_id, &attempt_owner, state, error.as_deref(),
+    ).map_err(|settle| format!(
+        "in_progress_or_uncertain: restore outcome could not be durably settled ({settle}); {message}"
+    ))?;
     Err(message)
 }
 
@@ -1087,6 +1111,8 @@ struct RestoreCommitHooks<'a> {
     tool: &'a str,
     display_name: &'a str,
     dispatch_id: &'a str,
+    request_id: &'a str,
+    attempt_owner: &'a str,
     restored_from_id: &'a str,
     /// The bytes this restore writes, already hash-verified against the
     /// selected version's own record.
@@ -1181,11 +1207,11 @@ impl crate::tool_host::FileCommitContext for RestoreCommitHooks<'_> {
         }
         let new_id = self
             .database
-            .register_managed_file_version(
+            .commit_restored_version(
                 &ManagedFileVersionInput {
                     conversation_id: self.conversation_id,
                     run_id: self.run_id,
-                    tool_call_id: self.tool_call_id,
+                    tool_call_id: Some(self.dispatch_id),
                     tool: self.tool,
                     storage_path: &target.to_string_lossy().to_owned(),
                     display_name: self.display_name,
@@ -1200,6 +1226,9 @@ impl crate::tool_host::FileCommitContext for RestoreCommitHooks<'_> {
                     source: ManagedFileSource::Restore,
                 },
                 now_ms(),
+                self.request_id,
+                self.attempt_owner,
+                self.dispatch_id,
             )
             .map_err(|error| {
                 // A registration failure must not be reported as "nothing

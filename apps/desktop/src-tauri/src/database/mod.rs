@@ -3,7 +3,7 @@ mod kernel_changes;
 mod models;
 mod repositories;
 
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 82;
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 83;
 pub(crate) use repositories::kernel_execution_admission;
 pub(crate) use repositories::kernel_reconciliation::*;
 pub(crate) use repositories::{BudgetTier, ContinuableRun, ContinuationRequest, GrantRegistration, GrantScopeKind, GrantSkipReason};
@@ -34,6 +34,7 @@ pub(crate) use repositories::{
     package_snapshot_hash, CreateChildRunInput, DeliveryArtifactRow, DeliveryChecklistItem,
     DeliveryChecklistSeed, DeliveryRequirement, RequirementKind,
     KernelHostScope, ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput,
+    RestoreClaim, RestoreRequestRecord,
     MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
     SkillActivationRecord, SteeringDecision, SteeringMessage, MAX_STEERING_FOLLOWUPS,
 };

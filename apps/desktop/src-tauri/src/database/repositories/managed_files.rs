@@ -77,17 +77,46 @@ pub(crate) struct RestoreRequestRecord {
     pub target_identity: String,
     pub baseline_version: Option<String>,
     pub dispatch_id: String,
+    pub intent_digest: Option<String>,
+    pub attempt_owner: Option<String>,
     pub state: String,
     pub result_version_id: Option<String>,
     pub error: Option<String>,
     pub display_name: String,
 }
 
+pub(crate) enum RestoreClaim {
+    Claimed { attempt_owner: String },
+    Existing(RestoreRequestRecord),
+}
+
+fn restore_request_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RestoreRequestRecord> {
+    Ok(RestoreRequestRecord {
+        version_id: row.get(0)?,
+        target_identity: row.get(1)?,
+        baseline_version: row.get(2)?,
+        dispatch_id: row.get(3)?,
+        intent_digest: row.get(4)?,
+        attempt_owner: row.get(5)?,
+        state: row.get(6)?,
+        result_version_id: row.get(7)?,
+        error: row.get(8)?,
+        display_name: row.get::<_, Option<String>>(9)?
+            .unwrap_or_else(|| "the file".to_owned()),
+    })
+}
+
+const RESTORE_REQUEST_SELECT: &str = "SELECT r.version_id, r.target_identity, r.baseline_version,
+    r.dispatch_id, r.intent_digest, r.attempt_owner, r.state, r.result_version_id,
+    r.error, v.display_name FROM kernel_restore_requests r
+    LEFT JOIN managed_file_versions v ON v.id = r.version_id
+    WHERE r.conversation_id = ?1 AND r.request_id = ?2";
+
 impl Database {
-    /// Record a restore request before its commit, binding the baseline the
-    /// Host read at confirmation time. `INSERT OR IGNORE` keeps a repeated
-    /// delivery from overwriting an already-settled request.
-    pub(crate) fn record_restore_request(
+    /// The IMMEDIATE transaction is the sole admission point for this request
+    /// identity across independent Database connections. The first claimant
+    /// binds the Host-observed target and baseline; a retry cannot rebind them.
+    pub(crate) fn claim_restore_request(
         &self,
         conversation_id: &str,
         request_id: &str,
@@ -95,14 +124,19 @@ impl Database {
         target_identity: &str,
         baseline_version: Option<&str>,
         dispatch_id: &str,
-    ) -> Result<(), String> {
+        intent_digest: &str,
+    ) -> Result<RestoreClaim, String> {
+        let attempt_owner = uuid::Uuid::new_v4().to_string();
         self.with_connection(|connection| {
-            connection
-                .execute(
-                    "INSERT OR IGNORE INTO kernel_restore_requests(
+            let transaction = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let inserted = transaction.execute(
+                    "INSERT INTO kernel_restore_requests(
                         conversation_id, request_id, version_id, target_identity,
-                        baseline_version, dispatch_id, state, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7)",
+                        baseline_version, dispatch_id, intent_digest, attempt_owner,
+                        state, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running', ?9)
+                     ON CONFLICT(conversation_id, request_id) DO NOTHING",
                     rusqlite::params![
                         conversation_id,
                         request_id,
@@ -110,10 +144,22 @@ impl Database {
                         target_identity,
                         baseline_version,
                         dispatch_id,
+                        intent_digest,
+                        attempt_owner,
                         now_ms(),
                     ],
                 )?;
-            Ok(())
+            let outcome = if inserted == 1 {
+                RestoreClaim::Claimed { attempt_owner }
+            } else {
+                RestoreClaim::Existing(transaction.query_row(
+                    RESTORE_REQUEST_SELECT,
+                    rusqlite::params![conversation_id, request_id],
+                    restore_request_row,
+                )?)
+            };
+            transaction.commit()?;
+            Ok(outcome)
         })
     }
 
@@ -126,25 +172,9 @@ impl Database {
         self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT r.version_id, r.target_identity, r.baseline_version, r.dispatch_id,
-                            r.state, r.result_version_id, r.error, v.display_name
-                       FROM kernel_restore_requests r
-                       LEFT JOIN managed_file_versions v ON v.id = r.version_id
-                      WHERE r.conversation_id = ?1 AND r.request_id = ?2",
+                    RESTORE_REQUEST_SELECT,
                     rusqlite::params![conversation_id, request_id],
-                    |row| {
-                        Ok(RestoreRequestRecord {
-                            version_id: row.get(0)?,
-                            target_identity: row.get(1)?,
-                            baseline_version: row.get(2)?,
-                            dispatch_id: row.get(3)?,
-                            state: row.get(4)?,
-                            result_version_id: row.get(5)?,
-                            error: row.get(6)?,
-                            display_name: row.get::<_, Option<String>>(7)?
-                                .unwrap_or_else(|| "the file".to_owned()),
-                        })
-                    },
+                    restore_request_row,
                 )
                 .optional()
         })
@@ -155,27 +185,33 @@ impl Database {
         &self,
         conversation_id: &str,
         request_id: &str,
+        attempt_owner: &str,
         state: &str,
-        result_version_id: Option<&str>,
         error: Option<&str>,
     ) -> Result<(), String> {
-        self.with_connection(|connection| {
-            connection
-                .execute(
+        if !matches!(state, "not_applied" | "recovery_required" | "indeterminate") {
+            return Err("restore_settlement_invalid_state".into());
+        }
+        let changed = self.with_connection(|connection| {
+            connection.execute(
                     "UPDATE kernel_restore_requests
-                        SET state = ?3, result_version_id = ?4, error = ?5, settled_at = ?6
-                      WHERE conversation_id = ?1 AND request_id = ?2",
+                        SET state = ?4, result_version_id = NULL, error = ?5, settled_at = ?6
+                      WHERE conversation_id = ?1 AND request_id = ?2
+                        AND attempt_owner = ?3 AND state = 'running'",
                     rusqlite::params![
                         conversation_id,
                         request_id,
+                        attempt_owner,
                         state,
-                        result_version_id,
                         error,
                         now_ms(),
                     ],
-                )?;
-            Ok(())
-        })
+                )
+        })?;
+        if changed != 1 {
+            return Err("restore_settlement_conflict: request owner or running state changed".into());
+        }
+        Ok(())
     }
 }
 
@@ -223,42 +259,47 @@ impl Database {
     ) -> Result<String, String> {
         self.with_connection(|conn| {
             let tx = conn.transaction()?;
-            let version_no = tx.query_row(
-                "SELECT COALESCE(MAX(version_no),0)+1 FROM managed_file_versions
-                 WHERE storage_path=?1",
-                params![input.storage_path],
-                |row| row.get::<_, i64>(0),
-            )?;
-            let id = format!("file-version:{}", uuid::Uuid::new_v4());
-            tx.execute(
-                "INSERT INTO managed_file_versions(
-                    id, conversation_id, run_id, tool_call_id, tool, storage_path, display_name,
-                    version_no, change_kind, before_hash, before_size, after_hash, after_size,
-                    backup_path, after_backup_path, restored_from_id, source_kind, source_verified,
-                    created_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+            let id = insert_managed_file_version(&tx, input, now)?;
+            tx.commit()?;
+            Ok(id)
+        })
+    }
+
+    /// Publish the restored version and its receipt in one transaction while
+    /// the file commit lock still covers the target. If either write fails,
+    /// neither DB fact is published and the running claim remains uncertain.
+    pub(crate) fn commit_restored_version(
+        &self,
+        input: &ManagedFileVersionInput<'_>,
+        now: i64,
+        request_id: &str,
+        attempt_owner: &str,
+        dispatch_id: &str,
+    ) -> Result<String, String> {
+        self.with_connection(|conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let id = insert_managed_file_version(&tx, input, now)?;
+            let changed = tx.execute(
+                "UPDATE kernel_restore_requests
+                    SET state = 'committed', result_version_id = ?4, error = NULL, settled_at = ?5
+                  WHERE conversation_id = ?1 AND request_id = ?2
+                    AND attempt_owner = ?3 AND state = 'running'
+                    AND result_version_id IS NULL AND dispatch_id = ?6
+                    AND target_identity = ?7 AND version_id = ?8",
                 params![
-                    id,
                     input.conversation_id,
-                    input.run_id,
-                    input.tool_call_id,
-                    input.tool,
-                    input.storage_path,
-                    input.display_name,
-                    version_no,
-                    input.change_kind,
-                    input.before_hash,
-                    input.before_size,
-                    input.after_hash,
-                    input.after_size,
-                    input.backup_path,
-                    input.after_backup_path,
-                    input.restored_from_id,
-                    input.source.as_str(),
-                    i64::from(input.source.is_verified()),
+                    request_id,
+                    attempt_owner,
+                    id,
                     now,
+                    dispatch_id,
+                    input.storage_path,
+                    input.restored_from_id,
                 ],
             )?;
+            if changed != 1 {
+                return Err(rusqlite::Error::QueryReturnedNoRows);
+            }
             tx.commit()?;
             Ok(id)
         })
@@ -440,6 +481,50 @@ impl Database {
             Ok(acceptable(candidate).then(|| candidate.to_owned()))
         })
     }
+}
+
+fn insert_managed_file_version(
+    tx: &rusqlite::Transaction<'_>,
+    input: &ManagedFileVersionInput<'_>,
+    now: i64,
+) -> rusqlite::Result<String> {
+    let version_no = tx.query_row(
+        "SELECT COALESCE(MAX(version_no),0)+1 FROM managed_file_versions
+         WHERE storage_path=?1",
+        params![input.storage_path],
+        |row| row.get::<_, i64>(0),
+    )?;
+    let id = format!("file-version:{}", uuid::Uuid::new_v4());
+    tx.execute(
+        "INSERT INTO managed_file_versions(
+            id, conversation_id, run_id, tool_call_id, tool, storage_path, display_name,
+            version_no, change_kind, before_hash, before_size, after_hash, after_size,
+            backup_path, after_backup_path, restored_from_id, source_kind, source_verified,
+            created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+        params![
+            id,
+            input.conversation_id,
+            input.run_id,
+            input.tool_call_id,
+            input.tool,
+            input.storage_path,
+            input.display_name,
+            version_no,
+            input.change_kind,
+            input.before_hash,
+            input.before_size,
+            input.after_hash,
+            input.after_size,
+            input.backup_path,
+            input.after_backup_path,
+            input.restored_from_id,
+            input.source.as_str(),
+            i64::from(input.source.is_verified()),
+            now,
+        ],
+    )?;
+    Ok(id)
 }
 
 fn row_to_managed_version(row: &rusqlite::Row<'_>) -> rusqlite::Result<ManagedFileVersion> {

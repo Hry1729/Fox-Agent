@@ -7121,6 +7121,31 @@ fn run_transaction(connection: &mut Connection, now: i64) -> Result<()> {
             [now],
         )?;
     }
+    let v83_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 83)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !v83_applied {
+        // Existing v82 requests did not record `force`, so their intent cannot
+        // be reconstructed. Keep the new fields NULL and reject their replay.
+        ensure_column_if_missing(
+            &transaction,
+            "kernel_restore_requests",
+            "intent_digest",
+            "TEXT",
+        )?;
+        ensure_column_if_missing(
+            &transaction,
+            "kernel_restore_requests",
+            "attempt_owner",
+            "TEXT",
+        )?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (83, ?1)",
+            [now],
+        )?;
+    }
     let violations: i64 = transaction.query_row(
         "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))?;
     if violations != 0 {
@@ -13850,7 +13875,7 @@ DROP TABLE IF EXISTS kernel_whole_file_replace_grants;
 DROP TABLE IF EXISTS kernel_restore_requests;
 ALTER TABLE kernel_execution_credentials DROP COLUMN replace_candidate_digest;
 ALTER TABLE kernel_execution_credentials DROP COLUMN replace_request_digest;
-DELETE FROM schema_migrations WHERE version IN (80,81,82);
+DELETE FROM schema_migrations WHERE version IN (80,81,82,83);
 "#,
                 )
                 .expect("narrow to a v79-shaped database");
@@ -14245,6 +14270,54 @@ DELETE FROM schema_migrations WHERE version=79;
                     Ok(())
                 })
                 .expect("idempotent reopen");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn migration_83_preserves_v82_restore_requests_without_inventing_force() {
+        let root = std::env::temp_dir().join(format!("fox-v83-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("scratch dir");
+        let path = root.join("facts.db");
+        let conversation = {
+            let db = crate::database::Database::open(path.clone()).expect("fresh database");
+            let conversation = db.create_conversation(
+                db.default_agent_id(), Some("v82 restore"), None, None,
+            ).expect("conversation");
+            conversation.id
+        };
+        {
+            let connection = Connection::open(&path).expect("synthetic v82 database");
+            connection.execute(
+                "INSERT INTO kernel_restore_requests(
+                    conversation_id,request_id,version_id,target_identity,baseline_version,
+                    dispatch_id,state,result_version_id,created_at,settled_at)
+                 VALUES (?1,'old-request','old-version','old-target','sha256:old',
+                    'restore:old-request','committed','old-result',1,2)",
+                [&conversation],
+            ).expect("v82 request");
+            connection.execute_batch(
+                "ALTER TABLE kernel_restore_requests DROP COLUMN intent_digest;
+                 ALTER TABLE kernel_restore_requests DROP COLUMN attempt_owner;
+                 DELETE FROM schema_migrations WHERE version=83;",
+            ).expect("remove only v83 shape and marker");
+        }
+        for _ in 0..2 {
+            let db = crate::database::Database::open(path.clone()).expect("upgrade and reopen");
+            db.with_connection(|connection| {
+                let old: (String, String, Option<String>, Option<String>) = connection.query_row(
+                    "SELECT state,result_version_id,intent_digest,attempt_owner
+                     FROM kernel_restore_requests WHERE conversation_id=?1 AND request_id='old-request'",
+                    [&conversation],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
+                assert_eq!(old, ("committed".into(), "old-result".into(), None, None));
+                let version: i64 = connection.query_row(
+                    "SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0),
+                )?;
+                assert_eq!(version, DATABASE_SCHEMA_VERSION);
+                Ok(())
+            }).expect("preserved historical request and v83 shape");
         }
         let _ = std::fs::remove_dir_all(root);
     }
