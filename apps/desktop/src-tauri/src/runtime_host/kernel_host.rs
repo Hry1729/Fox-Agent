@@ -923,8 +923,17 @@ pub(super) fn drive_with_actions_transport(
                             .dispatch_initial_with_worker(&owner, policy, runtime, api_key)
                     }
                 }
-                OutboxEffectKind::ContinuationModel => coordinator.dispatch_continuation_live(
-                    &effect.effect_key, &owner, policy, runtime, api_key, &execute, &after_commit, &settle_children),
+                OutboxEffectKind::ContinuationModel => {
+                    let binding = database.run_control_binding(run_id)?
+                        .ok_or("authoritative Run has no frozen control binding")?;
+                    if binding.engine_id == "pi" && !force_per_round {
+                        coordinator.dispatch_continuation_live(&effect.effect_key, &owner, policy,
+                            runtime, api_key, &execute, &after_commit, &settle_children)
+                    } else {
+                        coordinator.dispatch_continuation_with_worker(&effect.effect_key,
+                            &owner,policy,runtime,api_key)
+                    }
+                },
                 OutboxEffectKind::DeliverToolBatch => coordinator
                     .dispatch_stored_batch_with_worker(
                         effect

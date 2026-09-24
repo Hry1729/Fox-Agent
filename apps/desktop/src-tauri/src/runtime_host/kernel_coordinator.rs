@@ -168,7 +168,16 @@ impl<'a> KernelCoordinator<'a> {
         }
         let mut messages = pre_history.to_vec();
         messages.push(assistant.clone());
-        let notices = self.pending_host_job_notices(&messages)?;
+        // The response lease is still open here. Markers delivered by this
+        // very request remain `bound` until the same response write-set
+        // acknowledges them, so the read-only historical validator (which
+        // requires `acknowledged`) cannot run before that transaction.
+        // checked_job_notice_input revalidates the complete history and facts
+        // after acknowledgement inside the response transaction.
+        let historical=fox_engine_protocol::historical_host_job_notice_bytes(&messages)?;
+        let notices=self.database.pending_host_job_notices(
+            &self.binding.conversation_id,&self.binding.run_id,
+            (16*1024usize).saturating_sub(historical))?;
         if notices.is_empty() { return Ok(None); }
         let mut input = self.database.kernel_initial_input(&self.binding.run_id)?;
         input.messages = messages;
@@ -754,6 +763,35 @@ impl<'a> KernelCoordinator<'a> {
         })
     }
 
+    pub(super) fn dispatch_continuation_with_worker(
+        &self,
+        effect_key: &str,
+        owner: &str,
+        policy: &dyn PolicyDecisionPort,
+        runtime: &super::RuntimeCommand,
+        api_key: &str,
+    ) -> Result<(), String> {
+        let (_,lane,_) = self.database.kernel_continuation_input_with_lane(
+            &self.binding.run_id,effect_key)?;
+        if lane.as_deref() != Some("job_notice") {
+            self.ensure_context_with_worker(effect_key,4096,owner,runtime,api_key)?;
+        }
+        let config = self.database.kernel_model_config(&self.binding.run_id)?;
+        self.dispatch_initial_request(owner,policy,Some(effect_key),|binding,frame,token| {
+            let now=self.clock.read();
+            let facts=self.controller.lock().map_err(|_|"Kernel coordinator lock poisoned")?
+                .shadow_checkpoint(now.monotonic_ms);
+            let since=facts.model_request_since_wall_ms
+                .ok_or("continuation model deadline is missing")?;
+            if now.wall_ms<since {return Err("continuation model clock moved backwards".into());}
+            let remaining=binding.budgets.limit_operation_ms(
+                binding.budgets.model_request_ms.saturating_sub(now.wall_ms.saturating_sub(since)),
+                facts.running_elapsed_ms);
+            super::kernel_model_worker::deliver_initial_with_preview(
+                runtime,&config,api_key,binding,frame,token,remaining,self.preview,Some(self.database))
+        })
+    }
+
     fn model_request_window_expired(&self) -> Result<bool, String> {
         let now = self.clock.read();
         let facts = self.controller.lock().map_err(|_| "Kernel coordinator lock poisoned")?
@@ -823,23 +861,47 @@ impl<'a> KernelCoordinator<'a> {
             &kernel::CancellationToken,
         ) -> Result<fox_engine_protocol::KernelInitialModelResponse, String>,
     ) -> Result<(), String> {
+        self.dispatch_initial_request(owner,policy,None,deliver)
+    }
+
+    fn dispatch_initial_request(
+        &self,
+        owner: &str,
+        policy: &dyn PolicyDecisionPort,
+        continuation_key: Option<&str>,
+        deliver: impl FnOnce(
+            &RunControlBinding,
+            &fox_engine_protocol::KernelInitialModelFrame,
+            &kernel::CancellationToken,
+        ) -> Result<fox_engine_protocol::KernelInitialModelResponse, String>,
+    ) -> Result<(), String> {
         self.tick()?;
         self.database
             .kernel_validate_resource_acquisition(&self.binding.run_id)?;
-        let mut input = self.database.kernel_initial_input(&self.binding.run_id)?;
-        input.messages = self.model_retry_context("initial", self.context_view("initial", &input.messages)?)?;
+        let (mut input,continuation_lane,frozen_notices)=if let Some(key)=continuation_key {
+            self.database.kernel_continuation_input_with_lane(&self.binding.run_id,key)?
+        } else {(self.database.kernel_initial_input(&self.binding.run_id)?,None,Vec::new())};
+        let context_key=continuation_key.unwrap_or("initial");
+        if continuation_lane.as_deref()!=Some("job_notice") {
+            input.messages=self.model_retry_context(context_key,
+                self.context_view(context_key,&input.messages)?)?;
+        }
         // Same steering boundary as the live transport: collect all active
         // rows into this frozen initial dispatch before it is armed.
-        let steering_rows = self.database.deliver_steering_for_dispatch(
-            &self.binding.run_id,
-            kernel::INITIAL_MODEL_IDEMPOTENCY_KEY,
-        )?;
+        let dispatch_key=continuation_key.map(|key|format!("continuation-delivery:{key}"))
+            .unwrap_or_else(||kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into());
+        let steering_rows=if continuation_lane.as_deref()==Some("job_notice") {Vec::new()} else {
+            self.database.deliver_steering_for_dispatch(&self.binding.run_id,&dispatch_key)?
+        };
         input
             .messages
             .extend(steering_rows.iter().map(steering::steering_user_message));
         let notice_mode = self.database.compute_job_notice_enabled(&self.binding.run_id)?;
         let historical_notice_bytes = fox_engine_protocol::historical_host_job_notice_bytes(&input.messages)?;
         let new_notices = self.pending_host_job_notices(&input.messages)?;
+        if continuation_lane.as_deref()==Some("job_notice") && new_notices!=frozen_notices {
+            return Err("job_notice facts changed after durable continuation".into());
+        }
         let token = self.cancellation.run_token(&self.binding.run_id)?;
         token.check()?;
         let frame = {
@@ -858,9 +920,9 @@ impl<'a> KernelCoordinator<'a> {
             let frame = fox_engine_protocol::KernelInitialModelFrame {
                 schema_version: 1,
                 input,
-                idempotency_key: kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into(),
-                continuation_key: None,
-                continuation_lane: None,
+                idempotency_key: dispatch_key.clone(),
+                continuation_key: continuation_key.map(str::to_owned),
+                continuation_lane: continuation_lane.clone(),
                 checkpoint_seq: guard.last_event_seq(),
                 host_job_notices: new_notices,
             };
@@ -876,20 +938,21 @@ impl<'a> KernelCoordinator<'a> {
             };
             let mut candidate = guard.clone();
             let now = self.clock.read();
-            let effects = candidate
-                .begin_initial_model_request(now.monotonic_ms, now.wall_ms)
+            let effects = if let Some(key)=continuation_key {
+                candidate.begin_continuation_model_request(key,now.monotonic_ms,now.wall_ms)
+            } else { candidate.begin_initial_model_request(now.monotonic_ms,now.wall_ms) }
                 .map_err(|error| error.to_string())?;
             #[cfg(test)]
             notice_lease_test_barrier::fire(&self.binding.run_id);
-            self.database.kernel_commit_initial_model(
-                &self.binding.run_id,
-                now.wall_ms,
-                &candidate.persist_command(&effects),
-                owner,
-                false,
-                None,
-                notice_mode.then_some(&notice_binding),
-            )?;
+            if let Some(key)=continuation_key {
+                self.database.kernel_commit_continuation_model(&self.binding.run_id,now.wall_ms,
+                    &candidate.persist_command(&effects),key,owner,false,None,
+                    notice_mode.then_some(&notice_binding))?;
+            } else {
+                self.database.kernel_commit_initial_model(&self.binding.run_id,now.wall_ms,
+                    &candidate.persist_command(&effects),owner,false,None,
+                    notice_mode.then_some(&notice_binding))?;
+            }
             *guard = candidate;
             frame
         };
@@ -898,7 +961,7 @@ impl<'a> KernelCoordinator<'a> {
             Ok(response) => response,
             Err(error) => {
                 return self.retry_settled_model(
-                    kernel::INITIAL_MODEL_EFFECT_KEY,
+                    continuation_key.unwrap_or(kernel::INITIAL_MODEL_EFFECT_KEY),
                     owner,
                     frame.checkpoint_seq,
                     error,
@@ -911,7 +974,7 @@ impl<'a> KernelCoordinator<'a> {
         }
         self.tick_settled_model()?;
         if self.model_request_window_expired()? {
-            return self.retry_settled_model(kernel::INITIAL_MODEL_EFFECT_KEY, owner, frame.checkpoint_seq,
+            return self.retry_settled_model(continuation_key.unwrap_or(kernel::INITIAL_MODEL_EFFECT_KEY), owner, frame.checkpoint_seq,
                 super::kernel_model_worker::MODEL_WINDOW_EXPIRED.into());
         }
         token.check()?;
@@ -971,8 +1034,12 @@ impl<'a> KernelCoordinator<'a> {
         loop {
             #[cfg(test)]
             live::test_barrier::fire(&self.binding.run_id);
-            let outcome = self.apply(Some(DecisionLease::Initial(owner)), |controller, now| {
-                let mut effects = vec![controller.record_initial_model_response(&encoded)?];
+            let lease=continuation_key.map(|key|DecisionLease::Continuation(key,owner))
+                .unwrap_or(DecisionLease::Initial(owner));
+            let outcome = self.apply(Some(lease), |controller, now| {
+                let mut effects=vec![if continuation_key.is_some() {
+                    controller.record_continuation_model_response(&encoded)?
+                } else { controller.record_initial_model_response(&encoded)? }];
                 if let Some(checkpoint) = next.clone() {
                     let value = serde_json::to_value(&checkpoint).map_err(|_| KernelError::FailClosed("invalid initial checkpoint".into()))?;
                     let stored = serde_json::json!({"hash":checkpoint_hash(&value),"value":value});
