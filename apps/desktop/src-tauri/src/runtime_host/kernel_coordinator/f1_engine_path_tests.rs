@@ -60,6 +60,15 @@ fn run_fixture(
     body: &str,
     config: crate::kernel_model_config::KernelModelConfig,
 ) -> Run {
+    run_fixture_with_mode(label, body, config, "allow")
+}
+
+fn run_fixture_with_mode(
+    label: &str,
+    body: &str,
+    config: crate::kernel_model_config::KernelModelConfig,
+    mode: &str,
+) -> Run {
     let root = std::env::temp_dir().join(format!(
         "fox-f1-engine-{label}-{}",
         uuid::Uuid::new_v4().simple()
@@ -72,7 +81,7 @@ fn run_fixture(
             db.default_agent_id(),
             None,
             Some(root.to_str().unwrap()),
-            Some("allow"),
+            Some(mode),
         )
         .unwrap();
     let id = db
@@ -770,3 +779,6 @@ fn f1_per_round_worker_provider_small_read_allows_replacement() {
 fn f1_per_round_reopen_after_read_rejects_first_write() {
     engine_case(PathKind::PerRound, true, false);
 }
+
+#[path = "f3_approval_tests.rs"]
+mod f3_approval_tests;
