@@ -17,6 +17,11 @@ use crate::tool_host;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+// A-F1：模型实际交付与整文件替换资格。独立文件，但作为本文件的子模块，以便复用
+// 这里已经过 REV 审查的真实夹具与执行缝，而不是另写一套替身。
+#[path = "f1_model_delivery_tests.rs"]
+mod f1_model_delivery_tests;
+
 // ---------------------------------------------------------------------------
 // 夹具：真实 Database + 真实项目绑定 + 冻结 Legacy(Rust executor) 绑定
 // ---------------------------------------------------------------------------
