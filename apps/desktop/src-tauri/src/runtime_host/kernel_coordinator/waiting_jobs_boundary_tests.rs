@@ -176,10 +176,22 @@ fn shutdown_owned_wake(live: bool) {
     assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(), Some("waiting_jobs"));
     at_settle_rx.recv_timeout(Duration::from_secs(20))
         .expect("real Job never reached its terminal transaction");
-    let job_id = db.kernel_jobs_for_run(&run).unwrap()[0].job_id.clone();
+    let job = db.kernel_jobs_for_run(&run).unwrap().remove(0);
+    let job_id = job.job_id.clone();
     job_release_tx.send(()).unwrap();
     wake_entered_rx.recv_timeout(Duration::from_secs(15))
         .expect("automatic wake never held its admission gate");
+    // A park-triggered checker may enter the hook before the Job transaction
+    // finishes. Keep that OS lock held until the real terminal notice exists.
+    let job_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let complete = db.kernel_job_snapshot(&job_id).unwrap().state.as_str() == "completed";
+        let noticed = db.kernel_job_notice(&job.conversation_id, &run, &job_id).unwrap().is_some();
+        if complete && noticed { break; }
+        assert!(Instant::now() < job_deadline,
+            "the real Job and scoped notice did not commit before Host shutdown");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert_eq!(db.kernel_job_snapshot(&job_id).unwrap().state.as_str(), "completed");
     assert_eq!(requests.load(Ordering::SeqCst), 2);
     {
