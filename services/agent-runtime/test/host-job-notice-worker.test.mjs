@@ -8,7 +8,8 @@ import { canonicalPermission } from '../src/control-binding.mjs'
 import { createEnvelope } from '../src/protocol.mjs'
 import { prepareKernelInitialModel } from '../src/pi-kernel-batch-resume.mjs'
 
-const identity = { runId: 'notice-run', conversationId: 'notice-conversation', runtimeSessionId: 'notice-session' }
+const identity = { runId: 'notice-run', conversationId: 'notice-conversation',
+  runtimeSessionId: 'notice-session', executionProfileId: 'legacy', engineId: 'pi' }
 const marker = 'FOX_HOST_JOB_NOTICE_V1\n'
 
 function fact(jobId) {
