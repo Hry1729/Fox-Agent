@@ -67,8 +67,14 @@ pub(super) fn execute(database: &Database, attachments: &Path, sessions: &Path,
         _ => {
             allowed_fields(input,if tool=="compute_job_result" {&["jobId","offset","limit"]} else if tool=="compute_job_status" {&["jobId","waitMs"]} else {&["jobId"]})?;
             let id=input["jobId"].as_str().ok_or("jobId is required")?;
+            let scoped_to_run = match database.run_control_binding(run_id)? {
+                Some(binding) if binding.authority == fox_engine_protocol::ExecutionAuthority::Authoritative =>
+                    database.compute_job_notice_enabled(run_id)?,
+                _ => false,
+            };
             let row=database.kernel_job_snapshot(id)?;
             if row.conversation_id!=conversation {return Err("job is outside the authorized conversation".into());}
+            if scoped_to_run && row.run_id!=run_id {return Err("job is outside this Run".into());}
             match tool {
                 "compute_job_cancel" => serde_json::to_value(host_lifecycle::cancel_host_job(database,registry(),id)?).map_err(|e|e.to_string())?,
                 "compute_job_result" => {

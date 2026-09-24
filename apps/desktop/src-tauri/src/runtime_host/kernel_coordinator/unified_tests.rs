@@ -149,6 +149,54 @@ fn experimental_compute_job_operations_reject_another_run_before_read_wait_or_ca
 }
 
 #[test]
+fn experimental_compute_job_operations_still_serve_their_own_run() {
+    use crate::database::JobStartRequest;
+    let (db, root, run, _older, _older_queued) = job_scope_fixture(true, false);
+    let conversation = db.run_control_binding(&run).unwrap().unwrap().conversation_id;
+    let completed = db.kernel_job_start(&JobStartRequest {
+        run_id: run.clone(), kind: "attachment_compute".into(),
+        idempotency_key: "own-result".into(), params: json!({"input":"fixture"}),
+        deadline_ms: Some(crate::database::now_ms() + 60_000), progress_total: None,
+    }).unwrap().snapshot().job_id.clone();
+    db.kernel_job_claim_attempt(&completed, 1).unwrap();
+    db.kernel_job_complete_attempt(&completed, 1, &conversation,
+        &json!({"visibleToOwner":"own-result"})).unwrap();
+    let queued = db.kernel_job_start(&JobStartRequest {
+        run_id: run.clone(), kind: "attachment_compute".into(),
+        idempotency_key: "own-cancel".into(), params: json!({"input":"fixture"}),
+        deadline_ms: Some(crate::database::now_ms() + 60_000), progress_total: None,
+    }).unwrap().snapshot().job_id.clone();
+    let call = |tool, input: Value| super::super::super::background_jobs::execute(
+        &db, &root, &root, &run, tool, &input, None,
+        std::time::Duration::from_secs(1), None);
+    assert!(call("compute_job_status", json!({"jobId":completed})).unwrap()
+        .to_string().contains("completed"));
+    assert!(call("compute_job_result", json!({"jobId":completed})).unwrap()
+        .to_string().contains("own-result"));
+    call("compute_job_cancel", json!({"jobId":queued})).unwrap();
+    assert!(db.kernel_job_snapshot(&queued).unwrap().cancel_requested_at.is_some());
+}
+
+#[test]
+fn authoritative_compute_job_lookup_rejects_unknown_notice_config() {
+    for missing in [false, true] {
+        let (db, root, run, completed, _queued) = job_scope_fixture(false, false);
+        db.with_connection(|conn| {
+            if missing {
+                conn.execute("DELETE FROM kernel_runs WHERE run_id=?1", [&run])
+            } else {
+                conn.execute("UPDATE kernel_runs SET frozen_config_json='{}' WHERE run_id=?1", [&run])
+            }
+        }).unwrap();
+        let lookup = super::super::super::background_jobs::execute(
+            &db, &root, &root, &run, "compute_job_status", &json!({"jobId":completed}),
+            None, std::time::Duration::from_secs(1), None);
+        assert!(lookup.is_err(),
+            "missing={missing}: an unknown Authoritative flag cannot inherit Legacy reachability");
+    }
+}
+
+#[test]
 fn default_off_and_legacy_compute_job_operations_keep_conversation_compatibility() {
     for legacy in [false, true] {
         let (db, root, run, completed, queued) = job_scope_fixture(false, legacy);
