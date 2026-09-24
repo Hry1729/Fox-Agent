@@ -94,9 +94,9 @@ fn stage_windows_zvec_test_dll() {
         fs::read(&temporary).expect("verify staged Zvec DLL") == original,
         "staged Zvec DLL differs from the selected build DLL"
     );
-    // Rename within deps publishes the verified bytes atomically. Never replace
-    // a different DLL that another build or running test may already be using.
-    if let Err(error) = fs::rename(&temporary, &destination) {
+    // A same-directory hard link publishes only if the destination is absent.
+    // Unlike Windows rename, it cannot replace another build's different DLL.
+    if let Err(error) = fs::hard_link(&temporary, &destination) {
         let _ = fs::remove_file(&temporary);
         if destination.exists()
             && fs::read(&destination)
@@ -107,6 +107,7 @@ fn stage_windows_zvec_test_dll() {
         }
         panic!("cannot publish {}: {error}", destination.display());
     }
+    fs::remove_file(&temporary).expect("remove only our verified temporary DLL");
     assert!(
         fs::read(&destination).expect("verify app-local Zvec DLL") == original,
         "app-local Zvec DLL differs from the selected build DLL"
