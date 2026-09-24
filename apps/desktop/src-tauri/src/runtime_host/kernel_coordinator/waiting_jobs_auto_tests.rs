@@ -424,6 +424,17 @@ fn run_parked_stop(live: bool, expire: bool) {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(db.kernel_job_snapshot(&job_id).unwrap().state.as_str(), "running");
+    if expire {
+        let (event_type, code): (String, String) = db.with_connection(|conn| conn.query_row(
+            "SELECT event_type, json_extract(payload_json,'$.code') FROM kernel_events
+               WHERE run_id=?1 AND event_type IN ('run.failed','run.budget_exhausted')
+               ORDER BY seq DESC LIMIT 1",
+            [&run], |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
+        assert!(matches!((event_type.as_str(), code.as_str()),
+            ("run.budget_exhausted", "runtime.duration_budget_exceeded")
+                | ("run.failed", "kernel.job_wait_deadline_reached")),
+            "parked Run stopped for an unrelated cause: {event_type}/{code}");
+    }
     let before_release: (i64, i64) = db.with_connection(|conn| conn.query_row(
         "SELECT (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.jobs_woken'),
                 (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='engine.continuation_requested')",
@@ -465,19 +476,21 @@ fn run_parked_stop(live: bool, expire: bool) {
     }
     let cleanup_deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let (active, watching, inflight) = {
+        let (active, watching, inflight, scope_retired) = {
             let state = host.state.lock().unwrap();
             (state.kernel_active_runs.contains(&run), state.waiting_wakes.contains_key(&run),
-                state.kernel_wake_inflight.contains(&run))
+                state.kernel_wake_inflight.contains(&run),
+                state.cancellation.run_token(&run).is_err())
         };
         let lock_released = match crate::runtime_host::kernel_host::acquire(&root, &run) {
             Ok(ownership) => { drop(ownership); true }
             Err(error) if error == crate::runtime_host::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED => false,
             Err(error) => panic!("terminal Run lock acquisition failed: {error}"),
         };
-        if !active && !watching && !inflight && lock_released && parent_token.is_cancelled() { break; }
+        if !active && !watching && !inflight && scope_retired && lock_released
+            && parent_token.is_cancelled() { break; }
         assert!(Instant::now() < cleanup_deadline,
-            "stopped Run retained Host ownership: active={active} watching={watching} inflight={inflight} lock_released={lock_released}");
+            "stopped Run retained Host ownership: active={active} watching={watching} inflight={inflight} scope_retired={scope_retired} lock_released={lock_released}");
         std::thread::sleep(Duration::from_millis(10));
     }
     drop(host);
