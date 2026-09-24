@@ -182,7 +182,24 @@ $savedEnvironment = @{}
 foreach ($name in @('LIBSQLITE3_FLAGS', 'CARGO_TARGET_DIR', 'PATH', 'FOX_DATA_DIR', 'TMP', 'TEMP')) {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
+$savedErrorMode = $null
 try {
+    # Match the bounded review runner: children inherit this process error mode,
+    # so loader/critical-error dialogs surface as exit codes instead of hanging.
+    if (-not ('FoxTest.NativeErrorMode' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+namespace FoxTest {
+    public static class NativeErrorMode {
+        [DllImport("kernel32.dll")] public static extern uint GetErrorMode();
+        [DllImport("kernel32.dll")] public static extern uint SetErrorMode(uint mode);
+    }
+}
+'@
+    }
+    $savedErrorMode = [FoxTest.NativeErrorMode]::GetErrorMode()
+    [void][FoxTest.NativeErrorMode]::SetErrorMode([uint32]($savedErrorMode -bor 0x8003))
+    Write-Host "Windows error mode for test children: 0x$('{0:X4}' -f [FoxTest.NativeErrorMode]::GetErrorMode())"
     $env:FOX_DATA_DIR = Join-Path $scratchDirectory 'd'
     $env:TMP = $tempDirectory
     $env:TEMP = $tempDirectory
@@ -223,7 +240,14 @@ try {
         Invoke-TestProcess 'test' $selectedExecutable $ExecutableArguments
     }
 } finally {
+    if ($null -ne $savedErrorMode) {
+        [void][FoxTest.NativeErrorMode]::SetErrorMode([uint32]$savedErrorMode)
+    }
     foreach ($name in $savedEnvironment.Keys) {
-        [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
+        if ($null -eq $savedEnvironment[$name]) {
+            Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+        } else {
+            [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
+        }
     }
 }
