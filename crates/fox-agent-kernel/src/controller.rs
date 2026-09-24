@@ -177,6 +177,8 @@ pub struct RehydratedRun {
     pub seq: u64,
     pub running_elapsed_ms: i64,
     pub approval_deadline_wall_ms: Option<i64>,
+    pub wait_deadline_wall_ms: Option<i64>,
+    pub wait_accounted_until_wall_ms: Option<i64>,
     pub terminal_written: bool,
     pub batches: Vec<RehydratedBatch>,
     pub tools: Vec<RehydratedToolCall>,
@@ -185,6 +187,17 @@ pub struct RehydratedRun {
     /// Persisted wall anchor of a model request that was in flight at the
     /// crash boundary; preserves the timeout window across restarts.
     pub model_request_since_wall_ms: Option<i64>,
+}
+
+/// Frozen identity of an unfinished child Job at the park boundary. The
+/// repository verifies this exact set against its current scoped rows in the
+/// same transaction that writes `run.waiting_jobs`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WaitingJobFact {
+    pub job_id: String,
+    pub attempt: i64,
+    pub deadline_wall_ms: i64,
 }
 
 /// Per-run aggregate. Constructed via [`RunController::start`] for a new run or
@@ -204,6 +217,8 @@ pub struct RunController {
     running_since_mono_ms: Option<i64>,
     /// Persisted wall-clock approval deadline; survives restart.
     approval_deadline_wall_ms: Option<i64>,
+    wait_deadline_wall_ms: Option<i64>,
+    wait_accounted_until_wall_ms: Option<i64>,
     retry: RetryState,
     compaction: CompactionState,
     /// Whether a model request is EXPLICITLY in flight. Model-request timeout
@@ -251,6 +266,8 @@ impl RunController {
                     .unwrap_or(0),
             ),
             approval_deadline_wall_ms: self.approval_deadline_wall_ms,
+            wait_deadline_wall_ms: self.wait_deadline_wall_ms,
+            wait_accounted_until_wall_ms: self.wait_accounted_until_wall_ms,
             terminal_written: self.terminal_written,
             batches: self
                 .batches
@@ -303,6 +320,8 @@ impl RunController {
             running_elapsed_ms: 0,
             running_since_mono_ms: None,
             approval_deadline_wall_ms: None,
+            wait_deadline_wall_ms: None,
+            wait_accounted_until_wall_ms: None,
             retry: RetryState::default(),
             compaction: CompactionState::default(),
             model_request_in_flight: false,
@@ -447,6 +466,20 @@ impl RunController {
         {
             return Err(KernelError::FailClosed(
                 "rehydrated approval deadline must be positive".into(),
+            ));
+        }
+        if (data.state == RunState::WaitingJobs)
+            != data.wait_deadline_wall_ms.is_some()
+            || (data.state == RunState::WaitingJobs)
+                != data.wait_accounted_until_wall_ms.is_some()
+            || matches!((data.wait_deadline_wall_ms, data.wait_accounted_until_wall_ms),
+                (Some(deadline), Some(accounted)) if accounted <= 0 || deadline < accounted)
+            || data.state == RunState::WaitingJobs
+                && (!data.config.experimental_compute_job_notice
+                    || data.model_request_since_wall_ms.is_some())
+        {
+            return Err(KernelError::FailClosed(
+                "rehydrated job wait is incomplete or inconsistent".into(),
             ));
         }
         // Terminal exhaustion commits turn_attempts == turn_max + 1 (the failed
@@ -611,6 +644,8 @@ impl RunController {
             // Re-anchor on the first tick in the fresh monotonic domain.
             running_since_mono_ms: None,
             approval_deadline_wall_ms: data.approval_deadline_wall_ms,
+            wait_deadline_wall_ms: data.wait_deadline_wall_ms,
+            wait_accounted_until_wall_ms: data.wait_accounted_until_wall_ms,
             retry: data.retry,
             compaction: data.compaction,
             // After restart the model-request flag is re-anchored from the
@@ -745,6 +780,134 @@ impl RunController {
 
     pub fn approval_deadline_wall_ms(&self) -> Option<i64> {
         self.approval_deadline_wall_ms
+    }
+
+    pub fn wait_deadline_wall_ms(&self) -> Option<i64> {
+        self.wait_deadline_wall_ms
+    }
+
+    pub fn wait_accounted_until_wall_ms(&self) -> Option<i64> {
+        self.wait_accounted_until_wall_ms
+    }
+
+    /// Park only a settled response. The Host must commit this event with that
+    /// response under its model lease; the repository rechecks the response,
+    /// scoped Jobs, original deadlines and root before accepting the write.
+    pub fn park_waiting_jobs(
+        &mut self,
+        monotonic_ms: i64,
+        wall_ms: i64,
+        data_root_id: &str,
+        settled_response_seq: u64,
+        response_json: &str,
+        history_json: &str,
+        jobs: &[WaitingJobFact],
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Running
+            || !self.config.experimental_compute_job_notice
+            || self.model_request_in_flight
+            || self.retry.model_dispatch_pending
+            || self.approval_deadline_wall_ms.is_some()
+            || self.tools.values().any(|tool| !tool.state.is_terminal())
+            || self.batches.iter().any(|batch| !batch.barrier_emitted)
+            || self.seq != settled_response_seq
+            || wall_ms <= 0
+            || data_root_id.trim().is_empty()
+            || jobs.is_empty()
+            || response_json.len() > 1_048_576
+            || history_json.len() > 1_048_576
+            || self.running_since_mono_ms.is_some_and(|since| monotonic_ms < since)
+        {
+            return Err(KernelError::FailClosed("job wait has no settled response or valid scope".into()));
+        }
+        let response: serde_json::Value = serde_json::from_str(response_json)
+            .map_err(|_| KernelError::FailClosed("invalid parked model response".into()))?;
+        let history: serde_json::Value = serde_json::from_str(history_json)
+            .map_err(|_| KernelError::FailClosed("invalid parked model history".into()))?;
+        if !response.is_object() || !history.is_array() {
+            return Err(KernelError::FailClosed("parked response/history shape is invalid".into()));
+        }
+        let mut ordered = jobs.to_vec();
+        ordered.sort_by(|a, b| a.job_id.cmp(&b.job_id));
+        if ordered.iter().any(|job| job.job_id.trim().is_empty()
+            || job.attempt < 0 || job.deadline_wall_ms <= wall_ms)
+            || ordered.windows(2).any(|pair| pair[0].job_id == pair[1].job_id)
+        {
+            return Err(KernelError::FailClosed("job wait has duplicate or expired Job identity".into()));
+        }
+        let active_delta = self.running_since_mono_ms
+            .map(|since| monotonic_ms - since).unwrap_or(0);
+        let elapsed = self.running_elapsed_ms.checked_add(active_delta)
+            .ok_or_else(|| KernelError::FailClosed("job wait elapsed overflow".into()))?;
+        let job_deadline = ordered.iter().map(|job| job.deadline_wall_ms).max().unwrap();
+        let deadline = if self.config.run_execution_limited {
+            let remaining = self.config.run_execution_budget_ms - elapsed;
+            if remaining <= 0 {
+                return Err(KernelError::FailClosed("job wait Run budget already exhausted".into()));
+            }
+            wall_ms.checked_add(remaining)
+                .ok_or_else(|| KernelError::FailClosed("job wait deadline overflow".into()))?
+                .min(job_deadline)
+        } else {
+            job_deadline
+        };
+        self.running_elapsed_ms = elapsed;
+        self.running_since_mono_ms = None;
+        self.state = RunState::WaitingJobs;
+        self.wait_deadline_wall_ms = Some(deadline);
+        self.wait_accounted_until_wall_ms = Some(wall_ms);
+        Ok(vec![self.append_event("run.waiting_jobs", serde_json::json!({
+            "dataRootId": data_root_id,
+            "parkedAtWallMs": wall_ms,
+            "waitDeadlineWallMs": deadline,
+            "runningElapsedMs": elapsed,
+            "settledResponseSeq": settled_response_seq,
+            "response": response,
+            "history": history,
+            "jobs": ordered,
+        })), Effect::PublishSnapshot])
+    }
+
+    /// Charge a waiting interval once in the wall-clock domain. The caller
+    /// commits with a CAS on the durable park event and prior accounted cursor.
+    /// Repeated observations at the same wall instant are no-ops.
+    pub fn account_waiting_jobs(
+        &mut self,
+        park_seq: u64,
+        wall_ms: i64,
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::WaitingJobs || park_seq == 0 {
+            return Err(KernelError::FailClosed("run is not waiting on Jobs".into()));
+        }
+        let (Some(deadline), Some(accounted)) =
+            (self.wait_deadline_wall_ms, self.wait_accounted_until_wall_ms) else {
+            return Err(KernelError::FailClosed("job wait cursor is missing".into()));
+        };
+        if wall_ms < accounted {
+            return Err(KernelError::FailClosed("job wait wall clock moved backwards".into()));
+        }
+        let through = wall_ms.min(deadline);
+        if through == accounted { return Ok(Vec::new()); }
+        self.running_elapsed_ms = self.running_elapsed_ms.checked_add(through - accounted)
+            .ok_or_else(|| KernelError::FailClosed("job wait elapsed overflow".into()))?;
+        self.wait_accounted_until_wall_ms = Some(through);
+        let mut effects = vec![self.append_event("run.jobs_wait_accounted", serde_json::json!({
+            "parkSeq": park_seq,
+            "fromWallMs": accounted,
+            "throughWallMs": through,
+            "runningElapsedMs": self.running_elapsed_ms,
+        }))];
+        if self.config.run_execution_limited
+            && self.running_elapsed_ms >= self.config.run_execution_budget_ms {
+            effects.extend(self.terminate(RunOutcome::BudgetExhausted {
+                code: "runtime.duration_budget_exceeded".into(),
+                message: format!("Run exceeded its {}ms execution budget while waiting for Jobs.",
+                    self.config.run_execution_budget_ms),
+            }));
+        } else {
+            effects.push(Effect::PublishSnapshot);
+        }
+        Ok(effects)
     }
 
     /// Read a tool call's state without exposing controller internals. Used by
@@ -1251,6 +1414,8 @@ impl RunController {
         self.retry.scheduled_at_wall_ms = None;
         self.retry.due_wall_ms = None;
         self.approval_deadline_wall_ms = None;
+        self.wait_deadline_wall_ms = None;
+        self.wait_accounted_until_wall_ms = None;
         self.state = RunState::Cancelling;
         let mut effects = vec![self.append_event("run.cancelling", serde_json::json!({}))];
         effects.push(Effect::CancelEngineTurn {
@@ -1305,6 +1470,8 @@ impl RunController {
         self.settle_model_request();
         self.terminal_written = true;
         self.state = RunState::Cancelled;
+        self.wait_deadline_wall_ms = None;
+        self.wait_accounted_until_wall_ms = None;
         let mut effects = cancelled_tool_ids
             .into_iter()
             .map(|tool_call_id| {
@@ -1369,6 +1536,8 @@ impl RunController {
         self.retry.scheduled_at_wall_ms = None;
         self.retry.due_wall_ms = None;
         self.approval_deadline_wall_ms = None;
+        self.wait_deadline_wall_ms = None;
+        self.wait_accounted_until_wall_ms = None;
         // Invariant: a terminal run must not hold an in-flight model-request
         // anchor (it would be meaningless after termination and must not be
         // re-armed by a restart).
@@ -2395,6 +2564,8 @@ pub struct KernelPersistCommand {
     pub terminal_written: bool,
     pub running_elapsed_ms: i64,
     pub approval_deadline_wall_ms: Option<i64>,
+    pub wait_deadline_wall_ms: Option<i64>,
+    pub wait_accounted_until_wall_ms: Option<i64>,
     /// Persisted wall anchor of an in-flight model request; None when settled.
     pub model_request_since_wall_ms: Option<i64>,
     pub turn_id: String,
@@ -2556,6 +2727,8 @@ impl RunController {
             terminal_written: self.terminal_written,
             running_elapsed_ms: self.running_elapsed_ms,
             approval_deadline_wall_ms: self.approval_deadline_wall_ms,
+            wait_deadline_wall_ms: self.wait_deadline_wall_ms,
+            wait_accounted_until_wall_ms: self.wait_accounted_until_wall_ms,
             model_request_since_wall_ms: self.model_request_since_wall_ms,
             turn_id: self.turn_id.clone(),
             retry: self.retry.clone(),

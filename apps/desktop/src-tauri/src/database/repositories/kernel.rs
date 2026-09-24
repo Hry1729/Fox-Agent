@@ -160,6 +160,7 @@ fn valid_run_state(state: &str) -> bool {
         "created"
             | "running"
             | "waiting_approval"
+            | "waiting_jobs"
             | "retry_scheduled"
             | "compacting"
             | "cancelling"
@@ -179,6 +180,7 @@ fn run_transition_allowed(from: &str, to: &str) -> bool {
                 | ("created", "failed")
                 | ("created", "cancelling")
                 | ("running", "waiting_approval")
+                | ("running", "waiting_jobs")
                 | ("running", "retry_scheduled")
                 | ("running", "compacting")
                 | ("running", "cancelling")
@@ -192,6 +194,10 @@ fn run_transition_allowed(from: &str, to: &str) -> bool {
                 // The human never decided: the attempt ends as a continuable
                 // expiry, and the expired approval stays non-executable.
                 | ("waiting_approval", "approval_expired")
+                | ("waiting_jobs", "running")
+                | ("waiting_jobs", "cancelling")
+                | ("waiting_jobs", "failed")
+                | ("waiting_jobs", "budget_exhausted")
                 | ("retry_scheduled", "running")
                 | ("retry_scheduled", "cancelling")
                 | ("retry_scheduled", "failed")
@@ -2396,6 +2402,8 @@ impl Database {
                     compaction_state_json = ?9,
                     last_event_seq = ?10,
                     model_request_since_wall_ms = ?11,
+                    wait_deadline_wall_ms = ?12,
+                    wait_accounted_until_wall_ms = ?13,
                     updated_at = ?7
                   WHERE run_id = ?1",
                 params![
@@ -2410,6 +2418,8 @@ impl Database {
                     compaction_json,
                     final_last_seq,
                     cmd.model_request_since_wall_ms,
+                    cmd.wait_deadline_wall_ms,
+                    cmd.wait_accounted_until_wall_ms,
                 ],
             )?;
             if affected != 1 {
@@ -3025,6 +3035,8 @@ impl Database {
                 Option<String>,
                 Option<String>,
                 Option<i64>,
+                Option<i64>,
+                Option<i64>,
             )> = transaction
                 .query_row(
                     "SELECT turn_id, engine_id, kernel_mode, capability_manifest_version,
@@ -3032,7 +3044,8 @@ impl Database {
                             frozen_config_json, state,
                             last_event_seq, running_elapsed_ms, approval_deadline_wall_ms,
                             terminal_written, retry_state_json, compaction_state_json,
-                            capability_manifest_hash, model_request_since_wall_ms
+                            capability_manifest_hash, model_request_since_wall_ms,
+                            wait_deadline_wall_ms, wait_accounted_until_wall_ms
                        FROM kernel_runs WHERE run_id=?1",
                     params![run_id],
                     |row| {
@@ -3054,6 +3067,8 @@ impl Database {
                             row.get(14)?,
                             row.get(15)?,
                             row.get(16)?,
+                            row.get(17)?,
+                            row.get(18)?,
                         ))
                     },
                 )
@@ -3076,6 +3091,8 @@ impl Database {
                 compaction_json,
                 manifest_hash,
                 model_request_since_wall_ms,
+                wait_deadline_wall_ms,
+                wait_accounted_until_wall_ms,
             )) = row
             else {
                 return Ok(None);
@@ -3339,6 +3356,8 @@ impl Database {
                 seq: last_seq.max(0) as u64,
                 running_elapsed_ms: elapsed,
                 approval_deadline_wall_ms,
+                wait_deadline_wall_ms,
+                wait_accounted_until_wall_ms,
                 terminal_written: terminal_written != 0,
                 batches,
                 tools,

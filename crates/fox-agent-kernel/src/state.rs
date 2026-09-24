@@ -77,6 +77,9 @@ pub enum RunState {
     /// Waiting on a human approval decision for one or more tool calls. The
     /// execution budget clock is suspended while in this state.
     WaitingApproval,
+    /// A settled model response is parked while durable child Jobs finish.
+    /// The original Run budget continues to elapse on the wall clock.
+    WaitingJobs,
     /// A whole-turn retry has been scheduled (error recovery). Distinct from
     /// `Compacting`, which is context management.
     RetryScheduled,
@@ -102,6 +105,7 @@ impl RunState {
             RunState::Created => "created",
             RunState::Running => "running",
             RunState::WaitingApproval => "waiting_approval",
+            RunState::WaitingJobs => "waiting_jobs",
             RunState::RetryScheduled => "retry_scheduled",
             RunState::Compacting => "compacting",
             RunState::Cancelling => "cancelling",
@@ -139,6 +143,7 @@ impl RunState {
             "created" => RunState::Created,
             "running" => RunState::Running,
             "waiting_approval" => RunState::WaitingApproval,
+            "waiting_jobs" => RunState::WaitingJobs,
             "retry_scheduled" => RunState::RetryScheduled,
             "compacting" => RunState::Compacting,
             "cancelling" => RunState::Cancelling,

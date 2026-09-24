@@ -7180,6 +7180,7 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     }
     apply_migration(&transaction, 84, MIGRATION_84, now)?;
     apply_migration(&transaction, 85, MIGRATION_85, now)?;
+    apply_migration(&transaction, 86, MIGRATION_86, now)?;
     finish_transaction(transaction)
 }
 
@@ -14815,6 +14816,14 @@ CREATE TABLE kernel_job_notice_deliveries (
 );
 CREATE INDEX idx_kernel_job_notice_deliveries_dispatch
     ON kernel_job_notice_deliveries(dispatch_key,state);
+"#;
+
+/// WaitingJobs is a nonterminal projection. The event stream retains the
+/// response/history and the wait identity; these two columns retain its fixed
+/// wall deadline and the last accounted wall instant across process restarts.
+const MIGRATION_86: &str = r#"
+ALTER TABLE kernel_runs ADD COLUMN wait_deadline_wall_ms INTEGER;
+ALTER TABLE kernel_runs ADD COLUMN wait_accounted_until_wall_ms INTEGER;
 "#;
 
 /// Column additions applied once under migration 75 (idempotent helper).

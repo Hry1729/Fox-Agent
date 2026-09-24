@@ -34,7 +34,7 @@ pub use controller::{
     approval_effect_key, batch_delivery_effect_key, batch_delivery_idempotency_key,
     dispatch_effect_key, dispatch_idempotency_key, persist_events, Effect, KernelPersistCommand,
     PersistApprovalResolution, PersistBatch, PersistEvent, PersistOutboxEffect, PersistTool,
-    RehydratedBatch, RehydratedRun, RehydratedToolCall, RunController, INITIAL_MODEL_EFFECT_KEY,
+    RehydratedBatch, RehydratedRun, RehydratedToolCall, RunController, WaitingJobFact, INITIAL_MODEL_EFFECT_KEY,
     INITIAL_MODEL_IDEMPOTENCY_KEY, STEERING_COMPETITION,
 };
 pub use ports::{
@@ -292,6 +292,8 @@ mod tests {
             seq: 0,
             running_elapsed_ms: 5,
             approval_deadline_wall_ms: None,
+            wait_deadline_wall_ms: None,
+            wait_accounted_until_wall_ms: None,
             terminal_written: false,
             batches: vec![RehydratedBatch {
                 batch_id: "batch".into(),
@@ -1047,6 +1049,8 @@ mod tests {
             seq: 1,
             running_elapsed_ms: 0,
             approval_deadline_wall_ms: None,
+            wait_deadline_wall_ms: None,
+            wait_accounted_until_wall_ms: None,
             terminal_written: false,
             batches: vec![],
             tools: vec![],
@@ -1107,6 +1111,8 @@ mod tests {
             seq: 5,
             running_elapsed_ms: 0,
             approval_deadline_wall_ms: None,
+            wait_deadline_wall_ms: None,
+            wait_accounted_until_wall_ms: None,
             terminal_written: true,
             batches: vec![],
             tools: vec![],
