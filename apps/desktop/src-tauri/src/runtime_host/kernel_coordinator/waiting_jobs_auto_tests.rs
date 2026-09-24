@@ -34,10 +34,46 @@ fn real_host_auto_wakes_after_job_settles_on_both_pi_transports() {
         return;
     };
     assert!(mode == "live" || mode == "round");
-    run_auto_park_then_settle(mode == "live");
+    run_auto_park_then_settle(mode == "live", false);
 }
 
-fn run_auto_park_then_settle(live: bool) {
+/// A committed park while the old Host still owns the OS lock forces the
+/// automatic checker through its lock-contention retry path. This is the
+/// lost-wake window; settling during the earlier Provider reply instead would
+/// take the direct-notice path and produce no park or wake.
+#[test]
+fn real_host_auto_wake_survives_park_lock_contention() {
+    let selected = std::env::var("FOX_TEST_AUTO_JOB_LOCK_CHILD").ok();
+    let Some(mode) = selected else {
+        for mode in ["live", "round"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("real_host_auto_wake_survives_park_lock_contention")
+                .arg("--test-threads=1")
+                .env("FOX_TEST_AUTO_JOB_LOCK_CHILD", mode)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(55);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{mode} automatic lock-contention wake exceeded 55 seconds");
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{mode} stdout: {}\n{mode} stderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr));
+        }
+        return;
+    };
+    assert!(mode == "live" || mode == "round");
+    run_auto_park_then_settle(mode == "live", true);
+}
+
+fn run_auto_park_then_settle(live: bool, hold_park_lock: bool) {
     let arguments = json!({"idempotencyKey":"one-auto-compute",
         "params":{"processing":"chunked",
             "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).to_string();
@@ -74,6 +110,7 @@ fn run_auto_park_then_settle(live: bool) {
     let app = tauri::Builder::default().any_thread().build(context).unwrap();
     let host = crate::runtime_host::RuntimeHost::new(app.handle().clone(), db.clone(), root.clone(),
         root.join("attachments"), root.join("skills"), crate::yuxi::YuxiClient::new().unwrap());
+    if !live { host.force_auto_wake_round_for_test(&run); }
     let binding = db.run_control_binding(&run).unwrap().unwrap();
     let parent_token = {
         let state = host.state.lock().unwrap();
@@ -88,6 +125,61 @@ fn run_auto_park_then_settle(live: bool) {
             "bounded QuickJS settlement release never arrived");
     })));
 
+    let mut at_settle_rx = Some(at_settle_rx);
+    let mut release_tx = Some(release_tx);
+    let race_gate = hold_park_lock.then(|| {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (unlock_tx, unlock_rx) = std::sync::mpsc::channel();
+        let unlock_rx = std::sync::Arc::new(std::sync::Mutex::new(unlock_rx));
+        crate::runtime_host::kernel_host::waiting_wake_test_hooks::set_before_park_unlock(
+            &run, std::sync::Arc::new(move || {
+                entered_tx.send(()).unwrap();
+                unlock_rx.lock().unwrap().recv_timeout(Duration::from_secs(20))
+                    .expect("the committed park lock was never released by the fixture");
+            }));
+        (entered_rx, unlock_tx)
+    });
+    let race_settlement = race_gate.map(|(entered_rx, unlock_tx)| {
+        let db = db.clone();
+        let run = run.clone();
+        let host = host.clone();
+        let parent_token = parent_token.clone();
+        let at_settle_rx = at_settle_rx.take().unwrap();
+        let release_tx = release_tx.take().unwrap();
+        std::thread::spawn(move || {
+            entered_rx.recv_timeout(Duration::from_secs(20))
+                .expect("Host never reached the committed park with its OS lock held");
+            assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(), Some("waiting_jobs"));
+            at_settle_rx.recv_timeout(Duration::from_secs(20))
+                .expect("QuickJS Job never reached its terminal write");
+            let jobs = db.kernel_jobs_for_run(&run).unwrap();
+            assert_eq!(jobs.len(), 1);
+            assert_eq!(jobs[0].state.as_str(), "running");
+            assert_eq!(jobs[0].attempts, 1);
+            assert!(!parent_token.is_cancelled(), "park retired the child Job parent token");
+            let job_id = jobs[0].job_id.clone();
+            release_tx.send(()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let settled = db.kernel_job_snapshot(&job_id).unwrap().state.is_terminal();
+                let notice = db.kernel_job_notice(&jobs[0].conversation_id, &run, &job_id)
+                    .unwrap().is_some();
+                if settled && notice { break; }
+                assert!(Instant::now() < deadline,
+                    "Job terminal state and scoped notice did not commit before unlock");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            while host.auto_wake_lock_conflicts_for_test(&run) == 0 {
+                assert!(Instant::now() < deadline,
+                    "automatic checker never observed the held Run OS lock");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(), Some("waiting_jobs"));
+            unlock_tx.send(()).unwrap();
+            job_id
+        })
+    });
+
     let ownership = crate::runtime_host::kernel_host::acquire(&root, &run).unwrap();
     if live {
         host.start_kernel_run(ownership, &binding, Value::Null, Value::Null).unwrap();
@@ -95,23 +187,27 @@ fn run_auto_park_then_settle(live: bool) {
         host.start_kernel_run_forced_round_for_test(ownership, &binding, Value::Null, Value::Null)
             .unwrap();
     }
-    assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(), Some("waiting_jobs"),
-        "the original Host must park while the Job is held before settlement");
-    at_settle_rx.recv_timeout(Duration::from_secs(20))
-        .expect("real QuickJS Job did not reach the terminal write");
-    let jobs = db.kernel_jobs_for_run(&run).unwrap();
-    assert_eq!(jobs.len(), 1, "one formal job_start creates exactly one Job");
-    let job_id = jobs[0].job_id.clone();
-    assert_eq!(jobs[0].attempts, 1);
-    assert_eq!(jobs[0].state.as_str(), "running");
-    assert!(!parent_token.is_cancelled(), "park retired the child Job parent token");
+    let job_id = if let Some(settlement) = race_settlement {
+        settlement.join().unwrap()
+    } else {
+        assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(), Some("waiting_jobs"),
+            "the original Host must park while the Job is held before settlement");
+        at_settle_rx.take().unwrap().recv_timeout(Duration::from_secs(20))
+            .expect("real QuickJS Job did not reach the terminal write");
+        let jobs = db.kernel_jobs_for_run(&run).unwrap();
+        assert_eq!(jobs.len(), 1, "one formal job_start creates exactly one Job");
+        assert_eq!(jobs[0].attempts, 1);
+        assert_eq!(jobs[0].state.as_str(), "running");
+        assert!(!parent_token.is_cancelled(), "park retired the child Job parent token");
+        release_tx.take().unwrap().send(()).unwrap();
+        jobs[0].job_id.clone()
+    };
     let formal_before: i64 = db.with_connection(|conn| conn.query_row(
         "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='tool.completed'
            AND json_extract(payload_json,'$.toolCallId')='job-start'",
         [&run], |row| row.get(0))).unwrap();
     assert_eq!(formal_before, 1);
 
-    release_tx.send(()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
         let state = db.kernel_host_run_state(&run).unwrap();
@@ -130,6 +226,11 @@ fn run_auto_park_then_settle(live: bool) {
     let continued = requests[2]["messages"].to_string();
     assert_eq!(continued.matches("FOX_HOST_JOB_NOTICE_V1").count(), 1);
     assert!(continued.contains(&job_id));
+    assert_eq!(
+        crate::runtime_host::kernel_host::waiting_wake_test_hooks::take_continuation_transports_for_test(&run),
+        vec![if live { "live" } else { "per_round" }],
+        "the automatic continuation must use the requested real Pi transport",
+    );
     let (parks, wakes, replies, formal): (i64, i64, i64, i64) = db.with_connection(|conn| conn.query_row(
         "SELECT (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.waiting_jobs'),
                 (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.jobs_woken'),
@@ -146,22 +247,20 @@ fn run_auto_park_then_settle(live: bool) {
     }
     let cleanup_deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let active = host.state.lock().unwrap().kernel_active_runs.contains(&run);
+        let (active, watching) = {
+            let state = host.state.lock().unwrap();
+            (state.kernel_active_runs.contains(&run), state.waiting_wakes.contains_key(&run))
+        };
         let lock_released = match crate::runtime_host::kernel_host::acquire(&root, &run) {
             Ok(ownership) => { drop(ownership); true }
             Err(error) if error == crate::runtime_host::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED => false,
             Err(error) => panic!("terminal Run lock acquisition failed: {error}"),
         };
-        if !active && lock_released { break; }
+        if !active && !watching && lock_released { break; }
         assert!(Instant::now() < cleanup_deadline,
-            "completed Run retained Host ownership: active={active} lock_released={lock_released}");
+            "completed Run retained Host ownership: active={active} watching={watching} lock_released={lock_released}");
         std::thread::sleep(Duration::from_millis(10));
     }
     drop(host);
     drop(app);
 }
-
-// The lost-wake race needs a separate test-only seam after the park transaction
-// commits but before the original KernelRunLock drops. Settling during a held
-// second Provider response takes the already-covered direct-notice path (0
-// parks), and cannot prove that an automatic parked wake survives lock contention.
