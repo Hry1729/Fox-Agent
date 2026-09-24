@@ -85,6 +85,82 @@ fn live_provider(continuation: bool) -> (std::net::SocketAddr, std::thread::Join
     (address,server)
 }
 
+fn delayed_ready_worker(root: &std::path::Path, ready_delay_ms: Option<u64>) -> super::super::super::RuntimeCommand {
+    let script = root.join("delayed-ready-worker.mjs");
+    let source = r#"
+import { createInterface } from 'node:readline'
+import { appendFileSync } from 'node:fs'
+const events = new URL('./ready-events', import.meta.url)
+createInterface({ input: process.stdin }).on('line', line => {
+  const request = JSON.parse(line)
+  if (request.type === 'kernel.initialize') {
+    appendFileSync(events, 'initialize\n')
+    if (__READY_DELAY__ !== null) setTimeout(() => {
+      process.stdout.write(JSON.stringify({ ...request, kind: 'response', type: 'kernel.ready', requestId: request.id,
+        payload: { singleUse: true, resourceExecution: false, automaticReplay: false, roundLoop: true, adapterVersion: '__ADAPTER__' } }) + '\n')
+    }, __READY_DELAY__)
+  } else if (request.type === 'kernel.start_initial') {
+    appendFileSync(events, 'start_initial\n')
+    setInterval(() => {}, 1000)
+  } else {
+    appendFileSync(events, `unexpected:${request.type}\n`)
+    process.exit(2)
+  }
+})
+"#;
+    std::fs::write(&script, source
+        .replace("__READY_DELAY__", &ready_delay_ms.map_or("null".to_owned(), |ms| ms.to_string()))
+        .replace("__ADAPTER__", crate::kernel_model_config::KERNEL_MODEL_ADAPTER)).unwrap();
+    super::super::super::RuntimeCommand { program: "node".into(), script: Some(script) }
+}
+
+fn wait_ready_stage(root: &std::path::Path, stage: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if std::fs::read_to_string(root.join("ready-events"))
+            .unwrap_or_default().lines().any(|line| line == stage) { return; }
+        assert!(Instant::now() < deadline, "worker did not reach {stage}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn live_ready_delay_does_not_consume_the_unstarted_model_window() {
+    let config = worker_configuration();
+    let setup_clock = TestClock::new(crate::database::now_ms());
+    let budgets = TimeBudgets { model_request_ms: 3_500, model_first_response_ms: 3_500,
+        model_idle_ms: 3_500, ..TimeBudgets::default() };
+    let (db, root, run_id) = fixture_with_budgets_opt(&setup_clock, &config.hash().unwrap(),
+        Some(&config), true, true, (0, 1), true, budgets);
+    freeze_host_scope(&db, &run_id);
+    let clock = AdvancingClock { base: setup_clock.get(), started: Instant::now() };
+    let cancellation = CancellationRegistry::default();
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    let runtime = delayed_ready_worker(&root, Some(3_800));
+    let preview = |_: &fox_engine_protocol::KernelModelPreview| {};
+    let coordinator = coordinator.with_preview(&preview);
+    std::thread::scope(|scope| {
+        let delivery = scope.spawn(|| coordinator.dispatch_initial_live("slow-ready", &Allow, &runtime,
+            "local-test-only", &|_, _, _| panic!("no tools"), &|_| Ok(()), &|_| Ok(())));
+        wait_ready_stage(&root, "initialize");
+        let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+        let pending: (String, i64) = conn.query_row(
+            "SELECT status, attempts FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key='initial-model'",
+            [&run_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(pending, ("pending".into(), 0));
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='engine.initial_dispatched'",
+            [&run_id], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        delivery.join().unwrap().unwrap();
+    });
+    assert_eq!(std::fs::read_to_string(root.join("ready-events")).unwrap().lines().collect::<Vec<_>>(),
+        vec!["initialize", "start_initial"]);
+    let conn = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let categories: Vec<String> = conn.prepare("SELECT json_extract(payload_json,'$.failure.category') FROM kernel_events WHERE run_id=?1 AND event_type='engine.model_rejected'")
+        .unwrap().query_map([&run_id], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+    assert_eq!(categories, vec!["model_timeout"]);
+    assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
+}
+
 #[test]
 fn live_total_timeout_with_continuous_arguments_retries_initial_without_execution() {
     assert_live_total_retry(false);
