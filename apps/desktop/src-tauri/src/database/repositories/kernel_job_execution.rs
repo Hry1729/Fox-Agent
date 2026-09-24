@@ -492,7 +492,14 @@ mod notice_tests {
         assert!(f.db.kernel_job_complete_attempt(&job,1,"foreign",&result).is_err());
         assert!(f.db.kernel_job_notice("foreign",&f.run,&job).unwrap().is_none());
         assert!(f.db.kernel_job_notice(&f.conversation,"foreign-run",&job).unwrap().is_none());
-        let second_run=f.db.create_run(&f.conversation,"same conversation",None).unwrap().run.id;
+        // Build a second persisted identity solely for this cross-Run read
+        // negative; the product create_run flow is outside this test.
+        let second_run=format!("{}-other",f.run);
+        f.db.with_connection(|conn| conn.execute(
+            "INSERT INTO runs(id,conversation_id,status,model,created_at)
+             VALUES(?1,?2,'running','test',?3)",
+            params![&second_run,&f.conversation,now_ms()],
+        )).unwrap();
         assert!(f.db.kernel_job_notice(&f.conversation,&second_run,&job).unwrap().is_none());
         assert_eq!(f.db.kernel_job_result_value(&f.conversation,&job).unwrap(),result);
         f.finish();
