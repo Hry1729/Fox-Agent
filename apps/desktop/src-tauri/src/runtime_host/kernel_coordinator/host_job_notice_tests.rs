@@ -349,50 +349,68 @@ fn batch_model_lease_rejects_forged_durable_middle_in_both_transports() {
 
 #[test]
 fn live_continuation_lease_rejects_self_consistent_forged_history() {
-    // Use the real Kernel continuation intent/outbox transaction. The review
-    // request is a controlled fixture so this test targets the DB lease, not
-    // the stop-review policy that decides when to request another round.
-    let (db,_root,run,clock,cancellation,_conversation)=notice_host_fixture("live-cont-source");
-    let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
-    let mut input=db.kernel_initial_input(&run).unwrap();
-    input.messages.push(json!({"role":"assistant","stopReason":"stop",
-        "content":[{"type":"text","text":"review me"}]}));
-    input.messages.push(json!({"role":"user","content":[{"type":"text",
-        "text":super::super::live::CONTINUATION_PROMPT}],"timestamp":0}));
-    input.validate().unwrap();
-    let encoded=serde_json::to_string(&input).unwrap();
-    coordinator.apply(None,|controller,_|controller.request_continuation(
-        super::super::live::CONTINUATION_PROMPT,&encoded)).unwrap();
-    let cursor=coordinator.snapshot().unwrap().last_event_seq;
-    let effect_key=format!("continuation:{cursor}");
-    let mut controller=RunController::rehydrate(db.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
-    let effects=controller.begin_continuation_model_request(&effect_key,
-        clock.now_monotonic_ms(),clock.now_wall_ms()).unwrap();
-    let command=controller.persist_command(&effects);
-    let directive=fox_engine_protocol::KernelRoundDirective {
-        schema_version:1,kind:fox_engine_protocol::KernelRoundDirectiveKind::Continuation,
-        batch_id:None,checkpoint_seq:None,preview_seq:Some(cursor),tools:vec![],
-        prompt:Some(super::super::live::CONTINUATION_PROMPT.into()),
-        steering:vec![],host_job_notices:vec![],
-    };
-    directive.validate().unwrap();
-    let payload=serde_json::to_value(&directive).unwrap();
-    let mut forged=input.messages.clone();
-    forged[0]["content"]=json!("different user demand");
-    let binding=crate::database::ModelNoticeInput {
-        payload:&payload,delivered_history:&forged,live_history:Some(&forged),
-        checkpoint_seq:cursor,history_start:forged.len(),historical_bytes:0,
-    };
-    let error=db.kernel_commit_continuation_model(&run,clock.now_wall_ms(),&command,
-        &effect_key,"continuation-owner",false,None,Some(&binding)).unwrap_err();
-    assert!(error.contains("bound live continuation differs from durable Host sources"),"{error}");
-    let (bound,leased):(i64,i64)=db.with_connection(|conn|conn.query_row(
-        "SELECT (SELECT COUNT(*) FROM kernel_model_notice_inputs WHERE run_id=?1 AND dispatch_key=?2),
-                (SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key=?3
-                  AND status='leased')",
-        rusqlite::params![run,format!("continuation-delivery:{effect_key}"),effect_key],
-        |row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
-    assert_eq!((bound,leased),(0,0),"forged continuation must roll back its whole lease");
+    for forged in [false,true] {
+        // A real settled initial response creates the steering continuation.
+        // Bind its queued row through the same durable Host API that a live
+        // directive uses; a second fresh Run is the positive lease control.
+        let (db,_root,run,clock,cancellation,_conversation)=notice_host_fixture("live-cont-source");
+        let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
+        let accepted=db.clone();
+        let accepted_run=run.clone();
+        coordinator.dispatch_initial("initial-owner",&Allow,move|binding,frame,_|{
+            accepted.enqueue_run_steering(&accepted_run,"during-model",
+                "Check the completed work too",crate::database::now_ms()).unwrap();
+            Ok(stop_response(binding,frame))
+        }).unwrap();
+        let cursor=coordinator.snapshot().unwrap().last_event_seq;
+        let effect_key=format!("continuation:{cursor}");
+        let response_seq:i64=db.with_connection(|conn|conn.query_row(
+            "SELECT seq FROM kernel_events WHERE run_id=?1 AND event_type='engine.initial_response'",
+            [&run],|row|row.get(0))).unwrap();
+        let rows=db.deliver_steering_for_dispatch(&run,&format!("round-response:{response_seq}"))
+            .unwrap();
+        assert_eq!(rows.len(),1);
+        let notices=rows.iter().map(|row|fox_engine_protocol::KernelSteeringNotice {
+            message_id:row.message_id.clone(),content:row.content.clone(),
+            received_at:Some(row.received_at),
+        }).collect::<Vec<_>>();
+        let input=db.kernel_continuation_input(&run,&effect_key).unwrap();
+        let mut history=input.messages.clone();
+        history.extend(rows.iter().map(super::super::steering::steering_user_message));
+        let mut controller=RunController::rehydrate(db.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
+        let effects=controller.begin_continuation_model_request(&effect_key,
+            clock.now_monotonic_ms(),clock.now_wall_ms()).unwrap();
+        let command=controller.persist_command(&effects);
+        let directive=fox_engine_protocol::KernelRoundDirective {
+            schema_version:1,kind:fox_engine_protocol::KernelRoundDirectiveKind::Continuation,
+            batch_id:None,checkpoint_seq:None,preview_seq:Some(cursor),tools:vec![],
+            prompt:Some(super::super::steering::STEERING_PROMPT.into()),
+            steering:notices,host_job_notices:vec![],
+        };
+        directive.validate().unwrap();
+        let payload=serde_json::to_value(&directive).unwrap();
+        if forged {history[0]["content"]=json!("different user demand");}
+        let binding=crate::database::ModelNoticeInput {
+            payload:&payload,delivered_history:&history,live_history:Some(&history),
+            checkpoint_seq:cursor,history_start:history.len(),historical_bytes:0,
+        };
+        let outcome=db.kernel_commit_continuation_model(&run,clock.now_wall_ms(),&command,
+            &effect_key,"continuation-owner",false,None,Some(&binding));
+        let (bound,leased):(i64,i64)=db.with_connection(|conn|conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM kernel_model_notice_inputs WHERE run_id=?1 AND dispatch_key=?2),
+                    (SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key=?3
+                      AND status='leased')",
+            rusqlite::params![run,format!("continuation-delivery:{effect_key}"),effect_key],
+            |row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+        if forged {
+            let error=outcome.unwrap_err();
+            assert!(error.contains("bound live continuation differs from durable Host sources"),"{error}");
+            assert_eq!((bound,leased),(0,0),"forged continuation must roll back its whole lease");
+        } else {
+            outcome.unwrap();
+            assert_eq!((bound,leased),(1,1),"real durable continuation must bind and lease");
+        }
+    }
 }
 
 #[test]
@@ -659,14 +677,14 @@ fn real_runtime_host_job_start_parks_and_wakes_on_both_pi_transports() {
 }
 
 #[test]
-fn real_runtime_host_job_finishes_during_second_model_lease_or_uses_legacy_review() {
+fn real_runtime_host_job_finishes_during_second_lease_or_retains_flag_off_behavior() {
     use std::time::{Duration,Instant};
     use tauri::Manager;
     let selected=std::env::var("FOX_TEST_REAL_HOST_JOB_RACE_CHILD").ok();
     let Some(selected)=selected else {
         for mode in ["live-direct","round-direct","live-off","round-off"] {
             let mut child=std::process::Command::new(std::env::current_exe().unwrap())
-                .arg("real_runtime_host_job_finishes_during_second_model_lease_or_uses_legacy_review")
+                .arg("real_runtime_host_job_finishes_during_second_lease_or_retains_flag_off_behavior")
                 .arg("--test-threads=1")
                 .env("FOX_TEST_REAL_HOST_JOB_RACE_CHILD",mode)
                 .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
@@ -687,22 +705,26 @@ fn real_runtime_host_job_finishes_during_second_model_lease_or_uses_legacy_revie
     };
     let live=selected.starts_with("live");
     let direct=selected.ends_with("direct");
+    let round_off=selected=="round-off";
     assert!(live||selected.starts_with("round"));
     let (seen_tx,seen_rx)=std::sync::mpsc::channel();
     let (proceed_tx,proceed_rx)=std::sync::mpsc::channel();
+    let (finish_tx,finish_rx)=std::sync::mpsc::channel();
     let arguments=json!({"idempotencyKey":"one-real-compute",
         "params":{"processing":"chunked",
             "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).to_string();
-    let (address,server)=start_http_model_fixture_with_response_hook(vec![
+    let mut replies=vec![
         json!({"role":"assistant","tool_calls":[{"index":0,"id":"job-start","type":"function",
             "function":{"name":"compute_job_start","arguments":arguments}}]}),
         json!({"role":"assistant","content":"The compute Job is still running."}),
-        json!({"role":"assistant","content":"The Host result is ready."}),
-    ],Some((if direct {1}else{2},Box::new(move||{
+    ];
+    if !round_off {replies.push(json!({"role":"assistant","content":"The Host result is ready."}));}
+    let hook=(!round_off).then_some((if direct {1}else{2},Box::new(move||{
         seen_tx.send(()).unwrap();
         proceed_rx.recv_timeout(Duration::from_secs(25))
             .expect("the held provider reply was never released");
-    }))));
+    }) as Box<dyn FnOnce()+Send>));
+    let (address,server)=start_http_model_fixture_with_response_hook(replies,hook);
     let mut config=worker_configuration();
     config.model_service=json!({"apiType":"openai-completions","modelId":"kernel-http-test",
         "baseUrl":format!("http://{address}/v1")});
@@ -741,14 +763,21 @@ fn real_runtime_host_job_finishes_during_second_model_lease_or_uses_legacy_revie
     let observed_run=run.clone();
     let job_parent=parent_token.clone();
     let settle=std::thread::spawn(move||{
-        seen_rx.recv_timeout(Duration::from_secs(20))
-            .expect("the selected model lease did not reach local Provider");
+        if round_off {
+            finish_rx.recv_timeout(Duration::from_secs(20))
+                .expect("the legacy round did not finish");
+        } else {
+            seen_rx.recv_timeout(Duration::from_secs(20))
+                .expect("the selected model lease did not reach local Provider");
+        }
         at_settle_rx.recv_timeout(Duration::from_secs(20))
             .expect("real QuickJS Job did not reach terminal write");
         let jobs=observed.kernel_jobs_for_run(&observed_run).unwrap();
         assert_eq!(jobs.len(),1);
         assert_eq!(jobs[0].state.as_str(),"running");
-        assert!(!job_parent.is_cancelled(),"active Job lost its Run parent before settlement");
+        if !round_off {
+            assert!(!job_parent.is_cancelled(),"active Job lost its Run parent before settlement");
+        }
         if direct {
             let bound:i64=observed.with_connection(|conn|conn.query_row(
                 "SELECT COUNT(*) FROM kernel_model_notice_inputs WHERE run_id=?1 AND state='bound'",
@@ -756,22 +785,48 @@ fn real_runtime_host_job_finishes_during_second_model_lease_or_uses_legacy_revie
             assert_eq!(bound,1,"the second request must be leased before Job settlement");
         }
         release_tx.send(()).unwrap();
-        let deadline=Instant::now()+Duration::from_secs(20);
-        while !observed.kernel_job_snapshot(&jobs[0].job_id).unwrap().state.is_terminal() {
-            assert!(Instant::now()<deadline,"real Job did not settle during the held reply");
-            std::thread::sleep(Duration::from_millis(20));
+        if !round_off {
+            let deadline=Instant::now()+Duration::from_secs(20);
+            while !observed.kernel_job_snapshot(&jobs[0].job_id).unwrap().state.is_terminal() {
+                assert!(Instant::now()<deadline,"real Job did not settle during the held reply");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(observed.kernel_job_snapshot(&jobs[0].job_id).unwrap().state.as_str(),"completed");
+            proceed_tx.send(()).unwrap();
+        } else {
+            let deadline=Instant::now()+Duration::from_secs(10);
+            while !observed.kernel_job_snapshot(&jobs[0].job_id).unwrap().state.is_terminal() {
+                assert!(Instant::now()<deadline,"legacy failed Run left its child thread unsettled");
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
-        assert_eq!(observed.kernel_job_snapshot(&jobs[0].job_id).unwrap().state.as_str(),"completed");
-        proceed_tx.send(()).unwrap();
         jobs[0].job_id.clone()
     });
     let ownership=crate::runtime_host::kernel_host::acquire(&root,&run).unwrap();
-    if live {host.start_kernel_run(ownership,&binding,Value::Null,Value::Null).unwrap();}
-    else {host.start_kernel_run_forced_round_for_test(ownership,&binding,Value::Null,Value::Null)
-        .unwrap();}
+    let started=if live {host.start_kernel_run(ownership,&binding,Value::Null,Value::Null)}
+        else {host.start_kernel_run_forced_round_for_test(ownership,&binding,Value::Null,Value::Null)};
+    if round_off {finish_tx.send(()).unwrap();}
     let job_id=settle.join().unwrap();
     crate::runtime_host::attachment_compute::jobs::test_hooks::set_at_settle(None);
     let requests=server.join().unwrap();
+    if round_off {
+        assert!(started.is_ok(),"legacy rejection should be a durable Run failure: {started:?}");
+        assert_eq!(requests.len(),2,"legacy single-round guard rejects before a third model request");
+        assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(),Some("failed"));
+        let (code,parks,notices):(String,i64,i64)=db.with_connection(|conn|conn.query_row(
+            "SELECT json_extract((SELECT payload_json FROM kernel_events WHERE run_id=?1
+                 AND event_type='run.failed'),'$.code'),
+                 (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.waiting_jobs'),
+                 (SELECT COUNT(*) FROM kernel_job_notice_deliveries d JOIN kernel_job_notices n
+                   ON n.job_id=d.job_id WHERE n.run_id=?1)",
+            [&run],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
+        assert_eq!((code.as_str(),parks,notices),("kernel.jobs_pending",0,0),
+            "the pre-B2b single-round terminal guard remains in force");
+        assert!(requests[1]["messages"].to_string().contains(&job_id));
+        drop(host);drop(app);
+        return;
+    }
+    started.unwrap();
     assert_eq!(requests.len(),3,"one formal tool call and two model replies");
     let second=requests[1]["messages"].to_string();
     let third=requests[2]["messages"].to_string();
