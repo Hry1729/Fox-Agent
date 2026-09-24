@@ -15,6 +15,8 @@ pub use cancellation::{CancellationRegistry, CancellationToken};
 #[cfg(test)]
 mod compaction_tests;
 #[cfg(test)]
+mod waiting_jobs_tests;
+#[cfg(test)]
 pub mod corpus;
 pub mod ports;
 pub mod recovery;
