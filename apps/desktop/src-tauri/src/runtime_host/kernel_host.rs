@@ -1163,6 +1163,24 @@ impl super::RuntimeHost {
             &self.database, run_id, &binding.conversation_id)
     }
 
+    fn settle_parked_cancel(&self, run_id: &str,
+        coordinator: &KernelCoordinator<'_>) -> Result<(), String> {
+        if !self.database.pending_kernel_host_commands(run_id)?
+            .iter().any(|command| command.kind=="cancel") {
+            return Err("parked cancellation has no durable user command".into());
+        }
+        coordinator.cancel_waiting_jobs_now()?;
+        coordinator.settle_cancellation()?;
+        for command in self.database.pending_kernel_host_commands(run_id)? {
+            self.database.complete_kernel_host_command(run_id,command.seq)?;
+        }
+        let jobs=self.reconcile_terminal_compute_jobs(run_id);
+        if let Ok(mut state)=self.state.lock() {
+            state.cancellation.retire_run(run_id);
+        }
+        jobs
+    }
+
     pub(super) fn stop_kernel_runs(&self) -> Result<(), String> {
         let active = {
             let mut state = self
@@ -1362,18 +1380,12 @@ impl super::RuntimeHost {
         // opening a model transport.
         if self.database.pending_kernel_host_commands(run_id)?
             .iter().any(|command| command.kind == "cancel") {
-            drop(coordinator);
-            self.start_kernel_run_with_transport(
-                ownership, &binding, Value::Null, Value::Null, force_per_round,
-            )?;
+            self.settle_parked_cancel(run_id,&coordinator)?;
             return Ok(false);
         }
         if let Err(error)=coordinator.account_waiting_jobs_now() {
             if error.contains("job_wake_cancel_pending") {
-                drop(coordinator);
-                self.start_kernel_run_with_transport(
-                    ownership, &binding, Value::Null, Value::Null, force_per_round,
-                )?;
+                self.settle_parked_cancel(run_id,&coordinator)?;
                 return Ok(false);
             }
             return Err(error);
