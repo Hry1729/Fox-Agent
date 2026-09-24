@@ -202,8 +202,35 @@ fn live_loop_answers_input_accepted_during_the_last_round_instead_of_completing(
     // still `received` when that round stops. The stop must not complete the Run:
     // the accepted request gets its own model round first. The second round then
     // stops again and completes, with the request applied exactly once.
-    let ((address, _server), seen) =
-        steering_provider_shared(vec![("first stop", "stop-1"), ("final stop", "stop-2")]);
+    // This case supplies its model response through dispatch_initial's local
+    // callback. Keep an HTTP guard to detect unexpected requests, but do not
+    // leave a two-reply provider waiting after the test has already finished.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut requests = 0;
+        loop {
+            match done_rx.try_recv() {
+                Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) =>
+                    return (requests, false),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            if Instant::now() >= deadline { return (requests, true); }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    requests += 1;
+                    stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock =>
+                    std::thread::sleep(Duration::from_millis(10)),
+                Err(error) => panic!("{error}"),
+            }
+        }
+    });
     let SteeringLive { db, root: _root, run_id } = steering_live_fixture(address);
     let clock = TestClock::new(crate::database::now_ms());
     let cancellation = CancellationRegistry::default();
@@ -237,8 +264,6 @@ fn live_loop_answers_input_accepted_during_the_last_round_instead_of_completing(
     // never the stop-review prompt. (Driving that round to its own response is
     // the live session's job and is covered by the live tests; what is asserted
     // here is exactly the durable decision this transport committed.)
-    let (address2, _) = steering_provider(vec![]);
-    let _ = address2;
     let rows = db.run_steering_messages(&run_id).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -278,13 +303,11 @@ fn live_loop_answers_input_accepted_during_the_last_round_instead_of_completing(
         !staged_text.contains("这条要求必须被回答"),
         "the frozen input must not duplicate the queued text: {staged_text}"
     );
-    let seen = seen.lock().unwrap();
-    assert!(
-        seen.len() <= 1,
-        "this transport commits the steering round but does not drive it; the live \
-         session is what sends that request (saw {})",
-        seen.len()
-    );
+    done_tx.send(()).unwrap();
+    let (requests, expired) = server.join().unwrap();
+    assert!(!expired, "the no-request HTTP guard must finish within its bound");
+    assert_eq!(requests, 0,
+        "this synthetic transport commits the steering round without HTTP model IO");
 }
 
 /// F1: a request accepted **inside the live decision window** — after the last

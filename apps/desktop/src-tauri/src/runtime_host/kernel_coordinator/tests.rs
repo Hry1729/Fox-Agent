@@ -172,15 +172,15 @@ fn fixture_with_start_opt(clock: &TestClock, prompt_hash: &str, model: Option<&c
     fixture_with_retry_opt(clock,prompt_hash,model,initial,prepared,(0,0))
 }
 
-fn fixture_with_retry_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32)) -> (Database, PathBuf, String) {
+fn fixture_with_retry_opt(clock: &dyn Clock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32)) -> (Database, PathBuf, String) {
     fixture_with_project_opt(clock,prompt_hash,model,initial,prepared,retries,true)
 }
 
-fn fixture_with_project_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32), has_project: bool) -> (Database, PathBuf, String) {
+fn fixture_with_project_opt(clock: &dyn Clock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32), has_project: bool) -> (Database, PathBuf, String) {
     fixture_with_budgets_opt(clock, prompt_hash, model, initial, prepared, retries, has_project, TimeBudgets::default())
 }
 
-fn fixture_with_budgets_opt(clock: &TestClock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32), has_project: bool, budgets: TimeBudgets) -> (Database, PathBuf, String) {
+fn fixture_with_budgets_opt(clock: &dyn Clock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32), has_project: bool, budgets: TimeBudgets) -> (Database, PathBuf, String) {
     let engine = model.map(|model| model.engine_id.as_str()).unwrap_or("pi");
     let root = std::env::temp_dir().join(format!("fox-coordinator-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
@@ -2465,6 +2465,87 @@ fn kernel_real_model_previews_are_transient_until_the_response_transaction_commi
 // ---------------------------------------------------------------------------
 
 #[test]
+fn host_live_transport_failure_retry_reaches_due_and_exhausts_once() {
+    // The real Node transport advertises the live-loop capability, then exits
+    // on each initial request. This deterministically exercises the owning
+    // Host's retry wait; a frozen TestClock would leave it there indefinitely.
+    let clock = crate::runtime_host::shadow_reconcile::ReconcilerClock;
+    let config = worker_configuration();
+    let budgets = TimeBudgets {
+        model_request_ms: 15_000,
+        model_first_response_ms: 15_000,
+        model_idle_ms: 15_000,
+        run_execution_ms: 45_000,
+        ..TimeBudgets::default()
+    };
+    let (db, root, run_id) = fixture_with_budgets_opt(
+        &clock, &config.hash().unwrap(), Some(&config), true, true, (0, 1), true, budgets,
+    );
+    freeze_host_scope(&db, &run_id);
+    let script = root.join("exit-on-initial.mjs");
+    std::fs::write(
+        &script,
+        include_str!("../../../../../../services/agent-runtime/test/fixtures/lost-live-frame.mjs")
+            .replace("__MODE__", "exit")
+            .replace("__ADAPTER__", crate::kernel_model_config::KERNEL_MODEL_ADAPTER),
+    )
+    .unwrap();
+    let runtime = super::super::RuntimeCommand { program: "node".into(), script: Some(script) };
+    let preview = |_: &fox_engine_protocol::KernelModelPreview| {};
+    super::super::kernel_host::drive_with_actions(
+        &super::super::kernel_host::acquire(&root, &run_id).unwrap(),
+        &db, &clock, &CancellationRegistry::default(), &run_id, &runtime, "local-test-only",
+        &Allow, |_, _, _| panic!("transport failure cannot execute a tool"),
+        |_| Ok(()), |_| Ok(()), &preview,
+    )
+    .unwrap();
+
+    let snapshot = db.kernel_build_full_snapshot(&run_id).unwrap();
+    assert_eq!(snapshot.state, "failed");
+    assert!(snapshot.tool_calls.is_empty());
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let retry: (String, i64, i64) = connection.query_row(
+        "SELECT json_extract(payload_json,'$.kind'),
+                json_extract(payload_json,'$.scheduledAtWallMs'),
+                json_extract(payload_json,'$.dueWallMs')
+         FROM kernel_events WHERE run_id=?1 AND event_type='run.retrying'",
+        [&run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    assert_eq!(retry.0, "model_transport_failure");
+    assert_eq!(retry.2 - retry.1, 1_000);
+    let dispatch_times: Vec<i64> = {
+        let mut query = connection.prepare(
+            "SELECT created_at FROM kernel_events
+             WHERE run_id=?1 AND event_type='engine.initial_dispatched' ORDER BY seq",
+        ).unwrap();
+        query.query_map([&run_id], |row| row.get(0))
+            .unwrap().collect::<Result<_, _>>().unwrap()
+    };
+    assert_eq!(dispatch_times.len(), 2, "the retry must dispatch exactly once after due");
+    assert!(dispatch_times[1] >= retry.2, "second dispatch must wait for the durable due time");
+    let categories: Vec<String> = {
+        let mut query = connection.prepare(
+            "SELECT json_extract(payload_json,'$.failure.category') FROM kernel_events
+             WHERE run_id=?1 AND event_type='engine.model_rejected' ORDER BY seq",
+        ).unwrap();
+        query.query_map([&run_id], |row| row.get(0))
+            .unwrap().collect::<Result<_, _>>().unwrap()
+    };
+    assert_eq!(categories, vec!["model_transport_failure".to_owned(); 2]);
+    let attempts: i64 = connection.query_row(
+        "SELECT attempts FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key='initial-model'",
+        [&run_id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(attempts, 2, "the frozen one-retry budget must not refresh");
+    let failure: String = connection.query_row(
+        "SELECT json_extract(payload_json,'$.code') FROM kernel_events
+         WHERE run_id=?1 AND event_type='run.failed'",
+        [&run_id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(failure, "kernel.model_retry_exhausted");
+}
+
+#[test]
 fn live_executable_preface_gets_one_bounded_review_then_projects_final_answer() {
     assert_live_continuation_projection(false);
 }
@@ -2497,7 +2578,7 @@ fn assert_live_continuation_projection(after_tool: bool) {
         config.proposal_tools = vec![json!({"name":"attachment_compute","description":"Compute selected attachment data with JavaScript",
             "parameters":{"type":"object","properties":{"code":{"type":"string"},"attachmentIds":{"type":"array","items":{"type":"string"}}},"required":["code"]}})];
     }
-    let clock = TestClock::new(crate::database::now_ms());
+    let clock = crate::runtime_host::shadow_reconcile::ReconcilerClock;
     let (db, root, run_id) =
         fixture_with_retry_opt(&clock, &config.hash().unwrap(), Some(&config), true, true, (0, 1));
     db.freeze_kernel_host_scope(&run_id, &crate::database::KernelHostScope {
@@ -2602,7 +2683,7 @@ fn live_readonly_complete_answer_completes_without_review_round() {
     let mut config = worker_configuration(); // read-only `read` tool only
     config.system_prompt = "Answer directly.".into();
     config.model_service = json!({"apiType":"openai-completions","modelId":"kernel-http-test","baseUrl":format!("http://{address}/v1")});
-    let clock = TestClock::new(crate::database::now_ms());
+    let clock = crate::runtime_host::shadow_reconcile::ReconcilerClock;
     let (db, root, run_id) =
         fixture_with_retry_opt(&clock, &config.hash().unwrap(), Some(&config), true, true, (0, 1));
     freeze_host_scope(&db, &run_id);
