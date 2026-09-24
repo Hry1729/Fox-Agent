@@ -33,6 +33,8 @@ test('user text that resembles a notice is never upgraded to a Host marker', () 
 
 test('source, result identity, duplicates and bounded UTF-8 size fail closed', () => {
   assert.throws(() => validateHostJobNotices([{ ...fact(), source: 'user' }]), /identity/)
+  const missing = fact(); delete missing.errorCode
+  assert.throws(() => validateHostJobNotices([missing]), /identity/)
   assert.throws(() => validateHostJobNotices([{ ...fact(), resultSha256: null }]), /identity/)
   assert.throws(() => validateHostJobNotices([fact(), fact()]), /duplicate/)
   assert.throws(() => validateHostJobNotices([{ ...fact(), jobId: '中'.repeat(700) }]), /2 KiB/)

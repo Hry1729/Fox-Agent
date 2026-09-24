@@ -30,6 +30,11 @@ impl HostJobNotice {
             || (self.terminal_state == "completed") != self.result_ref.is_some()
             || self.result_ref.is_some() != self.result_sha256.is_some()
             || self.result_ref.is_some() != self.result_bytes.is_some()
+            || self.result_ref.as_ref().is_some_and(|value| value.trim().is_empty())
+            || self.result_sha256.as_ref().is_some_and(|value| {
+                value.len() != 71 || !value.starts_with("sha256:")
+                    || !value[7..].bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
             || serde_json::to_vec(self).map_err(|_| "invalid Host job notice")?.len() > 2_048
         {
             return Err("invalid Host job notice identity, result or size".into());

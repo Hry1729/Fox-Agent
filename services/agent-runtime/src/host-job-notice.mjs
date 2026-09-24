@@ -18,7 +18,9 @@ export function validateHostJobNotices(notices) {
   const seen = new Set()
   let total = 0
   for (const notice of notices) {
-    if (!record(notice) || Object.keys(notice).some(key => !fields.has(key))
+    if (!record(notice) || Object.keys(notice).length !== fields.size
+        || Object.keys(notice).some(key => !fields.has(key))
+        || [...fields].some(key => !Object.hasOwn(notice, key))
         || notice.source !== 'fox_kernel_host'
         || ['dataRootId', 'conversationId', 'runId', 'jobId'].some(key => !nonempty(notice[key]))
         || !Number.isSafeInteger(notice.attempt) || notice.attempt < 0
