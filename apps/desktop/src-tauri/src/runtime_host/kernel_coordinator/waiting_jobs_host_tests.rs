@@ -52,9 +52,15 @@ fn waiting_jobs_recovery_detached_accounts_and_releases_host_without_retiring_jo
 
     assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(), Some("waiting_jobs"));
     assert!(!job_parent_token.is_cancelled(), "parked Job parent token was retired");
-    let ownership = super::super::super::kernel_host::acquire(&root, &run)
-        .expect("detached parked Run must release its OS lock");
-    drop(ownership);
+    let mut reclaimed = None;
+    wait_until("parked Run OS lock release", || {
+        match super::super::super::kernel_host::acquire(&root, &run) {
+            Ok(ownership) => { reclaimed = Some(ownership); true }
+            Err(error) if error == super::super::super::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED => false,
+            Err(error) => panic!("unexpected parked Run lock error: {error}"),
+        }
+    });
+    drop(reclaimed);
     drop(host);
     drop(app);
 }
@@ -98,6 +104,11 @@ fn created_recovery_detached_records_preparation_failure_and_retires_scope() {
         &clock, &model.hash().unwrap(), Some(&model), true, true,
     );
     assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(), Some("created"));
+    assert!(db.run_control_binding(&run).unwrap().is_some());
+    assert!(db.kernel_model_config(&run).is_ok());
+    let expected_scope = freeze_host_scope(&db, &run);
+    assert_eq!(db.kernel_host_scope(&run).unwrap(), expected_scope);
+    assert!(!std::path::PathBuf::from(std::env::var_os("FOX_RUNTIME_EXECUTABLE").unwrap()).is_file());
     let mut context = tauri::generate_context!();
     for window in &mut context.config_mut().app.windows { window.create = false; }
     let app = tauri::Builder::default().any_thread().build(context).unwrap();
@@ -119,10 +130,22 @@ fn created_recovery_detached_records_preparation_failure_and_retires_scope() {
         "SELECT status FROM runs WHERE id=?1", [&run], |row| row.get(0),
     )).unwrap();
     assert_eq!(legacy_status, "failed");
+    let failure_code: String = db.with_connection(|conn| conn.query_row(
+        "SELECT json_extract(payload_json,'$.code') FROM kernel_events \
+         WHERE run_id=?1 AND event_type='run.failed' ORDER BY seq DESC LIMIT 1",
+        [&run], |row| row.get(0),
+    )).unwrap();
+    assert_eq!(failure_code, "kernel.preparation_failed");
     assert!(issued_token.is_cancelled(), "failed Run scope was not retired");
-    let ownership = super::super::super::kernel_host::acquire(&root, &run)
-        .expect("failed detached Run must release its OS lock");
-    drop(ownership);
+    let mut reclaimed = None;
+    wait_until("failed Run OS lock release", || {
+        match super::super::super::kernel_host::acquire(&root, &run) {
+            Ok(ownership) => { reclaimed = Some(ownership); true }
+            Err(error) if error == super::super::super::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED => false,
+            Err(error) => panic!("unexpected failed Run lock error: {error}"),
+        }
+    });
+    drop(reclaimed);
     drop(host);
     drop(app);
 }
