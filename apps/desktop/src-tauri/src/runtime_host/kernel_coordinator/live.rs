@@ -1262,6 +1262,15 @@ impl KernelCoordinator<'_> {
         // Spawn and initialize before the durable dispatch commit: the ready
         // handshake advances no controller state, and an old runtime without
         // the loop capability must fall back to the per-round transport.
+        //
+        // The live transport spawns through this second entry point, so the
+        // opt-in timeline has to be recorded here as well; otherwise a live Run
+        // shows a Provider timeline with no Host-side counterpart at all.
+        // Unlike the per-round transport, live runs every model round inside
+        // this ONE session, so this is a single record covering session
+        // spawn→ready, not one record per Provider request.
+        #[cfg(test)]
+        let live_spawn_started = std::time::Instant::now();
         let mut session = super::super::kernel_model_worker::LiveKernelSession::spawn(
             runtime,
             &config,
@@ -1270,6 +1279,16 @@ impl KernelCoordinator<'_> {
             &token,
             self.live_ready_deadline()?,
         )?;
+        #[cfg(test)]
+        if super::super::kernel_model_worker::host_trace::enabled() {
+            super::super::kernel_model_worker::host_trace::record(
+                &self.binding.run_id,
+                format!(
+                    "host:live_session_ready ready_ms={}",
+                    live_spawn_started.elapsed().as_millis()
+                ),
+            );
+        }
         session.observe_usage(self.database);
         self.tick()?;
         self.database
