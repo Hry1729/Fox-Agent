@@ -4,6 +4,15 @@ use super::*;
 use std::time::{Duration, Instant};
 use tauri::Manager;
 
+fn provider_notice_text(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(text) if text.contains("FOX_HOST_JOB_NOTICE_V1\n") => Some(text),
+        Value::Array(items) => items.iter().find_map(provider_notice_text),
+        Value::Object(fields) => fields.values().find_map(provider_notice_text),
+        _ => None,
+    }
+}
+
 #[test]
 fn failed_and_independently_cancelled_jobs_auto_resume_on_both_pi_transports() {
     let selected = std::env::var("FOX_TEST_JOB_TERMINAL_CHILD").ok();
@@ -132,7 +141,7 @@ fn run_terminal_job_chain(live: bool, fail: bool) {
     let notice = db.kernel_job_notice(&binding.conversation_id, &run, &job_id).unwrap().unwrap();
     let expected = if fail { "failed" } else { "cancelled" };
     assert_eq!(job.state.as_str(), expected);
-    assert_eq!(notice.terminal_state, expected);
+    assert_eq!(notice.terminal_state.as_str(), expected);
     assert_eq!(job.attempts, 1);
     assert_eq!(notice.attempt, 1);
     assert_eq!(notice.error_code.as_deref(),
@@ -140,7 +149,16 @@ fn run_terminal_job_chain(live: bool, fail: bool) {
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 3, "a terminal Job has one automatic continuation");
     assert_eq!(requests[2]["messages"].to_string().matches("FOX_HOST_JOB_NOTICE_V1").count(), 1);
-    assert!(requests[2]["messages"].to_string().contains(&job_id));
+    let message = provider_notice_text(&requests[2]["messages"])
+        .expect("the third Provider request omitted the typed Host notice");
+    let wire: fox_engine_protocol::HostJobNotice = serde_json::from_str(
+        message.rsplit('\n').next().unwrap()).expect("the model-visible terminal fact is malformed");
+    assert_eq!(wire.run_id, run);
+    assert_eq!(wire.job_id, job_id);
+    assert_eq!(wire.attempt, notice.attempt);
+    assert_eq!(wire.terminal_state, notice.terminal_state.as_str());
+    assert_eq!(wire.error_code, notice.error_code);
+    assert_eq!(wire.finished_at, notice.finished_at);
     assert_eq!(crate::runtime_host::kernel_host::waiting_wake_test_hooks::take_continuation_transports_for_test(&run),
         vec![if live { "live" } else { "per_round" }]);
     let (parks, wakes, replies, formal): (i64, i64, i64, i64) = db.with_connection(|conn| conn.query_row(
