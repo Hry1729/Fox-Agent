@@ -141,11 +141,12 @@ fn acknowledge_model_notices(
             return Err(notice_error("model notice terminal fact changed"));
         }
     }
-    tx.execute("UPDATE kernel_job_notice_deliveries SET state='acknowledged',acknowledged_at=?5
+    let delivered = tx.execute("UPDATE kernel_job_notice_deliveries SET state='acknowledged',acknowledged_at=?5
         WHERE dispatch_key=?4 AND state='bound' AND job_id IN
           (SELECT job_id FROM kernel_job_notices WHERE data_root_id=?1
             AND conversation_id=?2 AND run_id=?3)",
         params![root,conversation,run,dispatch_key,now])?;
+    if delivered != notices.len() { return Err(notice_error("model notice acknowledgement count changed")); }
     let changed = tx.execute("UPDATE kernel_model_notice_inputs SET state='acknowledged',acknowledged_at=?4
         WHERE run_id=?1 AND dispatch_key=?2 AND lease_owner=?3 AND state='bound'",
         params![run,dispatch_key,owner,now])?;

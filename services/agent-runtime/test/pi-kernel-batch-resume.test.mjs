@@ -68,6 +68,22 @@ function fixture() {
   } }
 }
 
+test('same batch projects Host receipt time before a typed job fact', () => {
+  const request = fixture()
+  request.payload.batchResume.steering = [{ messageId: 'extra-1', content: '请继续核对', receivedAt: 123456 }]
+  request.payload.batchResume.hostJobNotices = [{ source: 'fox_kernel_host',
+    dataRootId: `sha256:${'a'.repeat(64)}`, conversationId: identity.conversationId,
+    runId: identity.runId, jobId: 'compute-1', attempt: 1, terminalState: 'completed',
+    finishedAt: 42, resultRef: `fox-result://${identity.runId}/compute-1`,
+    resultSha256: `sha256:${'b'.repeat(64)}`, resultBytes: 5, errorCode: null }]
+  const prepared = prepareKernelBatchResume(request, identity)
+  assert.equal(prepared.messages.at(-2).role, 'user')
+  assert.equal(prepared.messages.at(-2).timestamp, 123456)
+  assert.match(prepared.messages.at(-2).content[0].text, /请继续核对/)
+  assert.match(prepared.messages.at(-1).content[0].text, /^FOX_HOST_JOB_NOTICE_V1\n/)
+  assert.deepEqual(prepared.hostJobNoticeIds, ['compute-1'])
+})
+
 test('Kernel batch resume requires the complete barrier and preserves source order without repairing facts', () => {
   const request = fixture()
   const before = structuredClone(request)

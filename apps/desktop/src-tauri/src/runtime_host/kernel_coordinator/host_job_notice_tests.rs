@@ -95,7 +95,7 @@ fn experimental_host_initial_lease_binds_complete_input_and_acks_with_response()
 
 #[test]
 fn experimental_host_notice_response_faults_leave_lease_bound_and_no_reply() {
-    for fault in ["hash", "owner", "ack_trigger"] {
+    for fault in ["hash", "owner", "ack_trigger", "ack_ignore"] {
         let (db, _root, run, clock, cancellation, conversation)=notice_host_fixture(fault);
         let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
         let job=finished_compute(&db,&run,&conversation,fault);
@@ -105,9 +105,12 @@ fn experimental_host_notice_response_faults_leave_lease_bound_and_no_reply() {
                     rusqlite::params![job,format!("sha256:{}","c".repeat(64))]).map(|_|()),
                 "owner" => conn.execute("UPDATE kernel_model_notice_inputs SET lease_owner='foreign' WHERE run_id=?1",
                     [&run]).map(|_|()),
-                _ => conn.execute_batch("CREATE TRIGGER reject_b2a_ack BEFORE UPDATE OF state
+                "ack_trigger" => conn.execute_batch("CREATE TRIGGER reject_b2a_ack BEFORE UPDATE OF state
                     ON kernel_job_notice_deliveries WHEN NEW.state='acknowledged'
                     BEGIN SELECT RAISE(ABORT,'injected ack fault'); END"),
+                _ => conn.execute_batch("CREATE TRIGGER ignore_b2a_ack BEFORE UPDATE OF state
+                    ON kernel_job_notice_deliveries WHEN NEW.state='acknowledged'
+                    BEGIN SELECT RAISE(IGNORE); END"),
             }).unwrap();
             Ok(stop_response(binding,frame))
         }).is_err(),"{fault} must reject response atomically");
@@ -275,4 +278,105 @@ fn unknown_model_response_reopens_without_replaying_bound_notice_or_job() {
         }).is_err());
         assert_eq!(reopened.kernel_job_notice(&conversation,&run,&job).unwrap().unwrap(),original);
     }
+}
+
+#[test]
+fn live_batch_binds_steering_receipt_and_job_notice_in_the_same_model_input() {
+    use std::io::{Read,Write};
+    use std::net::TcpListener;
+    use std::time::{Duration,Instant};
+    let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+    let address=listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut config=worker_configuration();
+    config.model_service=json!({"apiType":"openai-completions","modelId":"kernel-http-test",
+        "baseUrl":format!("http://{address}/v1")});
+    let clock=crate::runtime_host::shadow_reconcile::ReconcilerClock;
+    let cancellation=CancellationRegistry::default();
+    let (db,root,run)=fixture_with_retry_opt(&clock,&config.hash().unwrap(),Some(&config),true,true,(0,1));
+    enable_notices(&db,&run);freeze_host_scope(&db,&run);
+    let conversation=db.run_control_binding(&run).unwrap().unwrap().conversation_id;
+    let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
+    let job=db.kernel_job_start(&JobStartRequest {run_id:run.clone(),kind:"attachment_compute".into(),
+        idempotency_key:"while-model-running".into(),params:json!({"x":1}),
+        deadline_ms:Some(crate::database::now_ms()+60_000),progress_total:None})
+        .unwrap().snapshot().job_id.clone();
+    db.kernel_job_claim_attempt(&job,1).unwrap();
+    let source=root.join("facts.db");
+    let server_run=run.clone();let server_conversation=conversation.clone();let server_job=job.clone();
+    let server=std::thread::spawn(move || {
+        let mut requests=Vec::new();
+        let deadline=Instant::now()+Duration::from_secs(30);
+        while requests.len()<2 {
+            let mut stream=match listener.accept() {
+                Ok((stream,_))=>stream,
+                Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{
+                    assert!(Instant::now()<deadline,"expected two local Provider requests");
+                    std::thread::sleep(Duration::from_millis(10));continue;
+                }
+                Err(error)=>panic!("{error}"),
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut bytes=Vec::new();let mut buffer=[0u8;8192];
+            let (header_end,length)=loop {
+                let read=stream.read(&mut buffer).unwrap();assert!(read>0);
+                bytes.extend_from_slice(&buffer[..read]);assert!(bytes.len()<1_048_576);
+                if let Some(end)=bytes.windows(4).position(|part|part==b"\r\n\r\n") {
+                    let headers=String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                    let length:usize=headers.lines().find_map(|line|line.strip_prefix("content-length:"))
+                        .unwrap().trim().parse().unwrap();
+                    break (end+4,length);
+                }
+            };
+            while bytes.len()<header_end+length {
+                let read=stream.read(&mut buffer).unwrap();assert!(read>0);
+                bytes.extend_from_slice(&buffer[..read]);
+            }
+            requests.push(serde_json::from_slice::<Value>(&bytes[header_end..header_end+length]).unwrap());
+            if requests.len()==1 {
+                let second=Database::open(&source).unwrap();
+                second.kernel_job_complete_attempt(&server_job,1,&server_conversation,&json!({"completed":"once"})).unwrap();
+                second.enqueue_run_steering(&server_run,"midrun-steering","补充要求：继续核对已完成结果。",
+                    crate::database::now_ms()).unwrap();
+            }
+            let delta=if requests.len()==1 {
+                json!({"role":"assistant","tool_calls":[{"index":0,"id":"read-once","type":"function",
+                    "function":{"name":"read","arguments":"{\"path\":\"proof.txt\"}"}}]})
+            } else {json!({"role":"assistant","content":"处理完成。"})};
+            let finish=if requests.len()==1 {"tool_calls"} else {"stop"};
+            let chunk=json!({"id":"b2a-steering","object":"chat.completion.chunk","created":1,
+                "model":"kernel-http-test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
+            let done=json!({"id":"b2a-steering","object":"chat.completion.chunk","created":1,
+                "model":"kernel-http-test","choices":[{"index":0,"delta":{},"finish_reason":finish}]});
+            let body=format!("data: {chunk}\n\ndata: {done}\n\ndata: [DONE]\n\n");
+            write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+        }
+        requests
+    });
+    let sink=|_:&fox_engine_protocol::KernelModelPreview|{};
+    let coordinator=coordinator.with_preview(&sink);
+    coordinator.dispatch_initial_live("steer-notice-live",&Allow,&real_worker_command(),"local-test-only",
+        &|_,effect,_| {
+            assert_eq!(effect.tool_call_id.as_deref(),Some("read-once"));
+            Ok((true,json!({"content":[{"type":"text","text":"Host-settled read"}]})))
+        },&|_|Ok(()),&|_|Ok(())).unwrap();
+    let requests=server.join().unwrap();
+    assert_eq!(requests.len(),2);
+    let second_wire=serde_json::to_string(&requests[1]["messages"]).unwrap();
+    assert_eq!(second_wire.matches("FOX_HOST_JOB_NOTICE_V1").count(),1);
+    assert_eq!(second_wire.matches("用户在运行过程中补充要求").count(),1);
+    assert!(second_wire.find("用户在运行过程中补充要求")<second_wire.find("FOX_HOST_JOB_NOTICE_V1"));
+    let input_json:String=db.with_connection(|conn|conn.query_row(
+        "SELECT input_json FROM kernel_model_notice_inputs WHERE run_id=?1
+         AND dispatch_key LIKE 'tool-batch-delivery:%'",[&run],|row|row.get(0))).unwrap();
+    let input:Value=serde_json::from_str(&input_json).unwrap();
+    let receipt=input["modelInput"]["steering"][0]["receivedAt"].as_i64().unwrap();
+    let history=input["modelHistory"].as_array().unwrap();
+    let projected=history.iter().find(|message|message["content"][0]["text"]
+        .as_str().is_some_and(|text|text.contains("用户在运行过程中补充要求"))).unwrap();
+    assert_eq!(projected["timestamp"].as_i64(),Some(receipt));
+    let state:String=db.with_connection(|conn|conn.query_row(
+        "SELECT state FROM kernel_job_notice_deliveries WHERE job_id=?1",[&job],|row|row.get(0))).unwrap();
+    assert_eq!(state,"acknowledged");
+    assert_eq!(coordinator.snapshot().unwrap().state,"completed");
 }

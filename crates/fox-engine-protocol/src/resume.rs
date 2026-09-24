@@ -49,14 +49,19 @@ impl HostJobNotice {
 
 pub fn validate_host_job_notices(notices: &[HostJobNotice]) -> Result<(), String> {
     let mut seen = std::collections::HashSet::new();
-    let mut bytes = 0usize;
     for notice in notices {
         notice.validate()?;
         if !seen.insert(&notice.job_id) { return Err("duplicate Host job notice".into()); }
-        bytes += serde_json::to_vec(notice).map_err(|_| "invalid Host job notice")?.len();
-        if bytes > 16 * 1024 { return Err("Host job notices exceed model input limit".into()); }
+    }
+    if host_job_notice_bytes(notices)? > 16 * 1024 {
+        return Err("Host job notices exceed model input limit".into());
     }
     Ok(())
+}
+
+fn host_job_notice_bytes(notices: &[HostJobNotice]) -> Result<usize, String> {
+    notices.iter().try_fold(0usize,|bytes,notice| Ok(bytes.saturating_add(
+        serde_json::to_vec(notice).map_err(|_| "invalid Host job notice")?.len())))
 }
 
 pub fn historical_host_job_notice_bytes(history: &[Value]) -> Result<usize, String> {
@@ -242,7 +247,7 @@ impl KernelInitialModelFrame {
     pub fn validate(&self) -> Result<(), String> {
         validate_host_job_notices(&self.host_job_notices)?;
         if historical_host_job_notice_bytes(&self.input.messages)?
-            + serde_json::to_vec(&self.host_job_notices).map_err(|_| "invalid Host job notices")?.len()
+            .saturating_add(host_job_notice_bytes(&self.host_job_notices)?)
             > 16 * 1024 { return Err("Host job notice input exceeds total limit".into()); }
         self.input.validate()?;
         let expected_key = match &self.continuation_key {
@@ -609,7 +614,7 @@ impl KernelBatchResumeFrame {
     pub fn validate(&self) -> Result<(), String> {
         validate_host_job_notices(&self.host_job_notices)?;
         if historical_host_job_notice_bytes(&self.history)?
-            + serde_json::to_vec(&self.host_job_notices).map_err(|_| "invalid Host job notices")?.len()
+            .saturating_add(host_job_notice_bytes(&self.host_job_notices)?)
             > 16 * 1024 { return Err("Host job notice input exceeds total limit".into()); }
         validate_checkpoint_parts(&self.history, &self.assistant_message)?;
         if self.schema_version != 1 || self.turn_id.trim().is_empty() || self.batch_id.trim().is_empty()
@@ -734,6 +739,63 @@ mod tests {
         let mut unsettled = wire;
         unsettled["tools"][0]["state"] = json!("running");
         assert!(serde_json::from_value::<KernelBatchResumeFrame>(unsettled).is_err());
+    }
+
+    #[test]
+    fn notice_budget_counts_fact_objects_without_array_delimiters_in_both_frames() {
+        fn fact(job: &str) -> HostJobNotice {
+            HostJobNotice {source:"fox_kernel_host".into(),data_root_id:"root".into(),
+                conversation_id:"conversation".into(),run_id:"run".into(),job_id:job.into(),
+                attempt:1,terminal_state:"failed".into(),finished_at:42,
+                result_ref:None,result_sha256:None,result_bytes:None,error_code:Some(String::new())}
+        }
+        fn historical(total:usize) -> Vec<Value> {
+            let mut markers=Vec::new();
+            for index in 0..8 {
+                let desired=if index<7 {2048} else {total-7*2048};
+                let mut notice=fact(&format!("old-{index}"));
+                let base=serde_json::to_vec(&notice).unwrap().len();
+                assert!(desired>=base && desired<=2048);
+                notice.error_code=Some("x".repeat(desired-base));
+                assert_eq!(serde_json::to_vec(&notice).unwrap().len(),desired);
+                markers.push(notice.history_marker());
+            }
+            markers
+        }
+        let initial=|history:Vec<Value>,new:Vec<HostJobNotice>| KernelInitialModelFrame {
+            schema_version:1,idempotency_key:"initial-model-delivery".into(),checkpoint_seq:2,
+            continuation_key:None,host_job_notices:new,
+            input:KernelInitialModelInput {schema_version:1,run_id:"run".into(),turn_id:"turn".into(),
+                prompt_config_hash:"hash".into(),messages:[vec![json!({"role":"user","content":"old"})],
+                    history,vec![json!({"role":"user","content":"continue"})]].concat()},
+        };
+        let batch=|history:Vec<Value>,new:Vec<HostJobNotice>| KernelBatchResumeFrame {
+            schema_version:1,turn_id:"turn".into(),batch_id:"batch".into(),
+            idempotency_key:"tool-batch-delivery:batch".into(),checkpoint_seq:2,
+            history:[vec![json!({"role":"user","content":"old"})],history].concat(),
+            assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[
+                {"type":"toolCall","id":"read-1","name":"read","arguments":{"path":"a"}}]}),
+            tools:vec![KernelSettledToolResult {tool_call_id:"read-1".into(),tool:"read".into(),
+                canonical_input:json!({"path":"a"}),source_order:0,
+                state:KernelSettledToolState::Completed,storage:None,
+                result:json!({"content":[{"type":"text","text":"done"}]})}],
+            steering:vec![],host_job_notices:new,
+        };
+        for old_bytes in [16382,16383,16384] {
+            initial(historical(old_bytes),vec![]).validate().unwrap();
+            batch(historical(old_bytes),vec![]).validate().unwrap();
+        }
+        let mut fresh=fact("new");
+        fresh.error_code=Some("a".repeat(100));
+        let fresh_bytes=serde_json::to_vec(&fresh).unwrap().len();
+        let remaining=16384-fresh_bytes;
+        // Split the near-limit history into eight valid facts rather than
+        // relying on Vec's '[' and comma bytes in the budget.
+        initial(historical(remaining),vec![fresh.clone()]).validate().unwrap();
+        batch(historical(remaining),vec![fresh.clone()]).validate().unwrap();
+        fresh.error_code.as_mut().unwrap().push('a');
+        assert!(initial(historical(remaining),vec![fresh.clone()]).validate().is_err());
+        assert!(batch(historical(remaining),vec![fresh]).validate().is_err());
     }
 }
 
