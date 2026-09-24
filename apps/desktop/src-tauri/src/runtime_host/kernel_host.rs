@@ -724,7 +724,7 @@ pub(super) fn drive_with_actions(
     preview: &super::kernel_model_worker::PreviewSink,
 ) -> Result<(), String> {
     drive_with_actions_transport(_ownership, database, clock, cancellation, run_id, runtime,
-        api_key, policy, execute, after_commit, settle_children, preview, false)
+        api_key, policy, execute, after_commit, settle_children, preview, false).map(|_| ())
 }
 
 /// Test-only transport selection exercises the owning Host's complete
@@ -746,11 +746,17 @@ pub(super) fn drive_with_actions_per_round(
     preview: &super::kernel_model_worker::PreviewSink,
 ) -> Result<(), String> {
     drive_with_actions_transport(ownership, database, clock, cancellation, run_id, runtime,
-        api_key, policy, execute, after_commit, settle_children, preview, true)
+        api_key, policy, execute, after_commit, settle_children, preview, true).map(|_| ())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum KernelDriveOutcome {
+    Terminal,
+    Parked,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn drive_with_actions_transport(
+pub(super) fn drive_with_actions_transport(
     _ownership: &KernelRunLock,
     database: &Database,
     clock: &dyn Clock,
@@ -764,7 +770,7 @@ fn drive_with_actions_transport(
     settle_children: impl Fn(bool) -> Result<(), String>,
     preview: &super::kernel_model_worker::PreviewSink,
     force_per_round: bool,
-) -> Result<(), String> {
+) -> Result<KernelDriveOutcome, String> {
     // Validate all frozen inputs before any recovery dispatch. Never reconstruct
     // a missing input/scope/model from current settings.
     database.kernel_host_scope(run_id)?;
@@ -795,12 +801,18 @@ fn drive_with_actions_transport(
             // same batch under the terminal gate, without applying its decision
             // or calling child cleanup again after parent cancellation.
             consume_approval_step(&coordinator, database, run_id, policy)?;
-            return Ok(());
+            return Ok(KernelDriveOutcome::Terminal);
         }
         coordinator.tick()?;
         let snapshot = coordinator.snapshot()?;
         if terminal(&snapshot.state) {
-            return Ok(());
+            return Ok(KernelDriveOutcome::Terminal);
+        }
+        if snapshot.state == "waiting_jobs" {
+            // The model response and wait decision have already committed. The
+            // owning stack must now unwind so the OS Run lock is released. The
+            // background Job still holds the parent's uncancelled token.
+            return Ok(KernelDriveOutcome::Parked);
         }
         if snapshot.state == "cancelling" {
             coordinator.settle_cancellation()?;
@@ -1087,7 +1099,7 @@ impl super::RuntimeHost {
 
     pub(crate) fn recover_kernel_runs_detached(&self) -> Result<(), String> {
         let runs = self.database.kernel_host_recoverable_runs()?;
-        {
+        let newly_owned = {
             let mut state = self
                 .state
                 .lock()
@@ -1095,15 +1107,23 @@ impl super::RuntimeHost {
             if state.shutting_down {
                 return Err("Runtime Host is shutting down".into());
             }
-            if !runs.is_empty() {
+            // A second recovery call must never spawn a lock loser that later
+            // removes the first owner's active marker or retires its Job token.
+            let fresh: Vec<_> = runs.into_iter()
+                .filter(|run_id| !state.kernel_active_runs.contains(run_id))
+                .collect();
+            for run_id in &fresh {
+                state.cancellation.register_run(run_id)?;
+            }
+            if !fresh.is_empty() {
                 state.state = "recovering".into();
             }
-            for run_id in &runs {
-                state.cancellation.register_run(run_id)?;
+            for run_id in &fresh {
                 state.kernel_active_runs.insert(run_id.clone());
             }
-        }
-        for run_id in runs {
+            fresh
+        };
+        for run_id in newly_owned {
             let host = self.clone();
             std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
                 let result = (|| {
@@ -1121,18 +1141,24 @@ impl super::RuntimeHost {
                     let runtime = host.runtime_command()?;
                     host.drive_kernel_run(ownership, &binding, &runtime, &cancellation)
                 })();
-                if result.is_err() {
+                if result.as_ref().err().map(String::as_str) != Some(super::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED)
+                    && result.is_err() {
                     // Failure recording reacquires ownership; it cannot terminate
                     // a Run currently held by another process.
                     let _ = host.record_kernel_start_failure(&run_id);
                 }
                 if let Ok(mut state) = host.state.lock() {
                     state.kernel_active_runs.remove(&run_id);
-                    state.cancellation.retire_run(&run_id);
+                    if result.as_ref() != Ok(&KernelDriveOutcome::Parked)
+                        && result.as_ref().err().map(String::as_str) != Some(super::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED) {
+                        state.cancellation.retire_run(&run_id);
+                    }
                     if state.kernel_active_runs.is_empty() {
                         state.state = "ready".into();
                     }
-                    if result.is_err() {
+                    if result.is_err()
+                        && result.as_ref().err().map(String::as_str)
+                            != Some(super::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED) {
                         state.last_error = Some(
                             "A Kernel Run could not be recovered; no fallback execution was used."
                                 .into(),
@@ -1306,12 +1332,14 @@ impl super::RuntimeHost {
         })();
         if let Ok(mut state) = self.state.lock() {
             state.kernel_active_runs.remove(&binding.run_id);
-            state.cancellation.retire_run(&binding.run_id);
+            if result.as_ref() != Ok(&KernelDriveOutcome::Parked) {
+                state.cancellation.retire_run(&binding.run_id);
+            }
             if state.kernel_active_runs.is_empty() {
                 state.state = "ready".into();
             }
         }
-        result
+        result.map(|_| ())
     }
 
     fn drive_kernel_run(
@@ -1320,7 +1348,7 @@ impl super::RuntimeHost {
         binding: &RunControlBinding,
         runtime: &RuntimeCommand,
         cancellation: &CancellationRegistry,
-    ) -> Result<(), String> {
+    ) -> Result<KernelDriveOutcome, String> {
         let config = self.database.kernel_model_config(&binding.run_id)?;
         let base_url = config.model_service["baseUrl"]
             .as_str()
@@ -1364,7 +1392,7 @@ impl super::RuntimeHost {
                 let _ = app.emit("fox://kernel-model-preview", notice);
             }
         };
-        let result = drive_with_actions(
+        let result = drive_with_actions_transport(
             &ownership,
             &self.database,
             &super::shadow_reconcile::ReconcilerClock,
@@ -1418,6 +1446,7 @@ impl super::RuntimeHost {
             |tool_id| self.dispatch_kernel_host_action(binding, tool_id),
             |force_cancel| self.wait_kernel_action_children(binding, force_cancel),
             &preview,
+            false,
         );
         if result.is_err() {
             self.wait_kernel_action_children(binding, true)?;

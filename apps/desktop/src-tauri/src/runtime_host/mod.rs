@@ -1489,7 +1489,8 @@ impl RuntimeHost {
     ) -> Result<(), String> {
         let result = self.start_run_inner(started, text, attachments);
         if let Err(error) = &result {
-            if error == CANCELLED_BEFORE_SUBMISSION {
+            if error == CANCELLED_BEFORE_SUBMISSION
+                || error == kernel_run_lock::KERNEL_RUN_ALREADY_OWNED {
                 return result;
             }
             if let Ok(mut state) = self.state.lock() {
@@ -1856,7 +1857,7 @@ impl RuntimeHost {
                                 state.state = "ready".to_owned();
                             }
                         }
-                    } else {
+                    } else if error != kernel_run_lock::KERNEL_RUN_ALREADY_OWNED {
                         runtime_host.record_start_failure(&queued.started, error);
                     }
                 }
@@ -2145,7 +2146,8 @@ impl RuntimeHost {
         let run_id = started.run.id.clone();
         std::thread::spawn(move || {
             if let Err(error) = host.start_kernel_run(ownership, &binding, prompt, service) {
-                if error != CANCELLED_BEFORE_SUBMISSION {
+                if error != CANCELLED_BEFORE_SUBMISSION
+                    && error != kernel_run_lock::KERNEL_RUN_ALREADY_OWNED {
                     let _ = database.mark_run_failed(
                         &run_id,
                         "kernel.continuation_start_failed",

@@ -16,6 +16,7 @@ fn parked_job_fixture_with_mutation(mutation: Option<&str>)
     let model = worker_configuration();
     let (db, root, run) = fixture_with_start_opt(
         &clock, &model.hash().unwrap(), Some(&model), true, true);
+    freeze_host_scope(&db, &run);
     db.with_connection(|conn| conn.execute(
         "UPDATE kernel_runs SET frozen_config_json=json_set(frozen_config_json,
           '$.experimentalComputeJobNotice',json('true')) WHERE run_id=?1", [&run],
@@ -185,4 +186,26 @@ fn waiting_jobs_reopen_rejects_changed_frozen_attempt() {
     db.with_connection(|conn|conn.execute(
         "UPDATE kernel_jobs SET attempts=2 WHERE job_id=?1",[&job])).unwrap();
     assert!(db.kernel_rehydrate(&run).is_err());
+}
+
+#[test]
+fn waiting_jobs_owned_host_loop_returns_parked_without_error_or_forced_child_settlement() {
+    let (db,root,run,_conversation,_job,_controller,_park_seq,_now)=parked_job_fixture();
+    let cancellation=CancellationRegistry::default();
+    cancellation.register_run(&run).unwrap();
+    let token=cancellation.run_token(&run).unwrap();
+    let ownership=super::super::super::kernel_host::acquire(&root,&run).unwrap();
+    let outcome=super::super::super::kernel_host::drive_with_actions_transport(
+        &ownership,&db,&super::super::super::shadow_reconcile::ReconcilerClock,&cancellation,&run,
+        &super::super::super::RuntimeCommand {program:"must-not-start-model".into(),script:None},
+        "",&Allow,|_,_,_|panic!("parked Run cannot dispatch a tool"),
+        |_|panic!("parked Run cannot dispatch a Host action"),
+        |force|{assert!(!force,"parked Run cannot force-settle children");Ok(())},
+        &|_|{},false).unwrap();
+    assert_eq!(outcome,super::super::super::kernel_host::KernelDriveOutcome::Parked);
+    assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(),Some("waiting_jobs"));
+    assert!(!token.is_cancelled(),"parent token must remain live across park");
+    drop(ownership);
+    let reacquired=super::super::super::kernel_host::acquire(&root,&run).unwrap();
+    drop(reacquired);
 }

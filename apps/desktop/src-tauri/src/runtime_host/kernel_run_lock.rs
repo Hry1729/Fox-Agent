@@ -3,8 +3,11 @@
 use sha2::{Digest, Sha256};
 use std::{
     fs::{File, OpenOptions},
+    io::ErrorKind,
     path::Path,
 };
+
+pub(super) const KERNEL_RUN_ALREADY_OWNED: &str = "kernel.run_already_owned";
 
 pub(super) struct KernelRunLock {
     _file: File,
@@ -27,8 +30,13 @@ impl KernelRunLock {
             .truncate(false)
             .open(directory.join(filename))
             .map_err(|error| format!("Kernel lock file: {error}"))?;
-        file.try_lock()
-            .map_err(|error| format!("Kernel Run already owned or cannot be locked: {error}"))?;
+        file.try_lock().map_err(|error| {
+            if error.kind() == ErrorKind::WouldBlock {
+                KERNEL_RUN_ALREADY_OWNED.to_owned()
+            } else {
+                format!("Kernel Run cannot be locked: {error}")
+            }
+        })?;
         Ok(Self { _file: file })
     }
 }
@@ -42,7 +50,8 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("fox-kernel-lock-{}", uuid::Uuid::new_v4()));
         let first = KernelRunLock::acquire(&directory, "run/../../not-a-path").unwrap();
-        assert!(KernelRunLock::acquire(&directory, "run/../../not-a-path").is_err());
+        assert_eq!(KernelRunLock::acquire(&directory, "run/../../not-a-path")
+            .err().as_deref(), Some(KERNEL_RUN_ALREADY_OWNED));
         let independent = KernelRunLock::acquire(&directory, "other-run").unwrap();
         drop(first);
         let recovered = KernelRunLock::acquire(&directory, "run/../../not-a-path").unwrap();
