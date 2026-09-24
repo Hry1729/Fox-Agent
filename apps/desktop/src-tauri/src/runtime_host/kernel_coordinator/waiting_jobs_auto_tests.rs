@@ -496,3 +496,173 @@ fn run_parked_stop(live: bool, expire: bool) {
     drop(host);
     drop(app);
 }
+
+/// A second real Run is submitted through the public detached queue while the
+/// first Run's automatic wake owns both its OS lock and wake-inflight marker.
+/// It must actually reach its separate local Provider after that owner exits.
+#[test]
+fn real_host_queued_run_dispatches_after_auto_wake_releases_ownership() {
+    if std::env::var_os("FOX_TEST_AUTO_WAKE_QUEUE_CHILD").is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("real_host_queued_run_dispatches_after_auto_wake_releases_ownership")
+            .arg("--test-threads=1")
+            .env("FOX_TEST_AUTO_WAKE_QUEUE_CHILD", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(55);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("automatic wake queue test exceeded 55 seconds");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "child stdout: {}\nchild stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+
+    let arguments = json!({"idempotencyKey":"one-queued-compute",
+        "params":{"processing":"chunked",
+            "code":"function onChunk(c){} function onFinish(){return {answer:42};}"}}).to_string();
+    let (first_address, first_server) = start_http_model_fixture(vec![
+        json!({"role":"assistant","tool_calls":[{"index":0,"id":"job-start","type":"function",
+            "function":{"name":"compute_job_start","arguments":arguments}}]}),
+        json!({"role":"assistant","content":"The first Job is still running."}),
+        json!({"role":"assistant","content":"The first Run has finished."}),
+    ]);
+    let (second_request_tx, second_request_rx) = std::sync::mpsc::channel();
+    let (second_address, second_server) = start_http_model_fixture_with_response_hook(
+        vec![json!({"role":"assistant","content":"The queued Run has finished."})],
+        Some((0, Box::new(move || { second_request_tx.send(()).unwrap(); }))));
+    let mut first_model = worker_configuration();
+    first_model.model_service = json!({"apiType":"openai-completions","modelId":"kernel-http-test",
+        "baseUrl":format!("http://{first_address}/v1")});
+    first_model.proposal_tools = vec![json!({"name":"compute_job_start",
+        "description":"Start a bounded background compute Job",
+        "parameters":{"type":"object","properties":{"idempotencyKey":{"type":"string"},
+            "params":{"type":"object"}},"required":["idempotencyKey","params"]}})];
+    let clock = crate::runtime_host::shadow_reconcile::ReconcilerClock;
+    let (db, root, first) = fixture_with_retry_opt(&clock, &first_model.hash().unwrap(),
+        Some(&first_model), true, true, (0, 1));
+    super::host_job_notice_tests::enable_notices(&db, &first);
+    db.freeze_kernel_host_scope(&first, &crate::database::KernelHostScope {
+        schema_version: 1,
+        tool_names: ["compute_job_start".into()].into_iter().collect(),
+        mcp_server_hashes: Default::default(),
+        knowledge_reference_hashes: Default::default(),
+        knowledge_connection_hashes: Default::default(),
+        office_tools: Default::default(),
+        lifecycle_hooks: vec![],
+    }).unwrap();
+
+    // A distinct conversation satisfies the real create_run active-run guard.
+    let conversation = db.create_conversation(db.default_agent_id(), None,
+        Some(root.to_str().unwrap()), Some("read_only")).unwrap();
+    let started = db.create_run(&conversation.id, "Queued Run local Provider fixture", None).unwrap();
+    let second = started.run.id.clone();
+    let mut second_binding = db.run_control_binding(&first).unwrap().unwrap();
+    second_binding.run_id = second.clone();
+    second_binding.conversation_id = conversation.id;
+    db.freeze_run_control(&second_binding).unwrap();
+    let mut second_model = first_model.clone();
+    second_model.model_service["baseUrl"] = json!(format!("http://{second_address}/v1"));
+    second_model.proposal_tools.clear();
+    let second_hash = second_model.hash().unwrap();
+    let mut second_frozen = db.kernel_rehydrate(&first).unwrap().unwrap().config;
+    second_frozen.prompt_config_hash = second_hash.clone();
+    second_frozen.experimental_compute_job_notice = false;
+    db.kernel_create_run(&second, "pi", "authoritative", 2,
+        &second_binding.permission_snapshot_id, &second_binding.execution_profile_id,
+        &second_hash, &serde_json::to_string(&second_frozen).unwrap()).unwrap();
+    db.freeze_kernel_model_config(&second, &second_model).unwrap();
+    db.freeze_kernel_initial_input(&initial_input(&second, &second_hash)).unwrap();
+    db.freeze_kernel_host_scope(&second, &crate::database::KernelHostScope {
+        schema_version: 1,
+        tool_names: Default::default(),
+        mcp_server_hashes: Default::default(),
+        knowledge_reference_hashes: Default::default(),
+        knowledge_connection_hashes: Default::default(),
+        office_tools: Default::default(),
+        lifecycle_hooks: vec![],
+    }).unwrap();
+
+    std::fs::create_dir_all(root.join("attachments")).unwrap();
+    std::fs::create_dir_all(root.join("skills")).unwrap();
+    let mut context = tauri::generate_context!();
+    for window in &mut context.config_mut().app.windows { window.create = false; }
+    let app = tauri::Builder::default().any_thread().build(context).unwrap();
+    let host = crate::runtime_host::RuntimeHost::new(app.handle().clone(), db.clone(), root.clone(),
+        root.join("attachments"), root.join("skills"), crate::yuxi::YuxiClient::new().unwrap());
+    let binding = db.run_control_binding(&first).unwrap().unwrap();
+    {
+        let state = host.state.lock().unwrap();
+        state.cancellation.register_run(&first).unwrap();
+    }
+    let (at_settle_tx, at_settle_rx) = std::sync::mpsc::channel();
+    let (job_release_tx, job_release_rx) = std::sync::mpsc::channel();
+    crate::runtime_host::attachment_compute::jobs::test_hooks::set_at_settle(Some(Box::new(move || {
+        at_settle_tx.send(()).unwrap();
+        job_release_rx.recv_timeout(Duration::from_secs(20))
+            .expect("the first Job was not released after park");
+    })));
+    let (wake_entered_tx, wake_entered_rx) = std::sync::mpsc::channel();
+    let (wake_release_tx, wake_release_rx) = std::sync::mpsc::channel();
+    let wake_release_rx = std::sync::Arc::new(std::sync::Mutex::new(wake_release_rx));
+    crate::runtime_host::kernel_host::waiting_wake_test_hooks::set_before_wake_account(
+        &first, std::sync::Arc::new(move || {
+            wake_entered_tx.send(()).unwrap();
+            wake_release_rx.lock().unwrap().recv_timeout(Duration::from_secs(20))
+                .expect("the automatic wake lock was not released by the fixture");
+        }));
+    let ownership = crate::runtime_host::kernel_host::acquire(&root, &first).unwrap();
+    host.start_kernel_run(ownership, &binding, Value::Null, Value::Null).unwrap();
+    assert_eq!(db.kernel_host_run_state(&first).unwrap().as_deref(), Some("waiting_jobs"));
+    at_settle_rx.recv_timeout(Duration::from_secs(20))
+        .expect("the first QuickJS Job did not reach terminal write");
+    job_release_tx.send(()).unwrap();
+    wake_entered_rx.recv_timeout(Duration::from_secs(15))
+        .expect("automatic wake did not acquire its admission gate");
+    {
+        let state = host.state.lock().unwrap();
+        assert!(state.kernel_wake_inflight.contains(&first));
+    }
+    assert!(matches!(crate::runtime_host::kernel_host::acquire(&root, &first),
+        Err(error) if error == crate::runtime_host::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED));
+    host.start_run_detached(started, "Queued Run local Provider fixture".into(), vec![]);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(matches!(second_request_rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+        "the second Provider was called while the first wake owned its admission gate");
+    assert_eq!(db.kernel_host_run_state(&second).unwrap().as_deref(), Some("created"));
+    assert!(host.state.lock().unwrap().queued_runs.iter().any(|queued| queued.started.run.id == second));
+    wake_release_tx.send(()).unwrap();
+
+    second_request_rx.recv_timeout(Duration::from_secs(20))
+        .expect("queued Run never reached its local Provider after wake ownership released");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let first_state = db.kernel_host_run_state(&first).unwrap();
+        let second_state = db.kernel_host_run_state(&second).unwrap();
+        if first_state.as_deref() == Some("completed")
+            && second_state.as_deref() == Some("completed") { break; }
+        assert!(Instant::now() < deadline,
+            "queued Run did not finish after wake: first={first_state:?} second={second_state:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    crate::runtime_host::attachment_compute::jobs::test_hooks::set_at_settle(None);
+    assert_eq!(first_server.join().unwrap().len(), 3);
+    assert_eq!(second_server.join().unwrap().len(), 1);
+    let first_wakes: i64 = db.with_connection(|conn| conn.query_row(
+        "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.jobs_woken'",
+        [&first], |row| row.get(0))).unwrap();
+    let second_initials: i64 = db.with_connection(|conn| conn.query_row(
+        "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='engine.initial_requested'",
+        [&second], |row| row.get(0))).unwrap();
+    assert_eq!((first_wakes, second_initials), (1, 1));
+    drop(host);
+    drop(app);
+}
