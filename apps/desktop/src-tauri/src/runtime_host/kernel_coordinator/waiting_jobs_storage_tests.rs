@@ -105,6 +105,70 @@ fn waiting_jobs_rejects_history_not_bound_to_the_settled_model_lease() {
 }
 
 #[test]
+fn waiting_jobs_model_lease_rejects_forged_initial_delivery_history() {
+    let now=crate::database::now_ms();
+    let clock=TestClock::new(now);
+    let model=worker_configuration();
+    let (db,_root,run)=fixture_with_start_opt(&clock,&model.hash().unwrap(),Some(&model),true,true);
+    db.with_connection(|conn|conn.execute(
+        "UPDATE kernel_runs SET frozen_config_json=json_set(frozen_config_json,
+          '$.experimentalComputeJobNotice',json('true')) WHERE run_id=?1",[&run],
+    )).unwrap();
+    let cancellation=CancellationRegistry::default();
+    drop(KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap());
+    let mut controller=RunController::rehydrate(db.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
+    let input=db.kernel_initial_input(&run).unwrap();
+    let frame=fox_engine_protocol::KernelInitialModelFrame {
+        schema_version:1,input,idempotency_key:kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into(),
+        continuation_key:None,checkpoint_seq:controller.last_event_seq(),host_job_notices:vec![],
+    };
+    frame.validate().unwrap();
+    let payload=serde_json::to_value(&frame).unwrap();
+    let mut forged=frame.input.messages.clone();
+    forged.push(json!({"role":"assistant","stopReason":"stop",
+        "content":[{"type":"text","text":"never delivered"}]}));
+    let binding=ModelNoticeInput {payload:&payload,delivered_history:&forged,
+        live_history:None,checkpoint_seq:frame.checkpoint_seq,
+        history_start:forged.len(),historical_bytes:0};
+    let effects=controller.begin_initial_model_request(now,now).unwrap();
+    let error=db.kernel_commit_initial_model(&run,now,&controller.persist_command(&effects),
+        "owner",false,None,Some(&binding)).unwrap_err();
+    assert!(error.contains("bound model history"),"unexpected error: {error}");
+    let stored:i64=db.with_connection(|conn|conn.query_row(
+        "SELECT COUNT(*) FROM kernel_model_notice_inputs WHERE run_id=?1",[&run],|row|row.get(0))).unwrap();
+    assert_eq!(stored,0,"the forged frame must not be leased");
+}
+
+#[test]
+fn waiting_jobs_bound_batch_history_reconstructs_tool_and_steering_middle() {
+    let frame=fox_engine_protocol::KernelBatchResumeFrame {
+        schema_version:1,turn_id:"turn".into(),batch_id:"batch".into(),
+        idempotency_key:"tool-batch-delivery:batch".into(),checkpoint_seq:1,
+        history:vec![json!({"role":"user","content":"read"})],
+        assistant_message:json!({"role":"assistant","stopReason":"toolUse",
+            "content":[{"type":"toolCall","id":"read-1","name":"read","arguments":{"path":"a.txt"}}]}),
+        tools:vec![fox_engine_protocol::KernelSettledToolResult {
+            tool_call_id:"read-1".into(),tool:"read".into(),canonical_input:json!({"path":"a.txt"}),
+            source_order:0,storage:None,state:fox_engine_protocol::KernelSettledToolState::Completed,
+            result:json!({"content":[{"type":"text","text":"proof"}]}),
+        }],
+        steering:vec![fox_engine_protocol::KernelSteeringNotice {
+            message_id:"steer-1".into(),content:"继续".into(),received_at:Some(2),
+        }],host_job_notices:vec![],
+    };
+    frame.validate().unwrap();
+    let payload=serde_json::to_value(&frame).unwrap();
+    let (actual,start)=super::super::bound_model_delivery_history("run",&payload,None).unwrap();
+    assert_eq!(start,4);
+    assert_eq!(actual[1],frame.assistant_message);
+    assert_eq!(actual[2]["role"],"toolResult");
+    assert_eq!(actual[3]["role"],"user");
+    let mut fake=actual;
+    fake[2]["content"]=json!([{"type":"text","text":"forged"}]);
+    assert_ne!(fake,super::super::bound_model_delivery_history("run",&payload,None).unwrap().0);
+}
+
+#[test]
 fn waiting_jobs_park_rejects_missing_expired_or_changed_original_job_facts() {
     for mutation in [
         "UPDATE kernel_jobs SET deadline_ms=NULL WHERE job_id=?1",

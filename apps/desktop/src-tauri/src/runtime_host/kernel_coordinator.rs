@@ -50,6 +50,51 @@ fn checkpoint_hash(value: &Value) -> String {
     )
 }
 
+/// Rebuild the pre-response transcript from the very frame leased to Node.
+/// The caller may not invent a middle segment or a historyStart for a park.
+pub(crate) fn bound_model_delivery_history(
+    run_id: &str,
+    payload: &Value,
+    live_history: Option<&[Value]>,
+) -> Result<(Vec<Value>, usize), String> {
+    if let Some(history) = live_history {
+        let directive: fox_engine_protocol::KernelRoundDirective =
+            serde_json::from_value(payload.clone()).map_err(|_| "invalid bound live directive")?;
+        directive.validate()?;
+        let mut delivered = history.to_vec();
+        let start = delivered.len();
+        delivered.extend(directive.host_job_notices.iter()
+            .map(fox_engine_protocol::HostJobNotice::history_marker));
+        return Ok((delivered,start));
+    }
+    if payload.get("input").is_some() {
+        let frame: fox_engine_protocol::KernelInitialModelFrame =
+            serde_json::from_value(payload.clone()).map_err(|_| "invalid bound initial frame")?;
+        frame.validate()?;
+        let mut delivered = frame.input.messages;
+        let start = delivered.len();
+        delivered.extend(frame.host_job_notices.iter()
+            .map(fox_engine_protocol::HostJobNotice::history_marker));
+        return Ok((delivered,start));
+    }
+    let frame: fox_engine_protocol::KernelBatchResumeFrame =
+        serde_json::from_value(payload.clone()).map_err(|_| "invalid bound batch frame")?;
+    frame.validate()?;
+    let mut delivered = frame.history;
+    delivered.push(frame.assistant_message.clone());
+    delivered.extend(steering::settled_tool_result_messages(
+        run_id, &frame.tools, &frame.assistant_message));
+    delivered.extend(frame.steering.iter().map(|notice| serde_json::json!({
+        "role":"user","content":[{"type":"text",
+            "text":steering::steering_notice_text(&notice.content)}],
+        "timestamp":notice.received_at.unwrap_or(0),
+    })));
+    let start = delivered.len();
+    delivered.extend(frame.host_job_notices.iter()
+        .map(fox_engine_protocol::HostJobNotice::history_marker));
+    Ok((delivered,start))
+}
+
 #[cfg(test)]
 mod notice_lease_test_barrier {
     use std::collections::HashMap;

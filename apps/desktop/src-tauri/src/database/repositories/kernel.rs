@@ -70,11 +70,11 @@ fn bind_model_notices(
         tx, root, conversation, run, remaining,
     )?;
     if supplied != expected { return Err(notice_error("Host job notice set changed before model lease")); }
-    if input.history_start.checked_add(supplied.len()) != Some(input.delivered_history.len())
-        || input.delivered_history.get(..history.len()) != Some(history)
-        || input.delivered_history.get(input.history_start..)
-            != Some(&supplied.iter().map(fox_engine_protocol::HostJobNotice::history_marker)
-                .collect::<Vec<_>>()[..]) {
+    let (actual_delivery, actual_start) =
+        crate::runtime_host::kernel_coordinator::bound_model_delivery_history(
+            run, input.payload, input.live_history,
+        ).map_err(|_| notice_error("cannot reconstruct bound model history"))?;
+    if actual_start != input.history_start || actual_delivery != input.delivered_history {
         return Err(notice_error("bound model history does not match its Host frame"));
     }
     let bound = serde_json::json!({"modelInput":input.payload,"modelHistory":input.live_history,
@@ -124,9 +124,11 @@ fn acknowledge_model_notices(
     }
     let bound: serde_json::Value = serde_json::from_str(&input_json)
         .map_err(|_|notice_error("invalid stored model notice input"))?;
-    let notices: Vec<fox_engine_protocol::HostJobNotice> = serde_json::from_value(
-        bound["modelInput"]["hostJobNotices"].clone(),
-    ).map_err(|_|notice_error("invalid stored model notice list"))?;
+    let notices: Vec<fox_engine_protocol::HostJobNotice> = match bound["modelInput"].get("hostJobNotices") {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|_|notice_error("invalid stored model notice list"))?,
+        None => Vec::new(), // DTO omits an empty vec on the wire.
+    };
     fox_engine_protocol::validate_host_job_notices(&notices)
         .map_err(|_|notice_error("invalid stored model notice bounds"))?;
     if bound["historyStart"].as_i64() != Some(start) {
