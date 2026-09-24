@@ -423,3 +423,44 @@ fn oversized_fact_blocks_dispatch_and_many_facts_deliver_only_a_fitting_prefix()
     assert_eq!(pending,12-prefix_len as i64);
     assert_ne!(coordinator.snapshot().unwrap().state,"completed");
 }
+
+#[test]
+fn second_database_job_and_steering_arrival_before_lease_rechecks_the_final_frame() {
+    let (db,root,run,clock,cancellation,conversation)=notice_host_fixture("b2a-lease-race");
+    let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
+    let job=db.kernel_job_start(&JobStartRequest {run_id:run.clone(),kind:"attachment_compute".into(),
+        idempotency_key:"racing-compute".into(),params:json!({"x":1}),
+        deadline_ms:Some(crate::database::now_ms()+60_000),progress_total:None})
+        .unwrap().snapshot().job_id.clone();
+    db.kernel_job_claim_attempt(&job,1).unwrap();
+    let (path,run_for_hook,conversation_for_hook,job_for_hook)=(root.join("facts.db"),
+        run.clone(),conversation.clone(),job.clone());
+    super::super::notice_lease_test_barrier::install(&run,Box::new(move || {
+        let second=Database::open(path.clone()).unwrap();
+        second.kernel_job_complete_attempt(&job_for_hook,1,&conversation_for_hook,
+            &json!({"settled":"between frame and lease"})).unwrap();
+        second.enqueue_run_steering(&run_for_hook,"late-steering","继续核对刚完成的作业。",
+            crate::database::now_ms()).unwrap();
+    }));
+    assert!(coordinator.dispatch_initial("stale-frame",&Allow,|_,_,_| {
+        panic!("stale frame must never reach Node")
+    }).is_err());
+    assert!(db.kernel_job_notice(&conversation,&run,&job).unwrap().is_some());
+    let delivery_count:i64=db.with_connection(|conn|conn.query_row(
+        "SELECT COUNT(*) FROM kernel_job_notice_deliveries WHERE job_id=?1",[&job],|row|row.get(0))).unwrap();
+    assert_eq!(delivery_count,0,"stale lease must roll back the full binding");
+    coordinator.dispatch_initial("fresh-frame",&Allow,|binding,frame,_| {
+        assert_eq!(frame.host_job_notices.len(),1);
+        assert_eq!(frame.host_job_notices[0].job_id,job);
+        assert!(frame.input.messages.iter().any(|message|message["content"][0]["text"]
+            .as_str().is_some_and(|text|text.contains("继续核对刚完成的作业"))));
+        let (stored,hash):(String,String)=db.with_connection(|conn|conn.query_row(
+            "SELECT input_json,input_hash FROM kernel_model_notice_inputs WHERE run_id=?1",
+            [&run],|row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+        assert_eq!(hash,format!("sha256:{}",hex::encode(Sha256::digest(stored.as_bytes()))));
+        let input:Value=serde_json::from_str(&stored).unwrap();
+        assert_eq!(input["modelInput"],serde_json::to_value(frame).unwrap());
+        Ok(stop_response(binding,frame))
+    }).unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state,"completed");
+}

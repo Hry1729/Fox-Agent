@@ -50,6 +50,24 @@ fn checkpoint_hash(value: &Value) -> String {
     )
 }
 
+#[cfg(test)]
+mod notice_lease_test_barrier {
+    use std::collections::HashMap;
+    use std::sync::{Mutex,OnceLock};
+    type Hook=Box<dyn Fn() + Send + 'static>;
+    fn hooks()->&'static Mutex<HashMap<String,Hook>> {
+        static HOOKS:OnceLock<Mutex<HashMap<String,Hook>>>=OnceLock::new();
+        HOOKS.get_or_init(||Mutex::new(HashMap::new()))
+    }
+    pub(super) fn install(run:&str,hook:Hook) {
+        hooks().lock().expect("notice barrier lock").insert(run.to_owned(),hook);
+    }
+    pub(super) fn fire(run:&str) {
+        let hook=hooks().lock().expect("notice barrier lock").remove(run);
+        if let Some(hook)=hook { hook(); }
+    }
+}
+
 enum DecisionLease<'a> {
     Approval(u64),
     ModelRetry(&'a str, &'a str),
@@ -770,6 +788,8 @@ impl<'a> KernelCoordinator<'a> {
             let effects = candidate
                 .begin_initial_model_request(now.monotonic_ms, now.wall_ms)
                 .map_err(|error| error.to_string())?;
+            #[cfg(test)]
+            notice_lease_test_barrier::fire(&self.binding.run_id);
             self.database.kernel_commit_initial_model(
                 &self.binding.run_id,
                 now.wall_ms,
