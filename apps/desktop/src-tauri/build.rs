@@ -187,5 +187,16 @@ fn main() {
         }
     }
 
-    tauri_build::build()
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        // The linker now embeds the same v6 manifest for both the desktop
+        // binary and lib unit tests. Leave Tauri's icon and version resource
+        // intact, but omit only its duplicate RT_MANIFEST (id 1).
+        tauri_build::try_build(tauri_build::Attributes::new().windows_attributes(
+            tauri_build::WindowsAttributes::new_without_app_manifest(),
+        )).expect("build Tauri resources without a duplicate linker manifest");
+    } else {
+        tauri_build::build();
+    }
 }
