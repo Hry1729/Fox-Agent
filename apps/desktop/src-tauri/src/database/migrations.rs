@@ -14476,6 +14476,14 @@ DELETE FROM schema_migrations WHERE version=79;
                     WHERE run_id='v85-run'",[]).is_err());
                 assert!(conn.execute("UPDATE kernel_runs SET wait_deadline_wall_ms=5,
                     wait_accounted_until_wall_ms=6 WHERE run_id='v85-run'",[]).is_err());
+                assert!(conn.execute("UPDATE kernel_runs SET wait_accounted_until_wall_ms=5
+                    WHERE run_id='v85-run'",[]).is_err());
+                assert!(conn.execute("UPDATE kernel_runs SET wait_deadline_wall_ms=5
+                    WHERE run_id='v85-run'",[]).is_err());
+                conn.execute("UPDATE kernel_runs SET wait_deadline_wall_ms=5,
+                    wait_accounted_until_wall_ms=3 WHERE run_id='v85-run'",[])?;
+                conn.execute("UPDATE kernel_runs SET wait_deadline_wall_ms=NULL,
+                    wait_accounted_until_wall_ms=NULL WHERE run_id='v85-run'",[])?;
                 Ok(())
             }).unwrap();
         }
@@ -14886,9 +14894,11 @@ const MIGRATION_86: &str = r#"
 ALTER TABLE kernel_runs ADD COLUMN wait_deadline_wall_ms INTEGER
     CHECK(wait_deadline_wall_ms IS NULL OR wait_deadline_wall_ms > 0);
 ALTER TABLE kernel_runs ADD COLUMN wait_accounted_until_wall_ms INTEGER
-    CHECK(wait_accounted_until_wall_ms IS NULL OR
-        (wait_accounted_until_wall_ms > 0 AND
-         wait_deadline_wall_ms >= wait_accounted_until_wall_ms));
+    CHECK((wait_deadline_wall_ms IS NULL AND wait_accounted_until_wall_ms IS NULL)
+        OR (wait_deadline_wall_ms IS NOT NULL
+            AND wait_accounted_until_wall_ms IS NOT NULL
+            AND wait_accounted_until_wall_ms > 0
+            AND wait_deadline_wall_ms >= wait_accounted_until_wall_ms));
 "#;
 
 /// Column additions applied once under migration 75 (idempotent helper).
