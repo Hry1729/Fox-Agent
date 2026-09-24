@@ -144,7 +144,19 @@ fn run_auto_park_then_settle(live: bool) {
         assert!(Instant::now() < retirement_deadline, "terminal Run retained the old child scope");
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(parent_token.is_cancelled(), "terminal Run retained the old child scope");
+    let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let active = host.state.lock().unwrap().kernel_active_runs.contains(&run);
+        let lock_released = match crate::runtime_host::kernel_host::acquire(&root, &run) {
+            Ok(ownership) => { drop(ownership); true }
+            Err(error) if error == crate::runtime_host::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED => false,
+            Err(error) => panic!("terminal Run lock acquisition failed: {error}"),
+        };
+        if !active && lock_released { break; }
+        assert!(Instant::now() < cleanup_deadline,
+            "completed Run retained Host ownership: active={active} lock_released={lock_released}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     drop(host);
     drop(app);
 }
