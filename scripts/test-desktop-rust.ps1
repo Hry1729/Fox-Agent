@@ -2,6 +2,7 @@
 #   ./scripts/test-desktop-rust.ps1 -Mode Suite
 #   ./scripts/test-desktop-rust.ps1 -Mode Suite -DefaultFeatures
 #   ./scripts/test-desktop-rust.ps1 -Mode Executable -ExecutablePath <test-exe> -TargetDirectory <target-dir>
+#   ./scripts/test-desktop-rust.ps1 -Mode Executable -ExecutablePath <test-exe> -ScratchRoot <short-dir>
 # Suite and Performance compile with --no-default-features unless -DefaultFeatures
 # is given. Suite keeps Rust's default test parallelism; Performance preserves its
 # existing isolated one-thread check. Executable only launches an already built
@@ -15,6 +16,7 @@ param(
     [string]$ExecutablePath,
     [string[]]$ExecutableArguments = @(),
     [string]$TargetDirectory,
+    [string]$ScratchRoot,
     [ValidateRange(1, 86400)]
     [int]$TimeoutSeconds = 1800
 )
@@ -42,10 +44,21 @@ $targetDirectory = if ($TargetDirectory) {
 }
 $runId = [System.IO.Path]::GetRandomFileName().Substring(0, 8)
 $runDirectory = Join-Path $repoRoot ".test-target/rust-host-runs/$runId"
-$scratchDirectory = Join-Path $repoRoot ".test-target/r/$runId"
+$scratchBase = if ($ScratchRoot) {
+    [System.IO.Path]::GetFullPath($ScratchRoot, $repoRoot)
+} else {
+    [System.IO.Path]::GetTempPath()
+}
+$scratchDirectory = Join-Path $scratchBase "fxr-$runId"
 $tempDirectory = Join-Path $scratchDirectory 't'
+# Zvec's real test files add deep subpaths. Keep the scratch prefix short and
+# fail with a useful path diagnostic before the native test reports MAX_PATH.
+if ((Join-Path $scratchDirectory 'd').Length -gt 64 -or $tempDirectory.Length -gt 64) {
+    throw "Rust test scratch path is too long ($scratchDirectory). Use -ScratchRoot with a short directory; relative paths resolve from $repoRoot."
+}
 New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path $tempDirectory -Force | Out-Null
+Write-Host "Rust test scratch: $scratchDirectory"
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
 
 function Get-SqliteTestFlags([string]$previous) {
