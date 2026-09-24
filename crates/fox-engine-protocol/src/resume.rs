@@ -512,6 +512,10 @@ pub struct KernelSteeringNotice {
     /// Stable idempotency id of the durable steering row.
     pub message_id: String,
     pub content: String,
+    /// Original Host receipt time. Optional for older frames; new Host
+    /// dispatches use it so live and replacement transcripts are identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_at: Option<i64>,
 }
 
 impl KernelSteeringNotice {
@@ -519,6 +523,7 @@ impl KernelSteeringNotice {
         if self.message_id.trim().is_empty() || self.message_id.len() > 128
             || self.content.trim().is_empty()
             || self.content.chars().count() > 8_000
+            || self.received_at.is_some_and(|value| value < 0)
         {
             return Err("invalid steering notice".into());
         }

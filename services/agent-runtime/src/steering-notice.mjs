@@ -21,7 +21,8 @@ export function validateSteeringNotices(steering, fail) {
         || typeof notice.messageId !== 'string' || !notice.messageId.trim()
         || notice.messageId.length > 128
         || typeof notice.content !== 'string' || !notice.content.trim()
-        || [...notice.content].length > 8000) {
+        || [...notice.content].length > 8000
+        || notice.receivedAt !== undefined && (!Number.isSafeInteger(notice.receivedAt) || notice.receivedAt < 0)) {
       fail('invalid steering notice')
     }
     if (seen.has(notice.messageId)) fail('duplicate steering notice')

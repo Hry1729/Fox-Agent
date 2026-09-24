@@ -243,7 +243,7 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
   const steeringMessage = notice => ({
     role: 'user',
     content: [{ type: 'text', text: steeringNoticeText(notice.content) }],
-    timestamp: Date.now(),
+    timestamp: notice.receivedAt ?? Date.now(),
   })
   const queueSteering = notices => {
     for (const notice of validateSteeringNotices(notices, fail)) {
@@ -492,7 +492,7 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
         resetPreviewRound(directive.previewSeq)
         roundCursor = previewCursor
         session.agent.state.messages = [...session.agent.state.messages,
-          { role: 'user', content: [{ type: 'text', text: directive.prompt }], timestamp: Date.now() }]
+          { role: 'user', content: [{ type: 'text', text: directive.prompt }], timestamp: 0 }]
         // Spliced after the review prompt at the next provider request.
         queueSteering(directive.steering)
         queueHostJobNotices(directive.hostJobNotices)

@@ -174,7 +174,7 @@ export function prepareKernelBatchResume(request, identity) {
   const steeringMessages = steering.map(notice => ({
     role: 'user',
     content: [{ type: 'text', text: steeringNoticeText(notice.content) }],
-    timestamp: 0,
+    timestamp: notice.receivedAt ?? 0,
   }))
   // All results were checked before the normal provider projection; no synthetic
   // recovery failures may be inserted to fill a missing result here.

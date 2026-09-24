@@ -32,6 +32,7 @@ pub(super) fn steering_notices(rows: &[SteeringMessage]) -> Vec<KernelSteeringNo
         .map(|row| KernelSteeringNotice {
             message_id: row.message_id.clone(),
             content: row.content.clone(),
+            received_at: Some(row.received_at),
         })
         .collect()
 }
