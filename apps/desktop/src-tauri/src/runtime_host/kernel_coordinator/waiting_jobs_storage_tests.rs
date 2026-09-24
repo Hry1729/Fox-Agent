@@ -209,3 +209,41 @@ fn waiting_jobs_owned_host_loop_returns_parked_without_error_or_forced_child_set
     let reacquired=super::super::super::kernel_host::acquire(&root,&run).unwrap();
     drop(reacquired);
 }
+
+#[test]
+fn waiting_jobs_real_host_start_and_recovery_lock_race_preserve_parent_token() {
+    use tauri::Manager;
+    let (db,root,run,_conversation,_job,_controller,_park_seq,_now)=parked_job_fixture();
+    let mut context=tauri::generate_context!();
+    for window in &mut context.config_mut().app.windows {
+        window.create=false;
+    }
+    let app=tauri::Builder::default().build(context).unwrap();
+    let host=super::super::super::RuntimeHost::new(
+        app.handle().clone(),db.clone(),root.clone(),root.join("attachments"),
+        root.join("skills"),crate::yuxi::YuxiClient::new().unwrap());
+    let binding=db.run_control_binding(&run).unwrap().unwrap();
+    let token={
+        let state=host.state.lock().unwrap();
+        state.cancellation.register_run(&run).unwrap();
+        // This is the parent token already issued to a compute Job before the
+        // Host returns. Re-registering the Run must reuse, not replace, it.
+        state.cancellation.tool_token(&run,"job-start").unwrap()
+    };
+    let ownership=super::super::super::kernel_host::acquire(&root,&run).unwrap();
+    // Force the exact interleaving: the ordinary start owns the OS lock but
+    // has not yet inserted kernel_active_runs. Recovery must not insert a
+    // shadow owner whose later cleanup could remove the real owner's marker.
+    host.recover_kernel_runs_detached().unwrap();
+    assert!(!host.state.lock().unwrap().kernel_active_runs.contains(&run));
+    assert!(!token.is_cancelled());
+    host.start_kernel_run(ownership,&binding,serde_json::Value::Null,
+        serde_json::Value::Null).unwrap();
+    assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(),Some("waiting_jobs"));
+    assert!(host.state.lock().unwrap().kernel_active_runs.is_empty());
+    assert!(!token.is_cancelled(),"Parked must preserve the issued Job parent token");
+    let ownership=super::super::super::kernel_host::acquire(&root,&run).unwrap();
+    drop(ownership);
+    drop(host);
+    drop(app);
+}

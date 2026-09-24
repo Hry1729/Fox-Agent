@@ -1153,7 +1153,12 @@ impl super::RuntimeHost {
                         .map_err(|_| "runtime state lock poisoned")?
                         .cancellation
                         .clone();
-                    let runtime = host.runtime_command()?;
+                    let runtime = if host.database.kernel_host_run_state(&run_id)?.as_deref()
+                        == Some("waiting_jobs") {
+                        RuntimeCommand { program: std::path::PathBuf::new(), script: None }
+                    } else {
+                        host.runtime_command()?
+                    };
                     host.drive_kernel_run(ownership, &binding, &runtime, &cancellation)
                 })();
                 if result.is_err() {
@@ -1285,7 +1290,7 @@ impl super::RuntimeHost {
             // Waiting has no model dispatch. It must be able to release the
             // Host even when Node runtime startup is unavailable.
             let runtime = if existing.as_deref() == Some("waiting_jobs") {
-                RuntimeCommand { program: String::new(), script: None }
+                RuntimeCommand { program: std::path::PathBuf::new(), script: None }
             } else {
                 self.runtime_command()?
             };
@@ -1382,7 +1387,14 @@ impl super::RuntimeHost {
         let base_url = config.model_service["baseUrl"]
             .as_str()
             .ok_or("missing frozen model URL")?;
-        let api_key = crate::model_service::get_api_key(base_url).unwrap_or_default();
+        let api_key = if self.database.kernel_host_run_state(&binding.run_id)?.as_deref()
+            == Some("waiting_jobs") {
+            // A parked Run has no model request. Avoid even consulting a key
+            // store while releasing an already-settled Host session.
+            String::new()
+        } else {
+            crate::model_service::get_api_key(base_url).unwrap_or_default()
+        };
         let policy = super::kernel_gateway::GatewayPolicy {
             binding: binding.clone(),
             scope: self.database.kernel_host_scope(&binding.run_id)?,
