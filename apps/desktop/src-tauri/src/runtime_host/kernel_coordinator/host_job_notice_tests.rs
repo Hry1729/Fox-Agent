@@ -34,6 +34,17 @@ fn finished_compute(db: &Database, run: &str, conversation: &str, key: &str) -> 
     job
 }
 
+fn failed_compute(db:&Database,run:&str,key:&str,code:&str)->String {
+    let job=db.kernel_job_start(&JobStartRequest {run_id:run.into(),kind:"attachment_compute".into(),
+        idempotency_key:key.into(),params:json!({"input":key}),
+        deadline_ms:Some(crate::database::now_ms()+60_000),progress_total:None})
+        .unwrap().snapshot().job_id.clone();
+    db.kernel_job_claim_attempt(&job,1).unwrap();
+    db.kernel_job_settle_attempt(&job,1,crate::database::JobState::Failed,
+        Some((code,"bounded error detail"))).unwrap();
+    job
+}
+
 fn stop_response(binding: &RunControlBinding, frame: &fox_engine_protocol::KernelInitialModelFrame)
     -> fox_engine_protocol::KernelInitialModelResponse {
     fox_engine_protocol::KernelInitialModelResponse {
@@ -334,7 +345,7 @@ fn live_batch_binds_steering_receipt_and_job_notice_in_the_same_model_input() {
             }
             requests.push(serde_json::from_slice::<Value>(&bytes[header_end..header_end+length]).unwrap());
             if requests.len()==1 {
-                let second=Database::open(&source).unwrap();
+                let second=Database::open(source.clone()).unwrap();
                 second.kernel_job_complete_attempt(&server_job,1,&server_conversation,&json!({"completed":"once"})).unwrap();
                 second.enqueue_run_steering(&server_run,"midrun-steering","补充要求：继续核对已完成结果。",
                     crate::database::now_ms()).unwrap();
@@ -379,4 +390,36 @@ fn live_batch_binds_steering_receipt_and_job_notice_in_the_same_model_input() {
         "SELECT state FROM kernel_job_notice_deliveries WHERE job_id=?1",[&job],|row|row.get(0))).unwrap();
     assert_eq!(state,"acknowledged");
     assert_eq!(coordinator.snapshot().unwrap().state,"completed");
+}
+
+#[test]
+fn oversized_fact_blocks_dispatch_and_many_facts_deliver_only_a_fitting_prefix() {
+    let (db,_root,run,clock,cancellation,conversation)=notice_host_fixture("b2a-large-one");
+    let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
+    let oversized=failed_compute(&db,&run,"too-large",&"e".repeat(5_000));
+    assert!(db.pending_host_job_notices(&conversation,&run,16*1024).is_err());
+    assert!(coordinator.dispatch_initial("oversized",&Allow,|_,_,_|panic!("invalid fact must not reach model")).is_err());
+    assert!(db.kernel_job_notice(&conversation,&run,&oversized).unwrap().is_some());
+    assert_ne!(coordinator.snapshot().unwrap().state,"completed");
+
+    let (db,_root,run,clock,cancellation,conversation)=notice_host_fixture("b2a-prefix");
+    let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
+    let code="e".repeat(1_600);
+    for index in 0..12 { failed_compute(&db,&run,&format!("many-{index}"),&code); }
+    let prefix=db.pending_host_job_notices(&conversation,&run,16*1024).unwrap();
+    assert!(!prefix.is_empty() && prefix.len()<12);
+    let prefix_len=prefix.len();
+    assert!(coordinator.dispatch_initial("prefix",&Allow,|binding,frame,_| {
+        assert_eq!(frame.host_job_notices,prefix);
+        Ok(stop_response(binding,frame))
+    }).is_err(),"remaining pending facts must prevent Final");
+    let (bound,pending):(i64,i64)=db.with_connection(|conn|conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM kernel_job_notice_deliveries d
+          JOIN kernel_job_notices n ON n.job_id=d.job_id WHERE n.run_id=?1 AND d.state='bound'),
+          (SELECT COUNT(*) FROM kernel_job_notices n LEFT JOIN kernel_job_notice_deliveries d
+            ON d.job_id=n.job_id WHERE n.run_id=?1 AND d.job_id IS NULL)",
+        [&run],|row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+    assert_eq!(bound,prefix_len as i64);
+    assert_eq!(pending,12-prefix_len as i64);
+    assert_ne!(coordinator.snapshot().unwrap().state,"completed");
 }
