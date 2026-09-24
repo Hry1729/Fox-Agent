@@ -7809,6 +7809,43 @@ mod tests {
         transaction.commit().expect("commit through v37");
     }
 
+    // Build the actual v52 schema by applying the existing migrations in the
+    // same order as run_transaction. A current database with migration rows
+    // deleted still carries later triggers and is not a historical v52 database.
+    fn run_through_v52(connection: &mut Connection, now: i64) {
+        run_through_v37(connection, now);
+        connection
+            .pragma_update(None, "foreign_keys", "OFF")
+            .expect("disable foreign keys before v38-v52 migration");
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("begin v38-v52 migration");
+        apply_migration(&transaction, 38, MIGRATION_38, now).expect("migration 38");
+        apply_graph_review_acceptance_migration(&transaction, now).expect("migration 39");
+        for (version, sql) in [
+            (40, MIGRATION_40),
+            (41, MIGRATION_41),
+            (42, MIGRATION_42),
+            (43, MIGRATION_43),
+            (44, MIGRATION_44),
+            (45, MIGRATION_45),
+            (46, MIGRATION_46),
+            (47, MIGRATION_47),
+            (48, MIGRATION_48),
+            (49, MIGRATION_49),
+            (50, MIGRATION_50),
+            (51, MIGRATION_51),
+            (52, MIGRATION_52),
+        ] {
+            apply_migration(&transaction, version, sql, now)
+                .unwrap_or_else(|error| panic!("migration {version}: {error}"));
+        }
+        transaction.commit().expect("commit through v52");
+        connection
+            .pragma_update(None, "foreign_keys", "ON")
+            .expect("restore foreign keys");
+    }
+
     fn run_pre_a0(connection: &mut Connection, now: i64) {
         connection
             .pragma_update(None, "foreign_keys", "ON")
@@ -12867,26 +12904,28 @@ mod tests {
     #[test]
     fn v53_checkpoint_upgrade_preserves_existing_shadow_identity() {
         let mut connection = Connection::open_in_memory().unwrap();
-        run(&mut connection, 1).unwrap();
+        run_through_v52(&mut connection, 1);
         connection.execute_batch(
             "INSERT INTO kernel_shadow_runs(
                 shadow_run_id, legacy_run_id, conversation_id, turn_id, engine_id, kernel_mode,
                 capability_manifest_version, capability_manifest_hash, permission_snapshot_id,
                 execution_profile_id, prompt_config_hash, frozen_config_json, created_at)
-             VALUES ('old-shadow','old-run','old-conversation','old-turn','pi','shadow',2,'manifest','permission','legacy','prompt','{}',1);
-             DROP TABLE kernel_context_budget_reports;
-             DROP TABLE kernel_jobs;
-             DROP TABLE kernel_shadow_checkpoints;
-             DROP TABLE kernel_host_actions;
-             DROP TABLE kernel_host_commands;
-             DROP TABLE kernel_host_runs;
-             DROP TABLE kernel_initial_inputs;
-             DROP TRIGGER kernel_initial_input_start_guard;
-             DROP TABLE kernel_model_configs;
-             DROP TABLE kernel_recovery_runs;
-             DROP TABLE kernel_reconciliation_events;
-             DROP TABLE run_control_bindings;
-             DELETE FROM schema_migrations WHERE version>=53;"
+             VALUES ('old-shadow','old-run','old-conversation','old-turn','pi','shadow',2,'manifest','permission','legacy','prompt','{}',1);"
+        ).unwrap();
+        // A genuine v52 database has neither the v53 checkpoint table nor the
+        // v77 trigger that would be rewritten by the v57 outbox table rename.
+        let later_objects: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name IN
+             ('kernel_shadow_checkpoints', 'execution_policy_invalidate')",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(later_objects, 0);
+        let original_identity: (String, String, String, String) = connection.query_row(
+            "SELECT legacy_run_id, conversation_id, turn_id, frozen_config_json
+             FROM kernel_shadow_runs WHERE shadow_run_id='old-shadow'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).unwrap();
         assert_eq!(
             connection
@@ -12909,6 +12948,13 @@ mod tests {
                 .unwrap(),
             1
         );
+        let upgraded_identity: (String, String, String, String) = connection.query_row(
+            "SELECT legacy_run_id, conversation_id, turn_id, frozen_config_json
+             FROM kernel_shadow_runs WHERE shadow_run_id='old-shadow'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).unwrap();
+        assert_eq!(upgraded_identity, original_identity);
         assert_eq!(
             connection
                 .query_row(
@@ -12928,6 +12974,23 @@ mod tests {
                 .unwrap(),
             crate::database::DATABASE_SCHEMA_VERSION
         );
+        let dangling_outbox_triggers: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'
+             AND sql LIKE '%kernel_effect_outbox_v56%'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(dangling_outbox_triggers, 0);
+        let foreign_key_violations: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_foreign_key_check",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(foreign_key_violations, 0);
+        let integrity: String = connection.query_row(
+            "PRAGMA integrity_check", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(integrity, "ok");
     }
 
     #[test]
