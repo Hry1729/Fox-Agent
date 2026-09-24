@@ -12,6 +12,7 @@ fn f3_live_ask_to_allow_reevaluates_pending_write() {
     let waiting_visits = AtomicUsize::new(0);
     let switched = AtomicBool::new(false);
     let cancellation = CancellationRegistry::default();
+    let clock = crate::runtime_host::shadow_reconcile::ReconcilerClock;
     let worker = real_worker_command();
     let gateway = policy(&run);
     let previews = Arc::new(AtomicUsize::new(0));
@@ -19,7 +20,7 @@ fn f3_live_ask_to_allow_reevaluates_pending_write() {
     let preview = move |_: &fox_engine_protocol::KernelModelPreview| {
         received_previews.fetch_add(1, Ordering::SeqCst);
     };
-    let coordinator = KernelCoordinator::start_prepared(&run.db, &run.clock, &run.id, &cancellation)
+    let coordinator = KernelCoordinator::start_prepared(&run.db, &clock, &run.id, &cancellation)
         .unwrap()
         .with_preview(&preview);
     let execute = |binding: &RunControlBinding,
@@ -68,6 +69,59 @@ fn f3_live_ask_to_allow_reevaluates_pending_write() {
     assert!(run.db.pending_kernel_host_commands(&run.id).unwrap().is_empty());
 }
 
+#[test]
+fn f3_fixed_clock_expired_card_is_rejected_after_real_node_proposal() {
+    let version = Arc::new(Mutex::new(None));
+    let provider = LocalProvider::start(version.clone());
+    let run = run_fixture_with_mode("f3-fixed-clock-expired", SMALL, model(provider.address), "ask");
+    // This one test intentionally mixes a stale deterministic Kernel clock
+    // with the Host repository's real wall clock. The real transport tests
+    // below use ReconcilerClock for both sides of the approval deadline.
+    run.clock.advance(-20_000);
+    let writes = AtomicUsize::new(0);
+    let observed_expiry = AtomicBool::new(false);
+    let visits = AtomicUsize::new(0);
+    let cancellation = CancellationRegistry::default();
+    let worker = real_worker_command();
+    let gateway = policy(&run);
+    let preview = |_: &fox_engine_protocol::KernelModelPreview| {};
+    let execute = |binding: &RunControlBinding,
+                   effect: &kernel::OutboxEffect,
+                   token: &kernel::CancellationToken| {
+        execute_real(&run, &version, &writes, binding, effect, token)
+    };
+    let settle = |_: bool| {
+        let snapshot = run.db.kernel_build_full_snapshot(&run.id)?;
+        if visits.fetch_add(1, Ordering::SeqCst) > 30 {
+            return Err("real Node did not reach the fixed-clock approval".into());
+        }
+        if snapshot.tool_calls.iter().any(|call| call.tool_call_id == "f1-write"
+            && call.state == "waiting_approval") {
+            let deadline = snapshot.approval_deadline_wall_ms.expect("pending approval deadline");
+            assert!(deadline < crate::database::now_ms(), "the test card is deliberately expired by real wall time");
+            let card = run.db.kernel_approval_identity(&run.id, "f1-write")?;
+            let refusal = run.db.queue_kernel_host_approval(&card, "allow_once")
+                .expect_err("expired card must be refused by the real Host repository");
+            assert!(refusal.contains("Kernel approval is no longer actionable"), "{refusal}");
+            observed_expiry.store(true, Ordering::SeqCst);
+            return Err(super::super::super::live::LIVE_DETACHED.into());
+        }
+        Ok(())
+    };
+    let after_commit = |_: &str| Ok(());
+    let result = KernelCoordinator::start_prepared(&run.db, &run.clock, &run.id, &cancellation)
+        .unwrap().with_preview(&preview).dispatch_initial_live(
+            "f3-fixed-clock-owner", &gateway, &worker, "local-test-only",
+            &execute, &after_commit, &settle);
+    assert_eq!(result.unwrap_err(), super::super::super::live::LIVE_DETACHED);
+    assert_eq!(provider.finish().len(), 2, "real Node produced read then pending write");
+    assert!(observed_expiry.load(Ordering::SeqCst));
+    assert_eq!(writes.load(Ordering::SeqCst), 0);
+    assert_eq!(std::fs::read_to_string(run.root.join("target.txt")).unwrap(), SMALL);
+    assert_eq!(version_count(&run), 0);
+    assert!(run.db.pending_kernel_host_commands(&run.id).unwrap().is_empty());
+}
+
 #[derive(Clone, Copy, Debug)]
 enum F3Case {
     AskAllow,
@@ -110,6 +164,7 @@ fn f3_matrix_case(case: F3Case, live: bool) {
     let approved_reissue = AtomicBool::new(false);
     let original_ticket = Mutex::new(None::<String>);
     let cancellation = CancellationRegistry::default();
+    let clock = crate::runtime_host::shadow_reconcile::ReconcilerClock;
     let worker = real_worker_command();
     let gateway = policy(&run);
     let preview_count = Arc::new(AtomicUsize::new(0));
@@ -193,13 +248,13 @@ fn f3_matrix_case(case: F3Case, live: bool) {
         Ok(())
     };
     let outcome = if live {
-        KernelCoordinator::start_prepared(&run.db, &run.clock, &run.id, &cancellation)
+        KernelCoordinator::start_prepared(&run.db, &clock, &run.id, &cancellation)
             .unwrap().with_preview(&preview).dispatch_initial_live(
                 &label, &gateway, &worker, "local-test-only", &execute, &after_commit, &settle)
     } else {
         let ownership = super::super::super::super::kernel_host::acquire(&run.root, &run.id).unwrap();
         super::super::super::super::kernel_host::drive_with_actions_per_round(
-            &ownership, &run.db, &run.clock, &cancellation, &run.id, &worker,
+            &ownership, &run.db, &clock, &cancellation, &run.id, &worker,
             "local-test-only", &gateway, &execute, &after_commit, &settle, &preview)
     };
     match outcome {
@@ -289,6 +344,7 @@ fn f3_live_cancel_wins_over_approval_in_same_host_batch() {
     let queued = AtomicBool::new(false);
     let visits = AtomicUsize::new(0);
     let cancellation = CancellationRegistry::default();
+    let clock = crate::runtime_host::shadow_reconcile::ReconcilerClock;
     let worker = real_worker_command();
     let gateway = policy(&run);
     let preview = |_: &fox_engine_protocol::KernelModelPreview| {};
@@ -310,7 +366,7 @@ fn f3_live_cancel_wins_over_approval_in_same_host_batch() {
         }
         Ok(())
     };
-    let result = KernelCoordinator::start_prepared(&run.db, &run.clock, &run.id, &cancellation)
+    let result = KernelCoordinator::start_prepared(&run.db, &clock, &run.id, &cancellation)
         .unwrap().with_preview(&preview).dispatch_initial_live(
             "f3-cancel-owner", &gateway, &worker, "local-test-only", &execute, &|_| Ok(()), &settle);
     assert_eq!(result.unwrap_err(), super::super::super::live::LIVE_CANCEL,
@@ -338,6 +394,7 @@ fn f3_outer_host_cancel_acks_queued_approval_without_consuming_it() {
     let queued = AtomicBool::new(false);
     let visits = AtomicUsize::new(0);
     let cancellation = CancellationRegistry::default();
+    let clock = crate::runtime_host::shadow_reconcile::ReconcilerClock;
     let worker = real_worker_command();
     let gateway = policy(&run);
     let preview = |_: &fox_engine_protocol::KernelModelPreview| {};
@@ -363,7 +420,7 @@ fn f3_outer_host_cancel_acks_queued_approval_without_consuming_it() {
     let ownership = super::super::super::super::kernel_host::acquire(&run.root, &run.id).unwrap();
     let after_commit = |_: &str| Ok(());
     super::super::super::super::kernel_host::drive_with_actions_per_round(
-        &ownership, &run.db, &run.clock, &cancellation, &run.id, &worker,
+        &ownership, &run.db, &clock, &cancellation, &run.id, &worker,
         "local-test-only", &gateway, &execute, &after_commit, &settle, &preview,
     ).unwrap();
     let requests = provider.finish();
