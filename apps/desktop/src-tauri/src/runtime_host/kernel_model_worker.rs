@@ -145,6 +145,72 @@ struct Worker {
 
 pub(super) type PreviewSink = dyn Fn(&fox_engine_protocol::KernelModelPreview) + Sync;
 
+/// Test-only, opt-in monotonic trace of the formal worker path.
+///
+/// The F1/F3 fixtures measure a model round from the *Provider's* side, which
+/// cannot see how long the Host spent before the worker even opened its socket.
+/// This registry lets the Host and the fixture correlate per-Run, so a stalled
+/// round can be attributed to worker startup, the model exchange, or the
+/// durable round decision instead of being guessed from request counts.
+///
+/// Recording is a no-op unless `FOX_F1_TIMELINE` is set: the ordinary suite
+/// pays one relaxed atomic load and nothing else. The store is process-global
+/// and keyed by Run id, so concurrently executing tests cannot mix timelines.
+#[cfg(test)]
+pub(crate) mod host_trace {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+
+    fn origin() -> &'static Instant {
+        static ORIGIN: OnceLock<Instant> = OnceLock::new();
+        ORIGIN.get_or_init(Instant::now)
+    }
+
+    fn enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("FOX_F1_TIMELINE").is_some())
+    }
+
+    fn store() -> &'static Mutex<Vec<(String, u128, String)>> {
+        static STORE: OnceLock<Mutex<Vec<(String, u128, String)>>> = OnceLock::new();
+        STORE.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub(crate) fn record(run_id: &str, event: impl Into<String>) {
+        if !enabled() {
+            return;
+        }
+        if let Ok(mut entries) = store().lock() {
+            entries.push((run_id.to_owned(), origin().elapsed().as_millis(), event.into()));
+        }
+    }
+
+    /// Entries for one Run, in the order they were observed.
+    pub(crate) fn take(run_id: &str) -> Vec<(u128, String)> {
+        let Ok(mut entries) = store().lock() else { return Vec::new() };
+        let mut mine = Vec::new();
+        entries.retain(|(id, at, event)| {
+            if id == run_id {
+                mine.push((*at, event.clone()));
+                false
+            } else {
+                true
+            }
+        });
+        mine
+    }
+
+    /// Every Run that recorded something, so a diagnostic run can attribute
+    /// stray entries instead of silently dropping them.
+    pub(crate) fn runs() -> Vec<String> {
+        let Ok(entries) = store().lock() else { return Vec::new() };
+        let mut ids: Vec<String> = entries.iter().map(|(id, _, _)| id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+}
+
 impl Drop for Worker {
     fn drop(&mut self) {
         #[cfg(windows)]
@@ -552,7 +618,13 @@ fn call_model(
     // the worker must not open the live round loop on this path.
     initialization["execution"] = json!("once");
     initialization["usageRecords"] = json!(database.is_some());
+    let spawn_started = Instant::now();
     let mut worker = Worker::spawn(runtime)?;
+    #[cfg(test)]
+    host_trace::record(
+        &binding.run_id,
+        format!("host:worker_spawned kind={kind} spawn_ms={}", spawn_started.elapsed().as_millis()),
+    );
     worker.usage_database=database.cloned();
     let ready = worker.exchange(
         request("kernel.initialize", initialization),
@@ -568,7 +640,14 @@ fn call_model(
     {
         return Err("Kernel worker lacks isolated single-use capability".into());
     }
-    request_payload["streamPreview"] = json!(preview.is_some());
+    #[cfg(test)]
+    host_trace::record(
+        &binding.run_id,
+        format!(
+            "host:worker_ready kind={kind} ready_ms={} budget_ms={budget}",
+            spawn_started.elapsed().as_millis()
+        ),
+    );    request_payload["streamPreview"] = json!(preview.is_some());
     let expected = if kind == "kernel.compact_context" {
         if ready["hostCompaction"] != true {
             return Err("Kernel worker lacks Host compaction capability".into());

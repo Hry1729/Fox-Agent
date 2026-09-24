@@ -229,7 +229,16 @@ struct LocalProvider {
     stop: Arc<AtomicBool>,
     seen: Arc<Mutex<Vec<Value>>>,
     events: Arc<Mutex<Vec<String>>>,
+    started: Instant,
+    printed: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<Vec<Value>>>,
+}
+
+/// Monotonic timestamp relative to one Provider's own start. Diagnostic runs set
+/// `FOX_F1_TIMELINE` so the Host and the Provider share nothing but a wall-clock
+/// origin; the deltas are what expose where a round's time actually went.
+fn since_ms(started: Instant) -> u128 {
+    started.elapsed().as_millis()
 }
 
 impl LocalProvider {
@@ -241,11 +250,12 @@ impl LocalProvider {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
+        let started = Instant::now();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_worker = stop.clone();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_worker = seen.clone();
-        let events = Arc::new(Mutex::new(Vec::new()));
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
         let events_worker = events.clone();
         let worker = std::thread::spawn(move || {
             struct Client {
@@ -259,13 +269,22 @@ impl LocalProvider {
             while !stop_worker.load(Ordering::SeqCst) {
                 assert!(
                     Instant::now() < deadline,
-                    "local Provider exceeded its 20 s deadline"
+                    "local Provider exceeded its 20 s deadline; timeline={:?}",
+                    events_worker
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|event| event.contains('@'))
+                        .collect::<Vec<_>>()
                 );
                 loop {
                     match listener.accept() {
                         Ok((stream, _)) => {
                             stream.set_nonblocking(true).unwrap();
-                            events_worker.lock().unwrap().push("accepted".into());
+                            events_worker
+                                .lock()
+                                .unwrap()
+                                .push(format!("accepted@{}ms", since_ms(started)));
                             clients.push(Client {
                                 stream,
                                 bytes: Vec::new(),
@@ -357,7 +376,7 @@ impl LocalProvider {
                 events_worker
                     .lock()
                     .unwrap()
-                    .push(format!("request {index} body_bytes={request_bytes}"));
+                    .push(format!("request {index} body_bytes={request_bytes}@{}ms", since_ms(started)));
                 requests.push(request);
                 let (delta, finish) = match index {
                     0 => (
@@ -415,7 +434,7 @@ impl LocalProvider {
                 events_worker
                     .lock()
                     .unwrap()
-                    .push(format!("response {index} body_bytes={}", body.len()));
+                    .push(format!("response {index} body_bytes={}@{}ms", body.len(), since_ms(started)));
             }
             requests
         });
@@ -424,6 +443,8 @@ impl LocalProvider {
             stop,
             seen,
             events,
+            started,
+            printed: Arc::new(AtomicBool::new(false)),
             worker: Some(worker),
         }
     }
@@ -438,27 +459,62 @@ impl LocalProvider {
 
     fn finish(mut self) -> Vec<Value> {
         self.stop.store(true, Ordering::SeqCst);
+        self.print_diagnostics();
         self.worker
             .take()
             .unwrap()
             .join()
             .expect("local Provider thread")
     }
+
+    /// One line per test naming how many rounds actually reached the Provider,
+    /// plus per-event monotonic offsets when `FOX_F1_TIMELINE` is set. Printing
+    /// before `finish`'s join keeps the record even when the worker died.
+    fn print_diagnostics(&mut self) {
+        if self.printed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // Without the opt-in flag, only a failing test needs the detail; a
+        // panicking test still reaches Drop, which prints it there.
+        if std::env::var_os("FOX_F1_TIMELINE").is_none() && !std::thread::panicking() {
+            return;
+        }
+        eprintln!(
+            "[f1-provider] requests={} events={:?}",
+            self.request_count(),
+            self.event_log()
+        );
+    }
 }
 
 impl Drop for LocalProvider {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        // `finish()` takes the handle before joining. If it is still here, the
+        // worker thread died (deadline or accept panic) or the test unwound
+        // before finishing, and its timeline is the only record of where the
+        // round's time actually went.
+        let unfinished = self.worker.is_some();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
-        if std::thread::panicking() {
-            eprintln!(
-                "[f1-provider] requests={} events={:?}",
-                self.request_count(),
-                self.event_log()
-            );
+        if unfinished || std::thread::panicking() {
+            self.print_diagnostics();
         }
+    }
+}
+
+/// Dump the opt-in Host timeline for one Run. Called on the normal path and, via
+/// `Drop`, whenever the fixture unwinds, so every diagnosed run yields a
+/// comparable record instead of only the passing ones.
+fn dump_host_timeline(label: &str, run_id: &str) {
+    let entries = crate::runtime_host::kernel_model_worker::host_trace::take(run_id);
+    if entries.is_empty() && crate::runtime_host::kernel_model_worker::host_trace::runs().is_empty() {
+        return;
+    }
+    eprintln!("[f1-host-timeline] {label} run={run_id} entries={}", entries.len());
+    for (at, event) in entries {
+        eprintln!("[f1-host-timeline] {label} @{at}ms {event}");
     }
 }
 

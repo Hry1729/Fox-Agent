@@ -122,6 +122,17 @@ fn f3_fixed_clock_expired_card_is_rejected_after_real_node_proposal() {
     assert!(run.db.pending_kernel_host_commands(&run.id).unwrap().is_empty());
 }
 
+pub(super) fn dump_matrix_timeline(label: &str, run: &Run) {
+    let entries = crate::runtime_host::kernel_model_worker::host_trace::take(&run.id);
+    if entries.is_empty() && crate::runtime_host::kernel_model_worker::host_trace::runs().is_empty() {
+        return;
+    }
+    eprintln!("[f3-host-timeline] {label} run={} entries={}", run.id, entries.len());
+    for (at, event) in entries {
+        eprintln!("[f3-host-timeline] {label} @{at}ms {event}");
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum F3Case {
     AskAllow,
@@ -268,6 +279,9 @@ fn f3_matrix_case(case: F3Case, live: bool) {
             "{:?} {} failed; Provider={:?}", case,
             if live { "live" } else { "round" }, provider.event_log()),
     }
+    // Emit the opt-in Host timeline for this Run before collecting the Provider,
+    // so a test that is about to unwind still leaves a comparable record.
+    dump_matrix_timeline(&label, &run);
     let requests = provider.finish();
     let minimum_requests = if case.repeats() { 4 } else { 2 };
     assert!((minimum_requests..=minimum_requests + 3).contains(&requests.len()),
