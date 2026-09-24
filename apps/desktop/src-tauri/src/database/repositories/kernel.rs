@@ -290,6 +290,18 @@ fn validate_job_wait_decision(
         }
         let conversation: String = tx.query_row(
             "SELECT conversation_id FROM runs WHERE id=?1", [run], |row| row.get(0))?;
+        let unresolved_tools: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM kernel_tool_calls WHERE run_id=?1
+              AND state NOT IN ('completed','failed','cancelled','expired')",
+            [run], |row| row.get(0))?;
+        let unresolved_models: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1
+              AND effect_type IN ('initial_model','continuation_model','deliver_tool_batch')
+              AND status IN ('pending','leased')",
+            [run], |row| row.get(0))?;
+        if unresolved_tools != 0 || unresolved_models != 0 {
+            return Err(kernel_err("job wait still has executable tool or model effects"));
+        }
         let mut statement = tx.prepare(
             "SELECT job_id,attempts,deadline_ms,kind FROM kernel_jobs
               WHERE run_id=?1 AND conversation_id=?2 AND state IN ('queued','running','paused')
@@ -3958,6 +3970,21 @@ impl Database {
             })?;
             let parsed_state = crate::kernel::RunState::parse(&state)
                 .ok_or_else(|| kernel_err(format!("unknown snapshot run state: {state}")))?;
+            if parsed_state == crate::kernel::RunState::WaitingJobs {
+                let (deadline,accounted): (Option<i64>,Option<i64>) = txn.query_row(
+                    "SELECT wait_deadline_wall_ms,wait_accounted_until_wall_ms
+                       FROM kernel_runs WHERE run_id=?1", [run_id],
+                    |row| Ok((row.get(0)?,row.get(1)?)))?;
+                let root: Option<String> = txn.query_row(
+                    "SELECT json_extract(payload_json,'$.dataRootId') FROM kernel_events
+                      WHERE run_id=?1 AND event_type='run.waiting_jobs' ORDER BY seq DESC LIMIT 1",
+                    [run_id], |row| row.get(0)).optional()?.flatten();
+                if root.as_deref() != Some(self.data_root_id.as_str())
+                    || deadline.is_none_or(|value| value <= 0)
+                    || accounted.is_none_or(|value| value <= 0 || value > deadline.unwrap_or(0)) {
+                    return Err(kernel_err("snapshot job wait root or accounting projection changed"));
+                }
+            }
             let actual_last_seq: i64 = txn.query_row(
                 "SELECT COALESCE(MAX(seq),0) FROM kernel_events WHERE run_id=?1",
                 params![run_id],

@@ -6,6 +6,11 @@ use crate::kernel::{RunState, WaitingJobFact};
 use serde_json::json;
 
 fn parked_job_fixture() -> (Database, PathBuf, String, String, String, RunController, u64, i64) {
+    parked_job_fixture_with_mutation(None)
+}
+
+fn parked_job_fixture_with_mutation(mutation: Option<&str>)
+    -> (Database, PathBuf, String, String, String, RunController, u64, i64) {
     let now = crate::database::now_ms();
     let clock = TestClock::new(now);
     let model = worker_configuration();
@@ -26,6 +31,9 @@ fn parked_job_fixture() -> (Database, PathBuf, String, String, String, RunContro
         deadline_ms: Some(now+6_000), progress_total: None,
     }).unwrap().snapshot().job_id.clone();
     db.kernel_job_claim_attempt(&job,1).unwrap();
+    if let Some(sql)=mutation {
+        db.with_connection(|conn|conn.execute(sql,[&job])).unwrap();
+    }
 
     let mut controller = RunController::rehydrate(db.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
     let input = db.kernel_initial_input(&run).unwrap();
@@ -59,11 +67,37 @@ fn parked_job_fixture() -> (Database, PathBuf, String, String, String, RunContro
     effects.extend(controller.park_waiting_jobs(now,now,db.kernel_data_root_id(),
         response_seq,&response_json,&serde_json::to_string(&frame.input.messages).unwrap(),
         &[WaitingJobFact {job_id: job.clone(),attempt:1,deadline_wall_ms:now+6_000}]).unwrap());
-    db.kernel_commit_initial_model(&run,now,&controller.persist_command(&effects),
-        "owner",true,None,None).unwrap();
+    let committed=db.kernel_commit_initial_model(&run,now,&controller.persist_command(&effects),
+        "owner",true,None,None);
     let park_seq = controller.last_event_seq();
-    assert_eq!(db.kernel_rehydrate(&run).unwrap().unwrap().state,RunState::WaitingJobs);
+    if mutation.is_none() {
+        committed.unwrap();
+        assert_eq!(db.kernel_rehydrate(&run).unwrap().unwrap().state,RunState::WaitingJobs);
+    } else {
+        assert!(committed.is_err(),"mutated Job must reject the whole park transaction");
+        assert_eq!(db.kernel_rehydrate(&run).unwrap().unwrap().state,RunState::Running);
+    }
     (db,root,run,conversation,job,controller,park_seq,now)
+}
+
+#[test]
+fn waiting_jobs_park_rejects_missing_expired_or_changed_original_job_facts() {
+    for mutation in [
+        "UPDATE kernel_jobs SET deadline_ms=NULL WHERE job_id=?1",
+        "UPDATE kernel_jobs SET deadline_ms=1 WHERE job_id=?1",
+        "UPDATE kernel_jobs SET attempts=2 WHERE job_id=?1",
+    ] {
+        let (db,_root,run,_conversation,_job,_controller,_park_seq,_now)=
+            parked_job_fixture_with_mutation(Some(mutation));
+        let count:i64=db.with_connection(|conn|conn.query_row(
+            "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.waiting_jobs'",
+            [&run],|row|row.get(0))).unwrap();
+        assert_eq!(count,0);
+        let leased:String=db.with_connection(|conn|conn.query_row(
+            "SELECT status FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key='initial-model'",
+            [&run],|row|row.get(0))).unwrap();
+        assert_eq!(leased,"leased","failed park must not settle original model lease");
+    }
 }
 
 #[test]
@@ -133,12 +167,22 @@ fn waiting_jobs_wake_outbox_failure_rolls_back_and_two_handles_cannot_wake_twice
 #[test]
 fn waiting_jobs_copied_database_cannot_reopen_old_root_wait() {
     let (db,root,run,_conversation,_job,_controller,_park_seq,_now)=parked_job_fixture();
+    let original_root=db.kernel_data_root_id().to_string();
+    assert!(db.kernel_rehydrate(&run).unwrap().is_some());
+    drop(db); // close/checkpoint the source file before making a byte copy
     let copied=std::env::temp_dir().join(format!("fox-wait-copy-{}",uuid::Uuid::new_v4()));
     std::fs::create_dir(&copied).unwrap();
     std::fs::copy(root.join("facts.db"),copied.join("facts.db")).unwrap();
-    assert!(db.kernel_rehydrate(&run).unwrap().is_some());
     let foreign=Database::open(copied.join("facts.db")).unwrap();
-    assert_ne!(foreign.kernel_data_root_id(),db.kernel_data_root_id());
+    assert_ne!(foreign.kernel_data_root_id(),original_root);
     assert!(foreign.kernel_rehydrate(&run).is_err());
     assert!(foreign.kernel_update_run_state(&run,"completed").is_err());
+}
+
+#[test]
+fn waiting_jobs_reopen_rejects_changed_frozen_attempt() {
+    let (db,_root,run,_conversation,job,_controller,_park_seq,_now)=parked_job_fixture();
+    db.with_connection(|conn|conn.execute(
+        "UPDATE kernel_jobs SET attempts=2 WHERE job_id=?1",[&job])).unwrap();
+    assert!(db.kernel_rehydrate(&run).is_err());
 }
