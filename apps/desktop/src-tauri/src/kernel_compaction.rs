@@ -1182,25 +1182,23 @@ pub(crate) fn effective_boundable_tool<'a>(tool: &'a str, canonical_input: &'a V
     }
 }
 
-/// Whether the model view of this settled result kept **every byte** of it.
+/// Conservative whole-result eligibility under the current model projection.
 ///
-/// This is the model-DELIVERY fact, as opposed to the Host's SOURCE fact
-/// (`HostObservation::authorizes_whole_file_replacement`, which says what the
-/// read delivered at the tool-result boundary). A whole-file read whose model
-/// projection was head/tail-bounded delivered the host bytes but not the model
-/// view, and this function is what tells the two apart.
+/// This is a replayed eligibility calculation, not a durable historical record
+/// of a Provider request. It supplements the Host's SOURCE fact
+/// (`HostObservation::authorizes_whole_file_replacement`). A whole-file read
+/// whose model projection was head/tail-bounded cannot qualify here.
 ///
-/// It is a *replay* of the production projection — the same
-/// [`bound_tool_result_content_with_storage`] the coordinator calls — against
-/// the durable result, never against an already-projected view. Two
-/// consequences are load-bearing:
+/// It replays the production Kernel projection against the durable result,
+/// never against an already-projected view. Legacy's actual model path requires
+/// separate evidence. Two consequences are load-bearing:
 ///
-/// * Replaying the durable row makes the answer idempotent: a second
-///   projection, a recovery resume or a history compaction can never turn an
-///   omitted delivery back into a whole one.
-/// * `true` is decided by positive evidence (the projection provably changed
-///   nothing); every uncertainty — a missing row, an unparsable result, an
-///   unknown tool — must be handled by the caller as "no eligibility".
+/// * With the same canonical result, verified storage and projection rules,
+///   repeated calculation gives the same answer. Missing or inconsistent
+///   evidence can only lower eligibility.
+/// * `true` requires a successful, readable result and a verified durable
+///   storage fact. A failed result or an unknown storage fact cannot establish
+///   that a full-file read reached the model.
 pub(crate) fn model_view_keeps_every_byte(
     tool: &str,
     is_error: bool,
@@ -1208,23 +1206,37 @@ pub(crate) fn model_view_keeps_every_byte(
     reference: Option<&str>,
     storage: &ToolResultStorage,
 ) -> bool {
-    if is_error || !is_boundable(tool) {
-        // Not a re-readable projection target: nothing is ever omitted.
-        return true;
+    let Some(blocks) = content.as_array() else { return false; };
+    let mut text_bytes = 0usize;
+    let mut text_blocks = 0usize;
+    for block in blocks {
+        if block["type"] == "text" {
+            let Some(text) = block["text"].as_str() else { return false; };
+            text_bytes = text_bytes.saturating_add(text.len());
+            text_blocks += 1;
+        }
+    }
+    text_bytes = text_bytes.saturating_add(text_blocks.saturating_sub(1));
+    if is_error || !is_boundable(tool) || text_blocks == 0 || reference.is_none()
+        || !storage.stored || storage.failure_reason.is_some()
+        || storage.retrievable_bytes != storage.stored_bytes
+        || !storage.covers(text_bytes) {
+        return false;
     }
     bound_tool_result_content_with_storage(tool, false, content, reference, storage).is_none()
 }
 
-/// Normalize one durable `tool_calls.result_json` value into the `content`
-/// array the model-view projection works on. Mirrors the normalization in
-/// `KernelCoordinator::project_settled_tools` so the delivery replay sees
-/// exactly the bytes the coordinator projected.
-pub(crate) fn durable_result_content(raw: &Value) -> Value {
-    if raw.get("content").is_some() {
-        raw["content"].clone()
-    } else {
-        json!([{"type":"text","text":raw.to_string()}])
+/// Read a settled result's actual content blocks. A missing, null or malformed
+/// content cannot prove a full-file read; serializing the envelope as fallback
+/// text would manufacture a model delivery that never occurred.
+pub(crate) fn durable_result_content(raw: &Value) -> Option<&Value> {
+    let content = raw.get("content")?;
+    let blocks = content.as_array()?;
+    if blocks.is_empty() || !blocks.iter().any(|block| block["type"] == "text" && block["text"].is_string())
+        || blocks.iter().any(|block| block["type"] == "text" && !block["text"].is_string()) {
+        return None;
     }
+    Some(content)
 }
 
 /// Sentinel prefix of the model-visible `read_tool_result` cursor block.
@@ -1995,6 +2007,37 @@ mod tests {
 
     fn stored_whole(total_bytes: usize) -> ToolResultStorage {
         ToolResultStorage::whole(total_bytes)
+    }
+
+    #[test]
+    fn f1_replay_requires_complete_storage_and_valid_content() {
+        let small = json!([{"type":"text","text":"small"}]);
+        let empty = json!([{"type":"text","text":""}]);
+        assert!(model_view_keeps_every_byte("read", false, &small,
+            Some(TEST_REF), &stored_whole(5)));
+        assert!(model_view_keeps_every_byte("read", false, &empty,
+            Some(TEST_REF), &stored_whole(0)), "empty files are complete files");
+        assert!(!model_view_keeps_every_byte("read", false, &small,
+            Some(TEST_REF), &ToolResultStorage::unknown()));
+        let mut short_store = stored_whole(5);
+        short_store.stored_bytes = 4;
+        assert!(!model_view_keeps_every_byte("read", false, &small,
+            Some(TEST_REF), &short_store));
+        let mut short_retrieval = stored_whole(5);
+        short_retrieval.retrievable_bytes = 4;
+        assert!(!model_view_keeps_every_byte("read", false, &small,
+            Some(TEST_REF), &short_retrieval));
+        assert!(!model_view_keeps_every_byte("read", true, &small,
+            Some(TEST_REF), &stored_whole(5)));
+        assert!(!model_view_keeps_every_byte("unknown_reader", false, &small,
+            Some(TEST_REF), &stored_whole(5)));
+        assert!(!model_view_keeps_every_byte("read", false,
+            &json!([{"type":"text","text":null}]), Some(TEST_REF), &stored_whole(4)));
+        assert!(!model_view_keeps_every_byte("read", false, &Value::Null,
+            Some(TEST_REF), &stored_whole(4)));
+        assert!(durable_result_content(&json!({"content":null})).is_none());
+        assert!(durable_result_content(&Value::Null).is_none());
+        assert!(durable_result_content(&json!({"content":[{"type":"text","text":null}]})).is_none());
     }
 
     /// Test helper: the same call with the Host's complete-store fact, which is

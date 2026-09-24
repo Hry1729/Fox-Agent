@@ -162,7 +162,9 @@ const MAX_TOOL_RESULT_RANGE_BYTES: usize = 64 * 1024;
 ///
 /// A non-terminal row, a row with no result, or a row the range reader can only
 /// serve as a preview is `unknown`: no caller may read that as permission to
-/// omit bytes, and the projection keeps every byte instead.
+/// omit bytes, and the projection keeps every byte instead. Admission must not
+/// turn that current fallback into proof about a past model request; unknown
+/// storage lowers whole-file-replacement eligibility.
 pub(crate) fn tool_result_storage_for(
     connection: &Connection,
     run_id: &str,

@@ -23,7 +23,10 @@ use crate::tool_host;
 use fox_engine_protocol::HostObservation;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// 大文件正文：唯一标记落在头 6 000 / 尾 2 000 之外。
 const F1_MARKER: &str = "FOX-F1-MIDDLE-MARKER-7c1f9a2d-NEVER-DELIVERED";
@@ -51,8 +54,8 @@ fn kernel_read_result(db: &Database, run_id: &str, call: &str) -> Value {
     serde_json::from_str(&raw).expect("durable Kernel result json")
 }
 
-/// 一条已结算结果的 durable 行：权威 Kernel 记在 `kernel_tool_calls`，Legacy 记在
-/// `tool_calls`，两者按构造互斥。
+/// 一条已结算结果的 durable 行：优先取权威 Kernel 行；兼容投影可能让同一
+/// Authoritative Run 同时拥有 `tool_calls` 行。Legacy 则只有后一种行。
 fn durable_result_json(db: &Database, run_id: &str, call: &str) -> Value {
     let raw: String = db
         .with_connection(|c| {
@@ -117,10 +120,15 @@ fn observation(
 }
 
 fn f1_replace_grant_state(db: &Database, run: &str) -> Option<String> {
+    f1_replace_grant_state_for(db, run, "write-1")
+}
+
+fn f1_replace_grant_state_for(db: &Database, run: &str, call: &str) -> Option<String> {
+    let dispatch = fox_engine_protocol::encode_dispatch_id(run, call).expect("dispatch identity");
     db.with_connection(|c| {
         c.query_row(
-            "SELECT state FROM kernel_whole_file_replace_grants WHERE run_id=?1",
-            [run],
+            "SELECT state FROM kernel_whole_file_replace_grants WHERE run_id=?1 AND dispatch_id=?2",
+            rusqlite::params![run, dispatch],
             |r| r.get::<_, String>(0),
         )
         .optional()
@@ -248,6 +256,7 @@ struct F1Run {
     read_input: Value,
     read_call: String,
     version: String,
+    target_path: String,
 }
 
 /// `mode` 为会话权限模式。`body` 是写入磁盘的正文，模型候选内容由调用方给出。
@@ -263,12 +272,160 @@ fn build_f1_run_with_read(
     candidate: &str,
     read_args: Value,
 ) -> F1Run {
-    let (db, root, conversation, run, scope) =
-        kernel_gateway_fixture_with_model(label, mode, &rev_consumer_model_config());
+    let run = build_f1_read_only(label, mode, body, read_args);
+    propose_f1_write(&run, candidate);
+    run
+}
+
+fn settle_f1_host_approval(run: &F1Run, decision: kernel::ApprovalDecision, label: &str) {
+    let approval_id = run.db.kernel_approval_identity(&run.run_id, "write-1")
+        .expect("projected approval identity");
+    assert!(run.db.queue_kernel_host_approval(&approval_id, label)
+        .expect("enqueue Host approval command"));
+    let command = run.db.pending_kernel_host_commands(&run.run_id)
+        .expect("pending commands").into_iter().find(|command| command.kind == "approval")
+        .expect("approval command");
+    let cancellation = CancellationRegistry::default();
+    let coordinator = KernelCoordinator::reopen(&run.db, &run.clock, &run.run_id, &cancellation)
+        .expect("reopen for approval");
+    coordinator.resolve_approval("write-1", decision)
+        .expect("durable Kernel approval transition");
+    run.db.complete_kernel_host_command(&run.run_id, command.seq)
+        .expect("Host acknowledgement and dedicated-grant settlement");
+}
+
+/// 把实际 Host 结算结果送入 Node 的真实 Pi adapter。子进程有独立硬截止，
+/// 避免测试 runner 被 worker 挂住；这是 Legacy 模型投影证据，不借 Kernel 助手代替。
+fn node_projection_view(db: &Database, run_id: &str, call: &str, result: &Value, path: &str) -> Value {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../services/agent-runtime/test/fixtures/f1-host-projection-cli.mjs");
+    let storage = db.tool_result_storage(run_id, call)
+        .ok().and_then(|value| serde_json::to_value(value).ok());
+    let input = json!({
+        "path":path, "runId":run_id, "toolCallId":call,
+        "resultRef":format!("fox-result://{run_id}/{call}"),
+        "result":result, "storage":storage,
+    });
+    let output_base = std::env::temp_dir().join(format!(
+        "fox-f1-node-{}", uuid::Uuid::new_v4().simple(),
+    ));
+    let stdout_path = output_base.with_extension("stdout.json");
+    let stderr_path = output_base.with_extension("stderr.log");
+    let mut child = Command::new("node")
+        .arg(&script)
+        .arg("--f1-bridge")
+        .stdin(Stdio::piped())
+        .stdout(std::fs::File::create(&stdout_path).expect("Node stdout file"))
+        .stderr(std::fs::File::create(&stderr_path).expect("Node stderr file"))
+        .spawn()
+        .expect("start the real Legacy adapter bridge");
+    child.stdin.take().expect("stdin").write_all(input.to_string().as_bytes())
+        .expect("send Host result to Node");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if child.try_wait().expect("poll Node adapter").is_some() { break; }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("Legacy adapter bridge exceeded 30 seconds");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let status = child.wait().expect("collect Node adapter status");
+    let stdout = std::fs::read(&stdout_path).expect("Node output");
+    let stderr = std::fs::read(&stderr_path).expect("Node errors");
+    let _ = std::fs::remove_file(stdout_path);
+    let _ = std::fs::remove_file(stderr_path);
+    assert!(status.success(), "Node projection failed: {}", String::from_utf8_lossy(&stderr));
+    serde_json::from_slice(&stdout).expect("Node projection JSON")
+}
+
+fn legacy_adapter_view(db: &Database, run_id: &str, call: &str, result: &Value) -> Value {
+    node_projection_view(db, run_id, call, result, "legacy")
+}
+
+/// 停在真实 read 已结算、模型还没有提出 write 的边界，供恢复用例使用。
+fn build_f1_read_only(label: &str, mode: &str, body: &str, read_args: Value) -> F1Run {
+    build_f1_read_only_with_file(label, mode, "target.txt", body.as_bytes(), read_args)
+}
+
+/// 正常冻结顺序构造带真实历史消息的 Run，供生产压缩入口消费。
+fn f1_long_history_fixture(
+) -> (Database, PathBuf, String, String, crate::database::KernelHostScope) {
+    let root = std::env::temp_dir().join(format!(
+        "fox-f1-compaction-{}", uuid::Uuid::new_v4().simple(),
+    ));
+    std::fs::create_dir_all(&root).expect("project root");
+    let db = Database::open(root.join("facts.db")).expect("database");
+    let conversation = db.create_conversation(
+        db.default_agent_id(), None, Some(root.to_str().expect("root path")), Some("allow"),
+    ).expect("conversation");
+    let run = db.create_run(&conversation.id, "F1 history compaction", None)
+        .expect("run").run;
+    let binding = db.freeze_kernel_run_control(
+        &run.id, "legacy", fox_engine_protocol::TimeBudgets::continuous(),
+    ).expect("frozen binding");
+    let mut model = rev_consumer_model_config();
+    model.model_service["contextWindow"] = json!(8192);
+    model.model_service["maxOutputTokens"] = json!(512);
+    let config_hash = model.hash().expect("model config hash");
+    let frozen = crate::kernel::RunFrozenConfig {
+        engine_id: "pi".into(), kernel_mode: "authoritative".into(),
+        capability_manifest_version: 2, capability_manifest_hash: "f1-history-manifest".into(),
+        permission_snapshot_id: binding.permission_snapshot_id.clone(),
+        execution_profile_id: binding.execution_profile_id.clone(),
+        prompt_config_hash: config_hash.clone(),
+        model_request_timeout_ms: binding.budgets.model_request_ms,
+        model_first_response_ms: binding.budgets.model_first_response_ms,
+        model_idle_ms: binding.budgets.model_idle_ms,
+        tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
+        run_execution_budget_ms: binding.budgets.run_execution_ms,
+        run_execution_limited: binding.budgets.run_execution_limited,
+        approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
+        provider_max_retries: 0, turn_max_retries: 0,
+    };
+    db.kernel_create_run(
+        &run.id, "pi", "authoritative", 2,
+        &binding.permission_snapshot_id, &binding.execution_profile_id,
+        &config_hash, &serde_json::to_string(&frozen).expect("frozen json"),
+    ).expect("kernel run");
+    db.freeze_kernel_model_config(&run.id, &model).expect("model config");
+    let mut messages = vec![json!({"role":"user","content":"F1 fixture task"})];
+    messages.extend((0..12).map(|index| json!({
+        "role":if index % 2 == 0 {"user"} else {"assistant"},
+        "content":format!("old-{index}: {}", "bounded earlier discussion ".repeat(38)),
+    })));
+    messages.extend((0..8).map(|index| json!({
+        "role":"user", "content":format!("recent-{index}: preserve exactly"),
+    })));
+    db.freeze_kernel_initial_input(&fox_engine_protocol::KernelInitialModelInput {
+        schema_version: 1, run_id: run.id.clone(), turn_id: "turn-1".into(),
+        prompt_config_hash: config_hash, messages,
+    }).expect("initial history");
+    let scope = kernel_gateway::freeze_scope(&db, &binding, &json!({}), &model)
+        .expect("Host scope");
+    db.freeze_kernel_host_scope(&run.id, &scope).expect("persist Host scope");
+    db.apply_runtime_event(&run.id, 1, &json!({"type":"run.started"}))
+        .expect("running Run");
+    (db, root, conversation.id, run.id, scope)
+}
+
+fn build_f1_read_only_with_file(
+    label: &str, mode: &str, target_path: &str, body: &[u8], read_args: Value,
+) -> F1Run {
+    let fixture = kernel_gateway_fixture_with_model(label, mode, &rev_consumer_model_config());
+    build_f1_read_only_from_fixture(fixture, target_path, body, read_args)
+}
+
+fn build_f1_read_only_from_fixture(
+    fixture: (Database, PathBuf, String, String, crate::database::KernelHostScope),
+    target_path: &str, body: &[u8], read_args: Value,
+) -> F1Run {
+    let (db, root, conversation, run, scope) = fixture;
     let clock = crate::kernel::TestClock::new(crate::database::now_ms());
     let cancellation = CancellationRegistry::default();
     let policy = rev_gateway_policy_existing(&db, &run, scope.clone());
-    std::fs::write(root.join("target.txt"), body.as_bytes()).expect("write target");
+    std::fs::write(root.join(target_path), body).expect("write target");
     let read_input = read_args.clone();
     let coordinator =
         KernelCoordinator::start_prepared(&db, &clock, &run, &cancellation).expect("real Run start");
@@ -296,24 +453,6 @@ fn build_f1_run_with_read(
         .as_str()
         .expect("the settled read carries readVersion")
         .to_owned();
-    // 第 2 轮：模型提案整文件替换。
-    let coordinator = KernelCoordinator::reopen(&db, &clock, &run, &cancellation).expect("reopen");
-    coordinator
-        .propose_tools(
-            "f1-write",
-            vec![kernel::ToolCallRequest {
-                tool_call_id: "write-1".into(),
-                tool: "write_file".into(),
-                canonical_input_json: json!({
-                    "path":"target.txt","content":candidate,"expectedVersion":version
-                })
-                .to_string(),
-                source_order: 0,
-            }],
-            &policy,
-        )
-        .expect("the write proposal is recorded through the real policy");
-    drop(coordinator);
     F1Run {
         db,
         root,
@@ -324,18 +463,61 @@ fn build_f1_run_with_read(
         read_input,
         read_call: "read-whole".into(),
         version,
+        target_path: target_path.into(),
     }
 }
 
+fn propose_f1_write(run: &F1Run, candidate: &str) {
+    let cancellation = CancellationRegistry::default();
+    let policy = rev_gateway_policy_existing(&run.db, &run.run_id, run.scope.clone());
+    // 真实恢复/续答后的首次提案也走同一生产策略入口。
+    let coordinator = KernelCoordinator::reopen(&run.db, &run.clock, &run.run_id, &cancellation)
+        .expect("reopen for write proposal");
+    coordinator
+        .propose_tools(
+            "f1-write",
+            vec![kernel::ToolCallRequest {
+                tool_call_id: "write-1".into(),
+                tool: "write_file".into(),
+                canonical_input_json: json!({
+                    "path":run.target_path,"content":candidate,"expectedVersion":run.version
+                })
+                .to_string(),
+                source_order: 0,
+            }],
+            &policy,
+        )
+        .expect("the write proposal is recorded through the real policy");
+}
+
+fn propose_f1_continued_read(run: &F1Run, call: &str, input: Value) -> Value {
+    let cancellation = CancellationRegistry::default();
+    let policy = rev_gateway_policy_existing(&run.db, &run.run_id, run.scope.clone());
+    let coordinator = KernelCoordinator::reopen(&run.db, &run.clock, &run.run_id, &cancellation)
+        .expect("reopen for continued read");
+    coordinator.propose_tools(
+        "f1-continued-read",
+        vec![kernel::ToolCallRequest {
+            tool_call_id: call.into(), tool: "read".into(),
+            canonical_input_json: input.to_string(), source_order: 0,
+        }], &policy,
+    ).expect("second read proposal");
+    let results = execute_pending_dispatches(
+        &run.db, &run.root, &run.scope, &run.run_id, &run.clock,
+    ).expect("settle continued read");
+    assert_eq!(results.len(), 1);
+    results.into_iter().next().expect("read result")
+}
+
 fn target_disk_bytes(run: &F1Run) -> Vec<u8> {
-    std::fs::read(run.root.join("target.txt")).expect("target bytes")
+    std::fs::read(run.root.join(&run.target_path)).expect("target bytes")
 }
 
 fn version_row_count(run: &F1Run) -> usize {
     version_rows(
         &run.db,
         &run.conversation_id,
-        &stored_path(&run.root, "target.txt"),
+        &stored_path(&run.root, &run.target_path),
     )
 }
 
@@ -505,7 +687,10 @@ fn f1_small_file_delivered_whole_still_replaces_normally() {
 #[test]
 fn f1_recovery_does_not_restore_whole_file_eligibility() {
     let body = f1_big_body();
-    let run = build_f1_run("r1", "allow", &body, &body);
+    let run = build_f1_read_only("r1", "allow", &body, json!({"path":"target.txt"}));
+    assert_ne!(f1_run_state(&run.db, &run.run_id), "waiting_approval",
+        "重开前不得已有写提案或待确认请求");
+    assert_eq!(f1_replace_grant_state(&run.db, &run.run_id), None);
     let before = observation(&run.db, &run.run_id, &run.root, "target.txt", &run.version);
     let before_rows = run
         .db
@@ -515,7 +700,7 @@ fn f1_recovery_does_not_restore_whole_file_eligibility() {
         )
         .expect("observations");
 
-    // 关库重开：只剩 durable 事实。
+    // 首次 write 提案之前关库重开：只剩 durable 读取和源观察事实。
     let F1Run {
         db,
         root,
@@ -526,6 +711,7 @@ fn f1_recovery_does_not_restore_whole_file_eligibility() {
         read_input,
         read_call,
         version,
+        target_path,
     } = run;
     drop(db);
     let db = Database::open(root.join("facts.db")).expect("reopen");
@@ -539,6 +725,7 @@ fn f1_recovery_does_not_restore_whole_file_eligibility() {
         read_input,
         read_call,
         version,
+        target_path,
     };
 
     let after = observation(
@@ -576,6 +763,9 @@ fn f1_recovery_does_not_restore_whole_file_eligibility() {
         !view[0]["text"].as_str().expect("text").contains(F1_MARKER),
         "恢复重放不得把未交付的中间内容变回模型可见"
     );
+    assert_eq!(f1_replace_grant_state(&reopened.db, &reopened.run_id), None,
+        "恢复时仍不得有预先提出的确认请求");
+    propose_f1_write(&reopened, &body);
     assert_eq!(
         f1_run_state(&reopened.db, &reopened.run_id),
         "waiting_approval",
@@ -640,32 +830,238 @@ fn f1_partial_read_observation_is_not_whole_file_source() {
     );
 }
 
-/// F1-S2：Office 提取视图是容器的派生文本，永远不是文档源文本。
-///
-/// 这是**契约级**用例：观察本身由真实入口产生，这里只把同一结构中的
-/// `view_kind` 换成生产枚举里的 `OfficeExtract`，确认源事实闸门不因
-/// "看起来像全文"而松动；不冒充 Host 真的读过 Office 容器。
+/// F1-S2：实际 xlsx 容器由 Host 读取并提取文本，提取视图不能授权替换容器。
 #[test]
 fn f1_office_extract_view_kind_never_authorizes_replacement() {
-    let (db, root, conversation, run, _scope) = kernel_gateway_fixture("f1-office", "allow");
-    let target = tool_host::canonical_file_identity(&root, "book.docx").expect("target");
-    let observation = HostObservation {
-        target_identity: target,
-        version: "v1".into(),
-        observed_by_tool_call_id: "read-office".into(),
-        view_kind: fox_engine_protocol::ObservationView::OfficeExtract,
-        covered_whole_file: true,
-        range_start: Some(0),
-        range_end: Some(10),
-        total_units: Some(10),
-        truncated: false,
-    };
-    db.record_host_observation(&run, &conversation, &observation)
-        .expect("record the extract observation");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/office-reading.xlsx");
+    let bytes = std::fs::read(fixture).expect("real xlsx fixture");
+    let run = build_f1_read_only_with_file(
+        "f1-office", "allow", "book.xlsx", &bytes, json!({"path":"book.xlsx"}),
+    );
+    let read = kernel_read_result(&run.db, &run.run_id, &run.read_call);
+    assert!(read["content"][0]["text"].as_str().is_some_and(|text| !text.is_empty()),
+        "真实 Office 读取必须交付提取文本");
+    let observation = observation(&run.db, &run.run_id, &run.root, "book.xlsx", &run.version);
+    assert_eq!(observation.view_kind, fox_engine_protocol::ObservationView::OfficeExtract);
     assert!(
         !observation.authorizes_whole_file_replacement(),
         "Office 提取视图永远不构成源全文"
     );
+    assert!(run.db.needs_replace_grant(&run.run_id, &observation)
+        .expect("F1 delivery admission"));
+    propose_f1_write(&run, "malicious container replacement");
+    let write = kernel_read_result(&run.db, &run.run_id, "write-1");
+    let (input, state): (String, String) = run.db.with_connection(|c| c.query_row(
+        "SELECT canonical_input_json,state FROM kernel_tool_calls WHERE run_id=?1 AND tool_call_id='write-1'",
+        [&run.run_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    )).expect("write proposal row");
+    assert_eq!(serde_json::from_str::<Value>(&input).expect("write input")["path"], "book.xlsx",
+        "写提案与 Office 读取必须指向同一目标");
+    assert_eq!(state, "failed", "二进制 Office 容器先由文本写入校验拒绝");
+    assert_eq!(write["details"]["errorCode"], "tool.invalid_input");
+    assert!(write["content"][0]["text"].as_str().is_some_and(|text|
+        text.contains("not valid UTF-8 text")));
+    assert!(execute_pending_dispatches(&run.db, &run.root, &run.scope, &run.run_id, &run.clock)
+        .expect("Host execution seam").is_empty());
+    assert_eq!(target_disk_bytes(&run), bytes);
+    assert_eq!(version_row_count(&run), 0);
+}
+
+#[test]
+fn f1_two_pages_of_the_same_snapshot_still_require_a_dedicated_confirmation() {
+    let body = format!("{}{}", "A".repeat(64), "B".repeat(64));
+    let run = build_f1_read_only(
+        "same-snapshot-pages", "allow", &body,
+        json!({"path":"target.txt","offset":0,"limit":64}),
+    );
+    let next = propose_f1_continued_read(
+        &run, "read-next", json!({"path":"target.txt","offset":64,"limit":64}),
+    );
+    assert_eq!(next["details"]["readVersion"], run.version);
+    let second = observation(&run.db, &run.run_id, &run.root, "target.txt", &run.version);
+    assert!(!second.authorizes_whole_file_replacement());
+    propose_f1_write(&run, "combined replacement");
+    assert_eq!(f1_run_state(&run.db, &run.run_id), "waiting_approval");
+    assert_eq!(f1_replace_grant_state(&run.db, &run.run_id).as_deref(), Some("pending"));
+    assert_eq!(target_disk_bytes(&run), body.as_bytes());
+    assert_eq!(version_row_count(&run), 0);
+}
+
+#[test]
+fn f1_pages_from_different_versions_cannot_form_a_whole_file_read() {
+    let first = format!("{}{}", "A".repeat(64), "B".repeat(64));
+    let mut run = build_f1_read_only(
+        "cross-version-pages", "allow", &first,
+        json!({"path":"target.txt","offset":0,"limit":64}),
+    );
+    let first_version = run.version.clone();
+    let second_body = format!("{}{}", "A".repeat(64), "C".repeat(64));
+    std::fs::write(run.root.join("target.txt"), second_body.as_bytes())
+        .expect("external version change between reads");
+    let next = propose_f1_continued_read(
+        &run, "read-next", json!({"path":"target.txt","offset":64,"limit":64}),
+    );
+    let second_version = next["details"]["readVersion"].as_str().expect("second version");
+    assert_ne!(second_version, first_version);
+    run.version = second_version.into();
+    let second = observation(&run.db, &run.run_id, &run.root, "target.txt", &run.version);
+    assert!(!second.authorizes_whole_file_replacement());
+    propose_f1_write(&run, "mixed-version replacement");
+    assert_eq!(f1_run_state(&run.db, &run.run_id), "waiting_approval");
+    assert_eq!(f1_replace_grant_state(&run.db, &run.run_id).as_deref(), Some("pending"));
+    assert_eq!(target_disk_bytes(&run), second_body.as_bytes());
+    assert_eq!(version_row_count(&run), 0);
+}
+
+#[test]
+fn f1_actual_history_compaction_does_not_turn_a_clipped_read_into_whole_delivery() {
+    let body = f1_big_body();
+    let fixture = f1_long_history_fixture();
+    let run = build_f1_read_only_from_fixture(
+        fixture, "target.txt", body.as_bytes(), json!({"path":"target.txt"}),
+    );
+    let cancellation = CancellationRegistry::default();
+    let coordinator = KernelCoordinator::reopen(
+        &run.db, &run.clock, &run.run_id, &cancellation,
+    ).expect("reopen before compaction");
+    let batch = coordinator.snapshot().expect("snapshot").tool_calls[0].batch_id.clone();
+    let original = run.db.kernel_initial_input(&run.run_id).expect("frozen history");
+    assert!(coordinator.prepare_context_if_needed(&batch, 4096)
+        .expect("prepare real history compaction"));
+    coordinator.dispatch_pending_compaction("f1-summary-owner", |_, request, _, _| {
+        Ok(fox_engine_protocol::KernelCompactionResponse {
+            schema_version: 1, run_id: request.run_id.clone(),
+            turn_id: request.turn_id.clone(), compaction_id: request.compaction_id.clone(),
+            input_hash: request.input_hash.clone(),
+            summary: "The earlier discussion is context; this summary grants no file access."
+                .into(),
+            usage: json!({"input":100,"output":20,"totalTokens":120}),
+        })
+    }).expect("commit actual compaction result");
+    assert!(coordinator.snapshot().expect("snapshot after compaction")
+        .compaction.compactions > 0);
+    assert_eq!(run.db.kernel_initial_input(&run.run_id).expect("original history"), original);
+    drop(coordinator);
+    let view = model_visible_tool_result(
+        &run.db, &run.run_id, &run.read_call, "read", &run.read_input,
+    );
+    assert!(!view[0]["text"].as_str().expect("clipped text").contains(F1_MARKER));
+    propose_f1_write(&run, &body);
+    assert_eq!(f1_run_state(&run.db, &run.run_id), "waiting_approval");
+    assert_eq!(f1_replace_grant_state(&run.db, &run.run_id).as_deref(), Some("pending"));
+    assert_eq!(target_disk_bytes(&run), body.as_bytes());
+    assert_eq!(version_row_count(&run), 0);
+}
+
+/// 辅助跨层证据：真实 Host read durable 行经 Rust 生产投影后，把结果内容
+/// 原样送进 Node 的生产二次投影。最终 Provider 请求仍由引擎 HTTP 用例负责。
+#[test]
+fn f1_real_host_read_keeps_the_same_coverage_after_node_second_projection() {
+    for (label, body, middle_expected) in [
+        ("second-big", f1_big_body(), false),
+        ("second-small", "alpha\nbeta\n".to_owned(), true),
+    ] {
+        let run = build_f1_read_only(label, "allow", &body, json!({"path":"target.txt"}));
+        let rust_content = model_visible_tool_result(
+            &run.db, &run.run_id, &run.read_call, "read", &run.read_input,
+        );
+        let rust_text = rust_content[0]["text"].as_str().expect("Rust text");
+        assert_eq!(rust_text.contains(F1_MARKER), middle_expected && body.contains(F1_MARKER));
+        let node = node_projection_view(
+            &run.db, &run.run_id, &run.read_call,
+            &json!({"content":rust_content}), "kernel",
+        );
+        let node_text = node["content"][0]["text"].as_str().expect("Node text");
+        assert_eq!(node_text, rust_text,
+            "Node 二次投影不得扩大或继续丢失 Rust 交付的正文");
+        assert_eq!(node_text.contains(F1_MARKER), middle_expected && body.contains(F1_MARKER));
+        assert_eq!(target_disk_bytes(&run), body.as_bytes());
+        assert_eq!(version_row_count(&run), 0);
+    }
+}
+
+/// 当前裁剪读取引出的专门批准只对本次候选有效；实际 Host 写入消耗一次。
+#[test]
+fn f1_cropped_read_confirmation_is_bound_to_one_candidate_and_consumed_once() {
+    let body = f1_big_body();
+    let candidate = "approved replacement";
+    let run = build_f1_run("confirm-once", "allow", &body, candidate);
+    assert_eq!(f1_replace_grant_state(&run.db, &run.run_id).as_deref(), Some("pending"));
+    settle_f1_host_approval(&run, kernel::ApprovalDecision::AllowOnce, "allow_once");
+    assert_eq!(f1_replace_grant_state(&run.db, &run.run_id).as_deref(), Some("approved"));
+
+    // 同一份读，另一候选即使使用当前版本也必须重新取得专门确认。
+    let changed = json!({
+        "path":"target.txt", "content":"different candidate", "expectedVersion":run.version,
+    });
+    let changed_credential = run.db.issue_dispatch_credential(
+        &run.run_id, "write-changed", "write_file", &changed.to_string(),
+    ).expect("issue changed candidate").expect("file credential");
+    assert!(changed_credential.requires_replace_grant);
+    let refused = run.db.claim_execution_attempt(
+        &run.run_id, &run.conversation_id, &changed_credential,
+        &changed_credential.intent_digest, "changed-owner",
+    ).expect("claim changed candidate");
+    assert!(matches!(refused, fox_engine_protocol::AttemptOutcome::AlreadyRefused { .. }),
+        "另一候选不能借用 write-1 的专门确认：{refused:?}");
+    assert_eq!(target_disk_bytes(&run), body.as_bytes());
+    assert_eq!(version_row_count(&run), 0);
+
+    let executed = execute_pending_dispatches(
+        &run.db, &run.root, &run.scope, &run.run_id, &run.clock,
+    ).expect("admitted Host dispatch");
+    assert_eq!(executed.len(), 1);
+    assert_eq!(target_disk_bytes(&run), candidate.as_bytes());
+    assert_eq!(version_row_count(&run), 1);
+    assert_eq!(f1_replace_grant_state(&run.db, &run.run_id).as_deref(), Some("consumed"));
+    assert!(execute_pending_dispatches(
+        &run.db, &run.root, &run.scope, &run.run_id, &run.clock,
+    ).expect("repeated Host drive").is_empty());
+    assert_eq!(version_row_count(&run), 1);
+}
+
+#[test]
+fn f1_cropped_read_denial_cannot_write_or_revive_the_request() {
+    let body = f1_big_body();
+    let run = build_f1_run("deny-cropped", "allow", &body, "denied candidate");
+    settle_f1_host_approval(&run, kernel::ApprovalDecision::Deny, "denied");
+    assert_eq!(f1_replace_grant_state(&run.db, &run.run_id).as_deref(), Some("expired"));
+    assert!(execute_pending_dispatches(
+        &run.db, &run.root, &run.scope, &run.run_id, &run.clock,
+    ).expect("denied Host drive").is_empty());
+    assert_eq!(target_disk_bytes(&run), body.as_bytes());
+    assert_eq!(version_row_count(&run), 0);
+    assert!(run.db.approve_whole_file_replacement(
+        &run.run_id, "write-1", &run.conversation_id,
+        &tool_host::canonical_file_identity(&run.root, "target.txt").expect("target"),
+        &run.version, "wrong candidate", "wrong request",
+    ).is_err(), "terminal denial cannot be revived");
+}
+
+#[test]
+fn f1_cropped_read_expired_confirmation_cannot_write() {
+    let body = f1_big_body();
+    let run = build_f1_run("expire-cropped", "allow", &body, "late candidate");
+    let approval_id = run.db.kernel_approval_identity(&run.run_id, "write-1")
+        .expect("approval identity");
+    assert!(run.db.queue_kernel_host_approval(&approval_id, "allow_once")
+        .expect("queue before expiration"));
+    let command = run.db.pending_kernel_host_commands(&run.run_id)
+        .expect("pending commands").into_iter().find(|command| command.kind == "approval")
+        .expect("approval command");
+    run.clock.advance(86_000_000);
+    let cancellation = CancellationRegistry::default();
+    let coordinator = KernelCoordinator::reopen(&run.db, &run.clock, &run.run_id, &cancellation)
+        .expect("reopen after deadline");
+    coordinator.tick().expect("expire the durable approval");
+    run.db.complete_kernel_host_command(&run.run_id, command.seq)
+        .expect("acknowledge the expired command without granting");
+    assert_eq!(f1_replace_grant_state(&run.db, &run.run_id).as_deref(), Some("expired"));
+    assert!(execute_pending_dispatches(
+        &run.db, &run.root, &run.scope, &run.run_id, &run.clock,
+    ).expect("expired Host drive").is_empty());
+    assert_eq!(target_disk_bytes(&run), body.as_bytes());
+    assert_eq!(version_row_count(&run), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -721,12 +1117,13 @@ fn legacy_durable_read(
 ///
 /// 这里走 `Database::issue_legacy_file_credential`，也就是桌面 Host 写路径
 /// （`runtime_host::execute_host_tool_call`）用的那条发证入口：
-///  * 30 KB 全文读取 + 被裁剪的模型视图 → `requires_replace_grant == true`，
+///  * 30 KB 全文读取：Legacy Pi adapter 原样交付，但当前统一保守资格规则
+///    仍要求专门确认（当前重算按 Kernel 投影上界）；
 ///    并留下 pending 的专门替换请求；
 ///  * 小文件全文交付 → 不额外要求专门确认，避免"一律禁写"。
 #[test]
-fn f1_legacy_entry_requires_the_replacement_grant_for_an_undelivered_whole_read() {
-    // --- 大文件：Host 读到全文，模型只收到头尾 ---
+fn f1_legacy_entry_conservatively_requires_replacement_grant_for_large_read() {
+    // --- 大文件：真实 Host 读到全文，Legacy adapter 实际保留全文；准入保守。
     let (db, root, conversation, run) = rev_fixture("f1-legacy-big", "allow");
     let binding = db.run_control_binding(&run).expect("binding").expect("frozen");
     let body = f1_big_body();
@@ -739,10 +1136,10 @@ fn f1_legacy_entry_requires_the_replacement_grant_for_an_undelivered_whole_read(
         observation.authorizes_whole_file_replacement(),
         "源事实必须成立：Legacy 读取确实交付了全文"
     );
-    let view = model_visible_tool_result(&db, &run, "read-big", "read", &read_input);
+    let view = legacy_adapter_view(&db, &run, "read-big", &read);
     assert!(
-        !view[0]["text"].as_str().expect("text").contains(F1_MARKER),
-        "Legacy 模型视图同样被生产投影裁剪"
+        view["content"][0]["text"].as_str().expect("text").contains(F1_MARKER),
+        "真实 Legacy adapter 的 Pi 结果分支保留完整 30 KB 正文"
     );
 
     let policy_version = db
@@ -765,7 +1162,7 @@ fn f1_legacy_entry_requires_the_replacement_grant_for_an_undelivered_whole_read(
         .expect("the Legacy issuance entry");
     assert!(
         credential.requires_replace_grant,
-        "Legacy 入口同样必须要求专门替换确认"
+        "当前统一重算规则对 Legacy 30 KB 正文保守要求专门确认"
     );
     assert!(credential.replace_candidate_digest.is_some());
     assert!(credential.replace_request_digest.is_some());
@@ -787,6 +1184,8 @@ fn f1_legacy_entry_requires_the_replacement_grant_for_an_undelivered_whole_read(
     std::fs::write(root.join("small.txt"), small.as_bytes()).expect("write");
     let read_input = json!({"path":"small.txt"});
     let read = legacy_durable_read(&db, &binding, &read_input, "read-small");
+    let view = legacy_adapter_view(&db, &run, "read-small", &read);
+    assert_eq!(view["content"][0]["text"], small);
     let version = read_version(&read);
     let policy_version = db
         .execution_policy(&conversation)

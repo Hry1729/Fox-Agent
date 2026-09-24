@@ -2,16 +2,16 @@
 // the durable result, and the projection must never look like it delivered
 // content it omitted.
 //
-// The Host decides whole-file replacement eligibility from the *durable* row
-// (see `model_delivery_covered_whole_file_in_tx` in
+// The Host decides whole-file replacement eligibility from canonical and
+// compatibility durable rows plus trusted storage (see
 // `apps/desktop/src-tauri/src/database/repositories/kernel_execution_admission.rs`),
 // so what this file pins is the other half of the contract: the engine-side
 // projection keeps the same bounds as the Host's, never mutates or re-expands
 // the durable payload, and is idempotent — a second projection of an already
 // bounded view can never restore the omitted middle.
 //
-// Constants mirrored from `apps/desktop/src-tauri/src/kernel_compaction.rs`
-// (`TOOL_VIEW_HEAD_BYTES` / `TOOL_VIEW_TAIL_BYTES` / `TOOL_VIEW_MAX_BYTES`).
+// These are Node projection tests. Cross-layer equality requires the Rust Host
+// result as input; a copied size constant does not establish that equality.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { boundToolResultContent, modelToolResultContent, RECEIPT_MARKER } from '../src/tool-view.mjs'
@@ -29,7 +29,7 @@ const storedWhole = (text) => ({
 const MARKER = 'FOX-F1-MIDDLE-MARKER-7c1f9a2d-NEVER-DELIVERED'
 const bigBody = () => 'H'.repeat(15_000) + MARKER + 'T'.repeat(15_000)
 
-test('F1: a whole 30 KB read reaches the provider without its middle, and the durable bytes are untouched', () => {
+test('F1: Node projects a 30 KB read without its middle and leaves input untouched', () => {
   const body = bigBody()
   const content = [{ type: 'text', text: body }]
   const projected = boundToolResultContent('read', {
@@ -43,8 +43,7 @@ test('F1: a whole 30 KB read reaches the provider without its middle, and the du
   assert.equal(text.includes(MARKER), false, 'the omitted middle must not reach the provider')
   assert.ok(bytes(text) < bytes(body), 'the model view must be smaller than the source')
   assert.ok(text.includes(REF), 'the view must name the durable result so the bytes stay reachable')
-  // The durable payload is never rewritten, so the Host can still replay the
-  // projection from it and reach the same answer.
+  // Projection does not rewrite its input; Rust tests inspect the durable row.
   assert.equal(content[0].text, body, 'the source result object must be unchanged')
   assert.equal(content[0].text.includes(MARKER), true, 'the durable bytes still carry the marker')
 })
@@ -85,9 +84,8 @@ test('F1: an independent receipt block never protects the body from being bounde
   assert.ok(bytes(projected[0].text) < bytes(body))
 })
 
-test('F1: the engine bound matches the Host bound on both sides of the limit', () => {
-  // Exactly at the Host ceiling: nothing is omitted, so a whole-file read of
-  // this size still reaches the model whole.
+test('F1: Node projection changes behavior around its current size threshold', () => {
+  // This tests the Node projection only. It does not compare Rust output.
   const atLimit = 'x'.repeat(9_000)
   const unchanged = boundToolResultContent('read', {
     content: [{ type: 'text', text: atLimit }],
@@ -96,8 +94,7 @@ test('F1: the engine bound matches the Host bound on both sides of the limit', (
   })
   assert.equal(unchanged[0].text, atLimit)
 
-  // One byte over: the projection must omit, and the Host replay would find the
-  // same omission.
+  // One byte over: the projection must omit.
   const overLimit = 'x'.repeat(9_001)
   const bounded = boundToolResultContent('read', {
     content: [{ type: 'text', text: overLimit }],
@@ -108,10 +105,10 @@ test('F1: the engine bound matches the Host bound on both sides of the limit', (
   assert.ok(bytes(bounded[0].text) <= 9_000, `bounded view must fit the budget, got ${bytes(bounded[0].text)}`)
 })
 
-test('F1: without a trusted storage fact nothing is omitted, so eligibility is decided by the durable row alone', () => {
+test('F1: without trusted storage the Node view keeps all bytes and promises no retrieval', () => {
   const body = bigBody()
-  // No storage fact: the projection keeps every byte and promises nothing, so
-  // the model really does receive the whole result.
+  // No storage fact: this local projection keeps every byte and promises no
+  // retrieval; Host admission conservatively requires dedicated confirmation.
   const kept = boundToolResultContent('read', {
     content: [{ type: 'text', text: body }],
     resultRef: REF,

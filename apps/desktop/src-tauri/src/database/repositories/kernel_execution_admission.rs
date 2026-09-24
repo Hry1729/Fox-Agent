@@ -465,20 +465,21 @@ pub fn replace_request_binding(
 /// Whether the model view of the observation's durable result kept every byte.
 ///
 /// The observation's `covered_whole_file` is the Host's SOURCE fact: what the
-/// read tool returned. The model only sees a projection of that result, and
+/// read tool returned. The Kernel model path projects that result, and
 /// [`crate::kernel_compaction::bound_tool_result_content_with_storage`] may cut
-/// a long body to a head/tail view. Admission must therefore ask this question
-/// as well, from the durable row, and never from the observation alone.
+/// a long body to a head/tail view. Admission therefore also checks the durable
+/// row. Legacy's actual model input is a separate path to verify.
 ///
-/// The replay always runs on the DURABLE result, so:
-/// * re-projecting an already-projected frame cannot restore eligibility;
-/// * a recovery resume, a database reopen or a history compaction cannot
-///   change the answer, because the durable row is untouched by all three;
+/// The calculation replays the CURRENT durable result, so:
+/// * it does not treat an already-projected frame as a fresh full result;
+/// * recovery, reopen or compaction alone do not expand eligibility, provided
+///   the canonical result and compatibility storage rows remain consistent;
 /// * nothing is taken from the model's or the tool's own description of what it
 ///   "read" — a result that claims `coveredWholeFile` provides no elevation.
 ///
-/// Every uncertainty (missing row, non-terminal call, unparsable result, absent
-/// reference) returns `false`: an unknown delivery is not an eligible one.
+/// Every uncertainty (missing or inconsistent rows, failed call, unparsable
+/// result, absent reference or unverified storage) returns `false`: an unknown
+/// delivery is not an eligible one.
 pub fn model_delivery_covered_whole_file_in_tx(
     transaction: &Transaction<'_>,
     run_id: &str,
@@ -493,12 +494,9 @@ pub fn model_delivery_covered_whole_file_in_tx(
     if tool_call_id.is_empty() {
         return Ok(false);
     }
-    // Two durable records can carry a settled tool result, and they are mutually
-    // exclusive by construction: an authoritative Kernel Run records its calls
-    // in `kernel_tool_calls` (the Legacy writer is refused:
-    // `require_legacy_run_writer`), and a Legacy Run records them in
-    // `tool_calls`. Both are addressed by the same `(run_id, tool_call_id)`
-    // pair, so the replay asks each shape in turn and never guesses.
+    // Kernel calls also have a compatibility projection in `tool_calls`.
+    // The latter supplies the storage fact, so it must agree with the canonical
+    // `kernel_tool_calls` row before replay can establish eligibility.
     let kernel_row: Option<(String, String, Option<String>, String)> = transaction
         .query_row(
             "SELECT tool, state, result_json, canonical_input_json FROM kernel_tool_calls
@@ -517,34 +515,53 @@ pub fn model_delivery_covered_whole_file_in_tx(
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let Some((tool_name, status, result_json, input_json)) = kernel_row.or(legacy_row) else {
-        // The observing call left no durable settled result: what the model
-        // received cannot be established, so it is not authorized.
-        return Ok(false);
+    let (tool_name, status, result_json, input_json) = match (kernel_row, legacy_row) {
+        (Some(canonical), Some(projected)) if canonical == projected => canonical,
+        (None, Some(legacy)) => {
+            let is_kernel_run: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM kernel_runs WHERE run_id=?1)",
+                [run_id],
+                |row| row.get(0),
+            ).map_err(|error| error.to_string())?;
+            if is_kernel_run { return Ok(false); }
+            legacy
+        }
+        _ => return Ok(false),
     };
-    if !matches!(status.as_str(), "completed" | "failed") {
+    // A FullFile observation is produced by the managed `read` seam. A failed
+    // read or unrelated tool cannot establish a successful whole-file delivery.
+    if status != "completed" || tool_name != "read" {
         return Ok(false);
     }
     let Some(result_json) = result_json else {
         return Ok(false);
     };
-    let is_error = status == "failed";
-    let raw: Value = serde_json::from_str(&result_json)
-        .map_err(|error| format!("durable tool result is not JSON: {error}"))?;
-    let canonical_input: Value = serde_json::from_str(&input_json).unwrap_or(Value::Null);
+    let Ok(raw) = serde_json::from_str::<Value>(&result_json) else {
+        return Ok(false);
+    };
+    let Ok(canonical_input) = serde_json::from_str::<Value>(&input_json) else {
+        return Ok(false);
+    };
     let tool = crate::kernel_compaction::effective_boundable_tool(&tool_name, &canonical_input);
-    let content = crate::kernel_compaction::durable_result_content(&raw);
-    let reference = crate::kernel_compaction::tool_result_ref(run_id, tool_call_id);
-    // The same trusted storage fact the delivery used. Unknown is not
-    // "unlimited": with no verified fact the projection keeps every byte, which
-    // is what the model received too, so the replay stays truthful.
-    let storage = super::tool_result_storage_for(transaction, run_id, tool_call_id)
-        .unwrap_or_default();
+    let Some(content) = crate::kernel_compaction::durable_result_content(&raw) else {
+        return Ok(false);
+    };
+    let Some(reference) = crate::kernel_compaction::tool_result_ref(run_id, tool_call_id) else {
+        return Ok(false);
+    };
+    // Storage is read through the same compatibility row used by delivery.
+    // Missing/unknown storage cannot prove what an earlier model request saw.
+    let Ok(storage) = super::tool_result_storage_for(transaction, run_id, tool_call_id) else {
+        return Ok(false);
+    };
+    if !storage.stored || storage.failure_reason.is_some() {
+        return Ok(false);
+    }
     Ok(crate::kernel_compaction::model_view_keeps_every_byte(
         tool,
-        is_error,
-        &content,
-        reference.as_deref(),
+        false,
+        content,
+        Some(&reference),
         &storage,
     ))
 }
@@ -2286,7 +2303,7 @@ pub fn host_observations_for_target_in_tx(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fox_engine_protocol::{encode_dispatch_id, job_row_key};
+    use fox_engine_protocol::{encode_dispatch_id, job_row_key, ObservationView};
 
     fn fixture() -> (Database, std::path::PathBuf, String, String) {
         let path =
@@ -2299,6 +2316,97 @@ mod tests {
             .create_run(&conversation.id, "exec admission run", None)
             .unwrap();
         (db, path, conversation.id, run.run.id)
+    }
+
+    fn settled_read_fixture(body: &str) -> (Database, String, HostObservation) {
+        let (db, _, _conversation, run) = fixture();
+        db.with_connection(|connection| {
+            connection.execute("UPDATE runs SET status='running',started_at=?2 WHERE id=?1",
+                params![run, now_ms()])?;
+            Ok(())
+        }).unwrap();
+        db.freeze_legacy_run_control(&run, "delivery-replay-test").unwrap();
+        db.create_host_tool_call(&run, "read-1", "read",
+            &serde_json::json!({"path":"document.txt"}), "running", false).unwrap();
+        db.complete_host_tool_call(&run, "read-1",
+            Some(&serde_json::json!({"content":[{"type":"text","text":body}]})), None).unwrap();
+        let observation = HostObservation {
+            target_identity: "document.txt".into(),
+            version: "sha256:fixture".into(),
+            observed_by_tool_call_id: "read-1".into(),
+            view_kind: ObservationView::FullFile,
+            covered_whole_file: true,
+            ..Default::default()
+        };
+        (db, run, observation)
+    }
+
+    #[test]
+    fn f1_small_settled_read_retains_whole_file_eligibility() {
+        let (empty_db, empty_run, empty_observation) = settled_read_fixture("");
+        assert!(empty_db.model_delivery_covered_whole_file(&empty_run, &empty_observation).unwrap(),
+            "an actual empty file is still a complete file");
+        let (db, run, observation) = settled_read_fixture("short complete file");
+        assert!(db.model_delivery_covered_whole_file(&run, &observation).unwrap());
+        db.with_connection(|connection| {
+            connection.execute("INSERT INTO kernel_tool_calls
+                (run_id,tool_call_id,batch_id,tool,source_order,canonical_input_json,state,result_json,created_at,settled_at)
+                SELECT run_id,runtime_tool_call_id,'batch','read',0,input_json,status,result_json,started_at,completed_at
+                  FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id='read-1'", [&run])?;
+            Ok(())
+        }).unwrap();
+        assert!(db.model_delivery_covered_whole_file(&run, &observation).unwrap(),
+            "matching canonical and compatibility rows preserve the small positive case");
+        db.with_connection(|connection| {
+            connection.execute("UPDATE tool_calls SET result_json='null'
+                WHERE run_id=?1 AND runtime_tool_call_id='read-1'", [&run])?;
+            Ok(())
+        }).unwrap();
+        assert!(!db.model_delivery_covered_whole_file(&run, &observation).unwrap(),
+            "a diverged compatibility row cannot supply the canonical row's storage fact");
+    }
+
+    #[test]
+    fn f1_clipped_read_cannot_gain_eligibility_when_compatibility_storage_disappears() {
+        let (db, run, observation) = settled_read_fixture(&"middle omitted ".repeat(2_000));
+        // Simulate the canonical Kernel row and its compatibility projection.
+        // The settled producer above persisted the same ordinary result shape.
+        db.with_connection(|connection| {
+            connection.execute("INSERT INTO kernel_tool_calls
+                (run_id,tool_call_id,batch_id,tool,source_order,canonical_input_json,state,result_json,created_at,settled_at)
+                SELECT run_id,runtime_tool_call_id,'batch','read',0,input_json,status,result_json,started_at,completed_at
+                  FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id='read-1'", [&run])?;
+            Ok(())
+        }).unwrap();
+        assert!(!db.model_delivery_covered_whole_file(&run, &observation).unwrap(),
+            "the original fully stored result was clipped by the model view");
+        db.with_connection(|connection| {
+            connection.execute("DELETE FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id='read-1'", [&run])?;
+            Ok(())
+        }).unwrap();
+        assert!(!db.model_delivery_covered_whole_file(&run, &observation).unwrap(),
+            "losing storage evidence cannot reclassify the same clipped read as complete");
+    }
+
+    #[test]
+    fn f1_failed_malformed_and_unrelated_result_rows_never_authorize_replacement() {
+        let (db, run, observation) = settled_read_fixture("short complete file");
+        for (status, tool, result) in [
+            ("failed", "read", r#"{"content":[{"type":"text","text":"short complete file"}]}"#),
+            ("completed", "read", "null"),
+            ("completed", "read", r#"{"content":null}"#),
+            ("completed", "read", "{broken"),
+            ("completed", "unknown_reader", r#"{"content":[{"type":"text","text":"short complete file"}]}"#),
+        ] {
+            db.with_connection(|connection| {
+                connection.execute("UPDATE tool_calls SET status=?2,tool_name=?3,result_json=?4
+                    WHERE run_id=?1 AND runtime_tool_call_id='read-1'",
+                    params![run,status,tool,result])?;
+                Ok(())
+            }).unwrap();
+            assert!(!db.model_delivery_covered_whole_file(&run, &observation).unwrap(),
+                "{status}/{tool}/{result} must not establish delivery");
+        }
     }
 
     fn legacy_file_fixture(

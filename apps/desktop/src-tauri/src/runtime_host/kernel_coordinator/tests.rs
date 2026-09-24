@@ -64,6 +64,8 @@ mod harness_security_tests;
 mod kernel_artifact_gate_tests;
 #[path = "rev_repro_tests.rs"]
 mod rev_repro_tests;
+#[path = "f1_engine_path_tests.rs"]
+mod f1_engine_path_tests;
 
 /// Record the durable settled result of one authoritative Kernel tool call.
 ///
@@ -74,9 +76,9 @@ mod rev_repro_tests;
 /// writes when it settles a dispatch (`kernel_tool_calls`, state `completed`),
 /// and nothing here grants authority.
 ///
-/// A Legacy Run records its calls in `tool_calls` instead; the two shapes are
-/// mutually exclusive because a Legacy writer is refused on an authoritative
-/// Run (`require_legacy_run_writer`).
+/// The production Kernel projection also materializes this authoritative row
+/// in the compatibility `tool_calls` table. The admission replay and stored
+/// result reader must see those two views of the same settled result.
 pub(super) fn record_kernel_read_fact(
     db: &Database,
     run_id: &str,
@@ -109,6 +111,14 @@ pub(super) fn record_kernel_read_fact(
         Ok(())
     })
     .expect("record the settled Kernel read fact");
+    db.kernel_project_for_test(run_id)
+        .expect("project the authoritative read through the production compatibility path");
+    assert!(
+        db.tool_result_storage(run_id, tool_call_id)
+            .expect("read the projected result storage")
+            .stored,
+        "the real read must remain range-readable after projection"
+    );
 }
 use crate::kernel::{CancellationRegistry, PolicyDecision, TestClock};
 use fox_engine_protocol::{FrozenPermission, PermissionMode, ResourceExecutor, TimeBudgets};
