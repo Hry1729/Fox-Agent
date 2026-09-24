@@ -6345,11 +6345,12 @@ fn exercise_eval_approval_clock(approve: bool) {
     let cancellation = CancellationRegistry::default();
     cancellation.register_run(&run_id).unwrap();
     let token = cancellation.tool_token(&run_id, "clock-observe-proof").unwrap();
+    let read_input = json!({"path":"proof.txt"});
     let observed = crate::runtime_host::managed_files::execute_observed_reader(
         &db,
         &binding,
         "read",
-        &json!({"path":"proof.txt"}),
+        &read_input,
         "clock-observe-proof",
         &token,
         Duration::from_secs(5),

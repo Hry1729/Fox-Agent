@@ -1150,6 +1150,83 @@ pub(crate) fn bound_tool_result_content_with_storage(
     }
 }
 
+/// The operation a settled call is judged by when bounding the model view.
+///
+/// `office_read` is named in `BOUNDABLE_TOOLS`, but the Host never dispatches it
+/// under that name: the built-in connector is always reached through the
+/// `call_mcp_tool` wrapper, so a match on the wrapper name made the whitelist
+/// entry dead code and let a 927-row sheet read pass through verbatim.
+///
+/// Only the built-in Office connector is unwrapped, and only for the read-only
+/// operations the whitelist already accepts. A *generic* MCP call keeps
+/// `call_mcp_tool`: its side-effect and re-read semantics are unknown, which is
+/// what the whitelist's own reasoning requires. An unrecognised or write-form
+/// inner operation also keeps the wrapper name, so it is never bounded.
+///
+/// This is the single definition: `runtime_host::kernel_coordinator::live` uses
+/// it for the frame it sends the worker, and the admission-side delivery replay
+/// below uses it for the durable row, so the two can never disagree about which
+/// operation the projected bytes belong to. Mirrors `effectiveBoundableTool` in
+/// `services/agent-runtime/src/tool-view.mjs`.
+pub(crate) fn effective_boundable_tool<'a>(tool: &'a str, canonical_input: &'a Value) -> &'a str {
+    const UNWRAPPABLE: &[&str] = &["office_read", "office_help", "office_validate"];
+    if tool != "call_mcp_tool" {
+        return tool;
+    }
+    if canonical_input["serverId"].as_str() != Some(crate::office::SERVER_ID) {
+        return tool;
+    }
+    match canonical_input["tool"].as_str() {
+        Some(inner) if UNWRAPPABLE.contains(&inner) => boundable_tool_name(inner).unwrap_or(tool),
+        _ => tool,
+    }
+}
+
+/// Whether the model view of this settled result kept **every byte** of it.
+///
+/// This is the model-DELIVERY fact, as opposed to the Host's SOURCE fact
+/// (`HostObservation::authorizes_whole_file_replacement`, which says what the
+/// read delivered at the tool-result boundary). A whole-file read whose model
+/// projection was head/tail-bounded delivered the host bytes but not the model
+/// view, and this function is what tells the two apart.
+///
+/// It is a *replay* of the production projection — the same
+/// [`bound_tool_result_content_with_storage`] the coordinator calls — against
+/// the durable result, never against an already-projected view. Two
+/// consequences are load-bearing:
+///
+/// * Replaying the durable row makes the answer idempotent: a second
+///   projection, a recovery resume or a history compaction can never turn an
+///   omitted delivery back into a whole one.
+/// * `true` is decided by positive evidence (the projection provably changed
+///   nothing); every uncertainty — a missing row, an unparsable result, an
+///   unknown tool — must be handled by the caller as "no eligibility".
+pub(crate) fn model_view_keeps_every_byte(
+    tool: &str,
+    is_error: bool,
+    content: &Value,
+    reference: Option<&str>,
+    storage: &ToolResultStorage,
+) -> bool {
+    if is_error || !is_boundable(tool) {
+        // Not a re-readable projection target: nothing is ever omitted.
+        return true;
+    }
+    bound_tool_result_content_with_storage(tool, false, content, reference, storage).is_none()
+}
+
+/// Normalize one durable `tool_calls.result_json` value into the `content`
+/// array the model-view projection works on. Mirrors the normalization in
+/// `KernelCoordinator::project_settled_tools` so the delivery replay sees
+/// exactly the bytes the coordinator projected.
+pub(crate) fn durable_result_content(raw: &Value) -> Value {
+    if raw.get("content").is_some() {
+        raw["content"].clone()
+    } else {
+        json!([{"type":"text","text":raw.to_string()}])
+    }
+}
+
 /// Sentinel prefix of the model-visible `read_tool_result` cursor block.
 /// Mirrors `READ_RESULT_CURSOR_MARKER` in `services/agent-runtime/src/tool-view.mjs`.
 pub(crate) const READ_RESULT_CURSOR_MARKER: &str = "FOX_RESULT_CURSOR_V1";

@@ -64,6 +64,52 @@ mod harness_security_tests;
 mod kernel_artifact_gate_tests;
 #[path = "rev_repro_tests.rs"]
 mod rev_repro_tests;
+
+/// Record the durable settled result of one authoritative Kernel tool call.
+///
+/// A-F1 replays the model-view projection from the read's durable result to
+/// decide whole-file replacement eligibility. Fixtures whose subject is the
+/// permission decision (not the delivery chain) therefore need the read's
+/// durable fact to exist; the row written here is the same one the coordinator
+/// writes when it settles a dispatch (`kernel_tool_calls`, state `completed`),
+/// and nothing here grants authority.
+///
+/// A Legacy Run records its calls in `tool_calls` instead; the two shapes are
+/// mutually exclusive because a Legacy writer is refused on an authoritative
+/// Run (`require_legacy_run_writer`).
+pub(super) fn record_kernel_read_fact(
+    db: &Database,
+    run_id: &str,
+    tool_call_id: &str,
+    input: &serde_json::Value,
+    result: &serde_json::Value,
+) {
+    let batch_id = format!("{tool_call_id}-batch");
+    db.with_connection(|connection| {
+        // `barrier_emitted = 0`: this read is fixture-side evidence, not a model
+        // round of the Run, so no delivery may be expected for its batch.
+        connection.execute(
+            "INSERT INTO kernel_tool_batches(batch_id, run_id, ordered_tool_call_ids_json, barrier_emitted, created_at)
+             VALUES (?1, ?2, json_array(?3), 0, 0)
+             ON CONFLICT(batch_id) DO NOTHING",
+            rusqlite::params![batch_id, run_id, tool_call_id],
+        )?;
+        connection.execute(
+            "INSERT INTO kernel_tool_calls(run_id, tool_call_id, batch_id, tool, source_order,
+                 canonical_input_json, state, result_json, created_at, settled_at)
+             VALUES (?1, ?2, ?3, 'read', 0, ?4, 'completed', ?5, 0, 0)",
+            rusqlite::params![
+                run_id,
+                tool_call_id,
+                batch_id,
+                input.to_string(),
+                result.to_string()
+            ],
+        )?;
+        Ok(())
+    })
+    .expect("record the settled Kernel read fact");
+}
 use crate::kernel::{CancellationRegistry, PolicyDecision, TestClock};
 use fox_engine_protocol::{FrozenPermission, PermissionMode, ResourceExecutor, TimeBudgets};
 use serde_json::json;
@@ -2721,20 +2767,27 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
     // consume only this durable opened-file evidence; the model cannot provide
     // or synthesize its own baseline. Observing `other` lets the final check
     // reach the permission decision and prove it is out of the approved scope.
+    //
+    // A-F1: whole-file replacement eligibility is replayed from the read's
+    // DURABLE settled result, so this authoritative Kernel fixture has to carry
+    // the same `kernel_tool_calls` row the coordinator writes. This fixture is
+    // about approval-scope reuse, not about the delivery chain.
     let cancellation = CancellationRegistry::default();
     cancellation.register_run(&run_id).unwrap();
     for (tool_call_id, path) in [("read-target", &target), ("read-other", &other)] {
         let token = cancellation.tool_token(&run_id, tool_call_id).unwrap();
-        super::super::managed_files::execute_observed_reader(
+        let read_input = json!({"path": path.to_string_lossy()});
+        let result = super::super::managed_files::execute_observed_reader(
             &db,
             &binding,
             "read",
-            &json!({"path": path.to_string_lossy()}),
+            &read_input,
             tool_call_id,
             &token,
             std::time::Duration::from_secs(5),
         )
         .expect("the real Host reader records the opened file version");
+        record_kernel_read_fact(&db, &run_id, tool_call_id, &read_input, &result);
     }
     let input_from_observation = |path: &std::path::Path| {
         let identity = crate::tool_host::canonical_file_identity(

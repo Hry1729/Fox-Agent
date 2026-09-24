@@ -608,10 +608,11 @@ impl GatewayPolicy {
     }
 
     /// REV-05 whole-file replacement: `write_file` replaces the entire content,
-    /// so it needs either a full-content observation of the bound version or an
-    /// explicit, purpose-specific replacement authorization. Returns the reason
-    /// a dedicated approval is required, or `None` when the read already
-    /// delivered the whole file.
+    /// so it needs either a whole-file observation whose content actually
+    /// REACHED the model or an explicit, purpose-specific replacement
+    /// authorization. Returns the reason a dedicated approval is required, or
+    /// `None` when the read delivered the whole file *and* the model view kept
+    /// every byte of it.
     fn whole_file_replacement_gap(&self, tool: &str, input: &Value) -> Result<Option<String>, String> {
         if tool != "write_file" {
             return Ok(None);
@@ -639,10 +640,19 @@ impl GatewayPolicy {
             .filter(|value| !value.is_empty());
         let observation = db.host_observation_for_version(&self.binding.run_id, &target, declared)?;
         match observation {
-            Some(observation) if observation.authorizes_whole_file_replacement() => Ok(None),
+            // The source fact AND the model delivery fact must both hold. A
+            // whole-file read whose model projection was bounded (the durable
+            // result is longer than one model view) delivered the bytes to the
+            // tool boundary but not to the model, so it never authorizes a
+            // replacement on its own.
+            Some(observation)
+                if db.model_delivery_covered_whole_file(&self.binding.run_id, &observation)? =>
+            {
+                Ok(None)
+            }
             Some(_) => Ok(Some(
-                "whole-file replacement needs a complete same-version read or an explicit \
-                 replacement confirmation"
+                "whole-file replacement needs a complete same-version read that actually \
+                 reached the model, or an explicit replacement confirmation"
                     .to_owned(),
             )),
             // No observation at all: `validate` already refuses with a conflict.

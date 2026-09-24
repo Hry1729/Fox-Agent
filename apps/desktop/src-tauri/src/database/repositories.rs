@@ -150,6 +150,62 @@ pub(crate) const MAX_STORED_TOOL_RESULT_BYTES: usize = 128 * 1024;
 /// paginated so a stored result can always be walked to its end without ever
 /// returning an unbounded blob.
 const MAX_TOOL_RESULT_RANGE_BYTES: usize = 64 * 1024;
+
+/// The Host's trusted storage fact for one settled tool result, derived from the
+/// durable row through the very same range reader the model would use.
+///
+/// Extracted as a free function over `&Connection` so that the admission-side
+/// delivery replay (which runs inside a `Transaction`) and
+/// `Database::tool_result_storage` derive it from ONE definition. Two copies
+/// would let the model view and the admission decision disagree about whether
+/// any byte was omitted — which is exactly the confusion A-F1 is about.
+///
+/// A non-terminal row, a row with no result, or a row the range reader can only
+/// serve as a preview is `unknown`: no caller may read that as permission to
+/// omit bytes, and the projection keeps every byte instead.
+pub(crate) fn tool_result_storage_for(
+    connection: &Connection,
+    run_id: &str,
+    tool_call_id: &str,
+) -> Result<crate::kernel_compaction::ToolResultStorage, String> {
+    use crate::kernel_compaction::ToolResultStorage;
+    let record = query_tool_call(connection, run_id, tool_call_id)
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "tool result has not been stored".to_owned())?;
+    if !matches!(record.status.as_str(), "completed" | "failed") || record.result.is_none() {
+        return Ok(ToolResultStorage::unknown());
+    }
+    let reference = crate::kernel_compaction::tool_result_ref(run_id, tool_call_id)
+        .ok_or_else(|| "invalid stored tool identity".to_owned())?;
+    let (parsed_run, parsed_call) = crate::kernel_compaction::parse_tool_result_ref(&reference)
+        .ok_or_else(|| "invalid tool result reference".to_owned())?;
+    if parsed_run != record.run_id || parsed_call != record.runtime_tool_call_id {
+        return Err("tool result reference does not name this record".to_owned());
+    }
+    // When the full result was spilled to a content-addressed blob, ranges are
+    // served from it: the inline preview is only the model-facing copy. Blob
+    // identity was verified at write time, so a present blob is by construction
+    // the complete original.
+    let blob_body: Option<Value> = connection
+        .query_row(
+            "SELECT b.body_json FROM tool_calls t
+             JOIN tool_call_result_blobs b ON b.sha256 = t.result_blob_sha256
+             WHERE t.run_id = ?1 AND t.runtime_tool_call_id = ?2
+               AND t.result_blob_sha256 IS NOT NULL",
+            params![record.run_id, record.runtime_tool_call_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .map(|body| parse_json(&body));
+    let serving = blob_body.as_ref().or(record.result.as_ref());
+    let (_text, truncated, original_bytes) = stored_result_text(serving);
+    if truncated {
+        return Ok(ToolResultStorage::unknown());
+    }
+    Ok(ToolResultStorage::whole(original_bytes))
+}
 const KNOWLEDGE_PREVIEW_CACHE_LIMIT_KEY: &str = "knowledge_preview_cache_limit_bytes";
 const USER_PROFILE_KEY: &str = "user_profile";
 const AGENT_RECORD_COLUMNS: &str =
@@ -2292,19 +2348,17 @@ impl Database {
     pub(crate) fn tool_result_storage(
         &self, run_id: &str, tool_call_id: &str,
     ) -> Result<crate::kernel_compaction::ToolResultStorage, String> {
-        let record = self.with_connection(|connection| {
-            Ok(query_tool_call(connection, run_id, tool_call_id).optional()?)
-        })?.ok_or("tool result has not been stored")?;
-        if !matches!(record.status.as_str(), "completed" | "failed") || record.result.is_none() {
-            return Ok(crate::kernel_compaction::ToolResultStorage::unknown());
+        let (fact, error) = self.with_connection(|connection| {
+            Ok(match tool_result_storage_for(connection, run_id, tool_call_id) {
+                Ok(fact) => (Some(fact), None),
+                Err(error) => (None, Some(error)),
+            })
+        })?;
+        match (fact, error) {
+            (Some(fact), _) => Ok(fact),
+            (None, Some(error)) => Err(error),
+            (None, None) => Err("tool result storage fact is missing".to_owned()),
         }
-        let reference = crate::kernel_compaction::tool_result_ref(run_id, tool_call_id)
-            .ok_or("invalid stored tool identity")?;
-        let range = self.tool_result_range(&reference, &record.conversation_id, 0, 4)?;
-        if !range.retrievable || range.truncated {
-            return Ok(crate::kernel_compaction::ToolResultStorage::unknown());
-        }
-        Ok(crate::kernel_compaction::ToolResultStorage::whole(range.original_bytes))
     }
 
     pub fn load_conversation_trace_records(

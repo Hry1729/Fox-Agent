@@ -24,6 +24,7 @@ use fox_engine_protocol::{
     ExecutionStage, HostObservation, RealtimeRequirement, SideEffectState, TriState,
 };
 use rusqlite::{params, OptionalExtension, Transaction};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 /// One durable execution-attempt row.
@@ -293,7 +294,7 @@ pub fn issue_dispatch_credential_with_resolver_in_tx(
     // never disagree.
     if tool == "write_file" {
         if let Some(baseline) = file_baseline.as_ref() {
-            if !baseline.authorizes_whole_file_replacement() {
+            if !model_delivery_covered_whole_file_in_tx(transaction, run_id, baseline)? {
                 let input: serde_json::Value = serde_json::from_str(canonical_input_json)
                     .map_err(|error| format!("invalid file input: {error}"))?;
                 let content = input
@@ -461,9 +462,91 @@ pub fn replace_request_binding(
     }
 }
 
-/// Whether a `write_file` proposal needs the dedicated authorization at all.
-pub fn needs_replace_grant(baseline: &HostObservation) -> bool {
-    !baseline.authorizes_whole_file_replacement()
+/// Whether the model view of the observation's durable result kept every byte.
+///
+/// The observation's `covered_whole_file` is the Host's SOURCE fact: what the
+/// read tool returned. The model only sees a projection of that result, and
+/// [`crate::kernel_compaction::bound_tool_result_content_with_storage`] may cut
+/// a long body to a head/tail view. Admission must therefore ask this question
+/// as well, from the durable row, and never from the observation alone.
+///
+/// The replay always runs on the DURABLE result, so:
+/// * re-projecting an already-projected frame cannot restore eligibility;
+/// * a recovery resume, a database reopen or a history compaction cannot
+///   change the answer, because the durable row is untouched by all three;
+/// * nothing is taken from the model's or the tool's own description of what it
+///   "read" — a result that claims `coveredWholeFile` provides no elevation.
+///
+/// Every uncertainty (missing row, non-terminal call, unparsable result, absent
+/// reference) returns `false`: an unknown delivery is not an eligible one.
+pub fn model_delivery_covered_whole_file_in_tx(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    observation: &HostObservation,
+) -> Result<bool, String> {
+    // The source fact comes first: a partial/Office-extract/legacy observation
+    // never becomes eligible here, whatever the durable result happens to say.
+    if !observation.authorizes_whole_file_replacement() {
+        return Ok(false);
+    }
+    let tool_call_id = observation.observed_by_tool_call_id.trim();
+    if tool_call_id.is_empty() {
+        return Ok(false);
+    }
+    // Two durable records can carry a settled tool result, and they are mutually
+    // exclusive by construction: an authoritative Kernel Run records its calls
+    // in `kernel_tool_calls` (the Legacy writer is refused:
+    // `require_legacy_run_writer`), and a Legacy Run records them in
+    // `tool_calls`. Both are addressed by the same `(run_id, tool_call_id)`
+    // pair, so the replay asks each shape in turn and never guesses.
+    let kernel_row: Option<(String, String, Option<String>, String)> = transaction
+        .query_row(
+            "SELECT tool, state, result_json, canonical_input_json FROM kernel_tool_calls
+              WHERE run_id=?1 AND tool_call_id=?2",
+            params![run_id, tool_call_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let legacy_row: Option<(String, String, Option<String>, String)> = transaction
+        .query_row(
+            "SELECT tool_name, status, result_json, input_json FROM tool_calls
+              WHERE run_id=?1 AND runtime_tool_call_id=?2",
+            params![run_id, tool_call_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((tool_name, status, result_json, input_json)) = kernel_row.or(legacy_row) else {
+        // The observing call left no durable settled result: what the model
+        // received cannot be established, so it is not authorized.
+        return Ok(false);
+    };
+    if !matches!(status.as_str(), "completed" | "failed") {
+        return Ok(false);
+    }
+    let Some(result_json) = result_json else {
+        return Ok(false);
+    };
+    let is_error = status == "failed";
+    let raw: Value = serde_json::from_str(&result_json)
+        .map_err(|error| format!("durable tool result is not JSON: {error}"))?;
+    let canonical_input: Value = serde_json::from_str(&input_json).unwrap_or(Value::Null);
+    let tool = crate::kernel_compaction::effective_boundable_tool(&tool_name, &canonical_input);
+    let content = crate::kernel_compaction::durable_result_content(&raw);
+    let reference = crate::kernel_compaction::tool_result_ref(run_id, tool_call_id);
+    // The same trusted storage fact the delivery used. Unknown is not
+    // "unlimited": with no verified fact the projection keeps every byte, which
+    // is what the model received too, so the replay stays truthful.
+    let storage = super::tool_result_storage_for(transaction, run_id, tool_call_id)
+        .unwrap_or_default();
+    Ok(crate::kernel_compaction::model_view_keeps_every_byte(
+        tool,
+        is_error,
+        &content,
+        reference.as_deref(),
+        &storage,
+    ))
 }
 
 /// Propose the purpose-specific whole-file-replacement authorization.
@@ -1447,8 +1530,43 @@ impl Database {
         self.with_connection(|connection| {
             let transaction = connection.transaction()?;
             host_observations_for_target_in_tx(&transaction, run_id, target_identity)
-                .map_err(|error| rusqlite::Error::InvalidParameterName(error))
+                .map_err(rusqlite::Error::InvalidParameterName)
         })
+    }
+
+    /// Whether the model actually RECEIVED the whole content of the version this
+    /// observation names — the second half of the whole-file replacement rule.
+    ///
+    /// The `HostObservation` only records the SOURCE fact (what the read
+    /// delivered at the tool-result boundary). The model view is a later,
+    /// narrower projection: a 30 KB read is delivered whole by the reader and
+    /// still reaches the provider as a head/tail-bounded view. This method ties
+    /// admission to the delivery fact so the two can never be confused.
+    ///
+    /// Unknown delivery is NOT eligibility: a missing or non-terminal tool-call
+    /// row makes this return `false`, which conservatively requires the existing
+    /// purpose-specific replacement confirmation. Nothing here is taken from
+    /// model text or from a tool result's self-description.
+    pub fn model_delivery_covered_whole_file(
+        &self,
+        run_id: &str,
+        observation: &HostObservation,
+    ) -> Result<bool, String> {
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            model_delivery_covered_whole_file_in_tx(&transaction, run_id, observation)
+                .map_err(rusqlite::Error::InvalidParameterName)
+        })
+    }
+
+    /// The single admission rule for a whole-file replacement: BOTH the Host's
+    /// source observation and the model delivery must cover the whole version.
+    pub fn needs_replace_grant(
+        &self,
+        run_id: &str,
+        observation: &HostObservation,
+    ) -> Result<bool, String> {
+        Ok(!self.model_delivery_covered_whole_file(run_id, observation)?)
     }
 
     /// Build the stage receipt from durable facts only. Repeat requests and
@@ -1810,7 +1928,7 @@ fn issue_legacy_file_credential_in_tx(
     )?;
     // REV-05: same purpose-specific authorization as the Kernel path, recorded
     // in the same transaction so credential and grant can never disagree.
-    if tool == "write_file" && !file_baseline.authorizes_whole_file_replacement() {
+    if tool == "write_file" && !model_delivery_covered_whole_file_in_tx(transaction, run_id, &file_baseline)? {
         let input: serde_json::Value = serde_json::from_str(&canonical_input_json)
             .map_err(|error| format!("invalid file input: {error}"))?;
         let content = input

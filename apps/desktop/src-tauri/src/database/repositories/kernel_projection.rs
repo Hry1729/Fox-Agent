@@ -514,7 +514,17 @@ fn project_whole_file_replacement_requests(
             Ok(Some(baseline)) => baseline,
             _ => continue,
         };
-        if baseline.authorizes_whole_file_replacement() {
+        // REV-05 / F1: eligibility is the SOURCE observation AND the model
+        // delivery. A whole-file read whose model view was bounded never
+        // reached the model whole, so it still needs the purpose-specific
+        // replacement confirmation. An unreadable/missing delivery fact is
+        // treated as "not covered", which proposes the confirmation rather than
+        // silently authorizing a replacement.
+        if super::kernel_execution_admission::model_delivery_covered_whole_file_in_tx(
+            tx, run_id, &baseline,
+        )
+        .unwrap_or(false)
+        {
             continue;
         }
         let binding = super::kernel_execution_admission::replace_request_binding(

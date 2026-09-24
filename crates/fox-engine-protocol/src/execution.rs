@@ -359,8 +359,20 @@ impl ObservationView {
 }
 
 impl HostObservation {
-    /// Whether this observation can authorize a whole-file replacement on its
-    /// own. Only a full-content delivery of the same version can.
+    /// Whether the Host's SOURCE read delivered the whole content of `version`
+    /// at the tool-result boundary.
+    ///
+    /// This is **not** a statement about what the model received. The model view
+    /// is a later, narrower projection of the same durable result (a long body
+    /// is kept as a head/tail view), so a `true` here can coexist with a model
+    /// that never saw the middle of the file. Whole-file replacement admission
+    /// must therefore combine this fact with the Host's own delivery check —
+    /// `kernel_execution_admission::model_delivery_covered_whole_file_in_tx`,
+    /// which replays the production projection on the durable row — and must
+    /// treat an unknown delivery as *not* authorized.
+    ///
+    /// The fields this reads are the Host's own durable record; no model text
+    /// and no tool-result self-description can influence it.
     pub fn authorizes_whole_file_replacement(&self) -> bool {
         self.covered_whole_file && self.view_kind == ObservationView::FullFile
     }

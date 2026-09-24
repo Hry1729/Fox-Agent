@@ -9,6 +9,12 @@ use super::*;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
+/// Re-exported so the coordinator and this module's tests keep naming the
+/// projection rule through `live`. The definition is a single one in
+/// `kernel_compaction`, because the admission-side delivery replay must judge
+/// the durable row by exactly the name the frame projection used.
+pub(super) use crate::kernel_compaction::effective_boundable_tool;
+
 pub(super) const CONTINUATION_LIMIT: i64 = 2;
 
 /// Bounded number of follow-up rounds the Host will dedicate to additional user
@@ -1441,34 +1447,6 @@ fn commit_tail(
             &serde_json::to_string(input)
                 .map_err(|error| kernel::KernelError::FailClosed(error.to_string()))?,
         ),
-    }
-}
-
-/// The operation a settled call is judged by when bounding the model view.
-///
-/// `office_read` is named in `BOUNDABLE_TOOLS`, but the Host never dispatches it
-/// under that name: the built-in connector is always reached through the
-/// `call_mcp_tool` wrapper, so a match on the wrapper name made the whitelist
-/// entry dead code and let a 927-row sheet read pass through verbatim.
-///
-/// Only the built-in Office connector is unwrapped, and only for the read-only
-/// operations the whitelist already accepts. A *generic* MCP call keeps
-/// `call_mcp_tool`: its side-effect and re-read semantics are unknown, which is
-/// what the whitelist's own reasoning requires. An unrecognised or write-form
-/// inner operation also keeps the wrapper name, so it is never bounded.
-pub(super) fn effective_boundable_tool<'a>(tool: &'a str, canonical_input: &'a Value) -> &'a str {
-    const UNWRAPPABLE: &[&str] = &["office_read", "office_help", "office_validate"];
-    if tool != "call_mcp_tool" {
-        return tool;
-    }
-    if canonical_input["serverId"].as_str() != Some(crate::office::SERVER_ID) {
-        return tool;
-    }
-    match canonical_input["tool"].as_str() {
-        Some(inner) if UNWRAPPABLE.contains(&inner) => {
-            crate::kernel_compaction::boundable_tool_name(inner).unwrap_or(tool)
-        }
-        _ => tool,
     }
 }
 

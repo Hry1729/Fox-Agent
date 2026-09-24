@@ -9422,28 +9422,36 @@ fn execute_host_tool_request(
     // into the approval record HERE, when the request is created — so what the
     // user approves is exactly what the later claim will require, and an
     // ordinary write approval can never be read as a replacement authorization.
-    let replace_binding = match (&file_policy, tool) {
-        (Some((_, baseline)), "write_file")
-            if crate::database::kernel_execution_admission::needs_replace_grant(baseline) =>
-        {
-            let target = crate::tool_host::canonical_file_identity(
-                Path::new(&project_root),
-                input["path"].as_str().unwrap_or_default(),
-            )
-            .ok();
-            let content = input.get("content").and_then(Value::as_str).unwrap_or_default();
-            target.map(|target| {
-                crate::database::kernel_execution_admission::replace_request_binding(
-                    conversation_id,
-                    run_id,
-                    tool_call_id,
-                    &target,
-                    &baseline.version,
-                    content,
+    // F1: "needs a replacement confirmation" is decided by the SOURCE
+    // observation AND the model delivery fact together, so a whole-file read
+    // whose model view was bounded also lands here.
+    let needs_replace_grant = match (&file_policy, tool) {
+        (Some((_, baseline)), "write_file") => database.needs_replace_grant(run_id, baseline)?,
+        _ => false,
+    };
+    let replace_binding = if needs_replace_grant {
+        file_policy
+            .as_ref()
+            .and_then(|(_, baseline)| {
+                let target = crate::tool_host::canonical_file_identity(
+                    Path::new(&project_root),
+                    input["path"].as_str().unwrap_or_default(),
                 )
+                .ok();
+                let content = input.get("content").and_then(Value::as_str).unwrap_or_default();
+                target.map(|target| {
+                    crate::database::kernel_execution_admission::replace_request_binding(
+                        conversation_id,
+                        run_id,
+                        tool_call_id,
+                        &target,
+                        &baseline.version,
+                        content,
+                    )
+                })
             })
-        }
-        _ => None,
+    } else {
+        None
     };
     if let (Some(binding), Some(baseline)) = (&replace_binding, file_policy.as_ref().map(|(_, b)| b))
     {
