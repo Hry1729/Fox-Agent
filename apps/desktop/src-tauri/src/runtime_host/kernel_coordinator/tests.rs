@@ -1519,10 +1519,10 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
 
-    // One server, two sequential connections (same frozen config/hash):
+    // One server, two requests (same frozen config/hash):
     //  1. sends one chunk of partial tool-call JSON (as the AGV failure
-    //     produced long Office arguments), then stalls forever — only the
-    //     idle bound can classify this;
+    //     produced long Office arguments), then stays open without output —
+    //     only the idle bound can classify this;
     //  2. answers the retried request with a completed final answer.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -1567,12 +1567,9 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
         read_request(&mut first);
         let chunk = json!({"id":"agv-stall","object":"chat.completion.chunk","created":1,"model":"agv-stall","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"write-excel","type":"function","function":{"name":"read","arguments":"{\"path\":\"proof.t"}}]},"finish_reason":null}]});
         sse_stall(&mut first, format!("data: {chunk}\n\n"));
-        // Stall past the 1.5s idle bound (the worker aborts on its own timer)
-        // but release early enough that the retried request still arrives
-        // inside its 1s first-response budget.
-        std::thread::sleep(Duration::from_millis(2_500));
-        drop(first);
-
+        // Keep the stalled connection open while accepting the retry. A fixed
+        // sleep here raced the 1.5s idle timeout plus 1s retry delay and could
+        // close the first stream just as the second request was dispatched.
         // Connection 2: the retry completes normally.
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut second = loop {
@@ -1592,6 +1589,7 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
             json!({"id":"agv-retry","object":"chat.completion.chunk","created":1,"model":"agv-stall","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
         ];
         sse(&mut second, format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", chunks[0], chunks[1]));
+        drop(first);
     });
 
     let mut config = worker_configuration();
@@ -1604,6 +1602,7 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
         model_idle_ms: 1_500,
         ..TimeBudgets::default()
     };
+    let idle_budget_ms = budgets.model_idle_ms;
     let (db, root, run_id) = fixture_with_budgets_opt(&clock, &config.hash().unwrap(), Some(&config), false, false, (0, 1), true, budgets);
     let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
     settle_worker_batch(&coordinator);
@@ -1612,6 +1611,17 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
     let snapshot = coordinator.snapshot().unwrap();
     assert_eq!(snapshot.state, "retry_scheduled", "idle timeout must schedule a retry, not fail the run");
     assert_eq!(snapshot.tool_calls, tools, "completed tool results are kept; nothing is replayed");
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let rejected: String = connection.query_row(
+        "SELECT payload_json FROM kernel_events WHERE run_id=?1 AND event_type='engine.model_rejected'",
+        [&run_id], |row| row.get(0),
+    ).unwrap();
+    let rejected: Value = serde_json::from_str(&rejected).unwrap();
+    assert_eq!(rejected["failure"]["category"], "model_timeout");
+    let telemetry = &rejected["failure"]["telemetry"];
+    assert!(telemetry["toolParamBytes"].as_u64().unwrap() > 0);
+    assert!(telemetry["idleElapsedMs"].as_i64().unwrap() >= idle_budget_ms);
+    drop(connection);
 
     // The single turn-budget retry resumes with the SAME frozen configuration
     // and completes the run without re-executing any tool.
