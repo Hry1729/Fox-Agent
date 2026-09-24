@@ -292,7 +292,11 @@ fn unknown_model_response_reopens_without_replaying_bound_notice_or_job() {
 }
 
 #[test]
-fn live_batch_binds_steering_receipt_and_job_notice_in_the_same_model_input() {
+fn live_and_single_round_batch_bind_steering_receipt_and_job_notice_in_the_same_model_input() {
+    for live in [true,false] { exercise_same_round_steering_and_notice(live); }
+}
+
+fn exercise_same_round_steering_and_notice(live:bool) {
     use std::io::{Read,Write};
     use std::net::TcpListener;
     use std::time::{Duration,Instant};
@@ -318,7 +322,8 @@ fn live_batch_binds_steering_receipt_and_job_notice_in_the_same_model_input() {
     let server=std::thread::spawn(move || {
         let mut requests=Vec::new();
         let deadline=Instant::now()+Duration::from_secs(30);
-        while requests.len()<2 {
+        let expected_requests=if live {2} else {3};
+        while requests.len()<expected_requests {
             let mut stream=match listener.accept() {
                 Ok((stream,_))=>stream,
                 Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{
@@ -354,8 +359,11 @@ fn live_batch_binds_steering_receipt_and_job_notice_in_the_same_model_input() {
             let delta=if requests.len()==1 {
                 json!({"role":"assistant","tool_calls":[{"index":0,"id":"read-once","type":"function",
                     "function":{"name":"read","arguments":"{\"path\":\"proof.txt\"}"}}]})
+            } else if !live && requests.len()==2 {
+                json!({"role":"assistant","tool_calls":[{"index":0,"id":"read-after-steering","type":"function",
+                    "function":{"name":"read","arguments":"{\"path\":\"proof.txt\"}"}}]})
             } else {json!({"role":"assistant","content":"处理完成。"})};
-            let finish=if requests.len()==1 {"tool_calls"} else {"stop"};
+            let finish=if requests.len()==1 || !live && requests.len()==2 {"tool_calls"} else {"stop"};
             let chunk=json!({"id":"b2a-steering","object":"chat.completion.chunk","created":1,
                 "model":"kernel-http-test","choices":[{"index":0,"delta":delta,"finish_reason":null}]});
             let done=json!({"id":"b2a-steering","object":"chat.completion.chunk","created":1,
@@ -367,29 +375,79 @@ fn live_batch_binds_steering_receipt_and_job_notice_in_the_same_model_input() {
     });
     let sink=|_:&fox_engine_protocol::KernelModelPreview|{};
     let coordinator=coordinator.with_preview(&sink);
-    coordinator.dispatch_initial_live("steer-notice-live",&Allow,&real_worker_command(),"local-test-only",
-        &|_,effect,_| {
+    if live {
+        coordinator.dispatch_initial_live("steer-notice-live",&Allow,&real_worker_command(),"local-test-only",
+            &|_,effect,_| {
+                assert_eq!(effect.tool_call_id.as_deref(),Some("read-once"));
+                Ok((true,json!({"content":[{"type":"text","text":"Host-settled read"}]})))
+            },&|_|Ok(()),&|_|Ok(())).unwrap();
+    } else {
+        coordinator.dispatch_initial_with_worker("steer-notice-initial",&Allow,
+            &real_worker_command(),"local-test-only").unwrap();
+        assert_eq!(coordinator.snapshot().unwrap().tool_calls.len(),1);
+        assert!(coordinator.dispatch_tool("read-once","steer-notice-read",|_,effect,_| {
             assert_eq!(effect.tool_call_id.as_deref(),Some("read-once"));
             Ok((true,json!({"content":[{"type":"text","text":"Host-settled read"}]})))
-        },&|_|Ok(()),&|_|Ok(())).unwrap();
+        }).unwrap());
+        let batch=db.kernel_rehydrate(&run).unwrap().unwrap().tools.iter()
+            .find(|tool|tool.tool_call_id=="read-once").unwrap().batch_id.clone();
+        assert!(db.kernel_engine_batch_checkpoint(&run,&batch).unwrap().is_some());
+        coordinator.dispatch_stored_batch_with_worker(&batch,"steer-notice-batch",&Allow,
+            &real_worker_command(),"local-test-only").unwrap();
+    }
+    let (input_json,input_hash,dispatch_key):(String,String,String)=db.with_connection(|conn|conn.query_row(
+        "SELECT input_json,input_hash,dispatch_key FROM kernel_model_notice_inputs WHERE run_id=?1
+         AND dispatch_key LIKE 'tool-batch-delivery:%'",[&run],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
+    assert_eq!(input_hash,format!("sha256:{}",hex::encode(Sha256::digest(input_json.as_bytes()))));
+    let input:Value=serde_json::from_str(&input_json).unwrap();
+    let receipt=input["modelInput"]["steering"][0]["receivedAt"].as_i64().unwrap();
+    assert!(receipt>0);
+    assert_eq!(input["modelInput"]["hostJobNotices"][0]["jobId"].as_str(),Some(job.as_str()));
+    if live {
+        let history=input["modelHistory"].as_array().unwrap();
+        let projected=history.iter().find(|message|message["content"][0]["text"]
+            .as_str().is_some_and(|text|text.contains("用户在运行过程中补充要求"))).unwrap();
+        assert_eq!(projected["timestamp"].as_i64(),Some(receipt));
+    } else {
+        assert!(input["modelHistory"].is_null());
+        assert!(input["modelInput"]["history"].is_array());
+    }
+    let (state,delivery_key,delivery_hash):(String,String,String)=db.with_connection(|conn|conn.query_row(
+        "SELECT state,dispatch_key,input_hash FROM kernel_job_notice_deliveries WHERE job_id=?1",
+        [&job],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
+    assert_eq!(state,"acknowledged");
+    assert_eq!(delivery_key,dispatch_key);
+    assert_eq!(delivery_hash,input_hash);
+    if !live {
+        let second_batch=db.kernel_rehydrate(&run).unwrap().unwrap().tools.iter()
+            .find(|tool|tool.tool_call_id=="read-after-steering").unwrap().batch_id.clone();
+        let checkpoint=db.kernel_engine_batch_checkpoint(&run,&second_batch).unwrap().unwrap();
+        let history=checkpoint["checkpoint"]["value"]["history"].as_array().unwrap();
+        let durable_steering=history.iter().find(|message|message["content"][0]["text"]
+            .as_str().is_some_and(|text|text.contains("用户在运行过程中补充要求"))).unwrap();
+        assert_eq!(durable_steering["timestamp"].as_i64(),Some(receipt),
+            "the next durable checkpoint must match the Provider's receipt timestamp");
+        assert_eq!(history.iter().filter(|message|message["role"]=="hostJobNotice").count(),1);
+        assert!(coordinator.dispatch_tool("read-after-steering","second-read",|_,effect,_| {
+            assert_eq!(effect.tool_call_id.as_deref(),Some("read-after-steering"));
+            Ok((true,json!({"content":[{"type":"text","text":"Second settled read"}]})))
+        }).unwrap());
+        coordinator.dispatch_stored_batch_with_worker(&second_batch,"after-steering-batch",&Allow,
+            &real_worker_command(),"local-test-only").unwrap();
+    }
     let requests=server.join().unwrap();
-    assert_eq!(requests.len(),2);
+    assert_eq!(requests.len(),if live {2} else {3});
     let second_wire=serde_json::to_string(&requests[1]["messages"]).unwrap();
     assert_eq!(second_wire.matches("FOX_HOST_JOB_NOTICE_V1").count(),1);
     assert_eq!(second_wire.matches("用户在运行过程中补充要求").count(),1);
     assert!(second_wire.find("用户在运行过程中补充要求")<second_wire.find("FOX_HOST_JOB_NOTICE_V1"));
-    let input_json:String=db.with_connection(|conn|conn.query_row(
-        "SELECT input_json FROM kernel_model_notice_inputs WHERE run_id=?1
-         AND dispatch_key LIKE 'tool-batch-delivery:%'",[&run],|row|row.get(0))).unwrap();
-    let input:Value=serde_json::from_str(&input_json).unwrap();
-    let receipt=input["modelInput"]["steering"][0]["receivedAt"].as_i64().unwrap();
-    let history=input["modelHistory"].as_array().unwrap();
-    let projected=history.iter().find(|message|message["content"][0]["text"]
-        .as_str().is_some_and(|text|text.contains("用户在运行过程中补充要求"))).unwrap();
-    assert_eq!(projected["timestamp"].as_i64(),Some(receipt));
-    let state:String=db.with_connection(|conn|conn.query_row(
-        "SELECT state FROM kernel_job_notice_deliveries WHERE job_id=?1",[&job],|row|row.get(0))).unwrap();
-    assert_eq!(state,"acknowledged");
+    assert_eq!(requests[1]["messages"].as_array().unwrap().iter().filter(|message|
+        message["role"]=="tool" && message["tool_call_id"]=="read-once").count(),1);
+    if !live {
+        let third_wire=serde_json::to_string(&requests[2]["messages"]).unwrap();
+        assert_eq!(third_wire.matches("FOX_HOST_JOB_NOTICE_V1").count(),1,
+            "an acknowledged fact stays once in a subsequent Provider request");
+    }
     assert_eq!(coordinator.snapshot().unwrap().state,"completed");
 }
 

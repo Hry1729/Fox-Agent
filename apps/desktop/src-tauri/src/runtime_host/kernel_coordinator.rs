@@ -1074,7 +1074,7 @@ impl<'a> KernelCoordinator<'a> {
         ));
         batch_history.extend(frame.steering.iter().map(|notice| serde_json::json!({
             "role":"user","content":[{"type":"text",
-                "text":steering::steering_notice_text(&notice.content)}],"timestamp":0,
+                "text":steering::steering_notice_text(&notice.content)}],"timestamp":notice.received_at.unwrap_or(0),
         })));
         batch_history.extend(frame.host_job_notices.iter().map(fox_engine_protocol::HostJobNotice::history_marker));
         let next = if response.assistant_message["stopReason"] == "toolUse" {
