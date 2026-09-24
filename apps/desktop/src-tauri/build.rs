@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn pe_machine(path: &Path) -> Result<u16, String> {
     let mut file = fs::File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -23,7 +23,7 @@ fn pe_machine(path: &Path) -> Result<u16, String> {
     Ok(u16::from_le_bytes([header[4], header[5]]))
 }
 
-fn stage_windows_zvec_test_dll() {
+fn stage_windows_zvec_test_dll() -> PathBuf {
     let target = env::var("TARGET").expect("Cargo TARGET");
 
     // This metadata comes from the direct, feature-matched zvec-rust-sys native
@@ -86,7 +86,7 @@ fn stage_windows_zvec_test_dll() {
             destination.display(),
             source.display()
         );
-        return;
+        return source;
     }
     let temporary = deps_dir.join(format!(".zvec_c_api.{}.tmp", std::process::id()));
     fs::copy(&source, &temporary).expect("stage real Zvec DLL beside test executables");
@@ -103,7 +103,7 @@ fn stage_windows_zvec_test_dll() {
                 .ok()
                 .is_some_and(|bytes| bytes == original)
         {
-            return;
+            return source;
         }
         panic!("cannot publish {}: {error}", destination.display());
     }
@@ -112,6 +112,64 @@ fn stage_windows_zvec_test_dll() {
         fs::read(&destination).expect("verify app-local Zvec DLL") == original,
         "app-local Zvec DLL differs from the selected build DLL"
     );
+    source
+}
+
+fn map_windows_zvec_bundle_resource(source: &Path) {
+    const ZVEC_RESOURCE_GLOB: &str =
+        "target/*/build/zvec-rust-sys-*/out/zvec-prebuilt/zvec_c_api.dll";
+
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("Cargo manifest dir");
+    let config_path = Path::new(&manifest_dir).join("tauri.conf.json");
+    let config: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&config_path).expect("read Tauri configuration"),
+    )
+    .expect("parse Tauri configuration");
+    let Some(target) = config
+        .pointer("/bundle/resources")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|resources| resources.get(ZVEC_RESOURCE_GLOB))
+        .and_then(serde_json::Value::as_str)
+    else {
+        // The configured resource was removed or changed; there is no default
+        // glob to replace, so leave the caller's config alone.
+        return;
+    };
+
+    let mut overrides = env::var("TAURI_CONFIG")
+        .ok()
+        .map(|body| serde_json::from_str::<serde_json::Value>(&body).expect("parse TAURI_CONFIG"))
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Some(root) = overrides.as_object_mut() else {
+        // A non-object TAURI_CONFIG replaces the whole config shape. Respect
+        // that explicit caller override rather than silently rewriting it.
+        return;
+    };
+    let Some(bundle) = root
+        .entry("bundle")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+    else {
+        // A caller-supplied non-object bundle is also a complete override.
+        return;
+    };
+    let resources = bundle
+        .entry("resources")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(resources) = resources.as_object_mut() else {
+        // Lists and other non-map resource overrides are caller-owned complete
+        // replacements. Preserve them without changing their resource semantics.
+        return;
+    };
+
+    // Remove only the stale default glob, then map the verified native DLL at
+    // its actual resolved path to the destination configured in tauri.conf.json.
+    resources.insert(ZVEC_RESOURCE_GLOB.into(), serde_json::Value::Null);
+    resources.insert(
+        source.to_string_lossy().replace('\\', "/"),
+        serde_json::Value::String(target.to_owned()),
+    );
+    env::set_var("TAURI_CONFIG", serde_json::to_string(&overrides).unwrap());
 }
 
 fn main() {
@@ -137,13 +195,21 @@ fn main() {
         stage_windows_zvec_test_dll();
     }
     // The zvec native DLL is only produced when the `zvec` feature is enabled
-    // (zvec-rust-sys downloads/builds it into OUT_DIR). tauri.conf.json lists it
-    // as a bundle resource glob; on a clean checkout built `--no-default-features`
-    // (no zvec, no DLL) tauri_build would fail at the build-script stage with
-    // "glob pattern ... zvec_c_api.dll didn't match any files". Drop that
-    // resource entry when zvec is disabled. The DLL must never be faked: when the
-    // feature IS on, tauri.conf.json's own glob is used unchanged (the override
-    // is not applied), so a real zvec build still bundles the real DLL.
+    // (zvec-rust-sys downloads/builds it into OUT_DIR). On Windows/MSVC, replace
+    // the default resource glob with the verified DLL path selected by Cargo;
+    // this avoids relying on a target-directory glob that may not match a shared
+    // or custom CARGO_TARGET_DIR. The DLL must never be faked.
+    if env::var_os("CARGO_FEATURE_ZVEC").is_some()
+        && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        let source = stage_windows_zvec_test_dll();
+        map_windows_zvec_bundle_resource(&source);
+    } else if env::var_os("CARGO_FEATURE_ZVEC").is_some()
+        && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+    {
+        stage_windows_zvec_test_dll();
+    }
     if env::var_os("CARGO_FEATURE_ZVEC").is_none() {
         if let Ok(conf_path) = env::var("CARGO_MANIFEST_DIR") {
             let path = std::path::Path::new(&conf_path).join("tauri.conf.json");
