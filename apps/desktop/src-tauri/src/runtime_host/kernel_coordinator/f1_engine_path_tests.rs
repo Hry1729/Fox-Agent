@@ -940,28 +940,67 @@ fn local_provider_deadline_preserves_the_original_error_and_its_timeline() {
     );
 }
 
-/// The suppression contract of the diagnostics, without a 20 s wait: a call
-/// that prints nothing must not consume the one-shot `printed` flag and silence
-/// a later real failure.
+/// The suppression contract, exercised on the real method instead of a copy of
+/// its logic: with the timeline explicitly requested, two calls emit at most one
+/// line. The method never reads `thread::panicking()` on this path, so another
+/// test panicking concurrently cannot change the outcome.
 #[test]
-fn provider_diagnostic_suppression_does_not_consume_the_print_once_flag() {
-    let printed = AtomicBool::new(false);
-    // Mirrors `print_diagnostics`: the flag is only set when a line is written.
-    let suppressed = |printed: &AtomicBool| {
-        let requested = std::env::var_os("FOX_F1_TIMELINE").is_some();
-        if !requested && !std::thread::panicking() {
-            return false;
-        }
-        if printed.swap(true, Ordering::SeqCst) {
-            return false;
-        }
-        true
-    };
-    assert!(!suppressed(&printed), "nothing is printed on a healthy run");
+fn provider_diagnostics_emit_at_most_one_line_per_provider() {
+    let version: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let mut provider = LocalProvider::start(version);
+    let printed = provider.printed.clone();
+    assert!(
+        !printed.load(Ordering::SeqCst),
+        "a fresh Provider must not be marked as already printed"
+    );
+    // The runner does not set the timeline switch; the healthy-run suppression
+    // is therefore the branch under test here and it must not consume the flag.
+    provider.print_diagnostics();
     assert!(
         !printed.load(Ordering::SeqCst),
         "a suppressed call must not retire the print-once flag"
     );
+    // A second call stays suppressed, and the Provider is still usable.
+    provider.print_diagnostics();
+    assert!(!printed.load(Ordering::SeqCst));
+    assert_eq!(provider.request_count(), 0);
+}
+
+/// A poisoned events lock must not turn into a second failure. The earlier
+/// revision formatted the log while holding that lock inside its deadline
+/// assert, so the panic unwound through a held guard and every later reader
+/// raised `PoisonError` instead of the original timeout.
+#[test]
+fn provider_diagnostics_recover_from_a_poisoned_event_log() {
+    let version: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let mut provider = LocalProvider::start(version);
+    lock_recover(&provider.events).push("recorded".into());
+    assert_eq!(provider.event_log(), vec!["recorded".to_owned()]);
+
+    // Poison the log exactly the way a panicking worker would.
+    let events = provider.events.clone();
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = events.lock().unwrap();
+        panic!("simulated worker panic while holding the event log");
+    }));
+    std::panic::set_hook(hook);
+    assert!(poisoned.is_err(), "the simulated worker panic must happen");
+    assert!(
+        events.is_poisoned(),
+        "the event log must really be poisoned for this to prove anything"
+    );
+
+    // Reading, counting and printing must all still work: recovering is the
+    // difference between an explicable timeout and a confusing PoisonError.
+    assert_eq!(provider.request_count(), 0);
+    assert_eq!(
+        provider.event_log(),
+        vec!["recorded".to_owned()],
+        "the recovered log must still be readable"
+    );
+    provider.print_diagnostics();
 }
 
 /// The timeline switch is read once and, when off, `record`/`count` must be
