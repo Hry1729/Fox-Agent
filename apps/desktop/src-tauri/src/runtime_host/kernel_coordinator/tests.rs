@@ -1546,12 +1546,14 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
     let address = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
-        let read_request = |stream: &mut std::net::TcpStream| -> Option<usize> {
+        let read_request = |stream: &mut std::net::TcpStream, deadline: Instant| -> Option<usize> {
             let mut bytes = Vec::new();
             let mut buffer = [0u8; 8192];
             stream.set_nonblocking(false).unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(!remaining.is_zero(), "AGV fixture request deadline exceeded");
+                stream.set_read_timeout(Some(remaining.min(Duration::from_secs(5)))).unwrap();
                 let read = match stream.read(&mut buffer) {
                     Ok(0) if bytes.is_empty() => return None,
                     Err(error) if bytes.is_empty()
@@ -1573,6 +1575,9 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
                     let total = header_end.checked_add(lengths[0]).unwrap();
                     assert!(total <= 4 * 1024 * 1024, "AGV fixture request exceeds 4 MiB");
                     while bytes.len() < total {
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        assert!(!remaining.is_zero(), "AGV fixture request deadline exceeded");
+                        stream.set_read_timeout(Some(remaining.min(Duration::from_secs(5)))).unwrap();
                         let read = stream.read(&mut buffer).unwrap();
                         assert!(read > 0, "AGV fixture request body ended early");
                         bytes.extend_from_slice(&buffer[..read]);
@@ -1600,7 +1605,7 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
             assert!(Instant::now() < deadline, "stalled request was not received");
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    if let Some(body_bytes) = read_request(&mut stream) {
+                    if let Some(body_bytes) = read_request(&mut stream, deadline) {
                         break (stream, body_bytes);
                     }
                     eprintln!("AGV fixture ignored empty connection before request 1");
@@ -1623,7 +1628,7 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
             assert!(Instant::now() < deadline, "retried request was not received");
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    if let Some(body_bytes) = read_request(&mut stream) {
+                    if let Some(body_bytes) = read_request(&mut stream, deadline) {
                         break (stream, body_bytes);
                     }
                     eprintln!("AGV fixture ignored empty connection before request 2");
