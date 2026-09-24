@@ -334,3 +334,49 @@ fn waiting_jobs_real_host_start_and_recovery_lock_race_preserve_parent_token() {
     drop(host);
     drop(app);
 }
+
+#[test]
+fn waiting_jobs_created_start_error_still_retires_and_records_kernel_failure() {
+    if std::env::var_os("FOX_TEST_CREATED_START_FAILURE_CHILD").is_none() {
+        // runtime_command reads a process-wide override. Isolate the negative
+        // from parallel tests so no other Run observes the missing executable.
+        let missing=std::env::temp_dir().join(format!("fox-missing-runtime-{}",uuid::Uuid::new_v4()));
+        let output=std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("waiting_jobs_created_start_error_still_retires_and_records_kernel_failure")
+            .arg("--test-threads=1")
+            .env("FOX_TEST_CREATED_START_FAILURE_CHILD","1")
+            .env("FOX_RUNTIME_EXECUTABLE",&missing)
+            .output().unwrap();
+        assert!(output.status.success(),"child stdout: {}\nchild stderr: {}",
+            String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    use tauri::Manager;
+    let now=crate::database::now_ms();
+    let clock=TestClock::new(now);
+    let model=worker_configuration();
+    let (db,root,run)=fixture_with_start_opt(&clock,&model.hash().unwrap(),Some(&model),true,true);
+    let mut context=tauri::generate_context!();
+    for window in &mut context.config_mut().app.windows {window.create=false;}
+    let app=tauri::Builder::default().any_thread().build(context).unwrap();
+    let host=super::super::super::RuntimeHost::new(
+        app.handle().clone(),db.clone(),root.clone(),root.join("attachments"),
+        root.join("skills"),crate::yuxi::YuxiClient::new().unwrap());
+    let binding=db.run_control_binding(&run).unwrap().unwrap();
+    let token={let state=host.state.lock().unwrap();
+        state.cancellation.register_run(&run).unwrap();
+        state.cancellation.run_token(&run).unwrap()};
+    assert!(super::super::super::kernel_host::kernel_scope_should_retire(&db,&run));
+    let ownership=super::super::super::kernel_host::acquire(&root,&run).unwrap();
+    let error=host.start_kernel_run(ownership,&binding,serde_json::Value::Null,
+        serde_json::Value::Null).unwrap_err();
+    assert!(error.contains("runtime executable was not found"),"unexpected error: {error}");
+    assert!(token.is_cancelled(),"created Run must retire its old scope on failed preparation");
+    host.record_kernel_start_failure(&run).unwrap();
+    assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(),Some("failed"));
+    let status:String=db.with_connection(|conn|conn.query_row(
+        "SELECT status FROM runs WHERE id=?1",[&run],|row|row.get(0))).unwrap();
+    assert_eq!(status,"failed");
+    drop(host);
+    drop(app);
+}

@@ -2148,17 +2148,16 @@ impl RuntimeHost {
             .run_control_binding(&started.run.id)?
             .ok_or("续做任务缺少冻结绑定")?;
         let host = self.clone_for_detached_dispatch();
-        let database = self.database.clone();
         let run_id = started.run.id.clone();
         std::thread::spawn(move || {
             if let Err(error) = host.start_kernel_run(ownership, &binding, prompt, service) {
                 if error != CANCELLED_BEFORE_SUBMISSION
                     && error != kernel_run_lock::KERNEL_RUN_ALREADY_OWNED {
-                    let _ = database.mark_run_failed(
-                        &run_id,
-                        "kernel.continuation_start_failed",
-                        &error,
-                    );
+                    // An Authoritative aggregate rejects the legacy failure
+                    // column update. Reacquire ownership and record a Kernel
+                    // terminal decision through the same recovery path used
+                    // for ordinary starts; never leave a created attempt stuck.
+                    let _ = host.record_kernel_start_failure(&run_id);
                 }
             }
         });

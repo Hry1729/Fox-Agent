@@ -759,8 +759,11 @@ pub(super) enum KernelDriveOutcome {
 /// Job. The durable Run state, not the stack's return value, decides when its
 /// already-issued cancellation tokens may be retired.
 pub(super) fn kernel_scope_should_retire(database: &Database, run_id: &str) -> bool {
-    database.kernel_host_run_state(run_id).ok().flatten()
-        .is_some_and(|state| terminal(&state) || state == "cancelling")
+    // Only a durably parked Run owns a still-live child Job token after the
+    // Host stack has returned. Created/running preparation failures retain the
+    // original cleanup behavior; a missing/corrupt aggregate fails closed.
+    database.kernel_host_run_state(run_id).ok().flatten().as_deref()
+        != Some("waiting_jobs")
         || database.pending_kernel_host_commands(run_id).ok()
             .is_some_and(|commands| commands.iter().any(|command| command.kind == "cancel"))
 }
