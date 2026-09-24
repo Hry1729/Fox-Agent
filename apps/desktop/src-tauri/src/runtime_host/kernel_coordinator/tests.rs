@@ -1546,43 +1546,72 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
     let address = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
     let server = std::thread::spawn(move || {
-        let read_request = |stream: &mut std::net::TcpStream| {
+        let read_request = |stream: &mut std::net::TcpStream| -> Option<usize> {
             let mut bytes = Vec::new();
             let mut buffer = [0u8; 8192];
             stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             loop {
-                let read = stream.read(&mut buffer).unwrap();
-                assert!(read > 0);
+                let read = match stream.read(&mut buffer) {
+                    Ok(0) if bytes.is_empty() => return None,
+                    Err(error) if bytes.is_empty()
+                        && matches!(error.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => return None,
+                    Ok(0) => panic!("AGV fixture request ended after {} bytes", bytes.len()),
+                    Err(error) => panic!("AGV fixture request failed after {} bytes: {error}", bytes.len()),
+                    Ok(read) => read,
+                };
                 bytes.extend_from_slice(&buffer[..read]);
-                if bytes.windows(4).position(|part| part == b"\r\n\r\n").is_some() {
-                    break;
+                assert!(bytes.len() <= 4 * 1024 * 1024, "AGV fixture request exceeds 4 MiB");
+                if let Some(header_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n").map(|offset| offset + 4) {
+                    let headers = std::str::from_utf8(&bytes[..header_end]).unwrap();
+                    let lengths: Vec<usize> = headers.lines().filter_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    }).collect();
+                    assert_eq!(lengths.len(), 1, "AGV fixture requires one Content-Length");
+                    let total = header_end.checked_add(lengths[0]).unwrap();
+                    assert!(total <= 4 * 1024 * 1024, "AGV fixture request exceeds 4 MiB");
+                    while bytes.len() < total {
+                        let read = stream.read(&mut buffer).unwrap();
+                        assert!(read > 0, "AGV fixture request body ended early");
+                        bytes.extend_from_slice(&buffer[..read]);
+                    }
+                    assert_eq!(bytes.len(), total, "AGV fixture received pipelined request bytes");
+                    return Some(lengths[0]);
                 }
             }
         };
         let sse = |stream: &mut std::net::TcpStream, body: String| {
             // One complete chunked response: data chunk + terminating chunk.
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n", body.len(), body).unwrap();
+            stream.flush().unwrap();
         };
         let sse_stall = |stream: &mut std::net::TcpStream, body: String| {
             // A partial chunk with NO terminating chunk: the stream stays
             // open, so only the worker's idle bound can classify the stall.
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n", body.len(), body).unwrap();
+            stream.flush().unwrap();
         };
 
         // Connection 1: partial tool arguments, then stall with no further bytes.
         let deadline = Instant::now() + Duration::from_secs(20);
-        let mut first = loop {
+        let (mut first, first_body_bytes) = loop {
+            assert!(Instant::now() < deadline, "stalled request was not received");
             match listener.accept() {
-                Ok((stream, _)) => break stream,
+                Ok((mut stream, _)) => {
+                    if let Some(body_bytes) = read_request(&mut stream) {
+                        break (stream, body_bytes);
+                    }
+                    eprintln!("AGV fixture ignored empty connection before request 1");
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "stalled request was not received");
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(error) => panic!("{error}"),
             }
         };
-        read_request(&mut first);
+        eprintln!("AGV fixture complete request 1: body_bytes={first_body_bytes}");
         let chunk = json!({"id":"agv-stall","object":"chat.completion.chunk","created":1,"model":"agv-stall","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"write-excel","type":"function","function":{"name":"read","arguments":"{\"path\":\"proof.t"}}]},"finish_reason":null}]});
         sse_stall(&mut first, format!("data: {chunk}\n\n"));
         // Keep the stalled connection open while accepting the retry. A fixed
@@ -1590,17 +1619,22 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
         // close the first stream just as the second request was dispatched.
         // Connection 2: the retry completes normally.
         let deadline = Instant::now() + Duration::from_secs(20);
-        let mut second = loop {
+        let (mut second, second_body_bytes) = loop {
+            assert!(Instant::now() < deadline, "retried request was not received");
             match listener.accept() {
-                Ok((stream, _)) => break stream,
+                Ok((mut stream, _)) => {
+                    if let Some(body_bytes) = read_request(&mut stream) {
+                        break (stream, body_bytes);
+                    }
+                    eprintln!("AGV fixture ignored empty connection before request 2");
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "retried request was not received");
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(error) => panic!("{error}"),
             }
         };
-        read_request(&mut second);
+        eprintln!("AGV fixture complete request 2: body_bytes={second_body_bytes}");
         let delta = json!({"role":"assistant","content":"继续完成剩余表格并交付。\n<fox-final/>"});
         let chunks = [
             json!({"id":"agv-retry","object":"chat.completion.chunk","created":1,"model":"agv-stall","choices":[{"index":0,"delta":delta,"finish_reason":null}]}),
