@@ -383,6 +383,35 @@ impl<'a> KernelCoordinator<'a> {
         })
     }
 
+    /// Controlled B2b-2 wake. The caller owns the Run OS lock; B2b-3 will
+    /// supply the automatic trigger. This method only creates the one durable
+    /// continuation intent after all original Jobs have terminal notices.
+    pub(crate) fn wake_waiting_jobs_now(&self) -> Result<bool,String> {
+        if self.snapshot()?.state!="waiting_jobs" {return Ok(false);}
+        if !self.unfinished_compute_wait_facts()?.is_empty() {return Ok(false);}
+        let (park_seq,parked)=self.database.kernel_waiting_park(&self.binding.run_id)?;
+        let mut input=self.database.kernel_initial_input(&self.binding.run_id)?;
+        input.messages=serde_json::from_value(parked["history"].clone())
+            .map_err(|_|"invalid frozen job wait history")?;
+        input.messages.push(parked["response"]["assistantMessage"].clone());
+        input.validate_job_notice()?;
+        let notices=self.pending_host_job_notices(&input.messages)?;
+        if notices.is_empty() {
+            return Err("kernel.job_notice_capacity_blocked: no bounded pending typed fact".into());
+        }
+        self.apply(None,|controller,now| {
+            let accounted=controller.wait_accounted_until_wall_ms()
+                .ok_or_else(||KernelError::FailClosed("job wait cursor is missing".into()))?;
+            let effect_key=format!("continuation:{}",controller.last_event_seq()
+                +u64::from(now.wall_ms>accounted)+1);
+            let payload=serde_json::json!({"turnId":input.turn_id,
+                "effectKey":effect_key,"lane":"job_notice","prompt":"",
+                "input":input,"hostJobNotices":notices});
+            controller.wake_waiting_jobs(park_seq,now.wall_ms,&payload.to_string())
+        })?;
+        Ok(true)
+    }
+
     pub(crate) fn cancel_waiting_jobs_now(&self) -> Result<(), String> {
         let park_seq = self.database.kernel_waiting_park_seq(&self.binding.run_id)?;
         self.apply(None, |controller, now| {

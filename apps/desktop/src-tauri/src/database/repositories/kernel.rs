@@ -821,6 +821,23 @@ pub struct KernelRunRecovery {
 }
 
 impl Database {
+    pub(crate) fn kernel_waiting_park(&self,run_id:&str)
+        -> Result<(u64,serde_json::Value),String> {
+        self.with_connection(|conn| {
+            let (seq,body):(i64,String)=conn.query_row(
+                "SELECT e.seq,e.payload_json FROM kernel_events e JOIN kernel_runs k ON k.run_id=e.run_id
+                 WHERE e.run_id=?1 AND k.state='waiting_jobs' AND e.event_type='run.waiting_jobs'
+                 ORDER BY e.seq DESC LIMIT 1",[run_id],|row|Ok((row.get(0)?,row.get(1)?)))?;
+            let event:serde_json::Value=serde_json::from_str(&body)
+                .map_err(|_|kernel_err("invalid frozen job wait event"))?;
+            if event["dataRootId"]!=self.data_root_id || !event["history"].is_array()
+                || !event["response"].is_object() {
+                return Err(kernel_err("frozen job wait is outside this data root"));
+            }
+            Ok((u64::try_from(seq).map_err(|_|kernel_err("invalid job wait park sequence"))?,event))
+        })
+    }
+
     pub(crate) fn kernel_waiting_park_seq(&self, run_id: &str) -> Result<u64, String> {
         self.with_connection(|connection| {
             let seq: i64 = connection.query_row(

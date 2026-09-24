@@ -1200,6 +1200,50 @@ impl super::RuntimeHost {
         Ok(())
     }
 
+    /// A controlled wake owns the same OS Run lock as normal start/recovery.
+    /// The background Job has already outlived its Pi session; only durable
+    /// terminal notices may create the one continuation request. The automatic
+    /// scanner is intentionally a later batch.
+    pub(crate) fn wake_kernel_waiting_run(&self, run_id: &str) -> Result<bool, String> {
+        let ownership = acquire(&self.sessions_dir, run_id)?;
+        if self.database.kernel_host_run_state(run_id)?.as_deref() != Some("waiting_jobs") {
+            return Ok(false);
+        }
+        let binding = self.database.run_control_binding(run_id)?
+            .ok_or("waiting Kernel Run has no frozen control binding")?;
+        let cancellation = self.state.lock()
+            .map_err(|_| "runtime state lock poisoned")?.cancellation.clone();
+        let coordinator = KernelCoordinator::reopen(
+            &self.database, &super::shadow_reconcile::ReconcilerClock,
+            run_id, &cancellation,
+        )?;
+        // A persisted user cancellation wins even if the last Job completed at
+        // the same instant. The ordinary drive consumes that command without
+        // opening a model transport.
+        if self.database.pending_kernel_host_commands(run_id)?
+            .iter().any(|command| command.kind == "cancel") {
+            drop(coordinator);
+            self.start_kernel_run(ownership, &binding, Value::Null, Value::Null)?;
+            return Ok(false);
+        }
+        coordinator.account_waiting_jobs_now()?;
+        if coordinator.snapshot()?.state != "waiting_jobs" {
+            return Ok(false);
+        }
+        if !coordinator.wake_waiting_jobs_now()? {
+            return Ok(false);
+        }
+        drop(coordinator);
+        // The wake intent is durable before Node starts. A preparation failure
+        // settles it through the normal Kernel failure path, never by replaying
+        // the settled model response or the completed Job.
+        let result = self.start_kernel_run(ownership, &binding, Value::Null, Value::Null);
+        if result.is_err() {
+            let _ = self.record_kernel_start_failure(run_id);
+        }
+        result.map(|_| true)
+    }
+
     pub(super) fn record_kernel_start_failure(&self, run_id: &str) -> Result<(), String> {
         let _ownership = acquire(&self.sessions_dir, run_id)?;
         if self.database.kernel_host_run_state(run_id)?.as_deref() == Some("waiting_jobs")
