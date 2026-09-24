@@ -405,7 +405,11 @@ fn run_parked_stop(live: bool, expire: bool) {
     } else { Instant::now() + Duration::from_secs(6) };
     loop {
         let job = db.kernel_job_snapshot(&job_id).unwrap();
-        let stopped = job.cancel_requested_at.is_some() || parent_token.is_cancelled();
+        // Both durable cancellation and the live executor signal must exist
+        // before the held Job is allowed to acknowledge its terminal write.
+        // A cancelled parent token alone was already supplied by the old
+        // cancel_run path and cannot prove parked-child reconciliation.
+        let stopped = job.cancel_requested_at.is_some() && parent_token.is_cancelled();
         let run_state = db.kernel_host_run_state(&run).unwrap();
         let terminal = if expire {
             matches!(run_state.as_deref(), Some("failed" | "budget_exhausted"))
