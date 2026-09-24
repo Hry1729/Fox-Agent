@@ -16,8 +16,9 @@ fn notice_host_fixture(_tag: &str) -> (Database, PathBuf, String, TestClock, Can
 fn enable_notices(db:&Database,run:&str) {
     db.with_connection(|conn| conn.execute(
         "UPDATE kernel_runs SET frozen_config_json=json_set(frozen_config_json,
-          '$.experimental_compute_job_notice',json('true')) WHERE run_id=?1", [run],
+          '$.experimentalComputeJobNotice',json('true')) WHERE run_id=?1", [run],
     )).unwrap();
+    assert!(db.compute_job_notice_enabled(run).unwrap(),"test must freeze the enabled wire flag");
 }
 
 fn finished_compute(db: &Database, run: &str, conversation: &str, key: &str) -> String {
@@ -28,6 +29,8 @@ fn finished_compute(db: &Database, run: &str, conversation: &str, key: &str) -> 
     }).unwrap().snapshot().job_id.clone();
     db.kernel_job_claim_attempt(&job,1).unwrap();
     db.kernel_job_complete_attempt(&job,1,conversation,&json!({"result":key})).unwrap();
+    assert!(db.kernel_job_notice(conversation,run,&job).unwrap().is_some(),
+        "real compute settlement must create its atomic Host notice");
     job
 }
 
