@@ -749,8 +749,24 @@ pub(super) fn drive_with_actions_per_round(
         api_key, policy, execute, after_commit, settle_children, preview, true).map(|_| ())
 }
 
+/// A wake owns admission from lock acquisition through its durable CAS and
+/// possible model drive. Shutdown sees this marker even before start registers
+/// the ordinary active Run; removing it is guaranteed on every return path.
+struct WakeInflight<'a> {
+    host: &'a super::RuntimeHost,
+    run_id: String,
+}
+impl Drop for WakeInflight<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.host.state.lock() {
+            state.kernel_wake_inflight.remove(&self.run_id);
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod waiting_wake_test_hooks {
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
     type Hook = (String, Arc<dyn Fn() + Send + Sync>);
     fn slot() -> &'static Mutex<Option<Hook>> {
@@ -768,6 +784,16 @@ pub(crate) mod waiting_wake_test_hooks {
             } else { None }
         };
         if let Some(hook) = hook { hook(); }
+    }
+    fn routes() -> &'static Mutex<HashMap<String, Vec<&'static str>>> {
+        static ROUTES: OnceLock<Mutex<HashMap<String, Vec<&'static str>>>> = OnceLock::new();
+        ROUTES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+    pub(crate) fn record_continuation_transport(run_id: &str, route: &'static str) {
+        routes().lock().unwrap().entry(run_id.to_owned()).or_default().push(route);
+    }
+    pub(crate) fn take_continuation_transports_for_test(run_id: &str) -> Vec<&'static str> {
+        routes().lock().unwrap().remove(run_id).unwrap_or_default()
     }
 }
 
@@ -949,9 +975,13 @@ pub(super) fn drive_with_actions_transport(
                     let binding = database.run_control_binding(run_id)?
                         .ok_or("authoritative Run has no frozen control binding")?;
                     if binding.engine_id == "pi" && !force_per_round {
+                        #[cfg(test)]
+                        waiting_wake_test_hooks::record_continuation_transport(run_id,"live");
                         coordinator.dispatch_continuation_live(&effect.effect_key, &owner, policy,
                             runtime, api_key, &execute, &after_commit, &settle_children)
                     } else {
+                        #[cfg(test)]
+                        waiting_wake_test_hooks::record_continuation_transport(run_id,"per_round");
                         coordinator.dispatch_continuation_with_worker(&effect.effect_key,
                             &owner,policy,runtime,api_key)
                     }
@@ -1122,7 +1152,9 @@ impl super::RuntimeHost {
             // The registration and dispatch checks use the same lock. A cleanup
             // callback setting the display state to ready cannot reopen admission.
             state.shutting_down = true;
-            state.kernel_active_runs.iter().cloned().collect::<Vec<_>>()
+            state.kernel_active_runs.iter().chain(state.kernel_wake_inflight.iter())
+                .cloned().collect::<std::collections::HashSet<_>>()
+                .into_iter().collect::<Vec<_>>()
         };
         for run_id in active {
             if let Err(error) = self.database.queue_kernel_host_command(&run_id, None) {
@@ -1142,13 +1174,10 @@ impl super::RuntimeHost {
                 .request_run_cancel(&run_id);
         }
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !self
-            .state
-            .lock()
-            .map_err(|_| "runtime state lock poisoned")?
-            .kernel_active_runs
-            .is_empty()
-        {
+        while {
+            let state=self.state.lock().map_err(|_| "runtime state lock poisoned")?;
+            !state.kernel_active_runs.is_empty() || !state.kernel_wake_inflight.is_empty()
+        } {
             if std::time::Instant::now() >= deadline {
                 return Err("Kernel shutdown is still waiting for owned resource cleanup".into());
             }
@@ -1249,6 +1278,12 @@ impl super::RuntimeHost {
         self.wake_kernel_waiting_run_with_transport(run_id, Some(park_seq), false)
     }
 
+    pub(crate) fn wake_kernel_waiting_run_for_park_transport(
+        &self, run_id: &str, park_seq: u64, force_per_round: bool,
+    ) -> Result<bool, String> {
+        self.wake_kernel_waiting_run_with_transport(run_id, Some(park_seq), force_per_round)
+    }
+
     #[cfg(test)]
     pub(crate) fn wake_kernel_waiting_run_forced_round_for_test(
         &self, run_id: &str,
@@ -1260,6 +1295,14 @@ impl super::RuntimeHost {
         &self, run_id: &str, expected_park_seq: Option<u64>, force_per_round: bool,
     ) -> Result<bool, String> {
         let ownership = acquire(&self.sessions_dir, run_id)?;
+        {
+            let mut state=self.state.lock().map_err(|_| "runtime state lock poisoned")?;
+            if state.shutting_down {
+                return Err("Runtime Host is shutting down".into());
+            }
+            state.kernel_wake_inflight.insert(run_id.to_owned());
+        }
+        let _wake_inflight=WakeInflight {host:self,run_id:run_id.to_owned()};
         if self.database.kernel_host_run_state(run_id)?.as_deref() != Some("waiting_jobs") {
             return Ok(false);
         }
@@ -1304,13 +1347,18 @@ impl super::RuntimeHost {
             return Ok(false);
         }
         drop(coordinator);
+        if self.state.lock().map_err(|_| "runtime state lock poisoned")?.shutting_down {
+            // The wake intent is durable and still pending. A new Host can
+            // recover it; shutdown must never dispatch a new Provider call.
+            return Err("Runtime Host is shutting down".into());
+        }
         // The wake intent is durable before Node starts. A preparation failure
         // settles it through the normal Kernel failure path, never by replaying
         // the settled model response or the completed Job.
         let result = self.start_kernel_run_with_transport(
             ownership, &binding, Value::Null, Value::Null, force_per_round,
         );
-        if result.is_err() {
+        if result.as_ref().err().is_some_and(|error| error != "Runtime Host is shutting down") {
             let _ = self.record_kernel_start_failure(run_id);
         }
         result.map(|_| true)

@@ -266,15 +266,11 @@ pub(crate) fn start_host_job(
     let registry = launch.registry.clone();
     let job_id = snapshot.job_id.clone();
     let on_terminal = launch.on_terminal;
-    let notice_database = launch.database.clone();
-    let notice_conversation = snapshot.conversation_id.clone();
     let notice_run = snapshot.run_id.clone();
     Ok(std::thread::spawn(move || {
         let terminal = super::jobs::run_on_lifecycle(&context, &launch_params, port);
         registry.forget(&job_id);
-        if terminal.settled
-            && notice_database.kernel_job_notice(&notice_conversation, &notice_run, &job_id)
-                .ok().flatten().is_some() {
+        if terminal.settled {
             if let Some(notify) = on_terminal { notify(&notice_run); }
         }
         terminal

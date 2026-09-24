@@ -762,9 +762,12 @@ fn node_dependency_is_available(script: &Path, package: &str) -> bool {
 struct RuntimeHostState {
     cancellation: crate::kernel::CancellationRegistry,
     kernel_active_runs: HashSet<String>,
+    kernel_wake_inflight: HashSet<String>,
     waiting_wakes: HashMap<String, waiting_jobs_wake::WakeSlot>,
     #[cfg(test)]
     auto_wake_disabled: HashSet<String>,
+    #[cfg(test)]
+    auto_wake_force_round: HashSet<String>,
     shutting_down: bool,
     state: String,
     worker: Option<WorkerHandle>,
@@ -1226,9 +1229,12 @@ impl RuntimeHost {
             state: Arc::new(Mutex::new(RuntimeHostState {
                 cancellation: crate::kernel::CancellationRegistry::default(),
                 kernel_active_runs: HashSet::new(),
+                kernel_wake_inflight: HashSet::new(),
                 waiting_wakes: HashMap::new(),
                 #[cfg(test)]
                 auto_wake_disabled: HashSet::new(),
+                #[cfg(test)]
+                auto_wake_force_round: HashSet::new(),
                 shutting_down: false,
                 state: "stopped".to_owned(),
                 worker: None,

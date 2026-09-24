@@ -1,13 +1,14 @@
 //! Process-local signals for the durable WaitingJobs wake CAS. The database is
 //! the source of truth; this slot only avoids lost in-process notifications.
 use super::RuntimeHost;
-use std::{sync::{mpsc, Arc, Weak}, time::Duration};
+use std::{sync::{atomic::{AtomicUsize, Ordering}, mpsc, Arc, Weak}, time::Duration};
 use tokio::sync::Notify;
 
 pub(super) struct WakeSlot {
     pub park_seq: u64,
     pub notify: Weak<Notify>,
     pub finished: mpsc::Receiver<()>,
+    pub lock_conflicts: Arc<AtomicUsize>,
 }
 
 impl RuntimeHost {
@@ -19,12 +20,18 @@ impl RuntimeHost {
         let deadline = parked["waitDeadlineWallMs"].as_i64()
             .filter(|value| *value > 0).ok_or("waiting Run has no original deadline")?;
         let notify = Arc::new(Notify::new());
+        let lock_conflicts = Arc::new(AtomicUsize::new(0));
         let (finished_tx, finished_rx) = mpsc::channel();
+        let force_per_round;
         {
             let mut state = self.state.lock().map_err(|_| "runtime state lock poisoned")?;
             if state.shutting_down { return Ok(()); }
             #[cfg(test)]
             if state.auto_wake_disabled.contains(run_id) { return Ok(()); }
+            force_per_round = {
+                #[cfg(test)] { state.auto_wake_force_round.contains(run_id) }
+                #[cfg(not(test))] { false }
+            };
             if let Some(slot) = state.waiting_wakes.get(run_id) {
                 if slot.park_seq == park_seq {
                     if let Some(existing) = slot.notify.upgrade() {
@@ -38,12 +45,14 @@ impl RuntimeHost {
             }
             state.waiting_wakes.insert(run_id.to_owned(), WakeSlot {
                 park_seq, notify: Arc::downgrade(&notify), finished: finished_rx,
+                lock_conflicts: lock_conflicts.clone(),
             });
         }
         let host = self.clone();
         let run_id = run_id.to_owned();
         tauri::async_runtime::spawn(async move {
-            host.watch_waiting_run(&run_id, park_seq, deadline, notify).await;
+            host.watch_waiting_run(&run_id, park_seq, deadline, notify,
+                lock_conflicts, force_per_round).await;
             let _ = finished_tx.send(());
         });
         Ok(())
@@ -55,7 +64,8 @@ impl RuntimeHost {
     }
 
     async fn watch_waiting_run(&self, run_id: &str, park_seq: u64,
-        deadline_wall_ms: i64, notify: Arc<Notify>) {
+        deadline_wall_ms: i64, notify: Arc<Notify>, lock_conflicts: Arc<AtomicUsize>,
+        force_per_round: bool) {
         let mut lock_retry = Duration::from_millis(100);
         loop {
             if !self.waiting_slot_is_current(run_id, park_seq) { break; }
@@ -65,7 +75,7 @@ impl RuntimeHost {
             let host = self.clone();
             let run = run_id.to_owned();
             let checked = tauri::async_runtime::spawn_blocking(move ||
-                host.wake_kernel_waiting_run_for_park(&run, park_seq)).await;
+                host.wake_kernel_waiting_run_for_park_transport(&run, park_seq, force_per_round)).await;
             if !self.waiting_slot_is_current(run_id, park_seq) { break; }
             let now = crate::database::now_ms();
             let due = deadline_wall_ms.saturating_sub(now).max(0) as u64;
@@ -80,6 +90,9 @@ impl RuntimeHost {
                 Ok(Err(error)) if error == super::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED
                     || error.contains("job_wake_policy_changed")
                     || error.contains("job_wake_cancel_pending") => {
+                    if error == super::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED {
+                        lock_conflicts.fetch_add(1, Ordering::SeqCst);
+                    }
                     // Another process may own the lock and cannot notify this
                     // Host. Retry finitely without extending the original wait.
                     if now >= deadline_wall_ms.saturating_add(5_000) { break; }
@@ -95,9 +108,8 @@ impl RuntimeHost {
                     Duration::from_millis(due)
                 }
             };
-            tokio::select! {
-                _ = notify.notified() => { lock_retry = Duration::from_millis(100); }
-                _ = tokio::time::sleep(pause) => {}
+            if tokio::time::timeout(pause, notify.notified()).await.is_ok() {
+                lock_retry = Duration::from_millis(100);
             }
         }
         if let Ok(mut state) = self.state.lock() {
@@ -128,5 +140,16 @@ impl RuntimeHost {
     #[cfg(test)]
     pub(crate) fn disable_auto_wake_for_test(&self, run_id: &str) {
         self.state.lock().unwrap().auto_wake_disabled.insert(run_id.to_owned());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_auto_wake_round_for_test(&self, run_id: &str) {
+        self.state.lock().unwrap().auto_wake_force_round.insert(run_id.to_owned());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn auto_wake_lock_conflicts_for_test(&self, run_id: &str) -> usize {
+        self.state.lock().unwrap().waiting_wakes.get(run_id)
+            .map_or(0, |slot| slot.lock_conflicts.load(Ordering::SeqCst))
     }
 }

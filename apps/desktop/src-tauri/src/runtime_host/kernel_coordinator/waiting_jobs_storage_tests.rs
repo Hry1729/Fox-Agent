@@ -308,6 +308,18 @@ fn waiting_jobs_wake_outbox_failure_rolls_back_and_two_handles_cannot_wake_twice
     let payload=payload.to_string();
     let effects=first.wake_waiting_jobs(park_seq,now+1_000,&payload).unwrap();
     let command=first.persist_command(&effects);
+    let old_policy=db.execution_policy(&conversation).unwrap();
+    let changed=db.change_execution_policy(&conversation,"waiting-policy-race",
+        old_policy.version,if old_policy.mode=="allow" {"ask"} else {"allow"}).unwrap();
+    assert_ne!(changed.version,old_policy.version);
+    let stale_policy=db.kernel_commit_waiting_wake(&run,now+1_000,&command,
+        old_policy.version).unwrap_err();
+    assert!(stale_policy.contains("job_wake_policy_changed"),"{stale_policy}");
+    assert_eq!(db.kernel_rehydrate(&run).unwrap().unwrap().state,RunState::WaitingJobs);
+    let outbox_before:i64=db.with_connection(|conn|conn.query_row(
+        "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='continuation_model'",
+        [&run],|row|row.get(0))).unwrap();
+    assert_eq!(outbox_before,0,"policy CAS failure must roll back the wake outbox");
     db.with_connection(|conn|conn.execute_batch(
         "CREATE TRIGGER reject_job_wake_outbox BEFORE INSERT ON kernel_effect_outbox
           WHEN NEW.effect_type='continuation_model'
