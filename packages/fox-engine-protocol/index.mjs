@@ -614,6 +614,14 @@ export const SCHEMA_BUNDLE = {
             "messageId": {
               "description": "Stable idempotency id of the durable steering row.",
               "type": "string"
+            },
+            "receivedAt": {
+              "description": "Original Host receipt time. Optional for older frames; new Host\ndispatches use it so live and replacement transcripts are identical.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
@@ -1343,6 +1351,14 @@ export const SCHEMA_BUNDLE = {
             "messageId": {
               "description": "Stable idempotency id of the durable steering row.",
               "type": "string"
+            },
+            "receivedAt": {
+              "description": "Original Host receipt time. Optional for older frames; new Host\ndispatches use it so live and replacement transcripts are identical.",
+              "format": "int64",
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
