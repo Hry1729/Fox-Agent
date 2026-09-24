@@ -365,6 +365,55 @@ fn checked_job_notice_input(
     Ok(())
 }
 
+/// The replacement frame carries an idempotency key; an in-session Pi
+/// directive does not. In the latter case derive its dispatch from the typed
+/// directive, model cursor and the durable leased outbox instead of expecting
+/// a field the protocol never sent.
+fn bound_response_dispatch_matches(
+    tx: &rusqlite::Transaction<'_>, run: &str, event_type: &str,
+    response: &serde_json::Value, dispatch_key: &str,
+    model_input: &serde_json::Value, checkpoint: i64,
+) -> rusqlite::Result<bool> {
+    let ordinary_key = model_input["idempotencyKey"].as_str() == Some(dispatch_key);
+    match event_type {
+        "engine.initial_response" => Ok(dispatch_key == crate::kernel::INITIAL_MODEL_IDEMPOTENCY_KEY
+            && ordinary_key && model_input["continuationKey"].is_null()),
+        "engine.batch_response" => {
+            let Some(batch_id) = response["batchId"].as_str() else { return Ok(false) };
+            if dispatch_key != crate::kernel::batch_delivery_idempotency_key(batch_id)
+                || model_input["batchId"] != batch_id { return Ok(false); }
+            if model_input["kind"] == "batch" {
+                return Ok(model_input["checkpointSeq"].as_i64() == Some(checkpoint)
+                    && tx.query_row("SELECT EXISTS(SELECT 1 FROM kernel_effect_outbox
+                        WHERE run_id=?1 AND batch_id=?2 AND effect_type='deliver_tool_batch'
+                          AND idempotency_key=?3 AND status='completed')",
+                        params![run,batch_id,dispatch_key],|row|row.get::<_,bool>(0))?);
+            }
+            Ok(ordinary_key)
+        }
+        "engine.continuation_response" => {
+            if model_input["kind"] == "continuation" {
+                let Some(effect_key)=dispatch_key.strip_prefix("continuation-delivery:") else {
+                    return Ok(false);
+                };
+                return Ok(model_input["previewSeq"].as_i64() == Some(checkpoint)
+                    && tx.query_row("SELECT EXISTS(SELECT 1 FROM kernel_effect_outbox o
+                        JOIN kernel_events e ON e.run_id=o.run_id
+                          AND e.event_type='engine.continuation_dispatched'
+                          AND e.seq=?3+1
+                          AND json_extract(e.payload_json,'$.effectKey')=o.effect_key
+                        WHERE o.run_id=?1 AND o.effect_key=?2
+                          AND o.effect_type='continuation_model'
+                          AND o.idempotency_key=?4 AND o.status='completed')",
+                        params![run,effect_key,checkpoint,dispatch_key],|row|row.get::<_,bool>(0))?);
+            }
+            Ok(ordinary_key && model_input["continuationKey"].as_str()
+                .is_some_and(|key| dispatch_key == format!("continuation-delivery:{key}")))
+        }
+        _ => Ok(false),
+    }
+}
+
 fn settled_model_delivery_history(
     tx: &rusqlite::Transaction<'_>, run: &str,
     response: &crate::kernel::PersistEvent,
@@ -388,15 +437,8 @@ fn settled_model_delivery_history(
     let bound: serde_json::Value = serde_json::from_str(input_json)
         .map_err(|_| kernel_err("invalid settled model input for job notice"))?;
     let model_input = &bound["modelInput"];
-    let right_dispatch = match response.event_type.as_str() {
-        "engine.initial_response" => dispatch_key == crate::kernel::INITIAL_MODEL_IDEMPOTENCY_KEY,
-        "engine.batch_response" => dispatch_key == &crate::kernel::batch_delivery_idempotency_key(
-            payload["batchId"].as_str().unwrap_or_default()),
-        "engine.continuation_response" => model_input["continuationKey"].as_str()
-            .is_some_and(|key| dispatch_key == &format!("continuation-delivery:{key}")),
-        _ => false,
-    };
-    if !right_dispatch || model_input["idempotencyKey"] != *dispatch_key {
+    if !bound_response_dispatch_matches(tx,run,&response.event_type,&payload,
+        dispatch_key,model_input,checkpoint)? {
         return Err(kernel_err("job notice response differs from its settled dispatch"));
     }
     let mut history: Vec<serde_json::Value> = serde_json::from_value(bound["deliveredHistory"].clone())
@@ -531,15 +573,8 @@ fn validate_job_wait_decision(
         let bound: serde_json::Value = serde_json::from_str(input_json)
             .map_err(|_| kernel_err("invalid bound model input for job wait"))?;
         let model_input = &bound["modelInput"];
-        let right_dispatch = match response.event_type.as_str() {
-            "engine.initial_response" => dispatch_key == crate::kernel::INITIAL_MODEL_IDEMPOTENCY_KEY,
-            "engine.batch_response" => dispatch_key == &crate::kernel::batch_delivery_idempotency_key(
-                response_payload["batchId"].as_str().unwrap_or_default()),
-            "engine.continuation_response" => model_input["continuationKey"].as_str()
-                .is_some_and(|key| dispatch_key == &format!("continuation-delivery:{key}")),
-            _ => false,
-        };
-        if !right_dispatch || model_input["idempotencyKey"] != *dispatch_key
+        if !bound_response_dispatch_matches(tx,run,&response.event_type,&response_payload,
+            dispatch_key,model_input,checkpoint)?
             || bound["deliveredHistory"] != payload["history"] {
             return Err(kernel_err("job wait history differs from bound Host model delivery"));
         }
