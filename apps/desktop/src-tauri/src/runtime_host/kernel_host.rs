@@ -1171,7 +1171,7 @@ impl super::RuntimeHost {
                     } else {
                         host.runtime_command()?
                     };
-                    host.drive_kernel_run(ownership, &binding, &runtime, &cancellation)
+                    host.drive_kernel_run(ownership, &binding, &runtime, &cancellation, false)
                 })();
                 if result.is_err() {
                     // Failure recording reacquires ownership; it cannot terminate
@@ -1205,6 +1205,19 @@ impl super::RuntimeHost {
     /// terminal notices may create the one continuation request. The automatic
     /// scanner is intentionally a later batch.
     pub(crate) fn wake_kernel_waiting_run(&self, run_id: &str) -> Result<bool, String> {
+        self.wake_kernel_waiting_run_with_transport(run_id, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wake_kernel_waiting_run_forced_round_for_test(
+        &self, run_id: &str,
+    ) -> Result<bool, String> {
+        self.wake_kernel_waiting_run_with_transport(run_id, true)
+    }
+
+    fn wake_kernel_waiting_run_with_transport(
+        &self, run_id: &str, force_per_round: bool,
+    ) -> Result<bool, String> {
         let ownership = acquire(&self.sessions_dir, run_id)?;
         if self.database.kernel_host_run_state(run_id)?.as_deref() != Some("waiting_jobs") {
             return Ok(false);
@@ -1223,7 +1236,9 @@ impl super::RuntimeHost {
         if self.database.pending_kernel_host_commands(run_id)?
             .iter().any(|command| command.kind == "cancel") {
             drop(coordinator);
-            self.start_kernel_run(ownership, &binding, Value::Null, Value::Null)?;
+            self.start_kernel_run_with_transport(
+                ownership, &binding, Value::Null, Value::Null, force_per_round,
+            )?;
             return Ok(false);
         }
         coordinator.account_waiting_jobs_now()?;
@@ -1237,7 +1252,9 @@ impl super::RuntimeHost {
         // The wake intent is durable before Node starts. A preparation failure
         // settles it through the normal Kernel failure path, never by replaying
         // the settled model response or the completed Job.
-        let result = self.start_kernel_run(ownership, &binding, Value::Null, Value::Null);
+        let result = self.start_kernel_run_with_transport(
+            ownership, &binding, Value::Null, Value::Null, force_per_round,
+        );
         if result.is_err() {
             let _ = self.record_kernel_start_failure(run_id);
         }
@@ -1318,6 +1335,21 @@ impl super::RuntimeHost {
         prompt: Value,
         service: Value,
     ) -> Result<(), String> {
+        self.start_kernel_run_with_transport(ownership, binding, prompt, service, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_kernel_run_forced_round_for_test(
+        &self, ownership: KernelRunLock, binding: &RunControlBinding,
+        prompt: Value, service: Value,
+    ) -> Result<(), String> {
+        self.start_kernel_run_with_transport(ownership, binding, prompt, service, true)
+    }
+
+    fn start_kernel_run_with_transport(
+        &self, ownership: KernelRunLock, binding: &RunControlBinding,
+        prompt: Value, service: Value, force_per_round: bool,
+    ) -> Result<(), String> {
         let cancellation = {
             let _transition = self
                 .run_transition
@@ -1352,7 +1384,7 @@ impl super::RuntimeHost {
             };
             if existing.is_some() {
                 // A pre-existing aggregate must use all of its persisted inputs.
-                return self.drive_kernel_run(ownership, binding, &runtime, &cancellation);
+                return self.drive_kernel_run(ownership, binding, &runtime, &cancellation, force_per_round);
             }
             let token = cancellation.run_token(&binding.run_id)?;
             let mut supported = super::kernel_gateway::supported_tools();
@@ -1417,7 +1449,7 @@ impl super::RuntimeHost {
             self.database.freeze_kernel_initial_input(&input)?;
             self.database
                 .freeze_kernel_host_scope(&binding.run_id, &scope)?;
-            self.drive_kernel_run(ownership, binding, &runtime, &cancellation)
+            self.drive_kernel_run(ownership, binding, &runtime, &cancellation, force_per_round)
         })();
         let retire = kernel_scope_should_retire(&self.database, &binding.run_id);
         if let Ok(mut state) = self.state.lock() {
@@ -1438,6 +1470,7 @@ impl super::RuntimeHost {
         binding: &RunControlBinding,
         runtime: &RuntimeCommand,
         cancellation: &CancellationRegistry,
+        force_per_round: bool,
     ) -> Result<KernelDriveOutcome, String> {
         let config = self.database.kernel_model_config(&binding.run_id)?;
         let base_url = config.model_service["baseUrl"]
@@ -1543,7 +1576,7 @@ impl super::RuntimeHost {
             |tool_id| self.dispatch_kernel_host_action(binding, tool_id),
             |force_cancel| self.wait_kernel_action_children(binding, force_cancel),
             &preview,
-            false,
+            force_per_round,
         );
         if result.is_err() {
             self.wait_kernel_action_children(binding, true)?;
