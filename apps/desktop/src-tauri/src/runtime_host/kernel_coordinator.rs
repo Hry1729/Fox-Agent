@@ -55,11 +55,11 @@ enum DecisionLease<'a> {
     ModelRetry(&'a str, &'a str),
     Initial(&'a str),
     Continuation(&'a str, &'a str),
-    ContinuationDispatch(&'a str, &'a str),
+    ContinuationDispatch(&'a str, &'a str, Option<&'a crate::database::ModelNoticeInput<'a>>),
     Tool(&'a str, &'a str),
     Batch(&'a str, &'a str),
     /// Claim a settled batch's pending delivery and arm its model request.
-    BatchDispatch(&'a str, &'a str),
+    BatchDispatch(&'a str, &'a str, Option<&'a crate::database::ModelNoticeInput<'a>>),
 }
 
 pub(crate) struct KernelCoordinator<'a> {
@@ -72,6 +72,19 @@ pub(crate) struct KernelCoordinator<'a> {
 }
 
 impl<'a> KernelCoordinator<'a> {
+    fn pending_host_job_notices(
+        &self, history: &[Value],
+    ) -> Result<Vec<fox_engine_protocol::HostJobNotice>, String> {
+        self.database.validate_host_job_notice_history(&self.binding.conversation_id,
+            &self.binding.run_id, history)?;
+        if !self.database.compute_job_notice_enabled(&self.binding.run_id)? {
+            return Ok(Vec::new());
+        }
+        let historical = fox_engine_protocol::historical_host_job_notice_bytes(history)?;
+        self.database.pending_host_job_notices(&self.binding.conversation_id,
+            &self.binding.run_id,(16 * 1024usize).saturating_sub(historical))
+    }
+
     pub(crate) fn start_prepared(
         database: &'a Database,
         clock: &'a dyn Clock,
@@ -192,9 +205,9 @@ impl<'a> KernelCoordinator<'a> {
                 )?
             }
             Some(DecisionLease::Continuation(effect_key, owner)) => self.database.kernel_commit_continuation_model(
-                &self.binding.run_id, now.wall_ms, &command, effect_key, owner, true, steering)?,
-            Some(DecisionLease::ContinuationDispatch(effect_key, owner)) => self.database.kernel_commit_continuation_model(
-                &self.binding.run_id, now.wall_ms, &command, effect_key, owner, false, None)?,
+                &self.binding.run_id, now.wall_ms, &command, effect_key, owner, true, steering, None)?,
+            Some(DecisionLease::ContinuationDispatch(effect_key, owner, input)) => self.database.kernel_commit_continuation_model(
+                &self.binding.run_id, now.wall_ms, &command, effect_key, owner, false, None, input)?,
             Some(DecisionLease::Initial(owner)) => self.database.kernel_commit_initial_model(
                 &self.binding.run_id,
                 now.wall_ms,
@@ -202,6 +215,7 @@ impl<'a> KernelCoordinator<'a> {
                 owner,
                 true,
                 steering,
+                None,
             )?,
             Some(DecisionLease::Tool(tool_call_id, owner)) => {
                 self.database.kernel_commit_tool_result(
@@ -222,13 +236,14 @@ impl<'a> KernelCoordinator<'a> {
                     steering,
                 )?
             }
-            Some(DecisionLease::BatchDispatch(batch_id, owner)) => {
+            Some(DecisionLease::BatchDispatch(batch_id, owner, input)) => {
                 self.database.kernel_commit_batch_dispatch(
                     &self.binding.run_id,
                     now.wall_ms,
                     &command,
                     batch_id,
                     owner,
+                    input,
                 )?
             }
             None => {
@@ -503,6 +518,7 @@ impl<'a> KernelCoordinator<'a> {
             assistant_message,
             tools,
             steering,
+            host_job_notices: Vec::new(),
         };
         frame.validate()?;
         Ok(frame)
@@ -716,6 +732,9 @@ impl<'a> KernelCoordinator<'a> {
         input
             .messages
             .extend(steering_rows.iter().map(steering::steering_user_message));
+        let notice_mode = self.database.compute_job_notice_enabled(&self.binding.run_id)?;
+        let historical_notice_bytes = fox_engine_protocol::historical_host_job_notice_bytes(&input.messages)?;
+        let new_notices = self.pending_host_job_notices(&input.messages)?;
         let token = self.cancellation.run_token(&self.binding.run_id)?;
         token.check()?;
         let frame = {
@@ -737,8 +756,14 @@ impl<'a> KernelCoordinator<'a> {
                 idempotency_key: kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into(),
                 continuation_key: None,
                 checkpoint_seq: guard.last_event_seq(),
+                host_job_notices: new_notices,
             };
             frame.validate()?;
+            let payload = serde_json::to_value(&frame).map_err(|_|"invalid initial model input")?;
+            let notice_binding = crate::database::ModelNoticeInput {
+                payload: &payload, history_start: frame.input.messages.len(),
+                historical_bytes: historical_notice_bytes,
+            };
             let mut candidate = guard.clone();
             let now = self.clock.read();
             let effects = candidate
@@ -751,6 +776,7 @@ impl<'a> KernelCoordinator<'a> {
                 owner,
                 false,
                 None,
+                notice_mode.then_some(&notice_binding),
             )?;
             *guard = candidate;
             frame
@@ -778,6 +804,8 @@ impl<'a> KernelCoordinator<'a> {
         }
         token.check()?;
         let encoded = serde_json::to_string(&response).map_err(|_| "invalid initial response")?;
+        let mut initial_history = frame.input.messages.clone();
+        initial_history.extend(frame.host_job_notices.iter().map(fox_engine_protocol::HostJobNotice::history_marker));
         let next = if response.assistant_message["stopReason"] == "toolUse" {
             let checkpoint = fox_engine_protocol::KernelEngineBatchCheckpoint {
                 schema_version: 1,
@@ -785,7 +813,7 @@ impl<'a> KernelCoordinator<'a> {
                     "initial-batch:{}:{}",
                     self.binding.run_id, frame.checkpoint_seq
                 ),
-                history: frame.input.messages.clone(),
+                history: initial_history.clone(),
                 assistant_message: response.assistant_message.clone(),
             };
             checkpoint.validate()?;
@@ -802,7 +830,7 @@ impl<'a> KernelCoordinator<'a> {
             steering::steering_followup_input(
                 &self.database,
                 &self.binding,
-                frame.input.messages.clone(),
+                initial_history.clone(),
                 response.assistant_message.clone(),
             )?
         } else {
@@ -872,7 +900,7 @@ impl<'a> KernelCoordinator<'a> {
                         steering_input = steering::steering_followup_input(
                             &self.database,
                             &self.binding,
-                            frame.input.messages.clone(),
+                            initial_history.clone(),
                             response.assistant_message.clone(),
                         )?;
                     }
@@ -952,7 +980,17 @@ impl<'a> KernelCoordinator<'a> {
             &kernel::CancellationToken,
         ) -> Result<fox_engine_protocol::KernelModelResponse, String>,
     ) -> Result<(), String> {
-        let frame = self.prepare_stored_batch_resume(batch_id)?;
+        let mut frame = self.prepare_stored_batch_resume(batch_id)?;
+        let notice_mode = self.database.compute_job_notice_enabled(&self.binding.run_id)?;
+        let historical_notice_bytes = fox_engine_protocol::historical_host_job_notice_bytes(&frame.history)?;
+        frame.host_job_notices = self.pending_host_job_notices(&frame.history)?;
+        frame.validate()?;
+        let notice_payload = serde_json::to_value(&frame).map_err(|_|"invalid batch model input")?;
+        let notice_binding = crate::database::ModelNoticeInput {
+            payload: &notice_payload,
+            history_start: frame.history.len() + 1 + frame.tools.len() + frame.steering.len(),
+            historical_bytes: historical_notice_bytes,
+        };
         self.database.kernel_validate_resource_acquisition(&self.binding.run_id)?;
         let token = self.cancellation.run_token(&self.binding.run_id)?;
         token.check()?;
@@ -972,6 +1010,7 @@ impl<'a> KernelCoordinator<'a> {
                 &candidate.persist_command(&effects),
                 batch_id,
                 owner,
+                notice_mode.then_some(&notice_binding),
             )?;
             *guard = candidate;
         }
@@ -1011,6 +1050,11 @@ impl<'a> KernelCoordinator<'a> {
             &frame.tools,
             &frame.assistant_message,
         ));
+        batch_history.extend(frame.steering.iter().map(|notice| serde_json::json!({
+            "role":"user","content":[{"type":"text",
+                "text":steering::steering_notice_text(&notice.content)}],"timestamp":0,
+        })));
+        batch_history.extend(frame.host_job_notices.iter().map(fox_engine_protocol::HostJobNotice::history_marker));
         let next = if response.assistant_message["stopReason"] == "toolUse" {
             let checkpoint = fox_engine_protocol::KernelEngineBatchCheckpoint {
                 schema_version: 1, batch_id: format!("model-batch:{}:{}", self.binding.run_id, frame.checkpoint_seq),

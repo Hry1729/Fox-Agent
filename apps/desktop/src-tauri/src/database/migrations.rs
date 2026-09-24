@@ -7179,6 +7179,7 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
         return finish_transaction(transaction);
     }
     apply_migration(&transaction, 84, MIGRATION_84, now)?;
+    apply_migration(&transaction, 85, MIGRATION_85, now)?;
     finish_transaction(transaction)
 }
 
@@ -14781,6 +14782,39 @@ CREATE TABLE kernel_job_notices (
 );
 CREATE INDEX idx_kernel_job_notices_scope
     ON kernel_job_notices(data_root_id,conversation_id,run_id);
+"#;
+
+/// Model delivery is a separate ledger: absence means pending, and the B1
+/// terminal fact remains immutable across binding and response acknowledgement.
+const MIGRATION_85: &str = r#"
+CREATE TABLE kernel_model_notice_inputs (
+    run_id TEXT NOT NULL REFERENCES kernel_runs(run_id),
+    dispatch_key TEXT NOT NULL,
+    lease_owner TEXT NOT NULL,
+    input_hash TEXT NOT NULL CHECK(length(input_hash)=71 AND input_hash GLOB 'sha256:*'),
+    input_json TEXT NOT NULL,
+    history_start INTEGER NOT NULL CHECK(history_start>=0),
+    historical_bytes INTEGER NOT NULL CHECK(historical_bytes>=0),
+    state TEXT NOT NULL CHECK(state IN ('bound','acknowledged')),
+    bound_at INTEGER NOT NULL,
+    acknowledged_at INTEGER,
+    PRIMARY KEY(run_id,dispatch_key),
+    CHECK ((state='bound' AND acknowledged_at IS NULL)
+        OR (state='acknowledged' AND acknowledged_at IS NOT NULL))
+);
+CREATE TABLE kernel_job_notice_deliveries (
+    job_id TEXT PRIMARY KEY REFERENCES kernel_job_notices(job_id) ON DELETE CASCADE,
+    dispatch_key TEXT NOT NULL,
+    input_hash TEXT NOT NULL CHECK(length(input_hash)=71 AND input_hash GLOB 'sha256:*'),
+    history_position INTEGER NOT NULL CHECK(history_position>=0),
+    state TEXT NOT NULL CHECK(state IN ('bound','acknowledged')),
+    bound_at INTEGER NOT NULL,
+    acknowledged_at INTEGER,
+    CHECK ((state='bound' AND acknowledged_at IS NULL)
+        OR (state='acknowledged' AND acknowledged_at IS NOT NULL))
+);
+CREATE INDEX idx_kernel_job_notice_deliveries_dispatch
+    ON kernel_job_notice_deliveries(dispatch_key,state);
 "#;
 
 /// Column additions applied once under migration 75 (idempotent helper).

@@ -42,8 +42,8 @@ pub(super) const STEERING_COMPETITION_ATTEMPTS: u8 = 4;
 
 /// Which durable delivery the next engine output answers.
 enum Stage {
-    Initial { cursor: u64 },
-    Batch { batch_id: String, cursor: u64 },
+    Initial { cursor: u64, pre_history: Vec<Value> },
+    Batch { batch_id: String, cursor: u64, pre_history: Vec<Value> },
     Continuation { effect_key: String, pre_history: Vec<Value>, cursor: u64 },
 }
 
@@ -506,19 +506,12 @@ impl KernelCoordinator<'_> {
         // the durable history in the exact order the live engine saw them,
         // while still-`received` rows wait until this round's decision arms the
         // next directive.
-        let delivered_rows = self
-            .database
-            .delivered_run_steering(&self.binding.run_id)?;
         // Mutable: the end-of-turn decision re-reads this queue, and the rows it
         // finally delivers must be the same snapshot the directive, the frozen
         // follow-up input and the status flips are built from.
         let mut pending_rows = self
             .database
             .pending_run_steering(&self.binding.run_id)?;
-        let delivered_messages: Vec<Value> = delivered_rows
-            .iter()
-            .map(super::steering::steering_user_message)
-            .collect();
         let mut pending_messages: Vec<Value> = pending_rows
             .iter()
             .map(super::steering::steering_user_message)
@@ -526,7 +519,7 @@ impl KernelCoordinator<'_> {
 
         // Pre-read durable context needed by the commit tail.
         let (pre_history, response_json, answered_batch) = match stage {
-            Stage::Initial { cursor } => {
+            Stage::Initial { cursor, pre_history } => {
                 let response = fox_engine_protocol::KernelInitialModelResponse {
                     schema_version: 1,
                     run_id: self.binding.run_id.clone(),
@@ -535,22 +528,13 @@ impl KernelCoordinator<'_> {
                     assistant_message: output.clone(),
                 };
                 response.validate()?;
-                let mut pre = self.processed_initial_input()?;
-                pre.extend(delivered_messages.iter().cloned());
                 (
-                    pre,
+                    pre_history.clone(),
                     serde_json::to_string(&response).map_err(|_| "invalid response")?,
                     None,
                 )
             }
-            Stage::Batch { batch_id, cursor } => {
-                let (history, assistant, tools) = self.stored_batch_parts(batch_id)?;
-                let mut pre = history;
-                pre.push(assistant.clone());
-                pre.extend(Self::tool_result_messages(&self.binding.run_id, &assistant, &tools));
-                // After settled tool results, matching the worker transcript
-                // where the directive splices steering into the next request.
-                pre.extend(delivered_messages.iter().cloned());
+            Stage::Batch { batch_id, cursor, pre_history } => {
                 let response = fox_engine_protocol::KernelModelResponse {
                     schema_version: 1,
                     run_id: self.binding.run_id.clone(),
@@ -561,7 +545,7 @@ impl KernelCoordinator<'_> {
                 };
                 response.validate()?;
                 (
-                    pre,
+                    pre_history.clone(),
                     serde_json::to_string(&response).map_err(|_| "invalid response")?,
                     Some(batch_id.clone()),
                 )
@@ -762,7 +746,7 @@ impl KernelCoordinator<'_> {
                 .map_err(|_| "Kernel coordinator lock poisoned")?
                 .last_event_seq();
             let batch_id = match stage {
-                Stage::Initial { cursor } => {
+                Stage::Initial { cursor, .. } => {
                     format!("initial-batch:{}:{}", self.binding.run_id, cursor)
                 }
                 _ => format!("model-batch:{}:{}", self.binding.run_id, seq),
@@ -904,6 +888,16 @@ impl KernelCoordinator<'_> {
             // settled results to the live session and arm the next round.
             self.drive_batch_to_barrier(owner, &batch_id, policy, execute, after_commit, settle_children)?;
             let (history, assistant, tools) = self.stored_batch_parts(&batch_id)?;
+            let notice_mode = self.database.compute_job_notice_enabled(&self.binding.run_id)?;
+            let historical_notice_bytes = fox_engine_protocol::historical_host_job_notice_bytes(&history)?;
+            let new_notices = self.pending_host_job_notices(&history)?;
+            let tool_messages = Self::tool_result_messages(&self.binding.run_id,&assistant,&tools);
+            let mut batch_pre_history = history.clone();
+            batch_pre_history.push(assistant.clone());
+            batch_pre_history.extend(tool_messages.iter().cloned());
+            batch_pre_history.extend(pending_messages.iter().cloned());
+            let history_start = batch_pre_history.len();
+            batch_pre_history.extend(new_notices.iter().map(fox_engine_protocol::HostJobNotice::history_marker));
             let config = self.database.kernel_model_config(&self.binding.run_id)?;
             // The budget must cover the bytes this request really sends: the
             // assistant turn, the settled tool results, the steering notices the
@@ -912,12 +906,9 @@ impl KernelCoordinator<'_> {
             let steering_bytes = crate::kernel_compaction::bytes(
                 &super::steering::steering_notices(&pending_rows),
             )?;            let extra = crate::kernel_compaction::bytes(&assistant)?
-                .saturating_add(crate::kernel_compaction::bytes(&Self::tool_result_messages(
-                    &self.binding.run_id,
-                    &assistant,
-                    &tools,
-                ))?)
+                .saturating_add(crate::kernel_compaction::bytes(&tool_messages)?)
                 .saturating_add(steering_bytes)
+                .saturating_add(crate::kernel_compaction::bytes(&new_notices)?)
                 .saturating_add(4096);
             let view = self.context_view(&batch_id, &history)?;
             if !self.context_fits(&config, &view, extra)? {
@@ -930,8 +921,24 @@ impl KernelCoordinator<'_> {
                 .lock()
                 .map_err(|_| "Kernel coordinator lock poisoned")?
                 .last_event_seq();
+            let directive = fox_engine_protocol::KernelRoundDirective {
+                schema_version: 1,
+                kind: fox_engine_protocol::KernelRoundDirectiveKind::Batch,
+                batch_id: Some(batch_id.clone()),
+                checkpoint_seq: Some(cursor),
+                preview_seq: None,
+                tools,
+                prompt: None,
+                steering: super::steering::steering_notices(&pending_rows),
+                host_job_notices: new_notices,
+            };
+            directive.validate()?;
+            let payload = serde_json::to_value(&directive).map_err(|_|"invalid live batch directive")?;
+            let notice_binding = crate::database::ModelNoticeInput {
+                payload: &payload, history_start, historical_bytes: historical_notice_bytes,
+            };
             self.apply(
-                Some(DecisionLease::BatchDispatch(&batch_id, owner)),
+                Some(DecisionLease::BatchDispatch(&batch_id, owner, notice_mode.then_some(&notice_binding))),
                 |controller, now| {
                     controller
                         .begin_batch_model_request(
@@ -941,17 +948,8 @@ impl KernelCoordinator<'_> {
                         )
                 },
             )?;
-            *stage = Stage::Batch { batch_id: batch_id.clone(), cursor };
-            return Ok(fox_engine_protocol::KernelRoundDirective {
-                schema_version: 1,
-                kind: fox_engine_protocol::KernelRoundDirectiveKind::Batch,
-                batch_id: Some(batch_id),
-                checkpoint_seq: Some(cursor),
-                preview_seq: None,
-                tools,
-                prompt: None,
-                steering: super::steering::steering_notices(&pending_rows),
-            });
+            *stage = Stage::Batch { batch_id, cursor, pre_history: batch_pre_history };
+            return Ok(directive);
         }
 
         // Every continuation lane sends the same thing: the follow-up prompt,
@@ -966,12 +964,17 @@ impl KernelCoordinator<'_> {
         };
         if let Some((prompt, input)) = armed_followup {
             let config = self.database.kernel_model_config(&self.binding.run_id)?;
+            let notice_mode = self.database.compute_job_notice_enabled(&self.binding.run_id)?;
+            let historical_notice_bytes = fox_engine_protocol::historical_host_job_notice_bytes(&input.messages)?;
+            let new_notices = self.pending_host_job_notices(&input.messages)?;
             // The steering notices travel in the directive and the worker splices
             // them into this very model request, so they belong to this request's
             // byte budget. Leaving them out let a Run overshoot the frozen window
             // and skip the compaction/replacement transport it should have used.
             let mut next_messages = input.messages.clone();
             next_messages.extend(pending_messages.iter().cloned());
+            let history_start = next_messages.len();
+            next_messages.extend(new_notices.iter().map(fox_engine_protocol::HostJobNotice::history_marker));
             // `next_messages` already contains the notices the worker will splice
             // into this request, so only the fixed per-request reserve is added.
             if !self.context_fits(
@@ -983,16 +986,7 @@ impl KernelCoordinator<'_> {
             }
             let cursor = self.controller.lock().map_err(|_| "Kernel coordinator lock poisoned")?.last_event_seq();
             let effect_key = format!("continuation:{cursor}");
-            self.apply(Some(DecisionLease::ContinuationDispatch(&effect_key, owner)), |controller, now|
-                controller.begin_continuation_model_request(&effect_key, now.monotonic_ms, now.wall_ms))?;
-            // The frozen payload stored by the continuation request excludes
-            // steering (single source: run_steering_messages); mirror the
-            // worker transcript by appending the just-delivered rows so the
-            // next round's durable history matches what the live model sees.
-            let mut continuation_pre = input.messages.clone();
-            continuation_pre.extend(pending_messages.iter().cloned());
-            *stage = Stage::Continuation { effect_key, pre_history: continuation_pre, cursor };
-            return Ok(fox_engine_protocol::KernelRoundDirective {
+            let directive = fox_engine_protocol::KernelRoundDirective {
                 schema_version: 1,
                 kind: fox_engine_protocol::KernelRoundDirectiveKind::Continuation,
                 batch_id: None,
@@ -1001,7 +995,22 @@ impl KernelCoordinator<'_> {
                 tools: Vec::new(),
                 prompt: Some(prompt),
                 steering: super::steering::steering_notices(&pending_rows),
-            });
+                host_job_notices: new_notices,
+            };
+            directive.validate()?;
+            let payload = serde_json::to_value(&directive).map_err(|_|"invalid live continuation directive")?;
+            let notice_binding = crate::database::ModelNoticeInput {
+                payload: &payload, history_start, historical_bytes: historical_notice_bytes,
+            };
+            self.apply(Some(DecisionLease::ContinuationDispatch(&effect_key, owner,
+                notice_mode.then_some(&notice_binding))), |controller, now|
+                controller.begin_continuation_model_request(&effect_key, now.monotonic_ms, now.wall_ms))?;
+            // The frozen payload stored by the continuation request excludes
+            // steering (single source: run_steering_messages); mirror the
+            // worker transcript by appending the just-delivered rows so the
+            // next round's durable history matches what the live model sees.
+            *stage = Stage::Continuation { effect_key, pre_history: next_messages, cursor };
+            return Ok(directive);
         }
 
         Ok(fox_engine_protocol::KernelRoundDirective {
@@ -1015,6 +1024,7 @@ impl KernelCoordinator<'_> {
             // A Final directive can never carry steering: open rows were
             // cancelled inside the terminal write-set.
             steering: Vec::new(),
+            host_job_notices: Vec::new(),
         })
     }
 
@@ -1211,7 +1221,9 @@ impl KernelCoordinator<'_> {
             return Err(crate::kernel_compaction::INSUFFICIENT.into());
         }
         input.messages.extend(steering_messages);
-        let continuation_history = input.messages.clone();
+        let notice_mode = self.database.compute_job_notice_enabled(&self.binding.run_id)?;
+        let historical_notice_bytes = fox_engine_protocol::historical_host_job_notice_bytes(&input.messages)?;
+        let new_notices = self.pending_host_job_notices(&input.messages)?;
         token.check()?;
         let frame = {
             let mut guard = self
@@ -1233,28 +1245,38 @@ impl KernelCoordinator<'_> {
                     .unwrap_or_else(|| kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.into()),
                 continuation_key: continuation_key.map(str::to_owned),
                 checkpoint_seq: guard.last_event_seq(),
+                host_job_notices: new_notices,
             };
             frame.validate()?;
+            let payload = serde_json::to_value(&frame).map_err(|_|"invalid live initial frame")?;
+            let notice_binding = crate::database::ModelNoticeInput {
+                payload: &payload, history_start: frame.input.messages.len(),
+                historical_bytes: historical_notice_bytes,
+            };
             let mut candidate = guard.clone();
             let now = self.clock.read();
             if let Some(key) = continuation_key {
                 let effects = candidate.begin_continuation_model_request(key, now.monotonic_ms, now.wall_ms)
                     .map_err(|error| error.to_string())?;
                 self.database.kernel_commit_continuation_model(&self.binding.run_id, now.wall_ms,
-                    &candidate.persist_command(&effects), key, owner, false, None)?;
+                    &candidate.persist_command(&effects), key, owner, false, None,
+                    notice_mode.then_some(&notice_binding))?;
             } else {
                 let effects = candidate.begin_initial_model_request(now.monotonic_ms, now.wall_ms)
                     .map_err(|error| error.to_string())?;
                 self.database.kernel_commit_initial_model(&self.binding.run_id, now.wall_ms,
-                    &candidate.persist_command(&effects), owner, false, None)?;
+                    &candidate.persist_command(&effects), owner, false, None,
+                    notice_mode.then_some(&notice_binding))?;
             }
             *guard = candidate;
             frame
         };
         token.check()?;
+        let mut dispatched_history = frame.input.messages.clone();
+        dispatched_history.extend(frame.host_job_notices.iter().map(fox_engine_protocol::HostJobNotice::history_marker));
         let mut stage = match continuation_key {
-            Some(key) => Stage::Continuation { effect_key: key.into(), pre_history: continuation_history, cursor: frame.checkpoint_seq },
-            None => Stage::Initial { cursor: frame.checkpoint_seq },
+            Some(key) => Stage::Continuation { effect_key: key.into(), pre_history: dispatched_history, cursor: frame.checkpoint_seq },
+            None => Stage::Initial { cursor: frame.checkpoint_seq, pre_history: dispatched_history },
         };
         let mut service = |frame: fox_engine_protocol::KernelRoundOutputFrame| {
             self.service_round_output(
@@ -1289,13 +1311,13 @@ impl KernelCoordinator<'_> {
             // re-runs only the leased model round from durable facts, including
             // continuations. Tool execution effects are never reset here.
             Err(error) => match &stage {
-                Stage::Initial { cursor } => self.retry_settled_model(
+                Stage::Initial { cursor, .. } => self.retry_settled_model(
                     kernel::INITIAL_MODEL_EFFECT_KEY,
                     owner,
                     *cursor,
                     error,
                 ),
-                Stage::Batch { batch_id, cursor } => self.retry_settled_model(
+                Stage::Batch { batch_id, cursor, .. } => self.retry_settled_model(
                     &kernel::batch_delivery_effect_key(batch_id),
                     owner,
                     *cursor,

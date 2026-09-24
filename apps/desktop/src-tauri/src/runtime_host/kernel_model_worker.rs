@@ -1049,7 +1049,7 @@ createInterface({input:process.stdin}).on('line',line=>{
                 Ok(fox_engine_protocol::KernelRoundDirective {
                     schema_version:1,kind:fox_engine_protocol::KernelRoundDirectiveKind::Final,
                     batch_id:None,checkpoint_seq:None,preview_seq:None,tools:Vec::new(),prompt:None,
-                    steering:Vec::new(),
+                    steering:Vec::new(),host_job_notices:Vec::new(),
                 })
             };
             let mut deadline_for = || {

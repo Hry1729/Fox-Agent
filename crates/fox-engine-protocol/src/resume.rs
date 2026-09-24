@@ -2,6 +2,70 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// A Host-owned terminal fact. A model or a user-shaped message cannot mint
+/// one: the Host checks every identity against the durable notice ledger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HostJobNotice {
+    pub source: String,
+    pub data_root_id: String,
+    pub conversation_id: String,
+    pub run_id: String,
+    pub job_id: String,
+    pub attempt: u32,
+    pub terminal_state: String,
+    pub finished_at: i64,
+    pub result_ref: Option<String>,
+    pub result_sha256: Option<String>,
+    pub result_bytes: Option<u64>,
+    pub error_code: Option<String>,
+}
+
+impl HostJobNotice {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.source != "fox_kernel_host"
+            || [&self.data_root_id, &self.conversation_id, &self.run_id, &self.job_id]
+                .iter().any(|value| value.trim().is_empty())
+            || !matches!(self.terminal_state.as_str(), "completed" | "failed" | "cancelled")
+            || (self.terminal_state == "completed") != self.result_ref.is_some()
+            || self.result_ref.is_some() != self.result_sha256.is_some()
+            || self.result_ref.is_some() != self.result_bytes.is_some()
+            || serde_json::to_vec(self).map_err(|_| "invalid Host job notice")?.len() > 2_048
+        {
+            return Err("invalid Host job notice identity, result or size".into());
+        }
+        Ok(())
+    }
+
+    pub fn history_marker(&self) -> Value {
+        serde_json::json!({"role":"hostJobNotice","notice":self})
+    }
+}
+
+pub fn validate_host_job_notices(notices: &[HostJobNotice]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut bytes = 0usize;
+    for notice in notices {
+        notice.validate()?;
+        if !seen.insert(&notice.job_id) { return Err("duplicate Host job notice".into()); }
+        bytes += serde_json::to_vec(notice).map_err(|_| "invalid Host job notice")?.len();
+        if bytes > 16 * 1024 { return Err("Host job notices exceed model input limit".into()); }
+    }
+    Ok(())
+}
+
+pub fn historical_host_job_notice_bytes(history: &[Value]) -> Result<usize, String> {
+    let mut bytes = 0usize;
+    for message in history.iter().filter(|value| value["role"] == "hostJobNotice") {
+        let notice: HostJobNotice = serde_json::from_value(message["notice"].clone())
+            .map_err(|_| "invalid historical Host job notice")?;
+        notice.validate()?;
+        bytes = bytes.saturating_add(serde_json::to_vec(&notice)
+            .map_err(|_| "invalid historical Host job notice")?.len());
+    }
+    Ok(bytes)
+}
+
 /// Sanitized evidence of a settled model failure, never a permission to retry.
 /// Host still owns retry admission, counters, delay, lease and cancellation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -162,6 +226,8 @@ pub struct KernelInitialModelFrame {
     pub input: KernelInitialModelInput,
     pub idempotency_key: String,
     pub checkpoint_seq: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_job_notices: Vec<HostJobNotice>,
     /// Present when a fresh worker restores a durably leased continuation input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_key: Option<String>,
@@ -169,6 +235,10 @@ pub struct KernelInitialModelFrame {
 
 impl KernelInitialModelFrame {
     pub fn validate(&self) -> Result<(), String> {
+        validate_host_job_notices(&self.host_job_notices)?;
+        if historical_host_job_notice_bytes(&self.input.messages)?
+            + serde_json::to_vec(&self.host_job_notices).map_err(|_| "invalid Host job notices")?.len()
+            > 16 * 1024 { return Err("Host job notice input exceeds total limit".into()); }
         self.input.validate()?;
         let expected_key = match &self.continuation_key {
             Some(key) if key.strip_prefix("continuation:").is_some_and(|seq|
@@ -232,8 +302,19 @@ fn model_response_cannot_claim_completion_with_tools_or_unfinished_output() {
 
 pub fn validate_kernel_history(history: &[Value]) -> Result<(), String> {
     let mut pending = std::collections::HashMap::new();
+    let mut host_jobs = std::collections::HashSet::new();
     for message in history {
         match message["role"].as_str() {
+            Some("hostJobNotice") => {
+                if !pending.is_empty() { return Err("Host notice interrupts tool results".into()); }
+                let notice: HostJobNotice = serde_json::from_value(message["notice"].clone())
+                    .map_err(|_| "invalid historical Host job notice")?;
+                notice.validate()?;
+                if !host_jobs.insert(notice.job_id) { return Err("duplicate historical Host job notice".into()); }
+                if message.as_object().is_none_or(|value| value.len() != 2) {
+                    return Err("invalid historical Host job notice marker".into());
+                }
+            }
             Some("toolResult") => {
                 let id = message["toolCallId"].as_str().ok_or("missing historical result id")?;
                 let name = message["toolName"].as_str().ok_or("missing historical result name")?;
@@ -258,6 +339,9 @@ pub fn validate_kernel_history(history: &[Value]) -> Result<(), String> {
         }
     }
     if !pending.is_empty() { return Err("incomplete historical tool batch".into()); }
+    if historical_host_job_notice_bytes(history)? > 16 * 1024 {
+        return Err("historical Host job notices exceed input limit".into());
+    }
     Ok(())
 }
 
@@ -412,6 +496,8 @@ pub struct KernelRoundDirective {
     /// authority, tools, or grants. Final directives never carry steering.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steering: Vec<KernelSteeringNotice>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_job_notices: Vec<HostJobNotice>,
 }
 
 /// One additional user request attached to a round directive.
@@ -437,6 +523,7 @@ impl KernelSteeringNotice {
 
 impl KernelRoundDirective {
     pub fn validate(&self) -> Result<(), String> {
+        validate_host_job_notices(&self.host_job_notices)?;
         if self.schema_version != 1 {
             return Err("invalid Kernel round directive".into());
         }
@@ -504,10 +591,16 @@ pub struct KernelBatchResumeFrame {
     /// authority, tools, or grants.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steering: Vec<KernelSteeringNotice>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_job_notices: Vec<HostJobNotice>,
 }
 
 impl KernelBatchResumeFrame {
     pub fn validate(&self) -> Result<(), String> {
+        validate_host_job_notices(&self.host_job_notices)?;
+        if historical_host_job_notice_bytes(&self.history)?
+            + serde_json::to_vec(&self.host_job_notices).map_err(|_| "invalid Host job notices")?.len()
+            > 16 * 1024 { return Err("Host job notice input exceeds total limit".into()); }
         validate_checkpoint_parts(&self.history, &self.assistant_message)?;
         if self.schema_version != 1 || self.turn_id.trim().is_empty() || self.batch_id.trim().is_empty()
             || self.idempotency_key != format!("tool-batch-delivery:{}", self.batch_id)
@@ -614,7 +707,7 @@ mod tests {
                 tool_call_id: "read-1".into(), tool: "read".into(), canonical_input: json!({"path":"a.txt"}), source_order: 0,
                 storage: None, state: KernelSettledToolState::Completed, result: json!({"content":[{"type":"text","text":"proof"}]}),
             }],
-            steering: vec![],
+            steering: vec![], host_job_notices: vec![],
         };
         frame.validate().unwrap();
         let wire = serde_json::to_value(&frame).unwrap();
@@ -639,7 +732,7 @@ mod tests {
 fn restored_continuation_has_a_distinct_validated_delivery_identity() {
     let mut frame = KernelInitialModelFrame {
         schema_version: 1, idempotency_key: "initial-model-delivery".into(), checkpoint_seq: 2,
-        continuation_key: None,
+        continuation_key: None, host_job_notices: vec![],
         input: KernelInitialModelInput { schema_version: 1, run_id: "r".into(), turn_id: "t".into(),
             prompt_config_hash: "frozen".into(), messages: vec![serde_json::json!({"role":"user","content":"continue"})] },
     };

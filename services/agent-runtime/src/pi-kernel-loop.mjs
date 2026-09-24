@@ -9,6 +9,7 @@ import { finalizeKernelAnswer, completionPreview, KernelIncompleteResponseError 
 import { createRoundProgress, toolParamBytesOf } from './kernel-model-progress.mjs'
 import { effectiveBoundableTool, modelToolResultContent, toolResultRef } from './tool-view.mjs'
 import { steeringNoticeText, validateSteeringNotices } from './steering-notice.mjs'
+import { hostJobNoticeMessage, validateHostJobNotices } from './host-job-notice.mjs'
 import { describeKernelError, diagnosticLine } from './pi-kernel-diagnostics.mjs'
 
 export { steeringNoticeText }
@@ -233,10 +234,12 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
   // settled tool results (batch) or the Host review prompt (continuation) — so
   // the durable ordering the Host records matches the engine transcript.
   let pendingSteering = []
+  let pendingHostNotices = []
   // Ids already spliced into THIS session: a directive replay (or the same row
   // riding a retried dispatch) must never duplicate the user message locally.
   // Durable exactly-once application stays Host-side; this is transcript-side.
   const seenSteeringIds = new Set()
+  const seenHostJobIds = new Set(prepared.hostJobNoticeIds ?? [])
   const steeringMessage = notice => ({
     role: 'user',
     content: [{ type: 'text', text: steeringNoticeText(notice.content) }],
@@ -249,10 +252,17 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
       pendingSteering.push(steeringMessage(notice))
     }
   }
+  const queueHostJobNotices = notices => {
+    for (const notice of validateHostJobNotices(notices)) {
+      if (seenHostJobIds.has(notice.jobId)) continue
+      seenHostJobIds.add(notice.jobId)
+      pendingHostNotices.push(hostJobNoticeMessage(notice))
+    }
+  }
   const projectedStream = session.agent.streamFunction
   session.agent.streamFunction = (model, context, options) => {
-    if (pendingSteering.length) {
-      const additions = pendingSteering.splice(0)
+    if (pendingSteering.length || pendingHostNotices.length) {
+      const additions = [...pendingSteering.splice(0), ...pendingHostNotices.splice(0)]
       const transcript = session.agent.state.messages
       if (!Array.isArray(transcript)) fail('engine transcript unavailable for steering')
       for (const message of additions) {
@@ -380,6 +390,7 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
       // Appended to the transcript when the next model request starts, after
       // the settled tool results — never into the frozen proposal round.
       queueSteering(directive.steering)
+      queueHostJobNotices(directive.hostJobNotices)
     } catch (error) {
       pendingBatch = null
       fatal ??= error
@@ -458,6 +469,9 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
         if (Array.isArray(directive.steering) && directive.steering.length) {
           fail('Host carried steering into a final directive')
         }
+        if (Array.isArray(directive.hostJobNotices) && directive.hostJobNotices.length) {
+          fail('Host carried a job notice into a final directive')
+        }
         return {
           idempotencyKey: prepared.idempotencyKey ?? 'initial-model-delivery',
           checkpointSeq: roundCursor,
@@ -481,6 +495,7 @@ export async function runPiKernelLoop(session, request, prepared, hooks) {
           { role: 'user', content: [{ type: 'text', text: directive.prompt }], timestamp: Date.now() }]
         // Spliced after the review prompt at the next provider request.
         queueSteering(directive.steering)
+        queueHostJobNotices(directive.hostJobNotices)
         continue
       }
       fail('unexpected Host directive for a completed round')

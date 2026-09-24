@@ -35,6 +35,7 @@ mod expert_teams;
 mod expert_workflows;
 mod graph_lead;
 mod kernel;
+pub(crate) use kernel::ModelNoticeInput;
 mod kernel_compaction;
 pub(crate) mod kernel_authorization;
 pub(crate) mod kernel_continuation;

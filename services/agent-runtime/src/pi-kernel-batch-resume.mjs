@@ -8,6 +8,7 @@ import { finalizeKernelAnswer, completionPreview } from './kernel-completion.mjs
 import { createRoundProgress, toolParamBytesOf } from './kernel-model-progress.mjs'
 import { modelToolResultContent, toolResultRef } from './tool-view.mjs'
 import { steeringNoticeText, validateSteeringNotices } from './steering-notice.mjs'
+import { hostJobNoticeMarker, materializeHostJobHistory, validateHostJobNotices } from './host-job-notice.mjs'
 
 const knownTools = new Set(RUNTIME_TOOL_CATALOG.map(tool => tool.name))
 const deliveries = new WeakMap()
@@ -73,7 +74,12 @@ export function prepareKernelModelResponse(assistantMessage, prepared) {
 function assertCompleteHistory(history) {
   const pending = new Map()
   for (const message of history) {
-    if (!record(message) || !['user', 'assistant', 'toolResult'].includes(message.role)) fail('unsupported history message')
+    if (!record(message) || !['user', 'assistant', 'toolResult', 'hostJobNotice'].includes(message.role)) fail('unsupported history message')
+    if (message.role === 'hostJobNotice') {
+      if (pending.size || Object.keys(message).length !== 2) fail('invalid historical Host notice marker')
+      validateHostJobNotices([message.notice])
+      continue
+    }
     if (message.role === 'toolResult') {
       if (!nonempty(message.toolCallId) || !nonempty(message.toolName) || pending.get(message.toolCallId) !== message.toolName) fail('orphan, duplicate or mismatched historical result')
       if (typeof message.isError !== 'boolean') fail('historical result has no error classification')
@@ -168,8 +174,10 @@ export function prepareKernelBatchResume(request, identity) {
   }))
   // All results were checked before the normal provider projection; no synthetic
   // recovery failures may be inserted to fill a missing result here.
-  const messages = preparePiReplayHistory([...frame.history, assistant, ...results, ...steeringMessages])
-  return { messages, runId: request.runId, turnId: frame.turnId,
+  const hostNotices = validateHostJobNotices(frame.hostJobNotices)
+  const messages = preparePiReplayHistory(materializeHostJobHistory(
+    [...frame.history, assistant, ...results, ...steeringMessages, ...hostNotices.map(hostJobNoticeMarker)]))
+  return { messages, hostJobNoticeIds: hostNotices.map(item => item.jobId), runId: request.runId, turnId: frame.turnId,
     idempotencyKey: frame.idempotencyKey, batchId: frame.batchId, checkpointSeq: frame.checkpointSeq }
 }
 
@@ -201,7 +209,10 @@ export function prepareKernelInitialModel(request, identity) {
       fail('unsupported initial content')
     }
   }
-  return { messages: preparePiReplayHistory(input.messages), runId: input.runId, turnId: input.turnId,
+  const hostNotices = validateHostJobNotices(frame.hostJobNotices)
+  const all = [...input.messages, ...hostNotices.map(hostJobNoticeMarker)]
+  return { messages: preparePiReplayHistory(materializeHostJobHistory(all)),
+    hostJobNoticeIds: hostNotices.map(item => item.jobId), runId: input.runId, turnId: input.turnId,
     idempotencyKey: frame.idempotencyKey, checkpointSeq: frame.checkpointSeq, initial: true }
 }
 

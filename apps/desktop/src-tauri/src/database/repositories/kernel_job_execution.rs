@@ -77,7 +77,7 @@ fn insert_notice(
     Ok(())
 }
 
-fn read_notice(tx: &rusqlite::Connection, root: &str, conversation: &str, run: &str, id: &str)
+pub(super) fn read_notice(tx: &rusqlite::Connection, root: &str, conversation: &str, run: &str, id: &str)
     -> rusqlite::Result<Option<KernelJobNotice>> {
     tx.query_row(
         "SELECT n.data_root_id,n.conversation_id,n.run_id,n.job_id,n.attempt,
@@ -131,6 +131,58 @@ fn read_notice(tx: &rusqlite::Connection, root: &str, conversation: &str, run: &
     ).optional()
 }
 
+impl KernelJobNotice {
+    pub(super) fn model_fact(&self) -> fox_engine_protocol::HostJobNotice {
+        fox_engine_protocol::HostJobNotice {
+            source: "fox_kernel_host".into(),
+            data_root_id: self.data_root_id.clone(),
+            conversation_id: self.conversation_id.clone(),
+            run_id: self.run_id.clone(),
+            job_id: self.job_id.clone(),
+            attempt: self.attempt,
+            terminal_state: self.terminal_state.as_str().into(),
+            finished_at: self.finished_at,
+            result_ref: self.result_ref.clone(),
+            result_sha256: self.result_sha256.clone(),
+            result_bytes: self.result_bytes,
+            error_code: self.error_code.clone(),
+        }
+    }
+}
+
+pub(super) fn pending_model_facts(
+    connection: &rusqlite::Connection, root: &str, conversation: &str, run: &str,
+    max_bytes: usize,
+) -> rusqlite::Result<Vec<fox_engine_protocol::HostJobNotice>> {
+    let mut statement = connection.prepare(
+        "SELECT n.job_id FROM kernel_job_notices n
+         JOIN kernel_jobs j ON j.job_id=n.job_id AND j.kind='attachment_compute'
+             AND j.run_id=n.run_id AND j.conversation_id=n.conversation_id
+             AND j.attempts=n.attempt AND j.state=n.terminal_state
+         LEFT JOIN kernel_job_notice_deliveries d ON d.job_id=n.job_id
+         WHERE n.data_root_id=?1 AND n.conversation_id=?2 AND n.run_id=?3
+           AND d.job_id IS NULL ORDER BY n.finished_at,n.job_id",
+    )?;
+    let ids = statement.query_map(params![root, conversation, run], |row| row.get::<_,String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    let mut facts = Vec::with_capacity(ids.len());
+    let mut total_bytes = 0usize;
+    for id in ids {
+        let notice = read_notice(connection, root, conversation, run, &id)?
+            .ok_or_else(|| invalid("scoped job notice disappeared"))?;
+        let fact = notice.model_fact();
+        fact.validate().map_err(|_| invalid("job notice exceeds model bound"))?;
+        let size = serde_json::to_vec(&fact).map_err(|_| invalid("invalid job notice"))?.len();
+        if total_bytes.saturating_add(size) > max_bytes { break; }
+        total_bytes += size;
+        facts.push(fact);
+    }
+    fox_engine_protocol::validate_host_job_notices(&facts)
+        .map_err(|_| invalid("job notices exceed model input bound"))?;
+    Ok(facts)
+}
+
 fn same_worker_terminal(
     tx: &Transaction<'_>, root: &str, id: &str, attempt: u32,
     state: JobState, result: Option<(&str, &str, i64, &str)>,
@@ -178,6 +230,16 @@ fn same_worker_terminal(
 }
 
 impl Database {
+    pub(crate) fn compute_job_notice_enabled(&self, run: &str) -> Result<bool,String> {
+        let frozen: String = self.with_connection(|conn| conn.query_row(
+            "SELECT frozen_config_json FROM kernel_runs WHERE run_id=?1 AND kernel_mode='authoritative'",
+            [run],|row|row.get(0),
+        ))?;
+        let config: crate::kernel::RunFrozenConfig = serde_json::from_str(&frozen)
+            .map_err(|_| "invalid frozen Kernel Run for job notice")?;
+        Ok(config.experimental_compute_job_notice)
+    }
+
     pub(crate) fn kernel_command_job_checkpoint(&self,id:&str,attempt:u32,value:&Value)->Result<(),String> {
         self.with_connection(|conn| {
             let tx=conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -357,6 +419,55 @@ impl Database {
     pub(crate) fn kernel_job_notice(&self, conversation:&str, run:&str, id:&str)
         -> Result<Option<KernelJobNotice>,String> {
         self.with_connection(|conn| read_notice(conn,&self.data_root_id,conversation,run,id))
+    }
+
+    pub(crate) fn pending_host_job_notices(&self, conversation:&str, run:&str, max_bytes:usize)
+        -> Result<Vec<fox_engine_protocol::HostJobNotice>,String> {
+        self.with_connection(|conn| pending_model_facts(conn,&self.data_root_id,conversation,run,max_bytes))
+    }
+
+    /// Validate a typed historical marker against the original scoped model
+    /// binding. A model-produced string or a copied database cannot mint it.
+    pub(crate) fn validate_host_job_notice_history(&self, conversation:&str, run:&str,
+        history:&[serde_json::Value]) -> Result<(),String> {
+        fox_engine_protocol::validate_kernel_history(history)?;
+        self.with_connection(|conn| {
+            let mut seen = std::collections::HashSet::new();
+            for (position, marker) in history.iter().enumerate() {
+                if marker["role"] != "hostJobNotice" { continue; }
+                let fact: fox_engine_protocol::HostJobNotice = serde_json::from_value(marker["notice"].clone())
+                    .map_err(|_|invalid("invalid historical Host notice"))?;
+                if !seen.insert(fact.job_id.clone()) { return Err(invalid("duplicate historical Host notice")); }
+                let stored = read_notice(conn,&self.data_root_id,conversation,run,&fact.job_id)?
+                    .ok_or_else(||invalid("historical Host notice has no scoped terminal fact"))?;
+                if stored.model_fact()!=fact { return Err(invalid("historical Host notice fact changed")); }
+                let binding: Option<(String,String,i64,String,String,String)> = conn.query_row(
+                    "SELECT d.input_hash,m.input_hash,d.history_position,m.input_json,d.state,m.state
+                     FROM kernel_job_notice_deliveries d
+                     JOIN kernel_model_notice_inputs m ON m.run_id=?1 AND m.dispatch_key=d.dispatch_key
+                     WHERE d.job_id=?2",
+                    params![run,fact.job_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,
+                        row.get(3)?,row.get(4)?,row.get(5)?)),
+                ).optional()?;
+                let Some((delivery_hash,input_hash,bound_position,input_json,delivery_state,input_state))=binding else {
+                    return Err(invalid("historical Host notice lacks durable model binding"));
+                };
+                if delivery_state!="acknowledged" || input_state!="acknowledged"
+                    || delivery_hash!=input_hash || bound_position!=position as i64
+                    || format!("sha256:{}",hex::encode(Sha256::digest(input_json.as_bytes())))!=input_hash {
+                    return Err(invalid("historical Host notice binding changed"));
+                }
+            }
+            let expected:i64=conn.query_row(
+                "SELECT COUNT(*) FROM kernel_job_notice_deliveries d
+                 JOIN kernel_job_notices n ON n.job_id=d.job_id
+                 WHERE n.data_root_id=?1 AND n.conversation_id=?2 AND n.run_id=?3
+                   AND d.state='acknowledged'",
+                params![self.data_root_id,conversation,run],|row|row.get(0),
+            )?;
+            if expected != seen.len() as i64 { return Err(invalid("acknowledged Host notice missing from model history")); }
+            Ok(())
+        })
     }
 
     /// Terminalize an expired job that has no executor. B2 will decide when to

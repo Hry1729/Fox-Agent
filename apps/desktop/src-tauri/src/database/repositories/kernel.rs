@@ -8,6 +8,129 @@
 
 use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension};
+use sha2::{Digest, Sha256};
+
+/// The exact Host-to-Node frame or live directive, assembled before the model
+/// lease. The transaction re-reads its pending notice set before binding it.
+pub(crate) struct ModelNoticeInput<'a> {
+    pub payload: &'a serde_json::Value,
+    pub history_start: usize,
+    pub historical_bytes: usize,
+}
+
+fn notice_error(message: &str) -> rusqlite::Error {
+    rusqlite::Error::InvalidParameterName(message.into())
+}
+
+fn bind_model_notices(
+    tx: &rusqlite::Transaction<'_>, root: &str, conversation: &str, run: &str,
+    dispatch_key: &str, owner: &str, input: &ModelNoticeInput<'_>, now: i64,
+) -> rusqlite::Result<()> {
+    let supplied: Vec<fox_engine_protocol::HostJobNotice> = match input.payload.get("hostJobNotices") {
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|_| notice_error("invalid model Host job notices"))?,
+        None => Vec::new(),
+    };
+    fox_engine_protocol::validate_host_job_notices(&supplied)
+        .map_err(|_| notice_error("invalid model Host job notice bounds"))?;
+    let history = input.payload.pointer("/input/messages")
+        .or_else(|| input.payload.get("history"))
+        .and_then(serde_json::Value::as_array);
+    let history_bytes = history.map(|value| fox_engine_protocol::historical_host_job_notice_bytes(value))
+        .transpose().map_err(|_| notice_error("invalid historical Host job notice"))?.unwrap_or(0);
+    if input.historical_bytes < history_bytes {
+        return Err(notice_error("Host notice historical size was understated"));
+    }
+    let remaining = (16 * 1024usize).saturating_sub(input.historical_bytes);
+    let expected = super::kernel_job_execution::pending_model_facts(
+        tx, root, conversation, run, remaining,
+    )?;
+    if supplied != expected { return Err(notice_error("Host job notice set changed before model lease")); }
+    if supplied.is_empty() { return Ok(()); }
+    let bound = serde_json::json!({"modelInput":input.payload,"historyStart":input.history_start,
+        "historicalHostNoticeBytes":input.historical_bytes});
+    let input_json = bound.to_string();
+    let input_hash = format!("sha256:{}", hex::encode(Sha256::digest(input_json.as_bytes())));
+    tx.execute("INSERT INTO kernel_model_notice_inputs
+        (run_id,dispatch_key,lease_owner,input_hash,input_json,history_start,historical_bytes,state,bound_at)
+        VALUES (?1,?2,?3,?4,?5,?6,?7,'bound',?8)",
+        params![run,dispatch_key,owner,input_hash,input_json,
+            i64::try_from(input.history_start).map_err(|_|notice_error("Host notice position overflow"))?,
+            i64::try_from(input.historical_bytes).map_err(|_|notice_error("Host notice size overflow"))?,now])?;
+    for (order, notice) in supplied.iter().enumerate() {
+        let position = input.history_start.checked_add(order)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| notice_error("Host notice history position overflow"))?;
+        tx.execute("INSERT INTO kernel_job_notice_deliveries
+            (job_id,dispatch_key,input_hash,history_position,state,bound_at)
+            VALUES (?1,?2,?3,?4,'bound',?5)",
+            params![notice.job_id, dispatch_key, input_hash, position, now])?;
+    }
+    Ok(())
+}
+
+fn acknowledge_model_notices(
+    tx: &rusqlite::Transaction<'_>, root: &str, conversation: &str, run: &str,
+    dispatch_key: &str, owner: &str, now: i64,
+) -> rusqlite::Result<()> {
+    let bound: Option<(String,String,i64,String,String)> = tx.query_row(
+        "SELECT input_hash,input_json,history_start,lease_owner,state
+         FROM kernel_model_notice_inputs WHERE run_id=?1 AND dispatch_key=?2",
+        params![run,dispatch_key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+    ).optional()?;
+    let Some((input_hash,input_json,start,stored_owner,state)) = bound else {
+        let orphan: i64 = tx.query_row("SELECT COUNT(*) FROM kernel_job_notice_deliveries d
+            JOIN kernel_job_notices n ON n.job_id=d.job_id
+            WHERE n.data_root_id=?1 AND n.conversation_id=?2 AND n.run_id=?3
+              AND d.dispatch_key=?4",params![root,conversation,run,dispatch_key],|row|row.get(0))?;
+        if orphan != 0 { return Err(notice_error("orphan model notice binding")); }
+        return Ok(());
+    };
+    if stored_owner != owner || state != "bound"
+        || format!("sha256:{}",hex::encode(Sha256::digest(input_json.as_bytes()))) != input_hash {
+        return Err(notice_error("model notice dispatch input or owner changed"));
+    }
+    let bound: serde_json::Value = serde_json::from_str(&input_json)
+        .map_err(|_|notice_error("invalid stored model notice input"))?;
+    let notices: Vec<fox_engine_protocol::HostJobNotice> = serde_json::from_value(
+        bound["modelInput"]["hostJobNotices"].clone(),
+    ).map_err(|_|notice_error("invalid stored model notice list"))?;
+    fox_engine_protocol::validate_host_job_notices(&notices)
+        .map_err(|_|notice_error("invalid stored model notice bounds"))?;
+    if bound["historyStart"].as_i64() != Some(start) {
+        return Err(notice_error("model notice history position changed"));
+    }
+    let mut statement = tx.prepare("SELECT d.job_id,d.input_hash,d.history_position
+        FROM kernel_job_notice_deliveries d JOIN kernel_job_notices n ON n.job_id=d.job_id
+        WHERE n.data_root_id=?1 AND n.conversation_id=?2 AND n.run_id=?3
+          AND d.dispatch_key=?4 AND d.state='bound' ORDER BY d.history_position")?;
+    let rows = statement.query_map(params![root,conversation,run,dispatch_key],
+        |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    if rows.len() != notices.len() { return Err(notice_error("model notice binding count changed")); }
+    for (index, (id, hash, position)) in rows.iter().enumerate() {
+        if id != &notices[index].job_id || hash != &input_hash
+            || *position != start + index as i64 {
+            return Err(notice_error("model notice binding identity, hash or position changed"));
+        }
+        let fact = super::kernel_job_execution::read_notice(tx,root,conversation,run,id)?
+            .ok_or_else(||notice_error("model notice no longer matches terminal job"))?;
+        if fact.model_fact() != notices[index] {
+            return Err(notice_error("model notice terminal fact changed"));
+        }
+    }
+    tx.execute("UPDATE kernel_job_notice_deliveries SET state='acknowledged',acknowledged_at=?5
+        WHERE dispatch_key=?4 AND state='bound' AND job_id IN
+          (SELECT job_id FROM kernel_job_notices WHERE data_root_id=?1
+            AND conversation_id=?2 AND run_id=?3)",
+        params![root,conversation,run,dispatch_key,now])?;
+    let changed = tx.execute("UPDATE kernel_model_notice_inputs SET state='acknowledged',acknowledged_at=?4
+        WHERE run_id=?1 AND dispatch_key=?2 AND lease_owner=?3 AND state='bound'",
+        params![run,dispatch_key,owner,now])?;
+    if changed != 1 { return Err(notice_error("model notice input acknowledgement lost")); }
+    Ok(())
+}
 
 fn valid_run_state(state: &str) -> bool {
     matches!(
@@ -805,7 +928,7 @@ impl Database {
         wall_now_ms: i64,
         cmd: &crate::kernel::KernelPersistCommand,
     ) -> Result<(), String> {
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, None, None, None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, None, None, None, None, None)
     }
 
     /// Commit a tool result only while this executor still owns its dispatch.
@@ -822,13 +945,14 @@ impl Database {
         if cmd.settled_dispatch_tool_call_ids.len() != 1 || cmd.settled_dispatch_tool_call_ids[0] != tool_call_id {
             return Err("kernel result must settle exactly its owned tool dispatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, Some((tool_call_id, lease_owner)), None, None, None, None, None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, Some((tool_call_id, lease_owner)), None, None, None, None, None, None, None)
     }
 
     /// Claim exactly one pending result delivery and persist its model deadline
     /// in the same transaction. A crash after this point requires reconciliation.
     pub fn kernel_commit_batch_dispatch(&self, run_id: &str, wall_now_ms: i64,
-        cmd: &crate::kernel::KernelPersistCommand, batch_id: &str, lease_owner: &str) -> Result<(), String> {
+        cmd: &crate::kernel::KernelPersistCommand, batch_id: &str, lease_owner: &str,
+        model_input: Option<&ModelNoticeInput<'_>>) -> Result<(), String> {
         if batch_id.trim().is_empty() || lease_owner.trim().is_empty()
             || cmd.run_state != crate::kernel::RunState::Running
             || cmd.model_request_since_wall_ms != Some(wall_now_ms)
@@ -841,7 +965,7 @@ impl Database {
             || payload["startedAt"].as_i64() != Some(wall_now_ms) {
             return Err("Kernel batch dispatch identity mismatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, Some((batch_id, lease_owner)), None, None, None, None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, Some((batch_id, lease_owner)), None, None, None, None, None, model_input)
     }
 
     /// The response, terminal/next-batch decision, and consumed delivery lease
@@ -861,12 +985,12 @@ impl Database {
             || response.run_id != run_id || response.turn_id != cmd.turn_id {
             return Err("Kernel batch response identity mismatch".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, Some((batch_id, lease_owner)), None, None, None, steering)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, Some((batch_id, lease_owner)), None, None, None, steering, None)
     }
 
     pub(crate) fn kernel_commit_initial_model(&self, run_id: &str, wall_now_ms: i64,
         cmd: &crate::kernel::KernelPersistCommand, owner: &str, response: bool,
-        steering: Option<&super::SteeringDecision>) -> Result<(), String> {
+        steering: Option<&super::SteeringDecision>, model_input: Option<&ModelNoticeInput<'_>>) -> Result<(), String> {
         if owner.trim().is_empty() { return Err("initial model lease owner is empty".into()); }
         if response {
             let events = cmd.events.iter().filter(|event| event.event_type == "engine.initial_response").collect::<Vec<_>>();
@@ -884,7 +1008,7 @@ impl Database {
             if payload["turnId"] != cmd.turn_id || payload["idempotencyKey"] != crate::kernel::INITIAL_MODEL_IDEMPOTENCY_KEY
                 || payload["startedAt"].as_i64() != Some(wall_now_ms) { return Err("initial dispatch identity mismatch".into()); }
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, Some((owner, response)), None, None, steering)
+        self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, Some((owner, response)), None, None, steering, model_input)
     }
 
     pub(crate) fn kernel_continuation_input(&self, run_id: &str, effect_key: &str)
@@ -910,7 +1034,7 @@ impl Database {
 
     pub(crate) fn kernel_commit_continuation_model(&self, run_id: &str, wall_now_ms: i64,
         cmd: &crate::kernel::KernelPersistCommand, effect_key: &str, owner: &str, response: bool,
-        steering: Option<&super::SteeringDecision>) -> Result<(), String> {
+        steering: Option<&super::SteeringDecision>, model_input: Option<&ModelNoticeInput<'_>>) -> Result<(), String> {
         let event_type = if response { "engine.continuation_response" } else { "engine.continuation_dispatched" };
         let events = cmd.events.iter().filter(|event| event.event_type == event_type).collect::<Vec<_>>();
         if owner.trim().is_empty() || events.len() != 1 || !effect_key.starts_with("continuation:")
@@ -930,7 +1054,7 @@ impl Database {
             return Err("continuation dispatch identity changed".into());
         }
         self.kernel_commit_decision_with_dispatch_lease(run_id, wall_now_ms, cmd, None, None, None, None, None,
-            Some((effect_key, owner, response)), steering)
+            Some((effect_key, owner, response)), steering, model_input)
     }
 
     pub(crate) fn kernel_commit_model_retry(&self, run_id: &str, wall_now_ms: i64,
@@ -942,7 +1066,7 @@ impl Database {
             || cmd.events[1].event_type != if terminal { "run.failed" } else { "run.retrying" } || !cmd.outbox.is_empty() {
             return Err("invalid settled model retry decision".into());
         }
-        self.kernel_commit_decision_with_dispatch_lease(run_id,wall_now_ms,cmd,None,None,None,None,Some((effect_key,owner)), None, None)
+        self.kernel_commit_decision_with_dispatch_lease(run_id,wall_now_ms,cmd,None,None,None,None,Some((effect_key,owner)), None, None, None)
     }
 
     fn kernel_commit_decision_with_dispatch_lease(
@@ -957,14 +1081,15 @@ impl Database {
         model_retry_lease: Option<(&str, &str)>,
         continuation_lease: Option<(&str, &str, bool)>,
         steering: Option<&super::SteeringDecision>,
+        model_input: Option<&ModelNoticeInput<'_>>,
     ) -> Result<(), String> {
-        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,dispatch_lease,batch_lease,batch_response_lease,initial_lease,model_retry_lease,continuation_lease,steering,None)
+        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,dispatch_lease,batch_lease,batch_response_lease,initial_lease,model_retry_lease,continuation_lease,steering,None,model_input)
     }
 
     /// The UI must send the policy version captured when this approval was
     /// displayed. Re-reading it while answering would revive an obsolete ticket.
     pub fn kernel_commit_decision_with_approval_version(&self,run_id:&str,wall_now_ms:i64,cmd:&crate::kernel::KernelPersistCommand,expected_policy_version:u64)->Result<(),String>{
-        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,None,None,None,None,None,None,None,Some(expected_policy_version))
+        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,None,None,None,None,None,None,None,Some(expected_policy_version),None)
     }
 
     fn kernel_commit_decision_with_dispatch_lease_and_policy(
@@ -980,6 +1105,7 @@ impl Database {
         continuation_lease: Option<(&str, &str, bool)>,
         steering: Option<&super::SteeringDecision>,
         expected_approval_policy_version: Option<u64>,
+        model_input: Option<&ModelNoticeInput<'_>>,
     ) -> Result<(), String> {
         if !valid_run_state(cmd.run_state.as_str()) {
             return Err(format!(
@@ -1147,6 +1273,61 @@ impl Database {
                         crate::kernel::batch_delivery_idempotency_key(batch_id)],
                 )?;
                 if changed != 1 { return Err(kernel_err("Kernel batch delivery lost pending lease or model request already active")); }
+            }
+            let notice_dispatch = if initial_lease.is_some_and(|(_, response)| !response) {
+                Some(crate::kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.to_owned())
+            } else if let Some((effect_key, _, false)) = continuation_lease {
+                Some(format!("continuation-delivery:{effect_key}"))
+            } else {
+                batch_lease.map(|(batch_id, _)| crate::kernel::batch_delivery_idempotency_key(batch_id))
+            };
+            let notice_response = if initial_lease.is_some_and(|(_, response)| response) {
+                Some(crate::kernel::INITIAL_MODEL_IDEMPOTENCY_KEY.to_owned())
+            } else if let Some((effect_key, _, true)) = continuation_lease {
+                Some(format!("continuation-delivery:{effect_key}"))
+            } else {
+                batch_response_lease.map(|(batch_id, _)| crate::kernel::batch_delivery_idempotency_key(batch_id))
+            };
+            let notice_dispatch_owner = initial_lease.filter(|(_, response)| !*response).map(|(owner,_)|owner)
+                .or_else(||continuation_lease.filter(|(_,_,response)| !*response).map(|(_,owner,_)|owner))
+                .or_else(||batch_lease.map(|(_,owner)|owner));
+            let notice_response_owner = initial_lease.filter(|(_, response)| *response).map(|(owner,_)|owner)
+                .or_else(||continuation_lease.filter(|(_,_,response)| *response).map(|(_,owner,_)|owner))
+                .or_else(||batch_response_lease.map(|(_,owner)|owner));
+            if notice_dispatch.is_some() || notice_response.is_some() || model_retry_lease.is_some() {
+                let (conversation, frozen): (String, String) = transaction.query_row(
+                    "SELECT r.conversation_id,k.frozen_config_json FROM kernel_runs k
+                     JOIN runs r ON r.id=k.run_id WHERE k.run_id=?1 AND k.kernel_mode='authoritative'",
+                    [run_id], |row| Ok((row.get(0)?,row.get(1)?)),
+                )?;
+                let config: crate::kernel::RunFrozenConfig = serde_json::from_str(&frozen)
+                    .map_err(|_| kernel_err("invalid frozen model notice flag"))?;
+                if config.experimental_compute_job_notice {
+                    if let Some(key) = notice_dispatch.as_deref() {
+                        let input = model_input.ok_or_else(|| kernel_err("model notice input is missing"))?;
+                        let owner = notice_dispatch_owner.ok_or_else(||kernel_err("missing model notice dispatch owner"))?;
+                        bind_model_notices(&transaction,&self.data_root_id,&conversation,run_id,key,owner,input,wall_now_ms)?;
+                    }
+                    if let Some(key) = notice_response.as_deref() {
+                        if model_input.is_some() { return Err(kernel_err("model response carried a dispatch input")); }
+                        let owner = notice_response_owner.ok_or_else(||kernel_err("missing model notice response owner"))?;
+                        acknowledge_model_notices(&transaction,&self.data_root_id,&conversation,run_id,key,owner,wall_now_ms)?;
+                    }
+                    if let Some((effect_key, _)) = model_retry_lease {
+                        let bound: i64 = transaction.query_row(
+                            "SELECT COUNT(*) FROM kernel_job_notice_deliveries d
+                             JOIN kernel_job_notices n ON n.job_id=d.job_id
+                             WHERE n.data_root_id=?1 AND n.conversation_id=?2 AND n.run_id=?3
+                               AND d.state='bound' AND d.dispatch_key IN
+                                 (SELECT idempotency_key FROM kernel_effect_outbox
+                                  WHERE run_id=?3 AND effect_key=?4)",
+                            params![self.data_root_id,conversation,run_id,effect_key],|row|row.get(0),
+                        )?;
+                        if bound != 0 { return Err(kernel_err("model notice delivery remains uncertain")); }
+                    }
+                } else if model_input.is_some() {
+                    return Err(kernel_err("model notice input supplied while experiment is disabled"));
+                }
             }
             if let Some((tool_call_id, lease_owner)) = dispatch_lease {
                 let owns: bool = transaction.query_row(
@@ -2215,6 +2396,23 @@ impl Database {
             if cmd.run_state==crate::kernel::RunState::Completed {
                 let pending:i64=transaction.query_row("SELECT COUNT(*) FROM kernel_jobs WHERE run_id=?1 AND state IN ('queued','running','paused')",[run_id],|r|r.get(0))?;
                 if pending>0 {return Err(kernel_err("kernel.jobs_pending"));}
+                let (conversation, frozen): (String,String) = transaction.query_row(
+                    "SELECT r.conversation_id,k.frozen_config_json FROM kernel_runs k
+                     JOIN runs r ON r.id=k.run_id WHERE k.run_id=?1",[run_id],
+                    |row| Ok((row.get(0)?,row.get(1)?)),
+                )?;
+                let config: crate::kernel::RunFrozenConfig = serde_json::from_str(&frozen)
+                    .map_err(|_|kernel_err("invalid frozen model notice flag"))?;
+                if config.experimental_compute_job_notice {
+                    let unhandled: i64 = transaction.query_row(
+                        "SELECT COUNT(*) FROM kernel_job_notices n
+                         LEFT JOIN kernel_job_notice_deliveries d ON d.job_id=n.job_id
+                         WHERE n.data_root_id=?1 AND n.conversation_id=?2 AND n.run_id=?3
+                           AND (d.job_id IS NULL OR d.state!='acknowledged')",
+                        params![self.data_root_id,conversation,run_id],|row|row.get(0),
+                    )?;
+                    if unhandled != 0 { return Err(kernel_err("kernel.jobs_pending")); }
+                }
             }
             // 7b. A run that stopped because a human had not answered, or because
             //     its execution budget ran out, banks a durable progress snapshot
