@@ -135,6 +135,14 @@ pub(crate) struct KernelCoordinator<'a> {
 }
 
 impl<'a> KernelCoordinator<'a> {
+    fn unfinished_compute_wait_facts(&self) -> Result<Vec<kernel::WaitingJobFact>, String> {
+        if !self.database.compute_job_notice_enabled(&self.binding.run_id)? {
+            return Ok(Vec::new());
+        }
+        self.database.kernel_waiting_job_facts(
+            &self.binding.conversation_id, &self.binding.run_id)
+    }
+
     fn pending_host_job_notices(
         &self, history: &[Value],
     ) -> Result<Vec<fox_engine_protocol::HostJobNotice>, String> {
@@ -919,6 +927,11 @@ impl<'a> KernelCoordinator<'a> {
         } else {
             None
         };
+        let wait_jobs = if next.is_none() && steering_input.is_none() {
+            self.unfinished_compute_wait_facts()?
+        } else { Vec::new() };
+        let parked_history = serde_json::to_string(&initial_history)
+            .map_err(|_| "invalid parked initial history")?;
         // A request accepted between the queue read above and this write-set can
         // make a **Final** decision refuse. The model result is still in hand and
         // the write-set rolled back, so the safe recovery is to answer the new
@@ -967,6 +980,12 @@ impl<'a> KernelCoordinator<'a> {
                     effects.extend(
                         controller.request_steering_followup(steering::STEERING_PROMPT, &stored)?,
                     );
+                } else if !wait_jobs.is_empty() {
+                    let response_seq = controller.last_event_seq();
+                    effects.extend(controller.park_waiting_jobs(
+                        now.monotonic_ms, now.wall_ms, self.database.kernel_data_root_id(),
+                        response_seq, &encoded, &parked_history, &wait_jobs,
+                    )?);
                 } else {
                     effects.extend(controller.terminate(kernel::RunOutcome::Completed));
                 }
@@ -1175,6 +1194,11 @@ impl<'a> KernelCoordinator<'a> {
         } else {
             None
         };
+        let wait_jobs = if next.is_none() && steering_input.is_none() {
+            self.unfinished_compute_wait_facts()?
+        } else { Vec::new() };
+        let parked_history = serde_json::to_string(&batch_history)
+            .map_err(|_| "invalid parked batch history")?;
         // Same recovery as the initial path: a Final decision that loses a race
         // with a freshly accepted request is re-planned into its own steering
         // round in this call, with the reply the Host already holds.
@@ -1222,6 +1246,12 @@ impl<'a> KernelCoordinator<'a> {
                         effects.extend(controller.request_steering_followup(
                             steering::STEERING_PROMPT,
                             &stored,
+                        )?);
+                    } else if !wait_jobs.is_empty() {
+                        let response_seq = controller.last_event_seq();
+                        effects.extend(controller.park_waiting_jobs(
+                            now.monotonic_ms, now.wall_ms, self.database.kernel_data_root_id(),
+                            response_seq, &response_json, &parked_history, &wait_jobs,
                         )?);
                     } else {
                         effects.extend(controller.terminate(kernel::RunOutcome::Completed));

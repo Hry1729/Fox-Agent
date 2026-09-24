@@ -54,6 +54,9 @@ enum Stage {
 enum StopFollowup {
     /// Accept the stop as the Run's final answer.
     Final,
+    /// A settled response while original compute Jobs remain unfinished.
+    Park { history_json: String, response_json: String,
+        jobs: Vec<kernel::WaitingJobFact> },
     /// Generic stop-review via the `stop_review` continuation lane.
     Review(fox_engine_protocol::KernelInitialModelInput),
     /// Business delivery repair via the `delivery_repair` continuation lane.
@@ -622,9 +625,15 @@ impl KernelCoordinator<'_> {
                     // executed a tool and then produced a complete answer has
                     // nothing open here (the delivery lane owns machine-checkable
                     // demands), so it must not be charged another model round.
-                    let pending_jobs=self.database.kernel_jobs_for_run(&self.binding.run_id)?.iter().any(|job| !job.state.is_terminal());
-                    if pending_jobs && !review_budget_left {return Err("kernel.jobs_pending".into());}
-                    let promised_but_unstarted = pending_jobs || !looks_like_final_answer(&draft);
+                    let wait_jobs = self.unfinished_compute_wait_facts()?;
+                    if !wait_jobs.is_empty() {
+                        StopFollowup::Park {
+                            history_json: serde_json::to_string(&pre_history)
+                                .map_err(|_| "invalid parked live history")?,
+                            response_json: response_json.clone(), jobs: wait_jobs,
+                        }
+                    } else {
+                    let promised_but_unstarted = !looks_like_final_answer(&draft);
                     // Never while tools are still in flight: an unresolved call is
                     // not a promise, and the barrier (not this lane) owns it.
                     let no_tool_in_flight = self
@@ -650,6 +659,7 @@ impl KernelCoordinator<'_> {
                         input.messages.push(json!({"role":"user","content":[{"type":"text","text":CONTINUATION_PROMPT}],"timestamp":0}));
                         input.validate()?;
                         StopFollowup::Review(input)
+                    }
                     }
                 }
                 super::super::delivery::DeliveryStop::Repair {
@@ -959,7 +969,7 @@ impl KernelCoordinator<'_> {
         // therefore measures the exact bytes of the next request — including the
         // steering notices appended to it — before the dispatch is armed.
         let armed_followup = match &stop_followup {
-            StopFollowup::Final => None,
+            StopFollowup::Final | StopFollowup::Park { .. } => None,
             StopFollowup::Review(input) => Some((CONTINUATION_PROMPT.to_owned(), input)),
             StopFollowup::Repair { prompt, input } => Some((prompt.clone(), input)),
             StopFollowup::Steering(input) => Some((STEERING_PROMPT.to_owned(), input)),
@@ -1062,6 +1072,7 @@ impl KernelCoordinator<'_> {
                         effects.extend(commit_tail(
                             controller,
                             now,
+                            self.database.kernel_data_root_id(),
                             policy,
                             &next_checkpoint,
                             stop_followup,
@@ -1080,6 +1091,7 @@ impl KernelCoordinator<'_> {
                         effects.extend(commit_tail(
                             controller,
                             now,
+                            self.database.kernel_data_root_id(),
                             policy,
                             &next_checkpoint,
                             stop_followup,
@@ -1098,6 +1110,7 @@ impl KernelCoordinator<'_> {
                         effects.extend(commit_tail(
                             controller,
                             now,
+                            self.database.kernel_data_root_id(),
                             policy,
                             &next_checkpoint,
                             stop_followup,
@@ -1409,6 +1422,7 @@ impl<'a> KernelCoordinator<'a> {
 fn commit_tail(
     controller: &mut kernel::RunController,
     now: kernel::ClockReading,
+    data_root_id: &str,
     policy: &dyn kernel::PolicyDecisionPort,
     next_checkpoint: &Option<(String, fox_engine_protocol::KernelEngineBatchCheckpoint)>,
     stop_followup: &StopFollowup,
@@ -1442,6 +1456,11 @@ fn commit_tail(
     }
     match stop_followup {
         StopFollowup::Final => Ok(controller.terminate(kernel::RunOutcome::Completed)),
+        StopFollowup::Park { history_json, response_json, jobs } => {
+            let response_seq = controller.last_event_seq();
+            controller.park_waiting_jobs(now.monotonic_ms, now.wall_ms,
+                data_root_id, response_seq, response_json, history_json, jobs)
+        }
         StopFollowup::Review(input) => controller.request_continuation(
             CONTINUATION_PROMPT,
             &serde_json::to_string(input)

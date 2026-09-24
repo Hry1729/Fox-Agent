@@ -311,6 +311,32 @@ impl Database {
         Ok(out)
     }
 
+    /// Original unfinished compute deadlines for a prospective Kernel park.
+    /// The atomic park transaction re-reads this set; this read only prepares
+    /// the candidate and never authorizes a state transition on its own.
+    pub(crate) fn kernel_waiting_job_facts(
+        &self, conversation_id: &str, run_id: &str,
+    ) -> Result<Vec<crate::kernel::WaitingJobFact>, String> {
+        let rows: Vec<(String,String,i64,Option<i64>)> = self.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT job_id,kind,attempts,deadline_ms FROM kernel_jobs
+                 WHERE conversation_id=?1 AND run_id=?2 AND state IN ('queued','running','paused')
+                 ORDER BY job_id")?;
+            let rows = statement.query_map(params![conversation_id,run_id], |row| {
+                Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))
+            })?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })?;
+        rows.into_iter().map(|(job_id,kind,attempt,deadline)| {
+            if kind != "attachment_compute" || attempt < 0 || deadline.is_none_or(|value| value <= 0) {
+                return Err("kernel.job_deadline_missing: unfinished compute Job has no original deadline or valid identity".into());
+            }
+            Ok(crate::kernel::WaitingJobFact {
+                job_id, attempt, deadline_wall_ms: deadline.unwrap(),
+            })
+        }).collect()
+    }
+
     /// Mark a queued job as running and hand it to this process.
     #[cfg(test)] // Legacy fixture setup only; production must claim a fenced attempt.
     pub fn kernel_job_mark_running(&self, job_id: &str) -> Result<JobSnapshot, String> {

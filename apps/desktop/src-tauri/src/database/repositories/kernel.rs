@@ -377,6 +377,12 @@ fn validate_job_wait_decision(
             || cmd.wait_accounted_until_wall_ms != Some(now) {
             return Err(kernel_err("job wait deadline or accounting cursor changed"));
         }
+        let undelivered: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM run_steering_messages WHERE run_id=?1 AND status='received'",
+            [run], |row| row.get(0))?;
+        if undelivered > 0 {
+            return Err(kernel_err(format!("{}{undelivered}",crate::kernel::STEERING_COMPETITION)));
+        }
         return Ok(());
     }
 

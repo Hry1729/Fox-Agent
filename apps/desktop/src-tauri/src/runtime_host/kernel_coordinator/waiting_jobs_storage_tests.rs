@@ -189,6 +189,39 @@ fn waiting_jobs_park_rejects_missing_expired_or_changed_original_job_facts() {
 }
 
 #[test]
+fn waiting_jobs_per_round_settled_final_parks_instead_of_completing() {
+    let now=crate::database::now_ms();
+    let clock=TestClock::new(now);
+    let model=worker_configuration();
+    let (db,_root,run)=fixture_with_start_opt(&clock,&model.hash().unwrap(),Some(&model),true,true);
+    db.with_connection(|conn|conn.execute(
+        "UPDATE kernel_runs SET frozen_config_json=json_set(frozen_config_json,
+          '$.experimentalComputeJobNotice',json('true')) WHERE run_id=?1",[&run],
+    )).unwrap();
+    let cancellation=CancellationRegistry::default();
+    let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
+    let job=db.kernel_job_start(&JobStartRequest {
+        run_id:run.clone(),kind:"attachment_compute".into(),idempotency_key:"round-park".into(),
+        params:json!({"input":"local fixture"}),deadline_ms:Some(now+6_000),progress_total:None,
+    }).unwrap().snapshot().job_id.clone();
+    db.kernel_job_claim_attempt(&job,1).unwrap();
+    coordinator.dispatch_initial("park-owner",&Allow,|binding,frame,_| {
+        Ok(fox_engine_protocol::KernelInitialModelResponse {
+            schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),
+            checkpoint_seq:frame.checkpoint_seq,
+            assistant_message:json!({"role":"assistant","stopReason":"stop",
+                "content":[{"type":"text","text":"Job still running"}]}),
+        })
+    }).unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state,"waiting_jobs");
+    assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(),Some("waiting_jobs"));
+    let (terminal,status):(i64,String)=db.with_connection(|conn|conn.query_row(
+        "SELECT k.terminal_written,r.status FROM kernel_runs k JOIN runs r ON r.id=k.run_id
+         WHERE k.run_id=?1",[&run],|row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+    assert_eq!((terminal,status),(0,"running".into()));
+}
+
+#[test]
 fn waiting_jobs_park_is_atomic_rooted_and_accounted_once_after_reopen() {
     let (db,root,run,_conversation,_job,_controller,park_seq,now)=parked_job_fixture();
     assert!(db.kernel_update_run_state(&run,"completed").is_err());
