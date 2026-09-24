@@ -223,6 +223,76 @@ fn acknowledged_notice_survives_real_compaction_then_next_host_batch_notice() {
 }
 
 #[test]
+fn batch_model_lease_rejects_forged_durable_middle_in_both_transports() {
+    let (db, _root, run, clock, cancellation, _conversation) = notice_host_fixture("batch-source");
+    let coordinator = KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
+    coordinator.dispatch_initial("initial-owner",&Allow,|binding,frame,_| Ok(
+        fox_engine_protocol::KernelInitialModelResponse {
+            schema_version:1,run_id:binding.run_id.clone(),turn_id:frame.input.turn_id.clone(),
+            checkpoint_seq:frame.checkpoint_seq,
+            assistant_message:json!({"role":"assistant","stopReason":"toolUse","content":[
+                {"type":"toolCall","id":"source-read","name":"read",
+                 "arguments":{"path":"proof.txt"}}]}),
+        })).unwrap();
+    let batch = coordinator.snapshot().unwrap().tool_calls[0].batch_id.clone();
+    coordinator.dispatch_tool("source-read","tool-owner",|_,_,_|Ok((true,
+        json!({"content":[{"type":"text","text":"durable result"}]})))).unwrap();
+    let frame = coordinator.prepare_stored_batch_resume(&batch).unwrap();
+    let command = {
+        let mut controller = RunController::rehydrate(db.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
+        let effects = controller.begin_batch_model_request(&batch,clock.now_monotonic_ms(),
+            clock.now_wall_ms()).unwrap();
+        controller.persist_command(&effects)
+    };
+    let dispatch = |payload:&Value, history:&[Value], live_history:Option<&[Value]>,
+                    start:usize| {
+        let binding = crate::database::ModelNoticeInput {
+            payload,delivered_history:history,live_history,
+            checkpoint_seq:frame.checkpoint_seq,history_start:start,historical_bytes:0,
+        };
+        db.kernel_commit_batch_dispatch(&run,clock.now_wall_ms(),&command,&batch,
+            "batch-owner",Some(&binding)).unwrap_err()
+    };
+    for altered in ["history","tool","steering"] {
+        let mut forged = frame.clone();
+        match altered {
+            "history" => forged.history[0]["content"] = json!("forged earlier user text"),
+            "tool" => forged.tools[0].result["content"][0]["text"] = json!("forged tool result"),
+            _ => forged.steering.push(fox_engine_protocol::KernelSteeringNotice {
+                message_id:"forged-steering".into(),content:"new demand".into(),
+                received_at:Some(clock.now_wall_ms()),
+            }),
+        }
+        forged.validate().unwrap();
+        let payload = serde_json::to_value(&forged).unwrap();
+        let (delivered,start) = bound_model_delivery_history(&run,&payload,None).unwrap();
+        let error = dispatch(&payload,&delivered,None,start);
+        assert!(error.contains("bound batch frame differs from durable Host sources"),
+            "{altered}: {error}");
+    }
+    let directive = fox_engine_protocol::KernelRoundDirective {
+        schema_version:1,kind:fox_engine_protocol::KernelRoundDirectiveKind::Batch,
+        batch_id:Some(batch.clone()),checkpoint_seq:Some(frame.checkpoint_seq),
+        preview_seq:None,tools:frame.tools.clone(),prompt:None,
+        steering:Vec::new(),host_job_notices:Vec::new(),
+    };
+    let mut forged_history = bound_batch_live_history(&run,&frame.history,
+        &frame.assistant_message,&frame.tools,&[]);
+    forged_history[0]["content"] = json!("forged live history");
+    let live_payload = serde_json::to_value(&directive).unwrap();
+    let (delivered,start) = bound_model_delivery_history(
+        &run,&live_payload,Some(&forged_history)).unwrap();
+    let error = dispatch(&live_payload,&delivered,Some(&forged_history),start);
+    assert!(error.contains("bound live batch differs from durable Host sources"),"{error}");
+    let (bindings,leased):(i64,i64) = db.with_connection(|conn|conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM kernel_model_notice_inputs WHERE run_id=?1),
+                (SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1
+                  AND effect_type='deliver_tool_batch' AND status='leased')",
+        [&run],|row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+    assert_eq!((bindings,leased),(0,0),"a rejected frame must roll back the whole lease");
+}
+
+#[test]
 fn real_host_to_local_provider_delivers_notice_once_in_live_and_single_round() {
     for live in [false,true] {
         let (address,server)=start_http_model_fixture(vec![json!({"role":"assistant",
