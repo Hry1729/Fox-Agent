@@ -245,3 +245,30 @@ fn real_host_to_local_provider_delivers_notice_once_in_live_and_single_round() {
         assert_eq!(reopened.kernel_build_full_snapshot(&run).unwrap().state,"completed");
     }
 }
+
+#[test]
+fn unknown_model_response_reopens_without_replaying_bound_notice_or_job() {
+    let (db,root,run,clock,cancellation,conversation)=notice_host_fixture("b2a-unknown");
+    let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
+    let job=finished_compute(&db,&run,&conversation,"one-effect");
+    let original=db.kernel_job_notice(&conversation,&run,&job).unwrap().unwrap();
+    let calls=AtomicUsize::new(0);
+    assert!(coordinator.dispatch_initial("first-owner",&Allow,|_,frame,_| {
+        calls.fetch_add(1,Ordering::SeqCst);
+        assert_eq!(frame.host_job_notices.len(),1);
+        Err("model response disappeared after dispatch".into())
+    }).is_err());
+    assert_eq!(calls.load(Ordering::SeqCst),1);
+    let state:String=db.with_connection(|conn|conn.query_row(
+        "SELECT state FROM kernel_job_notice_deliveries WHERE job_id=?1",[&job],|row|row.get(0))).unwrap();
+    assert_eq!(state,"bound");
+    drop(coordinator);drop(db);
+    for _ in 0..2 {
+        let reopened=Database::open(root.join("facts.db")).unwrap();
+        let coordinator=KernelCoordinator::reopen(&reopened,&clock,&run,&cancellation).unwrap();
+        assert!(coordinator.dispatch_initial("replacement-owner",&Allow,|_,_,_| {
+            panic!("uncertain provider request must never be called twice")
+        }).is_err());
+        assert_eq!(reopened.kernel_job_notice(&conversation,&run,&job).unwrap().unwrap(),original);
+    }
+}
