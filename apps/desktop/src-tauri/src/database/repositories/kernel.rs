@@ -8,6 +8,7 @@
 
 use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 /// The exact Host-to-Node frame or live directive, assembled before the model
@@ -108,6 +109,33 @@ fn notice_error(message: &str) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.into())
 }
 
+fn bound_context_on(
+    tx: &rusqlite::Transaction<'_>, run: &str, target: &str,
+    effect_key: &str, mut messages: Vec<Value>,
+) -> rusqlite::Result<Vec<Value>> {
+    let model = super::kernel_model_config::read_model_config(tx, run)?;
+    let config_hash = model.hash().map_err(|_| notice_error("invalid model config hash"))?;
+    for (plan, result) in super::kernel_compaction::read_compaction_results_on(tx, run, target)? {
+        if plan.target != target || plan.source != messages || plan.config_hash != config_hash {
+            return Err(notice_error("bound model compaction source changed"));
+        }
+        messages = result.view(&plan).map_err(|_| notice_error("invalid bound model compaction"))?;
+    }
+    let retry: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM kernel_events e JOIN kernel_runs r ON r.run_id=e.run_id
+          WHERE e.run_id=?1 AND e.event_type='engine.model_rejected'
+            AND json_extract(e.payload_json,'$.effectKey')=?2
+            AND json_extract(e.payload_json,'$.failure.category')='incomplete_response'
+            AND r.kernel_mode='authoritative')",
+        params![run, effect_key], |row| row.get(0),
+    )?;
+    if retry {
+        messages.push(serde_json::json!({"role":"user","content":[{"type":"text",
+            "text":crate::kernel_compaction::INCOMPLETE_MODEL_RETRY_PROMPT}],"timestamp":0}));
+    }
+    Ok(messages)
+}
+
 /// Canonical source for an initial/replacement-session frame. The frame
 /// supplied to the lease is checked against this projection, never treated as
 /// proof of its own history. Every transform is justified by an immutable DB
@@ -137,25 +165,8 @@ fn bound_initial_frame_messages_on(
         (super::kernel_initial_input::read_input(tx,run)?.messages,false)
     };
     if !job_notice_lane {
-        let model=super::kernel_model_config::read_model_config(tx,run)?;
-        let config_hash=model.hash().map_err(|_|notice_error("invalid model config hash"))?;
-        for (plan,result) in super::kernel_compaction::read_compaction_results_on(tx,run,target)? {
-            if plan.target!=target || plan.source!=messages || plan.config_hash!=config_hash {
-                return Err(notice_error("bound model compaction source changed"));
-            }
-            messages=result.view(&plan).map_err(|_|notice_error("invalid bound model compaction"))?;
-        }
         let effect_key=continuation_key.unwrap_or(crate::kernel::INITIAL_MODEL_EFFECT_KEY);
-        let retry:bool=tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM kernel_events e JOIN kernel_runs r ON r.run_id=e.run_id
-              WHERE e.run_id=?1 AND e.event_type='engine.model_rejected'
-                AND json_extract(e.payload_json,'$.effectKey')=?2
-                AND json_extract(e.payload_json,'$.failure.category')='incomplete_response'
-                AND r.kernel_mode='authoritative')",params![run,effect_key],|row|row.get(0))?;
-        if retry {
-            messages.push(serde_json::json!({"role":"user","content":[{"type":"text",
-                "text":crate::kernel_compaction::INCOMPLETE_MODEL_RETRY_PROMPT}],"timestamp":0}));
-        }
+        messages=bound_context_on(tx,run,target,effect_key,messages)?;
     }
     let mut rows=tx.prepare("SELECT content,received_at,applied_dispatch_key
         FROM run_steering_messages WHERE run_id=?1 AND status='delivered' ORDER BY seq")?;
@@ -171,6 +182,93 @@ fn bound_initial_frame_messages_on(
             &content,received_at));
     }
     Ok(messages)
+}
+
+struct BoundBatchSource {
+    history: Vec<Value>,
+    assistant: Value,
+    tools: Vec<fox_engine_protocol::KernelSettledToolResult>,
+    turn_id: String,
+    response_seq: i64,
+}
+
+/// Rebuild the middle of a batch request from the original checkpoint and
+/// settled rows, never from the adapter-supplied frame being leased.
+fn bound_batch_source_on(
+    tx: &rusqlite::Transaction<'_>, run: &str, batch_id: &str,
+) -> rusqlite::Result<BoundBatchSource> {
+    let mut stmt = tx.prepare("SELECT seq,payload_json FROM kernel_events
+        WHERE run_id=?1 AND event_type='engine.batch_checkpoint'
+          AND json_extract(payload_json,'$.batchId')=?2 ORDER BY seq LIMIT 2")?;
+    let rows = stmt.query_map(params![run,batch_id], |row| {
+        Ok((row.get::<_,i64>(0)?, row.get::<_,String>(1)?))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+    if rows.len() != 1 { return Err(notice_error("missing or duplicate batch checkpoint")); }
+    let (checkpoint_seq, body) = &rows[0];
+    let payload: Value = serde_json::from_str(body)
+        .map_err(|_| notice_error("invalid durable batch checkpoint"))?;
+    let value = &payload["checkpoint"]["value"];
+    let hash = format!("sha256:{}",hex::encode(Sha256::digest(value.to_string().as_bytes())));
+    let engine_id: String = tx.query_row(
+        "SELECT engine_id FROM kernel_runs WHERE run_id=?1 AND kernel_mode='authoritative'",
+        [run], |row| row.get(0))?;
+    if payload["checkpoint"]["hash"] != hash || payload["engineId"] != engine_id {
+        return Err(notice_error("batch checkpoint hash or engine changed"));
+    }
+    let checkpoint: fox_engine_protocol::KernelEngineBatchCheckpoint =
+        serde_json::from_value(value.clone())
+            .map_err(|_| notice_error("invalid durable batch checkpoint value"))?;
+    checkpoint.validate().map_err(|_| notice_error("invalid durable batch history"))?;
+    if checkpoint.batch_id != batch_id {
+        return Err(notice_error("batch checkpoint identity changed"));
+    }
+    let turn_id = payload["turnId"].as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| notice_error("batch checkpoint turn is missing"))?.to_owned();
+    let (response_seq, response_body): (i64,String) = tx.query_row(
+        "SELECT seq,payload_json FROM kernel_events WHERE run_id=?1 AND seq<?2
+          AND event_type IN ('engine.initial_response','engine.batch_response',
+                             'engine.continuation_response') ORDER BY seq DESC LIMIT 1",
+        params![run,checkpoint_seq], |row| Ok((row.get(0)?,row.get(1)?)))?;
+    let response: Value = serde_json::from_str(&response_body)
+        .map_err(|_| notice_error("invalid durable batch source response"))?;
+    if response["turnId"] != turn_id
+        || response["response"]["assistantMessage"] != checkpoint.assistant_message {
+        return Err(notice_error("batch checkpoint differs from its model response"));
+    }
+    let history = bound_context_on(tx,run,batch_id,
+        &crate::kernel::batch_delivery_effect_key(batch_id),checkpoint.history)?;
+    let (ordered_json,barrier): (String,i64) = tx.query_row(
+        "SELECT ordered_tool_call_ids_json,barrier_emitted FROM kernel_tool_batches
+          WHERE run_id=?1 AND batch_id=?2",params![run,batch_id],
+        |row| Ok((row.get(0)?,row.get(1)?)))?;
+    if barrier != 1 { return Err(notice_error("batch result barrier is not durable")); }
+    let ordered: Vec<String> = serde_json::from_str(&ordered_json)
+        .map_err(|_| notice_error("invalid durable batch tool order"))?;
+    let tools = project_settled_tools_on(tx,run,batch_id,&ordered)?;
+    Ok(BoundBatchSource {history,assistant:checkpoint.assistant_message,
+        tools,turn_id,response_seq})
+}
+
+fn bound_batch_steering_on(
+    tx: &rusqlite::Transaction<'_>, run: &str, key: Option<&str>,
+) -> rusqlite::Result<Vec<fox_engine_protocol::KernelSteeringNotice>> {
+    if let Some(key) = key {
+        let rows = super::run_steering::bound_steering_rows(tx,run,key)?;
+        Ok(rows.into_iter().map(|row| fox_engine_protocol::KernelSteeringNotice {
+            message_id:row.message_id,content:row.content,
+            received_at:Some(row.received_at),
+        }).collect())
+    } else {
+        let mut stmt = tx.prepare("SELECT message_id,content,received_at
+             FROM run_steering_messages WHERE run_id=?1 AND status='delivered' ORDER BY seq")?;
+        let notices = stmt.query_map([run], |row| Ok(fox_engine_protocol::KernelSteeringNotice {
+            message_id:row.get(0)?,content:row.get(1)?,received_at:Some(row.get(2)?),
+        }))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(notices)
+    }
 }
 
 impl Database {
@@ -222,6 +320,34 @@ fn bind_model_notices(
             frame.continuation_key.as_deref(),dispatch_key)?;
         if frame.input.messages!=expected {
             return Err(notice_error("bound initial frame differs from frozen Host sources"));
+        }
+    } else if input.live_history.is_none() && input.payload.get("history").is_some() {
+        let frame: fox_engine_protocol::KernelBatchResumeFrame =
+            serde_json::from_value(input.payload.clone())
+                .map_err(|_| notice_error("invalid bound batch frame"))?;
+        frame.validate().map_err(|_| notice_error("invalid bound batch frame"))?;
+        let source = bound_batch_source_on(tx,run,&frame.batch_id)?;
+        let steering = bound_batch_steering_on(tx,run,None)?;
+        if frame.idempotency_key != dispatch_key || frame.turn_id != source.turn_id
+            || frame.history != source.history || frame.assistant_message != source.assistant
+            || frame.tools != source.tools || frame.steering != steering {
+            return Err(notice_error("bound batch frame differs from durable Host sources"));
+        }
+    } else if input.live_history.is_some() && input.payload["kind"] == "batch" {
+        let directive: fox_engine_protocol::KernelRoundDirective =
+            serde_json::from_value(input.payload.clone())
+                .map_err(|_| notice_error("invalid bound live batch directive"))?;
+        directive.validate().map_err(|_| notice_error("invalid bound live batch directive"))?;
+        let batch_id = directive.batch_id.as_deref()
+            .ok_or_else(|| notice_error("bound live batch has no id"))?;
+        let source = bound_batch_source_on(tx,run,batch_id)?;
+        let steering_key = format!("round-response:{}",source.response_seq);
+        let steering = bound_batch_steering_on(tx,run,Some(&steering_key))?;
+        let expected = crate::runtime_host::kernel_coordinator::bound_batch_live_history(
+            run,&source.history,&source.assistant,&source.tools,&steering);
+        if directive.tools != source.tools || directive.steering != steering
+            || input.live_history != Some(expected.as_slice()) {
+            return Err(notice_error("bound live batch differs from durable Host sources"));
         }
     }
     Database::validate_host_job_notice_history_on(tx,root,conversation,run,history)?;
