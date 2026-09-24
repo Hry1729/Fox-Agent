@@ -125,7 +125,7 @@ fn map_windows_zvec_bundle_resource(source: &Path) {
         &fs::read_to_string(&config_path).expect("read Tauri configuration"),
     )
     .expect("parse Tauri configuration");
-    let Some(target) = config
+    let Some(default_target) = config
         .pointer("/bundle/resources")
         .and_then(serde_json::Value::as_object)
         .and_then(|resources| resources.get(ZVEC_RESOURCE_GLOB))
@@ -162,13 +162,28 @@ fn map_windows_zvec_bundle_resource(source: &Path) {
         return;
     };
 
+    let target = match resources.get(ZVEC_RESOURCE_GLOB) {
+        Some(serde_json::Value::Null) => return,
+        Some(serde_json::Value::String(target)) => target.clone(),
+        Some(_) => return,
+        None => default_target.to_owned(),
+    };
+
+    let source = source.to_string_lossy();
+    let source = source
+        .strip_prefix(r"\\?\UNC\")
+        .map(|unc| format!(r"\\{unc}"))
+        .or_else(|| source.strip_prefix(r"\\?\").map(str::to_owned))
+        .unwrap_or_else(|| source.into_owned())
+        .replace('\\', "/");
+
     // Remove only the stale default glob, then map the verified native DLL at
-    // its actual resolved path to the destination configured in tauri.conf.json.
+    // its actual resolved path to the configured destination. A caller's
+    // explicit string target is carried over; explicit null disables the DLL.
     resources.insert(ZVEC_RESOURCE_GLOB.into(), serde_json::Value::Null);
-    resources.insert(
-        source.to_string_lossy().replace('\\', "/"),
-        serde_json::Value::String(target.to_owned()),
-    );
+    resources
+        .entry(source)
+        .or_insert_with(|| serde_json::Value::String(target));
     env::set_var("TAURI_CONFIG", serde_json::to_string(&overrides).unwrap());
 }
 
@@ -189,26 +204,22 @@ fn main() {
         println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
         println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
     }
-    if env::var_os("CARGO_FEATURE_ZVEC").is_some()
+    let zvec_source = if env::var_os("CARGO_FEATURE_ZVEC").is_some()
         && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
     {
-        stage_windows_zvec_test_dll();
-    }
+        Some(stage_windows_zvec_test_dll())
+    } else {
+        None
+    };
     // The zvec native DLL is only produced when the `zvec` feature is enabled
     // (zvec-rust-sys downloads/builds it into OUT_DIR). On Windows/MSVC, replace
     // the default resource glob with the verified DLL path selected by Cargo;
     // this avoids relying on a target-directory glob that may not match a shared
     // or custom CARGO_TARGET_DIR. The DLL must never be faked.
-    if env::var_os("CARGO_FEATURE_ZVEC").is_some()
-        && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
-    {
-        let source = stage_windows_zvec_test_dll();
-        map_windows_zvec_bundle_resource(&source);
-    } else if env::var_os("CARGO_FEATURE_ZVEC").is_some()
-        && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-    {
-        stage_windows_zvec_test_dll();
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        if let Some(source) = zvec_source.as_deref() {
+            map_windows_zvec_bundle_resource(source);
+        }
     }
     if env::var_os("CARGO_FEATURE_ZVEC").is_none() {
         if let Ok(conf_path) = env::var("CARGO_MANIFEST_DIR") {
