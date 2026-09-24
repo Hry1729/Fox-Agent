@@ -346,6 +346,36 @@ fn waiting_jobs_wake_outbox_failure_rolls_back_and_two_handles_cannot_wake_twice
 }
 
 #[test]
+fn automatic_waiting_wake_cannot_overtake_a_queued_cancel() {
+    let (db,_root,run,conversation,job,_controller,park_seq,now)=parked_job_fixture();
+    db.kernel_job_complete_attempt(&job,1,&conversation,&json!({"answer":"ready"})).unwrap();
+    let mut controller=RunController::rehydrate(db.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
+    let mut input=db.kernel_initial_input(&run).unwrap();
+    let parked:String=db.with_connection(|conn|conn.query_row(
+        "SELECT payload_json FROM kernel_events WHERE run_id=?1 AND event_type='run.waiting_jobs'",
+        [&run],|row|row.get(0))).unwrap();
+    let parked:serde_json::Value=serde_json::from_str(&parked).unwrap();
+    input.messages=serde_json::from_value(parked["history"].clone()).unwrap();
+    input.messages.push(parked["response"]["assistantMessage"].clone());
+    let notices=db.pending_host_job_notices(&conversation,&run,16*1024).unwrap();
+    let next_seq=controller.last_event_seq()+2;
+    let payload=json!({"turnId":input.turn_id,"effectKey":format!("continuation:{next_seq}"),
+        "lane":"job_notice","prompt":"","input":input,"hostJobNotices":notices});
+    let effects=controller.wake_waiting_jobs(park_seq,now+1_000,&payload.to_string()).unwrap();
+    let version=db.execution_policy(&conversation).unwrap().version;
+    db.queue_kernel_host_command(&run,None).unwrap();
+    let rejected=db.kernel_commit_waiting_wake(&run,now+1_000,
+        &controller.persist_command(&effects),version).unwrap_err();
+    assert!(rejected.contains("job_wake_cancel_pending"),"{rejected}");
+    assert_eq!(db.kernel_rehydrate(&run).unwrap().unwrap().state,RunState::WaitingJobs);
+    let (wakes,outbox):(i64,i64)=db.with_connection(|conn|conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.jobs_woken'),
+                (SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='continuation_model')",
+        [&run],|row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+    assert_eq!((wakes,outbox),(0,0));
+}
+
+#[test]
 fn terminal_job_direct_notice_requires_the_settled_input_and_exact_typed_fact() {
     let now=crate::database::now_ms();
     let clock=TestClock::new(now);
