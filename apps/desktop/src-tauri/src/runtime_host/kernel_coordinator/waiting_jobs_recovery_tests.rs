@@ -219,9 +219,14 @@ fn orphaned_running_job_stays_paused_until_the_original_wait_deadline() {
 }
 
 fn prepare_orphan_wait(limited: bool) -> (Database, std::path::PathBuf, String, String, i64, u64) {
+    prepare_waiting_lease(limited, worker_configuration(), true)
+}
+
+fn prepare_waiting_lease(limited: bool,
+    model: crate::kernel_model_config::KernelModelConfig, stale_owner: bool,
+) -> (Database, std::path::PathBuf, String, String, i64, u64) {
     let now = crate::database::now_ms();
     let clock = TestClock::new(now);
-    let model = worker_configuration();
     let budgets = TimeBudgets { run_execution_ms: 9_000, run_execution_limited: limited,
         ..TimeBudgets::default() };
     let (db, root, run) = fixture_with_budgets_opt(&clock, &model.hash().unwrap(),
@@ -281,9 +286,11 @@ fn prepare_orphan_wait(limited: bool) -> (Database, std::path::PathBuf, String, 
     assert!(original_deadline <= now + if limited { 9_000 } else { 12_000 });
     // A reused marker for this same PID is deterministically dead on Windows
     // without probing an arbitrary process or leaving any executor running.
-    db.with_connection(|conn| conn.execute(
-        "UPDATE kernel_jobs SET owner_pid=?2, owner_started_at=1 WHERE job_id=?1",
-        rusqlite::params![job, i64::from(std::process::id())])).unwrap();
+    if stale_owner {
+        db.with_connection(|conn| conn.execute(
+            "UPDATE kernel_jobs SET owner_pid=?2, owner_started_at=1 WHERE job_id=?1",
+            rusqlite::params![job, i64::from(std::process::id())])).unwrap();
+    }
     (db, root, run, job, original_deadline, park_seq)
 }
 
@@ -378,6 +385,182 @@ fn recover_orphan_without_resuming(limited: bool) {
                 (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='engine.continuation_requested')",
         [&run], |row| Ok((row.get(0)?, row.get(1)?)))).unwrap();
     assert_eq!((wakes, continuations), (0, 0));
+    drop(host);
+    drop(app);
+}
+
+/// The durable lease records that the continuation might already have reached
+/// a Provider. No Provider is contacted by this fixture; recovery must still
+/// treat the bound model response as unknown rather than dispatching again.
+#[test]
+fn bound_job_notice_continuation_lease_is_not_replayed_after_reopen() {
+    if std::env::var_os("FOX_TEST_UNKNOWN_NOTICE_LEASE_CHILD").is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("bound_job_notice_continuation_lease_is_not_replayed_after_reopen")
+            .arg("--test-threads=1")
+            .env("FOX_TEST_UNKNOWN_NOTICE_LEASE_CHILD", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(55);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("bound Job-notice lease recovery exceeded 55 seconds");
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "child stdout: {}\nchild stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let requests = std::sync::Arc::new(AtomicUsize::new(0));
+    let probe = { let stop = stop.clone(); let requests = requests.clone();
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        requests.fetch_add(1, Ordering::SeqCst);
+                        let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock =>
+                        std::thread::sleep(Duration::from_millis(5)),
+                    Err(error) => panic!("local Provider probe failed: {error}"),
+                }
+            }
+        })
+    };
+    let mut model = worker_configuration();
+    model.model_service = json!({"apiType":"openai-completions","modelId":"kernel-http-test",
+        "baseUrl":format!("http://{address}/v1")});
+    let (db, root, run, job_id, _deadline, _park_seq) =
+        prepare_waiting_lease(false, model, false);
+    let conversation = db.run_control_binding(&run).unwrap().unwrap().conversation_id;
+    db.kernel_job_complete_attempt(&job_id, 1, &conversation,
+        &json!({"answer":"settled before restart"})).unwrap();
+    assert!(db.kernel_job_notice(&conversation, &run, &job_id).unwrap().is_some());
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run, &cancellation).unwrap();
+    assert!(coordinator.wake_waiting_jobs_now().unwrap());
+    let effect = coordinator.snapshot().unwrap().pending_effects.into_iter()
+        .find(|effect| effect.kind == kernel::OutboxEffectKind::ContinuationModel
+            && effect.status == kernel::OutboxStatus::Pending).unwrap();
+    let key = effect.effect_key;
+    drop(coordinator);
+    let (input, lane, notices) = db.kernel_continuation_input_with_lane(&run, &key).unwrap();
+    assert_eq!(lane.as_deref(), Some("job_notice"));
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].job_id, job_id);
+    let mut controller = RunController::rehydrate(db.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
+    let frame = fox_engine_protocol::KernelInitialModelFrame {
+        schema_version: 1, input,
+        idempotency_key: format!("continuation-delivery:{key}"),
+        continuation_key: Some(key.clone()), continuation_lane: Some("job_notice".into()),
+        checkpoint_seq: controller.last_event_seq(), host_job_notices: notices,
+    };
+    frame.validate().unwrap();
+    let payload = serde_json::to_value(&frame).unwrap();
+    let mut delivered_history = frame.input.messages.clone();
+    delivered_history.extend(frame.host_job_notices.iter().map(fox_engine_protocol::HostJobNotice::history_marker));
+    let binding = ModelNoticeInput {
+        payload: &payload, delivered_history: &delivered_history, live_history: None,
+        checkpoint_seq: frame.checkpoint_seq, history_start: frame.input.messages.len(),
+        historical_bytes: fox_engine_protocol::historical_host_job_notice_bytes(&frame.input.messages).unwrap(),
+    };
+    let dispatched = controller.begin_continuation_model_request(&key,
+        clock.now_monotonic_ms(), clock.now_wall_ms()).unwrap();
+    db.kernel_commit_continuation_model(&run, clock.now_wall_ms(),
+        &controller.persist_command(&dispatched), &key, "unknown-fixture-owner", false,
+        None, Some(&binding)).unwrap();
+    let dispatch_key = format!("continuation-delivery:{key}");
+    let before: (String, String, String, String, String, String, i64, String, i64) =
+        db.with_connection(|conn| conn.query_row(
+        "SELECT m.dispatch_key,m.input_hash,m.state,d.dispatch_key,d.input_hash,d.state,d.history_position,
+                o.status,o.attempts
+           FROM kernel_model_notice_inputs m
+           JOIN kernel_job_notice_deliveries d ON d.dispatch_key=m.dispatch_key
+           JOIN kernel_effect_outbox o ON o.run_id=m.run_id AND o.effect_key=?3
+          WHERE m.run_id=?1 AND m.dispatch_key=?2 AND d.job_id=?4",
+        rusqlite::params![run,dispatch_key,key,job_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)))).unwrap();
+    assert_eq!(before.0, dispatch_key);
+    assert_eq!((before.2.as_str(), before.5.as_str()), ("bound", "bound"));
+    assert_eq!(before.3, dispatch_key);
+    assert_eq!(before.1, before.4, "notice delivery did not bind the model input hash");
+    assert_eq!((before.7.as_str(), before.8), ("leased", 1));
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    drop(db);
+
+    let reopened = Database::open(root.join("facts.db")).unwrap();
+    std::fs::create_dir_all(root.join("attachments")).unwrap();
+    std::fs::create_dir_all(root.join("skills")).unwrap();
+    let mut context = tauri::generate_context!();
+    for window in &mut context.config_mut().app.windows { window.create = false; }
+    let app = tauri::Builder::default().any_thread().build(context).unwrap();
+    let host = crate::runtime_host::RuntimeHost::new(app.handle().clone(), reopened.clone(), root.clone(),
+        root.join("attachments"), root.join("skills"), crate::yuxi::YuxiClient::new().unwrap());
+    host.recover_kernel_runs_detached().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while reopened.kernel_host_run_state(&run).unwrap().as_deref() != Some("failed") {
+        assert!(Instant::now() < deadline,
+            "unknown continuation lease did not fail closed: {:?}",
+            reopened.kernel_host_run_state(&run).unwrap());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let code: String = reopened.with_connection(|conn| conn.query_row(
+        "SELECT json_extract(payload_json,'$.code') FROM kernel_events
+           WHERE run_id=?1 AND event_type='run.failed' ORDER BY seq DESC LIMIT 1",
+        [&run], |row| row.get(0))).unwrap();
+    assert_eq!(code, "kernel.uncertain_execution");
+    host.recover_kernel_runs_detached().unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    stop.store(true, Ordering::SeqCst);
+    probe.join().unwrap();
+    assert_eq!(requests.load(Ordering::SeqCst), 0,
+        "recovery contacted the local Provider for an already leased model response");
+    let after: (String, String, String, String, String, String, i64, String, i64) =
+        reopened.with_connection(|conn| conn.query_row(
+        "SELECT m.dispatch_key,m.input_hash,m.state,d.dispatch_key,d.input_hash,d.state,d.history_position,
+                o.status,o.attempts
+           FROM kernel_model_notice_inputs m
+           JOIN kernel_job_notice_deliveries d ON d.dispatch_key=m.dispatch_key
+           JOIN kernel_effect_outbox o ON o.run_id=m.run_id AND o.effect_key=?3
+          WHERE m.run_id=?1 AND m.dispatch_key=?2 AND d.job_id=?4",
+        rusqlite::params![run,dispatch_key,key,job_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)))).unwrap();
+    assert_eq!(after.0, before.0);
+    assert_eq!(after.1, before.1);
+    assert_eq!(after.2, "bound", "an unknown model response was falsely acknowledged");
+    assert_eq!(after.3, before.3);
+    assert_eq!(after.4, before.4);
+    assert_eq!(after.5, "bound", "a response-unknown notice was falsely acknowledged");
+    assert_eq!(after.6, before.6);
+    assert_eq!(after.8, 1, "unknown model lease was claimed again");
+    assert_ne!(after.7, "pending", "terminal recovery made the old model lease redispatchable");
+    let counts: (i64, i64, i64, i64) = reopened.with_connection(|conn| conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_type='continuation_model'),
+                (SELECT COUNT(*) FROM kernel_model_notice_inputs WHERE run_id=?1 AND dispatch_key=?2),
+                (SELECT COUNT(*) FROM kernel_job_notice_deliveries WHERE job_id=?3),
+                (SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='engine.continuation_dispatched')",
+        rusqlite::params![run,dispatch_key,job_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))).unwrap();
+    assert_eq!(counts, (1, 1, 1, 1));
+    let job = reopened.kernel_job_snapshot(&job_id).unwrap();
+    assert_eq!(job.state.as_str(), "completed");
+    assert_eq!(job.attempts, 1);
     drop(host);
     drop(app);
 }
