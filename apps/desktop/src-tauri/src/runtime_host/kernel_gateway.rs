@@ -670,6 +670,22 @@ impl GatewayPolicy {
         input: &Value,
         token: &CancellationToken,
     ) -> Result<Value, String> {
+        self.execute_context_resource_with_terminal_notice(
+            database, attachments_dir, sessions_dir, skills_dir, tool, input, token, None,
+        )
+    }
+
+    pub(super) fn execute_context_resource_with_terminal_notice(
+        &self,
+        database: &Database,
+        attachments_dir: &std::path::Path,
+        sessions_dir: &std::path::Path,
+        skills_dir: &std::path::Path,
+        tool: &str,
+        input: &Value,
+        token: &CancellationToken,
+        on_terminal: Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>,
+    ) -> Result<Value, String> {
         token.check()?;
         self.validate(tool, input)?;
         if database.run_control_binding(&self.binding.run_id)?.as_ref() != Some(&self.binding)
@@ -679,7 +695,7 @@ impl GatewayPolicy {
         }
         database.kernel_validate_resource_acquisition_for(&self.binding.run_id, Some(tool))?;
         if super::background_jobs::TOOLS.contains(&tool) {
-            return super::background_jobs::execute(database, attachments_dir, sessions_dir, &self.binding.run_id, tool, input, Some(token.clone()), self.remaining_budget(database)?);
+            return super::background_jobs::execute(database, attachments_dir, sessions_dir, &self.binding.run_id, tool, input, Some(token.clone()), self.remaining_budget(database)?, on_terminal);
         }
         let result = match tool {
             "memory_search" | "memory_propose" => super::execute_memory_operation(

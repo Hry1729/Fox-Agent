@@ -12,6 +12,7 @@ pub(crate) mod kernel_coordinator;
 mod kernel_model_worker;
 mod kernel_run_lock;
 mod kernel_host;
+mod waiting_jobs_wake;
 mod kernel_authority;
 pub(crate) mod process_identity;
 pub(crate) use process_identity::process_start_marker;
@@ -761,6 +762,9 @@ fn node_dependency_is_available(script: &Path, package: &str) -> bool {
 struct RuntimeHostState {
     cancellation: crate::kernel::CancellationRegistry,
     kernel_active_runs: HashSet<String>,
+    waiting_wakes: HashMap<String, waiting_jobs_wake::WakeSlot>,
+    #[cfg(test)]
+    auto_wake_disabled: HashSet<String>,
     shutting_down: bool,
     state: String,
     worker: Option<WorkerHandle>,
@@ -1095,7 +1099,9 @@ impl RuntimeHost {
         };
         let token=self.state.lock().map_err(|_| "runtime state poisoned")?.cancellation.run_token(run_id).ok();
         let budget=std::time::Duration::from_millis(binding.budgets.limit_operation_ms(binding.budgets.tool_execution_ms, elapsed).max(0) as u64);
-        background_jobs::execute(&self.database,&self.attachments_dir,&self.sessions_dir,run_id,tool,input,token,budget)
+        let host = self.clone();
+        let on_terminal = Arc::new(move |run: &str| { let _ = host.signal_waiting_run(run); });
+        background_jobs::execute(&self.database,&self.attachments_dir,&self.sessions_dir,run_id,tool,input,token,budget,Some(on_terminal))
     }
     fn handle_job_tool_request(&self, stdin: &Arc<Mutex<ChildStdin>>, envelope: RuntimeEnvelope) {
         let outcome=(|| -> Result<Value,String> {
@@ -1220,6 +1226,9 @@ impl RuntimeHost {
             state: Arc::new(Mutex::new(RuntimeHostState {
                 cancellation: crate::kernel::CancellationRegistry::default(),
                 kernel_active_runs: HashSet::new(),
+                waiting_wakes: HashMap::new(),
+                #[cfg(test)]
+                auto_wake_disabled: HashSet::new(),
                 shutting_down: false,
                 state: "stopped".to_owned(),
                 worker: None,

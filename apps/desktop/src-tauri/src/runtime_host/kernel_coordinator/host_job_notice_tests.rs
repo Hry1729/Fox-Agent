@@ -595,6 +595,9 @@ fn real_runtime_host_job_start_parks_and_wakes_on_both_pi_transports() {
     // reason to relabel a live Job as an orphan in this scenario.
     let host=crate::runtime_host::RuntimeHost::new(app.handle().clone(),db.clone(),root.clone(),
         root.join("attachments"),root.join("skills"),crate::yuxi::YuxiClient::new().unwrap());
+    // This fixture verifies the explicit wake primitive; the automatic Host
+    // watcher is covered separately by waiting_jobs_auto_tests.
+    host.disable_auto_wake_for_test(&run);
     let binding=db.run_control_binding(&run).unwrap().unwrap();
     let parent_token={
         let state=host.state.lock().unwrap();

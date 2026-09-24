@@ -749,6 +749,28 @@ pub(super) fn drive_with_actions_per_round(
         api_key, policy, execute, after_commit, settle_children, preview, true).map(|_| ())
 }
 
+#[cfg(test)]
+pub(crate) mod waiting_wake_test_hooks {
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Hook = (String, Arc<dyn Fn() + Send + Sync>);
+    fn slot() -> &'static Mutex<Option<Hook>> {
+        static SLOT: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+        SLOT.get_or_init(|| Mutex::new(None))
+    }
+    pub(crate) fn set_before_park_unlock(run_id: &str, hook: Arc<dyn Fn() + Send + Sync>) {
+        *slot().lock().unwrap() = Some((run_id.to_owned(), hook));
+    }
+    pub(crate) fn run_before_park_unlock(run_id: &str) {
+        let hook = {
+            let mut stored = slot().lock().unwrap();
+            if stored.as_ref().is_some_and(|(id, _)| id == run_id) {
+                stored.take().map(|(_, hook)| hook)
+            } else { None }
+        };
+        if let Some(hook) = hook { hook(); }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum KernelDriveOutcome {
     Terminal,
@@ -1132,6 +1154,7 @@ impl super::RuntimeHost {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        self.stop_waiting_watches()?;
         Ok(())
     }
 
@@ -1184,6 +1207,7 @@ impl super::RuntimeHost {
                     // a Run currently held by another process.
                     let _ = host.record_kernel_start_failure(&run_id);
                 }
+                let parked = matches!(&result, Ok(KernelDriveOutcome::Parked));
                 let retire = kernel_scope_should_retire(&host.database, &run_id);
                 if let Ok(mut state) = host.state.lock() {
                     state.kernel_active_runs.remove(&run_id);
@@ -1201,6 +1225,11 @@ impl super::RuntimeHost {
                     }
                 }
                 host.dispatch_next_queued_run();
+                if parked {
+                    if let Err(error) = host.signal_waiting_run(&run_id) {
+                        eprintln!("Kernel WaitingJobs recovery signal failed: {error}");
+                    }
+                }
             }));
         }
         Ok(())
@@ -1211,25 +1240,45 @@ impl super::RuntimeHost {
     /// terminal notices may create the one continuation request. The automatic
     /// scanner is intentionally a later batch.
     pub(crate) fn wake_kernel_waiting_run(&self, run_id: &str) -> Result<bool, String> {
-        self.wake_kernel_waiting_run_with_transport(run_id, false)
+        self.wake_kernel_waiting_run_with_transport(run_id, None, false)
+    }
+
+    pub(crate) fn wake_kernel_waiting_run_for_park(
+        &self, run_id: &str, park_seq: u64,
+    ) -> Result<bool, String> {
+        self.wake_kernel_waiting_run_with_transport(run_id, Some(park_seq), false)
     }
 
     #[cfg(test)]
     pub(crate) fn wake_kernel_waiting_run_forced_round_for_test(
         &self, run_id: &str,
     ) -> Result<bool, String> {
-        self.wake_kernel_waiting_run_with_transport(run_id, true)
+        self.wake_kernel_waiting_run_with_transport(run_id, None, true)
     }
 
     fn wake_kernel_waiting_run_with_transport(
-        &self, run_id: &str, force_per_round: bool,
+        &self, run_id: &str, expected_park_seq: Option<u64>, force_per_round: bool,
     ) -> Result<bool, String> {
         let ownership = acquire(&self.sessions_dir, run_id)?;
         if self.database.kernel_host_run_state(run_id)?.as_deref() != Some("waiting_jobs") {
             return Ok(false);
         }
+        let (park_seq, _) = self.database.kernel_waiting_park(run_id)?;
+        if expected_park_seq.is_some_and(|expected| expected != park_seq) {
+            return Ok(false);
+        }
         let binding = self.database.run_control_binding(run_id)?
             .ok_or("waiting Kernel Run has no frozen control binding")?;
+        if binding.run_id != run_id
+            || binding.authority != fox_engine_protocol::ExecutionAuthority::Authoritative {
+            return Err("waiting Kernel Run identity or authority changed".into());
+        }
+        super::run_bound_conversation(&self.database, run_id, Some(&binding.conversation_id))?;
+        self.database.kernel_host_scope(run_id)?;
+        let policy = self.database.execution_policy(&binding.conversation_id)?;
+        if !matches!(policy.mode.as_str(), "ask" | "allow" | "read_only") {
+            return Err("waiting Kernel Run has invalid current permission mode".into());
+        }
         let cancellation = self.state.lock()
             .map_err(|_| "runtime state lock poisoned")?.cancellation.clone();
         let coordinator = KernelCoordinator::reopen(
@@ -1251,7 +1300,7 @@ impl super::RuntimeHost {
         if coordinator.snapshot()?.state != "waiting_jobs" {
             return Ok(false);
         }
-        if !coordinator.wake_waiting_jobs_now()? {
+        if !coordinator.wake_waiting_jobs_at_policy_version(policy.version)? {
             return Ok(false);
         }
         drop(coordinator);
@@ -1457,6 +1506,7 @@ impl super::RuntimeHost {
                 .freeze_kernel_host_scope(&binding.run_id, &scope)?;
             self.drive_kernel_run(ownership, binding, &runtime, &cancellation, force_per_round)
         })();
+        let parked = matches!(&result, Ok(KernelDriveOutcome::Parked));
         let retire = kernel_scope_should_retire(&self.database, &binding.run_id);
         if let Ok(mut state) = self.state.lock() {
             state.kernel_active_runs.remove(&binding.run_id);
@@ -1465,6 +1515,11 @@ impl super::RuntimeHost {
             }
             if state.kernel_active_runs.is_empty() {
                 state.state = "ready".into();
+            }
+        }
+        if parked {
+            if let Err(error) = self.signal_waiting_run(&binding.run_id) {
+                eprintln!("Kernel WaitingJobs park signal failed: {error}");
             }
         }
         result.map(|_| ())
@@ -1587,6 +1642,10 @@ impl super::RuntimeHost {
         if result.is_err() {
             self.wait_kernel_action_children(binding, true)?;
         }
+        #[cfg(test)]
+        if matches!(&result, Ok(KernelDriveOutcome::Parked)) {
+            waiting_wake_test_hooks::run_before_park_unlock(&binding.run_id);
+        }
         result
     }
 
@@ -1704,7 +1763,11 @@ impl super::RuntimeHost {
                 token,
             )
         } else if super::kernel_gateway::is_context_resource(tool) {
-            policy.execute_context_resource(
+            let host = self.clone();
+            let on_terminal = std::sync::Arc::new(move |run: &str| {
+                let _ = host.signal_waiting_run(run);
+            });
+            policy.execute_context_resource_with_terminal_notice(
                 &self.database,
                 &self.attachments_dir,
                 &self.sessions_dir,
@@ -1712,6 +1775,7 @@ impl super::RuntimeHost {
                 tool,
                 &input,
                 token,
+                Some(on_terminal),
             )
         } else if super::kernel_gateway::is_knowledge(tool) {
             use tauri::Manager;

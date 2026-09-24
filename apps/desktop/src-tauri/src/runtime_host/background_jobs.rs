@@ -2,7 +2,7 @@
 use super::attachment_compute::host_lifecycle::{self, HostJobLaunch, JobTokenRegistry};
 use crate::{database::{Database, JobStartRequest, JobState}, kernel::CancellationToken};
 use serde_json::{json, Value};
-use std::{path::Path, sync::OnceLock, time::{Duration, Instant}};
+use std::{path::Path, sync::{Arc, OnceLock}, time::{Duration, Instant}};
 
 pub(super) const TOOLS: &[&str] = &["compute_job_start", "compute_job_status", "compute_job_cancel", "compute_job_result"];
 fn registry() -> &'static JobTokenRegistry { static REGISTRY: OnceLock<JobTokenRegistry> = OnceLock::new(); REGISTRY.get_or_init(Default::default) }
@@ -15,7 +15,8 @@ fn allowed_fields(input: &Value, fields: &[&str]) -> Result<(), String> {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn execute(database: &Database, attachments: &Path, sessions: &Path,
-    run_id: &str, tool: &str, input: &Value, parent: Option<CancellationToken>, budget: Duration) -> Result<Value,String> {
+    run_id: &str, tool: &str, input: &Value, parent: Option<CancellationToken>, budget: Duration,
+    on_terminal: Option<Arc<dyn Fn(&str) + Send + Sync>>) -> Result<Value,String> {
     if !TOOLS.contains(&tool) { return Err("unsupported job operation".into()); }
     let conversation=super::run_bound_conversation(database,run_id,None)?;
     let result=match tool {
@@ -43,7 +44,7 @@ pub(super) fn execute(database: &Database, attachments: &Path, sessions: &Path,
                 (row.snapshot().clone(),params)
             };
             if matches!(snapshot.state,JobState::Queued|JobState::Paused)&&!registry().is_running_locally(&snapshot.job_id) {
-                let launched=host_lifecycle::start_host_job(HostJobLaunch {database,attachments_dir:attachments,sessions_dir:sessions,registry:registry(),snapshot:snapshot.clone(),params,deadline:Some(Instant::now()+budget),default_budget:budget,cancellation:None,parent});
+                let launched=host_lifecycle::start_host_job(HostJobLaunch {database,attachments_dir:attachments,sessions_dir:sessions,registry:registry(),snapshot:snapshot.clone(),params,deadline:Some(Instant::now()+budget),default_budget:budget,cancellation:None,parent,on_terminal});
                 if let Err(error)=launched { if !registry().is_running_locally(&snapshot.job_id) {return Err(error);} }
             }
             serde_json::to_value(database.kernel_job_snapshot(&snapshot.job_id)?).map_err(|e|e.to_string())?

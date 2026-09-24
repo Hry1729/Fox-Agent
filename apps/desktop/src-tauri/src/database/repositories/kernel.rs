@@ -1972,13 +1972,25 @@ impl Database {
         steering: Option<&super::SteeringDecision>,
         model_input: Option<&ModelNoticeInput<'_>>,
     ) -> Result<(), String> {
-        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,dispatch_lease,batch_lease,batch_response_lease,initial_lease,model_retry_lease,continuation_lease,steering,None,model_input)
+        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,dispatch_lease,batch_lease,batch_response_lease,initial_lease,model_retry_lease,continuation_lease,steering,None,None,model_input)
     }
 
     /// The UI must send the policy version captured when this approval was
     /// displayed. Re-reading it while answering would revive an obsolete ticket.
     pub fn kernel_commit_decision_with_approval_version(&self,run_id:&str,wall_now_ms:i64,cmd:&crate::kernel::KernelPersistCommand,expected_policy_version:u64)->Result<(),String>{
-        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,None,None,None,None,None,None,None,Some(expected_policy_version),None)
+        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,None,None,None,None,None,None,None,Some(expected_policy_version),None,None)
+    }
+
+    /// An automatic Job wake may only consume the current permission generation.
+    /// Mode changes remain legal: a caller reads the new version and retries the
+    /// whole wake decision, while an obsolete approval can never ride along.
+    pub(crate) fn kernel_commit_waiting_wake(&self,run_id:&str,wall_now_ms:i64,
+        cmd:&crate::kernel::KernelPersistCommand,expected_policy_version:u64)->Result<(),String>{
+        if cmd.run_state != crate::kernel::RunState::Running
+            || cmd.events.iter().filter(|event|event.event_type=="run.jobs_woken").count()!=1 {
+            return Err("automatic Job wake has no unique persistent intent".into());
+        }
+        self.kernel_commit_decision_with_dispatch_lease_and_policy(run_id,wall_now_ms,cmd,None,None,None,None,None,None,None,None,Some(expected_policy_version),None)
     }
 
     fn kernel_commit_decision_with_dispatch_lease_and_policy(
@@ -1994,6 +2006,7 @@ impl Database {
         continuation_lease: Option<(&str, &str, bool)>,
         steering: Option<&super::SteeringDecision>,
         expected_approval_policy_version: Option<u64>,
+        expected_wake_policy_version: Option<u64>,
         model_input: Option<&ModelNoticeInput<'_>>,
     ) -> Result<(), String> {
         let settling_model_response=initial_lease.is_some_and(|(_,response)|response)
@@ -2029,6 +2042,22 @@ impl Database {
             // Run.
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if let Some(expected)=expected_wake_policy_version {
+                let current: Option<u64> = transaction.query_row(
+                    "SELECT p.version FROM kernel_execution_policies p JOIN runs r
+                      ON r.conversation_id=p.conversation_id WHERE r.id=?1",
+                    [run_id], |row| row.get(0)).optional()?;
+                if current!=Some(expected) {
+                    return Err(kernel_err("job_wake_policy_changed: current permission version moved"));
+                }
+                let cancelled: bool=transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM kernel_host_commands
+                      WHERE run_id=?1 AND kind='cancel' AND status='pending')",
+                    [run_id],|row|row.get(0))?;
+                if cancelled {
+                    return Err(kernel_err("job_wake_cancel_pending: user cancellation wins"));
+                }
+            }
             if let Some((effect_key, owner)) = model_retry_lease {
                 let payload: serde_json::Value = serde_json::from_str(&cmd.events[0].payload_json).map_err(|_|kernel_err("invalid retry evidence"))?;
                 let failure: fox_engine_protocol::KernelModelFailure = serde_json::from_value(payload["failure"].clone()).map_err(|_|kernel_err("invalid retry evidence"))?;

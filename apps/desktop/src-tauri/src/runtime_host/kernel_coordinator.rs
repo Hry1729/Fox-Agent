@@ -131,6 +131,7 @@ mod notice_lease_test_barrier {
 
 enum DecisionLease<'a> {
     Approval(u64),
+    WaitingWakePolicy(u64),
     ModelRetry(&'a str, &'a str),
     Initial(&'a str),
     Continuation(&'a str, &'a str),
@@ -311,6 +312,8 @@ impl<'a> KernelCoordinator<'a> {
         match lease {
             Some(DecisionLease::Approval(version)) => self.database.kernel_commit_decision_with_approval_version(
                 &self.binding.run_id, now.wall_ms, &command, version)?,
+            Some(DecisionLease::WaitingWakePolicy(version)) => self.database.kernel_commit_waiting_wake(
+                &self.binding.run_id, now.wall_ms, &command, version)?,
             Some(DecisionLease::ModelRetry(effect_key, owner)) => {
                 self.database.kernel_commit_model_retry(
                     &self.binding.run_id,
@@ -396,6 +399,14 @@ impl<'a> KernelCoordinator<'a> {
     /// supply the automatic trigger. This method only creates the one durable
     /// continuation intent after all original Jobs have terminal notices.
     pub(crate) fn wake_waiting_jobs_now(&self) -> Result<bool,String> {
+        self.wake_waiting_jobs_with_policy_version(None)
+    }
+
+    pub(crate) fn wake_waiting_jobs_at_policy_version(&self, version: u64) -> Result<bool,String> {
+        self.wake_waiting_jobs_with_policy_version(Some(version))
+    }
+
+    fn wake_waiting_jobs_with_policy_version(&self, version: Option<u64>) -> Result<bool,String> {
         if self.snapshot()?.state!="waiting_jobs" {return Ok(false);}
         if !self.unfinished_compute_wait_facts()?.is_empty() {return Ok(false);}
         let (park_seq,parked)=self.database.kernel_waiting_park(&self.binding.run_id)?;
@@ -408,7 +419,7 @@ impl<'a> KernelCoordinator<'a> {
         if notices.is_empty() {
             return Err("kernel.job_notice_capacity_blocked: no bounded pending typed fact".into());
         }
-        self.apply(None,|controller,now| {
+        self.apply(version.map(DecisionLease::WaitingWakePolicy),|controller,now| {
             let accounted=controller.wait_accounted_until_wall_ms()
                 .ok_or_else(||KernelError::FailClosed("job wait cursor is missing".into()))?;
             let effect_key=format!("continuation:{}",controller.last_event_seq()
