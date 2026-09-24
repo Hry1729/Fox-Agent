@@ -6845,6 +6845,8 @@ enum MigrationTarget {
     V79,
     #[cfg(test)]
     V83,
+    #[cfg(test)]
+    V85,
 }
 
 fn run_with_target(connection: &mut Connection, now: i64, target: MigrationTarget) -> Result<()> {
@@ -7180,6 +7182,10 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     }
     apply_migration(&transaction, 84, MIGRATION_84, now)?;
     apply_migration(&transaction, 85, MIGRATION_85, now)?;
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V85) {
+        return finish_transaction(transaction);
+    }
     apply_migration(&transaction, 86, MIGRATION_86, now)?;
     finish_transaction(transaction)
 }
@@ -14420,6 +14426,61 @@ DELETE FROM schema_migrations WHERE version=79;
         }
         std::fs::remove_dir_all(root).expect("remove scratch fixture");
     }
+
+    #[test]
+    fn migration_86_upgrades_real_v85_run_twice_with_wait_constraints() {
+        let root=std::env::temp_dir().join(format!("fox-v86-from-v85-{}",uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path=root.join("facts.db");
+        {
+            let mut connection=Connection::open(&path).unwrap();
+            run_with_target(&mut connection,1,MigrationTarget::V85).unwrap();
+            let version:i64=connection.query_row(
+                "SELECT MAX(version) FROM schema_migrations",[],|row|row.get(0)).unwrap();
+            assert_eq!(version,85);
+            let wait_columns:i64=connection.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('kernel_runs')
+                  WHERE name IN ('wait_deadline_wall_ms','wait_accounted_until_wall_ms')",
+                [],|row|row.get(0)).unwrap();
+            assert_eq!(wait_columns,0);
+            connection.execute_batch(
+                "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
+                 VALUES('v85-agent','Old','','pi','','model',1,1);
+                 INSERT INTO conversations(id,agent_id,title,status,created_at,updated_at)
+                 VALUES('v85-conv','v85-agent','Old','active',1,1);
+                 INSERT INTO runs(id,conversation_id,status,model,created_at)
+                 VALUES('v85-run','v85-conv','running','model',1);
+                 INSERT INTO kernel_runs(run_id,engine_id,kernel_mode,capability_manifest_version,
+                    permission_snapshot_id,execution_profile_id,prompt_config_hash,frozen_config_json,
+                    state,created_at,updated_at)
+                 VALUES('v85-run','pi','authoritative',2,'perm','legacy','hash','{}','running',1,1);"
+            ).unwrap();
+        }
+        for _ in 0..2 {
+            let db=crate::database::Database::open(path.clone()).unwrap();
+            db.with_connection(|conn| {
+                let version:i64=conn.query_row(
+                    "SELECT MAX(version) FROM schema_migrations",[],|row|row.get(0))?;
+                let old:(String,String,Option<i64>,Option<i64>)=conn.query_row(
+                    "SELECT r.conversation_id,k.state,k.wait_deadline_wall_ms,
+                            k.wait_accounted_until_wall_ms
+                       FROM runs r JOIN kernel_runs k ON k.run_id=r.id WHERE r.id='v85-run'",
+                    [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+                let fk:i64=conn.query_row(
+                    "SELECT COUNT(*) FROM pragma_foreign_key_check",[],|row|row.get(0))?;
+                let integrity:String=conn.query_row("PRAGMA integrity_check",[],|row|row.get(0))?;
+                assert_eq!(version,DATABASE_SCHEMA_VERSION);
+                assert_eq!(old,("v85-conv".into(),"running".into(),None,None));
+                assert_eq!((fk,integrity),(0,"ok".into()));
+                assert!(conn.execute("UPDATE kernel_runs SET wait_deadline_wall_ms=-1
+                    WHERE run_id='v85-run'",[]).is_err());
+                assert!(conn.execute("UPDATE kernel_runs SET wait_deadline_wall_ms=5,
+                    wait_accounted_until_wall_ms=6 WHERE run_id='v85-run'",[]).is_err());
+                Ok(())
+            }).unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -14822,8 +14883,12 @@ CREATE INDEX idx_kernel_job_notice_deliveries_dispatch
 /// response/history and the wait identity; these two columns retain its fixed
 /// wall deadline and the last accounted wall instant across process restarts.
 const MIGRATION_86: &str = r#"
-ALTER TABLE kernel_runs ADD COLUMN wait_deadline_wall_ms INTEGER;
-ALTER TABLE kernel_runs ADD COLUMN wait_accounted_until_wall_ms INTEGER;
+ALTER TABLE kernel_runs ADD COLUMN wait_deadline_wall_ms INTEGER
+    CHECK(wait_deadline_wall_ms IS NULL OR wait_deadline_wall_ms > 0);
+ALTER TABLE kernel_runs ADD COLUMN wait_accounted_until_wall_ms INTEGER
+    CHECK(wait_accounted_until_wall_ms IS NULL OR
+        (wait_accounted_until_wall_ms > 0 AND
+         wait_deadline_wall_ms >= wait_accounted_until_wall_ms));
 "#;
 
 /// Column additions applied once under migration 75 (idempotent helper).
