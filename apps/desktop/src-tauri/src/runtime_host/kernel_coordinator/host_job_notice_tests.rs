@@ -299,6 +299,54 @@ fn batch_model_lease_rejects_forged_durable_middle_in_both_transports() {
 }
 
 #[test]
+fn live_continuation_lease_rejects_self_consistent_forged_history() {
+    // Use the real Kernel continuation intent/outbox transaction. The review
+    // request is a controlled fixture so this test targets the DB lease, not
+    // the stop-review policy that decides when to request another round.
+    let (db,_root,run,clock,cancellation,_conversation)=notice_host_fixture("live-cont-source");
+    let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
+    let mut input=db.kernel_initial_input(&run).unwrap();
+    input.messages.push(json!({"role":"assistant","stopReason":"stop",
+        "content":[{"type":"text","text":"review me"}]}));
+    input.messages.push(json!({"role":"user","content":[{"type":"text",
+        "text":super::super::live::CONTINUATION_PROMPT}],"timestamp":0}));
+    input.validate().unwrap();
+    let encoded=serde_json::to_string(&input).unwrap();
+    coordinator.apply(None,|controller,_|controller.request_continuation(
+        super::super::live::CONTINUATION_PROMPT,&encoded)).unwrap();
+    let cursor=coordinator.snapshot().unwrap().last_event_seq;
+    let effect_key=format!("continuation:{cursor}");
+    let mut controller=RunController::rehydrate(db.kernel_rehydrate(&run).unwrap().unwrap()).unwrap();
+    let effects=controller.begin_continuation_model_request(&effect_key,
+        clock.now_monotonic_ms(),clock.now_wall_ms()).unwrap();
+    let command=controller.persist_command(&effects);
+    let directive=fox_engine_protocol::KernelRoundDirective {
+        schema_version:1,kind:fox_engine_protocol::KernelRoundDirectiveKind::Continuation,
+        batch_id:None,checkpoint_seq:None,preview_seq:Some(cursor),tools:vec![],
+        prompt:Some(super::super::live::CONTINUATION_PROMPT.into()),
+        steering:vec![],host_job_notices:vec![],
+    };
+    directive.validate().unwrap();
+    let payload=serde_json::to_value(&directive).unwrap();
+    let mut forged=input.messages.clone();
+    forged[0]["content"]=json!("different user demand");
+    let binding=crate::database::ModelNoticeInput {
+        payload:&payload,delivered_history:&forged,live_history:Some(&forged),
+        checkpoint_seq:cursor,history_start:forged.len(),historical_bytes:0,
+    };
+    let error=db.kernel_commit_continuation_model(&run,clock.now_wall_ms(),&command,
+        &effect_key,"continuation-owner",false,None,Some(&binding)).unwrap_err();
+    assert!(error.contains("bound live continuation differs from durable Host sources"),"{error}");
+    let (bound,leased):(i64,i64)=db.with_connection(|conn|conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM kernel_model_notice_inputs WHERE run_id=?1 AND dispatch_key=?2),
+                (SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND effect_key=?3
+                  AND status='leased')",
+        rusqlite::params![run,format!("continuation-delivery:{effect_key}"),effect_key],
+        |row|Ok((row.get(0)?,row.get(1)?)))).unwrap();
+    assert_eq!((bound,leased),(0,0),"forged continuation must roll back its whole lease");
+}
+
+#[test]
 fn real_host_to_local_provider_delivers_notice_once_in_live_and_single_round() {
     for live in [false,true] {
         let (address,server)=start_http_model_fixture(vec![json!({"role":"assistant",
@@ -639,7 +687,7 @@ fn real_runtime_host_job_finishes_during_second_model_lease_or_uses_legacy_revie
         at_settle_tx.send(()).unwrap();
         release_rx.recv_timeout(Duration::from_secs(25))
             .expect("real QuickJS Job release never arrived");
-    }))); 
+    })));
     let observed=db.clone();
     let observed_run=run.clone();
     let job_parent=parent_token.clone();
