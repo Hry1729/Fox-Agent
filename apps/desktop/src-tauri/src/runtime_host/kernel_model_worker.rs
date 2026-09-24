@@ -158,17 +158,40 @@ pub(super) type PreviewSink = dyn Fn(&fox_engine_protocol::KernelModelPreview) +
 /// and keyed by Run id, so concurrently executing tests cannot mix timelines.
 #[cfg(test)]
 pub(crate) mod host_trace {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
+    /// Cap on retained entries. A full-suite parallel run has hundreds of Runs;
+    /// without a cap the ring itself becomes a resource the diagnosis creates.
+    const MAX_ENTRIES: usize = 4096;
+
+    /// Process-wide monotonic origin. Every recorded entry carries its own
+    /// absolute offset from this origin, so entries from different threads (the
+    /// Host thread and a fixture's Provider thread) compare directly instead of
+    /// each keeping a private zero.
     fn origin() -> &'static Instant {
         static ORIGIN: OnceLock<Instant> = OnceLock::new();
         ORIGIN.get_or_init(Instant::now)
     }
 
-    fn enabled() -> bool {
-        static ENABLED: OnceLock<bool> = OnceLock::new();
-        *ENABLED.get_or_init(|| std::env::var_os("FOX_F1_TIMELINE").is_some())
+    /// Milliseconds since the process-wide origin, on the same scale as every
+    /// recorded entry. A fixture records this once when it starts its Provider
+    /// thread, which is the explicit anchor that lets Provider-relative offsets
+    /// be compared with Host offsets instead of assumed to share a zero.
+    pub(crate) fn origin_elapsed_ms() -> u128 {
+        origin().elapsed().as_millis()
+    }
+
+    /// Frozen on first use: a diagnostic switch must not change mid-run.
+    fn enabled_cache() -> &'static AtomicBool {
+        static ENABLED: OnceLock<AtomicBool> = OnceLock::new();
+        ENABLED.get_or_init(|| AtomicBool::new(std::env::var_os("FOX_F1_TIMELINE").is_some()))
+    }
+
+    pub(crate) fn enabled() -> bool {
+        enabled_cache().load(Ordering::Relaxed)
     }
 
     fn store() -> &'static Mutex<Vec<(String, u128, String)>> {
@@ -176,35 +199,90 @@ pub(crate) mod host_trace {
         STORE.get_or_init(|| Mutex::new(Vec::new()))
     }
 
+    fn counters() -> &'static Mutex<HashMap<(String, &'static str), u64>> {
+        static COUNTERS: OnceLock<Mutex<HashMap<(String, &'static str), u64>>> = OnceLock::new();
+        COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// The store is only ever locked when `enabled()`; a poisoned lock is
+    /// recovered rather than propagated, so diagnostics can never turn a
+    /// failure into a second, different failure.
+    fn with_store<T>(f: impl FnOnce(&mut Vec<(String, u128, String)>) -> T) -> Option<T> {
+        match store().lock() {
+            Ok(mut entries) => Some(f(&mut entries)),
+            Err(poisoned) => Some(f(&mut poisoned.into_inner())),
+        }
+    }
+
+    /// Record one event. Callers guard on [`enabled`] when building a message,
+    /// so the formatted string is not constructed on the ordinary path.
     pub(crate) fn record(run_id: &str, event: impl Into<String>) {
         if !enabled() {
             return;
         }
-        if let Ok(mut entries) = store().lock() {
-            entries.push((run_id.to_owned(), origin().elapsed().as_millis(), event.into()));
-        }
+        let at = origin().elapsed().as_millis();
+        with_store(|entries| {
+            if entries.len() >= MAX_ENTRIES {
+                // Drop the oldest half: the newest entries belong to the run
+                // whose failure is being diagnosed right now.
+                entries.drain(..MAX_ENTRIES / 2);
+            }
+            entries.push((run_id.to_owned(), at, event.into()));
+        });
     }
 
-    /// Entries for one Run, in the order they were observed.
+    /// Bounded per-Run counter, also recording nothing while the switch is off.
+    pub(crate) fn count(run_id: &str, key: &'static str) -> u64 {
+        if !enabled() {
+            return 0;
+        }
+        let mut counters = match counters().lock() {
+            Ok(counters) => counters,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let entry = counters.entry((run_id.to_owned(), key)).or_insert(0);
+        *entry += 1;
+        *entry
+    }
+
+    /// Take one Run's entries and drop its counters. Called by the fixture on
+    /// every exit path (success or panic), so finished Runs leave nothing behind.
     pub(crate) fn take(run_id: &str) -> Vec<(u128, String)> {
-        let Ok(mut entries) = store().lock() else { return Vec::new() };
-        let mut mine = Vec::new();
-        entries.retain(|(id, at, event)| {
-            if id == run_id {
-                mine.push((*at, event.clone()));
-                false
-            } else {
-                true
-            }
-        });
+        let mut mine = with_store(|entries| {
+            let mut mine = Vec::new();
+            entries.retain(|(id, at, event)| {
+                if id == run_id {
+                    mine.push((*at, event.clone()));
+                    false
+                } else {
+                    true
+                }
+            });
+            mine
+        })
+        .unwrap_or_default();
+        mine.sort_by_key(|(at, _)| *at);
+        let mut counters = match counters().lock() {
+            Ok(counters) => counters,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        counters.retain(|(id, _), _| id != run_id);
         mine
     }
 
-    /// Every Run that recorded something, so a diagnostic run can attribute
-    /// stray entries instead of silently dropping them.
+    /// Discard a Run's entries without printing them, so a reused or retried Run
+    /// id cannot inherit a previous attempt's timeline.
+    pub(crate) fn clear(run_id: &str) {
+        let _ = take(run_id);
+    }
+
+    /// Every Run still holding entries, so a diagnostic run can attribute stray
+    /// entries instead of silently dropping them.
     pub(crate) fn runs() -> Vec<String> {
-        let Ok(entries) = store().lock() else { return Vec::new() };
-        let mut ids: Vec<String> = entries.iter().map(|(id, _, _)| id.clone()).collect();
+        let mut ids = with_store(|entries| {
+            entries.iter().map(|(id, _, _)| id.clone()).collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
         ids.sort();
         ids.dedup();
         ids
@@ -621,10 +699,12 @@ fn call_model(
     let spawn_started = Instant::now();
     let mut worker = Worker::spawn(runtime)?;
     #[cfg(test)]
-    host_trace::record(
-        &binding.run_id,
-        format!("host:worker_spawned kind={kind} spawn_ms={}", spawn_started.elapsed().as_millis()),
-    );
+    if host_trace::enabled() {
+        host_trace::record(
+            &binding.run_id,
+            format!("host:worker_spawned kind={kind} spawn_ms={}", spawn_started.elapsed().as_millis()),
+        );
+    }
     worker.usage_database=database.cloned();
     let ready = worker.exchange(
         request("kernel.initialize", initialization),
@@ -641,13 +721,15 @@ fn call_model(
         return Err("Kernel worker lacks isolated single-use capability".into());
     }
     #[cfg(test)]
-    host_trace::record(
-        &binding.run_id,
-        format!(
-            "host:worker_ready kind={kind} ready_ms={} budget_ms={budget}",
-            spawn_started.elapsed().as_millis()
-        ),
-    );    request_payload["streamPreview"] = json!(preview.is_some());
+    if host_trace::enabled() {
+        host_trace::record(
+            &binding.run_id,
+            format!(
+                "host:worker_ready kind={kind} ready_ms={} budget_ms={budget}",
+                spawn_started.elapsed().as_millis()
+            ),
+        );
+    }    request_payload["streamPreview"] = json!(preview.is_some());
     let expected = if kind == "kernel.compact_context" {
         if ready["hostCompaction"] != true {
             return Err("Kernel worker lacks Host compaction capability".into());

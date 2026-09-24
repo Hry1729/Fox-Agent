@@ -819,23 +819,6 @@ pub(super) enum KernelDriveOutcome {
     Parked,
 }
 
-/// Bounded per-Run counter for the approval/retry spin, used only by the opt-in
-/// timeline. Never read on a production path.
-#[cfg(test)]
-fn approval_spin_count(run_id: &str) -> u64 {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static COUNTS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
-    let counts = COUNTS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut counts = match counts.lock() {
-        Ok(counts) => counts,
-        Err(_) => return 0,
-    };
-    let entry = counts.entry(run_id.to_owned()).or_insert(0);
-    *entry += 1;
-    *entry
-}
-
 /// A transient Host preparation error must not cancel a still-waiting child
 /// Job. The durable Run state, not the stack's return value, decides when its
 /// already-issued cancellation tokens may be retired.
@@ -975,16 +958,20 @@ pub(super) fn drive_with_actions_transport(
             coordinator.resume_context_compaction(&owner, runtime, api_key)
         } else if let Some(effect) = next {
             #[cfg(test)]
-            super::kernel_model_worker::host_trace::record(
-                run_id,
-                format!(
-                    "host:round state={} effect={:?} tool={:?}",
-                    snapshot.state, effect.kind, effect.tool_call_id
-                ),
-            );
-            // Bind the dispatch result only so both branches of this `if` share
-            // one type; the loop re-reads durable state either way.
-            let _dispatched = match effect.kind {
+            if super::kernel_model_worker::host_trace::enabled() {
+                super::kernel_model_worker::host_trace::record(
+                    run_id,
+                    format!(
+                        "host:round state={} effect={:?} tool={:?}",
+                        snapshot.state, effect.kind, effect.tool_call_id
+                    ),
+                );
+            }
+            // The dispatch Result is the `result` binding of the enclosing
+            // `if`/`else if`: a dispatch error must reach the cleanup and
+            // terminal classification below exactly as it did before the
+            // timeline existed. Never bind and discard it.
+            match effect.kind {
                 OutboxEffectKind::InitialModel => {
                     let binding = database
                         .run_control_binding(run_id)?
@@ -1054,14 +1041,13 @@ pub(super) fn drive_with_actions_transport(
                     )
                     .map(|_| ()),
                 _ => unreachable!(),
-            };
-            Ok::<(), String>(())
+            }
         } else if snapshot.state == "waiting_approval" || snapshot.state == "retry_scheduled" {
-            // Record the spin without disturbing it: a bounded sample is enough
-            // to tell "briefly between approvals" from "stuck for the deadline".
+            // Sample the spin only when the timeline switch is on: no counter
+            // table, no formatted string, and no lock is touched otherwise.
             #[cfg(test)]
-            {
-                let spins = approval_spin_count(run_id);
+            if super::kernel_model_worker::host_trace::enabled() {
+                let spins = super::kernel_model_worker::host_trace::count(run_id, "approval_spin");
                 if spins == 1 || spins % 20 == 0 {
                     super::kernel_model_worker::host_trace::record(
                         run_id,

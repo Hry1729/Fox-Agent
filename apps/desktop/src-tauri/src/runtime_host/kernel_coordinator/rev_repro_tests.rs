@@ -2676,6 +2676,19 @@ fn drive_real_consumer_with(
     key: &str,
     crash: CrashPoint,
 ) -> Result<usize, String> {
+    drive_real_consumer_with_worker(run, key, crash, &tests_support::real_worker_command())
+}
+
+/// Same real consumer, with the worker command injected. `drive_with_actions`
+/// only falls back to the per-round transport when the engine reports it lacks
+/// the durable round-loop capability, so a command that cannot start produces a
+/// genuine transport error rather than a capability downgrade.
+fn drive_real_consumer_with_worker(
+    run: &KernelRun,
+    key: &str,
+    crash: CrashPoint,
+    worker: &crate::runtime_host::RuntimeCommand,
+) -> Result<usize, String> {
     let policy = rev_gateway_policy_existing(&run.db, &run.run_id, run.scope.clone());
     let policy_for_executor = rev_gateway_policy_existing(&run.db, &run.run_id, run.scope.clone());
     let cancellation = CancellationRegistry::default();
@@ -2690,7 +2703,7 @@ fn drive_real_consumer_with(
         &run.clock,
         &cancellation,
         &run.run_id,
-        &tests_support::real_worker_command(),
+        worker,
         key,
         &policy,
         move |binding, effect, token| {
@@ -2818,6 +2831,174 @@ fn t1_kernel_real_consumer_executes_a_legitimate_approval_once() {
         version_rows(&run.db, &run.conversation_id, &stored),
         1,
         "and must not add another version row"
+    );
+}
+
+/// `(row count, settled count, distinct statuses)` for the Run's model effects.
+/// Used to show that a repeat drive leaves the durable side-effect state
+/// untouched, which is what "no replay" has to mean durably.
+fn model_effect_facts(run: &KernelRun) -> (i64, i64, String) {
+    run.db
+        .with_connection(|c| {
+            Ok((
+                c.query_row(
+                    "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1",
+                    [&run.run_id],
+                    |row| row.get(0),
+                )?,
+                c.query_row(
+                    "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND status='completed'",
+                    [&run.run_id],
+                    |row| row.get(0),
+                )?,
+                c.query_row(
+                    "SELECT COALESCE(GROUP_CONCAT(status),'') FROM (SELECT DISTINCT status FROM kernel_effect_outbox WHERE run_id=?1 ORDER BY status)",
+                    [&run.run_id],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("durable model-effect facts")
+}
+
+/// T5: the regression guard for the timeline instrumentation's error handling.
+///
+/// An earlier revision bound the per-round dispatch `Result` to a discarded
+/// local and ended the branch with `Ok(())`, which converted a failed model
+/// transport into an apparently clean loop iteration. This Run is left at the
+/// point where its initial model round is still pending, so the real dispatch
+/// must spawn the worker; a worker command that cannot start is a genuine
+/// transport error, and it must reach the caller as one.
+#[test]
+fn t5_kernel_real_dispatch_error_propagates_instead_of_reporting_success() {
+    let (db, root, conversation, run_id, scope) =
+        kernel_gateway_fixture_with_model("t5-dispatch-error", "ask", &rev_consumer_model_config());
+    std::fs::write(root.join("a.txt"), b"line one\nline two\n").expect("write target");
+    let stored = stored_path(&root, "a.txt");
+    let before = std::fs::read(root.join("a.txt")).expect("target");
+    let run = KernelRun {
+        db,
+        root,
+        run_id,
+        conversation_id: conversation,
+        approval_id: String::new(),
+        scope,
+        clock: crate::kernel::TestClock::new(crate::database::now_ms()),
+    };
+
+    // This command cannot start, so `Worker::spawn` fails and the Host has no
+    // durable state to fall back on. It is NOT the "lacks the durable
+    // round-loop capability" downgrade signal.
+    let failing = crate::runtime_host::RuntimeCommand {
+        program: "fox-no-such-worker-binary-timeout-investigation".into(),
+        script: None,
+    };
+    let outcome = drive_real_consumer_with_worker(&run, "t5-key", CrashPoint::None, &failing);
+
+    // `drive` does not return dispatch errors as `Err`: it classifies them into
+    // durable state. The pre-instrumentation contract, which the discarded-local
+    // revision broke, is exactly this: a failed dispatch must leave a durably
+    // FAILED Run. With the error swallowed, the drive would instead have
+    // returned `Ok(())` with the Run still `running` and the effect still
+    // pending, i.e. a silent hang rather than a reported failure.
+    assert_eq!(
+        outcome,
+        Ok(0),
+        "the drive returns normally only after classifying the dispatch failure"
+    );
+    let state = run
+        .db
+        .kernel_build_full_snapshot(&run.run_id)
+        .expect("durable snapshot")
+        .state;
+    assert_eq!(
+        state, "failed",
+        "a failed dispatch must durably fail the Run, not leave it running"
+    );
+    let (status, error_code) = run
+        .db
+        .with_connection(|c| {
+            c.query_row(
+                "SELECT status, error_code FROM runs WHERE id=?1",
+                [&run.run_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+        })
+        .expect("durable Run row");
+    assert_eq!(status, "failed", "the Run row must record the failure");
+    assert_eq!(
+        error_code.as_deref(),
+        Some("kernel.execution_failed"),
+        "the dispatch failure must be classified, not substituted by a generic success"
+    );
+    assert_eq!(
+        run.db.kernel_last_event_type(&run.run_id).expect("last event"),
+        Some("run.failed".into()),
+        "the failure must be a committed Run event"
+    );
+
+    // Nothing was applied, authorized, or replayed by the failed dispatch.
+    assert_eq!(
+        std::fs::read(run.root.join("a.txt")).expect("target"),
+        before,
+        "a failed dispatch must not touch the target file"
+    );
+    assert_eq!(
+        version_rows(&run.db, &run.conversation_id, &stored),
+        0,
+        "a failed dispatch must not register a managed-file version"
+    );
+    let completed_tool_calls: i64 = run
+        .db
+        .with_connection(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM kernel_tool_calls WHERE run_id=?1 AND state='completed'",
+                [&run.run_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("completed tool calls");
+    assert_eq!(
+        completed_tool_calls, 0,
+        "no tool call may be committed as completed by a failed dispatch"
+    );
+    let failed_effects = model_effect_facts(&run);
+    assert_eq!(
+        failed_effects,
+        (1, 0, "failed".to_owned()),
+        "the dispatch error must be recorded on the durable effect itself"
+    );
+
+    // A repeat drive over the now-terminal Run must not replay the dispatch or
+    // apply anything: no new model round, no settled effect, no second write.
+    let second = drive_real_consumer_with_worker(&run, "t5-key", CrashPoint::None, &failing);
+    assert_eq!(
+        second,
+        Ok(0),
+        "a terminal Run must not re-execute on a repeat drive"
+    );
+    assert_eq!(
+        model_effect_facts(&run),
+        failed_effects,
+        "a repeat drive must not change any durable model-effect fact"
+    );
+    assert_eq!(
+        std::fs::read(run.root.join("a.txt")).expect("target"),
+        before,
+        "a repeated failed dispatch must not apply the write"
+    );
+    assert_eq!(
+        version_rows(&run.db, &run.conversation_id, &stored),
+        0,
+        "a repeated failed dispatch must not register a version"
+    );
+    assert_eq!(
+        run.db
+            .kernel_build_full_snapshot(&run.run_id)
+            .expect("durable snapshot")
+            .state,
+        "failed",
+        "the Run must stay failed rather than being revived by a repeat drive"
     );
 }
 

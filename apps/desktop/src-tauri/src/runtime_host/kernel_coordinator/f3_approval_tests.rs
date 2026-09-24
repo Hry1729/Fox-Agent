@@ -122,14 +122,46 @@ fn f3_fixed_clock_expired_card_is_rejected_after_real_node_proposal() {
     assert!(run.db.pending_kernel_host_commands(&run.id).unwrap().is_empty());
 }
 
-pub(super) fn dump_matrix_timeline(label: &str, run: &Run) {
-    let entries = crate::runtime_host::kernel_model_worker::host_trace::take(&run.id);
-    if entries.is_empty() && crate::runtime_host::kernel_model_worker::host_trace::runs().is_empty() {
+/// Dump and clear the opt-in Host timeline for one Run. `anchor_ms` is the
+/// Provider's own start on the shared clock, so Provider-relative offsets
+/// (`absolute_ms - anchor_ms`) line up with these Host offsets explicitly.
+pub(super) fn dump_matrix_timeline(label: &str, run: &Run, anchor_ms: u128) {
+    take_and_print_timeline(label, &run.id, anchor_ms);
+}
+
+pub(super) fn take_and_print_timeline(label: &str, run_id: &str, anchor_ms: u128) {
+    let entries = crate::runtime_host::kernel_model_worker::host_trace::take(run_id);
+    if entries.is_empty() {
         return;
     }
-    eprintln!("[f3-host-timeline] {label} run={} entries={}", run.id, entries.len());
+    eprintln!(
+        "[f3-host-timeline] {label} run={run_id} entries={} anchor_ms={anchor_ms}",
+        entries.len()
+    );
     for (at, event) in entries {
         eprintln!("[f3-host-timeline] {label} @{at}ms {event}");
+    }
+}
+
+/// Owns one case's timeline for the whole test body. The early `return`s in
+/// `f3_matrix_case` (a dispatch error hands the Run to Host cleanup) and any
+/// panic both drop this guard, so a failing case still leaves its timeline
+/// instead of only the normal path printing one.
+pub(super) struct TimelineGuard {
+    label: String,
+    run_id: String,
+    anchor_ms: u128,
+}
+
+impl TimelineGuard {
+    pub(super) fn new(label: &str, run_id: &str, anchor_ms: u128) -> Self {
+        Self { label: label.to_owned(), run_id: run_id.to_owned(), anchor_ms }
+    }
+}
+
+impl Drop for TimelineGuard {
+    fn drop(&mut self) {
+        take_and_print_timeline(&self.label, &self.run_id, self.anchor_ms);
     }
 }
 
@@ -169,6 +201,11 @@ fn f3_matrix_case(case: F3Case, live: bool) {
     let version = Arc::new(Mutex::new(None));
     let provider = LocalProvider::start_with_repeated_write(version.clone(), case.repeats());
     let run = run_fixture_with_mode(&label, SMALL, model(provider.address), case.initial_mode());
+    // Start this case's timeline here: the guard owns the Run's entries for the
+    // whole body, so every exit path below (including an early dispatch error
+    // and a panic) still prints them.
+    crate::runtime_host::kernel_model_worker::host_trace::clear(&run.id);
+    let _timeline = TimelineGuard::new(&label, &run.id, provider.anchor_ms());
     let writes = AtomicUsize::new(0);
     let visits = AtomicUsize::new(0);
     let acted = AtomicBool::new(false);
@@ -281,7 +318,6 @@ fn f3_matrix_case(case: F3Case, live: bool) {
     }
     // Emit the opt-in Host timeline for this Run before collecting the Provider,
     // so a test that is about to unwind still leaves a comparable record.
-    dump_matrix_timeline(&label, &run);
     let requests = provider.finish();
     let minimum_requests = if case.repeats() { 4 } else { 2 };
     assert!((minimum_requests..=minimum_requests + 3).contains(&requests.len()),

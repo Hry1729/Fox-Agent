@@ -230,15 +230,26 @@ struct LocalProvider {
     seen: Arc<Mutex<Vec<Value>>>,
     events: Arc<Mutex<Vec<String>>>,
     started: Instant,
+    /// Absolute offset of this Provider's own zero on the shared diagnostic
+    /// clock, so Provider-relative offsets have an explicit relation to Host
+    /// offsets instead of an assumed common origin.
+    anchor_ms: u128,
     printed: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<Vec<Value>>>,
 }
 
-/// Monotonic timestamp relative to one Provider's own start. Diagnostic runs set
-/// `FOX_F1_TIMELINE` so the Host and the Provider share nothing but a wall-clock
-/// origin; the deltas are what expose where a round's time actually went.
+/// Monotonic timestamp relative to one Provider's own start.
 fn since_ms(started: Instant) -> u128 {
     started.elapsed().as_millis()
+}
+
+/// A mutex whose holder panicked is still readable: the diagnostic must survive
+/// the very panic it exists to explain, never turn it into a second failure.
+fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 impl LocalProvider {
@@ -267,23 +278,17 @@ impl LocalProvider {
             let mut requests = Vec::new();
             let mut clients: Vec<Client> = Vec::new();
             while !stop_worker.load(Ordering::SeqCst) {
+                // Original failure text, unchanged: the fixture's own deadline,
+                // with no lock held and nothing else formatted into it.
                 assert!(
                     Instant::now() < deadline,
-                    "local Provider exceeded its 20 s deadline; timeline={:?}",
-                    events_worker
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .filter(|event| event.contains('@'))
-                        .collect::<Vec<_>>()
+                    "local Provider exceeded its 20 s deadline"
                 );
                 loop {
                     match listener.accept() {
                         Ok((stream, _)) => {
                             stream.set_nonblocking(true).unwrap();
-                            events_worker
-                                .lock()
-                                .unwrap()
+                            lock_recover(&events_worker)
                                 .push(format!("accepted@{}ms", since_ms(started)));
                             clients.push(Client {
                                 stream,
@@ -315,7 +320,7 @@ impl LocalProvider {
                             }
                             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                             Err(error) => {
-                                events_worker.lock().unwrap().push(format!(
+                                lock_recover(&events_worker).push(format!(
                                     "read error={:?} bytes={}",
                                     error.kind(),
                                     client.bytes.len()
@@ -326,9 +331,7 @@ impl LocalProvider {
                         }
                     }
                     if closed {
-                        events_worker
-                            .lock()
-                            .unwrap()
+                        lock_recover(&events_worker)
                             .push(format!("eof bytes={}", client.bytes.len()));
                         clients.swap_remove(index);
                         continue;
@@ -336,9 +339,7 @@ impl LocalProvider {
                     let Some(end) = client.bytes.windows(4).position(|part| part == b"\r\n\r\n")
                     else {
                         if client.accepted.elapsed() > Duration::from_secs(12) {
-                            events_worker
-                                .lock()
-                                .unwrap()
+                            lock_recover(&events_worker)
                                 .push(format!("idle deadline bytes={}", client.bytes.len()));
                             clients.swap_remove(index);
                         }
@@ -372,11 +373,11 @@ impl LocalProvider {
                     .set_write_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
                 let index = requests.len();
-                seen_worker.lock().unwrap().push(request.clone());
-                events_worker
-                    .lock()
-                    .unwrap()
-                    .push(format!("request {index} body_bytes={request_bytes}@{}ms", since_ms(started)));
+                lock_recover(&seen_worker).push(request.clone());
+                lock_recover(&events_worker).push(format!(
+                    "request {index} body_bytes={request_bytes}@{}ms",
+                    since_ms(started)
+                ));
                 requests.push(request);
                 let (delta, finish) = match index {
                     0 => (
@@ -431,10 +432,11 @@ impl LocalProvider {
                     chunks[0], chunks[1]
                 );
                 write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
-                events_worker
-                    .lock()
-                    .unwrap()
-                    .push(format!("response {index} body_bytes={}@{}ms", body.len(), since_ms(started)));
+                lock_recover(&events_worker).push(format!(
+                    "response {index} body_bytes={}@{}ms",
+                    body.len(),
+                    since_ms(started)
+                ));
             }
             requests
         });
@@ -444,45 +446,56 @@ impl LocalProvider {
             seen,
             events,
             started,
+            // Recorded unconditionally so the anchor exists whenever a timeline
+            // is produced; it costs one monotonic read per Provider.
+            anchor_ms: crate::runtime_host::kernel_model_worker::host_trace::origin_elapsed_ms(),
             printed: Arc::new(AtomicBool::new(false)),
             worker: Some(worker),
         }
     }
 
     fn request_count(&self) -> usize {
-        self.seen.lock().unwrap().len()
+        lock_recover(&self.seen).len()
     }
 
     fn event_log(&self) -> Vec<String> {
-        self.events.lock().unwrap().clone()
+        lock_recover(&self.events).clone()
+    }
+
+    /// This Provider's own zero on the shared diagnostic clock.
+    fn anchor_ms(&self) -> u128 {
+        self.anchor_ms
     }
 
     fn finish(mut self) -> Vec<Value> {
         self.stop.store(true, Ordering::SeqCst);
+        // Join first: `expect` must raise the worker's own panic message
+        // untouched. Printing before it would risk masking the original error
+        // with a second failure, which is exactly what this fixture must not do.
+        let outcome = self.worker.take().unwrap().join();
         self.print_diagnostics();
-        self.worker
-            .take()
-            .unwrap()
-            .join()
-            .expect("local Provider thread")
+        outcome.expect("local Provider thread")
     }
 
     /// One line per test naming how many rounds actually reached the Provider,
-    /// plus per-event monotonic offsets when `FOX_F1_TIMELINE` is set. Printing
-    /// before `finish`'s join keeps the record even when the worker died.
+    /// plus per-event monotonic offsets. `printed` is set only when a line is
+    /// actually written, so a suppressed call can never retire a later one.
     fn print_diagnostics(&mut self) {
+        let requested = std::env::var_os("FOX_F1_TIMELINE").is_some();
+        if !requested && !std::thread::panicking() {
+            return;
+        }
         if self.printed.swap(true, Ordering::SeqCst) {
             return;
         }
-        // Without the opt-in flag, only a failing test needs the detail; a
-        // panicking test still reaches Drop, which prints it there.
-        if std::env::var_os("FOX_F1_TIMELINE").is_none() && !std::thread::panicking() {
-            return;
-        }
+        // The snapshot is taken under one short lock and printed after it is
+        // released: a stuck or panicking worker can never make the diagnostic
+        // itself block or poison.
+        let requests = self.request_count();
+        let events = self.event_log();
         eprintln!(
-            "[f1-provider] requests={} events={:?}",
-            self.request_count(),
-            self.event_log()
+            "[f1-provider] requests={requests} anchor_ms={} events={events:?}",
+            self.anchor_ms
         );
     }
 }
@@ -491,9 +504,8 @@ impl Drop for LocalProvider {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         // `finish()` takes the handle before joining. If it is still here, the
-        // worker thread died (deadline or accept panic) or the test unwound
-        // before finishing, and its timeline is the only record of where the
-        // round's time actually went.
+        // test unwound before finishing, and this timeline is the only record of
+        // where the round's time went.
         let unfinished = self.worker.is_some();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -504,17 +516,34 @@ impl Drop for LocalProvider {
     }
 }
 
-/// Dump the opt-in Host timeline for one Run. Called on the normal path and, via
-/// `Drop`, whenever the fixture unwinds, so every diagnosed run yields a
-/// comparable record instead of only the passing ones.
-fn dump_host_timeline(label: &str, run_id: &str) {
+/// Dump the opt-in Host timeline for one Run, taking (and thereby clearing) its
+/// entries so a finished Run leaves nothing behind. The Provider's own offsets
+/// are anchored to the same clock, so one line can be read against the other:
+/// `absolute_ms - anchor_ms` recovers the Provider-relative offset.
+fn dump_host_timeline(label: &str, run_id: &str, anchor_ms: u128) {
     let entries = crate::runtime_host::kernel_model_worker::host_trace::take(run_id);
-    if entries.is_empty() && crate::runtime_host::kernel_model_worker::host_trace::runs().is_empty() {
+    if entries.is_empty() {
         return;
     }
-    eprintln!("[f1-host-timeline] {label} run={run_id} entries={}", entries.len());
+    eprintln!(
+        "[f1-host-timeline] {label} run={run_id} entries={} anchor_ms={anchor_ms}",
+        entries.len()
+    );
     for (at, event) in entries {
         eprintln!("[f1-host-timeline] {label} @{at}ms {event}");
+    }
+}
+
+/// Dump and clear the opt-in Host timeline for one Run, from every exit path.
+struct F1Timeline {
+    label: String,
+    run_id: String,
+    anchor_ms: u128,
+}
+
+impl Drop for F1Timeline {
+    fn drop(&mut self) {
+        dump_host_timeline(&self.label, &self.run_id, self.anchor_ms);
     }
 }
 
@@ -644,6 +673,12 @@ fn engine_case(path: PathKind, recovery: bool, small: bool) {
         (PathKind::PerRound, false, false) => "round-big",
     };
     let mut run = run_fixture(label, &body, model(provider.address));
+    crate::runtime_host::kernel_model_worker::host_trace::clear(&run.id);
+    let _timeline = F1Timeline {
+        label: label.to_owned(),
+        run_id: run.id.clone(),
+        anchor_ms: provider.anchor_ms(),
+    };
     let writes = AtomicUsize::new(0);
     let cancellation = CancellationRegistry::default();
     let worker = real_worker_command();
@@ -861,3 +896,104 @@ fn f1_per_round_reopen_after_read_rejects_first_write() {
 
 #[path = "f3_approval_tests.rs"]
 mod f3_approval_tests;
+
+/// Negative case for the diagnostics themselves: when the Provider reaches its
+/// deadline the thread still raises the ORIGINAL failure text, no lock is left
+/// poisoned behind it, and the timeline survives so the failure stays
+/// explicable. A diagnostic that replaced the real error with a PoisonError (or
+/// lost the timeline) would defeat the whole point of the instrumentation.
+#[test]
+fn local_provider_deadline_preserves_the_original_error_and_its_timeline() {
+    let version: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let mut provider = LocalProvider::start(version);
+    // Never connect: nothing is accepted, so the fixture's own absolute deadline
+    // is the only thing that can end the worker thread. This is bounded by that
+    // same 20 s deadline, which this test deliberately does NOT change.
+    let join = provider.worker.take().unwrap().join();
+    let payload = join.expect_err("the Provider must fail at its own deadline");
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+        .unwrap_or_else(|| panic!("unexpected Provider panic payload"));
+    assert_eq!(
+        message, "local Provider exceeded its 20 s deadline",
+        "the original failure text must be preserved verbatim"
+    );
+
+    // The worker panicked while holding the events lock in the unimplemented
+    // case; reading it back must recover rather than raise a second failure.
+    let events = provider.event_log();
+    assert!(
+        events.is_empty(),
+        "no request ever reached the Provider, so its timeline must be empty: {events:?}"
+    );
+    assert_eq!(
+        provider.request_count(),
+        0,
+        "the request count must stay readable after the timeout, not poison"
+    );
+    assert!(
+        !crate::runtime_host::kernel_model_worker::host_trace::runs()
+            .contains(&"local-provider-deadline-negative".to_owned()),
+        "the negative case must not leave a stray Run timeline behind"
+    );
+}
+
+/// The suppression contract of the diagnostics, without a 20 s wait: a call
+/// that prints nothing must not consume the one-shot `printed` flag and silence
+/// a later real failure.
+#[test]
+fn provider_diagnostic_suppression_does_not_consume_the_print_once_flag() {
+    let printed = AtomicBool::new(false);
+    // Mirrors `print_diagnostics`: the flag is only set when a line is written.
+    let suppressed = |printed: &AtomicBool| {
+        let requested = std::env::var_os("FOX_F1_TIMELINE").is_some();
+        if !requested && !std::thread::panicking() {
+            return false;
+        }
+        if printed.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        true
+    };
+    assert!(!suppressed(&printed), "nothing is printed on a healthy run");
+    assert!(
+        !printed.load(Ordering::SeqCst),
+        "a suppressed call must not retire the print-once flag"
+    );
+}
+
+/// The timeline switch is read once and, when off, `record`/`count` must be
+/// no-ops. Asserted against the switch itself rather than against global store
+/// contents, so an instrumented parallel run with the flag on cannot make it
+/// flaky.
+#[test]
+fn host_timeline_is_a_no_op_while_the_switch_is_off() {
+    let switched_on = std::env::var_os("FOX_F1_TIMELINE").is_some();
+    assert_eq!(
+        crate::runtime_host::kernel_model_worker::host_trace::enabled(),
+        switched_on,
+        "the timeline must follow the diagnostic switch exactly"
+    );
+    if !switched_on {
+        // A distinct Run id that no other test uses; it must stay invisible.
+        assert_eq!(
+            crate::runtime_host::kernel_model_worker::host_trace::count(
+                "f1-switch-off-probe",
+                "probe"
+            ),
+            0,
+            "the counter must not be maintained while the switch is off"
+        );
+        crate::runtime_host::kernel_model_worker::host_trace::record(
+            "f1-switch-off-probe",
+            "must not be stored",
+        );
+        assert!(
+            !crate::runtime_host::kernel_model_worker::host_trace::runs()
+                .contains(&"f1-switch-off-probe".to_owned()),
+            "nothing may be stored while the switch is off"
+        );
+    }
+}
