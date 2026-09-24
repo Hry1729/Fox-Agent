@@ -76,6 +76,8 @@ mod waiting_jobs_host_tests;
 mod waiting_jobs_auto_tests;
 #[path = "waiting_jobs_recovery_tests.rs"]
 mod waiting_jobs_recovery_tests;
+#[path = "waiting_jobs_boundary_tests.rs"]
+mod waiting_jobs_boundary_tests;
 
 /// Record the durable settled result of one authoritative Kernel tool call.
 ///
