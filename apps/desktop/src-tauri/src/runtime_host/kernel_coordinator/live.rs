@@ -57,6 +57,11 @@ enum StopFollowup {
     /// A settled response while original compute Jobs remain unfinished.
     Park { history_json: String, response_json: String,
         jobs: Vec<kernel::WaitingJobFact> },
+    /// All child Jobs are terminal and their typed facts are waiting for one
+    /// model turn. The old live session closes; its settled response and this
+    /// continuation intent commit together before a fresh leased dispatch.
+    JobNotice { input: fox_engine_protocol::KernelInitialModelInput,
+        notices: Vec<fox_engine_protocol::HostJobNotice> },
     /// Generic stop-review via the `stop_review` continuation lane.
     Review(fox_engine_protocol::KernelInitialModelInput),
     /// Business delivery repair via the `delivery_repair` continuation lane.
@@ -754,6 +759,14 @@ impl KernelCoordinator<'_> {
             }
         }
 
+        if !tool_use && pending_rows.is_empty()
+            && !matches!(stop_followup, StopFollowup::Park { .. } | StopFollowup::Steering(_)) {
+            if let Some((input,notices)) = self.job_notice_followup_input(&pre_history,&output)? {
+                stop_followup = StopFollowup::JobNotice { input, notices };
+                delivery_outcome = None;
+            }
+        }
+
         // The next checkpoint for a tool proposal, committed with the response.
         let next_checkpoint = if tool_use {
             let seq = self
@@ -975,7 +988,7 @@ impl KernelCoordinator<'_> {
         // therefore measures the exact bytes of the next request — including the
         // steering notices appended to it — before the dispatch is armed.
         let armed_followup = match &stop_followup {
-            StopFollowup::Final | StopFollowup::Park { .. } => None,
+            StopFollowup::Final | StopFollowup::Park { .. } | StopFollowup::JobNotice { .. } => None,
             StopFollowup::Review(input) => Some((CONTINUATION_PROMPT.to_owned(), input)),
             StopFollowup::Repair { prompt, input } => Some((prompt.clone(), input)),
             StopFollowup::Steering(input) => Some((STEERING_PROMPT.to_owned(), input)),
@@ -1484,6 +1497,12 @@ fn commit_tail(
             controller.park_waiting_jobs(now.monotonic_ms, now.wall_ms,
                 data_root_id, response_seq, response_json, history_json, jobs)
         }
+        StopFollowup::JobNotice { input, notices } => controller.request_job_notice_followup(
+            &serde_json::to_string(input)
+                .map_err(|error| kernel::KernelError::FailClosed(error.to_string()))?,
+            &serde_json::to_string(notices)
+                .map_err(|error| kernel::KernelError::FailClosed(error.to_string()))?,
+        ),
         StopFollowup::Review(input) => controller.request_continuation(
             CONTINUATION_PROMPT,
             &serde_json::to_string(input)

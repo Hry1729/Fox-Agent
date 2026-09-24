@@ -156,6 +156,26 @@ impl<'a> KernelCoordinator<'a> {
             &self.binding.run_id,(16 * 1024usize).saturating_sub(historical))
     }
 
+    /// Both direct completion and a durable wake resume from the assistant
+    /// response the model actually produced. Notices remain a typed Host lane,
+    /// never a fabricated user turn or a second tool result.
+    fn job_notice_followup_input(
+        &self, pre_history: &[Value], assistant: &Value,
+    ) -> Result<Option<(fox_engine_protocol::KernelInitialModelInput,
+        Vec<fox_engine_protocol::HostJobNotice>)>, String> {
+        if !self.database.compute_job_notice_enabled(&self.binding.run_id)? {
+            return Ok(None);
+        }
+        let mut messages = pre_history.to_vec();
+        messages.push(assistant.clone());
+        let notices = self.pending_host_job_notices(&messages)?;
+        if notices.is_empty() { return Ok(None); }
+        let mut input = self.database.kernel_initial_input(&self.binding.run_id)?;
+        input.messages = messages;
+        input.validate_job_notice()?;
+        Ok(Some((input, notices)))
+    }
+
     pub(crate) fn start_prepared(
         database: &'a Database,
         clock: &'a dyn Clock,
@@ -931,6 +951,9 @@ impl<'a> KernelCoordinator<'a> {
         let wait_jobs = if next.is_none() && steering_input.is_none() {
             self.unfinished_compute_wait_facts()?
         } else { Vec::new() };
+        let notice_followup = if next.is_none() && steering_input.is_none() && wait_jobs.is_empty() {
+            self.job_notice_followup_input(&initial_history,&response.assistant_message)?
+        } else { None };
         let parked_history = serde_json::to_string(&initial_history)
             .map_err(|_| "invalid parked initial history")?;
         // A request accepted between the queue read above and this write-set can
@@ -943,6 +966,7 @@ impl<'a> KernelCoordinator<'a> {
         // `steering` continuation, which is not terminal, so the guard that
         // rejected the completion cannot apply to it.
         let mut steering_input = steering_input;
+        let mut notice_followup = notice_followup;
         let mut attempts = 0u8;
         loop {
             #[cfg(test)]
@@ -987,6 +1011,13 @@ impl<'a> KernelCoordinator<'a> {
                         now.monotonic_ms, now.wall_ms, self.database.kernel_data_root_id(),
                         response_seq, &encoded, &parked_history, &wait_jobs,
                     )?);
+                } else if let Some((input,notices)) = &notice_followup {
+                    effects.extend(controller.request_job_notice_followup(
+                        &serde_json::to_string(input)
+                            .map_err(|error| KernelError::FailClosed(error.to_string()))?,
+                        &serde_json::to_string(notices)
+                            .map_err(|error| KernelError::FailClosed(error.to_string()))?,
+                    )?);
                 } else {
                     effects.extend(controller.terminate(kernel::RunOutcome::Completed));
                 }
@@ -1007,6 +1038,7 @@ impl<'a> KernelCoordinator<'a> {
                             response.assistant_message.clone(),
                         )?;
                     }
+                    notice_followup = None;
                     if steering_input.is_none() {
                         // The queue emptied again (an explicit cancel raced us):
                         // there is nothing to plan for, so this is a real refusal.
@@ -1198,12 +1230,16 @@ impl<'a> KernelCoordinator<'a> {
         let wait_jobs = if next.is_none() && steering_input.is_none() {
             self.unfinished_compute_wait_facts()?
         } else { Vec::new() };
+        let notice_followup = if next.is_none() && steering_input.is_none() && wait_jobs.is_empty() {
+            self.job_notice_followup_input(&batch_history,&response.assistant_message)?
+        } else { None };
         let parked_history = serde_json::to_string(&batch_history)
             .map_err(|_| "invalid parked batch history")?;
         // Same recovery as the initial path: a Final decision that loses a race
         // with a freshly accepted request is re-planned into its own steering
         // round in this call, with the reply the Host already holds.
         let mut steering_input = steering_input;
+        let mut notice_followup = notice_followup;
         let mut attempts = 0u8;
         loop {
             #[cfg(test)]
@@ -1254,6 +1290,13 @@ impl<'a> KernelCoordinator<'a> {
                             now.monotonic_ms, now.wall_ms, self.database.kernel_data_root_id(),
                             response_seq, &response_json, &parked_history, &wait_jobs,
                         )?);
+                    } else if let Some((input,notices)) = &notice_followup {
+                        effects.extend(controller.request_job_notice_followup(
+                            &serde_json::to_string(input)
+                                .map_err(|error| KernelError::FailClosed(error.to_string()))?,
+                            &serde_json::to_string(notices)
+                                .map_err(|error| KernelError::FailClosed(error.to_string()))?,
+                        )?);
                     } else {
                         effects.extend(controller.terminate(kernel::RunOutcome::Completed));
                     }
@@ -1275,6 +1318,7 @@ impl<'a> KernelCoordinator<'a> {
                             response.assistant_message.clone(),
                         )?;
                     }
+                    notice_followup = None;
                     if steering_input.is_none() {
                         return Err(replan_or_error(error));
                     }
