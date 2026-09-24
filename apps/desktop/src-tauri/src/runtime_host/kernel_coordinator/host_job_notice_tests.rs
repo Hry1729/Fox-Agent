@@ -327,6 +327,7 @@ fn live_batch_binds_steering_receipt_and_job_notice_in_the_same_model_input() {
                 }
                 Err(error)=>panic!("{error}"),
             };
+            stream.set_nonblocking(false).unwrap();
             stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
             let mut bytes=Vec::new();let mut buffer=[0u8;8192];
             let (header_end,length)=loop {
@@ -460,6 +461,39 @@ fn second_database_job_and_steering_arrival_before_lease_rechecks_the_final_fram
         assert_eq!(hash,format!("sha256:{}",hex::encode(Sha256::digest(stored.as_bytes()))));
         let input:Value=serde_json::from_str(&stored).unwrap();
         assert_eq!(input["modelInput"],serde_json::to_value(frame).unwrap());
+        Ok(stop_response(binding,frame))
+    }).unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state,"completed");
+}
+
+#[test]
+fn notice_delivery_insert_fault_rolls_back_model_lease_and_can_dispatch_once_repaired() {
+    let (db,_root,run,clock,cancellation,conversation)=notice_host_fixture("b2a-bind-fault");
+    let coordinator=KernelCoordinator::start_prepared(&db,&clock,&run,&cancellation).unwrap();
+    let job=finished_compute(&db,&run,&conversation,"bind-once");
+    db.with_connection(|conn|conn.execute_batch("CREATE TRIGGER reject_notice_delivery
+        BEFORE INSERT ON kernel_job_notice_deliveries
+        BEGIN SELECT RAISE(ABORT,'injected binding failure'); END")).unwrap();
+    assert!(coordinator.dispatch_initial("first-owner",&Allow,|_,_,_| {
+        panic!("uncommitted model lease cannot invoke Node")
+    }).is_err());
+    let (input_count,delivery_count,request_since,status,lease_owner):(i64,i64,Option<i64>,String,Option<String>)=
+        db.with_connection(|conn|conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM kernel_model_notice_inputs WHERE run_id=?1),
+                (SELECT COUNT(*) FROM kernel_job_notice_deliveries WHERE job_id=?2),
+                k.model_request_since_wall_ms,o.status,o.lease_owner
+             FROM kernel_runs k JOIN kernel_effect_outbox o ON o.run_id=k.run_id
+             WHERE k.run_id=?1 AND o.effect_key=?3",
+            rusqlite::params![run,job,kernel::INITIAL_MODEL_EFFECT_KEY],
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))).unwrap();
+    assert_eq!((input_count,delivery_count),(0,0));
+    assert!(request_since.is_none());
+    assert_eq!(status,"pending");
+    assert!(lease_owner.is_none());
+    db.with_connection(|conn|conn.execute_batch("DROP TRIGGER reject_notice_delivery")).unwrap();
+    coordinator.dispatch_initial("repaired-owner",&Allow,|binding,frame,_| {
+        assert_eq!(frame.host_job_notices.len(),1);
+        assert_eq!(frame.host_job_notices[0].job_id,job);
         Ok(stop_response(binding,frame))
     }).unwrap();
     assert_eq!(coordinator.snapshot().unwrap().state,"completed");
