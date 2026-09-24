@@ -233,7 +233,8 @@ fn bound_batch_source_on(
         params![run,checkpoint_seq], |row| Ok((row.get(0)?,row.get(1)?)))?;
     let response: Value = serde_json::from_str(&response_body)
         .map_err(|_| notice_error("invalid durable batch source response"))?;
-    if response["turnId"] != turn_id
+    if response["response"]["turnId"] != turn_id
+        || response["response"]["runId"] != run
         || response["response"]["assistantMessage"] != checkpoint.assistant_message {
         return Err(notice_error("batch checkpoint differs from its model response"));
     }
@@ -340,6 +341,9 @@ fn bind_model_notices(
         directive.validate().map_err(|_| notice_error("invalid bound live batch directive"))?;
         let batch_id = directive.batch_id.as_deref()
             .ok_or_else(|| notice_error("bound live batch has no id"))?;
+        if dispatch_key != crate::kernel::batch_delivery_idempotency_key(batch_id) {
+            return Err(notice_error("bound live batch differs from its leased dispatch"));
+        }
         let source = bound_batch_source_on(tx,run,batch_id)?;
         let steering_key = format!("round-response:{}",source.response_seq);
         let steering = bound_batch_steering_on(tx,run,Some(&steering_key))?;
