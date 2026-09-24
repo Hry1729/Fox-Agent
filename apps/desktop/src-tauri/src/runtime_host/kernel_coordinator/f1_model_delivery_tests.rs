@@ -383,6 +383,7 @@ fn f1_long_history_fixture(
         run_execution_limited: binding.budgets.run_execution_limited,
         approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
         provider_max_retries: 0, turn_max_retries: 0,
+        experimental_compute_job_notice: false,
     };
     db.kernel_create_run(
         &run.id, "pi", "authoritative", 2,

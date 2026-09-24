@@ -1615,6 +1615,7 @@ impl RuntimeHost {
             approval_wait_timeout_ms: budgets.approval_wait_ms,
             provider_max_retries: 2,
             turn_max_retries: 0,
+            experimental_compute_job_notice: false,
         };
         self.shadow_reconciler()?.bootstrap_with_policy(
             legacy_run_id,
@@ -2117,6 +2118,7 @@ impl RuntimeHost {
             approval_wait_timeout_ms: budgets.approval_wait_ms,
             provider_max_retries: 2,
             turn_max_retries: 1,
+            experimental_compute_job_notice: false,
         };
         let prepared = crate::database::PreparedContinuation {
             budgets: budgets.clone(),

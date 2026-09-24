@@ -1284,6 +1284,8 @@ impl super::RuntimeHost {
                 approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
                 provider_max_retries: 2,
                 turn_max_retries: 1,
+                experimental_compute_job_notice: std::env::var("FOX_EXPERIMENTAL_COMPUTE_JOB_NOTICE")
+                    .is_ok_and(|value| value == "1"),
             };
             self.database.kernel_create_run(
                 &binding.run_id,

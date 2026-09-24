@@ -209,6 +209,7 @@ pub(crate) fn tool_result_storage_for(
     Ok(ToolResultStorage::whole(original_bytes))
 }
 const KNOWLEDGE_PREVIEW_CACHE_LIMIT_KEY: &str = "knowledge_preview_cache_limit_bytes";
+const DATA_ROOT_INSTANCE_UUID_KEY: &str = "host_data_root_instance_uuid";
 const USER_PROFILE_KEY: &str = "user_profile";
 const AGENT_RECORD_COLUMNS: &str =
     "id, name, description, runtime_type, agent_kind, invocation_mode, visibility, default_model, \
@@ -218,6 +219,8 @@ const AGENT_RECORD_COLUMNS: &str =
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
+    /// Host-derived identity shared by clones, never supplied by a tool or model.
+    data_root_id: String,
     kernel_changes: Arc<super::kernel_changes::KernelChanges>,
     /// Volatile worker-observed model output progress: run_id -> wall_ms of the
     /// last preview (text, thinking, or tool-parameter bytes). Never persisted:
@@ -237,10 +240,57 @@ fn require_legacy_run_writer(connection: &Connection, run_id: &str) -> rusqlite:
 
 impl Database {
     pub fn open(path: PathBuf) -> Result<Self, String> {
-        let mut connection = Connection::open(path).map_err(|error| error.to_string())?;
+        let memory = path.as_path() == Path::new(":memory:");
+        let mut connection = Connection::open(&path).map_err(|error| error.to_string())?;
         migrations::run(&mut connection, now_ms()).map_err(|error| error.to_string())?;
+        let instance_uuid: String = {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO app_settings(key,value,updated_at) VALUES(?1,?2,?3)",
+                    params![DATA_ROOT_INSTANCE_UUID_KEY, Uuid::new_v4().to_string(), now_ms()],
+                )
+                .map_err(|error| error.to_string())?;
+            let stored: String = transaction
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key=?1",
+                    [DATA_ROOT_INSTANCE_UUID_KEY],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            Uuid::parse_str(&stored).map_err(|_| "invalid Host data-root UUID".to_string())?;
+            transaction.commit().map_err(|error| error.to_string())?;
+            stored
+        };
+        let mut identity = Sha256::new();
+        identity.update(b"fox-data-root-v1\0");
+        identity.update(instance_uuid.as_bytes());
+        identity.update(b"\0");
+        if memory {
+            identity.update(b"memory");
+        } else {
+            // SQLite has created this file. Use the full canonical DB path so
+            // even a copy beside the original cannot inherit its notices.
+            let canonical = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
+            #[cfg(windows)]
+            {
+                use std::os::windows::ffi::OsStrExt;
+                for unit in canonical.as_os_str().encode_wide() {
+                    identity.update(unit.to_le_bytes());
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                identity.update(canonical.as_os_str().as_bytes());
+            }
+        }
+        let data_root_id = format!("sha256:{}", hex::encode(identity.finalize()));
         let database = Self {
             connection: Arc::new(Mutex::new(connection)),
+            data_root_id,
             kernel_changes: Arc::new(super::kernel_changes::KernelChanges::default()),
             model_progress: Arc::new(Mutex::new(BTreeMap::new())),
         };
@@ -394,6 +444,9 @@ impl Database {
     }
 
     pub fn set_app_setting(&self, key: &str, value: &str) -> Result<(), String> {
+        if key == DATA_ROOT_INSTANCE_UUID_KEY {
+            return Err("Host data-root UUID is immutable".into());
+        }
         self.with_connection(|connection| {
             connection.execute(
                 "INSERT INTO app_settings(key, value, updated_at) VALUES (?1, ?2, ?3)

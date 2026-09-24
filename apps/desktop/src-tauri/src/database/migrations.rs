@@ -7146,6 +7146,7 @@ fn run_transaction(connection: &mut Connection, now: i64) -> Result<()> {
             [now],
         )?;
     }
+    apply_migration(&transaction, 84, MIGRATION_84, now)?;
     let violations: i64 = transaction.query_row(
         "SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))?;
     if violations != 0 {
@@ -14655,6 +14656,35 @@ CREATE TABLE IF NOT EXISTS kernel_restore_requests (
     settled_at INTEGER,
     PRIMARY KEY(conversation_id, request_id)
 );
+"#;
+
+/// Passive Host terminal facts; delivery and model-input binding belong to B2.
+const MIGRATION_84: &str = r#"
+CREATE TABLE kernel_job_notices (
+    job_id TEXT PRIMARY KEY REFERENCES kernel_jobs(job_id),
+    data_root_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL CHECK(attempt >= 0),
+    terminal_state TEXT NOT NULL CHECK(terminal_state IN ('completed','failed','cancelled')),
+    finished_at INTEGER NOT NULL,
+    result_ref TEXT,
+    result_sha256 TEXT,
+    result_bytes INTEGER,
+    error_code TEXT,
+    error_message TEXT,
+    terminal_origin TEXT NOT NULL CHECK(terminal_origin IN ('worker','unowned')),
+    owner_pid INTEGER,
+    owner_started_at INTEGER,
+    CHECK ((terminal_origin='worker' AND owner_pid IS NOT NULL AND owner_started_at IS NOT NULL)
+        OR (terminal_origin='unowned' AND owner_pid IS NULL AND owner_started_at IS NULL)),
+    CHECK ((terminal_state='completed' AND result_ref IS NOT NULL
+        AND result_sha256 IS NOT NULL AND result_bytes IS NOT NULL AND result_bytes >= 0)
+        OR (terminal_state IN ('failed','cancelled') AND result_ref IS NULL
+        AND result_sha256 IS NULL AND result_bytes IS NULL))
+);
+CREATE INDEX idx_kernel_job_notices_scope
+    ON kernel_job_notices(data_root_id,conversation_id,run_id);
 "#;
 
 /// Column additions applied once under migration 75 (idempotent helper).

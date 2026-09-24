@@ -1106,6 +1106,7 @@ impl ShadowReconciler {
             approval_wait_timeout_ms: 3_600_000,
             provider_max_retries: 2,
             turn_max_retries: 0,
+            experimental_compute_job_notice: false,
         }
     }
 }

@@ -131,12 +131,25 @@ fn test_config() -> RunFrozenConfig {
         approval_wait_timeout_ms: 3_600_000,
         provider_max_retries: 2,
         turn_max_retries: 0,
+        experimental_compute_job_notice: false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn historical_frozen_run_defaults_compute_notice_off() {
+        let config=test_config();
+        let mut stored=serde_json::to_value(&config).unwrap();
+        assert!(stored.get("experimentalComputeJobNotice").is_none());
+        let old: RunFrozenConfig=serde_json::from_value(stored.clone()).unwrap();
+        assert!(!old.experimental_compute_job_notice);
+        stored["experimentalComputeJobNotice"]=serde_json::Value::Bool(true);
+        let enabled: RunFrozenConfig=serde_json::from_value(stored).unwrap();
+        assert!(enabled.experimental_compute_job_notice);
+    }
 
     fn call(id: &str, tool: &str, order: usize) -> ToolCallRequest {
         ToolCallRequest {

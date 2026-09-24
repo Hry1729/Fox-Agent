@@ -55,6 +55,7 @@ fn config() -> RunFrozenConfig {
         approval_wait_timeout_ms: 60_000,
         provider_max_retries: 2,
         turn_max_retries: 1,
+        experimental_compute_job_notice: false,
     }
 }
 

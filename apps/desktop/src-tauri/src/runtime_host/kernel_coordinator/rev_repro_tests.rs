@@ -143,6 +143,7 @@ fn kernel_gateway_fixture_with_model(
         approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
         provider_max_retries: 0,
         turn_max_retries: 0,
+        experimental_compute_job_notice: false,
     };
     db.kernel_create_run(
         &run.id,
@@ -237,6 +238,7 @@ fn kernel_fixture(label: &str, mode: &str) -> (Database, PathBuf, String, String
         approval_wait_timeout_ms: 300_000,
         provider_max_retries: 2,
         turn_max_retries: 1,
+        experimental_compute_job_notice: false,
     };
     db.kernel_create_run(
         &run.id,

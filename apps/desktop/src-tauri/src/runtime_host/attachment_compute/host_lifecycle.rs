@@ -631,6 +631,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&fixture.root);
     }
     #[test]
+    fn host_lifecycle_publishes_one_experimental_terminal_fact() {
+        use super::super::jobs::JobLifecyclePort;
+        let f=ProductionFixture::new("host-notice");
+        let binding=f.database.freeze_kernel_run_control(&f.run_id,"legacy",
+            fox_engine_protocol::TimeBudgets::default()).unwrap();
+        let frozen=crate::kernel::RunFrozenConfig {
+            engine_id: binding.engine_id.clone(), kernel_mode: "authoritative".into(),
+            capability_manifest_version: 2, capability_manifest_hash: "host-notice-manifest".into(),
+            permission_snapshot_id: binding.permission_snapshot_id.clone(),
+            execution_profile_id: binding.execution_profile_id.clone(),
+            prompt_config_hash: "host-notice-prompt".into(),
+            model_request_timeout_ms: binding.budgets.model_request_ms,
+            model_first_response_ms: binding.budgets.model_first_response_ms,
+            model_idle_ms: binding.budgets.model_idle_ms,
+            tool_execution_timeout_ms: binding.budgets.tool_execution_ms,
+            run_execution_budget_ms: binding.budgets.run_execution_ms,
+            run_execution_limited: binding.budgets.run_execution_limited,
+            approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
+            provider_max_retries: 2, turn_max_retries: 1,
+            experimental_compute_job_notice: true,
+        };
+        f.database.kernel_create_run(&f.run_id,"pi","authoritative",2,
+            &binding.permission_snapshot_id,&binding.execution_profile_id,"host-notice-prompt",
+            &serde_json::to_string(&frozen).unwrap()).unwrap();
+        let job=f.database.kernel_job_start(&f.start_request("host-notice",chunked_params(&[])))
+            .unwrap().snapshot().job_id.clone();
+        let lifecycle=HostJobLifecycle::new(f.database.clone(),&f.sessions,&f.conversation_id,&job,1);
+        lifecycle.mark_running().unwrap();
+        lifecycle.settle_completed(&serde_json::json!({"host":"done"})).unwrap();
+        assert_eq!(f.database.kernel_job_notice(&f.conversation_id,&f.run_id,&job)
+            .unwrap().unwrap().terminal_state,JobState::Completed);
+        assert_eq!(f.database.kernel_job_snapshot(&job).unwrap().state,JobState::Completed);
+        let _=std::fs::remove_dir_all(&f.root);
+    }
+
+    #[test]
     fn stale_attempts_cannot_write_progress_or_overwrite_published_result() {
         let f=ProductionFixture::new("attempt-fence");
         let q=f.database.kernel_job_start(&f.start_request("once",chunked_params(&[]))).unwrap().snapshot().clone();

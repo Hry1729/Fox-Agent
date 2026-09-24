@@ -97,7 +97,12 @@ pub struct RunFrozenConfig {
     /// Provider HTTP retry and whole-turn retry are independent policies.
     pub provider_max_retries: u32,
     pub turn_max_retries: u32,
+    /// Opt-in Host job terminal facts; old persisted Runs remain on the legacy path.
+    #[serde(rename = "experimentalComputeJobNotice", default, skip_serializing_if = "is_false")]
+    pub experimental_compute_job_notice: bool,
 }
+
+fn is_false(value: &bool) -> bool { !*value }
 
 // Missing stall budgets in older persisted records inherit a bound no larger
 // than their original total window. Explicit invalid values still fail validation.
@@ -127,6 +132,8 @@ impl<'de> Deserialize<'de> for RunFrozenConfig {
             approval_wait_timeout_ms: i64,
             provider_max_retries: u32,
             turn_max_retries: u32,
+            #[serde(rename = "experimentalComputeJobNotice", default)]
+            experimental_compute_job_notice: bool,
         }
         let stored = Stored::deserialize(deserializer)?;
         Ok(Self {
@@ -146,6 +153,7 @@ impl<'de> Deserialize<'de> for RunFrozenConfig {
             approval_wait_timeout_ms: stored.approval_wait_timeout_ms,
             provider_max_retries: stored.provider_max_retries,
             turn_max_retries: stored.turn_max_retries,
+            experimental_compute_job_notice: stored.experimental_compute_job_notice,
         })
     }
 }

@@ -6674,6 +6674,7 @@ mod tests {
             run_execution_budget_ms:binding.budgets.run_execution_ms,
             run_execution_limited: binding.budgets.run_execution_limited,approval_wait_timeout_ms:binding.budgets.approval_wait_ms,
             provider_max_retries:0,turn_max_retries:0,
+            experimental_compute_job_notice: false,
         };
         database.kernel_create_run(&fixture.run_id,"pi","authoritative",2,&binding.permission_snapshot_id,
             "durable_v2","repair-fixture",&serde_json::to_string(&config).unwrap()).unwrap();

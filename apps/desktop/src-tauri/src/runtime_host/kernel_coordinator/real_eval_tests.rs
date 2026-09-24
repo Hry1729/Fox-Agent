@@ -2696,6 +2696,7 @@ fn prepare_eval_run_with_budgets(
         approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
         provider_max_retries: 0,
         turn_max_retries: 0,
+        experimental_compute_job_notice: false,
     };
     db.kernel_create_run(
         &run_id,

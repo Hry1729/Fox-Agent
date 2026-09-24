@@ -235,6 +235,7 @@ fn fixture_with_budgets_opt(clock: &TestClock, prompt_hash: &str, model: Option<
         approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
         provider_max_retries: retries.0,
         turn_max_retries: retries.1,
+        experimental_compute_job_notice: false,
     };
     db.kernel_create_run(
         &run_id,
@@ -2742,6 +2743,7 @@ fn approval_scope_is_reused_once_and_out_of_scope_still_asks() {
         approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
         provider_max_retries: 2,
         turn_max_retries: 1,
+        experimental_compute_job_notice: false,
     };
     db.kernel_create_run(
         &run_id,
@@ -2983,6 +2985,7 @@ fn expired_approval_is_never_executable_and_the_run_stays_continuable() {
         approval_wait_timeout_ms: 1_000,
         provider_max_retries: 2,
         turn_max_retries: 1,
+        experimental_compute_job_notice: false,
     };
     db.kernel_create_run(
         &run_id,
