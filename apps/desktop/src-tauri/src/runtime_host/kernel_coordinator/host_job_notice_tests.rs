@@ -422,7 +422,19 @@ fn real_runtime_host_job_start_parks_and_wakes_on_both_pi_transports() {
         host.start_kernel_run_forced_round_for_test(ownership,&binding,Value::Null,Value::Null)
             .unwrap();
     }
-    assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(),Some("waiting_jobs"));
+    let after_start=db.kernel_host_run_state(&run).unwrap();
+    if after_start.as_deref()!=Some("waiting_jobs") {
+        let evidence:(String,String,String)=db.with_connection(|conn|conn.query_row(
+            "SELECT COALESCE((SELECT payload_json FROM kernel_events WHERE run_id=?1
+                    AND event_type='run.failed' ORDER BY seq DESC LIMIT 1),''),
+                    COALESCE((SELECT group_concat(event_type,',') FROM kernel_events WHERE run_id=?1),''),
+                    COALESCE((SELECT group_concat(tool_call_id||':'||state,',')
+                        FROM kernel_tool_calls WHERE run_id=?1),'')",
+            [&run],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))).unwrap();
+        let _=release_tx.send(());
+        panic!("real Host did not park: state={after_start:?} failure={} events={} tools={}",
+            evidence.0,evidence.1,evidence.2);
+    }
     at_settle_rx.recv_timeout(Duration::from_secs(20))
         .expect("real QuickJS executor did not reach its settlement point");
     let jobs=db.kernel_jobs_for_run(&run).unwrap();

@@ -974,6 +974,12 @@ pub(super) fn drive_with_actions_transport(
             continue;
         };
         if let Err(error) = result {
+            #[cfg(test)]
+            if std::env::var_os("FOX_TEST_REAL_HOST_JOB_CHAIN_CHILD").is_some() {
+                // The isolated test uses only a local HTTP fixture. Keep raw
+                // adapter diagnostics out of the persistent Run/UI path.
+                eprintln!("local Host Job chain dispatch error: {error}");
+            }
             if error == super::kernel_coordinator::live::LIVE_DETACHED
                 || error == super::kernel_coordinator::STEERING_REPLAN
             {
