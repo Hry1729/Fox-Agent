@@ -2425,7 +2425,14 @@ impl Database {
                 if effect.kind == crate::kernel::OutboxEffectKind::ContinuationModel {
                     let payload: serde_json::Value = serde_json::from_str(&effect.payload_json).map_err(|_| kernel_err("invalid continuation input"))?;
                     let input: fox_engine_protocol::KernelInitialModelInput = serde_json::from_value(payload["input"].clone()).map_err(|_| kernel_err("invalid continuation input"))?;
-                    input.validate().map_err(kernel_err)?;
+                    if payload["lane"] == "job_notice" {
+                        // The dedicated wait/direct authorization above has
+                        // already bound this lane to the settled response and
+                        // current scoped facts in the same transaction.
+                        input.validate_job_notice().map_err(kernel_err)?;
+                    } else {
+                        input.validate().map_err(kernel_err)?;
+                    }
                     let prompt_hash: String = transaction.query_row("SELECT prompt_config_hash FROM kernel_runs WHERE run_id=?1", [run_id], |row| row.get(0))?;
                     if input.run_id != run_id || input.turn_id != cmd.turn_id || input.prompt_config_hash != prompt_hash
                         || payload["effectKey"] != effect.effect_key
