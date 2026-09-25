@@ -40,11 +40,6 @@ impl KernelRunLock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
-
-    /// Bounded handoff window for the assertions below. This test must finish
-    /// even when a lease is unexpectedly still held, so it never blocks forever.
-    const HANDOFF_TIMEOUT: Duration = Duration::from_secs(5);
 
     #[test]
     fn ownership_is_exclusive_and_released_on_drop() {
@@ -55,18 +50,7 @@ mod tests {
             .err().as_deref(), Some(KERNEL_RUN_ALREADY_OWNED));
         let independent = KernelRunLock::acquire(&directory, "other-run").unwrap();
         drop(first);
-        let deadline = Instant::now() + HANDOFF_TIMEOUT;
-        let recovered = loop {
-            match KernelRunLock::acquire(&directory, "run/../../not-a-path") {
-                Ok(lock) => break lock,
-                // Only a real ownership conflict may be retried; the released
-                // handle's close is asynchronous enough to need this window.
-                Err(error) if error == KERNEL_RUN_ALREADY_OWNED && Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(error) => panic!("lease was not released within {HANDOFF_TIMEOUT:?}: {error}"),
-            }
-        };
+        let recovered = KernelRunLock::acquire(&directory, "run/../../not-a-path").unwrap();
         assert!(KernelRunLock::acquire(&directory, "run/../../not-a-path").is_err());
         drop(recovered);
         drop(independent);
