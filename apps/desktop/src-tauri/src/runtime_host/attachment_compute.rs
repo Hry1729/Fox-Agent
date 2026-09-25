@@ -1,4 +1,5 @@
 //! Conversation-scoped authorization and immutable input snapshots for JS computation.
+use crate::data_compute::MAX_CODE_BYTES;
 use crate::database::Database;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -363,6 +364,27 @@ pub(crate) struct ComputeOptions<'a> {
     pub progress: Option<&'a dyn Fn(crate::data_compute::chunked::ChunkProgress)>,
 }
 
+/// The single rule for the submitted-program parameter, shared by the
+/// background job executor's pre-check and the execution path below.
+///
+/// The byte bound is `data_compute::MAX_CODE_BYTES`, the same bound the two
+/// interpreter entry points enforce (`data_compute.rs`, `data_compute/chunked.rs`),
+/// so the pre-check can never accept a program the execution layer will reject.
+/// Returning the message instead of a bare `bool` keeps one wording for both
+/// callers.
+///
+/// `jobs::run` calls this *before* any work starts, which is what makes the
+/// over-long/blank program a parameter error *by construction*. The background
+/// job classifier still decides the other validation branches by wording, and
+/// message text on this path is influenced by the user's own program, so the
+/// rule must not be left to the wording check alone.
+pub(crate) fn code_validation_error(code: Option<&str>) -> Option<String> {
+    if code.is_none_or(|code| code.trim().is_empty() || code.len() > MAX_CODE_BYTES) {
+        return Some("code must be nonempty JavaScript within 128 KiB".to_owned());
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_with_options(
     database: &Database,
@@ -408,11 +430,8 @@ pub(crate) fn execute_with_options(
             tier.max_inputs,
         ));
     }
-    if input["code"]
-        .as_str()
-        .is_none_or(|code| code.trim().is_empty() || code.len() > 128 * 1024)
-    {
-        return Err("code must be nonempty JavaScript within 128 KiB".into());
+    if let Some(error) = code_validation_error(input["code"].as_str()) {
+        return Err(error);
     }
     let storage = fs::canonicalize(attachments_dir).map_err(|e| e.to_string())?;
     // The snapshot deadline bounds verification+copy. On the job path it is the

@@ -522,10 +522,17 @@ pub(crate) fn run(
     if input.get("processing").is_none() {
         input["processing"] = json!("chunked");
     }
-    if !input.get("code").and_then(Value::as_str).is_some_and(|c| !c.trim().is_empty()) {
+    // Parameter shape, checked before any execution starts, by the same rule the
+    // execution layer applies. This branch used to accept any non-empty program,
+    // so an over-long one reached `execute_with_options`, was rejected there, and
+    // — after the broad `contains("code ")` heuristic was removed — was reported
+    // as `compute.execution_failed` even though nothing had been executed. The
+    // classification here is structural (this check *is* the parameter error),
+    // not a match on the wording of a later failure.
+    if let Some(message) = super::code_validation_error(input["code"].as_str()) {
         return Err(ComputeJobError {
             code: codes::INVALID_PARAMS,
-            message: "compute job requires nonempty JavaScript code".into(),
+            message,
         });
     }
     let progress = Arc::clone(&context.progress);
@@ -865,6 +872,44 @@ mod tests {
         code
     }
 
+    /// Run one real job and assert it failed as the *named* parameter
+    /// validation, not somewhere else.
+    ///
+    /// Every caller supplies a legal, non-empty program, so the job's code
+    /// pre-check cannot short circuit and the error must come from the
+    /// validation named by `expected_message`. The absence of any progress
+    /// report proves execution never started.
+    fn assert_invalid_params(harness: &Harness, params: Value, expected_message: &str) {
+        let token = token_for("run-1");
+        let terminal = harness.run_with("run-1", &token, params);
+        assert_eq!(
+            terminal.error_code,
+            Some(codes::INVALID_PARAMS),
+            "state={:?} message={:?}",
+            terminal.state,
+            terminal.error_message
+        );
+        assert_eq!(terminal.state, TerminalState::Failed);
+        assert!(terminal.settled);
+        assert_eq!(
+            harness.port.settles(),
+            vec![format!("settle_failed:{}", codes::INVALID_PARAMS)],
+            "{:?}",
+            harness.port.events()
+        );
+        let message = terminal.error_message.unwrap_or_default();
+        assert!(
+            message.contains(expected_message),
+            "the named validation itself must be the failure, not the code pre-check or \
+             another branch: expected to contain {expected_message:?}, got {message:?}"
+        );
+        assert!(
+            !harness.port.events().iter().any(|event| event.starts_with("report")),
+            "no execution may start for a rejected parameter: {:?}",
+            harness.port.events()
+        );
+    }
+
     #[test]
     fn start_cas_loss_writes_nothing_and_reports_not_started() {
         let harness = Harness::new("cas");
@@ -1185,6 +1230,108 @@ mod tests {
             harness.port.events()
         );
         let _ = std::fs::remove_dir_all(&harness.fixture.root);
+    }
+
+    /// The non-code parameter validations are reachable from the real job entry
+    /// point: a legal program passes the pre-check, so the error comes from the
+    /// validation itself. This is what an earlier report wrongly called
+    /// "unreachable" — that measurement had omitted the program and had only
+    /// proven the pre-check's early return.
+    #[test]
+    fn a_real_job_rejects_an_unknown_processing_mode_as_an_invalid_parameter() {
+        let harness = Harness::new("bad-processing");
+        harness.fixture.attach_csv("f1", 8);
+        assert_invalid_params(
+            &harness,
+            json!({
+                "processing": "streaming",
+                "attachmentIds": ["f1"],
+                "code": "function onChunk(c){}\nfunction onFinish(){ return {ok: 1}; }",
+            }),
+            "processing must be 'whole' or 'chunked'",
+        );
+        let _ = std::fs::remove_dir_all(&harness.fixture.root);
+    }
+
+    #[test]
+    fn a_real_job_rejects_an_unknown_profile_as_an_invalid_parameter() {
+        let harness = Harness::new("bad-profile");
+        harness.fixture.attach_csv("f1", 8);
+        assert_invalid_params(
+            &harness,
+            json!({
+                "processing": "chunked",
+                "profile": "enormous",
+                "attachmentIds": ["f1"],
+                "code": "function onChunk(c){}\nfunction onFinish(){ return {ok: 1}; }",
+            }),
+            "profile 'enormous'",
+        );
+        let _ = std::fs::remove_dir_all(&harness.fixture.root);
+    }
+
+    /// A profile that exists but cannot be combined with the requested
+    /// processing mode: `large` requires chunked loading, so `whole` is refused
+    /// even though both values are individually legal.
+    #[test]
+    fn a_real_job_rejects_an_incompatible_profile_and_processing_combination() {
+        let harness = Harness::new("bad-combo");
+        harness.fixture.attach_csv("f1", 8);
+        assert_invalid_params(
+            &harness,
+            json!({
+                "processing": "whole",
+                "profile": "large",
+                "attachmentIds": ["f1"],
+                "code": "function onChunk(c){}\nfunction onFinish(){ return {ok: 1}; }",
+            }),
+            "profile=large 需要 processing=chunked",
+        );
+        let _ = std::fs::remove_dir_all(&harness.fixture.root);
+    }
+
+    /// The byte bound is inclusive and is the execution layer's own bound: a
+    /// program of exactly `MAX_CODE_BYTES` is still a legal parameter and must
+    /// run to completion, while one byte more is rejected. Pinning both sides
+    /// stops the pre-check from drifting into refusing legal programs.
+    #[test]
+    fn the_job_accepts_a_program_at_the_byte_limit_and_rejects_one_byte_more() {
+        let accepted = Harness::new("code-limit-ok");
+        accepted.fixture.attach_csv("f1", 8);
+        let token = token_for("run-1");
+        let terminal = accepted.run_with(
+            "run-1",
+            &token,
+            json!({
+                "processing": "chunked",
+                "attachmentIds": ["f1"],
+                "code": program_of_code_bytes(crate::data_compute::MAX_CODE_BYTES),
+            }),
+        );
+        assert_eq!(
+            terminal.error_code, None,
+            "a program at the byte limit is legal; state={:?} message={:?}",
+            terminal.state, terminal.error_message
+        );
+        assert_eq!(terminal.state, TerminalState::Completed);
+        assert!(
+            accepted.port.stored_result.lock().unwrap().is_some(),
+            "the program at the limit must actually have run and published a result"
+        );
+        let _ = std::fs::remove_dir_all(&accepted.fixture.root);
+
+        let rejected = Harness::new("code-limit-over");
+        rejected.fixture.attach_csv("f1", 8);
+        assert_invalid_params(
+            &rejected,
+            json!({
+                "processing": "chunked",
+                "attachmentIds": ["f1"],
+                "code": program_of_code_bytes(crate::data_compute::MAX_CODE_BYTES + 1),
+            }),
+            "128 KiB",
+        );
+        let _ = std::fs::remove_dir_all(&rejected.fixture.root);
     }
 
     #[test]
