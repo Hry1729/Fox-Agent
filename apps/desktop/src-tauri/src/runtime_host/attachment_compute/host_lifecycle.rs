@@ -142,6 +142,11 @@ impl super::jobs::JobLifecyclePort for HostJobLifecycle {
         self.attempt
     }
 
+    #[cfg(test)]
+    fn job_identity(&self) -> &str {
+        &self.job_id
+    }
+
     fn mark_running(&self) -> Result<(), super::jobs::PortError> {
         self.database.kernel_job_claim_attempt(&self.job_id, self.attempt).map(|_| ()).map_err(port_error)
     }

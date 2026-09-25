@@ -287,6 +287,13 @@ pub(crate) trait JobLifecyclePort: Send + Sync {
     /// `report`/`settle` on `(job_id, attempt)` so a late report from an older
     /// attempt cannot touch a newer one.
     fn attempt(&self) -> u32;
+    /// Test-only identity of the Job this execution settles, so a per-Run
+    /// settlement gate can hold two Jobs of one Run independently. Production
+    /// builds never call it; the default keeps test doubles unchanged.
+    #[cfg(test)]
+    fn job_identity(&self) -> &str {
+        ""
+    }
     /// The start CAS: only the attempt that wins may run or settle. `Conflict`
     /// means another owner already has it.
     fn mark_running(&self) -> Result<(), PortError>;
@@ -311,17 +318,54 @@ pub(crate) trait JobLifecyclePort: Send + Sync {
 /// instead of sleeping and hoping.
 #[cfg(test)]
 pub(crate) mod test_hooks {
-    use std::sync::Mutex;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
 
     type Hook = Box<dyn FnMut() + Send>;
+    /// Per-Run settlement gate. It receives the settling Job identity, so one
+    /// test can hold two Jobs of the same Run and release them in a chosen
+    /// order. Held behind an `Arc` so a blocked gate never keeps the registry
+    /// lock while another Job of the same Run settles.
+    type RunHook = Arc<dyn Fn(&str) + Send + Sync>;
 
     static AT_SETTLE: Mutex<Option<Hook>> = Mutex::new(None);
+
+    fn run_gates() -> &'static Mutex<HashMap<String, RunHook>> {
+        static GATES: OnceLock<Mutex<HashMap<String, RunHook>>> = OnceLock::new();
+        GATES.get_or_init(|| Mutex::new(HashMap::new()))
+    }
 
     pub(crate) fn set_at_settle(hook: Option<Hook>) {
         *AT_SETTLE.lock().unwrap() = hook;
     }
 
-    pub(crate) fn run_at_settle() {
+    /// Removes the per-Run gate when it drops, including while a parallel test
+    /// unwinds, so a gate can never leak into another Run's Jobs.
+    pub(crate) struct SettleGate {
+        run_id: String,
+    }
+
+    impl Drop for SettleGate {
+        fn drop(&mut self) {
+            run_gates().lock().unwrap().remove(&self.run_id);
+        }
+    }
+
+    pub(crate) fn gate_at_settle_for_run(run_id: &str, hook: RunHook) -> SettleGate {
+        let previous = run_gates().lock().unwrap().insert(run_id.to_owned(), hook);
+        assert!(previous.is_none(), "a settlement gate is already registered for this Run");
+        SettleGate { run_id: run_id.to_owned() }
+    }
+
+    /// `job` is the settling Job identity, empty when the adapter cannot name
+    /// it. A Run-scoped gate owns the settlement; every other Run keeps the
+    /// original global hook.
+    pub(crate) fn run_at_settle(run_id: &str, job: &str) {
+        let gate = run_gates().lock().unwrap().get(run_id).cloned();
+        if let Some(gate) = gate {
+            gate(job);
+            return;
+        }
         if let Some(hook) = AT_SETTLE.lock().unwrap().as_mut() {
             hook();
         }
@@ -414,7 +458,7 @@ pub(crate) fn run_on_lifecycle(
     };
 
     #[cfg(test)]
-    test_hooks::run_at_settle();
+    test_hooks::run_at_settle(&context.run_id, port.job_identity());
 
     // 6) Fenced mid-flight: the row belongs to someone else now.
     if fence.load(Ordering::SeqCst) {
