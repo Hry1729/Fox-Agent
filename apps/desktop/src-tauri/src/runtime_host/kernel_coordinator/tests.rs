@@ -80,8 +80,8 @@ mod waiting_jobs_recovery_tests;
 mod waiting_jobs_boundary_tests;
 #[path = "waiting_jobs_terminal_tests.rs"]
 mod waiting_jobs_terminal_tests;
-#[path = "run_lock_probe_tests.rs"]
-mod run_lock_probe_tests;
+#[path = "run_lease_component_tests.rs"]
+mod run_lease_component_tests;
 
 /// Record the durable settled result of one authoritative Kernel tool call.
 ///

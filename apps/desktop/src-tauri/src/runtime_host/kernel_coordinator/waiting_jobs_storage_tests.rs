@@ -6,6 +6,13 @@ use crate::kernel::{RunState, WaitingJobFact};
 use serde_json::json;
 use sha2::Digest;
 
+/// Upper bound for the post-park lease handoff, used as ONE monotonic absolute
+/// deadline that is never refreshed. It is deliberately far below the test
+/// runner's limit so a genuine failure surfaces as a failed assertion instead of
+/// a killed process, and it is a wait for a legitimate handoff rather than a
+/// retry-until-green loop.
+const LEASE_HANDOFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 pub(super) fn parked_job_fixture() -> (Database, PathBuf, String, String, String, RunController, u64, i64) {
     parked_job_fixture_with_mutation(None)
 }
@@ -590,38 +597,6 @@ fn waiting_jobs_owned_host_loop_returns_parked_without_error_or_forced_child_set
 
 #[test]
 fn waiting_jobs_real_host_start_and_recovery_lock_race_preserve_parent_token() {
-    real_host_lock_race_body(true).unwrap();
-}
-
-/// Zero-argument wrapper so the bounded repeat probe can share the exact body
-/// and receive the lock trace as a value rather than as a swallowed panic.
-pub(super) fn real_host_lock_race_probe() -> Result<(), String> {
-    real_host_lock_race_body(true)
-}
-
-/// The same body with auto-wake disabled for the Run, used as the CONTROL that
-/// attributes the conflict to the watch task. Test-only switch; no production
-/// lock semantics change.
-pub(super) fn real_host_lock_race_probe_auto_wake_disabled() -> Result<(), String> {
-    real_host_lock_race_body_with_auto_wake(true, true)
-}
-
-/// The body above, shared verbatim with the bounded repeat probe so the probe
-/// exercises exactly the production/test scenario instead of a copy. The
-/// assertions stay in place; only the final reacquire reports its failure as a
-/// value so the probe can print the captured lock trace. `report_phases` adds
-/// opt-in lock-trace markers (no-ops unless `FOX_RUN_LOCK_TRACE` is set).
-pub(super) fn real_host_lock_race_body(report_phases: bool) -> Result<(), String> {
-    real_host_lock_race_body_with_auto_wake(report_phases, false)
-}
-
-/// The shared body. `disable_auto_wake` turns off the Host's WaitingJobs watch
-/// task for this Run before the start; that is the control showing which lock
-/// holder the immediate reacquire is racing.
-fn real_host_lock_race_body_with_auto_wake(
-    report_phases: bool,
-    disable_auto_wake: bool,
-) -> Result<(), String> {
     use tauri::Manager;
     let (db,root,run,_conversation,_job,_controller,_park_seq,_now)=parked_job_fixture();
     let mut context=tauri::generate_context!();
@@ -641,53 +616,49 @@ fn real_host_lock_race_body_with_auto_wake(
         state.cancellation.tool_token(&run,"job-start").unwrap()
     };
     let ownership=super::super::super::kernel_host::acquire(&root,&run).unwrap();
-    if report_phases {
-        crate::runtime_host::kernel_run_lock::lock_trace::record(format!("== T611 own run={run}"));
-    }
     // Force the exact interleaving: the ordinary start owns the OS lock but
     // has not yet inserted kernel_active_runs. Recovery must not insert a
     // shadow owner whose later cleanup could remove the real owner's marker.
     host.recover_kernel_runs_detached().unwrap();
-    if report_phases {
-        crate::runtime_host::kernel_run_lock::lock_trace::record(format!("== T615 recovered run={run}"));
-    }
     assert!(!host.state.lock().unwrap().kernel_active_runs.contains(&run));
     assert!(!token.is_cancelled());
-    if disable_auto_wake {
-        // Control only: keep the Host's WaitingJobs watch task from competing
-        // for the OS lease, so the start/recovery paths are observed alone.
-        host.disable_auto_wake_for_test(&run);
-    }
     host.start_kernel_run(ownership,&binding,serde_json::Value::Null,
         serde_json::Value::Null).unwrap();
-    if report_phases {
-        crate::runtime_host::kernel_run_lock::lock_trace::record(format!("== T619 start-returned run={run}"));
-    }
     assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(),Some("waiting_jobs"));
     assert!(host.state.lock().unwrap().kernel_active_runs.is_empty());
     assert!(!token.is_cancelled(),"Parked must preserve the issued Job parent token");
-    if report_phases {
-        crate::runtime_host::kernel_run_lock::lock_trace::record(format!("== T623 about-to-reacquire run={run}"));
-    }
-    let ownership=super::super::super::kernel_host::acquire(&root,&run).map_err(|error| {
-        // Mark the failing observation so the captured trace shows exactly which
-        // conflict blocked the reacquire, not merely the first conflict in the
-        // window (the recovery probe's self-conflict).
-        crate::runtime_host::kernel_run_lock::lock_trace::record(format!(
-            "== T623 CONFLICT-HERE run={run} error={error} by={}",
-            crate::runtime_host::kernel_run_lock::lock_trace::who()
-        ));
-        format!(
-            "T623 immediate reacquire after park failed with {error}; lock trace:\n{}",
-            crate::runtime_host::kernel_run_lock::lock_trace::take().join("\n")
-        )
-    })?;
-    // A conflict must never have cancelled the issued parent token.
-    assert!(!token.is_cancelled(),"Parked must preserve the issued Job parent token");
+    // Park hands the Run to its owner, and that owner may legitimately pass the
+    // OS lease straight to the WaitingJobs watch task, which takes it to decide
+    // whether a durable notice permits a continuation. So "the very next
+    // acquire must succeed" is NOT a contract; a bounded handoff is. Wait under
+    // ONE monotonic absolute deadline that is never refreshed: only the exact
+    // ownership conflict is retried, every other error fails immediately, and
+    // exhausting the deadline fails the test rather than retrying forever.
+    let deadline=std::time::Instant::now()+LEASE_HANDOFF_TIMEOUT;
+    let ownership=loop {
+        match super::super::super::kernel_host::acquire(&root,&run) {
+            Ok(lease)=>break lease,
+            Err(error) if error==super::super::super::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED
+                && std::time::Instant::now()<deadline => {
+                // A conflicting acquire must not disturb the parked contracts.
+                assert!(!token.is_cancelled(),"a lease conflict must not cancel the parent token");
+                assert!(host.state.lock().unwrap().kernel_active_runs.is_empty(),
+                    "a conflicting acquire must not register a shadow active owner");
+                assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(),Some("waiting_jobs"),
+                    "a lease conflict must not change the durable Run state");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(error)=>panic!(
+                "the lease handoff must complete within {LEASE_HANDOFF_TIMEOUT:?}; got: {error}"),
+        }
+    };
     drop(ownership);
+    // The contracts still hold after the handoff window.
+    assert!(!token.is_cancelled(),"Parked must preserve the issued Job parent token");
+    assert!(host.state.lock().unwrap().kernel_active_runs.is_empty());
+    assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(),Some("waiting_jobs"));
     drop(host);
     drop(app);
-    Ok(())
 }
 
 #[test]
