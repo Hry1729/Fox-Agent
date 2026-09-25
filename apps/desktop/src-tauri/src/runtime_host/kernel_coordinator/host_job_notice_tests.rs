@@ -2,7 +2,7 @@ use super::*;
 use crate::database::JobStartRequest;
 use sha2::{Digest, Sha256};
 
-fn notice_host_fixture(_tag: &str) -> (Database, PathBuf, String, TestClock, CancellationRegistry, String) {
+pub(super) fn notice_host_fixture(_tag: &str) -> (Database, PathBuf, String, TestClock, CancellationRegistry, String) {
     let clock = TestClock::new(crate::database::now_ms());
     let cancellation = CancellationRegistry::default();
     let config=worker_configuration();
@@ -34,7 +34,7 @@ fn finished_compute(db: &Database, run: &str, conversation: &str, key: &str) -> 
     job
 }
 
-fn failed_compute(db:&Database,run:&str,key:&str,code:&str)->String {
+pub(super) fn failed_compute(db:&Database,run:&str,key:&str,code:&str)->String {
     let job=db.kernel_job_start(&JobStartRequest {run_id:run.into(),kind:"attachment_compute".into(),
         idempotency_key:key.into(),params:json!({"input":key}),
         deadline_ms:Some(crate::database::now_ms()+60_000),progress_total:None})
@@ -45,7 +45,7 @@ fn failed_compute(db:&Database,run:&str,key:&str,code:&str)->String {
     job
 }
 
-fn stop_response(binding: &RunControlBinding, frame: &fox_engine_protocol::KernelInitialModelFrame)
+pub(super) fn stop_response(binding: &RunControlBinding, frame: &fox_engine_protocol::KernelInitialModelFrame)
     -> fox_engine_protocol::KernelInitialModelResponse {
     fox_engine_protocol::KernelInitialModelResponse {
         schema_version: 1, run_id: binding.run_id.clone(), turn_id: frame.input.turn_id.clone(),

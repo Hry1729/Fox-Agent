@@ -82,6 +82,8 @@ mod waiting_jobs_boundary_tests;
 mod waiting_jobs_terminal_tests;
 #[path = "waiting_jobs_batch_tests.rs"]
 mod waiting_jobs_batch_tests;
+#[path = "job_notice_capacity_tests.rs"]
+mod job_notice_capacity_tests;
 #[path = "run_lease_component_tests.rs"]
 mod run_lease_component_tests;
 
