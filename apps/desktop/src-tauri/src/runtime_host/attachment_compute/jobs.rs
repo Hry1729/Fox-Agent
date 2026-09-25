@@ -335,6 +335,17 @@ pub(crate) mod test_hooks {
         GATES.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
+    /// Poison-tolerant registry access: a panicking gate on an execution
+    /// thread must not turn cleanup on the test-owner thread into a second
+    /// panic, and must not strand a registration another Run would collide
+    /// with.
+    fn with_run_gates<T>(use_gates: impl FnOnce(&mut HashMap<String, RunHook>) -> T) -> T {
+        match run_gates().lock() {
+            Ok(mut gates) => use_gates(&mut gates),
+            Err(poisoned) => use_gates(&mut poisoned.into_inner()),
+        }
+    }
+
     pub(crate) fn set_at_settle(hook: Option<Hook>) {
         *AT_SETTLE.lock().unwrap() = hook;
     }
@@ -347,21 +358,27 @@ pub(crate) mod test_hooks {
 
     impl Drop for SettleGate {
         fn drop(&mut self) {
-            run_gates().lock().unwrap().remove(&self.run_id);
+            with_run_gates(|gates| { gates.remove(&self.run_id); });
         }
     }
 
     pub(crate) fn gate_at_settle_for_run(run_id: &str, hook: RunHook) -> SettleGate {
-        let previous = run_gates().lock().unwrap().insert(run_id.to_owned(), hook);
+        let previous = with_run_gates(|gates| gates.insert(run_id.to_owned(), hook));
         assert!(previous.is_none(), "a settlement gate is already registered for this Run");
         SettleGate { run_id: run_id.to_owned() }
+    }
+
+    /// Whether a per-Run settlement gate is registered right now. The cleanup
+    /// negative probe asserts the registration is gone after it unwinds.
+    pub(crate) fn settle_gate_registered(run_id: &str) -> bool {
+        with_run_gates(|gates| gates.contains_key(run_id))
     }
 
     /// `job` is the settling Job identity, empty when the adapter cannot name
     /// it. A Run-scoped gate owns the settlement; every other Run keeps the
     /// original global hook.
     pub(crate) fn run_at_settle(run_id: &str, job: &str) {
-        let gate = run_gates().lock().unwrap().get(run_id).cloned();
+        let gate = with_run_gates(|gates| gates.get(run_id).cloned());
         if let Some(gate) = gate {
             gate(job);
             return;

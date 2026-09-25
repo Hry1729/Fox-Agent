@@ -54,7 +54,7 @@ fn real_host_merges_two_compute_job_notices_into_one_continuation() {
 
 /// Holds every compute Job of one Run at its settlement boundary until the test
 /// releases that exact Job. Keyed by Run, removed by its RAII guard, and
-/// abandoned (every waiter released) if the guard drops during a panic.
+/// released by its test owner, not by the last `Arc` dropping.
 struct BatchGate {
     state: Mutex<GateState>,
     cv: Condvar,
@@ -69,32 +69,42 @@ struct GateState {
 }
 
 impl BatchGate {
-    fn install(run_id: &str) -> (Arc<Self>, mpsc::Receiver<String>,
-        crate::runtime_host::attachment_compute::jobs::test_hooks::SettleGate) {
-        let (entered, entered_rx) = mpsc::channel();
-        let gate = Arc::new(Self {
-            state: Mutex::new(GateState::default()), cv: Condvar::new(), entered,
-        });
-        let hook_gate = Arc::clone(&gate);
-        let guard = crate::runtime_host::attachment_compute::jobs::test_hooks::gate_at_settle_for_run(
-            run_id, Arc::new(move |job: &str| hook_gate.hold(job)));
-        (gate, entered_rx, guard)
+    /// Poison-tolerant access: a bounded-deadline panic on an execution thread
+    /// poisons this mutex, and the owner guard must still be able to release
+    /// the remaining waiters without a second panic during unwinding.
+    fn state(&self) -> std::sync::MutexGuard<'_, GateState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
     /// Runs on the real execution thread, after the work returned and before
     /// the terminal decision.
     fn hold(&self, job: &str) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         assert!(!job.is_empty(), "the settlement gate was reached without a Job identity");
         assert!(state.held.insert(job.to_owned()), "Job {job} reached the settlement gate twice");
         let _ = self.entered.send(job.to_owned());
         let deadline = Instant::now() + Duration::from_secs(60);
         while !state.released.contains(job) && !state.abandoned {
-            let (guard, timeout) = self.cv.wait_timeout(state, Duration::from_millis(50)).unwrap();
+            let (guard, timeout) = match self.cv.wait_timeout(state, Duration::from_millis(50)) {
+                Ok(waited) => waited,
+                Err(poisoned) => poisoned.into_inner(),
+            };
             state = guard;
             assert!(!(timeout.timed_out() && Instant::now() >= deadline),
                 "Job {job} was never released from its bounded settlement gate");
         }
+    }
+
+    /// Releases every blocked waiter. This is the release path a failed test
+    /// depends on and it takes `&self`: a blocked hook holds its own
+    /// `Arc<BatchGate>`, so `Drop for BatchGate` cannot run while it waits.
+    fn abandon(&self) {
+        let mut state = self.state();
+        state.abandoned = true;
+        self.cv.notify_all();
     }
 
     fn await_held(&self, entered: &mpsc::Receiver<String>, expected: usize) -> Vec<String> {
@@ -111,7 +121,7 @@ impl BatchGate {
     }
 
     fn release(&self, job: &str) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state();
         assert!(state.held.contains(job), "Job {job} is not held at its settlement gate");
         state.released.insert(job.to_owned());
         self.cv.notify_all();
@@ -119,11 +129,48 @@ impl BatchGate {
 }
 
 impl Drop for BatchGate {
+    /// Safety net only. The test owner guard abandons explicitly, so a waiter
+    /// is never released by this drop while a hook still holds the `Arc`.
     fn drop(&mut self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.abandoned = true;
-            self.cv.notify_all();
-        }
+        self.abandon();
+    }
+}
+
+/// The test owner of one Run's settlement gate. Holding this (not the
+/// `Arc<BatchGate>`) is what guarantees cleanup: its `Drop` runs on the test
+/// thread on the normal path and while unwinding, releases every blocked
+/// waiter first, and only then removes the per-Run registration.
+struct BatchGateOwner {
+    gate: Arc<BatchGate>,
+    registration: Option<crate::runtime_host::attachment_compute::jobs::test_hooks::SettleGate>,
+    entered: mpsc::Receiver<String>,
+}
+
+impl BatchGateOwner {
+    fn install(run_id: &str) -> Self {
+        let (entered, entered_rx) = mpsc::channel();
+        let gate = Arc::new(BatchGate {
+            state: Mutex::new(GateState::default()), cv: Condvar::new(), entered,
+        });
+        let hook_gate = Arc::clone(&gate);
+        let registration = crate::runtime_host::attachment_compute::jobs::test_hooks::gate_at_settle_for_run(
+            run_id, Arc::new(move |job: &str| hook_gate.hold(job)));
+        Self { gate, registration: Some(registration), entered: entered_rx }
+    }
+
+    fn await_held(&self, expected: usize) -> Vec<String> {
+        self.gate.await_held(&self.entered, expected)
+    }
+
+    fn release(&self, job: &str) {
+        self.gate.release(job);
+    }
+}
+
+impl Drop for BatchGateOwner {
+    fn drop(&mut self) {
+        self.gate.abandon();
+        drop(self.registration.take());
     }
 }
 
@@ -223,6 +270,139 @@ fn delivered_notices(value: &Value) -> Vec<fox_engine_protocol::HostJobNotice> {
     notices
 }
 
+/// The acceptance rule for the typed notice batch, in one place: the live
+/// scenarios and the reversed-delivery negative probe both call exactly this,
+/// so a rejected delivery cannot be explained away by a second, weaker
+/// assertion living in the probe.
+///
+/// `expected_order` is the durable `(finished_at, job_id)` order the Host must
+/// produce. The received sequence is compared against it **without being
+/// re-sorted**: sorting the observed sequence here would collapse the order
+/// check into the set check and accept a reversed delivery.
+fn assert_notice_batch_order(
+    delivered: &[fox_engine_protocol::HostJobNotice],
+    expected_order: &[(i64, String)],
+) {
+    assert_eq!(delivered.len(), expected_order.len(),
+        "the Provider must receive exactly the expected typed notices");
+    // Independent set check: same Jobs, no duplicate, no omission.
+    let mut observed_set: Vec<(i64, String)> = delivered.iter()
+        .map(|notice| (notice.finished_at, notice.job_id.clone())).collect();
+    observed_set.sort();
+    let mut expected_set = expected_order.to_vec();
+    expected_set.sort();
+    assert_eq!(observed_set, expected_set, "the batch must carry both Job notices exactly once");
+    // The order the Provider actually received them in.
+    let observed_order: Vec<(i64, String)> = delivered.iter()
+        .map(|notice| (notice.finished_at, notice.job_id.clone())).collect();
+    assert_eq!(observed_order, expected_order,
+        "the batch must follow the durable finished_at/job_id order");
+}
+
+/// A reversed wire order must be rejected by the rule the live scenarios accept.
+///
+/// This probe pins down the gap that made the original assertion vacuous: the
+/// pre-fix form re-sorted the observed sequence, so the reversed delivery below
+/// satisfied it. Both halves run on this exact input, so the negative case
+/// cannot pass by testing a different, stricter rule than the acceptance path.
+#[test]
+fn reversed_notice_delivery_is_rejected_by_the_shared_order_rule() {
+    let notice = |job: &str, finished_at: i64| fox_engine_protocol::HostJobNotice {
+        source: "fox_kernel_host".into(),
+        data_root_id: "sha256:negative-probe".into(),
+        conversation_id: "negative-probe-conversation".into(),
+        run_id: "negative-probe-run".into(),
+        job_id: job.into(),
+        attempt: 1,
+        terminal_state: "completed".into(),
+        finished_at,
+        result_ref: Some(format!("fox-job-result://{job}")),
+        result_sha256: Some(format!("sha256:{}", "0".repeat(64))),
+        result_bytes: Some(1),
+        error_code: None,
+    };
+    let first = notice("job:negative-a", 1_000);
+    let second = notice("job:negative-b", 2_000);
+    let expected_order =
+        vec![(1_000_i64, "job:negative-a".to_owned()), (2_000, "job:negative-b".to_owned())];
+
+    // The accepted delivery passes the shared rule.
+    assert_notice_batch_order(&[first.clone(), second.clone()], &expected_order);
+
+    // The same two notices delivered in the opposite order.
+    let reversed = vec![second.clone(), first.clone()];
+
+    // The pre-fix comparison (sort the observed sequence, then compare) accepts
+    // the reversal: this is exactly why the original assertion was vacuous.
+    let mut pre_fix_observed: Vec<(i64, String)> = reversed.iter()
+        .map(|fact| (fact.finished_at, fact.job_id.clone())).collect();
+    let mut pre_fix_expected = expected_order.clone();
+    pre_fix_observed.sort();
+    pre_fix_expected.sort();
+    assert_eq!(pre_fix_observed, pre_fix_expected,
+        "the pre-fix set-only comparison accepted a reversed delivery");
+    println!("negative probe: the pre-fix set-only comparison accepted the reversed delivery");
+
+    // The shared rule must reject that same reversed delivery.
+    println!("negative probe: expecting the shared order rule to reject the reversed delivery");
+    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_notice_batch_order(&reversed, &expected_order);
+    }));
+    assert!(rejected.is_err(), "the shared order rule accepted a reversed delivery");
+    println!("negative probe: the shared order rule rejected the reversed delivery");
+}
+
+/// The test owner — not the last `Arc<BatchGate>` — must release a blocked
+/// waiter. The waiter here reaches the real settlement seam, then the owner
+/// unwinds: the waiter has to exit and be joinable inside a bounded window
+/// (never the gate's own 60 s timeout) and the per-Run registration must be
+/// gone, so the next Run cannot inherit it.
+#[test]
+fn owner_unwind_releases_blocked_waiter_and_clears_registration() {
+    use crate::runtime_host::attachment_compute::jobs::test_hooks;
+    let run_id = format!("batch-gate-unwind-{}", std::process::id());
+    assert!(!test_hooks::settle_gate_registered(&run_id),
+        "a settlement gate leaked from an earlier test");
+
+    let owner = BatchGateOwner::install(&run_id);
+    assert!(test_hooks::settle_gate_registered(&run_id),
+        "the per-Run settlement gate must be registered before a waiter is gated");
+
+    let (exited, exited_rx) = mpsc::channel();
+    let waiter_run = run_id.clone();
+    let waiter = std::thread::spawn(move || {
+        test_hooks::run_at_settle(&waiter_run, "job:unwind-waiter");
+        let _ = exited.send(());
+    });
+    let held = owner.await_held(1);
+    assert_eq!(held, vec!["job:unwind-waiter".to_owned()],
+        "the real settlement seam must reach the gate");
+
+    // The test owner unwinds while the waiter is still gated. Only the owner
+    // guard can release it: the blocked hook holds its own `Arc<BatchGate>`.
+    let started = Instant::now();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _owner = owner;
+        panic!("controlled test-owner unwind while a waiter is gated");
+    }));
+    assert!(unwound.is_err(), "the controlled owner unwind must propagate");
+
+    exited_rx.recv_timeout(Duration::from_secs(5))
+        .expect("the blocked settlement waiter was not released by the owner guard");
+    waiter.join().expect("the released settlement waiter must be joinable");
+    let released_after = started.elapsed();
+    assert!(released_after < Duration::from_secs(5),
+        "cleanup took {released_after:?}: the waiter was not released by the owner guard");
+    assert!(!test_hooks::settle_gate_registered(&run_id),
+        "the per-Run settlement registration must be removed while unwinding");
+
+    // A fresh gate for the same Run must install cleanly: no stale entry.
+    drop(BatchGateOwner::install(&run_id));
+    assert!(!test_hooks::settle_gate_registered(&run_id));
+    println!("negative probe: owner unwind released the gated waiter in {released_after:?} \
+and cleared the registration");
+}
+
 fn job_key_map(db: &Database, run: &str) -> HashMap<String, String> {
     db.with_connection(|conn| {
         let mut statement = conn.prepare(
@@ -289,8 +469,9 @@ fn run_two_job_notice_batch(live: bool, a_first: bool) {
     };
 
     // Gate every settlement of this Run, then drive the real Host. The park
-    // happens while both Jobs are held at their settlement boundary.
-    let (gate, entered, settle_guard) = BatchGate::install(&run);
+    // happens while both Jobs are held at their settlement boundary. The owner
+    // guard — not the last `Arc<BatchGate>` — releases them if this test fails.
+    let gate = BatchGateOwner::install(&run);
     let park_entry = arm_wake_entry(&run);
     let ownership = crate::runtime_host::kernel_host::acquire(&root, &run).unwrap();
     if live {
@@ -302,7 +483,7 @@ fn run_two_job_notice_batch(live: bool, a_first: bool) {
     assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(), Some("waiting_jobs"),
         "the Run must park while both Jobs are still running");
 
-    let held = gate.await_held(&entered, 2);
+    let held = gate.await_held(2);
     let jobs = db.kernel_jobs_for_run(&run).unwrap();
     assert_eq!(jobs.len(), 2, "two formal job_start results must create exactly two Jobs");
     for job in &jobs {
@@ -375,7 +556,7 @@ fn run_two_job_notice_batch(live: bool, a_first: bool) {
             "the second Job terminal fact did not finish the Run: state={state:?}");
         std::thread::sleep(Duration::from_millis(20));
     }
-    drop(settle_guard);
+    drop(gate);
 
     let second_notice = db.kernel_job_notice(&binding.conversation_id, &run, &second_job)
         .unwrap().expect("the second Job committed no scoped notice");
@@ -399,21 +580,15 @@ fn run_two_job_notice_batch(live: bool, a_first: bool) {
     assert_eq!(requests[2]["messages"].to_string().matches("FOX_HOST_JOB_NOTICE_V1").count(), 2,
         "the single notice continuation must carry both typed notices");
     let delivered = delivered_notices(&requests[2]["messages"]);
-    assert_eq!(delivered.len(), 2, "the Provider must receive exactly two typed notices");
 
+    // The durable order the Host must produce, checked by the shared rule — the
+    // same rule the reversed-delivery negative probe must fail.
     let mut expected_order = vec![
         (first_notice.finished_at, first_notice.job_id.clone()),
         (second_notice.finished_at, second_notice.job_id.clone()),
     ];
     expected_order.sort();
-    let mut observed_order: Vec<(i64, String)> = delivered.iter()
-        .map(|notice| (notice.finished_at, notice.job_id.clone())).collect();
-    let mut observed_set = observed_order.clone();
-    observed_set.sort();
-    assert_eq!(observed_set, expected_order, "the batch must carry both Job notices exactly once");
-    observed_order.sort();
-    assert_eq!(observed_order, expected_order,
-        "the batch must follow the durable finished_at/job_id order");
+    assert_notice_batch_order(&delivered, &expected_order);
     for wire in &delivered {
         let durable = if wire.job_id == first_notice.job_id { &first_notice } else { &second_notice };
         assert_eq!(wire.run_id, run.as_str());
