@@ -848,6 +848,23 @@ mod tests {
         })
     }
 
+    /// A runnable chunked program padded to an exact byte length.
+    ///
+    /// The padding is whitespace, so the program stays valid JavaScript at any
+    /// exact size and the wrapper the interpreter appends after the user
+    /// program is never commented out. It defines `onChunk` and `onFinish`, so
+    /// a program that actually reaches the interpreter *completes* instead of
+    /// failing — that is what makes the assertions below able to tell "the
+    /// parameter was rejected" apart from "the program ran and threw".
+    fn program_of_code_bytes(total_bytes: usize) -> String {
+        let head = "function onChunk(c){}\nfunction onFinish(){ return {bytes: 1}; }\n";
+        assert!(total_bytes > head.len(), "the head alone is {} bytes", head.len());
+        let mut code = String::from(head);
+        code.push_str(&" ".repeat(total_bytes - head.len()));
+        assert_eq!(code.len(), total_bytes);
+        code
+    }
+
     #[test]
     fn start_cas_loss_writes_nothing_and_reports_not_started() {
         let harness = Harness::new("cas");
@@ -1109,6 +1126,64 @@ mod tests {
         assert!(message.contains("JavaScript execution failed"), "{message}");
         assert!(message.contains("processing profile 档位 code is invalid"), "{message}");
         assert!(message.contains("code line"), "{message}");
+        let _ = std::fs::remove_dir_all(&harness.fixture.root);
+    }
+
+    /// Regression: the byte bound on the submitted program is a *parameter*
+    /// rule, and the job must reject it as such before the interpreter starts.
+    ///
+    /// The front check used to accept any non-empty program, so an over-long
+    /// one reached `attachment_compute::execute_with_options`, whose own length
+    /// check rejected it with `code must be nonempty JavaScript within 128 KiB`.
+    /// While the classifier still matched the broad `contains("code ")`, that
+    /// rejection happened to look like a parameter error. Removing the broad
+    /// text match made it fall through to `compute.execution_failed`, which is
+    /// wrong: nothing was executed, so nothing "failed to execute".
+    ///
+    /// This is the real job path (`run_on_lifecycle` → production `jobs::run`)
+    /// over a real database, conversation and attachment; it does not call the
+    /// classifier helper with a hand-made string. The program would *complete*
+    /// if it were executed, so the `Failed` terminal cannot be a coincidental
+    /// execution error, and no progress report may exist because progress is
+    /// only emitted once execution has started.
+    #[test]
+    fn an_over_long_program_is_rejected_as_invalid_params_without_running_javascript() {
+        let harness = Harness::new("overlong-code");
+        harness.fixture.attach_csv("f1", 8);
+        let params = json!({
+            "processing": "chunked",
+            "attachmentIds": ["f1"],
+            "code": program_of_code_bytes(crate::data_compute::MAX_CODE_BYTES + 1),
+        });
+        let token = token_for("run-1");
+        let terminal = harness.run_with("run-1", &token, params);
+        assert_eq!(
+            terminal.error_code,
+            Some(codes::INVALID_PARAMS),
+            "an over-long program is a parameter error, not an execution failure; \
+             state={:?} message={:?}",
+            terminal.state,
+            terminal.error_message
+        );
+        assert_eq!(terminal.state, TerminalState::Failed);
+        assert!(terminal.settled);
+        assert_eq!(
+            harness.port.settles(),
+            vec![format!("settle_failed:{}", codes::INVALID_PARAMS)],
+            "{:?}",
+            harness.port.events()
+        );
+        let message = terminal.error_message.unwrap_or_default();
+        assert!(message.contains("128 KiB"), "must be the byte-bound rejection: {message}");
+        assert!(
+            !message.contains(JS_EXECUTION_FAILURE_MARKER),
+            "the interpreter must never have run: {message}"
+        );
+        assert!(
+            !harness.port.events().iter().any(|event| event.starts_with("report")),
+            "progress is only reported once execution starts: {:?}",
+            harness.port.events()
+        );
         let _ = std::fs::remove_dir_all(&harness.fixture.root);
     }
 
