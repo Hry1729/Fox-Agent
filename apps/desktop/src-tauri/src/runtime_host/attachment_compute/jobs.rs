@@ -1041,9 +1041,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&harness.fixture.root);
     }
 
+    /// A real JavaScript exception raised by the user's own code is an execution
+    /// failure, NOT a parameter error. Before this was fixed, the classifier ran
+    /// `message.contains("code ")` against the interpreter's own location text
+    /// ("near code line N"), so every executed exception was reported as
+    /// `compute.invalid_params` — the message text of a user error decided the
+    /// classification. The exception here is deliberately worded to look like a
+    /// parameter diagnostic as well, so parameters can never be inferred from
+    /// the text at all.
     #[test]
-    fn invalid_params_and_deadline_produce_their_own_terminals() {
-        let harness = Harness::new("params");
+    fn a_real_javascript_exception_is_an_execution_failure_not_an_invalid_parameter() {
+        let harness = Harness::new("js-exception");
+        // A real attachment: the chunked code only runs once rows are delivered,
+        // so this exercises the genuine QuickJS execution path.
+        harness.fixture.attach_csv("f1", 8);
+        let params = json!({
+            "processing": "chunked",
+            "attachmentIds": ["f1"],
+            "code": "function onChunk(c){}\nfunction onFinish(){ throw new Error('processing profile 档位 code is invalid'); }",
+        });
+        let token = token_for("run-1");
+        let terminal = harness.run_with("run-1", &token, params);
+        assert_eq!(terminal.state, TerminalState::Failed);
+        assert_eq!(
+            terminal.error_code,
+            Some(codes::EXECUTION_FAILED),
+            "a real executed exception must be an execution failure; message: {:?}",
+            terminal.error_message
+        );
+        assert_eq!(
+            harness.port.settles(),
+            vec![format!("settle_failed:{}", codes::EXECUTION_FAILED)],
+            "{:?}",
+            harness.port.events()
+        );
+        let message = terminal.error_message.unwrap_or_default();
+        // The real interpreter diagnostics must still be present in the message:
+        // this is the executed path, not a synthetic string.
+        assert!(message.contains("JavaScript execution failed"), "{message}");
+        assert!(message.contains("processing profile 档位 code is invalid"), "{message}");
+        assert!(message.contains("code line"), "{message}");
+        let _ = std::fs::remove_dir_all(&harness.fixture.root);
+    }
+
+    #[test]
+    fn invalid_params_and_deadline_produce_their_own_terminals() {        let harness = Harness::new("params");
         let token = token_for("run-1");
         let terminal = harness.run_with("run-1", &token, json!({"processing": "chunked"}));
         assert_eq!(terminal.state, TerminalState::Failed);
