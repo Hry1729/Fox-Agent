@@ -148,11 +148,14 @@ fn run_terminal_job_chain(live: bool, fail: bool) {
         assert!(job.error_message.as_deref().unwrap_or("").contains("planned compute failure"),
             "the failed Job must come from the real onFinish exception");
     }
-    // The current compute adapter classifies its own "near code line" diagnostic
-    // as invalid_params. This case still proves an executed, failed Job and
-    // checks that the model receives that exact durable classification.
+    // The executed onFinish exception is an execution failure, not a parameter
+    // error: the interpreter's "near code line" diagnostic must never be read as
+    // a statement about the submitted parameters. The model receives the same
+    // durable classification the Job persisted.
+    assert_eq!(job.error_code.as_deref(),
+        Some(if fail { "compute.execution_failed" } else { "compute.cancelled" }));
     assert_eq!(notice.error_code.as_deref(),
-        Some(if fail { "compute.invalid_params" } else { "compute.cancelled" }));
+        Some(if fail { "compute.execution_failed" } else { "compute.cancelled" }));
     let requests = server.join().unwrap();
     assert_eq!(requests.len(), 3, "a terminal Job has one automatic continuation");
     assert_eq!(requests[2]["messages"].to_string().matches("FOX_HOST_JOB_NOTICE_V1").count(), 1);

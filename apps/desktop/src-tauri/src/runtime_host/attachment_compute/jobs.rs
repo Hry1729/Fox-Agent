@@ -565,11 +565,17 @@ pub(crate) fn run(
                 codes::CANCELLED
             } else if message.contains("timed out") {
                 codes::TIMED_OUT
-            } else if message.contains("profile")
-                || message.contains("processing")
-                || message.contains("code ")
-                || message.contains("档位")
-            {
+            } else if is_javascript_execution_failure(&message) {
+                // Provenance, not wording. The QuickJS interpreter prefixes every
+                // error it raises with this marker and appends its own location
+                // diagnostic ("near code line N"). Classifying on message text
+                // instead made every executed exception look like a bad
+                // parameter, because the diagnostic itself contains "code ".
+                codes::EXECUTION_FAILED
+            } else if is_parameter_validation_failure(&message) {
+                // Only messages produced by the input-validation stage may reach
+                // here, and each is matched by a phrase that describes the
+                // parameter itself.
                 codes::INVALID_PARAMS
             } else {
                 codes::EXECUTION_FAILED
@@ -577,6 +583,28 @@ pub(crate) fn run(
             Err(ComputeJobError { code, message })
         }
     }
+}
+
+/// Marker every QuickJS failure carries out of the interpreter. It is emitted by
+/// `data_compute::format_js_error` and `data_compute::chunked::format_js_error`,
+/// which are the only producers of user-code execution errors on this path.
+/// Kept in sync with that producer: if it ever changes its wording, this
+/// predicate must change with it (and the regression test will fail loudly).
+const JS_EXECUTION_FAILURE_MARKER: &str = "JavaScript execution failed";
+
+fn is_javascript_execution_failure(message: &str) -> bool {
+    message.contains(JS_EXECUTION_FAILURE_MARKER)
+}
+
+/// Phrases produced only by the input-validation stage of
+/// `attachment_compute::execute_with_options`, before any execution work starts.
+/// Deliberately narrow: a broad "does the message mention code/profile" test is
+/// what caused the misclassification, because user exceptions and their source
+/// excerpts can contain any of those words.
+fn is_parameter_validation_failure(message: &str) -> bool {
+    message.contains("processing must be")
+        || message.contains("profile")
+        || message.contains("档位的")
 }
 
 #[cfg(test)]
