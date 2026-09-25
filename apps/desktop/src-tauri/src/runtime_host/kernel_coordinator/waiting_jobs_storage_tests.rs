@@ -590,6 +590,38 @@ fn waiting_jobs_owned_host_loop_returns_parked_without_error_or_forced_child_set
 
 #[test]
 fn waiting_jobs_real_host_start_and_recovery_lock_race_preserve_parent_token() {
+    real_host_lock_race_body(true).unwrap();
+}
+
+/// Zero-argument wrapper so the bounded repeat probe can share the exact body
+/// and receive the lock trace as a value rather than as a swallowed panic.
+pub(super) fn real_host_lock_race_probe() -> Result<(), String> {
+    real_host_lock_race_body(true)
+}
+
+/// The same body with auto-wake disabled for the Run, used as the CONTROL that
+/// attributes the conflict to the watch task. Test-only switch; no production
+/// lock semantics change.
+pub(super) fn real_host_lock_race_probe_auto_wake_disabled() -> Result<(), String> {
+    real_host_lock_race_body_with_auto_wake(true, true)
+}
+
+/// The body above, shared verbatim with the bounded repeat probe so the probe
+/// exercises exactly the production/test scenario instead of a copy. The
+/// assertions stay in place; only the final reacquire reports its failure as a
+/// value so the probe can print the captured lock trace. `report_phases` adds
+/// opt-in lock-trace markers (no-ops unless `FOX_RUN_LOCK_TRACE` is set).
+pub(super) fn real_host_lock_race_body(report_phases: bool) -> Result<(), String> {
+    real_host_lock_race_body_with_auto_wake(report_phases, false)
+}
+
+/// The shared body. `disable_auto_wake` turns off the Host's WaitingJobs watch
+/// task for this Run before the start; that is the control showing which lock
+/// holder the immediate reacquire is racing.
+fn real_host_lock_race_body_with_auto_wake(
+    report_phases: bool,
+    disable_auto_wake: bool,
+) -> Result<(), String> {
     use tauri::Manager;
     let (db,root,run,_conversation,_job,_controller,_park_seq,_now)=parked_job_fixture();
     let mut context=tauri::generate_context!();
@@ -609,21 +641,43 @@ fn waiting_jobs_real_host_start_and_recovery_lock_race_preserve_parent_token() {
         state.cancellation.tool_token(&run,"job-start").unwrap()
     };
     let ownership=super::super::super::kernel_host::acquire(&root,&run).unwrap();
+    if report_phases {
+        crate::runtime_host::kernel_run_lock::lock_trace::record(format!("== T611 own run={run}"));
+    }
     // Force the exact interleaving: the ordinary start owns the OS lock but
     // has not yet inserted kernel_active_runs. Recovery must not insert a
     // shadow owner whose later cleanup could remove the real owner's marker.
     host.recover_kernel_runs_detached().unwrap();
+    if report_phases {
+        crate::runtime_host::kernel_run_lock::lock_trace::record(format!("== T615 recovered run={run}"));
+    }
     assert!(!host.state.lock().unwrap().kernel_active_runs.contains(&run));
     assert!(!token.is_cancelled());
+    if disable_auto_wake {
+        // Control only: keep the Host's WaitingJobs watch task from competing
+        // for the OS lease, so the start/recovery paths are observed alone.
+        host.disable_auto_wake_for_test(&run);
+    }
     host.start_kernel_run(ownership,&binding,serde_json::Value::Null,
         serde_json::Value::Null).unwrap();
+    if report_phases {
+        crate::runtime_host::kernel_run_lock::lock_trace::record(format!("== T619 start-returned run={run}"));
+    }
     assert_eq!(db.kernel_host_run_state(&run).unwrap().as_deref(),Some("waiting_jobs"));
     assert!(host.state.lock().unwrap().kernel_active_runs.is_empty());
     assert!(!token.is_cancelled(),"Parked must preserve the issued Job parent token");
-    let ownership=super::super::super::kernel_host::acquire(&root,&run).unwrap();
+    if report_phases {
+        crate::runtime_host::kernel_run_lock::lock_trace::record(format!("== T623 about-to-reacquire run={run}"));
+    }
+    let ownership=super::super::super::kernel_host::acquire(&root,&run).map_err(|error| format!(
+        "T623 immediate reacquire after park failed with {error}; lock trace:\n{}",
+        crate::runtime_host::kernel_run_lock::lock_trace::take().join("\n")))?;
+    // A conflict must never have cancelled the issued parent token.
+    assert!(!token.is_cancelled(),"Parked must preserve the issued Job parent token");
     drop(ownership);
     drop(host);
     drop(app);
+    Ok(())
 }
 
 #[test]
