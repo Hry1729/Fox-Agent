@@ -1,17 +1,17 @@
-//! Capacity boundary of the typed Host notice lane (C2).
+//! Capacity boundary of the typed Host notice lane (C2 / C2-R1).
 //!
-//! Evidence tier: **component/coordinator**. These tests drive the real SQLite
-//! kernel state, the real production packer (`pending_model_facts` through
-//! `pending_host_job_notices`), the real binding/acknowledgement path and the
-//! real response-planning entries (`dispatch_initial` and
-//! `wake_waiting_jobs_now`). Model responses are closures and no Pi transport,
-//! Node worker or Provider is involved, so this is **not** a real Host/Node/Pi
-//! end-to-end acceptance.
+//! Evidence tier: **component/coordinator** for the packing, binding,
+//! acknowledgement and response-planning cases. The last test additionally
+//! drives the **real RuntimeHost** drive loop with the real Node/Pi worker on
+//! both transports and a bounded local mock OpenAI-compatible Provider. There is
+//! no real Provider, and the notices of that test are manufactured through
+//! database interfaces rather than produced by a compute execution, so none of
+//! this is a real Host/Node/Pi end-to-end acceptance.
 //!
 //! Every capacity boundary is measured in the serialized bytes the production
 //! packer itself counts — never in characters and never from a slack guess.
 use super::*;
-use super::host_job_notice_tests::{failed_compute, notice_host_fixture, stop_response};
+use super::host_job_notice_tests::{enable_notices, failed_compute, notice_host_fixture, stop_response};
 use crate::database::JobStartRequest;
 
 /// The batch budget the production planner uses
@@ -349,3 +349,300 @@ fn capacity_exhausted_by_historical_markers_blocks_the_wake_and_keeps_every_fact
 next={next_notice_bytes} bytes, state={}",
         db.kernel_host_run_state(&run).unwrap().unwrap());
 }
+
+/// Durable facts the C2-R1 lifecycle test reads back, and compares across its
+/// bounded re-entry. Everything comes from the database; the coordinator's
+/// in-memory snapshot is never used as evidence.
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct CapacityLifecycleFacts {
+    state: String,
+    failed_code: String,
+    failed_message: String,
+    model_request_since_wall_ms: Option<i64>,
+    wait_deadline_wall_ms: Option<i64>,
+    elapsed_to_terminal_ms: Option<i64>,
+    run_execution_budget_ms: i64,
+    unfinished_jobs: i64,
+    jobs: Vec<(String, String, i64)>,
+    /// `(history_position, job_id, state)` of every notice delivery.
+    deliveries: Vec<(i64, String, String)>,
+    delivery_dispatch_keys: Vec<String>,
+    /// `(dispatch_key, state, history_start, historical_bytes)`.
+    notice_inputs: Vec<(String, String, i64, i64)>,
+    notices_without_row: i64,
+    duplicate_deliveries: i64,
+    /// `(effect_key, effect_type, status, lease_owner, attempts)`.
+    outbox: Vec<(String, String, String, String, i64)>,
+    events: Vec<String>,
+}
+
+fn capacity_lifecycle_facts(db: &Database, run: &str) -> CapacityLifecycleFacts {
+    let duplicates = duplicate_deliveries(db, run);
+    let (_, _, _, without_row) = delivery_counts(db, run);
+    let mut facts = db.with_connection(|conn| {
+        let (state, since, wait_deadline, created, terminal_at, frozen): (
+            String, Option<i64>, Option<i64>, i64, Option<i64>, String,
+        ) = conn.query_row(
+            "SELECT state,model_request_since_wall_ms,wait_deadline_wall_ms,created_at,terminal_at,
+                    frozen_config_json FROM kernel_runs WHERE run_id=?1",
+            [run], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)))?;
+        let (failed_code, failed_message): (String, String) = conn.query_row(
+            "SELECT COALESCE(MAX(json_extract(payload_json,'$.code')),''),
+                    COALESCE(MAX(json_extract(payload_json,'$.message')),'')
+             FROM kernel_events WHERE run_id=?1 AND event_type='run.failed'",
+            [run], |row| Ok((row.get(0)?,row.get(1)?)))?;
+        let unfinished_jobs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM kernel_jobs WHERE run_id=?1 AND state IN ('queued','running','paused')",
+            [run], |row| row.get(0))?;
+        let jobs = {
+            let mut statement = conn.prepare(
+                "SELECT job_id,state,attempts FROM kernel_jobs WHERE run_id=?1 ORDER BY job_id")?;
+            let rows = statement.query_map([run], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<(String, String, i64)>>>()?;
+            rows
+        };
+        let deliveries = {
+            let mut statement = conn.prepare(
+                "SELECT d.history_position,d.job_id,d.state FROM kernel_job_notice_deliveries d
+                 JOIN kernel_job_notices n ON n.job_id=d.job_id
+                 WHERE n.run_id=?1 ORDER BY d.history_position")?;
+            let rows = statement.query_map([run], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<(i64, String, String)>>>()?;
+            rows
+        };
+        let delivery_dispatch_keys = {
+            let mut statement = conn.prepare(
+                "SELECT DISTINCT d.dispatch_key FROM kernel_job_notice_deliveries d
+                 JOIN kernel_job_notices n ON n.job_id=d.job_id
+                 WHERE n.run_id=?1 ORDER BY d.dispatch_key")?;
+            let rows = statement.query_map([run], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            rows
+        };
+        let notice_inputs = {
+            let mut statement = conn.prepare(
+                "SELECT dispatch_key,state,history_start,historical_bytes
+                 FROM kernel_model_notice_inputs WHERE run_id=?1 ORDER BY dispatch_key")?;
+            let rows = statement.query_map([run],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?
+                .collect::<rusqlite::Result<Vec<(String, String, i64, i64)>>>()?;
+            rows
+        };
+        let outbox = {
+            let mut statement = conn.prepare(
+                "SELECT effect_key,effect_type,status,COALESCE(lease_owner,''),attempts
+                 FROM kernel_effect_outbox WHERE run_id=?1 ORDER BY effect_key")?;
+            let rows = statement.query_map([run], |row| {
+                Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?))
+            })?.collect::<rusqlite::Result<Vec<(String, String, String, String, i64)>>>()?;
+            rows
+        };
+        let events: String = conn.query_row(
+            "SELECT COALESCE(group_concat(event_type,','),'') FROM
+                (SELECT event_type FROM kernel_events WHERE run_id=?1 ORDER BY seq)",
+            [run], |row| row.get(0))?;
+        let run_execution_budget_ms = serde_json::from_str::<serde_json::Value>(&frozen)
+            .ok().and_then(|value| value["run_execution_budget_ms"].as_i64()).unwrap_or(-1);
+        Ok(CapacityLifecycleFacts {
+            state, failed_code, failed_message, model_request_since_wall_ms: since,
+            wait_deadline_wall_ms: wait_deadline,
+            elapsed_to_terminal_ms: terminal_at.map(|at| at - created),
+            run_execution_budget_ms, unfinished_jobs, jobs, deliveries, delivery_dispatch_keys,
+            notice_inputs, notices_without_row: without_row, duplicate_deliveries: duplicates,
+            outbox,
+            events: events.split(',').map(str::to_owned).filter(|event| !event.is_empty()).collect(),
+        })
+    }).unwrap();
+    facts.notices_without_row = without_row;
+    facts.duplicate_deliveries = duplicates;
+    facts
+}
+
+/// C2-R1: what actually happens to the "maximal prefix plus undelivered
+/// remainder" state in the real RuntimeHost.
+///
+/// C2 proved the refusal at the coordinator entry. This test follows the same
+/// durable state through the real Host drive loop with the real Node/Pi worker
+/// on both transports and a local mock OpenAI-compatible Provider that answers
+/// once with a plain stop, then performs one bounded re-entry through the same
+/// Host entry and proves no durable fact moved.
+///
+/// The 13 notices are prepared through database interfaces: one settled
+/// `attachment_compute` Job per notice, the long `errorCode` of a failed Job
+/// setting its exact serialized size. They are therefore **not** the natural
+/// output of a compute execution; the fixture manufactures the byte boundary on
+/// purpose and this test claims no more than that.
+#[test]
+fn real_runtime_host_capacity_prefix_remainder_lifecycle_on_both_pi_transports() {
+    use std::time::{Duration, Instant};
+    use tauri::Manager;
+    let selected = std::env::var("FOX_TEST_C2_R1_TRANSPORT").ok();
+    let Some(mode) = selected else {
+        // One bounded process per transport: the mock Provider, the OS Run lock
+        // and the RuntimeHost singleton are all process-wide.
+        for mode in ["live", "round"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("real_runtime_host_capacity_prefix_remainder_lifecycle_on_both_pi_transports")
+                .arg("--test-threads=1")
+                .arg("--nocapture")
+                .env("FOX_TEST_C2_R1_TRANSPORT", mode)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(90);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{mode} capacity lifecycle exceeded 90 seconds");
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            let output = child.wait_with_output().unwrap();
+            // The child's own evidence is part of the run log, not only of a
+            // failure message.
+            println!("=== c2r1 {mode} child stdout ===\n{}\n=== c2r1 {mode} child stderr ===\n{}",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success(), "{mode} stdout: {}\n{mode} stderr: {}",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+        return;
+    };
+    assert!(mode == "live" || mode == "round", "unknown transport {mode}");
+    let live = mode == "live";
+
+    // Exactly one provider reply: the fixture fails loudly if the Host asks for
+    // a second model request.
+    let (address, server) = start_http_model_fixture(vec![
+        json!({"role":"assistant","content":"The requested work is complete."})]);
+    let mut config = worker_configuration();
+    config.model_service = json!({"apiType":"openai-completions","modelId":"kernel-http-test",
+        "baseUrl":format!("http://{address}/v1")});
+    let clock = crate::runtime_host::shadow_reconcile::ReconcilerClock;
+    let (db, root, run) = fixture_with_retry_opt(&clock, &config.hash().unwrap(), Some(&config),
+        true, true, (0, 1));
+    enable_notices(&db, &run);
+    freeze_host_scope(&db, &run);
+    let conversation = db.run_control_binding(&run).unwrap().unwrap().conversation_id;
+    std::fs::create_dir_all(root.join("attachments")).unwrap();
+    std::fs::create_dir_all(root.join("skills")).unwrap();
+    let mut context = tauri::generate_context!();
+    for window in &mut context.config_mut().app.windows { window.create = false; }
+    let app = tauri::Builder::default().any_thread().build(context).unwrap();
+    // Constructed before any Job exists: startup reconciliation has no reason to
+    // relabel these Jobs as orphans.
+    let host = crate::runtime_host::RuntimeHost::new(app.handle().clone(), db.clone(), root.clone(),
+        root.join("attachments"), root.join("skills"), crate::yuxi::YuxiClient::new().unwrap());
+    host.disable_auto_wake_for_test(&run);
+
+    // Capacity fixture: a prefix that fills the 16 KiB budget to the byte plus a
+    // remainder that cannot fit under it.
+    let probe = failed_compute(&db, &run, "c2r1-probe", &"p".repeat(32));
+    let probe_bytes = packed_bytes(&db, &conversation, &run, &probe);
+    let header = probe_bytes - 32;
+    let prefix = fill_to_total(&db, &conversation, &run, "c2r1", header, &probe, probe_bytes,
+        NOTICE_BUDGET);
+    let extra: Vec<String> = (0..4)
+        .map(|index| unverified_notice(&db, &run, &format!("c2r1-extra-{index}"), header, NOTICE_MAX))
+        .collect();
+    let offsets = packed_offsets(&db, &conversation, &run, prefix.len());
+    assert_eq!(offsets.last().copied(), Some(NOTICE_BUDGET),
+        "the prepared prefix must fill the notice budget exactly");
+    let order = durable_notice_order(&db, &run);
+    let remainder: Vec<String> = order.iter().filter(|job| !prefix.contains(*job)).cloned().collect();
+    assert_eq!(remainder.len(), extra.len());
+    assert_eq!(prefix.len() + remainder.len(), 13);
+
+    let binding = db.run_control_binding(&run).unwrap().unwrap();
+    let ownership = crate::runtime_host::kernel_host::acquire(&root, &run).unwrap();
+    let started = if live {
+        host.start_kernel_run(ownership, &binding, Value::Null, Value::Null)
+    } else {
+        host.start_kernel_run_forced_round_for_test(ownership, &binding, Value::Null, Value::Null)
+    };
+    started.unwrap_or_else(|error| panic!("{mode} Host drive failed: {error}"));
+
+    let facts = capacity_lifecycle_facts(&db, &run);
+    println!("c2r1 {mode} durable lifecycle facts: {facts:#?}");
+    println!("c2r1 {mode} prefix={} jobs/{} bytes, remainder={} jobs",
+        prefix.len(), NOTICE_BUDGET, remainder.len());
+
+    // The competition error is a refusal, not a retryable model failure: the Run
+    // reaches a durable terminal state without the execution budget expiring and
+    // without a second model request.
+    assert!(!matches!(facts.state.as_str(), "running" | "waiting_jobs"),
+        "the Run must reach a durable terminal state: {facts:?}");
+    assert_ne!(facts.state, "completed",
+        "a Final with an undelivered remainder must never be confirmed as complete");
+    assert_eq!(facts.state, "failed");
+    assert_eq!(facts.failed_code, "kernel.execution_failed",
+        "the durable code is the generic executor failure; the competition text is local only");
+    assert!(facts.failed_message.contains("uncertain work was not replayed"),
+        "unexpected durable failure message: {}", facts.failed_message);
+    assert_eq!(facts.model_request_since_wall_ms, None,
+        "a terminal Run must not keep an in-flight model-request anchor");
+    assert_eq!(facts.wait_deadline_wall_ms, None, "the Run never parked");
+    assert!(facts.elapsed_to_terminal_ms.is_some_and(|elapsed| elapsed < facts.run_execution_budget_ms),
+        "the terminal state must not be a budget expiry: {facts:?}");
+    assert_eq!(facts.unfinished_jobs, 0, "no Job may be left unfinished or replayed");
+    assert!(facts.jobs.iter().all(|(_, state, attempts)| state == "failed" && *attempts == 1),
+        "every Job must stay settled exactly once: {:?}", facts.jobs);
+
+    // Exactly the packed prefix is bound, in one dispatch, in durable order at
+    // consecutive history positions anchored at the bound input's history start,
+    // and nothing is acknowledged: the refused Final rolled its response back.
+    assert_eq!(facts.notice_inputs.len(), 1);
+    assert_eq!(facts.notice_inputs[0].1, "bound");
+    assert_eq!(facts.notice_inputs[0].3, 0, "this round had no historical markers");
+    assert_eq!(facts.delivery_dispatch_keys, vec![facts.notice_inputs[0].0.clone()],
+        "every delivery must belong to the one bound notice input");
+    let history_start = facts.notice_inputs[0].2;
+    assert_eq!(facts.deliveries.iter().map(|(position, job, _)| (*position, job.clone()))
+        .collect::<Vec<_>>(),
+        order[..prefix.len()].iter().enumerate()
+            .map(|(index, job)| (history_start + index as i64, job.clone())).collect::<Vec<_>>(),
+        "the bound deliveries must be exactly the packed prefix in durable order");
+    assert!(facts.deliveries.iter().all(|(_, _, state)| state == "bound"),
+        "no delivery may be acknowledged while the Final was refused: {:?}", facts.deliveries);
+    assert_eq!(facts.notices_without_row, remainder.len() as i64,
+        "every undelivered notice must keep its durable row and no delivery row");
+    assert_eq!(facts.duplicate_deliveries, 0, "no notice may be delivered twice");
+    assert_eq!(facts.outbox.iter().filter(|(_, kind, _, _, _)| kind == "initial_model").count(), 1);
+    assert_eq!(facts.outbox.iter().filter(|(_, kind, _, _, _)| kind == "continuation_model").count(),
+        0, "no second notice lane may be armed: {:?}", facts.outbox);
+    assert_eq!(facts.outbox.iter().filter(|(_, kind, _, _, _)| kind == "dispatch_tool").count(), 0);
+
+    // The Provider was asked exactly once, and only the prefix reached the wire.
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 1, "the Host must ask the Provider exactly once per transport");
+    let wire = serde_json::to_string(&requests[0]["messages"]).unwrap();
+    assert_eq!(wire.matches("FOX_HOST_JOB_NOTICE_V1").count(), prefix.len(),
+        "the request must carry exactly the packed prefix");
+    for job in &prefix { assert!(wire.contains(job.as_str()), "packed notice {job} is missing"); }
+    for job in &remainder {
+        assert!(!wire.contains(job.as_str()), "an undelivered notice reached the model: {job}");
+    }
+    assert_eq!(requests[0]["model"].as_str(), Some("kernel-http-test"),
+        "the round must have used the frozen local model service");
+
+    // Bounded re-entry through the same Host entry a restart uses. The OS Run
+    // lock must be free and the drive loop must return without dispatching.
+    let ownership = crate::runtime_host::kernel_host::acquire(&root, &run)
+        .expect("the previous owner must have released the OS Run lock");
+    let reentry = if live {
+        host.start_kernel_run(ownership, &binding, Value::Null, Value::Null)
+    } else {
+        host.start_kernel_run_forced_round_for_test(ownership, &binding, Value::Null, Value::Null)
+    };
+    println!("c2r1 {mode} bounded re-entry result: {reentry:?}");
+    assert!(reentry.is_ok(), "bounded re-entry failed: {reentry:?}");
+    let after = capacity_lifecycle_facts(&db, &run);
+    assert_eq!(after, facts, "a bounded re-entry must not change one durable fact");
+    assert!(!host.state.lock().unwrap().kernel_active_runs.contains(&run),
+        "the Host must not keep an active Run slot after the terminal state");
+    println!("c2r1 {mode} done: state={} code={} elapsed={:?}ms budget={}ms prefix={} bound={} \
+remainder={} undelivered re-entry=clean", facts.state, facts.failed_code,
+        facts.elapsed_to_terminal_ms, facts.run_execution_budget_ms, prefix.len(), prefix.len(),
+        remainder.len());
+}
+
