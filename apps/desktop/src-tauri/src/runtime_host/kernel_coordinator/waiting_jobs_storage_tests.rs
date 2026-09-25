@@ -669,9 +669,19 @@ fn real_host_lock_race_body_with_auto_wake(
     if report_phases {
         crate::runtime_host::kernel_run_lock::lock_trace::record(format!("== T623 about-to-reacquire run={run}"));
     }
-    let ownership=super::super::super::kernel_host::acquire(&root,&run).map_err(|error| format!(
-        "T623 immediate reacquire after park failed with {error}; lock trace:\n{}",
-        crate::runtime_host::kernel_run_lock::lock_trace::take().join("\n")))?;
+    let ownership=super::super::super::kernel_host::acquire(&root,&run).map_err(|error| {
+        // Mark the failing observation so the captured trace shows exactly which
+        // conflict blocked the reacquire, not merely the first conflict in the
+        // window (the recovery probe's self-conflict).
+        crate::runtime_host::kernel_run_lock::lock_trace::record(format!(
+            "== T623 CONFLICT-HERE run={run} error={error} by={}",
+            crate::runtime_host::kernel_run_lock::lock_trace::who()
+        ));
+        format!(
+            "T623 immediate reacquire after park failed with {error}; lock trace:\n{}",
+            crate::runtime_host::kernel_run_lock::lock_trace::take().join("\n")
+        )
+    })?;
     // A conflict must never have cancelled the issued parent token.
     assert!(!token.is_cancelled(),"Parked must preserve the issued Job parent token");
     drop(ownership);
