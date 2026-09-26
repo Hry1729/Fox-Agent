@@ -1,0 +1,26 @@
+{
+  "command": [
+    "cargo",
+    "test",
+    "--manifest-path",
+    "apps/desktop/src-tauri/Cargo.toml",
+    "--offline",
+    "--no-default-features",
+    "--lib",
+    "failure_tests::",
+    "--",
+    "--nocapture"
+  ],
+  "cwd": "D:\\python\\projects\\Fox\\worktrees\\b2b-20260924",
+  "sourceHead": "ed104ea670315b3dc4661470d4428c84d3e5101c",
+  "sourceStatus": " M apps/desktop/src-tauri/gen/schemas/desktop-schema.json\n M apps/desktop/src-tauri/gen/schemas/windows-schema.json\n M apps/desktop/src-tauri/src/runtime_host/kernel_coordinator/job_notice_capacity_tests.rs\n M apps/desktop/src-tauri/src/runtime_host/kernel_host.rs\n?? docs/f3-timeout-20260924/\n?? docs/releases/\n",
+  "nativeLibraryDirectories": [
+    "D:\\python\\projects\\Fox\\Fox\\.test-target\\debug\\build\\zvec-rust-sys-0dc50cb24efe3c0f\\out\\zvec-prebuilt"
+  ],
+  "timeoutSeconds": 180,
+  "exitCode": 0,
+  "seconds": 1.08,
+  "rustTestThreadsEnvironment": null,
+  "libsqlite3FlagsEnvironment": "SQLITE_DEFAULT_MEMSTATUS=0",
+  "temporaryDirectory": "D:\\python\\projects\\Fox\\buildtmp\\review-tmp\\6b62232928"
+}

@@ -1,0 +1,19 @@
+{
+  "docs/f3-timeout-20260924/b_phase_delivery_checklist.md": "f369479be1ed9d941388486e2005195f3bc6857153842189948afbdd6984c4d9",
+  "docs/f3-timeout-20260924/c_phase_batch_notice_design.md": "bc5ea6b0213b9b9da1335495956066b26db054c06d46cc08457966d5532d3c40",
+  "docs/f3-timeout-20260924/f3_round_timeout_evidence.md": "df2308c2741d2f5d7ef8ef232c8eeab8dccc9822174f733fdad3085dd4668469",
+  "docs/f3-timeout-20260924/README.md": "a2d4b9ff5d33e02bb4dc80ce6a9af69db5cd46f2d13af36e2257f74d5cce2317",
+  "docs/releases/fox-test-20260926-01/evidence/28_C4与历史延迟协调记录.md": "32169284c00adbf618e4e718ccf994eed1e1cb9487a04b7ed53f7562d3371e42",
+  "docs/releases/fox-test-20260926-01/evidence/29_HTTP夹具收尾独立审查.md": "0e5d3a9d0800e3876acbe1959a2ced5dff15bdbec95fc7edae5f77c42d712e3b",
+  "docs/releases/fox-test-20260926-01/evidence/capacity-diagnostic-failure-tests.json": "b75819f653952793f2eb5b56b0d5eb929138104a7646d994834ef05248be354c",
+  "docs/releases/fox-test-20260926-01/evidence/capacity-diagnostic-failure-tests.log": "5dea6c49ad55ddbe84ffd739a01f9504c8c4b5b70d1c17855d833ea572ce1c72",
+  "docs/releases/fox-test-20260926-01/evidence/capacity-diagnostic-post.json": "47a7d0f60459ec2ad83ab66c883bd5870e494cd19edb4c90c9060733347629fe",
+  "docs/releases/fox-test-20260926-01/evidence/capacity-diagnostic-post.log": "8cfdff84fb11f24fd5a2f9cd9c7f826cd100cf1fe1417b53c8d64ebbdb3664c0",
+  "docs/releases/fox-test-20260926-01/evidence/capacity-diagnostic-unit.json": "8e0b4f89b3507e7851ac4f7882d7a3272cfccb5a4f84d2966bd5a3264c424f88",
+  "docs/releases/fox-test-20260926-01/evidence/capacity-diagnostic-unit.log": "ffadaf48d14ae59be15cb02f4f1666afe20be19645a678e88dd77dead5f1703e",
+  "docs/releases/fox-test-20260926-01/evidence/freeze-final-full-3cedbed.json": "be711d58070d6197d49b85015c71017c68803b30b4c53c49315606301b555c17",
+  "docs/releases/fox-test-20260926-01/evidence/freeze-final-full-3cedbed.log": "f839228d552f3d5f68a24eb0b9b9432d7c79a57591d44c7688f506bb48eb8127",
+  "docs/releases/fox-test-20260926-01/evidence/review-final-full-ed104ea.json": "d5eb93e83c91127075f8be59300fdccf017ea3173b15d9e280bf1835c87fd4ca",
+  "docs/releases/fox-test-20260926-01/evidence/review-final-full-ed104ea.log": "48e4592cc2b750875fa64ed58caa15006cf7b7398772e302c62e43eda94a0155",
+  "docs/releases/fox-test-20260926-01/evidence/team-run.py": "c0f7105313aceb14972de86b727a2532eed27fe6281cf176c6ce892593f80e7d"
+}

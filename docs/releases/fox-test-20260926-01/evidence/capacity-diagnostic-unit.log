@@ -1,0 +1,949 @@
+   Compiling fox-desktop v0.1.0 (D:\python\projects\Fox\worktrees\b2b-20260924\apps\desktop\src-tauri)
+warning: unused import: `RunControlBinding`
+  --> apps\desktop\src-tauri\src\database\repositories\kernel_continuation.rs:19:40
+   |
+19 | use fox_engine_protocol::{TimeBudgets, RunControlBinding};
+   |                                        ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `AdditionalGrant`
+  --> apps\desktop\src-tauri\src\database\repositories.rs:49:5
+   |
+49 |     AdditionalGrant, GrantRegistration, GrantScopeKind, GrantSkipReason,
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `GrantScopeKind`
+  --> apps\desktop\src-tauri\src\database\mod.rs:10:99
+   |
+10 | pub(crate) use repositories::{BudgetTier, ContinuableRun, ContinuationRequest, GrantRegistration, GrantScopeKind, GrantSkipReason};
+   |                                                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `VerifiedContinuationPermission`
+  --> apps\desktop\src-tauri\src\database\mod.rs:13:48
+   |
+13 |     run_budget_for_tier, PreparedContinuation, VerifiedContinuationPermission,
+   |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Command` and `Stdio`
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:22:15
+   |
+22 |     process::{Command, Stdio},
+   |               ^^^^^^^  ^^^^^
+
+warning: unused doc comment
+   --> apps\desktop\src-tauri\src\runtime_host\attachment_compute.rs:142:1
+    |
+142 | / /// Deterministic seam for the "source changed while snapshotting" test: the
+143 | | /// hook runs on the same thread, after the copy loop and before the re-stat,
+144 | | /// so the mutation can be scheduled without any timing race.
+    | |_------------------------------------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `JobStartOutcome`
+  --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\host_lifecycle.rs:16:36
+   |
+16 | use crate::database::{JobSnapshot, JobStartOutcome, JobStartRequest, JobState};
+   |                                    ^^^^^^^^^^^^^^^
+
+warning: unused import: `path::Path`
+  --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\jobs.rs:33:5
+   |
+33 |     path::Path,
+   |     ^^^^^^^^^^
+
+warning: unused import: `Digest`
+ --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\host_lifecycle.rs:8:12
+  |
+8 | use sha2::{Digest, Sha256};
+  |            ^^^^^^
+
+warning: unused import: `tauri::Manager`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\host_job_notice_tests.rs:534:9
+    |
+534 |     use tauri::Manager;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\host_job_notice_tests.rs:685:9
+    |
+685 |     use tauri::Manager;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_storage_tests.rs:600:9
+    |
+600 |     use tauri::Manager;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_storage_tests.rs:692:9
+    |
+692 |     use tauri::Manager;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+ --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_host_tests.rs:5:5
+  |
+5 | use tauri::Manager;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+ --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_auto_tests.rs:3:5
+  |
+3 | use tauri::Manager;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+ --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_recovery_tests.rs:7:5
+  |
+7 | use tauri::Manager;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+ --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_boundary_tests.rs:4:5
+  |
+4 | use tauri::Manager;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+ --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_terminal_tests.rs:5:5
+  |
+5 | use tauri::Manager;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+  --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_batch_tests.rs:12:5
+   |
+12 | use tauri::Manager;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\job_notice_capacity_tests.rs:478:9
+    |
+478 |     use tauri::Manager;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `super`
+  --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\run_lease_component_tests.rs:14:5
+   |
+14 | use super::*;
+   |     ^^^^^
+
+warning: unused import: `tauri::Manager`
+  --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\run_lease_component_tests.rs:32:9
+   |
+32 |     use tauri::Manager;
+   |         ^^^^^^^^^^^^^^
+
+warning: unused variable: `conversation`
+    --> apps\desktop\src-tauri\src\database\repositories\kernel_execution_admission.rs:3384:24
+     |
+3384 |         let (db, path, conversation, run) = fixture();
+     |                        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_conversation`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `outcome`
+    --> apps\desktop\src-tauri\src\database\repositories\kernel_execution_admission.rs:3472:13
+     |
+3472 |         let outcome = db
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_outcome`
+
+warning: unused variable: `requested_mode`
+    --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:1998:13
+     |
+1998 |         let requested_mode = request.mode.as_deref().unwrap_or(&base.search_mode);
+     |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_requested_mode`
+
+warning: unused variable: `policy`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\f1_model_delivery_tests.rs:163:9
+    |
+163 |     let policy = rev_gateway_policy_existing(db, run_id, scope.clone());
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_policy`
+
+warning: unused variable: `stored`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\rev_repro_tests.rs:793:9
+    |
+793 |     let stored = stored_path(&root, "a.txt");
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stored`
+
+warning: unused variable: `scope`
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\rev_repro_tests.rs:2423:40
+     |
+2423 |     let (db, root, _conversation, run, scope) = kernel_gateway_fixture(label, "ask");
+     |                                        ^^^^^ help: if this is intentional, prefix it with an underscore: `_scope`
+
+warning: unused variable: `root_for_holder`
+  --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\run_lease_component_tests.rs:61:9
+   |
+61 |     let root_for_holder = root.clone();
+   |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_root_for_holder`
+
+warning: unused variable: `run_for_holder`
+  --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\run_lease_component_tests.rs:62:9
+   |
+62 |     let run_for_holder = run.clone();
+   |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_run_for_holder`
+
+warning: variable does not need to be mutable
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_host.rs:1257:19
+     |
+1257 |         if let Ok(mut state)=self.state.lock() {
+     |                   ----^^^^^
+     |                   |
+     |                   help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_host.rs:1495:23
+     |
+1495 |             if let Ok(mut state)=self.state.lock() {
+     |                       ----^^^^^
+     |                       |
+     |                       help: remove this `mut`
+
+warning: unused variable: `run_id`
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_host.rs:2729:25
+     |
+2729 |         let (db, _path, run_id, conversation_id, binding) = fixture();
+     |                         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_run_id`
+
+warning: type `AgentPromptContext` is more private than the item `conversation_prompt_context`
+   --> apps\desktop\src-tauri\src\runtime_host\mod.rs:903:1
+    |
+903 | / pub(crate) fn conversation_prompt_context(
+904 | |     database: &Database,
+905 | |     skills_dir: &std::path::Path,
+906 | |     conversation_id: &str,
+...   |
+909 | |     overrides: PromptScopeOverrides<'_>,
+910 | | ) -> Result<AgentPromptContext, String> {
+    | |_______________________________________^ function `conversation_prompt_context` is reachable at visibility `pub(crate)`
+    |
+note: but type `AgentPromptContext` is only usable at visibility `pub(self)`
+   --> apps\desktop\src-tauri\src\runtime_host\mod.rs:879:1
+    |
+879 | struct AgentPromptContext {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `AgentPromptContext` is more private than the item `KernelPromptPayload::context`
+    --> apps\desktop\src-tauri\src\runtime_host\mod.rs:1034:5
+     |
+1034 |     pub context: &'a AgentPromptContext,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `KernelPromptPayload::context` is reachable at visibility `pub(crate)`
+     |
+note: but type `AgentPromptContext` is only usable at visibility `pub(self)`
+    --> apps\desktop\src-tauri\src\runtime_host\mod.rs:879:1
+     |
+ 879 | struct AgentPromptContext {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `ArtifactKind` is more private than the item `delivery::ArtifactFacts::kind`
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:2094:5
+     |
+2094 |     pub kind: ArtifactKind,
+     |     ^^^^^^^^^^^^^^^^^^^^^^ field `delivery::ArtifactFacts::kind` is reachable at visibility `pub(crate)`
+     |
+note: but type `ArtifactKind` is only usable at visibility `pub(self)`
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:45:1
+     |
+  45 | enum ArtifactKind {
+     | ^^^^^^^^^^^^^^^^^
+
+warning: type `ArtifactKind` is more private than the item `item_requirements`
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:3065:1
+     |
+3065 | / pub(crate) fn item_requirements(
+3066 | |     requirements: &[DeliveryRequirement],
+3067 | |     item_key: &str,
+3068 | |     item_kind: ArtifactKind,
+3069 | | ) -> Vec<DeliveryRequirement> {
+     | |_____________________________^ function `item_requirements` is reachable at visibility `pub(crate)`
+     |
+note: but type `ArtifactKind` is only usable at visibility `pub(self)`
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:45:1
+     |
+  45 | enum ArtifactKind {
+     | ^^^^^^^^^^^^^^^^^
+
+warning: type `runtime_host::RuntimeCommand` is more private than the item `compaction::<impl kernel_coordinator::KernelCoordinator<'_>>::resume_context_compaction`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\compaction.rs:214:5
+    |
+214 | /     pub(crate) fn resume_context_compaction(
+215 | |         &self,
+216 | |         owner: &str,
+217 | |         runtime: &super::super::RuntimeCommand,
+218 | |         api_key: &str,
+219 | |     ) -> Result<(), String> {
+    | |___________________________^ method `compaction::<impl kernel_coordinator::KernelCoordinator<'_>>::resume_context_compaction` is reachable at visibility `pub(crate)`
+    |
+note: but type `runtime_host::RuntimeCommand` is only usable at visibility `pub(self)`
+   --> apps\desktop\src-tauri\src\runtime_host\mod.rs:741:1
+    |
+741 | struct RuntimeCommand {
+    | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `runtime_host::RuntimeCommand` is more private than the item `kernel_coordinator::live::<impl kernel_coordinator::KernelCoordinator<'_>>::dispatch_initial_live`
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\live.rs:1202:5
+     |
+1202 | /     pub(crate) fn dispatch_initial_live(
+1203 | |         &self,
+1204 | |         owner: &str,
+1205 | |         policy: &dyn kernel::PolicyDecisionPort,
+...    |
+1210 | |         settle_children: SettleChildrenFn,
+1211 | |     ) -> Result<(), String> {
+     | |___________________________^ method `kernel_coordinator::live::<impl kernel_coordinator::KernelCoordinator<'_>>::dispatch_initial_live` is reachable at visibility `pub(crate)`
+     |
+note: but type `runtime_host::RuntimeCommand` is only usable at visibility `pub(self)`
+    --> apps\desktop\src-tauri\src\runtime_host\mod.rs:741:1
+     |
+ 741 | struct RuntimeCommand {
+     | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `runtime_host::RuntimeCommand` is more private than the item `kernel_coordinator::live::<impl kernel_coordinator::KernelCoordinator<'_>>::dispatch_continuation_live`
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\live.rs:1215:5
+     |
+1215 | /     pub(crate) fn dispatch_continuation_live(
+1216 | |         &self,
+1217 | |         effect_key: &str,
+1218 | |         owner: &str,
+...    |
+1224 | |         settle_children: SettleChildrenFn,
+1225 | |     ) -> Result<(), String> {
+     | |___________________________^ method `kernel_coordinator::live::<impl kernel_coordinator::KernelCoordinator<'_>>::dispatch_continuation_live` is reachable at visibility `pub(crate)`
+     |
+note: but type `runtime_host::RuntimeCommand` is only usable at visibility `pub(self)`
+    --> apps\desktop\src-tauri\src\runtime_host\mod.rs:741:1
+     |
+ 741 | struct RuntimeCommand {
+     | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `kernel_run_lock::KernelRunLock` is more private than the item `runtime_host::kernel_host::<impl RuntimeHost>::start_kernel_run_forced_round_for_test`
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_host.rs:1600:5
+     |
+1600 | /     pub(crate) fn start_kernel_run_forced_round_for_test(
+1601 | |         &self, ownership: KernelRunLock, binding: &RunControlBinding,
+1602 | |         prompt: Value, service: Value,
+1603 | |     ) -> Result<(), String> {
+     | |___________________________^ method `runtime_host::kernel_host::<impl RuntimeHost>::start_kernel_run_forced_round_for_test` is reachable at visibility `pub(crate)`
+     |
+note: but type `kernel_run_lock::KernelRunLock` is only usable at visibility `pub(in crate::runtime_host)`
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_run_lock.rs:11:1
+     |
+  11 | pub(super) struct KernelRunLock {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `migration_79_widens_only_host_job_keys_and_reopens_idempotently` is never used
+     --> apps\desktop\src-tauri\src\database\migrations.rs:14029:8
+      |
+14029 |     fn migration_79_widens_only_host_job_keys_and_reopens_idempotently() {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `AgentRuntimeConfigRecord` is never constructed
+    --> apps\desktop\src-tauri\src\database\models.rs:1460:12
+     |
+1460 | pub struct AgentRuntimeConfigRecord {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `package_hash` and `signature` are never read
+    --> apps\desktop\src-tauri\src\database\models.rs:1676:9
+     |
+1670 | pub struct PluginCatalogEntryRecord {
+     |            ------------------------ fields in this struct
+...
+1676 |     pub package_hash: Option<String>,
+     |         ^^^^^^^^^^^^
+1677 |     pub signature: Option<String>,
+     |         ^^^^^^^^^
+     |
+     = note: `PluginCatalogEntryRecord` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `origin`, `install_path`, `package_hash`, and `last_error_code` are never read
+    --> apps\desktop\src-tauri\src\database\models.rs:1685:9
+     |
+1682 | pub struct PluginInstallationRecord {
+     |            ------------------------ fields in this struct
+...
+1685 |     pub origin: PluginOrigin,
+     |         ^^^^^^
+1686 |     pub install_status: PluginInstallStatus,
+1687 |     pub install_path: Option<String>,
+     |         ^^^^^^^^^^^^
+1688 |     pub package_hash: Option<String>,
+     |         ^^^^^^^^^^^^
+...
+1691 |     pub last_error_code: Option<String>,
+     |         ^^^^^^^^^^^^^^^
+     |
+     = note: `PluginInstallationRecord` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `SetKnowledgeBindingsRequest` is never constructed
+    --> apps\desktop\src-tauri\src\database\models.rs:1951:12
+     |
+1951 | pub struct SetKnowledgeBindingsRequest {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `record_mcp_status` is never used
+    --> apps\desktop\src-tauri\src\database\repositories.rs:3681:12
+     |
+ 242 | impl Database {
+     | ------------- method in this implementation
+...
+3681 |     pub fn record_mcp_status(
+     |            ^^^^^^^^^^^^^^^^^
+
+warning: method `get_expert_workflow` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\expert_workflows.rs:215:12
+    |
+ 10 | impl Database {
+    | ------------- method in this implementation
+...
+215 |     pub fn get_expert_workflow(
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: method `kernel_outbox_stuck_leased` is never used
+    --> apps\desktop\src-tauri\src\database\repositories\kernel.rs:3851:12
+     |
+1113 | impl Database {
+     | ------------- method in this implementation
+...
+3851 |     pub fn kernel_outbox_stuck_leased(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variant `ProjectMismatch` is never constructed
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_authorization.rs:104:5
+    |
+ 96 | pub enum GrantSkipReason {
+    |          --------------- variant in this enum
+...
+104 |     ProjectMismatch,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `GrantSkipReason` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `as_str` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_authorization.rs:108:12
+    |
+107 | impl GrantSkipReason {
+    | -------------------- method in this implementation
+108 |     pub fn as_str(&self) -> &'static str {
+    |            ^^^^^^
+
+warning: method `kernel_run_budget_tier` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_continuation.rs:575:12
+    |
+235 | impl Database {
+    | ------------- method in this implementation
+...
+575 |     pub fn kernel_run_budget_tier(&self, run_id: &str) -> Result<Option<(String, String)>, String> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `attempt_state_str` is never used
+  --> apps\desktop\src-tauri\src\database\repositories\kernel_execution_admission.rs:66:4
+   |
+66 | fn attempt_state_str(value: &AttemptState) -> &'static str {
+   |    ^^^^^^^^^^^^^^^^^
+
+warning: method `withdraw_whole_file_replacements` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_execution_admission.rs:914:12
+    |
+878 | impl Database {
+    | ------------- method in this implementation
+...
+914 |     pub fn withdraw_whole_file_replacements(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `kernel_job_pause` and `kernel_job_params` are never used
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_jobs.rs:483:12
+    |
+205 | impl Database {
+    | ------------- methods in this implementation
+...
+483 |     pub fn kernel_job_pause(&self, job_id: &str, reason: &str) -> Result<JobSnapshot, String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+551 |     pub fn kernel_job_params(&self, job_id: &str) -> Result<Value, String> {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: function `job_change_payload` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_jobs.rs:611:8
+    |
+611 | pub fn job_change_payload(snapshot: &JobSnapshot) -> Value {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: field `updated_at` is never read
+   --> apps\desktop\src-tauri\src\database\repositories\delivery_checks.rs:101:9
+    |
+ 92 | pub(crate) struct DeliveryChecklistItem {
+    |                   --------------------- field in this struct
+...
+101 |     pub updated_at: i64,
+    |         ^^^^^^^^^^
+    |
+    = note: `DeliveryChecklistItem` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `delivered_run_steering` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\run_steering.rs:273:19
+    |
+ 86 | impl Database {
+    | ------------- method in this implementation
+...
+273 |     pub(crate) fn delivered_run_steering(&self, run_id: &str) -> Result<Vec<SteeringMessage>, String> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `baseline_version` and `dispatch_id` are never read
+  --> apps\desktop\src-tauri\src\database\repositories\managed_files.rs:78:9
+   |
+75 | pub(crate) struct RestoreRequestRecord {
+   |                   -------------------- fields in this struct
+...
+78 |     pub baseline_version: Option<String>,
+   |         ^^^^^^^^^^^^^^^^
+79 |     pub dispatch_id: String,
+   |         ^^^^^^^^^^^
+   |
+   = note: `RestoreRequestRecord` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `withdraw_whole_file_replacements_for_call` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_host.rs:569:19
+    |
+149 | impl Database {
+    | ------------- method in this implementation
+...
+569 |     pub(crate) fn withdraw_whole_file_replacements_for_call(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_team_definition` is never used
+  --> apps\desktop\src-tauri\src\expert_teams.rs:84:15
+   |
+84 | pub(crate) fn validate_team_definition(value: &Value) -> Result<(), String> {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `zvec_resource_dir` is never read
+   --> apps\desktop\src-tauri\src\local_knowledge.rs:223:16
+    |
+220 | pub struct LocalKnowledgeStore {
+    |            ------------------- field in this struct
+...
+223 |     pub(crate) zvec_resource_dir: Arc<Option<PathBuf>>,
+    |                ^^^^^^^^^^^^^^^^^
+    |
+    = note: `LocalKnowledgeStore` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: method `with_zvec_resource_dir` is never used
+   --> apps\desktop\src-tauri\src\local_knowledge.rs:571:12
+    |
+511 | impl LocalKnowledgeStore {
+    | ------------------------ method in this implementation
+...
+571 |     pub fn with_zvec_resource_dir(mut self, resource_dir: impl AsRef<Path>) -> Self {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `reset` is never used
+   --> apps\desktop\src-tauri\src\local_knowledge_import.rs:104:12
+    |
+ 95 | impl ImportCancellationToken {
+    | ---------------------------- method in this implementation
+...
+104 |     pub fn reset(&self) {
+    |            ^^^^^
+
+warning: constant `ZVEC_STORE_KIND` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:41:7
+   |
+41 | const ZVEC_STORE_KIND: &str = "zvec-hnsw-cosine-v1";
+   |       ^^^^^^^^^^^^^^^
+
+warning: constant `ZVEC_STORE_VERSION` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:42:7
+   |
+42 | const ZVEC_STORE_VERSION: &str = "0.6.0";
+   |       ^^^^^^^^^^^^^^^^^^
+
+warning: constant `EMBEDDING_MODEL_TEST_TIMEOUT` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:44:7
+   |
+44 | const EMBEDDING_MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(45);
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RETRIEVAL_WORKER_TIMEOUT` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:45:7
+   |
+45 | const RETRIEVAL_WORKER_TIMEOUT: Duration = Duration::from_secs(60);
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RETRIEVAL_WORKER_ROOT_ENV` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:46:7
+   |
+46 | const RETRIEVAL_WORKER_ROOT_ENV: &str = "FOX_KNOWLEDGE_RETRIEVAL_ROOT";
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RETRIEVAL_WORKER_REQUEST_ENV` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:47:7
+   |
+47 | const RETRIEVAL_WORKER_REQUEST_ENV: &str = "FOX_KNOWLEDGE_RETRIEVAL_REQUEST";
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RETRIEVAL_WORKER_ZVEC_RESOURCE_ENV` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:48:7
+   |
+48 | const RETRIEVAL_WORKER_ZVEC_RESOURCE_ENV: &str = "FOX_KNOWLEDGE_ZVEC_RESOURCE_DIR";
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RetrievalWorkerResponse` is never constructed
+   --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:233:8
+    |
+233 | struct RetrievalWorkerResponse {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `collect_retrieval_worker_stream` is never used
+   --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:550:4
+    |
+550 | fn collect_retrieval_worker_stream(mut stream: impl Read, max_bytes: usize) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `finish_retrieval_worker_stream` is never used
+   --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:573:4
+    |
+573 | fn finish_retrieval_worker_stream(reader: thread::JoinHandle<String>) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `retrieval_worker_error` is never used
+   --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:579:4
+    |
+579 | fn retrieval_worker_error(
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `shadow_feed_tool_settled` is never used
+    --> apps\desktop\src-tauri\src\runtime_host\mod.rs:1806:12
+     |
+1088 | impl RuntimeHost {
+     | ---------------- method in this implementation
+...
+1806 |     pub fn shadow_feed_tool_settled(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `parse` is never used
+  --> apps\desktop\src-tauri\src\runtime_host\artifact_store.rs:62:19
+   |
+53 | impl ArtifactClass {
+   | ------------------ associated function in this implementation
+...
+62 |     pub(crate) fn parse(value: &str) -> ArtifactClass {
+   |                   ^^^^^
+
+warning: method `deliverable_relative_path` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\artifact_store.rs:130:19
+    |
+ 96 | impl ArtifactStore {
+    | ------------------ method in this implementation
+...
+130 |     pub(crate) fn deliverable_relative_path(&self, slug: &str, conversation_id: &str) -> PathBuf {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `execution_id` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\artifact_store.rs:742:19
+    |
+714 | impl StagingLedger {
+    | ------------------ method in this implementation
+...
+742 |     pub(crate) fn execution_id(&self) -> &str {
+    |                   ^^^^^^^^^^^^
+
+warning: field `token` is never read
+  --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\host_lifecycle.rs:51:5
+   |
+48 | struct JobCancellation {
+   |        --------------- field in this struct
+...
+51 |     token: crate::kernel::CancellationToken,
+   |     ^^^^^
+   |
+   = note: `JobCancellation` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: method `token_for` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\host_lifecycle.rs:100:19
+    |
+ 54 | impl JobTokenRegistry {
+    | --------------------- method in this implementation
+...
+100 |     pub(crate) fn token_for(&self, job_id: &str) -> Option<crate::kernel::CancellationToken> {
+    |                   ^^^^^^^^^
+
+warning: associated function `cancelled` is never used
+  --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\jobs.rs:87:19
+   |
+79 | impl PortError {
+   | -------------- associated function in this implementation
+...
+87 |     pub(crate) fn cancelled(message: impl Into<String>) -> Self {
+   |                   ^^^^^^^^^
+
+warning: fields `rows_processed` and `duration_ms` are never read
+   --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\jobs.rs:180:9
+    |
+178 | pub(crate) struct ComputeJobOutcome {
+    |                   ----------------- fields in this struct
+179 |     pub result: Value,
+180 |     pub rows_processed: u64,
+    |         ^^^^^^^^^^^^^^
+181 |     pub duration_ms: u64,
+    |         ^^^^^^^^^^^
+    |
+    = note: `ComputeJobOutcome` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `attempt` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\jobs.rs:289:8
+    |
+285 | pub(crate) trait JobLifecyclePort: Send + Sync {
+    |                  ---------------- method in this trait
+...
+289 |     fn attempt(&self) -> u32;
+    |        ^^^^^^^
+
+warning: field `attempt` is never read
+   --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\jobs.rs:761:9
+    |
+760 |     struct FakePort {
+    |            -------- field in this struct
+761 |         attempt: u32,
+    |         ^^^^^^^
+
+warning: function `office_write_artifact_class` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\managed_files.rs:210:15
+    |
+210 | pub(crate) fn office_write_artifact_class(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `origin` and `origin_version_no` are never read
+   --> apps\desktop\src-tauri\src\runtime_host\managed_files.rs:665:9
+    |
+657 | pub(crate) struct RestoreSource {
+    |                   ------------- fields in this struct
+...
+665 |     pub origin: &'static str,
+    |         ^^^^^^
+666 |     /// Which row the bytes were read for, for auditing a legacy recovery.
+667 |     pub origin_version_no: i64,
+    |         ^^^^^^^^^^^^^^^^^
+    |
+    = note: `RestoreSource` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variant `RecoveryRequired` is never constructed
+    --> apps\desktop\src-tauri\src\runtime_host\managed_files.rs:1096:5
+     |
+1094 | enum RestoreOutcome {
+     |      -------------- variant in this enum
+1095 |     NotApplied,
+1096 |     RecoveryRequired,
+     |     ^^^^^^^^^^^^^^^^
+     |
+     = note: `RestoreOutcome` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `item_key` and `sheets` are never read
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:2091:9
+     |
+2090 | pub(crate) struct ArtifactFacts {
+     |                   ------------- fields in this struct
+2091 |     pub item_key: String,
+     |         ^^^^^^^^
+...
+2098 |     pub sheets: Vec<String>,
+     |         ^^^^^^
+     |
+     = note: `ArtifactFacts` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `min_per_sheet` is never used
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:2121:19
+     |
+2119 | impl SheetChartCounts {
+     | --------------------- method in this implementation
+2120 |     /// The fewest charts any one sheet carries.
+2121 |     pub(crate) fn min_per_sheet(&self) -> Option<usize> {
+     |                   ^^^^^^^^^^^^^
+
+warning: function `evaluate_requirements` is never used
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:3010:15
+     |
+3010 | pub(crate) fn evaluate_requirements(
+     |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `zip_with_extra_part` is never used
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:3456:15
+     |
+3456 | pub(crate) fn zip_with_extra_part(bytes: &[u8], name: &str, body: &str) -> Vec<u8> {
+     |               ^^^^^^^^^^^^^^^^^^^
+
+warning: methods `round_can_still_act` and `processed_initial_input` are never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\live.rs:251:8
+    |
+189 | impl KernelCoordinator<'_> {
+    | -------------------------- methods in this implementation
+...
+251 |     fn round_can_still_act(&self) -> Result<bool, String> {
+    |        ^^^^^^^^^^^^^^^^^^^
+...
+294 |     fn processed_initial_input(&self) -> Result<Vec<Value>, String> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `retry_reason` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\tests.rs:330:4
+    |
+330 | fn retry_reason(root: &std::path::Path, run_id: &str) -> String {
+    |    ^^^^^^^^^^^^
+
+warning: function `await_requests` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\steering_live_tests.rs:136:4
+    |
+136 | fn await_requests(seen: &Arc<Mutex<Vec<Value>>>, count: usize, label: &str) -> Vec<Value> {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `steering_live_fixture_with_deliverable` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\steering_live_tests.rs:177:4
+    |
+177 | fn steering_live_fixture_with_deliverable(address: std::net::SocketAddr) -> SteeringLive {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `deliverable_bytes` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\steering_live_tests.rs:190:4
+    |
+190 | fn deliverable_bytes() -> Vec<u8> {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: field `started` is never read
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\f1_engine_path_tests.rs:232:5
+    |
+227 | struct LocalProvider {
+    |        ------------- field in this struct
+...
+232 |     started: Instant,
+    |     ^^^^^^^
+
+warning: function `deliver` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_model_worker.rs:547:15
+    |
+547 | pub(crate) fn deliver(
+    |               ^^^^^^^
+
+warning: function `deliver_initial` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_model_worker.rs:597:15
+    |
+597 | pub(crate) fn deliver_initial(
+    |               ^^^^^^^^^^^^^^^
+
+warning: methods `wake_kernel_waiting_run_for_park` and `admit_dispatch_execution` are never used
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_host.rs:1391:19
+     |
+1227 | impl super::RuntimeHost {
+     | ----------------------- methods in this implementation
+...
+1391 |     pub(crate) fn wake_kernel_waiting_run_for_park(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1872 |     fn admit_dispatch_execution(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `active_mut` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\shadow_reconcile.rs:206:8
+    |
+205 | impl ContextState {
+    | ----------------- method in this implementation
+206 |     fn active_mut(&mut self) -> Option<&mut ShadowContext> {
+    |        ^^^^^^^^^^
+
+warning: method `database` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\shadow_reconcile.rs:247:19
+    |
+238 | impl ShadowReconciler {
+    | --------------------- method in this implementation
+...
+247 |     pub(crate) fn database(&self) -> &Database {
+    |                   ^^^^^^^^
+
+warning: associated function `empty` is never used
+   --> apps\desktop\src-tauri\src\resource_gateway.rs:418:8
+    |
+402 | impl VerifiedReadObservation {
+    | ---------------------------- associated function in this implementation
+...
+418 |     fn empty(target_identity: String, version: String, total_units: u64) -> Self {
+    |        ^^^^^
+
+warning: fields `missing_tools` and `tools_available` are never read
+   --> apps\desktop\src-tauri\src\skills.rs:128:9
+    |
+123 | pub struct IncludedSkill {
+    |            ------------- fields in this struct
+...
+128 |     pub missing_tools: Vec<String>,
+    |         ^^^^^^^^^^^^^
+129 |     pub tools_available: bool,
+    |         ^^^^^^^^^^^^^^^
+    |
+    = note: `IncludedSkill` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `enabled_skill_prompt_for_context` is never used
+   --> apps\desktop\src-tauri\src\skills.rs:170:8
+    |
+170 | pub fn enabled_skill_prompt_for_context(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `retryable` is never used
+  --> apps\desktop\src-tauri\src\vector_store.rs:93:12
+   |
+27 | impl VectorIndexError {
+   | --------------------- method in this implementation
+...
+93 |     pub fn retryable(&self) -> bool {
+   |            ^^^^^^^^^
+
+warning: type alias `VectorSearchRequest` is never used
+   --> apps\desktop\src-tauri\src\vector_store.rs:149:10
+    |
+149 | pub type VectorSearchRequest = SearchRequest;
+    |          ^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `VectorHit` is never used
+   --> apps\desktop\src-tauri\src\vector_store.rs:150:10
+    |
+150 | pub type VectorHit = Hit;
+    |          ^^^^^^^^^
+
+warning: type alias `VectorStoreCheck` is never used
+   --> apps\desktop\src-tauri\src\vector_store.rs:151:10
+    |
+151 | pub type VectorStoreCheck = Check;
+    |          ^^^^^^^^^^^^^^^^
+
+warning: fields `thread_id` and `status` are never read
+  --> apps\desktop\src-tauri\src\yuxi\mod.rs:33:9
+   |
+31 | pub struct YuxiRunStart {
+   |            ------------ fields in this struct
+32 |     pub run_id: String,
+33 |     pub thread_id: String,
+   |         ^^^^^^^^^
+34 |     pub status: String,
+   |         ^^^^^^
+   |
+   = note: `YuxiRunStart` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `fox-desktop` (lib test) generated 111 warnings (run `cargo fix --lib -p fox-desktop --tests` to apply 18 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.70s
+     Running unittests src\lib.rs (D:/python/projects/Fox/Fox/.test-target\debug\deps\fox_desktop_lib-489858903a3a4a43.exe)
+
+running 1 test
+test runtime_host::kernel_host::failure_tests::notice_refusals_have_bounded_codes_without_classifying_unrelated_errors ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1347 filtered out; finished in 0.00s
+

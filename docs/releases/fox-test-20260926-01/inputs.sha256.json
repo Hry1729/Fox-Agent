@@ -1,0 +1,10 @@
+{
+  "Cargo.lock": "14302059ba71b875682603563f980a08230fc90b65fdd2f9ebe5903d394968dd",
+  "pnpm-lock.yaml": "24f91591b87f04c4a0e2b9723becc722f86a4ddab0bd0d61ce190381bb658dab",
+  "package.json": "a1b801eba7fb3ea31705f2aa68dc50e978ed53893731a79a625ce42910d32940",
+  "apps/desktop/src-tauri/Cargo.toml": "10de8082336ab4f57da55c25eb708fdd15492cc828255d5c73a65192c3b0c1a4",
+  "apps/desktop/src-tauri/tauri.conf.json": "fcddd7d39a2322be92c8ba6e253de731109bba3b46db7b268e454fe648aeed64",
+  "apps/desktop/src-tauri/tauri.installer.conf.json": "a1941b4052502eb83c363bac7267973c7990e591d8880c8a210cf68f02f494a0",
+  "services/agent-runtime/package.json": "f070d60a33ee5a511732578c3e47268239d8c767d33f8c37a74be8a7193063f3",
+  "scripts/test-desktop-rust.ps1": "1f2a04960d6013c72aa77c0ec149de0ed8ab781305f2e5754f578125664ceb7f"
+}

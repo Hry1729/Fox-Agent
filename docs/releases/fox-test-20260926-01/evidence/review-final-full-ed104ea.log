@@ -1,0 +1,2311 @@
+warning: unused import: `RunControlBinding`
+  --> apps\desktop\src-tauri\src\database\repositories\kernel_continuation.rs:19:40
+   |
+19 | use fox_engine_protocol::{TimeBudgets, RunControlBinding};
+   |                                        ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `AdditionalGrant`
+  --> apps\desktop\src-tauri\src\database\repositories.rs:49:5
+   |
+49 |     AdditionalGrant, GrantRegistration, GrantScopeKind, GrantSkipReason,
+   |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `GrantScopeKind`
+  --> apps\desktop\src-tauri\src\database\mod.rs:10:99
+   |
+10 | pub(crate) use repositories::{BudgetTier, ContinuableRun, ContinuationRequest, GrantRegistration, GrantScopeKind, GrantSkipReason};
+   |                                                                                                   ^^^^^^^^^^^^^^
+
+warning: unused import: `VerifiedContinuationPermission`
+  --> apps\desktop\src-tauri\src\database\mod.rs:13:48
+   |
+13 |     run_budget_for_tier, PreparedContinuation, VerifiedContinuationPermission,
+   |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Command` and `Stdio`
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:22:15
+   |
+22 |     process::{Command, Stdio},
+   |               ^^^^^^^  ^^^^^
+
+warning: unused doc comment
+   --> apps\desktop\src-tauri\src\runtime_host\attachment_compute.rs:142:1
+    |
+142 | / /// Deterministic seam for the "source changed while snapshotting" test: the
+143 | | /// hook runs on the same thread, after the copy loop and before the re-stat,
+144 | | /// so the mutation can be scheduled without any timing race.
+    | |_------------------------------------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `JobStartOutcome`
+  --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\host_lifecycle.rs:16:36
+   |
+16 | use crate::database::{JobSnapshot, JobStartOutcome, JobStartRequest, JobState};
+   |                                    ^^^^^^^^^^^^^^^
+
+warning: unused import: `path::Path`
+  --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\jobs.rs:33:5
+   |
+33 |     path::Path,
+   |     ^^^^^^^^^^
+
+warning: unused import: `Digest`
+ --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\host_lifecycle.rs:8:12
+  |
+8 | use sha2::{Digest, Sha256};
+  |            ^^^^^^
+
+warning: unused import: `tauri::Manager`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\host_job_notice_tests.rs:534:9
+    |
+534 |     use tauri::Manager;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\host_job_notice_tests.rs:685:9
+    |
+685 |     use tauri::Manager;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_storage_tests.rs:600:9
+    |
+600 |     use tauri::Manager;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_storage_tests.rs:692:9
+    |
+692 |     use tauri::Manager;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+ --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_host_tests.rs:5:5
+  |
+5 | use tauri::Manager;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+ --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_auto_tests.rs:3:5
+  |
+3 | use tauri::Manager;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+ --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_recovery_tests.rs:7:5
+  |
+7 | use tauri::Manager;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+ --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_boundary_tests.rs:4:5
+  |
+4 | use tauri::Manager;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+ --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_terminal_tests.rs:5:5
+  |
+5 | use tauri::Manager;
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+  --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\waiting_jobs_batch_tests.rs:12:5
+   |
+12 | use tauri::Manager;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tauri::Manager`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\job_notice_capacity_tests.rs:478:9
+    |
+478 |     use tauri::Manager;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `super`
+  --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\run_lease_component_tests.rs:14:5
+   |
+14 | use super::*;
+   |     ^^^^^
+
+warning: unused import: `tauri::Manager`
+  --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\run_lease_component_tests.rs:32:9
+   |
+32 |     use tauri::Manager;
+   |         ^^^^^^^^^^^^^^
+
+warning: unused variable: `conversation`
+    --> apps\desktop\src-tauri\src\database\repositories\kernel_execution_admission.rs:3384:24
+     |
+3384 |         let (db, path, conversation, run) = fixture();
+     |                        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_conversation`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `outcome`
+    --> apps\desktop\src-tauri\src\database\repositories\kernel_execution_admission.rs:3472:13
+     |
+3472 |         let outcome = db
+     |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_outcome`
+
+warning: unused variable: `requested_mode`
+    --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:1998:13
+     |
+1998 |         let requested_mode = request.mode.as_deref().unwrap_or(&base.search_mode);
+     |             ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_requested_mode`
+
+warning: unused variable: `policy`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\f1_model_delivery_tests.rs:163:9
+    |
+163 |     let policy = rev_gateway_policy_existing(db, run_id, scope.clone());
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_policy`
+
+warning: unused variable: `stored`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\rev_repro_tests.rs:793:9
+    |
+793 |     let stored = stored_path(&root, "a.txt");
+    |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_stored`
+
+warning: unused variable: `scope`
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\rev_repro_tests.rs:2423:40
+     |
+2423 |     let (db, root, _conversation, run, scope) = kernel_gateway_fixture(label, "ask");
+     |                                        ^^^^^ help: if this is intentional, prefix it with an underscore: `_scope`
+
+warning: unused variable: `root_for_holder`
+  --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\run_lease_component_tests.rs:61:9
+   |
+61 |     let root_for_holder = root.clone();
+   |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_root_for_holder`
+
+warning: unused variable: `run_for_holder`
+  --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\run_lease_component_tests.rs:62:9
+   |
+62 |     let run_for_holder = run.clone();
+   |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_run_for_holder`
+
+warning: variable does not need to be mutable
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_host.rs:1228:19
+     |
+1228 |         if let Ok(mut state)=self.state.lock() {
+     |                   ----^^^^^
+     |                   |
+     |                   help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_host.rs:1466:23
+     |
+1466 |             if let Ok(mut state)=self.state.lock() {
+     |                       ----^^^^^
+     |                       |
+     |                       help: remove this `mut`
+
+warning: unused variable: `run_id`
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_host.rs:2700:25
+     |
+2700 |         let (db, _path, run_id, conversation_id, binding) = fixture();
+     |                         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_run_id`
+
+warning: type `AgentPromptContext` is more private than the item `conversation_prompt_context`
+   --> apps\desktop\src-tauri\src\runtime_host\mod.rs:903:1
+    |
+903 | / pub(crate) fn conversation_prompt_context(
+904 | |     database: &Database,
+905 | |     skills_dir: &std::path::Path,
+906 | |     conversation_id: &str,
+...   |
+909 | |     overrides: PromptScopeOverrides<'_>,
+910 | | ) -> Result<AgentPromptContext, String> {
+    | |_______________________________________^ function `conversation_prompt_context` is reachable at visibility `pub(crate)`
+    |
+note: but type `AgentPromptContext` is only usable at visibility `pub(self)`
+   --> apps\desktop\src-tauri\src\runtime_host\mod.rs:879:1
+    |
+879 | struct AgentPromptContext {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `AgentPromptContext` is more private than the item `KernelPromptPayload::context`
+    --> apps\desktop\src-tauri\src\runtime_host\mod.rs:1034:5
+     |
+1034 |     pub context: &'a AgentPromptContext,
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `KernelPromptPayload::context` is reachable at visibility `pub(crate)`
+     |
+note: but type `AgentPromptContext` is only usable at visibility `pub(self)`
+    --> apps\desktop\src-tauri\src\runtime_host\mod.rs:879:1
+     |
+ 879 | struct AgentPromptContext {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `ArtifactKind` is more private than the item `delivery::ArtifactFacts::kind`
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:2094:5
+     |
+2094 |     pub kind: ArtifactKind,
+     |     ^^^^^^^^^^^^^^^^^^^^^^ field `delivery::ArtifactFacts::kind` is reachable at visibility `pub(crate)`
+     |
+note: but type `ArtifactKind` is only usable at visibility `pub(self)`
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:45:1
+     |
+  45 | enum ArtifactKind {
+     | ^^^^^^^^^^^^^^^^^
+
+warning: type `ArtifactKind` is more private than the item `item_requirements`
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:3065:1
+     |
+3065 | / pub(crate) fn item_requirements(
+3066 | |     requirements: &[DeliveryRequirement],
+3067 | |     item_key: &str,
+3068 | |     item_kind: ArtifactKind,
+3069 | | ) -> Vec<DeliveryRequirement> {
+     | |_____________________________^ function `item_requirements` is reachable at visibility `pub(crate)`
+     |
+note: but type `ArtifactKind` is only usable at visibility `pub(self)`
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:45:1
+     |
+  45 | enum ArtifactKind {
+     | ^^^^^^^^^^^^^^^^^
+
+warning: type `runtime_host::RuntimeCommand` is more private than the item `compaction::<impl kernel_coordinator::KernelCoordinator<'_>>::resume_context_compaction`
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\compaction.rs:214:5
+    |
+214 | /     pub(crate) fn resume_context_compaction(
+215 | |         &self,
+216 | |         owner: &str,
+217 | |         runtime: &super::super::RuntimeCommand,
+218 | |         api_key: &str,
+219 | |     ) -> Result<(), String> {
+    | |___________________________^ method `compaction::<impl kernel_coordinator::KernelCoordinator<'_>>::resume_context_compaction` is reachable at visibility `pub(crate)`
+    |
+note: but type `runtime_host::RuntimeCommand` is only usable at visibility `pub(self)`
+   --> apps\desktop\src-tauri\src\runtime_host\mod.rs:741:1
+    |
+741 | struct RuntimeCommand {
+    | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `runtime_host::RuntimeCommand` is more private than the item `kernel_coordinator::live::<impl kernel_coordinator::KernelCoordinator<'_>>::dispatch_initial_live`
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\live.rs:1202:5
+     |
+1202 | /     pub(crate) fn dispatch_initial_live(
+1203 | |         &self,
+1204 | |         owner: &str,
+1205 | |         policy: &dyn kernel::PolicyDecisionPort,
+...    |
+1210 | |         settle_children: SettleChildrenFn,
+1211 | |     ) -> Result<(), String> {
+     | |___________________________^ method `kernel_coordinator::live::<impl kernel_coordinator::KernelCoordinator<'_>>::dispatch_initial_live` is reachable at visibility `pub(crate)`
+     |
+note: but type `runtime_host::RuntimeCommand` is only usable at visibility `pub(self)`
+    --> apps\desktop\src-tauri\src\runtime_host\mod.rs:741:1
+     |
+ 741 | struct RuntimeCommand {
+     | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `runtime_host::RuntimeCommand` is more private than the item `kernel_coordinator::live::<impl kernel_coordinator::KernelCoordinator<'_>>::dispatch_continuation_live`
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\live.rs:1215:5
+     |
+1215 | /     pub(crate) fn dispatch_continuation_live(
+1216 | |         &self,
+1217 | |         effect_key: &str,
+1218 | |         owner: &str,
+...    |
+1224 | |         settle_children: SettleChildrenFn,
+1225 | |     ) -> Result<(), String> {
+     | |___________________________^ method `kernel_coordinator::live::<impl kernel_coordinator::KernelCoordinator<'_>>::dispatch_continuation_live` is reachable at visibility `pub(crate)`
+     |
+note: but type `runtime_host::RuntimeCommand` is only usable at visibility `pub(self)`
+    --> apps\desktop\src-tauri\src\runtime_host\mod.rs:741:1
+     |
+ 741 | struct RuntimeCommand {
+     | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `kernel_run_lock::KernelRunLock` is more private than the item `runtime_host::kernel_host::<impl RuntimeHost>::start_kernel_run_forced_round_for_test`
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_host.rs:1571:5
+     |
+1571 | /     pub(crate) fn start_kernel_run_forced_round_for_test(
+1572 | |         &self, ownership: KernelRunLock, binding: &RunControlBinding,
+1573 | |         prompt: Value, service: Value,
+1574 | |     ) -> Result<(), String> {
+     | |___________________________^ method `runtime_host::kernel_host::<impl RuntimeHost>::start_kernel_run_forced_round_for_test` is reachable at visibility `pub(crate)`
+     |
+note: but type `kernel_run_lock::KernelRunLock` is only usable at visibility `pub(in crate::runtime_host)`
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_run_lock.rs:11:1
+     |
+  11 | pub(super) struct KernelRunLock {
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `migration_79_widens_only_host_job_keys_and_reopens_idempotently` is never used
+     --> apps\desktop\src-tauri\src\database\migrations.rs:14029:8
+      |
+14029 |     fn migration_79_widens_only_host_job_keys_and_reopens_idempotently() {
+      |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `AgentRuntimeConfigRecord` is never constructed
+    --> apps\desktop\src-tauri\src\database\models.rs:1460:12
+     |
+1460 | pub struct AgentRuntimeConfigRecord {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `package_hash` and `signature` are never read
+    --> apps\desktop\src-tauri\src\database\models.rs:1676:9
+     |
+1670 | pub struct PluginCatalogEntryRecord {
+     |            ------------------------ fields in this struct
+...
+1676 |     pub package_hash: Option<String>,
+     |         ^^^^^^^^^^^^
+1677 |     pub signature: Option<String>,
+     |         ^^^^^^^^^
+     |
+     = note: `PluginCatalogEntryRecord` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `origin`, `install_path`, `package_hash`, and `last_error_code` are never read
+    --> apps\desktop\src-tauri\src\database\models.rs:1685:9
+     |
+1682 | pub struct PluginInstallationRecord {
+     |            ------------------------ fields in this struct
+...
+1685 |     pub origin: PluginOrigin,
+     |         ^^^^^^
+1686 |     pub install_status: PluginInstallStatus,
+1687 |     pub install_path: Option<String>,
+     |         ^^^^^^^^^^^^
+1688 |     pub package_hash: Option<String>,
+     |         ^^^^^^^^^^^^
+...
+1691 |     pub last_error_code: Option<String>,
+     |         ^^^^^^^^^^^^^^^
+     |
+     = note: `PluginInstallationRecord` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `SetKnowledgeBindingsRequest` is never constructed
+    --> apps\desktop\src-tauri\src\database\models.rs:1951:12
+     |
+1951 | pub struct SetKnowledgeBindingsRequest {
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `record_mcp_status` is never used
+    --> apps\desktop\src-tauri\src\database\repositories.rs:3681:12
+     |
+ 242 | impl Database {
+     | ------------- method in this implementation
+...
+3681 |     pub fn record_mcp_status(
+     |            ^^^^^^^^^^^^^^^^^
+
+warning: method `get_expert_workflow` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\expert_workflows.rs:215:12
+    |
+ 10 | impl Database {
+    | ------------- method in this implementation
+...
+215 |     pub fn get_expert_workflow(
+    |            ^^^^^^^^^^^^^^^^^^^
+
+warning: method `kernel_outbox_stuck_leased` is never used
+    --> apps\desktop\src-tauri\src\database\repositories\kernel.rs:3851:12
+     |
+1113 | impl Database {
+     | ------------- method in this implementation
+...
+3851 |     pub fn kernel_outbox_stuck_leased(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variant `ProjectMismatch` is never constructed
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_authorization.rs:104:5
+    |
+ 96 | pub enum GrantSkipReason {
+    |          --------------- variant in this enum
+...
+104 |     ProjectMismatch,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `GrantSkipReason` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+
+warning: method `as_str` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_authorization.rs:108:12
+    |
+107 | impl GrantSkipReason {
+    | -------------------- method in this implementation
+108 |     pub fn as_str(&self) -> &'static str {
+    |            ^^^^^^
+
+warning: method `kernel_run_budget_tier` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_continuation.rs:575:12
+    |
+235 | impl Database {
+    | ------------- method in this implementation
+...
+575 |     pub fn kernel_run_budget_tier(&self, run_id: &str) -> Result<Option<(String, String)>, String> {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `attempt_state_str` is never used
+  --> apps\desktop\src-tauri\src\database\repositories\kernel_execution_admission.rs:66:4
+   |
+66 | fn attempt_state_str(value: &AttemptState) -> &'static str {
+   |    ^^^^^^^^^^^^^^^^^
+
+warning: method `withdraw_whole_file_replacements` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_execution_admission.rs:914:12
+    |
+878 | impl Database {
+    | ------------- method in this implementation
+...
+914 |     pub fn withdraw_whole_file_replacements(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `kernel_job_pause` and `kernel_job_params` are never used
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_jobs.rs:483:12
+    |
+205 | impl Database {
+    | ------------- methods in this implementation
+...
+483 |     pub fn kernel_job_pause(&self, job_id: &str, reason: &str) -> Result<JobSnapshot, String> {
+    |            ^^^^^^^^^^^^^^^^
+...
+551 |     pub fn kernel_job_params(&self, job_id: &str) -> Result<Value, String> {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: function `job_change_payload` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_jobs.rs:611:8
+    |
+611 | pub fn job_change_payload(snapshot: &JobSnapshot) -> Value {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: field `updated_at` is never read
+   --> apps\desktop\src-tauri\src\database\repositories\delivery_checks.rs:101:9
+    |
+ 92 | pub(crate) struct DeliveryChecklistItem {
+    |                   --------------------- field in this struct
+...
+101 |     pub updated_at: i64,
+    |         ^^^^^^^^^^
+    |
+    = note: `DeliveryChecklistItem` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `delivered_run_steering` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\run_steering.rs:273:19
+    |
+ 86 | impl Database {
+    | ------------- method in this implementation
+...
+273 |     pub(crate) fn delivered_run_steering(&self, run_id: &str) -> Result<Vec<SteeringMessage>, String> {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `baseline_version` and `dispatch_id` are never read
+  --> apps\desktop\src-tauri\src\database\repositories\managed_files.rs:78:9
+   |
+75 | pub(crate) struct RestoreRequestRecord {
+   |                   -------------------- fields in this struct
+...
+78 |     pub baseline_version: Option<String>,
+   |         ^^^^^^^^^^^^^^^^
+79 |     pub dispatch_id: String,
+   |         ^^^^^^^^^^^
+   |
+   = note: `RestoreRequestRecord` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `withdraw_whole_file_replacements_for_call` is never used
+   --> apps\desktop\src-tauri\src\database\repositories\kernel_host.rs:569:19
+    |
+149 | impl Database {
+    | ------------- method in this implementation
+...
+569 |     pub(crate) fn withdraw_whole_file_replacements_for_call(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_team_definition` is never used
+  --> apps\desktop\src-tauri\src\expert_teams.rs:84:15
+   |
+84 | pub(crate) fn validate_team_definition(value: &Value) -> Result<(), String> {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `zvec_resource_dir` is never read
+   --> apps\desktop\src-tauri\src\local_knowledge.rs:223:16
+    |
+220 | pub struct LocalKnowledgeStore {
+    |            ------------------- field in this struct
+...
+223 |     pub(crate) zvec_resource_dir: Arc<Option<PathBuf>>,
+    |                ^^^^^^^^^^^^^^^^^
+    |
+    = note: `LocalKnowledgeStore` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: method `with_zvec_resource_dir` is never used
+   --> apps\desktop\src-tauri\src\local_knowledge.rs:571:12
+    |
+511 | impl LocalKnowledgeStore {
+    | ------------------------ method in this implementation
+...
+571 |     pub fn with_zvec_resource_dir(mut self, resource_dir: impl AsRef<Path>) -> Self {
+    |            ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `reset` is never used
+   --> apps\desktop\src-tauri\src\local_knowledge_import.rs:104:12
+    |
+ 95 | impl ImportCancellationToken {
+    | ---------------------------- method in this implementation
+...
+104 |     pub fn reset(&self) {
+    |            ^^^^^
+
+warning: constant `ZVEC_STORE_KIND` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:41:7
+   |
+41 | const ZVEC_STORE_KIND: &str = "zvec-hnsw-cosine-v1";
+   |       ^^^^^^^^^^^^^^^
+
+warning: constant `ZVEC_STORE_VERSION` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:42:7
+   |
+42 | const ZVEC_STORE_VERSION: &str = "0.6.0";
+   |       ^^^^^^^^^^^^^^^^^^
+
+warning: constant `EMBEDDING_MODEL_TEST_TIMEOUT` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:44:7
+   |
+44 | const EMBEDDING_MODEL_TEST_TIMEOUT: Duration = Duration::from_secs(45);
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RETRIEVAL_WORKER_TIMEOUT` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:45:7
+   |
+45 | const RETRIEVAL_WORKER_TIMEOUT: Duration = Duration::from_secs(60);
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RETRIEVAL_WORKER_ROOT_ENV` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:46:7
+   |
+46 | const RETRIEVAL_WORKER_ROOT_ENV: &str = "FOX_KNOWLEDGE_RETRIEVAL_ROOT";
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RETRIEVAL_WORKER_REQUEST_ENV` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:47:7
+   |
+47 | const RETRIEVAL_WORKER_REQUEST_ENV: &str = "FOX_KNOWLEDGE_RETRIEVAL_REQUEST";
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `RETRIEVAL_WORKER_ZVEC_RESOURCE_ENV` is never used
+  --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:48:7
+   |
+48 | const RETRIEVAL_WORKER_ZVEC_RESOURCE_ENV: &str = "FOX_KNOWLEDGE_ZVEC_RESOURCE_DIR";
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `RetrievalWorkerResponse` is never constructed
+   --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:233:8
+    |
+233 | struct RetrievalWorkerResponse {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `collect_retrieval_worker_stream` is never used
+   --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:550:4
+    |
+550 | fn collect_retrieval_worker_stream(mut stream: impl Read, max_bytes: usize) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `finish_retrieval_worker_stream` is never used
+   --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:573:4
+    |
+573 | fn finish_retrieval_worker_stream(reader: thread::JoinHandle<String>) -> String {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `retrieval_worker_error` is never used
+   --> apps\desktop\src-tauri\src\local_knowledge_vector.rs:579:4
+    |
+579 | fn retrieval_worker_error(
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `shadow_feed_tool_settled` is never used
+    --> apps\desktop\src-tauri\src\runtime_host\mod.rs:1806:12
+     |
+1088 | impl RuntimeHost {
+     | ---------------- method in this implementation
+...
+1806 |     pub fn shadow_feed_tool_settled(
+     |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated function `parse` is never used
+  --> apps\desktop\src-tauri\src\runtime_host\artifact_store.rs:62:19
+   |
+53 | impl ArtifactClass {
+   | ------------------ associated function in this implementation
+...
+62 |     pub(crate) fn parse(value: &str) -> ArtifactClass {
+   |                   ^^^^^
+
+warning: method `deliverable_relative_path` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\artifact_store.rs:130:19
+    |
+ 96 | impl ArtifactStore {
+    | ------------------ method in this implementation
+...
+130 |     pub(crate) fn deliverable_relative_path(&self, slug: &str, conversation_id: &str) -> PathBuf {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `execution_id` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\artifact_store.rs:742:19
+    |
+714 | impl StagingLedger {
+    | ------------------ method in this implementation
+...
+742 |     pub(crate) fn execution_id(&self) -> &str {
+    |                   ^^^^^^^^^^^^
+
+warning: field `token` is never read
+  --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\host_lifecycle.rs:51:5
+   |
+48 | struct JobCancellation {
+   |        --------------- field in this struct
+...
+51 |     token: crate::kernel::CancellationToken,
+   |     ^^^^^
+   |
+   = note: `JobCancellation` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: method `token_for` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\host_lifecycle.rs:100:19
+    |
+ 54 | impl JobTokenRegistry {
+    | --------------------- method in this implementation
+...
+100 |     pub(crate) fn token_for(&self, job_id: &str) -> Option<crate::kernel::CancellationToken> {
+    |                   ^^^^^^^^^
+
+warning: associated function `cancelled` is never used
+  --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\jobs.rs:87:19
+   |
+79 | impl PortError {
+   | -------------- associated function in this implementation
+...
+87 |     pub(crate) fn cancelled(message: impl Into<String>) -> Self {
+   |                   ^^^^^^^^^
+
+warning: fields `rows_processed` and `duration_ms` are never read
+   --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\jobs.rs:180:9
+    |
+178 | pub(crate) struct ComputeJobOutcome {
+    |                   ----------------- fields in this struct
+179 |     pub result: Value,
+180 |     pub rows_processed: u64,
+    |         ^^^^^^^^^^^^^^
+181 |     pub duration_ms: u64,
+    |         ^^^^^^^^^^^
+    |
+    = note: `ComputeJobOutcome` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `attempt` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\jobs.rs:289:8
+    |
+285 | pub(crate) trait JobLifecyclePort: Send + Sync {
+    |                  ---------------- method in this trait
+...
+289 |     fn attempt(&self) -> u32;
+    |        ^^^^^^^
+
+warning: field `attempt` is never read
+   --> apps\desktop\src-tauri\src\runtime_host\attachment_compute\jobs.rs:761:9
+    |
+760 |     struct FakePort {
+    |            -------- field in this struct
+761 |         attempt: u32,
+    |         ^^^^^^^
+
+warning: function `office_write_artifact_class` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\managed_files.rs:210:15
+    |
+210 | pub(crate) fn office_write_artifact_class(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `origin` and `origin_version_no` are never read
+   --> apps\desktop\src-tauri\src\runtime_host\managed_files.rs:665:9
+    |
+657 | pub(crate) struct RestoreSource {
+    |                   ------------- fields in this struct
+...
+665 |     pub origin: &'static str,
+    |         ^^^^^^
+666 |     /// Which row the bytes were read for, for auditing a legacy recovery.
+667 |     pub origin_version_no: i64,
+    |         ^^^^^^^^^^^^^^^^^
+    |
+    = note: `RestoreSource` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: variant `RecoveryRequired` is never constructed
+    --> apps\desktop\src-tauri\src\runtime_host\managed_files.rs:1096:5
+     |
+1094 | enum RestoreOutcome {
+     |      -------------- variant in this enum
+1095 |     NotApplied,
+1096 |     RecoveryRequired,
+     |     ^^^^^^^^^^^^^^^^
+     |
+     = note: `RestoreOutcome` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `item_key` and `sheets` are never read
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:2091:9
+     |
+2090 | pub(crate) struct ArtifactFacts {
+     |                   ------------- fields in this struct
+2091 |     pub item_key: String,
+     |         ^^^^^^^^
+...
+2098 |     pub sheets: Vec<String>,
+     |         ^^^^^^
+     |
+     = note: `ArtifactFacts` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `min_per_sheet` is never used
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:2121:19
+     |
+2119 | impl SheetChartCounts {
+     | --------------------- method in this implementation
+2120 |     /// The fewest charts any one sheet carries.
+2121 |     pub(crate) fn min_per_sheet(&self) -> Option<usize> {
+     |                   ^^^^^^^^^^^^^
+
+warning: function `evaluate_requirements` is never used
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:3010:15
+     |
+3010 | pub(crate) fn evaluate_requirements(
+     |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `zip_with_extra_part` is never used
+    --> apps\desktop\src-tauri\src\runtime_host\delivery.rs:3456:15
+     |
+3456 | pub(crate) fn zip_with_extra_part(bytes: &[u8], name: &str, body: &str) -> Vec<u8> {
+     |               ^^^^^^^^^^^^^^^^^^^
+
+warning: methods `round_can_still_act` and `processed_initial_input` are never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\live.rs:251:8
+    |
+189 | impl KernelCoordinator<'_> {
+    | -------------------------- methods in this implementation
+...
+251 |     fn round_can_still_act(&self) -> Result<bool, String> {
+    |        ^^^^^^^^^^^^^^^^^^^
+...
+294 |     fn processed_initial_input(&self) -> Result<Vec<Value>, String> {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `retry_reason` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\tests.rs:330:4
+    |
+330 | fn retry_reason(root: &std::path::Path, run_id: &str) -> String {
+    |    ^^^^^^^^^^^^
+
+warning: function `await_requests` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\steering_live_tests.rs:136:4
+    |
+136 | fn await_requests(seen: &Arc<Mutex<Vec<Value>>>, count: usize, label: &str) -> Vec<Value> {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `steering_live_fixture_with_deliverable` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\steering_live_tests.rs:177:4
+    |
+177 | fn steering_live_fixture_with_deliverable(address: std::net::SocketAddr) -> SteeringLive {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `deliverable_bytes` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\steering_live_tests.rs:190:4
+    |
+190 | fn deliverable_bytes() -> Vec<u8> {
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: field `started` is never read
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_coordinator\f1_engine_path_tests.rs:232:5
+    |
+227 | struct LocalProvider {
+    |        ------------- field in this struct
+...
+232 |     started: Instant,
+    |     ^^^^^^^
+
+warning: function `deliver` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_model_worker.rs:547:15
+    |
+547 | pub(crate) fn deliver(
+    |               ^^^^^^^
+
+warning: function `deliver_initial` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\kernel_model_worker.rs:597:15
+    |
+597 | pub(crate) fn deliver_initial(
+    |               ^^^^^^^^^^^^^^^
+
+warning: methods `wake_kernel_waiting_run_for_park` and `admit_dispatch_execution` are never used
+    --> apps\desktop\src-tauri\src\runtime_host\kernel_host.rs:1362:19
+     |
+1198 | impl super::RuntimeHost {
+     | ----------------------- methods in this implementation
+...
+1362 |     pub(crate) fn wake_kernel_waiting_run_for_park(
+     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1843 |     fn admit_dispatch_execution(
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `active_mut` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\shadow_reconcile.rs:206:8
+    |
+205 | impl ContextState {
+    | ----------------- method in this implementation
+206 |     fn active_mut(&mut self) -> Option<&mut ShadowContext> {
+    |        ^^^^^^^^^^
+
+warning: method `database` is never used
+   --> apps\desktop\src-tauri\src\runtime_host\shadow_reconcile.rs:247:19
+    |
+238 | impl ShadowReconciler {
+    | --------------------- method in this implementation
+...
+247 |     pub(crate) fn database(&self) -> &Database {
+    |                   ^^^^^^^^
+
+warning: associated function `empty` is never used
+   --> apps\desktop\src-tauri\src\resource_gateway.rs:418:8
+    |
+402 | impl VerifiedReadObservation {
+    | ---------------------------- associated function in this implementation
+...
+418 |     fn empty(target_identity: String, version: String, total_units: u64) -> Self {
+    |        ^^^^^
+
+warning: fields `missing_tools` and `tools_available` are never read
+   --> apps\desktop\src-tauri\src\skills.rs:128:9
+    |
+123 | pub struct IncludedSkill {
+    |            ------------- fields in this struct
+...
+128 |     pub missing_tools: Vec<String>,
+    |         ^^^^^^^^^^^^^
+129 |     pub tools_available: bool,
+    |         ^^^^^^^^^^^^^^^
+    |
+    = note: `IncludedSkill` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `enabled_skill_prompt_for_context` is never used
+   --> apps\desktop\src-tauri\src\skills.rs:170:8
+    |
+170 | pub fn enabled_skill_prompt_for_context(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `retryable` is never used
+  --> apps\desktop\src-tauri\src\vector_store.rs:93:12
+   |
+27 | impl VectorIndexError {
+   | --------------------- method in this implementation
+...
+93 |     pub fn retryable(&self) -> bool {
+   |            ^^^^^^^^^
+
+warning: type alias `VectorSearchRequest` is never used
+   --> apps\desktop\src-tauri\src\vector_store.rs:149:10
+    |
+149 | pub type VectorSearchRequest = SearchRequest;
+    |          ^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `VectorHit` is never used
+   --> apps\desktop\src-tauri\src\vector_store.rs:150:10
+    |
+150 | pub type VectorHit = Hit;
+    |          ^^^^^^^^^
+
+warning: type alias `VectorStoreCheck` is never used
+   --> apps\desktop\src-tauri\src\vector_store.rs:151:10
+    |
+151 | pub type VectorStoreCheck = Check;
+    |          ^^^^^^^^^^^^^^^^
+
+warning: fields `thread_id` and `status` are never read
+  --> apps\desktop\src-tauri\src\yuxi\mod.rs:33:9
+   |
+31 | pub struct YuxiRunStart {
+   |            ------------ fields in this struct
+32 |     pub run_id: String,
+33 |     pub thread_id: String,
+   |         ^^^^^^^^^
+34 |     pub status: String,
+   |         ^^^^^^
+   |
+   = note: `YuxiRunStart` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `fox-desktop` (lib test) generated 111 warnings (run `cargo fix --lib -p fox-desktop --tests` to apply 18 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.99s
+     Running unittests src\lib.rs (D:/python/projects/Fox/Fox/.test-target\debug\deps\fox_desktop_lib-489858903a3a4a43.exe)
+
+running 1347 tests
+test commands::command_tests::expert_binding_errors_keep_stable_command_codes ... ok
+test commands::command_tests::direct_open_allows_documents_and_images ... ok
+test commands::command_tests::direct_open_rejects_executables_scripts_and_unknown_files ... ok
+test commands::command_tests::preview_cache_path_preserves_only_safe_file_extensions ... ok
+test commands::command_tests::external_url_validation_only_allows_http_and_https ... ok
+test commands::command_tests::preview_cache_key_is_stable_and_revision_sensitive ... ok
+test app_state::tests::preview_cancellation_registry_owns_the_complete_operation_lifecycle ... ok
+test commands::command_tests::knowledge_binding_request_distinguishes_legacy_and_v2_fields ... ok
+test commands::permission_window_tests::authority_changes_require_the_bundled_main_document ... ok
+test commands::project_file_tests::rejects_parent_and_absolute_project_paths ... ok
+test commands::project_file_tests::sanitizes_download_filenames_without_losing_unicode ... ok
+test commands::project_file_tests::skips_large_generated_directories ... ok
+test artifact_gateway::tests::resolves_only_regular_files_inside_authorized_root ... ok
+test artifact_gateway::tests::rejects_stale_size_hash_and_non_ready_records ... ok
+test artifact_gateway::tests::rejects_files_larger_than_gateway_limit ... ok
+test artifact_gateway::tests::rejects_directories_and_invalid_relative_paths ... ok
+test app_state::tests::downloaded_file_registry_only_allows_live_registered_files ... ok
+test data_compute::chunked::tests::legacy_formats_are_rejected_with_an_explicit_alternative ... ok
+test commands::command_tests::conversation_cleanup_removes_only_fox_managed_files ... ok
+test commands::command_tests::preview_cache_paths_cannot_escape_or_use_part_files ... ok
+test artifact_gateway::tests::rejects_missing_and_outside_paths ... ok
+test data_compute::execution_tests::compute_exec_reports_user_code_line_and_accepts_quoted_key_correction ... ok
+test data_compute::sparse_allocation_tests::compute_sparse_far_cells_are_rejected_before_dense_allocation ... ok
+test data_compute::sparse_allocation_tests::compute_sparse_rows_preserve_offsets_and_cached_values ... ok
+test data_compute::sparse_allocation_tests::real_agv_workbook_loads_in_compute ... ignored, reads the real AGV workbook fixture: tests/execl-ceshi
+test data_compute::tests::csv_reader_keeps_quoted_fields_and_bounds_rows ... ok
+test data_compute::tests::output_name_rejects_reserved_windows_devices ... ok
+test data_compute::tests::output_name_rejects_traversal_absolute_and_alternate_streams ... ok
+test data_compute::tests::script_wraps_explicit_return_and_save_file_collection ... ok
+test data_compute::execution_tests::large_result_spill_fails_explicitly_when_storage_unwritable ... ok
+test data_compute::tests::timeout_defaults_and_clamps_to_thirty_seconds ... ok
+test data_compute::execution_tests::compute_exec_saves_utf8_files_and_rejects_path_escape ... ok
+test data_compute::chunked::tests::workbook_delivers_dense_extent_with_true_row_numbers ... ok
+test database::kernel_changes::tests::slow_consumers_coalesce_all_runs_and_independent_subscribers_stay_live ... ok
+test data_compute::execution_tests::result_boundary_is_exact_and_belongs_to_the_result_field ... ok
+test data_compute::execution_tests::compute_exec_errors_are_actionable_and_large_results_are_bounded ... ok
+test data_compute::execution_tests::compute_exec_rejects_timeout_cancel_and_async_results ... ok
+test data_compute::execution_tests::large_saved_file_is_not_subject_to_the_inline_result_cap ... ok
+test data_compute::chunked::tests::missing_onchunk_and_cancellation_and_timeout_are_distinct ... ok
+test data_compute::execution_tests::spill_shares_output_count_and_byte_budget ... ok
+test data_compute::execution_tests::oversized_sample_is_byte_bounded_not_copied_whole ... ok
+test artifact_gateway::tests::reports_text_html_image_pdf_and_unknown_preview_kinds ... ok
+test data_compute::execution_tests::spill_is_refused_when_total_bytes_exceed_cap ... ok
+test database::migrations::tests::cascade_delete_scope_repair_restores_goal_deletion_for_drifted_v36_databases ... ok
+test database::migrations::tests::kernel_v50_preserves_v49_outbox_rows_and_allows_batch_delivery ... ok
+test database::migrations::tests::classifies_existing_agents_and_enforces_binding_constraints ... ok
+test database::migrations::tests::enforces_a0_status_and_single_active_work_constraints ... ok
+test database::migrations::tests::app_capability_migration_is_idempotent_and_enforces_defaults ... ok
+test database::migrations::tests::continuation_decision_schema_is_append_friendly_and_rejects_invalid_facts ... ok
+test database::migrations::tests::enforces_p0_p2_unique_and_source_constraints ... ok
+test database::migrations::tests::adds_persisted_model_provider_icon_column ... ok
+test commands::plugin_center::tests::not_applicable_activation_is_rejected ... ok
+test commands::plugin_center::tests::catalog_aggregates_mcp_skill_and_builtin_tools ... ok
+test commands::command_tests::kernel_cancel_command_routes_before_legacy_writes_and_never_falls_back ... ok
+test database::migrations::tests::creates_knowledge_preview_cache_settings_and_document_activity_schema ... ok
+test commands::plugin_center::tests::per_agent_activation_updates_skill_fact_source ... ok
+test database::migrations::tests::graph_node_finish_migration_is_idempotent_and_enforces_evidence_contract ... ok
+test commands::plugin_center::tests::global_activation_updates_mcp_fact_source ... ok
+test database::migrations::tests::failed_upgrade_can_restore_and_migrate_the_pre_a0_backup ... ok
+test data_compute::chunked::tests::csv_streams_in_order_with_progress_and_outputs ... ok
+test database::migrations::tests::the_placement_migration_preserves_the_real_activity_database ... ignored, reads the operator's real activity database; set FOX_REAL_DATABASE and run explicitly
+test database::migrations::tests::graph_review_acceptance_migration_tolerates_missing_late_v36_objects ... ok
+test database::migrations::tests::graph_review_acceptance_migration_upgrades_v38_idempotently_and_seals_authority ... ok
+test database::migrations::tests::migration_51_shadow_tables_persist_alongside_v49_v50_data ... ok
+test database::migrations::tests::migration_backfills_artifact_origin_without_promoting_historical_rows ... ok
+test database::migrations::tests::obsolete_foreground_notifications_are_removed_without_touching_background_work ... ok
+test database::migrations::tests::migrates_plugin_and_knowledge_schema_without_losing_legacy_bindings ... ok
+test database::migrations::tests::graph_node_cancel_migration_enforces_two_phase_negative_reconciliation ... ok
+test database::migrations::tests::migration_51_adds_shadow_tables_and_is_repeatable ... ok
+test database::migrations::tests::sensenova_model_id_migration_repairs_display_names_idempotently ... ok
+test database::migrations::tests::readonly_graph_migration_is_idempotent_and_enforces_graph_invariants ... ok
+test database::migrations::tests::scoped_permission_migration_discards_legacy_broad_grants ... ok
+test database::migrations::tests::repair_override_event_and_approval_claim_migration_is_idempotent ... ok
+test database::migrations::tests::populated_v34_upgrades_to_v35_without_losing_approvals_and_enforces_constraints ... ok
+test data_compute::chunked::tests::standard_tier_rejects_oversize_with_named_dimension_and_remedy ... ok
+test database::migrations::tests::upgrades_phase_one_project_roots_without_losing_conversations ... ok
+test database::migrations::tests::migration_86_upgrades_real_v85_run_twice_with_wait_constraints ... ok
+test database::migrations::tests::migration_84_upgrades_real_v83_jobs_and_reopens_idempotently ... ok
+test database::migrations::tests::migration_83_preserves_v82_restore_requests_without_inventing_force ... ok
+test database::migrations::tests::upgrades_pre_a0_data_and_is_idempotent ... ok
+test database::migrations::tests::upgrades_v20_bindings_with_static_package_snapshots ... ok
+test database::migrations::tests::validation_policy_and_attempt_migration_is_idempotent ... ok
+test database::migrations::tests::v53_checkpoint_upgrade_preserves_existing_shadow_identity ... ok
+test database::migrations::tests::migration_68_upgrade_preserves_dependent_kernel_rows ... ok
+test database::migrations::unified_migration_tests::migration_rebuild_failure_rolls_back_schema_data_and_restores_foreign_keys ... ok
+test database::repositories::a1_workflow::tests::plan_revisions_require_host_resolution_and_preserve_approved_history ... ok
+test database::repositories::app_management::tests::archived_projects_leave_global_search_and_missing_paths_are_reported ... ok
+test database::repositories::app_management::tests::feedback_context_is_bounded_and_excludes_message_content ... ok
+test database::repositories::app_management::tests::resolved_approval_notifications_are_read_instead_of_reopened ... ok
+test database::repositories::app_management::tests::notification_merge_reopens_changed_status_and_preferences_persist ... ok
+test database::repositories::child_runs::tests::child_agent_catalog_always_exposes_the_seeded_general_agent ... ok
+test database::repositories::child_runs::tests::child_run_enforces_root_concurrency_without_cumulative_tool_limits ... ok
+test database::repositories::child_runs::tests::child_run_is_isolated_idempotent_and_linked_to_parent_trace ... ok
+test database::repositories::bundled_capabilities::compute_upgrade_tests::compute_upgrade_refreshes_idle_binding_preserves_active_run_and_user_choices ... ok
+test database::migrations::tests::migration_80_upgrades_a_v79_database_without_changing_effective_modes ... ok
+test database::repositories::bundled_capabilities::tests::library_is_complete_and_reopening_preserves_package_hashes ... ok
+test database::repositories::child_runs::tests::child_run_projects_bounded_usage_and_terminal_result ... ok
+test database::repositories::child_runs::tests::child_managed_tool_acquisition_is_atomic_without_a_cumulative_count_cap ... ok
+test database::repositories::child_runs::tests::child_tool_acquisition_rechecks_duration_but_not_cumulative_usage ... ok
+test database::repositories::child_runs::tests::child_tool_count_snapshots_do_not_block_ordinary_runtime_or_legacy_completion ... ok
+test database::repositories::child_runs::tests::cumulative_usage_is_observed_without_terminating_ordinary_child_runs ... ok
+test database::repositories::computed_artifacts::tests::persist_maps_details_files_to_full_size_compute_artifacts ... ok
+test database::repositories::child_runs::tests::expert_consultation_catalog_is_separate_from_child_templates ... ok
+test database::repositories::digital_colleagues::tests::cumulative_output_budget_is_per_run_while_daily_total_spans_planned_runs ... ok
+test database::repositories::digital_colleagues::tests::digital_tool_acquisition_rechecks_all_frozen_budgets_and_delayed_promotion ... ok
+test database::repositories::digital_colleagues::tests::digital_tool_slots_reserve_once_allow_boundary_and_block_legacy_excess ... ok
+test database::repositories::digital_colleagues::tests::revoke_disables_ingress_schedules_and_future_triggers ... ok
+test database::repositories::digital_colleagues::tests::trigger_freezes_output_to_remaining_daily_budget_and_rejects_below_minimum ... ok
+test database::repositories::digital_colleagues::tests::trigger_is_idempotent_non_overlapping_and_projects_runtime_usage ... ok
+test database::repositories::digital_colleagues::tests::scheduler_coalesces_catchup_skips_misfires_and_restores_after_reopen ... ok
+test database::repositories::expert_teams::tests::persists_serial_members_scopes_and_aggregate_result ... ok
+test database::repositories::expert_workflows::tests::retries_only_to_the_declared_bound_then_blocks_the_goal ... ok
+test database::repositories::graph_lead::tests::a_new_same_conversation_durable_lead_run_can_resume_the_persisted_graph ... ok
+test database::repositories::graph_lead::tests::activates_branching_read_only_graph_and_projects_stable_readiness ... ok
+test database::repositories::expert_workflows::tests::persists_gates_checkpoints_and_reuses_the_empty_host_goal ... ok
+test database::repositories::graph_lead::tests::an_explicitly_skipped_dependency_does_not_invent_a_skipped_dependent ... ok
+test database::repositories::graph_lead::tests::active_node_attempt_and_child_snapshot_survive_database_restart ... ok
+test database::repositories::graph_lead::tests::exact_activation_replays_and_conflicting_activation_is_rejected ... ok
+test database::repositories::graph_lead::tests::concurrent_graph_node_starts_have_one_atomic_winner ... ok
+test database::repositories::graph_lead::tests::failed_cancel_finalizer_is_inert_and_completed_child_wins_race ... ok
+test database::repositories::graph_lead::tests::forged_succeeded_graph_attempt_without_finish_header_never_unlocks_dependency ... ok
+test database::repositories::graph_lead::tests::generic_goal_acceptance_is_rejected_for_activated_graphs ... ok
+test database::repositories::graph_lead::tests::generic_graph_attempt_start_is_rejected_without_creating_facts ... ok
+test database::repositories::graph_lead::tests::graph_cancel_intent_is_pending_until_completed_tool_call_and_exactly_once_active ... ok
+test database::repositories::graph_lead::tests::graph_cancel_rejects_high_risk_and_stale_cas_without_intent ... ok
+test database::repositories::graph_lead::tests::reviewer_inconclusive_and_invalid_outputs_are_canonicalized_fail_closed ... ok
+test database::repositories::graph_lead::tests::graph_finish_accepts_passing_test_criterion_but_still_requires_fresh_inspection ... ok
+test database::repositories::graph_lead::tests::graph_node_start_atomically_owns_attempt_child_scope_profile_and_exact_replay ... ok
+test database::repositories::graph_lead::tests::graph_node_start_enforces_read_only_mvp_budget_before_writing ... ok
+test database::repositories::graph_lead::tests::graph_node_start_rolls_back_attempt_when_child_creation_fails ... ok
+test database::repositories::graph_lead::tests::graph_parent_lineage_cannot_be_forged_before_node_start ... ok
+test database::repositories::graph_lead::tests::high_risk_graph_review_finish_and_final_acceptance_complete_end_to_end ... ok
+test database::repositories::graph_lead::tests::high_risk_graph_review_revise_blocks_attempt_with_immutable_findings_and_proof ... ok
+test database::repositories::graph_lead::tests::newer_approved_plan_blocks_old_graph_finish_without_side_effects ... ok
+test database::repositories::graph_lead::tests::newer_approved_plan_prevents_a_resumed_lead_from_starting_the_old_graph ... ok
+test database::repositories::graph_lead::tests::newer_proposed_plan_pauses_graph_node_start_without_side_effects ... ok
+test database::repositories::graph_lead::tests::only_current_successful_attempt_with_live_evidence_unlocks_dependents ... ok
+test database::repositories::graph_lead::tests::rejects_nodes_without_explicit_acceptance_criteria_before_sql_insert ... ok
+test database::repositories::graph_lead::tests::snapshot_survives_database_restart ... ok
+test database::repositories::kernel::tests::approval_cas_is_once_only_and_terminal_runs_are_not_recovered ... ok
+test database::repositories::graph_lead::tests::startup_repair_closes_crash_active_graph_child_before_owner_audit_returns ... ok
+test database::repositories::graph_lead::tests::standard_graph_finish_binds_live_runtime_evidence_replays_and_unlocks_dependency ... ok
+test database::repositories::kernel::tests::approval_commit_binds_displayed_policy_version_and_refuses_legacy_reissued_ticket ... ok
+test database::repositories::kernel::tests::approval_commit_rejects_late_human_decision ... ok
+test database::repositories::kernel::tests::conflicting_batch_and_tool_identities_are_rejected ... ok
+test database::repositories::kernel::tests::authoritative_recovery_executor_harness_pending_lease_and_leased_reconcile ... ok
+test database::repositories::kernel::tests::conflicting_event_replay_is_rejected_instead_of_silently_ignored ... ok
+test database::repositories::kernel::tests::conversation_snapshot_is_owned_authoritative_and_payload_free ... ok
+test database::repositories::kernel::tests::decision_commit_rejects_event_gaps_and_conflicting_outbox_replay ... ok
+test database::repositories::kernel::tests::decide_persist_reopen_then_resolve_pending_approval_without_regenerating ... ok
+test database::repositories::kernel::tests::crash_after_approval_before_dispatch_is_recovered_without_regeneration ... ok
+test database::repositories::graph_lead::tests::graph_child_negative_terminals_reconcile_once_using_actual_status ... ok
+test database::repositories::kernel::tests::executable_run_table_rejects_shadow_mode ... ok
+test database::repositories::graph_lead::tests::graph_finish_rejects_high_risk_empty_child_and_blocked_goal_without_writes ... ok
+test database::repositories::kernel::tests::kernel_events_are_idempotent_on_run_and_seq ... ok
+test database::repositories::graph_lead::tests::graph_finish_rejects_old_foreign_and_forged_approval_tool_evidence_atomically ... ok
+test database::repositories::kernel::tests::multi_tool_batch_persists_each_call_and_snapshot_keeps_source_order ... ok
+test database::repositories::graph_lead::tests::graph_node_start_rejects_waiting_blocked_and_skipped_nodes_without_facts ... ok
+test database::repositories::kernel::tests::persisted_state_machines_reject_terminal_rewrites_and_approval_bypass ... ok
+test database::repositories::kernel::tests::leased_effect_after_crash_is_not_blindly_rerun ... ok
+test database::repositories::kernel::tests::pending_approval_persists_and_is_recovered_after_restart ... ok
+test database::repositories::kernel::tests::recovery_executor_pending_dispatch_leased_once_then_completed ... ok
+test database::repositories::kernel::tests::rehydrate_allows_only_unconsumed_policy_expiry_pending_reevaluation ... ok
+test database::repositories::kernel::tests::rehydrate_fails_closed_on_corrupt_terminal_and_batch_facts ... ok
+test database::repositories::kernel_authorization::tests::scope_keys_keep_their_host_taxonomy ... ok
+test database::repositories::kernel::tests::rehydrate_restores_full_controller_state ... ok
+test database::repositories::graph_lead::tests::rejects_non_durable_parent_profiles ... ok
+test database::repositories::kernel_continuation::tests::explicit_tiers_change_only_bounded_windows ... ok
+test database::repositories::kernel_continuation::tests::standard_tier_preserves_the_inherited_duration_policy ... ok
+test database::repositories::kernel_continuation::tests::tier_names_round_trip_and_reject_unknown_values ... ok
+test database::repositories::kernel_display::tests::a_declared_artifact_class_cannot_relabel_a_projected_file ... ok
+test database::repositories::kernel::tests::shadow_diff_cursor_must_be_monotonic ... ok
+test database::repositories::kernel::tests::shadow_divergence_deterministically_classified_and_persisted ... ok
+test database::repositories::kernel::tests::scheduled_retry_due_time_survives_rehydrate ... ok
+test database::repositories::kernel::tests::shadow_rejects_unknown_identity_and_wrong_legacy_binding ... ok
+test database::repositories::kernel::tests::shadow_run_identity_conflict_fails_closed_not_silently_ignored ... ok
+test database::repositories::kernel::tests::terminal_recovery_drains_only_pending_cancellation_effects ... ok
+test database::repositories::kernel::tests::single_effect_lease_is_authoritative_scoped_and_does_not_prelease_siblings ... ok
+test database::repositories::kernel::tests::tool_result_and_dispatch_completion_are_one_transaction ... ok
+test database::repositories::kernel::tests::shadow_run_persists_and_is_never_executable_even_after_reopen_and_lease_scan ... ok
+test database::repositories::graph_lead::tests::activation_requires_the_running_host_graph_tool_contract ... ok
+test database::repositories::kernel_authorization::tests::a_foreign_or_one_shot_approval_cannot_mint_a_grant ... ok
+test database::repositories::kernel_authorization::tests::a_named_scope_is_reused_and_an_out_of_scope_call_still_misses ... ok
+test database::repositories::kernel_authorization::tests::allow_once_never_becomes_a_session_authorization ... ok
+test database::repositories::kernel_authorization::tests::grant_retry_keeps_identity_and_new_approval_records_its_actual_source ... ok
+test database::repositories::kernel_authorization::tests::revocation_takes_effect_immediately ... ok
+test database::repositories::kernel_authorization::tests::unknown_or_stale_approval_version_cannot_register_a_grant ... ok
+test database::repositories::kernel_authorization::tests::unlimited_run_grant_has_no_expiration_deadline ... ok
+test database::repositories::kernel_execution_admission::tests::confirmed_start_is_never_regressed ... ok
+test database::repositories::kernel_execution_admission::tests::manage_actions_do_not_require_a_backend ... ok
+test database::repositories::kernel_execution_admission::tests::claim_is_not_a_start_confirmation ... ok
+test database::repositories::kernel_execution_admission::tests::credential_is_issued_once_and_never_re_signed ... ok
+test database::repositories::kernel_execution_admission::tests::cross_conversation_reads_and_claims_are_refused ... ok
+test database::repositories::kernel_execution_admission::tests::an_upgraded_v74_database_accepts_a_manage_credential_and_keeps_old_rows ... ok
+test database::repositories::kernel_execution_admission::tests::cross_run_same_tool_call_id_does_not_collide ... ok
+test database::repositories::kernel_execution_admission::tests::f1_clipped_read_cannot_gain_eligibility_when_compatibility_storage_disappears ... ok
+test database::repositories::kernel_execution_admission::tests::f1_failed_malformed_and_unrelated_result_rows_never_authorize_replacement ... ok
+test database::repositories::kernel_execution_admission::tests::dispatch_and_credential_roll_back_together_in_the_real_transaction ... ok
+test database::repositories::kernel_execution_admission::tests::host_observations_are_authoritative_and_model_claims_are_not ... ok
+test database::repositories::kernel_execution_admission::tests::legacy_file_credential_is_issued_from_running_host_facts_once ... ok
+test database::repositories::kernel_execution_admission::tests::interrupted_claim_stays_unknown_and_never_replays ... ok
+test database::repositories::kernel_execution_admission::tests::independent_connections_claim_exactly_once ... ok
+test database::repositories::kernel_host::resource_admission_tests::a_pending_approval_admits_independent_reads_but_never_effects ... ok
+test database::repositories::kernel_host::scope_tests::host_scope_validates_all_resource_hashes ... ok
+test database::repositories::kernel_execution_admission::tests::issuance_consumes_a_recorded_host_observation_for_the_resolved_target ... ok
+test database::repositories::kernel_execution_admission::tests::live_policy_change_refuses_previously_ready_credential_and_never_replays ... ok
+test database::repositories::kernel_execution_admission::tests::parent_revocation_is_rechecked_after_claim_and_confirmed_start_is_preserved ... ok
+test database::repositories::kernel_execution_admission::tests::refusal_after_real_job_creation_preserves_job_created_stage ... ok
+test database::repositories::kernel_execution_admission::tests::same_key_different_content_conflicts ... ok
+test database::repositories::kernel_execution_admission::tests::refusal_is_persistent_and_survives_reopen_without_a_job_row ... ok
+test database::repositories::kernel_execution_admission::tests::write_without_host_observation_is_refused ... ok
+test database::repositories::kernel_execution_admission::tests::migration_74_upgrade_is_repeatable_and_adds_no_authorization ... ok
+test database::repositories::kernel_execution_policy::tests::execution_policy_consumed_intent_cannot_be_reopened ... ok
+test database::repositories::kernel_execution_admission::tests::f1_small_settled_read_retains_whole_file_eligibility ... ok
+test database::repositories::kernel_execution_policy::tests::execution_policy_legacy_mode_change_increments_generation ... ok
+test database::repositories::kernel_execution_policy::tests::execution_policy_old_approved_ticket_stays_expired_after_roundtrip ... ok
+test database::repositories::kernel_execution_policy::tests::execution_policy_retry_is_bound_to_full_request_before_cas ... ok
+test database::repositories::kernel_execution_policy::tests::execution_policy_parent_cancellation_increments_durable_generation ... ok
+test database::repositories::kernel_job_execution::notice_tests::completed_notice_is_atomic_unique_scoped_and_exactly_idempotent ... ok
+test database::repositories::kernel_job_execution::notice_tests::failure_cancel_and_deadline_publish_only_real_terminal_facts ... ok
+test database::repositories::kernel_execution_admission::tests::legacy_file_credential_refuses_read_only_and_stale_policy_versions ... ok
+test database::repositories::kernel_execution_policy::tests::execution_policy_two_connections_cas_one_winner ... ok
+test database::repositories::kernel::tests::rehydrate_rejects_expired_waits_without_authoritative_reevaluation_proof ... ok
+test database::repositories::kernel_execution_admission::tests::legacy_file_credential_requires_a_consumed_approval_in_ask_mode ... ok
+test database::repositories::kernel_job_execution::notice_tests::notice_or_blob_insert_failure_rolls_back_the_whole_settlement ... ok
+test database::repositories::kernel_job_execution::notice_tests::resumed_attempt_cannot_be_overwritten_by_stale_attempt ... ok
+test database::repositories::kernel_jobs::tests::a_completed_job_must_carry_a_retrievable_result ... ok
+test database::repositories::kernel_jobs::tests::an_orphaned_running_job_becomes_resumable_instead_of_replaying ... ok
+test database::repositories::kernel_jobs::tests::cancel_is_idempotent_and_terminal_state_is_written_once ... ok
+test database::repositories::kernel_jobs::tests::key_order_does_not_fake_a_new_job ... ok
+test database::repositories::kernel_jobs::tests::host_dispatch_keys_accept_the_full_utf8_bound_and_bind_the_run ... ok
+test database::repositories::kernel_jobs::tests::progress_is_monotonic_and_only_while_running ... ok
+test database::repositories::kernel_job_execution::notice_tests::owner_conflicts_and_database_copies_cannot_consume_existing_notice ... ok
+test database::repositories::kernel_jobs::tests::reusing_a_key_with_different_params_is_a_conflict_not_a_second_run ... ok
+test database::repositories::kernel_projection::tests::kernel_usage_is_cumulative_bounded_and_transactional ... ok
+test database::repositories::kernel_jobs::tests::starting_the_same_request_twice_returns_one_job ... ok
+test database::repositories::memory::tests::governs_candidates_conflicts_recall_and_audit ... ok
+test database::repositories::observability::tests::projects_trace_tree_metrics_and_evaluation_history ... ok
+test database::repositories::run_control::tests::approval_clock_rollback_expires_and_corrupt_binding_still_allows_denial ... ok
+test database::repositories::model_usage::tests::usage_records_are_durable_deduplicated_and_run_bound ... ok
+test database::repositories::kernel_job_execution::notice_tests::memory_instances_are_distinct_and_root_setting_is_immutable ... ok
+test database::repositories::run_control::tests::approval_window_survives_reopen_and_rejects_late_grants ... ok
+test database::repositories::kernel_job_execution::notice_tests::old_flag_and_command_jobs_keep_their_rejection_semantics ... ok
+test database::repositories::tests::generate_legacy_expert_v1_fixture_explicitly ... ignored, explicit fixture generation only; never run as part of compatibility tests
+test database::repositories::run_control::tests::kernel_startup_freezes_permissions_budgets_and_refuses_legacy_takeover ... ok
+test database::repositories::run_control::tests::run_control_is_immutable_and_rejects_tampering ... ok
+test database::repositories::run_control::tests::run_control_rejects_foreign_conversation_and_unknown_run ... ok
+test database::repositories::run_control::tests::run_control_shadow_projection_preserves_grants_and_legacy_compatibility ... ok
+test database::repositories::run_control::tests::rollback_new_runs_to_legacy_preserves_frozen_authoritative_runs ... ok
+test database::repositories::tests::atomically_creates_a_resumed_run_and_records_the_response ... ok
+test database::repositories::tests::binds_pending_attachments_to_the_created_user_message ... ok
+test database::repositories::tests::builds_runtime_context_in_message_order ... ok
+test database::repositories::tests::cancelling_run_ignores_late_non_terminal_runtime_events ... ok
+test database::repositories::run_control::tests::run_control_survives_reopen_and_ignores_live_permission_changes ... ok
+test database::repositories::tests::conversation_lifecycle_restores_and_forks_without_runtime_state ... ok
+test database::repositories::tests::creates_and_restores_a_conversation ... ok
+test database::repositories::tests::creates_copies_updates_and_deletes_user_expert_packages ... ok
+test database::repositories::tests::creates_hidden_goal_continuation_run_without_polluting_prompt_history ... ok
+test database::repositories::tests::cumulative_usage_is_strict_monotonic_atomic_and_counted_once_per_run ... ok
+test database::repositories::tests::daily_usage_falls_back_to_latest_event_for_legacy_non_cumulative_runs ... ok
+test database::repositories::tests::failed_run_interrupts_the_streaming_assistant_message ... ok
+test database::repositories::tests::default_assistant_compute_permissions_survive_existing_database_upgrade ... ok
+test database::repositories::tests::get_agent_uses_primary_key_lookup ... ok
+test database::repositories::tests::host_failure_interrupts_streaming_message_once_without_mutating_exact_replay ... ok
+test database::repositories::tests::ignores_duplicate_runtime_events ... ok
+test database::repositories::tests::ignores_runtime_events_that_arrive_out_of_order ... ok
+test database::repositories::tests::installs_upgrades_and_rolls_back_versioned_expert_packages ... ok
+test database::repositories::tests::interrupts_an_active_run_on_shutdown ... ok
+test database::repositories::tests::invalid_resume_rolls_back_without_creating_a_run_or_message ... ok
+test database::repositories::tests::legacy_expert_v1_fixture_preserves_snapshot_and_remote_knowledge_contract ... ok
+test database::repositories::tests::host_tool_call_execution_disposition_has_one_concurrent_winner ... ok
+test database::repositories::tests::locks_expert_changes_only_for_dialog_messages_active_runs_or_archive ... ok
+test database::repositories::tests::large_result_is_spilled_to_blob_and_every_byte_stays_retrievable ... ok
+test database::repositories::tests::only_active_runs_can_enter_cancelling ... ok
+test database::repositories::tests::marks_cached_remote_agents_unavailable_after_sync_failure ... ok
+test database::repositories::tests::marks_remote_agents_missing_from_refresh_as_unavailable ... ok
+test database::repositories::tests::package_snapshot_remains_static_after_expert_definition_changes ... ok
+test database::repositories::tests::persists_attachments_artifacts_bindings_and_approval_lifecycle ... ok
+test database::repositories::tests::persists_document_reading_state_bookmarks_and_annotations_by_document ... ok
+test database::repositories::tests::pending_work_mode_dispatch_survives_restart_and_resolves_the_same_run ... ok
+test database::repositories::tests::persists_toggles_and_audits_declarative_lifecycle_hooks ... ok
+test database::repositories::tests::preserves_recoverable_yuxi_runs_across_restart_repair ... ok
+test database::repositories::tests::paginates_large_history_without_loading_the_entire_conversation ... ok
+test database::repositories::tests::preview_cache_leases_do_not_underflow ... ok
+test database::repositories::tests::preview_cache_statistics_separate_active_usage ... ok
+test database::repositories::tests::preview_cache_lru_excludes_active_leases_and_tracks_usage ... ok
+test database::repositories::tests::preview_cache_upsert_preserves_active_leases ... ok
+test database::repositories::tests::preview_cache_limit_uses_default_and_persists_updates ... ok
+test database::repositories::tests::reads_legacy_remote_bindings_through_the_v2_reference_api ... ok
+test database::repositories::tests::summarizes_large_tool_results_before_persistence ... ok
+test database::repositories::tests::rejecting_work_mode_cancels_the_undispatched_run ... ok
+test database::repositories::tests::rejects_invalid_assistant_and_expert_roles ... ok
+test database::repositories::tests::rejects_unavailable_remote_experts_with_stable_error ... ok
+test database::repositories::tests::repair_override_approval_rejects_conversation_grants_and_generic_claims ... ok
+test database::repositories::tests::tool_result_range_cursor_always_advances_and_never_splits_or_repeats_bytes ... ok
+test database::repositories::tests::restores_pending_user_question_events ... ok
+test database::repositories::tests::replaces_recovers_removes_and_cascades_expert_bindings ... ok
+test database::repositories::tests::replacing_large_progress_clears_blob_pointer_for_small_empty_and_error_results ... ok
+test database::repositories::tests::restores_runtime_diagnostics_without_assistant_text ... ok
+test database::repositories::tests::restores_reasoning_and_tool_events_in_sequence ... ok
+test database::repositories::tests::resume_requires_one_canonical_awaiting_user_completion_and_rolls_back_other_terminals ... ok
+test database::repositories::graph_lead::tests::rejects_unknown_self_cycle_duplicate_and_depth_two_graphs ... ok
+test database::repositories::tests::resume_targets_the_latest_unanswered_question_on_the_parent_run ... ok
+test database::repositories::tests::round_trips_local_and_remote_knowledge_references_through_v2 ... ok
+test database::repositories::tests::rewinds_a_message_and_restarts_from_the_same_ordinal ... ok
+test database::repositories::tests::run_terminal_outcomes_are_immutable_across_runtime_and_late_host_events ... ok
+test database::repositories::tests::runtime_context_budget_keeps_recent_messages_in_original_order ... ok
+test database::repositories::tests::searches_conversation_titles_projects_agents_and_message_content ... ok
+test database::repositories::tests::runtime_projection_and_late_host_completion_cannot_mutate_foreign_or_terminal_tool_calls ... ok
+test database::repositories::tests::terminal_run_event_allowlist_accepts_only_exact_outcome_replay ... ok
+test database::repositories::tests::terminal_crash_cancel_new_run_and_startup_repair_close_pending_approvals ... ok
+test database::repositories::tests::terminal_tool_calls_and_approvals_are_insert_once_and_never_reopened ... ok
+test database::repositories::tests::seeds_builtin_experts_on_existing_database_open ... ok
+test database::repositories::tests::terminal_runs_reject_late_message_mutation_and_message_completion_replay_is_exact ... ok
+test database::repositories::tests::tool_result_range_reads_every_stored_byte_under_conversation_authorization ... ok
+test database::repositories::tests::tool_result_range_reports_a_bounded_stored_preview_instead_of_claiming_full_text ... ok
+test database::repositories::tests::tool_result_range_surfaces_unservable_ranges_instead_of_returning_nothing ... ok
+test database::repositories::tests::tracks_conversation_project_roots ... ok
+test database::repositories::tests::yuxi_run_uses_only_an_explicit_model_override ... ok
+test database::repositories::tests::yuxi_service_is_a_singleton ... ok
+test database::repositories::tests::updates_default_assistant_without_reclassifying_it ... ok
+test database::repositories::work_events::tests::duplicate_conversation_sequence_is_idempotent_and_unknown_types_are_ignored ... ok
+test database::repositories::work_graph::tests::accepted_decision_audit_does_not_create_pending_actions_or_override_completed_facts ... ok
+test database::repositories::work_graph::tests::completed_run_terminalizes_inflight_override_without_erasing_audit_history ... ok
+test database::repositories::work_graph::tests::bounded_work_snapshot_keeps_high_ordinal_critical_task_and_latest_valid_evidence ... ok
+test database::repositories::work_graph::tests::continuation_projection_hash_cas_rejects_stale_facts_but_allows_idempotent_retry ... ok
+test database::repositories::work_graph::tests::continuation_decisions_append_history_and_validate_watermarks_and_associations ... ok
+test database::repositories::work_graph::tests::create_many_rolls_back_every_task_on_validation_failure ... ok
+test database::repositories::work_graph::tests::continuation_v1_reason_and_retry_contract_round_trips ... ok
+test database::repositories::work_graph::tests::concurrent_attempt_starts_allow_exactly_one_cas_winner ... ok
+test database::repositories::work_graph::tests::deleted_artifact_file_becomes_missing_and_keeps_history ... ok
+test database::repositories::work_graph::tests::evidence_rejects_duplicates_bad_pairs_and_cross_conversation_references ... ok
+test database::repositories::work_graph::tests::deleted_tool_call_evidence_becomes_missing_and_keeps_history ... ok
+test database::repositories::work_graph::tests::durable_execution_is_single_use_and_new_run_cannot_reset_task_budget ... ok
+test database::repositories::work_graph::tests::evidence_accepts_every_supported_local_reference_kind ... ok
+test database::repositories::work_graph::tests::evidence_validity_updates_without_deleting_history ... ok
+test database::repositories::work_graph::tests::execution_cursor_selects_the_task_matching_the_projected_phase ... ok
+test database::repositories::work_graph::tests::concurrent_exact_repair_override_replay_creates_one_event_and_attempt ... ok
+test database::repositories::work_graph::tests::failed_test_tool_call_cannot_be_valid_or_complete_a_durable_attempt ... ok
+test database::repositories::work_graph::tests::goal_optimistic_lock_and_single_active_constraint_are_explicit ... ok
+test database::repositories::work_graph::tests::goal_supports_every_legal_transition_and_rejects_illegal_jumps ... ok
+test database::repositories::work_graph::tests::high_risk_completion_requires_independent_review_run ... ok
+test database::repositories::work_graph::tests::high_risk_repair_rejects_stale_review_and_implementation_self_resolution ... ok
+test database::repositories::work_graph::tests::host_frozen_run_profile_ignores_runtime_legacy_spoof_and_only_elevates_risk ... ok
+test database::repositories::work_graph::tests::kernel_repair_override_requires_once_decision_and_dispatch_lease ... ok
+test database::repositories::work_graph::tests::mark_run_interrupted_cascades_without_completing_the_task ... ok
+test database::repositories::work_graph::tests::repair_budget_exhaustion_persists_real_blockage_without_extra_attempt ... ok
+test database::repositories::work_graph::tests::repair_override_rejects_missing_denied_and_cross_bound_approval ... ok
+test database::repositories::work_graph::tests::human_repair_override_is_atomic_idempotent_and_task_lifetime_single_use ... ok
+test digital_colleagues::tests::hmac_matches_rfc_4231_and_comparison_is_constant_shape ... ok
+test digital_colleagues::tests::signature_input_is_canonical_and_binds_timestamp_and_idempotency ... ok
+test expert_packages::tests::canonical_hash_is_independent_of_object_key_order ... ok
+test database::repositories::work_graph::tests::repair_override_rechecks_managed_duration_after_approval_without_partial_work_writes ... ok
+test expert_packages::tests::rejects_path_escape_and_hash_tampering ... ok
+test expert_packages::tests::schema_three_embeds_a_strict_serial_team ... ok
+test expert_packages::tests::validates_a_bounded_code_free_package ... ok
+test expert_teams::tests::rejects_nested_delegation_and_unbounded_budget ... ok
+test expert_teams::tests::validates_supervisor_team_with_bounded_members ... ok
+test expert_workflows::tests::rejects_external_schema_references_and_unbounded_retry ... ok
+test expert_packages::tests::schema_two_embeds_a_validated_workflow_while_schema_one_stays_frozen ... ok
+test expert_workflows::tests::validates_versioned_workflow_and_output_contracts ... ok
+test html_preview::tests::preview_keeps_interaction_but_separates_origin_and_navigation ... ok
+test kernel_compaction::tests::bounded_multibyte_text_never_introduces_a_replacement_character ... ok
+test kernel_compaction::tests::bounded_prefix_and_suffix_land_on_code_point_boundaries ... ok
+test kernel_compaction::tests::bounded_tool_view_keeps_errors_receipts_and_non_reference_tools ... ok
+test kernel_compaction::tests::bounded_view_reports_a_stable_result_reference_and_small_content_is_untouched ... ok
+test kernel_compaction::tests::budget_report_itemizes_components_and_marks_estimate_origin ... ok
+test database::repositories::work_graph::tests::read_transaction_does_not_mix_work_graph_and_a1_commit_points ... ok
+test kernel_compaction::tests::calibration_pairs_use_full_occupancy_and_reject_outliers ... ok
+test kernel_compaction::tests::compaction_accepts_real_host_rounds_with_signed_thinking_and_receipts ... ok
+test kernel_compaction::tests::compaction_covers_tool_dense_history_that_has_no_prose_candidates ... ok
+test kernel_compaction::tests::compaction_folds_receipt_bearing_rounds_and_records_execution_facts ... ok
+test database::repositories::work_graph::tests::rewind_cannot_cross_append_only_repair_override_boundary ... ok
+test kernel_compaction::tests::compaction_rejects_a_half_selected_tool_round ... ok
+test kernel_compaction::tests::estimate_tokens_is_monotonic_and_only_claims_a_fixed_ratio ... ok
+test kernel_compaction::tests::f1_replay_requires_complete_storage_and_valid_content ... ok
+test kernel_compaction::tests::compaction_fires_from_the_token_budget_and_skips_tiny_histories ... ok
+test kernel_compaction::tests::frame_limits_have_one_wording_with_object_sizes_and_remedy ... ok
+test kernel_compaction::tests::folded_notes_carry_stable_references_to_the_persisted_full_results ... ok
+test kernel_compaction::tests::compaction_projection_leaves_calls_and_results_paired ... ok
+test kernel_compaction::tests::generic_mcp_results_are_never_bounded ... ok
+test database::repositories::work_graph::tests::sqlite_busy_retry_is_bounded ... ok
+test database::repositories::work_graph::tests::failed_and_cancelled_run_events_interrupt_owned_tasks ... ok
+test kernel_compaction::tests::navigation_survives_the_projection_or_the_result_is_left_unbounded ... ok
+test kernel_compaction::tests::kernel_compaction_keeps_tool_pairs_receipts_images_and_recent_history_intact ... ok
+test kernel_compaction::tests::kernel_compaction_rejects_orphans_tampered_hashes_and_foreign_outputs ... ok
+test kernel_compaction::tests::receipt_facts_are_read_from_either_block_shape ... ok
+test kernel_compaction::tests::a_group_that_cannot_fit_any_batch_is_skipped_without_failing_the_run ... ok
+test kernel_compaction::tests::oversized_drop_in_a_paged_catalog_resumes_at_the_first_omitted_property ... ok
+test kernel_compaction::tests::recent_tail_is_sized_by_tokens_and_never_splits_a_tool_round ... ok
+test kernel_compaction::tests::single_item_too_large_is_detected_separately_from_no_candidates ... ok
+test kernel_compaction::tests::prepare_outcome_distinguishes_no_candidates_from_below_min_gain ... ok
+test kernel_compaction::tests::structured_office_catalog_stays_valid_json_with_every_property_and_the_next_page ... ok
+test kernel_compaction::tests::kernel_compaction_never_truncates_large_single_messages_or_recent_only_inputs ... ok
+test kernel_model_config::tests::a_union_of_object_variants_is_a_valid_tool_schema_but_anything_else_is_not ... ok
+test kernel_compaction::tests::steering_messages_are_never_folded_into_a_summary ... ok
+test kernel_model_config::tests::configuration_rejects_credentials_unknown_fields_and_invalid_tool_schemas ... ok
+test kernel_compaction::tests::normal_model_request_is_not_limited_by_the_summarizer_wire_cap ... ok
+test kernel_reconciliation::tests::reconciliation_targets_committed_office_output_and_edit_path_only ... ok
+test kernel_compaction::tests::storage_fact_decides_retrievability_instead_of_the_payload_size ... ok
+test lifecycle_hooks::tests::declarative_matchers_support_exact_prefix_suffix_and_lists ... ok
+test database::repositories::work_graph::tests::startup_audit_interrupts_tasks_owned_by_terminal_runs ... ok
+test kernel_model_config::tests::all_registered_tools_fit_but_duplicates_unknown_names_and_oversized_config_do_not ... ok
+test local_knowledge::tests::catalogs_selected_folders_without_deleting_source_files ... ok
+test kernel_compaction::tests::structured_projection_keeps_navigation_verbatim_and_falls_back_to_valid_json ... ok
+test local_knowledge::tests::creates_updates_and_deletes_knowledge_bases ... ok
+test local_knowledge::tests::enforces_one_active_generation_and_index_job ... ok
+test database::repositories::work_graph::tests::task_block_resume_and_skip_transitions_are_supported ... ok
+test local_knowledge::tests::opens_idempotently_and_reports_storage ... ok
+test database::repositories::work_graph::tests::standard_attempt_is_atomic_idempotent_and_survives_restart ... ok
+test local_knowledge_import::tests::chunking_keeps_utf8_boundaries_and_offsets ... ok
+test local_knowledge_import::tests::cancellation_cleans_staging_and_never_commits ... ok
+test local_knowledge_import::tests::imports_text_atomically_and_returns_hash_metadata ... ok
+test local_knowledge::tests::imports_text_into_documents_and_chunks ... ok
+test local_knowledge_import::tests::imports_document_into_a_safe_nested_relative_path ... ok
+test local_knowledge_import::tests::parses_minimal_docx_and_reuses_utf8_chunks ... ok
+test local_knowledge::tests::seeds_default_fox_guide_idempotently ... ok
+test local_knowledge_import::tests::parses_minimal_pdf_including_the_second_page ... ok
+test local_knowledge_import::tests::reads_legacy_office_acceptance_files ... ignored, requires FOX_LEGACY_OFFICE_FIXTURES in the isolated acceptance directory
+test local_knowledge_import::tests::reads_compressed_pptx_text_in_slide_order ... ok
+test local_knowledge_import::tests::reads_xlsx_cells_with_sheet_order_shared_strings_and_cached_formulas ... ok
+test local_knowledge_import::tests::parses_minimal_pptx_slides_in_numeric_order ... ok
+test local_knowledge_import::tests::rejects_unsafe_zip_paths_and_excessive_uncompressed_sizes ... ok
+test local_knowledge_import::tests::rejects_windows_dangerous_components_and_ads ... ok
+test local_knowledge_import::tests::rejects_missing_directories_unsupported_and_oversized_sources ... ok
+test local_knowledge_import::tests::xlsx_rejects_invalid_shared_strings_and_document_types ... ok
+test local_knowledge_import::tests::token_cancels_before_any_filesystem_work ... ok
+test local_knowledge_picker::tests::dialog_filter_covers_only_supported_extensions ... ok
+test local_knowledge_picker::tests::extension_filter_is_case_insensitive_and_rejects_unknown_files ... ok
+test local_knowledge_picker::tests::mime_types_match_the_import_pipeline ... ok
+test local_knowledge_import::tests::reports_invalid_utf8_for_text_formats ... ok
+test local_knowledge_picker::tests::path_validation_rejects_traversal_and_device_names ... ok
+test local_knowledge_picker::tests::relative_paths_are_not_accepted_as_picker_results ... ok
+test local_knowledge_import::tests::reports_parse_failure_for_malformed_specialized_documents ... ok
+test local_knowledge_storage::tests::startup_uses_valid_configured_path_and_falls_back_for_invalid_path ... ok
+test kernel_state_publisher::tests::failed_delivery_retries_and_shutdown_is_joined_and_idempotent ... ok
+test local_knowledge_storage::tests::destination_rejects_same_path_and_nested_paths ... ok
+test local_knowledge_vector::tests::controlled_manifests_have_pinned_integrity_metadata ... ok
+test local_knowledge_vector::tests::cosine_similarity_rejects_invalid_dimensions ... ok
+test maintenance::tests::archive_round_trip_validates_hashes_and_paths ... ok
+test local_knowledge_vector::tests::model_catalog_exposes_both_controlled_recommendations ... ok
+test local_knowledge_vector::tests::deleting_a_document_creates_a_completed_delete_job ... ok
+test local_knowledge_vector::tests::legacy_minilm_default_and_sqlite_vector_generation_are_not_reused ... ok
+test maintenance::tests::cache_cleanup_paths_stay_inside_the_managed_directory ... ok
+test maintenance::tests::diagnostic_report_excludes_credentials_conversations_and_project_contents ... ok
+test kernel_compaction::tests::summary_request_is_batched_to_its_own_wire_limit ... ok
+test maintenance::tests::interrupted_restore_rollback_recovers_previous_data ... ok
+test maintenance::tests::redacts_secret_bearing_diagnostic_errors ... ok
+test maintenance::tests::rejects_declared_archive_sizes_before_extracting_entries ... ok
+test maintenance::tests::rejects_duplicate_and_truncated_archive_entries ... ok
+test maintenance::tests::rejects_path_traversal ... ok
+test database::repositories::work_graph::tests::task_ledger_latest_run_uses_insertion_order_when_timestamps_match ... ok
+test maintenance::tests::stale_part_files_expire_after_twenty_four_hours ... ok
+test database::repositories::work_graph::tests::task_ledger_pending_approval_keeps_run_and_tool_call_identity ... ok
+test mcp::tests::kernel_owned_mcp_cancellation_stops_waiting_and_reaps_its_server ... ok
+test database::repositories::work_graph::tests::task_ledger_projection_rebuilds_from_legacy_facts_and_host_accepted_decisions ... ok
+test mcp::tests::negotiates_and_reuses_streamable_http_session_with_sse_tool_result ... ok
+test mcp::tests::parses_sse_rpc_responses_and_rejects_reserved_headers ... ok
+test mcp::tests::lists_and_calls_tools_through_one_persistent_stdio_session ... ok
+test mcp::tests::rejects_invalid_schema_and_unknown_tools ... ok
+test database::repositories::work_graph::tests::task_state_machine_increments_retry_attempt_without_overwriting_evidence ... ok
+test mcp_openapi::tests::calls_openapi_operation_with_encoded_path_and_query_parameters ... ok
+test mcp_openapi::tests::creates_dynamic_tools_from_yaml_and_resolves_refs ... ok
+test mcp_openapi::tests::rejects_external_references_and_openapi_two ... ok
+test model_service::tests::builds_anthropic_messages_endpoint ... ok
+test model_service::tests::normalizes_sensenova_display_names_to_api_model_ids ... ok
+test database::repositories::work_graph::tests::validation_policy_contract_matches_runtime_hashes_and_fails_closed_on_tamper ... ok
+test model_service::tests::rejects_an_openai_model_id_missing_from_the_provider_catalog ... ok
+test model_service::tests::tests_openai_compatible_models_endpoint ... ok
+test model_service::tests::tests_anthropic_messages_endpoint ... ok
+test model_service::tests::validates_local_and_remote_model_urls ... ok
+test office::tests::a1_cell_parsing_and_column_names_roundtrip ... ok
+test database::repositories::work_graph::tests::unprojected_proposals_and_run_conversation_use_authoritative_database_identity ... ok
+test office::tests::benchmark_import_data_against_per_cell_edits ... ignored, benchmark against the pinned OfficeCLI; run explicitly
+test database::repositories::work_graph::tests::work_snapshot_v2_uses_one_selected_goal_for_root_and_ledger ... ok
+test office::tests::blocks_writes_traversal_streams_and_external_properties ... ok
+test office::tests::import_data_scan_counts_bounds_and_screens_formulas ... ok
+test office::tests::import_summary_is_parsed_from_the_writer_envelope ... ok
+test office::tests::import_data_prepare_validates_scope_grid_and_permissions ... ok
+test office::tests::office_edit_sends_operations_over_stdin_not_the_command_line ... ok
+test office::tests::office_help_catalog_is_bounded_paged_and_keeps_working_metadata ... ok
+test office::tests::real_artifact_import_into_the_deliverable_folder_stays_readable ... ignored, requires the pinned OfficeCLI binary; run explicitly for integration verification
+test office::tests::real_documents_roundtrip_through_managed_connector ... ignored, requires the pinned OfficeCLI binary; run explicitly for integration verification
+test office::tests::real_import_by_artifact_id_matches_the_saved_data ... ignored, requires the pinned OfficeCLI binary; run explicitly for integration verification
+test office::tests::real_import_cancelled_mid_write_leaves_no_output_and_no_version ... ignored, requires the pinned OfficeCLI binary; run explicitly for integration verification
+test office::tests::real_import_data_writes_batches_idempotently_and_registers_versions ... ignored, requires the pinned OfficeCLI binary; run explicitly for integration verification
+test office::tests::real_import_registers_a_restorable_version ... ignored, requires the pinned OfficeCLI binary; run explicitly for integration verification
+test office::tests::real_office_cleanup_needs_registered_ownership_not_a_filename ... ignored, requires the pinned OfficeCLI binary; run explicitly for integration verification
+test office::tests::real_office_default_placement_and_purpose_follow_host_rules ... ignored, requires the pinned OfficeCLI binary; run explicitly for integration verification
+test office::tests::real_office_deliverable_folder_is_respected ... ignored, requires the pinned OfficeCLI binary; run explicitly for integration verification
+test office::tests::real_office_preview_is_host_private_and_reused ... ignored, requires the pinned OfficeCLI binary; run explicitly for integration verification
+test office::tests::real_office_working_copies_appear_only_in_the_host_area_while_running ... ignored, requires the pinned OfficeCLI binary; run explicitly for integration verification
+test office::tests::real_office_writes_leave_no_transient_state_in_the_project ... ignored, requires the pinned OfficeCLI binary; run explicitly for integration verification
+test mcp::tests::kernel_owned_mcp_validates_arguments_and_never_reuses_pooled_sessions ... ok
+test process_jobs::command_environment::tests::explicit_environment_rejects_secrets_duplicates_and_invalid_names ... ok
+test database::repositories::work_graph::tests::repair_override_rejects_stale_or_unexhausted_state_without_partial_writes ... ok
+test office::tests::rejects_unknown_commands_and_requires_explicit_overwrite ... ok
+test process_jobs::command_environment::tests::parent_environment_excludes_secret_shaped_canaries ... ok
+test process_jobs::tests::a_failed_start_is_recorded_and_retained_under_the_same_key ... ok
+test process_jobs::tests::a_reused_pid_is_never_signalled ... ok
+test process_jobs::tests::a_duplicate_start_never_observes_a_half_published_job ... ok
+test process_jobs::tests::a_failed_tree_walk_is_reported_as_incomplete_and_the_reprobe_agrees ... ok
+test process_jobs::tests::admission_verifier_rejects_before_manager_state_or_spawn ... ok
+test process_jobs::tests::an_authorized_manager_never_opens_the_gate_for_a_refusing_one ... ok
+test process_jobs::tests::an_old_cursor_reports_what_was_lost ... ok
+test process_jobs::tests::a_stop_during_launch_is_not_acknowledged_early_and_never_revives_the_job ... ok
+test process_jobs::tests::an_unprovable_owner_is_not_killed_either ... ok
+test process_jobs::tests::canonical_cannot_be_forged_by_field_boundaries ... ok
+test process_jobs::tests::canonical_distinguishes_every_decision_field ... ok
+test mcp::tests::reconciliation_connector_queries_require_live_explicit_readonly_schema ... ok
+test process_jobs::tests::cancel_after_completion_does_not_rewrite_history ... ok
+test process_jobs::tests::cancel_is_idempotent_and_only_acknowledged_when_terminal ... ok
+test process_jobs::tests::canonical_folds_trailing_separators_and_is_stable ... ok
+test process_jobs::tests::capability_refusal_lists_the_missing_capabilities_verbatim ... ok
+test process_jobs::tests::concurrent_distinct_keys_are_capacity_bounded ... ok
+test process_jobs::tests::end_of_bytes_and_closed_pipe_are_separate_facts ... ok
+test process_jobs::tests::every_required_capability_has_a_stable_name_and_no_duplicates ... ok
+test process_jobs::tests::concurrent_duplicate_starts_launch_once ... ok
+test process_jobs::tests::concurrent_starts_with_distinct_keys_cannot_exceed_the_capacity_limit ... ok
+test process_jobs::tests::invalid_requests_are_rejected_before_any_spawn ... ok
+test process_jobs::tests::invalid_utf8_keeps_exact_raw_byte_pages_and_monotonic_raw_offsets ... ok
+test process_jobs::tests::jobs_are_listed_per_run_in_a_stable_order ... ok
+test office::tests::kernel_office_process_cancellation_reaps_owned_process ... ok
+test process_jobs::tests::multibyte_content_is_never_split_mid_character ... ok
+test process_jobs::tests::output_reports_dropped_bytes_instead_of_hiding_them ... ok
+test process_jobs::tests::native_confinement_probe_reports_the_actual_machine_state ... ok
+test process_jobs::tests::joined_readers_report_no_abandonment ... ok
+test process_jobs::tests::owner_classification_never_guesses ... ok
+test process_jobs::tests::production_constructor_refuses_start_before_any_job_is_published ... ok
+test process_jobs::tests::reads_for_an_unknown_job_fail_with_a_stable_code ... ok
+test process_jobs::tests::recovery_does_not_claim_running_without_a_positive_probe ... ok
+test process_jobs::tests::production_state_mapping_is_explicit ... ok
+test process_jobs::tests::recovery_uses_ownership_evidence_and_never_allows_replay ... ok
+test process_jobs::tests::same_key_different_request_is_a_conflict_not_a_second_launch ... ok
+test process_jobs::tests::refusing_managers_stay_refusing_under_concurrent_authorized_managers ... ok
+test process_jobs::tests::same_key_same_request_returns_existing_and_does_not_relaunch ... ok
+test process_jobs::tests::status_and_output_are_pure_reads ... ok
+test process_jobs::tests::stream_cursors_are_independent ... ok
+test process_jobs::tests::orphaned_readers_report_which_pipe_is_still_held_and_when_it_is_released ... ok
+test process_jobs::tests::two_managers_in_one_process_keep_independent_decisions ... ok
+test process_jobs::tests::zero_exit_is_success_and_a_nonzero_exit_keeps_its_code_and_output ... ok
+test process_jobs::tests::polling_and_backgrounding_do_not_reset_the_execution_budget ... ok
+test resource_gateway::tests::missing_observation_requires_actual_absence_in_frozen_scope ... ok
+test process_jobs::tests::timeout_with_a_short_budget_terminates_and_keeps_output ... ok
+test resource_gateway::tests::r3_adversarial_glob_has_bounded_work_and_checks_cancellation ... ok
+test resource_gateway::tests::graph_profile_keeps_stricter_read_match_and_output_limits ... ok
+test resource_gateway::tests::grep_cursor_advances_directory_only_pages_and_tiny_budget_rejects ... ok
+test resource_gateway::tests::r4_read_version_reaches_model_and_drives_conflict_detection ... ok
+test resource_gateway::tests::resource_gateway_executes_read_ls_find_grep_with_utf16_offsets ... ok
+test lifecycle_hooks::tests::applies_before_and_after_tool_actions_and_records_audit_rows ... ok
+test resource_gateway::tests::resource_gateway_rejects_wrong_executor_cancelled_calls_and_oversized_files ... ok
+test resource_gateway::tests::resource_gateway_blocks_nested_links_outside_frozen_root ... ok
+test resource_gateway::tests::resource_gateway_uses_frozen_root_when_directory_path_is_omitted ... ok
+test resource_gateway::tests::trusted_read_observation_hashes_full_bytes_independently_of_returned_page ... ok
+test process_jobs::tests::system_spawner_refuses_when_handed_a_refusing_proof ... ok
+test runtime_host::artifact_store::tests::a_ledger_never_retires_its_own_live_registration ... ok
+test runtime_host::artifact_store::tests::a_crashed_owner_converges_after_copy_and_before_copy ... ok
+test runtime_host::artifact_store::tests::a_registered_but_not_yet_copied_staging_file_keeps_its_ledger_entry ... ok
+test runtime_host::artifact_store::tests::a_ledgered_commit_leaves_no_entry_and_refuses_a_taken_staging_name ... ok
+test runtime_host::artifact_store::tests::a_registered_leftover_is_reclaimed_only_without_a_live_owner ... ok
+test runtime_host::artifact_store::tests::a_user_file_that_merely_looks_like_staging_is_never_deleted ... ok
+test runtime_host::artifact_store::tests::an_unprobeable_lease_keeps_the_record_and_reports_why ... ok
+test local_knowledge::tests::rejects_failed_storage_destination_without_changing_current_path ... ok
+test runtime_host::artifact_store::tests::commit_creates_a_new_target_and_replaces_an_existing_one_without_losing_bytes ... ok
+test runtime_host::artifact_store::tests::deliverable_detection_survives_the_windows_verbatim_prefix ... ok
+test runtime_host::artifact_store::tests::deliverable_directory_name_is_safe_readable_and_conversation_bound ... ok
+test runtime_host::artifact_store::tests::a_live_owner_in_another_process_blocks_reclaim_until_it_dies ... ok
+test runtime_host::artifact_store::tests::commit_refuses_a_payload_that_changed_underneath_it ... ok
+test runtime_host::artifact_store::tests::only_a_sharing_violation_counts_as_a_live_lease ... ok
+test runtime_host::artifact_store::tests::deliverable_root_is_stable_across_runs_and_isolated_across_conversations ... ok
+test runtime_host::artifact_store::tests::purpose_is_decided_by_host_facts_not_by_location_or_extension ... ok
+test runtime_host::artifact_store::tests::staging_lease_child_holds_the_lease ... ok
+test runtime_host::artifact_store::tests::nothing_is_reclaimed_without_a_registered_in_scope_unprotected_owner_free_file ... ok
+test runtime_host::artifact_store::tests::transient_names_are_recognized ... ok
+test runtime_host::artifact_store::tests::traversal_in_a_relative_path_never_counts_as_inside_the_project ... ok
+test runtime_host::artifact_store::tests::preview_and_work_areas_are_private_and_outside_the_project ... ok
+test runtime_host::artifact_store::tests::the_lease_probe_separates_absent_abandoned_held_and_unknown ... ok
+test local_knowledge::tests::migrates_storage_safely_and_reopens_from_configured_path ... ok
+test resource_gateway::tests::reconciliation_fingerprint_reads_exact_bytes_and_rejects_scope_escape ... ok
+test maintenance::tests::configured_preview_cache_limit_clamps_invalid_persisted_values ... ok
+test maintenance::tests::manual_preview_cache_clear_removes_idle_files_and_preserves_active_files ... ok
+test maintenance::tests::configured_preview_cache_limit_evicts_idle_lru_and_preserves_active_entries ... ok
+test maintenance::tests::preview_cache_maintenance_removes_orphans_without_touching_known_or_part_files ... ok
+test maintenance::tests::restored_database_paths_are_rebased_to_the_new_data_directory ... ok
+test mcp::tests::reports_protocol_timeouts_without_leaving_a_process_running ... ok
+test maintenance::tests::backup_restores_core_data_into_a_fresh_directory_without_credentials ... ok
+test resource_gateway::tests::search_cursor_keeps_capped_results_reachable_and_globbed ... ok
+test office::tests::artifact_import_streams_exact_saved_bytes_and_grid ... ok
+test office::tests::artifact_reference_is_rejected_for_invalid_inputs_without_writing ... ok
+test database::repositories::work_graph::tests::repair_override_accepts_only_untampered_durable_profile ... ok
+test runtime_host::attachment_compute::host_lifecycle::tests::cancellation_requires_worker_ack_and_store_failure_is_not_cancel ... ok
+test runtime_host::attachment_compute::host_lifecycle::tests::durable_parent_cancellation_stops_a_worker_without_an_in_memory_parent_token ... ok
+test runtime_host::attachment_compute::host_lifecycle::tests::host_lifecycle_publishes_one_experimental_terminal_fact ... ok
+test runtime_host::attachment_compute::host_lifecycle::tests::cancelling_a_job_nobody_runs_settles_immediately ... ok
+test runtime_host::attachment_compute::host_lifecycle::tests::production_cancel_at_the_settlement_point_is_recorded_not_dropped ... ok
+test runtime_host::attachment_compute::host_lifecycle::tests::stale_attempts_cannot_write_progress_or_overwrite_published_result ... ok
+test runtime_host::attachment_compute::host_lifecycle::tests::production_restart_pauses_an_orphan_and_resume_reruns_without_replay ... ok
+test runtime_host::attachment_compute::host_lifecycle::tests::production_start_is_idempotent_for_the_same_request ... ok
+test runtime_host::attachment_compute::jobs::tests::a_concurrent_winner_on_the_result_write_keeps_its_terminal_state ... ok
+test runtime_host::attachment_compute::jobs::tests::a_panic_inside_the_executor_is_settled_as_a_failure ... ok
+test runtime_host::attachment_compute::jobs::tests::a_real_javascript_exception_is_an_execution_failure_not_an_invalid_parameter ... ok
+test runtime_host::attachment_compute::jobs::tests::a_real_job_rejects_an_incompatible_profile_and_processing_combination ... ok
+test runtime_host::attachment_compute::tests::snapshot_peak_memory_stays_bounded_with_production_entry ... ignored, memory measurement: run explicitly with --test-threads=1
+test runtime_host::attachment_compute::jobs::tests::a_fenced_attempt_stops_early_and_writes_no_terminal ... ok
+test database::repositories::work_graph::tests::repair_override_atomic_gate_leaves_no_state_when_goal_plan_or_task_turns_invalid ... ok
+test runtime_host::attachment_compute::jobs::tests::a_real_job_rejects_an_unknown_processing_mode_as_an_invalid_parameter ... ok
+test runtime_host::attachment_compute::jobs::tests::a_real_job_rejects_an_unknown_profile_as_an_invalid_parameter ... ok
+test runtime_host::attachment_compute::jobs::tests::a_result_storage_failure_is_never_reported_as_a_user_cancellation ... ok
+test runtime_host::attachment_tests::accepts_a_v1_runtime_as_a_normal_conversation ... ok
+test runtime_host::attachment_compute::host_lifecycle::tests::production_cancel_stops_the_work_before_the_terminal_write ... ok
+test runtime_host::attachment_compute::host_lifecycle::tests::production_start_runs_the_real_executor_and_publishes_a_readable_result ... ok
+test runtime_host::attachment_compute::jobs::tests::an_over_long_program_is_rejected_as_invalid_params_without_running_javascript ... ok
+test runtime_host::attachment_compute::jobs::tests::an_unrecordable_cancellation_is_an_unsettled_failure_not_a_cancel ... ok
+test runtime_host::attachment_tests::bounds_large_knowledge_tool_results_before_the_jsonl_response ... ok
+test runtime_host::attachment_compute::jobs::tests::cancel_at_the_settlement_point_is_written_and_never_reports_completed ... ok
+test runtime_host::attachment_tests::attachment_pages_preserve_unicode_and_bound_protocol_size ... ok
+test runtime_host::attachment_compute::jobs::tests::pre_start_cancel_never_runs_work_and_confirms_cancellation_once ... ok
+test runtime_host::attachment_tests::delegated_package_scope_can_only_narrow_parent_tools_and_mcps ... ok
+test runtime_host::attachment_compute::jobs::tests::spawn_on_lifecycle_settles_once_on_its_worker_thread ... ok
+test runtime_host::attachment_tests::expert_runtime_package_preserves_v2_knowledge_references ... ok
+test runtime_host::attachment_tests::expert_runtime_package_uses_the_bound_snapshot_and_validates_its_hash ... ok
+test runtime_host::attachment_tests::extracts_text_from_a_deflated_docx_document ... ok
+test runtime_host::attachment_compute::jobs::tests::start_cas_loss_writes_nothing_and_reports_not_started ... ok
+test runtime_host::attachment_tests::intersects_assistant_and_expert_mcp_scopes ... ok
+test runtime_host::attachment_tests::normalizes_and_rejects_child_run_budgets_at_the_host_boundary ... ok
+test runtime_host::attachment_tests::pending_approval_cleanup_is_scoped_to_one_run ... ok
+test runtime_host::attachment_tests::actual_runtime_initialize_passes_the_production_host_guard ... ok
+test runtime_host::attachment_tests::preserves_small_knowledge_tool_details_for_source_mapping ... ok
+test runtime_host::attachment_tests::preserves_structured_start_failure_codes ... ok
+test runtime_host::attachment_compute::tests::cancellation_during_snapshot_stops_before_the_next_input_and_cleans_up ... ok
+test runtime_host::attachment_tests::recognizes_docx_attachments ... ok
+test runtime_host::attachment_tests::recognizes_supported_attachment_text_types ... ok
+test runtime_host::attachment_tests::recognizes_supported_runtime_image_types ... ok
+test runtime_host::attachment_tests::redacts_runtime_diagnostic_secrets ... ok
+test runtime_host::attachment_tests::rejects_a_runtime_ready_handshake_with_an_old_manifest ... ok
+test runtime_host::attachment_tests::rejects_docx_content_that_expands_beyond_the_context_limit ... ok
+test runtime_host::attachment_tests::resolves_runtime_dependencies_from_a_hoisted_workspace_node_modules ... ok
+test runtime_host::attachment_tests::runtime_envelope_identity_is_bound_to_active_worker_and_database_run ... ok
+test runtime_host::attachment_tests::runtime_tool_authority_requires_active_frozen_and_manifest_agreement ... ok
+test runtime_host::attachment_tests::shadow_permission_hash_is_content_addressed_and_event_errors_fail ... ok
+test runtime_host::attachment_tests::shadow_preflight_uses_payload_tool_call_identity_and_approved_input ... ok
+test runtime_host::attachment_tests::shadow_prompt_hash_tracks_runtime_prompt_identity_only ... ok
+test runtime_host::attachment_tests::sidecar_recovery_is_single_attempt_and_contract_errors_are_fused ... ok
+test runtime_host::attachment_tests::team_member_scope_intersects_the_parent_host_scope ... ok
+test runtime_host::attachment_tests::validates_the_complete_runtime_ready_handshake ... ok
+test runtime_host::capability_tools::tests::accepts_explicit_duckduckgo_provider_without_configuration ... ok
+test runtime_host::capability_tools::tests::applies_domain_filters_to_search_syntax ... ok
+test runtime_host::capability_tools::tests::blocks_private_web_addresses ... ok
+test runtime_host::capability_tools::tests::capability_tool_catalog_is_stable ... ok
+test runtime_host::capability_tools::tests::detects_duckduckgo_challenge_pages_instead_of_reporting_no_results ... ok
+test runtime_host::capability_tools::tests::extracts_html_title_without_markup ... ok
+test runtime_host::capability_tools::tests::generic_http_headers_never_accept_credentials ... ok
+test runtime_host::capability_tools::tests::kernel_capability_cancel_and_deadline_restore_the_previous_scope ... ok
+test runtime_host::capability_tools::tests::parses_duckduckgo_html_results_and_unwraps_links ... ok
+test runtime_host::capability_tools::tests::parses_quoted_csv_and_aggregates ... ok
+test runtime_host::capability_tools::tests::parses_xml_without_external_entities ... ok
+test runtime_host::capability_tools::tests::parses_yahoo_html_results_and_unwraps_redirects ... ok
+test runtime_host::capability_tools::tests::queries_nested_structured_values ... ok
+test runtime_host::capability_tools::tests::sqlite_query_is_read_only_bounded_and_typed ... ok
+test runtime_host::attachment_compute::tests::snapshot_streams_inputs_and_publishes_only_complete_runs ... ok
+test runtime_host::attachment_tests::a_reported_execution_failure_stays_failed_and_keeps_its_diagnostics_reachable ... ok
+test runtime_host::command_jobs::tests::admitted_backend_snapshot_cannot_change_between_manager_and_spawner ... ok
+test runtime_host::attachment_tests::a_second_settle_of_the_same_failure_answers_with_the_same_envelope ... ok
+test runtime_host::attachment_tests::attachment_sheet_directory_jumps_to_unicode_sheet_without_scanning ... ok
+test runtime_host::attachment_tests::common_finalizer_persists_errors_and_replays_without_repeating_after_hooks ... ok
+test runtime_host::attachment_tests::common_finalizer_preserves_an_already_terminal_managed_error ... ok
+test runtime_host::attachment_tests::common_host_tool_gate_replays_persisted_outcome_without_second_handler ... ok
+test runtime_host::attachment_compute::tests::spilled_json_artifact_is_consumed_converted_and_imported_by_reference ... ok
+test runtime_host::attachment_compute::jobs::tests::token_cancel_at_the_settlement_point_stops_work_before_the_terminal_write ... ok
+test runtime_host::attachment_tests::failed_and_completed_results_get_the_same_trusted_storage_fact ... ok
+test runtime_host::command_jobs::tests::production_adapter_uses_only_the_refusing_proof ... ok
+test runtime_host::attachment_compute::jobs::tests::invalid_params_and_deadline_produce_their_own_terminals ... ok
+test runtime_host::command_jobs::tests::raw_system_spawner_refuses_without_a_verified_backend ... ok
+test runtime_host::attachment_tests::high_risk_graph_review_and_accept_wait_for_finalizers_and_replay_without_side_effects ... ok
+test runtime_host::attachment_tests::persistent_graph_activation_uses_host_identity_and_replays_without_second_handler ... ok
+test runtime_host::attachment_compute::jobs::tests::the_job_accepts_a_program_at_the_byte_limit_and_rejects_one_byte_more ... ok
+test runtime_host::attachment_tests::proposed_plan_blocks_project_mutations_but_not_read_tools ... ok
+test runtime_host::attachment_compute::tests::snapshot_rejects_integrity_and_size_mismatch_without_leaving_partials ... ok
+test runtime_host::continuation::tests::durable_continuation_cannot_treat_skipped_task_as_verified_completion ... ok
+test runtime_host::continuation::tests::execution_profiles_are_finite_and_reject_mixed_ready_contracts ... ok
+test runtime_host::command_jobs::tests::backend_change_at_manager_boundary_keeps_job_audit_without_start_evidence ... ok
+test runtime_host::continuation::tests::proposal_schema_limits_and_shadow_error_policy_are_host_enforced ... ok
+test runtime_host::command_jobs::tests::adapter_relays_the_caller_digest_and_never_synthesises_one ... ok
+test runtime_host::command_jobs::tests::command_boundary_rejects_rehashed_changed_authoritative_fields ... ok
+test runtime_host::command_jobs::tests::interrupted_command_recovery_fails_closed_and_never_becomes_resumable ... ok
+test runtime_host::continuation::tests::semantics_reject_invalid_evidence_and_cross_run_or_unreferenced_approval ... ok
+test runtime_host::continuation::tests::shadow_ready_accepts_internal_proposal_tool_but_rejects_write_capabilities ... ok
+test runtime_host::command_jobs::tests::model_cannot_supply_a_job_key_or_execution_credential ... ok
+test runtime_host::command_jobs::tests::refusal_cannot_be_talked_out_of_by_request_or_environment ... ok
+test runtime_host::command_jobs::tests::production_adapter_idempotency_cancel_and_cross_run_authorization_hold ... ok
+test runtime_host::command_jobs::tests::refusal_preserves_status_output_and_cancel_for_existing_jobs ... ok
+test runtime_host::command_jobs::tests::one_fixture_can_refuse_and_then_authorize_without_global_state ... ok
+test runtime_host::delivery::tests::a_distinct_source_and_target_stay_one_source_and_one_deliverable ... ok
+test runtime_host::delivery::tests::a_file_read_and_then_saved_back_stays_an_explicit_deliverable ... ok
+test runtime_host::command_jobs::tests::start_refusal_is_durable_and_same_dispatch_never_retries ... ok
+test runtime_host::command_jobs::tests::r2_status_excludes_full_checkpoints_and_unchanged_checkpoint_does_not_write ... ok
+test runtime_host::delivery::tests::a_per_sheet_chart_demand_is_checked_per_sheet ... ok
+test runtime_host::delivery::tests::a_read_only_task_seeds_no_delivery_target ... ok
+test runtime_host::delivery::tests::a_stated_ratio_is_computed_and_compared_instead_of_merely_present ... ok
+test runtime_host::command_jobs::tests::real_child_start_returns_positive_evidence_independent_of_later_exit_failure ... ok
+test runtime_host::delivery::tests::chinese_numerals_plain_one_and_explicit_name_backtracking ... ok
+test runtime_host::continuation::tests::ingest_diagnostics_are_unicode_safely_bounded_and_idempotent ... ok
+test runtime_host::delivery::tests::counts_agv_style_excel_and_word_deliverables ... ok
+test runtime_host::continuation::tests::reconciliation_cannot_self_declare_shadow_and_malformed_shadow_is_diagnostic_only ... ok
+test runtime_host::delivery::tests::editing_an_existing_document_in_place_promises_that_document_once ... ok
+test runtime_host::delivery::tests::explicit_chart_and_section_demands_become_structured_requirements ... ok
+test runtime_host::delivery::tests::explicit_filenames_bind_real_targets_and_do_not_double_seed_slots ... ok
+test runtime_host::command_jobs::tests::production_adapter_start_nonzero_and_utf8_byte_paging_are_durable ... ok
+test runtime_host::continuation::tests::reconciliation_uses_authoritative_profile_and_is_idempotent ... ok
+test runtime_host::deliverable_placement_tests::a_read_only_conversation_reserves_nothing_and_creates_nothing ... ok
+test runtime_host::delivery::tests::only_a_self_contained_share_statement_becomes_a_ratio_requirement ... ok
+test runtime_host::delivery::tests::questions_analysis_urls_and_vague_requests_never_seed_a_checklist ... ok
+test runtime_host::command_jobs::tests::replacement_text_pages_by_raw_pipe_offsets_without_reslicing_lossy_text ... ok
+test runtime_host::command_jobs::tests::r2_live_noisy_command_status_remains_small_and_cancel_is_responsive ... ok
+test runtime_host::delivery::tests::source_statistics_are_recomputed_from_the_named_source ... ok
+test runtime_host::delivery::tests::a_parseable_but_chartless_deliverable_fails_the_chart_requirement ... ok
+test runtime_host::delivery::tests::an_unreadable_artifact_reports_requirements_as_unverified ... ok
+test runtime_host::delivery::tests::corrupt_workbook_fails_parseability_not_just_existence ... ok
+test runtime_host::kernel_authority::tests::absent_environment_uses_the_built_in_default ... ok
+test runtime_host::kernel_authority::tests::existing_binding_is_not_reinterpreted_by_a_new_default ... ok
+test runtime_host::kernel_authority::tests::explicit_override_is_validated ... ok
+test runtime_host::kernel_coordinator::live::range_model_view_tests::settled_history_exposes_range_cursor_without_rewriting_host_results ... ok
+test runtime_host::kernel_coordinator::live::range_model_view_tests::the_office_wrapper_is_unwrapped_for_view_bounding_but_a_generic_mcp_call_is_not ... ok
+test runtime_host::kernel_coordinator::live::stop_completion_tests::short_answers_and_delivered_recommendations_do_not_trigger_a_review ... ok
+test runtime_host::kernel_coordinator::receipt::tests::approved_write_reports_exact_unicode_and_bytes_without_claiming_readback ... ok
+test runtime_host::kernel_coordinator::receipt::tests::connector_payload_cannot_supply_host_write_or_approval_facts ... ok
+test runtime_host::kernel_coordinator::receipt::tests::empty_and_large_writes_are_unambiguous_and_bounded ... ok
+test runtime_host::kernel_coordinator::receipt::tests::failure_or_inconsistent_output_never_claims_content_written ... ok
+test runtime_host::continuation::tests::reconciliation_drains_more_than_one_batch_with_malformed_events_and_is_idempotent ... ok
+test runtime_host::delivery::tests::csv_column_mismatch_is_a_structural_failure ... ok
+test database::repositories::work_graph::tests::repair_override_preflight_blocks_approval_fatigue_and_rechecks_goal_plan_and_task ... ok
+test runtime_host::delivery::tests::missing_artifact_fails_with_concrete_reason_and_repair_is_bounded ... ok
+test runtime_host::delivery::tests::ledger_survives_reopen ... ok
+test runtime_host::delivery::tests::no_checklist_means_no_delivery_gate ... ok
+test runtime_host::deliverable_placement_tests::an_unusable_stored_folder_name_is_replaced_not_trusted ... ok
+test runtime_host::delivery::tests::real_workbook_passes_and_gets_bound_to_the_slot_durably ... ok
+test runtime_host::delivery::tests::the_production_gate_refuses_a_named_target_this_run_never_rewrote ... ok
+test runtime_host::delivery::tests::a_missing_named_section_is_reported_and_a_complete_document_passes ... ok
+test runtime_host::frozen_approval_tests::legacy_approval_keeps_default_and_disconnection_is_not_approval ... ok
+test runtime_host::frozen_approval_tests::frozen_approval_deadline_is_enforced_and_corruption_cannot_fall_back ... ok
+test runtime_host::attachment_compute::tests::changed_source_and_over_limit_total_are_rejected_with_cleanup ... ok
+test runtime_host::kernel_coordinator::tests::an_approved_effect_waits_for_other_approvals_instead_of_failing_admission ... ok
+test runtime_host::kernel_coordinator::tests::approval_scope_is_reused_once_and_out_of_scope_still_asks ... ok
+test runtime_host::attachment_tests::an_oversized_stdout_only_failure_travels_bounded_and_stays_readable ... ok
+test runtime_host::kernel_coordinator::tests::batch_dispatch_claim_and_deadline_are_atomic_and_uncertain_delivery_is_not_replayed ... ok
+test runtime_host::kernel_coordinator::tests::concurrency_tests::classifier_whitelists_only_host_native_readers ... ok
+test runtime_host::deliverable_placement_tests::concurrent_placement_requests_resolve_to_exactly_one_folder ... ok
+test runtime_host::delivery::tests::the_production_gate_recomputes_source_statistics_and_flags_unbound_demands ... ok
+test runtime_host::kernel_coordinator::tests::compaction_tests::kernel_compaction_after_settled_tool_batch_preserves_approval_and_result_facts ... ok
+test runtime_host::kernel_coordinator::tests::compaction_tests::kernel_compaction_failed_result_commit_keeps_source_and_never_replays_after_restart ... ok
+test runtime_host::kernel_coordinator::tests::compaction_tests::kernel_compaction_input_transaction_failure_leaves_no_intent_and_can_prepare_again ... ok
+test runtime_host::kernel_coordinator::tests::compaction_tests::kernel_compaction_queued_cancel_wins_late_summary_transaction ... ok
+test runtime_host::kernel_coordinator::tests::compaction_tests::kernel_compaction_prepared_and_committed_views_survive_reopen_without_repeating_model ... ok
+test runtime_host::kernel_coordinator::tests::concurrency_tests::business_failed_reader_settles_inside_the_group_without_leasing_anything ... ok
+test runtime_host::deliverable_placement_tests::deliverable_folders_are_owned_per_conversation_and_per_project ... ok
+test runtime_host::kernel_coordinator::tests::concurrency_tests::panicking_reader_is_uncertain_without_replaying_or_losing_sibling_results ... ok
+test runtime_host::kernel_coordinator::tests::acceptance_task4_external_marker_survives_lost_result_without_duplicate_execution ... ok
+test runtime_host::kernel_coordinator::tests::concurrency_tests::independent_readers_run_concurrently_settle_in_source_order_and_never_replay ... ok
+test runtime_host::kernel_coordinator::tests::concurrency_tests::run_cancel_mid_group_stops_remaining_reads_without_duplicate_execution ... ok
+test runtime_host::kernel_coordinator::tests::concurrency_tests::uncertain_reader_keeps_its_lease_siblings_commit_and_reopen_never_replays ... ok
+test runtime_host::kernel_coordinator::tests::continuation_chain_is_one_way_and_one_successor_per_source ... ok
+test runtime_host::kernel_coordinator::tests::compaction_tests::kernel_compaction_host_drives_real_isolated_summarizer_then_normal_model ... ok
+test runtime_host::kernel_coordinator::tests::display_tests::projectless_real_xlsx_code_acceptance ... ignored, independent external XLSX acceptance fixture
+test runtime_host::kernel_coordinator::tests::compaction_tests::kernel_compaction_single_owner_and_invalid_response_never_publish_a_view ... ok
+test runtime_host::kernel_coordinator::tests::agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_replay ... ok
+test runtime_host::kernel_coordinator::tests::continuous_host_keeps_finite_transport_windows_after_a_day_and_reopen ... ok
+test runtime_host::kernel_coordinator::tests::compaction_tests::kernel_usage_calibration_pairs_the_dispatched_view_with_full_occupancy_usage ... ok
+test runtime_host::kernel_coordinator::tests::corrupt_frozen_binding_prevents_execution_after_coordinator_open ... ok
+test runtime_host::kernel_coordinator::tests::concurrency_tests::live_scheduler_fans_readers_out_and_never_overlaps_the_following_write ... ok
+test runtime_host::kernel_coordinator::tests::compaction_tests::kernel_compaction_stop_classes_distinguish_single_item_from_no_candidates ... ok
+test runtime_host::deliverable_placement_tests::the_production_entry_keeps_one_deliverable_folder_across_days_and_restarts ... ok
+test runtime_host::kernel_coordinator::tests::display_tests::final_response_replaces_partial_and_projects_tool_process_without_duplicate_usage ... ok
+test runtime_host::kernel_coordinator::tests::display_tests::approved_html_write_and_streamed_answer_remain_available_after_cancel ... ok
+test runtime_host::kernel_coordinator::tests::display_tests::kernel_reads_project_root_and_office_attachments_through_frozen_gateway ... ok
+test runtime_host::kernel_coordinator::tests::display_tests::projectless_attachment_code_computes_and_persists_scoped_artifacts ... ok
+test runtime_host::kernel_coordinator::tests::delivery_live_tests::live_delivery_gate_repairs_a_parseable_artifact_that_misses_a_stated_demand ... ok
+test runtime_host::kernel_coordinator::tests::expired_approval_is_never_executable_and_the_run_stays_continuable ... ok
+test runtime_host::kernel_coordinator::tests::compaction_tests::kernel_compaction_has_a_persisted_pass_limit_instead_of_unbounded_summary_calls ... ok
+test runtime_host::kernel_coordinator::tests::delivery_live_tests::live_delivery_gate_stays_quiet_without_a_structured_demand ... ok
+test runtime_host::kernel_coordinator::tests::delivery_live_tests::live_delivery_repair_budget_exhausts_with_completed_run_and_visibly_failed_item ... ok
+test runtime_host::kernel_coordinator::tests::delivery_live_tests::live_delivery_repair_loop_rides_continuation_without_consuming_review_budget_or_replaying_tools ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f1_live_worker_provider_big_read_requires_replacement_confirmation ... ok
+test runtime_host::kernel_coordinator::tests::expired_approval_and_cancel_never_reach_executor ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f1_live_worker_provider_small_read_allows_replacement ... ok
+test runtime_host::kernel_coordinator::tests::display_tests::received_display_survives_cancel_failure_and_database_reopen_without_settling_execution ... ok
+test runtime_host::capability_tools::tests::system_info_uses_a_fixed_environment_allowlist ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_fixed_clock_expired_card_is_rejected_after_real_node_proposal ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_live_ask_allow ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::host_timeline_is_a_no_op_while_the_switch_is_off ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_live_ask_read_only ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::local_provider_progress_deadline_allows_four_bounded_rounds_past_twenty_seconds ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::local_provider_progress_deadline_rejects_first_and_next_request_stalls ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::provider_diagnostics_emit_at_most_one_line_per_provider ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::provider_diagnostics_recover_from_a_poisoned_event_log ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_live_ask_to_allow_reevaluates_pending_write ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f1_live_read_then_reopened_stored_batch_rejects_first_write ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f1_per_round_worker_provider_big_read_requires_replacement_confirmation ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_live_cancel_wins_over_approval_in_same_host_batch ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f1_per_round_reopen_after_read_rejects_first_write ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_live_queued_then_read_only ... ok
+test runtime_host::kernel_coordinator::tests::harness_security_tests::a03_baseline_empty_content_is_currently_rejected ... ignored
+test runtime_host::kernel_coordinator::tests::harness_security_tests::a03_gate_empty_content_is_a_valid_write ... ok
+test runtime_host::kernel_coordinator::tests::harness_security_tests::b04_acc_read_tool_result_accepts_only_byte_range_arguments ... ok
+test runtime_host::kernel_coordinator::tests::harness_security_tests::b04_acc_read_tool_result_clamps_one_range_and_defaults_the_rest ... ok
+test runtime_host::kernel_coordinator::tests::harness_security_tests::b04_acc_read_tool_result_refuses_every_scope_choosing_argument ... ok
+test runtime_host::kernel_coordinator::tests::harness_security_tests::b04_acc_read_tool_result_rejects_malformed_and_foreign_references ... ok
+test runtime_host::kernel_coordinator::tests::harness_security_tests::ex_baseline_nonzero_exit_currently_returns_string_err ... ignored
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_live_conversation_grant_reuse ... ok
+test runtime_host::kernel_coordinator::tests::harness_security_tests::s01_acc_empty_path_and_empty_command_are_rejected ... ok
+test runtime_host::kernel_coordinator::tests::harness_security_tests::s01_acc_unknown_host_tool_is_refused ... ok
+test runtime_host::kernel_coordinator::tests::harness_security_tests::s01_acc_write_refuses_a_target_outside_the_authorized_root ... ok
+test runtime_host::kernel_coordinator::tests::harness_security_tests::s01_acc_write_refuses_parent_traversal_target ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_live_expired_card_replay ... ok
+test runtime_host::kernel_coordinator::tests::harness_security_tests::ex_gate_nonzero_exit_reports_failure_without_losing_diagnostics ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f1_per_round_worker_provider_small_read_allows_replacement ... ok
+test runtime_host::kernel_coordinator::tests::harness_security_tests::s01_command_child_excludes_parent_environment_canary ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_live_read_only_ask ... ok
+test runtime_host::kernel_coordinator::tests::failed_commit_rolls_back_memory_and_leaves_executed_effect_uncertain ... ok
+test runtime_host::kernel_coordinator::tests::foreign_lease_owner_cannot_commit_results_and_cancel_wins_late_result ... ok
+test runtime_host::kernel_coordinator::tests::formal_worker_can_be_cancelled_without_holding_the_coordinator_lock ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_outer_host_cancel_acks_queued_approval_without_consuming_it ... ok
+test runtime_host::kernel_coordinator::tests::formal_worker_uses_remaining_run_budget_instead_of_a_fresh_full_window ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::batch_model_lease_rejects_forged_durable_middle_in_both_transports ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_round_ask_allow ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::copied_database_cannot_hide_foreign_root_notice_from_host_final_guard ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::acknowledged_notice_survives_real_compaction_then_next_host_batch_notice ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::experimental_host_initial_lease_binds_complete_input_and_acks_with_response ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_round_expired_card_replay ... ok
+test runtime_host::kernel_coordinator::tests::compaction_tests::acceptance_task3_long_history_reopens_between_every_compaction_pass ... ok
+test runtime_host::kernel_coordinator::tests::formal_worker_protocol_failure_retains_uncertain_delivery_across_reopen ... ok
+test runtime_host::kernel_coordinator::tests::http_model_fixture_tests::only_zero_byte_eof_or_reset_is_an_ignorable_probe ... ok
+test runtime_host::kernel_coordinator::tests::http_model_fixture_tests::empty_disconnected_probe_does_not_consume_the_scripted_reply ... ok
+test runtime_host::kernel_coordinator::tests::http_model_fixture_tests::partial_body_disconnect_fails_without_consuming_a_reply ... ok
+test runtime_host::kernel_coordinator::tests::http_model_fixture_tests::partial_header_disconnect_fails_without_consuming_a_reply ... ok
+test runtime_host::kernel_coordinator::tests::formal_worker_transport_checks_frozen_configuration_before_lease_and_commits_real_response ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::notice_delivery_insert_fault_rolls_back_model_lease_and_can_dispatch_once_repaired ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_round_ask_read_only ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_round_queued_then_read_only ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::second_database_job_and_steering_arrival_before_lease_rechecks_the_final_frame ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::unknown_model_response_reopens_without_replaying_bound_notice_or_job ... ok
+test runtime_host::kernel_coordinator::tests::independent_reads_can_execute_concurrently_without_holding_the_controller_lock ... ok
+test runtime_host::kernel_coordinator::tests::initial_input_missing_or_changed_configuration_never_backfills_after_start ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::live_continuation_lease_rejects_self_consistent_forged_history ... ok
+test runtime_host::kernel_coordinator::tests::initial_input_tampering_is_rejected_without_exposing_message_content ... ok
+test runtime_host::kernel_coordinator::tests::initial_input_reopens_exactly_and_does_not_follow_current_messages ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::oversized_fact_blocks_dispatch_and_many_facts_deliver_only_a_fitting_prefix ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_round_conversation_grant_reuse ... ok
+test runtime_host::kernel_coordinator::tests::host_live_transport_failure_retry_reaches_due_and_exhausts_once ... ok
+test runtime_host::kernel_coordinator::tests::initial_model_lost_response_stays_uncertain_after_reopen ... ok
+test runtime_host::kernel_coordinator::tests::initial_model_proposal_enters_the_existing_approval_and_batch_pipeline ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::f3_approval_tests::f3_round_read_only_ask ... ok
+test runtime_host::kernel_coordinator::tests::initial_model_second_coordinator_cannot_claim_an_inflight_delivery ... ok
+test runtime_host::kernel_coordinator::tests::initial_model_dispatch_rollback_does_not_call_engine_or_arm_deadline ... ok
+test runtime_host::kernel_coordinator::tests::kernel_artifact_gate_tests::kernel_gate_accepts_own_conversation_artifact_and_rejects_abuse ... ok
+test runtime_host::kernel_coordinator::tests::job_notice_capacity_tests::capacity_exact_fit_delivers_acknowledges_and_completes_without_loss_or_duplicate ... ok
+test runtime_host::kernel_coordinator::tests::kernel_context_resources_preserve_conversation_scope_and_use_kernel_results ... ok
+test runtime_host::kernel_coordinator::tests::job_notice_capacity_tests::capacity_exhausted_by_historical_markers_blocks_the_wake_and_keeps_every_fact ... ok
+test runtime_host::kernel_coordinator::tests::job_notice_capacity_tests::capacity_prefix_is_maximal_and_the_remainder_is_not_bound_acked_or_deleted ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::experimental_host_notice_response_faults_leave_lease_bound_and_no_reply ... ok
+test runtime_host::kernel_coordinator::tests::initial_model_real_worker_after_reopen_commits_final_and_consumes_once ... ok
+test runtime_host::kernel_coordinator::tests::kernel_delegation_stages_a_single_child_without_starting_an_executor ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::real_host_to_local_provider_delivers_notice_once_in_live_and_single_round ... ok
+test runtime_host::kernel_coordinator::tests::kernel_parent_cancel_waits_for_unstarted_child_cleanup_without_model_io ... ok
+test runtime_host::kernel_coordinator::tests::kernel_host_scope_and_commands_survive_reopen_without_double_decisions ... ok
+test runtime_host::kernel_coordinator::tests::kernel_repair_override_cannot_be_auto_approved_or_prompt_for_ineligible_work ... ok
+test runtime_host::kernel_coordinator::tests::kernel_work_snapshot_uses_projected_tool_identity_and_frozen_gateway ... ok
+test runtime_host::kernel_coordinator::tests::kernel_frozen_hooks_keep_block_and_approval_policy_and_transactional_audit ... ok
+test runtime_host::kernel_coordinator::tests::kernel_delegation_correction_limit_survives_reopen_and_staging_errors_stay_fatal ... ok
+test runtime_host::kernel_coordinator::tests::limit_fix_tests::live_cancel_wins_while_worker_is_waiting_at_model_deadline ... ok
+test runtime_host::kernel_coordinator::tests::job_notice_capacity_tests::real_runtime_host_capacity_prefix_remainder_lifecycle_on_both_pi_transports ... ok
+test runtime_host::kernel_coordinator::tests::limit_fix_tests::live_ready_cancel_never_dispatches_a_model_request ... ok
+test runtime_host::kernel_coordinator::tests::kernel_real_model_previews_are_transient_until_the_response_transaction_commits ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::live_and_single_round_batch_bind_steering_receipt_and_job_notice_in_the_same_model_input ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::real_runtime_host_job_start_parks_and_wakes_on_both_pi_transports ... ok
+test runtime_host::kernel_coordinator::tests::kernel_initial_response_projects_usage_and_message_atomically ... ok
+test runtime_host::kernel_coordinator::tests::native_engine_tests::native_codex_host_approvals_reads_and_restart_continuation ... ignored, requires FOX_TEST_CODEX_BINARY; run explicitly against the installed native executable
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::real_node_live_and_single_round_park_then_wake_with_one_typed_notice ... ok
+test runtime_host::kernel_coordinator::tests::live_remaining_budget_excludes_approval_wait ... ok
+test runtime_host::kernel_coordinator::tests::model_progress_registry_is_consume_once_and_bounded ... ok
+test runtime_host::kernel_coordinator::tests::model_snapshot_is_immutable_and_tampering_fails_before_any_dispatch_lease ... ok
+test runtime_host::kernel_coordinator::tests::kernel_managed_child_quota_blocks_model_before_dispatch ... ok
+test runtime_host::kernel_coordinator::tests::limit_fix_tests::live_host_deadline_and_lost_worker_frame_are_settled_before_retry ... ok
+test runtime_host::kernel_coordinator::tests::native_engine_tests::native_engine_configuration_cannot_cross_a_frozen_identity ... ok
+test runtime_host::kernel_coordinator::tests::live_final_acknowledgement_survives_terminal_cancellation ... ok
+test runtime_host::kernel_coordinator::tests::f1_engine_path_tests::local_provider_first_request_timeout_preserves_diagnostic_and_timeline ... ok
+test runtime_host::kernel_coordinator::tests::live_readonly_complete_answer_completes_without_review_round ... ok
+test runtime_host::kernel_coordinator::tests::live_executable_preface_gets_one_bounded_review_then_projects_final_answer ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::a_scenario_directory_is_reserved_exclusively_and_old_evidence_survives ... ok
+
+running 1 test
+test runtime_host::kernel_coordinator::tests::real_eval_tests::evaluation_supervisor_child_fixture ... [eval-phase] synthetic-provider:intentional-stall (previous held 0s)
+test runtime_host::kernel_coordinator::tests::noted_worker_progress_arms_first_response_and_idle_is_bounded ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::evaluation_supervisor_child_fixture ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::persisted_completed_is_error_mutant_must_not_be_a_failure ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_checker_flags_fabricated_cross_document_inconsistency ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_cloud_checks_are_plan_and_round_count_independent ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_cloud_environment_resolution_is_explicit_and_never_records_the_key ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_cloud_mode_reports_not_run_and_names_missing_environment ... ok
+[eval-watchdog] DEADLINE: still in phase 'synthetic-provider:intentional-stall' after 0s (total 0s); the isolated-process supervisor will stop this evaluation instead of waiting without evidence
+[eval-watchdog] phase=start held=0s
+test runtime_host::kernel_coordinator::tests::original_engine_checkpoint_and_proposal_commit_atomically_and_replay_exactly ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_cursor_parsing_reads_escaped_model_view_blocks ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_derives_current_expectations_without_historical_constants ... ok
+test runtime_host::kernel_coordinator::tests::live_two_reviews_preserve_streamed_message_identity_after_tool_results ... ok
+test runtime_host::kernel_coordinator::tests::kernel_host_action_waits_for_result_commit_and_never_replays_claimed_action ... ok
+test runtime_host::kernel_coordinator::tests::owning_host_recovery_never_replays_an_uncertain_model_request ... ok
+test runtime_host::kernel_coordinator::tests::permission_change_ask_to_ask_reissues_only_a_current_ticket ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_entries_write_round_scoped_directories_only ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_independent_zip_lister_opens_ooxml_package ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_plan_is_deterministic_and_carries_charts_sections_and_derived_values ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_report_writer_records_tier_and_identity_for_both_modes ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_task_evaluation_cloud ... ignored, real cloud-model acceptance: requires FOX_EVAL_* credentials, the Node runtime and the pinned OfficeCLI sidecar
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_task_evaluation_through_host_kernel_runtime_and_real_tools ... ignored, synthetic regression: requires the Node runtime and the pinned OfficeCLI sidecar (no cloud credentials used)
+test runtime_host::kernel_coordinator::tests::real_eval_tests::rust_host_evidence_compiled_sources_match_the_checkout ... ok
+test runtime_host::kernel_coordinator::tests::permission_change_reevaluates_original_intent_atomically_and_rejects_old_ticket ... ok
+test runtime_host::kernel_coordinator::tests::r1_rejected_input_survives_sqlite_reopen_and_reaches_model_resume_frame ... ok
+test runtime_host::kernel_coordinator::tests::owning_host_loop_starts_real_model_and_commits_one_visible_final ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_command_stdout_only_non_zero_exit_preserves_diagnostics ... ok
+test runtime_host::kernel_coordinator::tests::native_engine_tests::native_deepseek_host_approvals_reads_and_restart_continuation ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_edit_file_allows_deleting_matched_text_to_empty ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_read_outside_the_frozen_project_root_is_denied_and_re_readable ... ok
+test runtime_host::kernel_coordinator::tests::owning_host_recovery_consumes_queued_approvals_then_real_reads_and_model ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::the_restore_audit_fails_when_a_snapshot_does_not_match_its_row ... ok
+test runtime_host::kernel_coordinator::tests::limit_fix_tests::live_continuation_total_timeout_reopens_its_lease_without_replaying_completed_tools ... ok
+test runtime_host::kernel_coordinator::tests::host_job_notice_tests::real_runtime_host_job_finishes_during_second_lease_or_retains_flag_off_behavior ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::the_watchdog_ends_with_the_evaluation_not_with_the_test_process ... ok
+
+running 1 test
+test runtime_host::kernel_coordinator::tests::real_eval_tests::evaluation_supervisor_child_fixture ... [eval-phase] real-cloud-model:intentional-stall (previous held 0s)
+[eval-watchdog] DEADLINE: still in phase 'real-cloud-model:intentional-stall' after 0s (total 0s); the isolated-process supervisor will stop this evaluation instead of waiting without evidence
+[eval-watchdog] phase=start held=0s
+test runtime_host::kernel_coordinator::tests::reconciliation_tests::reconciliation_cannot_modify_active_or_superseded_runs ... ok
+test runtime_host::kernel_coordinator::tests::reconciliation_tests::reconciliation_office_reads_committed_output_and_rejects_connector_drift ... ok
+test runtime_host::kernel_coordinator::tests::limit_fix_tests::live_ready_cannot_outlast_the_original_run_budget ... ok
+test runtime_host::kernel_coordinator::tests::reconciliation_tests::reconciliation_query_confirmation_and_new_readonly_run_preserve_original_facts ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::the_evaluation_describes_the_production_tool_surface ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_driver_expires_unanswered_approval_with_wall_time ... ok
+test runtime_host::kernel_coordinator::tests::reconciliation_tests::reconciliation_reapprove_requires_new_approval_and_preserves_old_terminal_run ... ok
+test runtime_host::kernel_coordinator::tests::limit_fix_tests::live_total_timeout_with_continuous_arguments_retries_initial_without_execution ... ok
+test runtime_host::kernel_coordinator::tests::limit_fix_tests::live_ready_delay_does_not_consume_the_unstarted_model_window ... ok
+test runtime_host::kernel_coordinator::tests::reconciliation_tests::reconciliation_unresolved_foreign_stale_and_query_after_confirm_fail_closed ... ok
+test runtime_host::kernel_coordinator::tests::reconciliation_tests::reconciliation_resume_transaction_rolls_back_and_rival_requests_create_one_run ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::api_layer_restore_request_identity_is_forwarded ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::real_eval_driver_gives_later_proposals_fresh_approval_windows ... ok
+test runtime_host::kernel_coordinator::tests::restart_approval_dispatches_real_reads_once_and_preserves_batch_order ... ok
+test runtime_host::kernel_coordinator::tests::reconciliation_tests::reconciliation_recovery_drives_real_worker_and_rejects_mutation ... ok
+
+running 1 test
+test runtime_host::kernel_coordinator::tests::real_eval_tests::evaluation_supervisor_child_fixture ... [eval-phase] completed:intentional-stall (previous held 0s)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1346 filtered out; finished in 0.05s
+
+test runtime_host::kernel_coordinator::tests::reconciliation_tests::reconciliation_reapproved_new_write_executes_once_after_new_approval ... ok
+test runtime_host::kernel_coordinator::tests::model_response_failure_never_partially_commits_terminal_or_next_batch ... ok
+test runtime_host::kernel_coordinator::tests::real_eval_tests::evaluation_deadlines_kill_only_the_owned_process_and_keep_evidence ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_actual_history_compaction_does_not_turn_a_clipped_read_into_whole_delivery ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_cropped_read_denial_cannot_write_or_revive_the_request ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_cropped_read_confirmation_is_bound_to_one_candidate_and_consumed_once ... ok
+test runtime_host::kernel_coordinator::tests::pi_checkpoint_sqlite_reopen_rust_readers_and_replacement_pi_share_one_result_batch ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_cropped_read_expired_confirmation_cannot_write ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_office_extract_view_kind_never_authorizes_replacement ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_pages_from_different_versions_cannot_form_a_whole_file_read ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_partial_read_observation_is_not_whole_file_source ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_small_file_delivered_whole_still_replaces_normally ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_two_pages_of_the_same_snapshot_still_require_a_dedicated_confirmation ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_recovery_does_not_restore_whole_file_eligibility ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_whole_read_that_the_model_never_received_cannot_replace_the_file ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f2_restore_lifecycle_tests::f2_failed_receipt_transaction_never_replays_an_uncertain_file_effect ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev01_second_page_of_the_same_version_keeps_the_request_valid ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f2_restore_lifecycle_tests::f2_same_request_cannot_replay_a_different_version_or_force ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev01_stale_declared_precondition_is_not_silently_upgraded ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev02_normal_restore_round_trips_the_selected_bytes ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f2_restore_lifecycle_tests::f2_later_valid_host_write_does_not_revoke_restore_receipt ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f2_restore_lifecycle_tests::f2_running_retry_does_not_claim_that_the_target_was_untouched ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev02_restore_never_silently_invalidates_a_committed_write ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev03_conversation_policy_change_does_not_touch_siblings ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f2_restore_lifecycle_tests::f2_two_database_connections_claim_one_restore_identity ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev03_normal_conversation_switch_keeps_cas_semantics ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev04_allow_once_never_becomes_a_reusable_grant ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_legacy_entry_conservatively_requires_replacement_grant_for_large_read ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev04_reusable_grant_does_not_survive_a_read_only_round_trip ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::f1_model_delivery_tests::f1_real_host_read_keeps_the_same_coverage_after_node_second_projection ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev05_one_line_read_cannot_authorize_a_whole_file_replacement ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev05_precise_edit_of_an_observed_fragment_still_works ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev06_full_pagination_reconstructs_the_source ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev06_offset_inside_a_surrogate_pair_does_not_skip_a_character ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_allow_command_cancelled_before_consumption_grants_nothing ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_allow_command_expired_before_consumption_grants_nothing ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_allow_command_stale_policy_grants_nothing ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_expected_version_is_never_upgraded_in_any_entry_point ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_epoch_change_keeps_resource_grants_and_drops_reuse ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_frozen_binding_grant_is_revoked_live ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_frozen_grant_is_not_revived_by_a_later_regrant ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_old_binding_without_epoch_never_authorizes_reuse ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_kernel_projection_binds_the_replacement_request ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_old_credential_and_binding_stay_loadable_and_conservative ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_persistent_refusal_is_not_retried ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_production_command_gate_stays_closed ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_repeated_acknowledgement_never_grants_twice ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_replace_all_cannot_touch_an_unobserved_fragment ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_replace_grant_fields_are_verified_field_by_field ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_replace_grant_is_consumed_atomically_with_the_claim ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev02_race_leaves_only_registered_content ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_replace_grant_is_refused_once_withdrawn ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_restore_request_is_deduplicated ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::state_fixture_ack_is_idempotent ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::state_fixture_decision_then_ack_executes_once ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::rev_restore_settles_after_an_after_replace_fault ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::state_fixture_denial_never_executes ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::state_fixture_enqueue_alone_authorizes_nothing ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::state_fixture_legacy_propose_confirm_persist_claim ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::state_fixture_preempting_ack_is_refused ... ok
+test runtime_host::kernel_coordinator::tests::run_lease_component_tests::run_lease_component_reports_owned_conflict_and_is_reusable_after_release ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::t5_kernel_real_dispatch_error_propagates_instead_of_reporting_success ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::t2_kernel_recovery_after_reopen_settles_once ... ok
+test runtime_host::kernel_coordinator::tests::settled_batch_retry_never_reexecutes_completed_resources ... ok
+test runtime_host::kernel_coordinator::tests::settled_incomplete_answer_uses_one_request_retry_across_reopen_without_reexecuting_tools ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::t1_kernel_real_consumer_executes_a_legitimate_approval_once ... ok
+test runtime_host::kernel_coordinator::tests::settled_initial_retry_survives_reopen_and_honors_server_delay ... ok
+test runtime_host::kernel_coordinator::tests::rev_repro_tests::t3_kernel_real_consumer_denial_never_executes ... ok
+test runtime_host::kernel_coordinator::tests::silent_request_trips_first_response_before_the_whole_round_bound ... ok
+test runtime_host::kernel_coordinator::tests::steering_live_tests::a_completed_decision_is_refused_while_accepted_input_was_never_delivered ... ok
+test runtime_host::kernel_coordinator::tests::skill_load_tests::missing_frozen_tools_are_reported_and_loading_never_grows_scope ... ok
+test runtime_host::kernel_coordinator::tests::skill_load_tests::unknown_disabled_and_scope_shaped_skill_loads_are_rejected ... ok
+test runtime_host::kernel_coordinator::tests::steering_live_tests::live_loop_answers_input_accepted_during_the_last_round_instead_of_completing ... ok
+test runtime_host::kernel_coordinator::tests::skill_load_tests::loads_enabled_skill_text_and_audits_the_exact_content_version ... ok
+test runtime_host::kernel_coordinator::tests::steering_tests::a_lost_terminal_race_is_reported_as_a_replan_signal ... ok
+test runtime_host::kernel_coordinator::tests::steering_tests::a_request_accepted_inside_the_decision_window_is_answered_not_failed ... ok
+test runtime_host::kernel_coordinator::tests::steering_tests::a_steering_follow_up_keeps_the_settled_tool_history ... ok
+test runtime_host::kernel_coordinator::tests::tool_result_read_tests::read_tool_result_model_view_drives_a_multipage_walk_from_the_model_view ... ok
+test runtime_host::kernel_coordinator::tests::tool_result_read_tests::read_tool_result_model_view_keeps_receipts_and_surfaces_preview_flags ... ok
+test runtime_host::kernel_coordinator::tests::steering_tests::delivered_rows_apply_inside_the_response_write_set_only ... ok
+test runtime_host::kernel_coordinator::tests::settled_model_retry_cancellation_and_frozen_budget_block_more_dispatch ... ok
+test runtime_host::kernel_coordinator::tests::steering_live_tests::a_request_accepted_inside_a_tool_batch_window_executes_the_tool_once ... ok
+test runtime_host::kernel_coordinator::tests::steering_live_tests::a_request_accepted_inside_the_live_decision_window_is_answered_and_applied ... ok
+test runtime_host::kernel_coordinator::tests::steering_tests::input_is_refused_once_the_additional_request_budget_is_spent ... ok
+test runtime_host::kernel_coordinator::tests::steering_tests::steering_enqueue_is_idempotent_ordered_and_bounded ... ok
+test runtime_host::kernel_coordinator::tests::steering_tests::steering_is_delivered_once_across_replacement_dispatches_and_cancelled_on_terminal ... ok
+test runtime_host::kernel_coordinator::tests::steering_tests::steering_is_collected_then_applied_by_the_initial_dispatch ... ok
+test runtime_host::kernel_coordinator::tests::steering_live_tests::live_loop_completes_without_a_steering_round_when_nothing_was_accepted ... ok
+test runtime_host::kernel_coordinator::tests::settled_incomplete_http_reply_continues_after_reopen_with_completed_tool_results ... ok
+test runtime_host::kernel_coordinator::tests::steering_tests::the_batch_steering_follow_up_appends_the_reply_exactly_once ... ok
+test runtime_host::kernel_coordinator::tests::steering_tests::the_context_gate_accounts_for_the_input_it_will_actually_send ... ok
+test runtime_host::kernel_coordinator::tests::tool_result_read_tests::a_reopened_database_reads_the_previous_result_without_replaying_it ... ok
+test runtime_host::kernel_coordinator::tests::tool_result_read_tests::kernel_context_resource_serves_a_persisted_result_and_rebuilds_it_exactly ... ok
+test runtime_host::kernel_coordinator::tests::tool_result_read_tests::kernel_refuses_scoped_reads_the_model_tried_to_authorize_itself ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_batch_tests::owner_unwind_releases_blocked_waiter_and_clears_registration ... ok
+test runtime_host::kernel_coordinator::tests::unified_tests::experimental_compute_job_operations_reject_another_run_before_read_wait_or_cancel ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_batch_tests::reversed_notice_delivery_is_rejected_by_the_shared_order_rule ... ok
+test runtime_host::kernel_coordinator::tests::uncertain_execution_is_not_retried_and_siblings_stay_pending ... ok
+test runtime_host::kernel_coordinator::tests::unified_tests::experimental_compute_job_operations_still_serve_their_own_run ... ok
+test runtime_host::kernel_coordinator::tests::unified_tests::job_model_tools_use_real_gateway_worker_storage_and_scope ... ok
+test runtime_host::kernel_coordinator::tests::steering_tests::the_steering_queue_cap_counts_utf8_bytes_not_characters ... ok
+test runtime_host::kernel_coordinator::tests::v54_model_snapshot_upgrade_preserves_existing_runs_without_backfilling ... ok
+test runtime_host::kernel_coordinator::tests::v55_initial_input_upgrade_preserves_runs_without_inventing_old_context ... ok
+test runtime_host::kernel_coordinator::tests::stored_model_configuration_reopens_and_drives_real_pi_without_caller_configuration ... ok
+test runtime_host::kernel_coordinator::tests::unified_tests::authoritative_compute_job_lookup_rejects_unknown_notice_config ... ok
+test runtime_host::kernel_coordinator::tests::unified_tests::default_off_and_legacy_compute_job_operations_keep_conversation_compatibility ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_host_tests::created_recovery_detached_records_preparation_failure_and_retires_scope ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_host_tests::waiting_jobs_recovery_detached_accounts_and_releases_host_without_retiring_job_token ... ok
+test runtime_host::kernel_coordinator::tests::limit_fix_tests::live_ready_has_a_finite_handshake_limit_without_a_run_limit ... ok
+test runtime_host::kernel_coordinator::tests::unified_tests::continuation_artifacts_commit_atomically_rebind_identity_and_finish_on_real_worker ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::waiting_jobs_bound_batch_history_reconstructs_tool_and_steering_middle ... ok
+test runtime_host::kernel_coordinator::tests::tool_result_read_tests::real_pi_jsonl_reads_a_persisted_result_through_read_tool_result ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_recovery_tests::bound_job_notice_continuation_lease_is_not_replayed_after_reopen ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::automatic_waiting_wake_cannot_overtake_a_queued_cancel ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::cancelled_wait_reopen_only_consumes_its_durable_cancel_command ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::job_finishing_between_pre_read_and_response_commit_replans_without_model_replay ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::waiting_jobs_created_start_error_still_retires_and_records_kernel_failure ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::terminal_job_direct_notice_requires_the_settled_input_and_exact_typed_fact ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::waiting_deadline_accounting_cannot_overtake_an_already_queued_cancel ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::waiting_jobs_copied_database_cannot_reopen_old_root_wait ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::waiting_jobs_model_lease_rejects_forged_initial_delivery_history ... ok
+test runtime_host::kernel_coordinator::tests::settled_incomplete_http_recovery_after_new_compute_error_keeps_prior_progress ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::waiting_jobs_owned_host_loop_returns_parked_without_error_or_forced_child_settlement ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::waiting_jobs_park_is_atomic_rooted_and_accounted_once_after_reopen ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::waiting_jobs_per_round_settled_final_parks_instead_of_completing ... ok
+test runtime_host::kernel_delegation::correction_tests::objective_suggestion_never_guesses_missing_conflicting_or_unbounded_content ... ok
+test runtime_host::kernel_delegation::correction_tests::objective_suggestion_preserves_values_without_rewriting_the_input ... ok
+test runtime_host::kernel_gateway::revision_tests::r1_matching_errors_are_repairable_but_scope_denials_remain_denials ... ok
+test runtime_host::kernel_host::failure_tests::a_cancelled_edit_reports_the_denial_reason_rather_than_a_generic_failure ... ok
+test runtime_host::kernel_host::failure_tests::a_failed_command_keeps_its_compiler_reason_and_classification ... ok
+test runtime_host::kernel_host::failure_tests::a_refused_call_says_it_never_ran ... ok
+test runtime_host::kernel_host::failure_tests::an_unclassified_failure_stays_generic_for_remote_tools_and_loses_nothing_locally ... ok
+test runtime_host::kernel_host::failure_tests::diagnostics_are_bounded_and_credentials_never_travel ... ok
+test runtime_host::kernel_host::failure_tests::kernel_reader_failure_preserves_reason_without_claiming_policy_denial ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::waiting_jobs_real_host_start_and_recovery_lock_race_preserve_parent_token ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::waiting_jobs_rejects_history_not_bound_to_the_settled_model_lease ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::waiting_jobs_reopen_rejects_changed_frozen_attempt ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::waiting_jobs_wake_outbox_failure_rolls_back_and_two_handles_cannot_wake_twice ... ok
+test runtime_host::kernel_coordinator::tests::worker_model_timeout_with_an_unsettled_tool_fails_closed_without_retry ... ok
+test runtime_host::kernel_coordinator::tests::worker_model_timeout_retries_only_the_model_request_without_replaying_tools ... ok
+test runtime_host::kernel_host::host_order_tests::a_confirmed_start_is_never_regressed_by_an_unknown_outcome ... ok
+test runtime_host::kernel_host::host_order_tests::a_manage_query_completion_is_not_a_start ... ok
+test runtime_host::kernel_host::host_order_tests::a_read_completion_never_claims_an_external_process_start ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_auto_tests::real_host_queued_run_dispatches_after_auto_wake_releases_ownership ... ok
+test runtime_host::kernel_host::host_order_tests::a_repeat_delivery_returns_the_real_receipt_and_never_replays ... ok
+test runtime_host::kernel_model_worker::tests::a_requested_stderr_pipe_without_a_reader_is_never_selected ... ok
+test runtime_host::kernel_model_worker::tests::a_worker_flooding_stderr_before_its_first_read_still_answers_the_protocol ... ok
+test runtime_host::kernel_host::host_order_tests::an_error_after_a_real_start_stays_unknown_and_never_replays ... ok
+test runtime_host::kernel_model_worker::tests::cancellation_during_pipe_wait_cleans_up_without_waiting_for_the_deadline ... ok
+test runtime_host::kernel_model_worker::tests::final_drain_wait_still_obeys_its_fixed_deadline ... ok
+test runtime_host::kernel_model_worker::tests::blocked_pipe_write_is_bounded_and_the_owned_child_is_reaped ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_auto_tests::real_host_parked_user_cancel_stops_without_job_completion_or_model_resume ... ok
+test runtime_host::kernel_model_worker::worker_job::tests::dropping_worker_job_reaps_its_native_descendant ... ok
+test runtime_host::kernel_run_lock::tests::ownership_is_exclusive_and_released_on_drop ... ok
+test runtime_host::knowledge_tool_contract_tests::accepts_legacy_and_source_aware_knowledge_targets ... ok
+test runtime_host::knowledge_tool_contract_tests::accepts_reference_alias_and_keeps_local_scope_explicit ... ok
+test runtime_host::knowledge_tool_contract_tests::preserves_structured_knowledge_error_codes ... ok
+test runtime_host::knowledge_tool_contract_tests::rejects_invalid_remote_reference_and_multiple_read_targets ... ok
+test runtime_host::knowledge_tool_contract_tests::remote_knowledge_errors_retry_only_transient_failures ... ok
+test runtime_host::managed_files::tests::a_generic_or_unfrozen_connector_is_never_a_managed_write ... ok
+test runtime_host::managed_files::tests::a_host_file_write_is_still_a_managed_write ... ok
+test runtime_host::kernel_host::host_order_tests::an_ok_structured_refusal_is_not_a_start_confirmation ... ok
+test runtime_host::kernel_host::host_order_tests::claim_is_not_start_and_only_execution_evidence_confirms_it ... ok
+test runtime_host::kernel_model_worker::tests::oversized_stdout_and_foreign_response_are_rejected_without_echoing_content ... ok
+test runtime_host::kernel_model_worker::tests::live_final_exchange_drains_only_the_acknowledgement_after_terminal_cancel ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_storage_tests::waiting_jobs_park_rejects_missing_expired_or_changed_original_job_facts ... ok
+test runtime_host::kernel_host::host_order_tests::missing_receipt_does_not_invent_a_confirmed_non_start ... ok
+test runtime_host::kernel_host::host_order_tests::same_tool_different_path_never_reaches_an_executor ... ok
+test runtime_host::kernel_host::host_order_tests::the_same_is_error_shape_with_unknown_evidence_is_not_projected_to_false ... ok
+test runtime_host::kernel_host::host_order_tests::safe_queries_stay_reachable_while_external_launches_stay_refused ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_boundary_tests::shutdown_during_owned_auto_wake_cancels_without_continuation_on_both_pi_transports ... ok
+test runtime_host::managed_files::tests::a_snapshot_that_disagrees_with_its_registered_hash_is_refused ... ok
+test runtime_host::managed_files::tests::a_verified_import_data_write_registers_and_restores ... ok
+test runtime_host::managed_files::tests::admitted_file_second_execution_rejects_an_externally_changed_old_baseline ... ok
+test runtime_host::managed_files::tests::real_legacy_chain_precheck_approval_execute_register_restore ... ignored, requires the pinned OfficeCLI binary; run explicitly for integration verification
+test runtime_host::managed_files::tests::admitted_file_executes_atomic_replace_and_registers_exact_bytes ... ok
+test runtime_host::managed_files::tests::a_verified_office_write_is_registered_with_the_office_operation_name ... ok
+test runtime_host::managed_files::tests::an_import_outside_the_frozen_scope_is_not_a_managed_write ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_auto_tests::real_host_auto_wakes_after_job_settles_on_both_pi_transports ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_auto_tests::real_host_auto_wake_survives_park_lock_contention ... ok
+test runtime_host::managed_files::tests::an_office_declaration_that_disagrees_with_host_facts_is_refused ... ok
+test runtime_host::process_identity::owner_tests::current_owner_is_preserved_and_reused_pid_is_detected ... ok
+test runtime_host::protocol::tests::child_run_tools_have_host_handlers ... ok
+test runtime_host::protocol::tests::every_canonical_host_tool_has_a_registered_handler ... ok
+test runtime_host::protocol::tests::every_registered_capability_tool_has_a_host_handler ... ok
+test runtime_host::protocol::tests::every_registered_work_tool_has_a_host_handler ... ok
+test runtime_host::protocol::tests::governed_memory_tools_have_host_handlers ... ok
+test runtime_host::protocol::tests::persistent_read_only_graph_tools_have_exact_host_work_contracts ... ok
+test runtime_host::protocol::tests::rejects_a_raw_database_host_surface ... ok
+test runtime_host::protocol::tests::rejects_duplicate_runtime_tools ... ok
+test runtime_host::protocol::tests::rejects_unknown_tools_and_canonical_contract_spoofing ... ok
+test runtime_host::protocol::tests::validates_the_runtime_capability_manifest_contract ... ok
+test runtime_host::protocol::tests::version_one_runtime_degrades_without_work_tools ... ok
+test runtime_host::managed_files::tests::created_file_registers_a_version_without_backup ... ok
+test runtime_host::managed_files::tests::deletion_blocks_restore_and_force_recreates_the_file ... ok
+test runtime_host::managed_files::tests::external_change_blocks_restore_until_force ... ok
+test runtime_host::managed_files::tests::final_revalidation_refusal_keeps_a_not_applied_journal ... ok
+test runtime_host::managed_files::tests::legacy_artifact_import_is_verified_and_registered_for_restore ... ok
+test runtime_host::managed_files::tests::modified_file_is_backed_up_before_the_write ... ok
+test runtime_host::managed_files::tests::restore_copies_backup_without_replaying_and_registers_restored_row ... ok
+test runtime_host::managed_files::tests::restore_refuses_other_conversations_and_missing_backups ... ok
+test runtime_host::managed_files::tests::the_frozen_office_wrapper_is_recognized_as_a_managed_write ... ok
+test runtime_host::managed_files::tests::selecting_a_version_restores_that_versions_exact_bytes ... ok
+test runtime_host::managed_files::tests::the_content_replaced_by_a_force_restore_is_itself_selectable ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_recovery_tests::committed_job_notice_recovers_once_across_reopened_hosts_and_pi_transports ... ok
+test runtime_host::managed_files::tests::the_shared_execution_seam_registers_exactly_what_it_executes ... ok
+test runtime_host::resource_gateway_tests::nested_rust_reader_requires_running_declared_node_and_namespaced_identity ... ok
+test runtime_host::resource_gateway_tests::legacy_file_read_claim_commit_and_duplicate_use_the_real_host_chain ... ok
+test runtime_host::resource_gateway_tests::rust_reader_dispatch_persists_exact_result_and_replays_without_reading_again ... ok
+test runtime_host::resource_gateway_tests::rust_reader_preparation_cannot_change_the_original_target_or_drop_default_path ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_boundary_tests::parked_job_wake_rechecks_current_read_only_policy_on_both_pi_transports ... ok
+test runtime_host::shadow_reconcile_tests::atomic_checkpoint_failure_rolls_back_diff_and_blocks_the_gate ... ok
+test runtime_host::resource_gateway_tests::real_pi_jsonl_reads_through_rust_and_returns_the_persisted_tool_result ... ok
+test runtime_host::shadow_reconcile_tests::bootstrap_keeps_state_registered_tool_survives_into_terminal ... ok
+test runtime_host::shadow_reconcile_tests::bootstrap_rejects_conflicting_frozen_config ... ok
+test runtime_host::shadow_reconcile_tests::cancel_sequence_persists_cancelled_match_and_drops_context ... ok
+test runtime_host::shadow_reconcile_tests::conflicting_settled_result_fails_closed_instead_of_reclassifying_history ... ok
+test runtime_host::shadow_reconcile_tests::cumulative_batches_remain_comparable_after_checkpoint_restart ... ok
+test runtime_host::shadow_reconcile_tests::diff_insert_failure_surfaces_persist_error_and_failed_state ... ok
+test runtime_host::shadow_reconcile_tests::direct_settlement_error_marks_context_failed_and_blocks_healthy_terminal ... ok
+test runtime_host::shadow_reconcile_tests::diverging_terminal_states_are_classified_not_forced_to_match ... ok
+test runtime_host::shadow_reconcile_tests::failed_context_bootstrap_returns_error_not_ok ... ok
+test runtime_host::shadow_reconcile_tests::failed_diff_cannot_revive_after_observer_restart ... ok
+test runtime_host::shadow_reconcile_tests::monotonic_clock_is_non_decreasing_and_separate_from_wall ... ok
+test runtime_host::shadow_reconcile_tests::failed_tool_then_run_completed_is_a_consistent_match ... ok
+test runtime_host::shadow_reconcile_tests::failed_tool_then_run_failed_is_consistent ... ok
+test runtime_host::shadow_reconcile_tests::gate_accepts_well_formed_begin_settle_lifecycle ... ok
+test runtime_host::shadow_reconcile_tests::kernel_policy_diff_for_web_search_is_observed_as_approval_mismatch ... ok
+test runtime_host::shadow_reconcile_tests::gate_rejects_malformed_model_lifecycle_pairing ... ok
+test runtime_host::shadow_reconcile_tests::host_canonical_tool_never_promoted_from_runtime_is_deny ... ok
+test runtime_host::shadow_reconcile_tests::lifecycle_clean_pair_raises_no_lifecycle_blocking_reason ... ok
+test runtime_host::shadow_reconcile_tests::large_applied_result_uses_the_canonical_projection_without_a_false_replay_conflict ... ok
+test runtime_host::shadow_reconcile_tests::lifecycle_dangling_begin_after_paired_pair_blocks ... ok
+test runtime_host::shadow_reconcile_tests::lifecycle_duplicate_settle_blocks ... ok
+test runtime_host::shadow_reconcile_tests::shared_policy_classification_table ... ok
+test runtime_host::shadow_reconcile_tests::lifecycle_multiple_well_formed_pairs_raise_no_lifecycle_reason ... ok
+test runtime_host::shadow_reconcile_tests::lifecycle_settle_without_begin_blocks ... ok
+test runtime_host::shadow_reconcile_tests::lifecycle_unknown_event_blocks ... ok
+test runtime_host::shadow_reconcile_tests::no_preflight_runtime_projection_is_swept_and_completes_consistently ... ok
+test runtime_host::shadow_reconcile_tests::nested_graph_read_skipped_for_valid_parent_and_observed_for_fabricated_parent ... ok
+test runtime_host::shadow_reconcile_tests::orphaned_bootstrap_without_semantic_checkpoint_is_not_a_new_healthy_run ... ok
+test runtime_host::shadow_reconcile_tests::permission_mode_is_frozen_and_granted_scopes_are_used_independently ... ok
+test runtime_host::shadow_reconcile_tests::preflight_allow_reads_back_identity_input_decision_and_category ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_recovery_tests::orphaned_running_job_stays_paused_until_the_original_wait_deadline ... ok
+test runtime_host::shadow_reconcile_tests::real_batch_partial_observations_and_results_survive_restart_in_source_order ... ok
+test runtime_host::shadow_reconcile_tests::promoted_host_tool_running_is_allow_even_while_executing ... ok
+test runtime_host::shadow_reconcile_tests::repeated_live_bootstrap_validates_conversation_identity ... ok
+test runtime_host::shadow_reconcile_tests::runtime_graph_readonly_tool_classified_by_canonical_contract ... ok
+test runtime_host::shadow_reconcile_tests::startup_recovery_observes_legacy_interruption_without_reexecuting_tools ... ok
+test runtime_host::shadow_reconcile_tests::terminal_insert_failure_keeps_failed_state ... ok
+test runtime_host::shadow_reconcile_tests::strict_shadow_gate_rejects_empty_incomplete_and_non_transport_samples ... ok
+test runtime_host::work_tools::tests::graph_acceptance_request_is_exact_and_bounded ... ok
+test runtime_host::work_tools::tests::graph_node_cancel_request_is_exact_bounded_and_host_owned ... ok
+test runtime_host::work_tools::tests::graph_node_finish_request_is_strict_bounded_and_allows_cross_criterion_reuse ... ok
+test runtime_host::work_tools::tests::graph_node_review_request_reuses_finish_bounds_without_model_authority ... ok
+test runtime_host::work_tools::tests::graph_node_start_exposes_a_stable_retryable_plan_change_error ... ok
+test runtime_host::work_tools::tests::graph_review_and_accept_repository_errors_are_stable ... ok
+test runtime_host::shadow_reconcile_tests::tool_iserror_maps_to_failed_terminal_and_does_not_fake_completed ... ok
+test runtime_host::shadow_reconcile_tests::semantic_checkpoint_reopens_pending_approval_and_settles_without_execution ... ok
+test runtime_host::work_tools::tests::plan_revision_graph_contract_rejects_partial_unsafe_or_unbounded_inputs ... ok
+test runtime_host::work_tools::tests::plan_revision_tasks_keep_serial_compatibility_and_canonicalize_read_only_graphs ... ok
+test runtime_host::shadow_reconcile_tests::unknown_tool_in_sweep_marks_context_failed_not_fabricated_deny ... ok
+test runtime_host::shadow_reconcile_tests::unknown_context_is_named_and_errors ... ok
+test runtime_host::shadow_reconcile_tests::unresolved_tool_before_terminal_never_fakes_completed_match ... ok
+test runtime_host::shadow_reconcile_tests::unresolved_tool_blocks_completed_and_surfaces_divergence ... ok
+test runtime_host::shadow_reconcile_tests::zero_tool_run_terminal_match_is_persisted_and_context_dropped ... ok
+test skills::tests::a_dropped_skill_is_recorded_by_id_and_a_smaller_skill_still_fits ... ok
+test skills::tests::an_impossible_budget_is_reported_instead_of_exceeded ... ok
+test skills::tests::budget_counts_unicode_characters_not_utf8_bytes ... ok
+test skills::tests::budget_fallback_keeps_included_omitted_and_full_text_in_step ... ok
+test skills::tests::catalog_lists_missing_tool_skills_but_full_text_is_not_injected ... ok
+test skills::tests::many_omitted_skills_stay_bounded_and_discoverable ... ok
+test skills::tests::marks_every_duplicate_id_invalid_and_orders_scans_deterministically ... ok
+test skills::tests::parses_and_validates_a_skill_package ... ok
+test skills::tests::rejects_skills_that_request_unknown_tools ... ok
+test skills::tests::skipped_skill_can_still_be_loaded_on_demand ... ok
+test tool_guard::tests::allows_supported_tools_inside_the_project ... ok
+test tool_guard::tests::blocks_paths_outside_the_project ... ok
+test tool_guard::tests::blocks_unknown_tools_and_missing_projects ... ok
+test tool_guard::tests::validates_frozen_read_ranges_and_search_cursor_shape ... ok
+test tool_host::a0_replace_recovery_tests::a0_probe_records_the_real_replace_failure_shape ... ignored, diagnostic probe: run with --nocapture to record the real ReplaceFileW failure shape
+test tool_host::a0_replace_recovery_tests::a_committed_target_without_a_verified_backup_is_not_committed ... ok
+test tool_host::a0_replace_recovery_tests::a_failed_settlement_never_destroys_the_applying_record ... ok
+test tool_host::a0_replace_recovery_tests::a_preimage_replace_commits_and_keeps_the_verified_backup ... ok
+test tool_host::a0_replace_recovery_tests::a_preimage_replace_detects_a_changed_original_before_renaming ... ok
+test tool_host::a0_replace_recovery_tests::a_preimage_replace_is_refused_when_the_backup_cannot_be_staged ... ok
+test tool_host::a0_replace_recovery_tests::a_replace_is_refused_when_the_record_cannot_be_stored ... ok
+test tool_host::a0_replace_recovery_tests::a_target_that_became_a_third_content_is_recovery_required ... ok
+test tool_host::a0_replace_recovery_tests::an_edit_commits_and_keeps_the_verified_recovery_materials ... ok
+test tool_host::a0_replace_recovery_tests::an_original_renamed_to_the_backup_is_recovery_required ... ok
+test tool_host::a0_replace_recovery_tests::an_unreadable_path_is_unknown_not_absent_and_pins_the_materials ... ok
+test tool_host::a0_replace_recovery_tests::committed_requires_a_verified_backup_holding_the_original ... ok
+test tool_host::a0_replace_recovery_tests::committed_still_holds_when_the_new_content_equals_the_original ... ok
+test tool_host::a0_replace_recovery_tests::failed_replace_keeps_the_original_and_the_new_content_recoverable ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_c4_comparison_tests::c4_real_host_notice_vs_fixed_polling ... ok
+test tool_host::a0_replace_recovery_tests::not_applied_requires_an_untouched_original_no_backup_and_a_staged_candidate ... ok
+test tool_host::a0_replace_recovery_tests::replace_errors_1175_1176_1177_pin_the_materials ... ok
+test tool_host::a0_replace_recovery_tests::failed_replace_on_a_locked_target_is_a_verified_no_effect_failure ... ok
+test tool_host::a0_replace_recovery_tests::settle_cleans_the_candidate_when_the_original_is_verifiably_intact ... ok
+test tool_host::a0_replace_recovery_tests::settle_commits_and_keeps_the_verified_backup_and_both_records ... ok
+test tool_host::a0_replace_recovery_tests::settle_pins_every_material_when_the_original_was_already_moved ... ok
+test tool_host::admitted_file_tests::authority_ignores_model_baseline_and_registration_failure_is_visible ... ok
+test tool_host::admitted_file_tests::final_gate_refuses_after_verified_preimage_before_any_replace ... ok
+test tool_host::admitted_file_tests::stale_authoritative_baseline_refuses_before_capture ... ok
+test tool_host::command_environment::tests::explicit_environment_rejects_secrets_duplicates_and_invalid_names ... ok
+test tool_host::command_environment::tests::parent_environment_excludes_secret_shaped_canaries ... ok
+test tool_host::revision_regression_tests::r4_failed_atomic_replace_preserves_original_and_cleans_staging ... ok
+test tool_host::revision_regression_tests::r4_stale_preparation_and_stale_read_cannot_overwrite_new_content ... ok
+test runtime_host::work_tools::tests::a1_acceptance_requires_plan_review_and_valid_evidence ... ok
+test runtime_host::work_tools::tests::conversational_markdown_cannot_create_a_runtime_goal ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_batch_tests::real_host_merges_two_compute_job_notices_into_one_continuation ... ok
+test runtime_host::work_tools::tests::durable_host_tools_freeze_policy_and_close_attempt_with_validated_checks ... ok
+test tool_host::tests::a_non_zero_exit_keeps_both_streams_and_labels_them ... ok
+test runtime_host::work_tools::tests::goal_complete_rejects_open_tasks ... ok
+test tool_host::tests::an_empty_and_a_whitespace_only_file_body_are_written_exactly_as_given ... ok
+test tool_host::tests::an_edit_with_an_empty_replacement_deletes_the_matched_text ... ok
+test runtime_host::work_tools::tests::cross_file_bug_workflow_restores_three_tasks_and_evidence_after_restart ... ok
+test runtime_host::work_tools::tests::goal_complete_requires_valid_evidence_for_each_completed_task ... ok
+test tool_host::tests::cancelled_tool_does_not_write_or_create_parent_directories ... ok
+test tool_host::tests::a_non_zero_exit_that_only_wrote_to_stdout_still_reports_that_output ... ok
+test runtime_host::work_tools::tests::high_risk_implementation_run_cannot_resolve_its_own_repair_blocker ... ok
+test runtime_host::work_tools::tests::proposed_goal_cannot_receive_tasks_before_host_confirmation ... ok
+test tool_host::tests::error_codes_round_trip_and_never_double_tag ... ok
+test runtime_host::work_tools::tests::persistent_graph_work_tools_activate_and_serialize_a_bounded_snapshot ... ok
+test tool_host::tests::malformed_write_and_edit_calls_stay_rejected_with_a_classification ... ok
+test runtime_host::work_tools::tests::repair_override_host_schema_is_exact_bounded_and_never_directly_executable ... ok
+test tool_host::tests::prepares_and_executes_file_edits_inside_the_project ... ok
+test tool_host::tests::synchronous_host_commands_require_a_verified_backend ... ok
+test runtime_host::work_tools::tests::snapshot_identity_is_owned_by_the_host_envelope ... ok
+test tool_host::tests::prepares_new_files_but_blocks_parent_traversal ... ok
+test tool_host::tests::utf8_child_bytes_are_kept_and_other_bytes_use_the_console_codepage ... ok
+test tool_host::tests::unicode_and_crlf_bodies_survive_a_write_and_an_edit ... ok
+test vector_store::tests::builds_flushes_verifies_and_searches_a_generation ... ok
+test vector_store::tests::rejects_dimension_changes_atomically_and_after_flush ... ok
+test vector_store::tests::returns_top_k_in_deterministic_cosine_order ... ok
+test vector_store::tests::validates_generation_lifecycle_and_all_error_codes_are_stable ... ok
+test work_diagnostics::tests::a0_reference_docs_match_code_contracts ... ok
+test runtime_host::work_tools::tests::work_snapshot_v2_source_identity_is_stable_and_covers_a1_facts ... ok
+test work_mode_gate::tests::changes_and_high_risk_requests_do_not_imply_goal_intent ... ok
+test tool_host::tests::a_parked_reader_keeps_draining_but_holds_no_bytes ... ok
+test work_mode_gate::tests::delegated_subtask_seed_does_not_create_a_goal ... ok
+test runtime_host::work_tools::tests::work_tools_enforce_host_owned_state_and_optimistic_versions ... ok
+test work_mode_gate::tests::explicit_goal_language_and_slash_command_require_confirmation ... ok
+test tool_host::tests::a_pipe_that_never_closes_keeps_its_partial_output_and_is_reaped_later ... ok
+test runtime_host::work_tools::tests::a0_snapshot_and_state_update_p95_stay_within_budget ... ok
+test work_diagnostics::tests::diagnoses_and_exports_a0_work_state ... ok
+test work_mode_gate::tests::cross_file_fix_stays_in_conversation_without_explicit_goal_intent ... ok
+test yuxi::knowledge_search::tests::indexed_failures_do_not_silently_become_lexical_no_hits ... ok
+test yuxi::knowledge_search::tests::indexed_search_preserves_semantic_chunks_and_enforces_output_limits ... ok
+test yuxi::knowledge_search::tests::live_remote_knowledge_search_and_read ... ignored, requires an explicitly authorized live test account in FOX_TEST_YUXI_* environment variables
+test yuxi::knowledge_search::tests::remote_access_denial_and_missing_parsed_documents_are_errors_not_missing_bindings ... ok
+test yuxi::knowledge_search::tests::remote_document_read_uses_parsed_text_and_rejects_binary_previews_and_oversized_bodies ... ok
+test yuxi::knowledge_search::tests::remote_search_reads_authorized_parsed_documents_with_sources_and_pagination ... ok
+test yuxi::knowledge_search::tests::remote_search_reports_unparsed_documents_as_partial_not_an_empty_complete_search ... ok
+test yuxi::runtime::tests::adds_selected_knowledge_bases_and_retrieval_requirement_to_yuxi_query ... ok
+test yuxi::runtime::tests::deduplicates_knowledge_bindings_by_id ... ok
+test yuxi::runtime::tests::does_not_duplicate_completed_ask_user_question_tools ... ok
+test yuxi::runtime::tests::flushes_unclosed_think_content_when_the_run_finishes ... ok
+test yuxi::runtime::tests::leaves_yuxi_query_unchanged_without_enabled_knowledge_bases ... ok
+test yuxi::runtime::tests::maps_stream_event_chunks_emitted_by_newer_yuxi_agents ... ok
+test yuxi::runtime::tests::maps_structured_ask_user_question_request ... ok
+test yuxi::runtime::tests::maps_terminal_only_resume_events ... ok
+test yuxi::runtime::tests::maps_yuxi_knowledge_tool_results_to_sources ... ok
+test yuxi::runtime::tests::parses_an_eof_frame_without_a_trailing_separator ... ok
+test yuxi::runtime::tests::parses_and_maps_compact_yuxi_sse ... ok
+test yuxi::runtime::tests::preserves_genuine_yuxi_interruptions ... ok
+test yuxi::runtime::tests::preserves_message_deltas_after_an_intermediate_success_status ... ok
+test yuxi::runtime::tests::preserves_utf8_characters_split_across_http_chunks ... ok
+test work_mode_gate::tests::explanation_and_one_shot_read_only_requests_stay_in_chat ... ok
+test yuxi::runtime::tests::rejects_an_oversized_complete_sse_frame ... ok
+test yuxi::runtime::tests::separates_inline_think_content_from_the_answer ... ok
+test yuxi::runtime::tests::separates_think_tags_split_across_stream_chunks ... ok
+test yuxi::runtime::tests::splits_large_message_deltas_on_unicode_boundaries ... ok
+test yuxi::runtime::tests::treats_ask_user_question_interruption_as_waiting_for_user ... ok
+test yuxi::runtime::tests::validates_selected_knowledge_bases_against_an_explicit_agent_scope ... ok
+test yuxi::runtime::tests::waits_for_the_explicit_end_after_an_ordinary_success_message ... ok
+test yuxi::tests::decodes_percent_encoded_knowledge_file_names ... ok
+test yuxi::runtime::tests::rejects_an_oversized_incomplete_sse_frame ... ok
+test yuxi::tests::maps_selected_and_default_all_agent_resources ... ok
+test yuxi::tests::deleting_an_already_missing_thread_is_idempotent ... ok
+test yuxi::tests::maps_workspace_knowledge_tree_entries ... ok
+test yuxi::tests::normalizes_local_and_remote_urls ... ok
+test yuxi::tests::reads_source_metadata_from_the_authenticated_head_endpoint ... ok
+test yuxi::tests::reads_only_the_requested_authenticated_byte_range ... ok
+test yuxi::tests::rejects_missing_source_revision_headers ... ok
+test yuxi::tests::rejects_unsafe_base_url_shapes ... ok
+test yuxi::tests::serializes_enabled_knowledge_bindings_for_remote_run_metadata ... ok
+test yuxi::tests::tests_configured_live_knowledge_original_gateway_when_requested ... ok
+test yuxi::tests::tests_configured_live_yuxi_when_requested ... ok
+test yuxi::tests::refuses_servers_that_ignore_range_requests ... ok
+test yuxi::tests::validates_exact_content_ranges ... ok
+test yuxi::tests::tests_the_real_yuxi_health_path ... ok
+test yuxi::tests::verifies_access_token_against_the_agent_endpoint ... ok
+test work_mode_gate::tests::explicit_no_change_request_overrides_other_signals ... ok
+test work_mode_gate::tests::hidden_goal_mode_uses_the_visible_prompt_for_goal_copy ... ok
+test work_mode_gate::tests::runtime_proposal_is_intercepted_and_user_confirmation_controls_activation ... ok
+test work_mode_gate::tests::runtime_proposal_refines_tracked_work_goal_before_confirmation ... ok
+test tool_host::tests::a_timeout_reports_the_output_produced_before_the_tree_was_killed ... ok
+test tool_host::tests::attached_readers_drain_past_retention_and_report_dropped_bytes ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_terminal_tests::failed_and_independently_cancelled_jobs_auto_resume_on_both_pi_transports ... ok
+test tool_host::tests::cancellation_keeps_failed_semantics_and_carries_the_partial_output ... ok
+test tool_host::tests::cancellation_stops_an_in_flight_command ... ok
+test tool_host::tests::command_output_beyond_the_old_cap_is_fully_retained_and_accounted ... ok
+test tool_host::tests::commands_must_use_a_working_directory_inside_the_project ... ok
+test tool_host::tests::oversized_output_is_counted_and_a_remedy_is_offered ... ok
+test tool_host::tests::the_result_names_the_shell_and_platform_that_actually_ran ... ok
+test tool_host::tests::wedged_readers_hit_a_ceiling_and_the_refusal_is_reported ... ok
+test tool_host::tests::a_command_runs_in_a_directory_with_chinese_and_spaces_and_propagates_its_code ... ok
+test tool_host::tests::cancelling_a_command_that_outruns_its_grace_window_still_reaps_readers ... ok
+test runtime_host::kernel_coordinator::tests::waiting_jobs_auto_tests::real_host_original_wait_deadline_stops_without_model_resume ... ok
+test runtime_host::shadow_reconcile_tests::real_pi_process_events_flow_through_host_database_and_shared_shadow_adapter ... ok
+
+test result: ok. 1320 passed; 0 failed; 27 ignored; 0 measured; 0 filtered out; finished in 163.09s
+
