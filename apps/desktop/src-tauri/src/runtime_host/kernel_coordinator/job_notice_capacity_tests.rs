@@ -575,9 +575,10 @@ fn real_runtime_host_capacity_prefix_remainder_lifecycle_on_both_pi_transports()
     assert_ne!(facts.state, "completed",
         "a Final with an undelivered remainder must never be confirmed as complete");
     assert_eq!(facts.state, "failed");
-    assert_eq!(facts.failed_code, "kernel.execution_failed",
-        "the durable code is the generic executor failure; the competition text is local only");
-    assert!(facts.failed_message.contains("uncertain work was not replayed"),
+    assert_eq!(facts.failed_code, "kernel.job_notice_competition",
+        "the durable code must preserve the notice refusal without exposing raw adapter text");
+    assert!(facts.failed_message.contains("可能是通知容量不足")
+        && facts.failed_message.contains("任务未确认完成"),
         "unexpected durable failure message: {}", facts.failed_message);
     assert_eq!(facts.model_request_since_wall_ms, None,
         "a terminal Run must not keep an in-flight model-request anchor");
@@ -645,4 +646,3 @@ remainder={} undelivered re-entry=clean", facts.state, facts.failed_code,
         facts.elapsed_to_terminal_ms, facts.run_execution_budget_ms, prefix.len(), prefix.len(),
         remainder.len());
 }
-

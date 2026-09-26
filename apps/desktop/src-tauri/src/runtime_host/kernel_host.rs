@@ -182,6 +182,16 @@ fn execution_failure_code(error: &str) -> String {
     "kernel.execution_failed".to_owned()
 }
 
+/// A tagged Kernel notice refusal gets a durable, bounded diagnostic.
+/// Never persist the original error: it can contain untrusted adapter content.
+fn job_notice_failure(error: &str) -> Option<(&'static str, &'static str)> {
+    if error.starts_with(kernel::JOB_NOTICE_COMPETITION) {
+        return Some(("kernel.job_notice_competition",
+            "后台计算结束时仍有通知或作业未处理；可能是通知容量不足或状态同时变化。任务未确认完成，请检查本次运行和作业状态。"));
+    }
+    None
+}
+
 /// Admission half of the Host order (verify → claim). Kept separate so the
 /// executor chain can stay in `RuntimeHost` where the gateway state lives.
 struct HostAdmission<'a> {
@@ -578,6 +588,21 @@ pub(crate) fn resource_failure_result(tool: &str, error: &str) -> Value {
 
 #[cfg(test)]
 mod failure_tests {
+    #[test]
+    fn notice_competition_has_bounded_code_without_classifying_unrelated_errors() {
+        assert_eq!(super::job_notice_failure(
+            "kernel.job_notice_competition:pending Host notices arrived at Final"),
+            Some(("kernel.job_notice_competition",
+                "后台计算结束时仍有通知或作业未处理；可能是通知容量不足或状态同时变化。任务未确认完成，请检查本次运行和作业状态。")));
+        // A parked Run's capacity-blocked wake returns this precise error to
+        // the caller while remaining parked; it never enters terminal mapping.
+        assert_eq!(super::job_notice_failure(
+            "kernel.job_notice_capacity_blocked: no bounded pending typed fact"), None);
+        assert_eq!(super::job_notice_failure("the Run was cancelled"), None);
+        assert_eq!(super::job_notice_failure("model execution failed"), None);
+        assert_eq!(super::job_notice_failure("kernel.job_notice_capacity_blockedness"), None);
+    }
+
     #[test]
     fn kernel_reader_failure_preserves_reason_without_claiming_policy_denial() {
         let result = super::resource_failure_result("ls", "tool path cannot be resolved: file not found");
@@ -1110,7 +1135,7 @@ pub(super) fn drive_with_actions_transport(
             if !terminal(&coordinator.snapshot()?.state) {
                 // Do not persist arbitrary adapter errors: they may contain
                 // request bodies or credentials. Detailed diagnostics stay local.
-                let (code, message) = match error.as_str() {
+                let (code, message) = job_notice_failure(&error).unwrap_or_else(|| match error.as_str() {
                     "kernel.jobs_pending" => ("kernel.jobs_pending", "后台计算尚未完成；任务已保留进度，请检查作业状态后继续。"),
                     crate::kernel_compaction::UNCERTAIN => (crate::kernel_compaction::UNCERTAIN,
                         "上下文压缩请求已发出，但结果未确认。原始历史保留，未自动重复请求；请检查后重新发起任务。"),
@@ -1122,7 +1147,7 @@ pub(super) fn drive_with_actions_transport(
                     crate::kernel_compaction::FAILED => (crate::kernel_compaction::FAILED,
                         "上下文压缩未取得有效结果，任务已停止。原始历史保留，未自动重复请求。"),
                     _ => ("kernel.execution_failed", "The owned model or resource executor failed; uncertain work was not replayed."),
-                };
+                });
                 let reason=match code {
                     crate::kernel_compaction::NO_CANDIDATES => Some("no_candidates"),
                     crate::kernel_compaction::NO_REDUCTION => Some("no_reduction"),
