@@ -84,6 +84,8 @@ mod waiting_jobs_terminal_tests;
 mod waiting_jobs_batch_tests;
 #[path = "waiting_jobs_c4_comparison_tests.rs"]
 mod waiting_jobs_c4_comparison_tests;
+#[path = "http_model_fixture_tests.rs"]
+mod http_model_fixture_tests;
 #[path = "job_notice_capacity_tests.rs"]
 mod job_notice_capacity_tests;
 #[path = "run_lease_component_tests.rs"]
@@ -1479,6 +1481,20 @@ fn start_http_model_fixture(replies: Vec<Value>) -> (std::net::SocketAddr, std::
     start_http_model_fixture_with_response_hook(replies,None)
 }
 
+/// A zero-byte disconnect has not supplied a model request. Once any request
+/// byte arrived, the same EOF/reset is a truncated request and must fail.
+fn is_empty_http_model_probe_disconnect(read: &std::io::Result<usize>, bytes_seen: usize) -> bool {
+    bytes_seen == 0
+        && match read {
+            Ok(0) => true,
+            Err(error) => matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+            ),
+            _ => false,
+        }
+}
+
 fn start_http_model_fixture_with_response_hook(
     replies: Vec<Value>,
     response_hook: Option<(usize,Box<dyn FnOnce() + Send>)>,
@@ -1493,7 +1509,8 @@ fn start_http_model_fixture_with_response_hook(
         let mut requests = Vec::new();
         let mut response_hook = response_hook;
         let deadline = Instant::now() + Duration::from_secs(45);
-        while requests.len() < replies.len() {
+        'responses: while requests.len() < replies.len() {
+            assert!(Instant::now() < deadline, "model request was not received");
             let mut stream = match listener.accept() {
                 Ok((stream, _)) => stream,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1508,8 +1525,14 @@ fn start_http_model_fixture_with_response_hook(
             let mut bytes = Vec::new();
             let mut buffer = [0u8; 8192];
             let (header_end, length) = loop {
-                let read = stream.read(&mut buffer).unwrap();
-                assert!(read > 0);
+                let result = stream.read(&mut buffer);
+                if is_empty_http_model_probe_disconnect(&result, bytes.len()) {
+                    continue 'responses;
+                }
+                let read = result.unwrap_or_else(|error| {
+                    panic!("model request read failed after {} bytes: {error}", bytes.len())
+                });
+                assert!(read > 0, "model request ended after {} bytes", bytes.len());
                 bytes.extend_from_slice(&buffer[..read]);
                 assert!(bytes.len() < 1_048_576);
                 if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
@@ -1520,8 +1543,10 @@ fn start_http_model_fixture_with_response_hook(
                 }
             };
             while bytes.len() < header_end + length {
-                let read = stream.read(&mut buffer).unwrap();
-                assert!(read > 0);
+                let read = stream.read(&mut buffer).unwrap_or_else(|error| {
+                    panic!("model request body failed after {} bytes: {error}", bytes.len())
+                });
+                assert!(read > 0, "model request body ended after {} bytes", bytes.len());
                 bytes.extend_from_slice(&buffer[..read]);
             }
             let body: Value = serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
