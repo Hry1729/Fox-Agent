@@ -252,6 +252,41 @@ fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     }
 }
 
+/// This fixture starts a fresh Node worker for each round. A completed HTTP
+/// response is progress; a TCP accept or a partial body cannot extend the
+/// deadline. Keep the same 20 s no-progress bound on every round.
+const PROVIDER_PROGRESS_LIMIT: Duration = Duration::from_secs(20);
+
+struct ProviderProgressDeadline {
+    next_progress_by: Instant,
+    completed_responses: usize,
+}
+
+impl ProviderProgressDeadline {
+    fn new(now: Instant) -> Self {
+        Self {
+            next_progress_by: now + PROVIDER_PROGRESS_LIMIT,
+            completed_responses: 0,
+        }
+    }
+
+    fn completed_response_at(&mut self, now: Instant) {
+        self.next_progress_by = now + PROVIDER_PROGRESS_LIMIT;
+        self.completed_responses += 1;
+    }
+
+    fn timeout_reason_at(&self, now: Instant) -> Option<&'static str> {
+        if now < self.next_progress_by {
+            return None;
+        }
+        Some(if self.completed_responses == 0 {
+            "local Provider timed out waiting for the first completed request/response (20 s)"
+        } else {
+            "local Provider timed out waiting for the next completed request/response (20 s)"
+        })
+    }
+}
+
 impl LocalProvider {
     fn start(version: Arc<Mutex<Option<String>>>) -> Self {
         Self::start_with_repeated_write(version, false)
@@ -274,16 +309,20 @@ impl LocalProvider {
                 bytes: Vec<u8>,
                 accepted: Instant,
             }
-            let deadline = Instant::now() + Duration::from_secs(20);
+            let mut deadline = ProviderProgressDeadline::new(Instant::now());
+            // F1's assert_provider_read_delivery requires exactly 2 requests;
+            // the F3 matrix accepts 2 or 4 required requests plus at most 3
+            // extra stop rounds. Rejecting an eighth/sixth request is already
+            // outside those assertions and limits deadline renewals.
+            let required_requests = if repeat_write { 4 } else { 2 };
+            let max_requests = required_requests + 3;
             let mut requests = Vec::new();
             let mut clients: Vec<Client> = Vec::new();
             while !stop_worker.load(Ordering::SeqCst) {
-                // Original failure text, unchanged: the fixture's own deadline,
-                // with no lock held and nothing else formatted into it.
-                assert!(
-                    Instant::now() < deadline,
-                    "local Provider exceeded its 20 s deadline"
-                );
+                if let Some(reason) = deadline.timeout_reason_at(Instant::now()) {
+                    // No event-log lock is held when the worker panics.
+                    panic!("{reason}");
+                }
                 loop {
                     match listener.accept() {
                         Ok((stream, _)) => {
@@ -373,6 +412,10 @@ impl LocalProvider {
                     .set_write_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
                 let index = requests.len();
+                assert!(
+                    index < max_requests,
+                    "local Provider exceeded its scripted request limit"
+                );
                 lock_recover(&seen_worker).push(request.clone());
                 lock_recover(&events_worker).push(format!(
                     "request {index} body_bytes={request_bytes}@{}ms",
@@ -432,6 +475,7 @@ impl LocalProvider {
                     chunks[0], chunks[1]
                 );
                 write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+                deadline.completed_response_at(Instant::now());
                 lock_recover(&events_worker).push(format!(
                     "response {index} body_bytes={}@{}ms",
                     body.len(),
@@ -897,18 +941,72 @@ fn f1_per_round_reopen_after_read_rejects_first_write() {
 #[path = "f3_approval_tests.rs"]
 mod f3_approval_tests;
 
+#[test]
+fn local_provider_progress_deadline_allows_four_bounded_rounds_past_twenty_seconds() {
+    let started = Instant::now();
+    let mut deadline = ProviderProgressDeadline::new(started);
+    // Every completed response is only 6 s after the preceding one. The old
+    // absolute fixture deadline would reject the fourth at 24 s even though
+    // no individual round has stopped making progress.
+    for seconds in [6, 12, 18, 24] {
+        let now = started + Duration::from_secs(seconds);
+        assert_eq!(deadline.timeout_reason_at(now), None);
+        deadline.completed_response_at(now);
+    }
+    // Arithmetic control for the removed absolute rule, not a replay of the
+    // historical failing Fox run.
+    let old_absolute_deadline = started + Duration::from_secs(20);
+    assert!(started + Duration::from_secs(24) > old_absolute_deadline);
+    assert_eq!(
+        deadline.timeout_reason_at(started + Duration::from_secs(43)),
+        None
+    );
+    assert_eq!(
+        deadline.timeout_reason_at(started + Duration::from_secs(44)),
+        Some("local Provider timed out waiting for the next completed request/response (20 s)")
+    );
+}
+
+#[test]
+fn local_provider_progress_deadline_rejects_first_and_next_request_stalls() {
+    let started = Instant::now();
+    let deadline = ProviderProgressDeadline::new(started);
+    assert_eq!(
+        deadline.timeout_reason_at(started + Duration::from_secs(19)),
+        None
+    );
+    assert_eq!(
+        deadline.timeout_reason_at(started + Duration::from_secs(20)),
+        Some("local Provider timed out waiting for the first completed request/response (20 s)")
+    );
+
+    // Only a fully handled request and response calls completed_response_at;
+    // an accepted socket or an incomplete HTTP body cannot refresh the clock.
+    let mut deadline = ProviderProgressDeadline::new(started);
+    deadline.completed_response_at(started + Duration::from_secs(6));
+    assert_eq!(
+        deadline.timeout_reason_at(started + Duration::from_secs(25)),
+        None
+    );
+    assert_eq!(
+        deadline.timeout_reason_at(started + Duration::from_secs(26)),
+        Some("local Provider timed out waiting for the next completed request/response (20 s)")
+    );
+}
+
 /// Negative case for the diagnostics themselves: when the Provider reaches its
-/// deadline the thread still raises the ORIGINAL failure text, no lock is left
+/// no-progress deadline the thread still raises the intended failure text,
+/// no lock is left
 /// poisoned behind it, and the timeline survives so the failure stays
 /// explicable. A diagnostic that replaced the real error with a PoisonError (or
 /// lost the timeline) would defeat the whole point of the instrumentation.
 #[test]
-fn local_provider_deadline_preserves_the_original_error_and_its_timeline() {
+fn local_provider_first_request_timeout_preserves_diagnostic_and_timeline() {
     let version: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let mut provider = LocalProvider::start(version);
-    // Never connect: nothing is accepted, so the fixture's own absolute deadline
-    // is the only thing that can end the worker thread. This is bounded by that
-    // same 20 s deadline, which this test deliberately does NOT change.
+    // Never connect: nothing is accepted, so the fixture's first-request
+    // deadline ends the worker thread after 20 s. This real wall-clock negative
+    // remains in addition to the deterministic clock tests above.
     let join = provider.worker.take().unwrap().join();
     let payload = join.expect_err("the Provider must fail at its own deadline");
     let message = payload
@@ -917,8 +1015,9 @@ fn local_provider_deadline_preserves_the_original_error_and_its_timeline() {
         .or_else(|| payload.downcast_ref::<&str>().map(|text| (*text).to_owned()))
         .unwrap_or_else(|| panic!("unexpected Provider panic payload"));
     assert_eq!(
-        message, "local Provider exceeded its 20 s deadline",
-        "the original failure text must be preserved verbatim"
+        message,
+        "local Provider timed out waiting for the first completed request/response (20 s)",
+        "the first-request timeout must remain explicit"
     );
 
     // The worker panicked while holding the events lock in the unimplemented
