@@ -82,6 +82,8 @@ mod waiting_jobs_boundary_tests;
 mod waiting_jobs_terminal_tests;
 #[path = "waiting_jobs_batch_tests.rs"]
 mod waiting_jobs_batch_tests;
+#[path = "waiting_jobs_c4_comparison_tests.rs"]
+mod waiting_jobs_c4_comparison_tests;
 #[path = "job_notice_capacity_tests.rs"]
 mod job_notice_capacity_tests;
 #[path = "run_lease_component_tests.rs"]
@@ -201,6 +203,11 @@ fn fixture_with_project_opt(clock: &dyn Clock, prompt_hash: &str, model: Option<
 }
 
 fn fixture_with_budgets_opt(clock: &dyn Clock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32), has_project: bool, budgets: TimeBudgets) -> (Database, PathBuf, String) {
+    fixture_with_budgets_notice_opt(clock, prompt_hash, model, initial, prepared, retries, has_project, budgets, false)
+}
+
+/// C4 varies only the flag frozen into the Kernel Run at creation.
+fn fixture_with_budgets_notice_opt(clock: &dyn Clock, prompt_hash: &str, model: Option<&crate::kernel_model_config::KernelModelConfig>, initial: bool, prepared: bool, retries: (u32,u32), has_project: bool, budgets: TimeBudgets, notice_enabled: bool) -> (Database, PathBuf, String) {
     let engine = model.map(|model| model.engine_id.as_str()).unwrap_or("pi");
     let root = std::env::temp_dir().join(format!("fox-coordinator-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
@@ -255,7 +262,7 @@ fn fixture_with_budgets_opt(clock: &dyn Clock, prompt_hash: &str, model: Option<
         approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
         provider_max_retries: retries.0,
         turn_max_retries: retries.1,
-        experimental_compute_job_notice: false,
+        experimental_compute_job_notice: notice_enabled,
     };
     db.kernel_create_run(
         &run_id,
