@@ -211,7 +211,11 @@ export function OnboardingPage({ navigate, onExit, dark = false }: { navigate: N
     setStepDirection(-1)
     setStep((value) => Math.max(0, value - 1))
   }
-  return <div className="fox-onboarding-screen" data-tauri-drag-region>
+  // The final step is a closing screen rather than another wizard page: the left
+  // column collapses, the fox artwork and its two lines slide into the centre of the
+  // full-width card, and the "进入 Fox" call to action appears underneath.
+  const finishing = step === steps.length - 1
+  return <div className={`fox-onboarding-screen${finishing ? ' is-finishing' : ''}`} data-tauri-drag-region>
     <Grainient
       className="fox-onboarding-background"
       color1="#9fc9ee"

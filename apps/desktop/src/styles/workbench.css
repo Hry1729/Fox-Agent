@@ -4498,7 +4498,7 @@ img[src='/avatars/fox-assistant.png'] {
    the default grey instead of taking the activation colour. */
 .fox-composer-wrap.is-empty .fox-prompt-input.is-focused > [data-slot='input-group'] {
   border-color: var(--fox-border);
-  box-shadow: var(--fox-composer-elevation), 0 0 0 2px var(--ring);
+  box-shadow: var(--fox-composer-elevation), 0 0 0 2px var(--fox-blue-soft);
 }
 
 .fox-user-message.is-editing {
@@ -5321,11 +5321,11 @@ img[src='/avatars/fox-assistant.png'] {
   background: linear-gradient(180deg, color-mix(in oklch, var(--fox-card) 38%, transparent), transparent 32%);
 }
 
-/* Activation: the border and the glow use the *same* light blue (`--ring`), so the
-   two no longer read as two different colours, and the elevation stays on. */
+/* Activation: border and glow share one very light blue (`--fox-blue-soft`), so the
+   two never read as two different colours, and the card keeps its elevation. */
 .fox-prompt-input.is-focused > [data-slot='input-group'] {
-  border-color: var(--ring);
-  box-shadow: var(--fox-composer-elevation), 0 0 0 2px var(--ring);
+  border-color: var(--fox-blue-soft);
+  box-shadow: var(--fox-composer-elevation), 0 0 0 2px var(--fox-blue-soft);
 }
 
 .fox-composer-attachments {

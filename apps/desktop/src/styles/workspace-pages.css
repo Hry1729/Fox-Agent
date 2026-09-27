@@ -3213,9 +3213,9 @@
 .fox-onboarding-enter{transition:opacity 500ms ease 800ms,transform 500ms cubic-bezier(.22,1,.36,1) 800ms,visibility 0s linear 800ms!important}
 .fox-onboarding-enter svg{width:13px}
 .fox-onboarding-screen.is-finishing .fox-onboarding-skip{opacity:0;visibility:hidden;pointer-events:none;transition:opacity 240ms ease,visibility 0s linear 240ms}
-.fox-onboarding-shell.is-finishing{grid-template-columns:minmax(0,0fr) minmax(0,1fr)}
-.fox-onboarding-shell.is-finishing .fox-onboarding-main{transform:translateX(-72px);opacity:0;pointer-events:none}
-.fox-onboarding-shell.is-finishing .fox-onboarding-enter{opacity:1;visibility:visible;pointer-events:auto;transform:translate(-50%,0)}
+.fox-onboarding-screen.is-finishing .fox-onboarding-shell{grid-template-columns:minmax(0,0fr) minmax(0,1fr)}
+.fox-onboarding-screen.is-finishing .fox-onboarding-main{transform:translateX(-72px);opacity:0;pointer-events:none}
+.fox-onboarding-screen.is-finishing .fox-onboarding-enter{opacity:1;visibility:visible;pointer-events:auto;transform:translate(-50%,0)}
 
 @keyframes foxGrainientFallback{0%{background-position:0% 12%}50%{background-position:72% 88%}100%{background-position:100% 20%}}
 @media(prefers-reduced-motion:reduce){.fox-onboarding-shell,.fox-onboarding-main,.fox-onboarding-visual-media,.fox-onboarding-enter{transition-duration:1ms!important;transition-delay:0s!important}}
