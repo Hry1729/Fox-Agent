@@ -778,7 +778,7 @@ function AgentEditorResourcesFields({ editor }: { editor: AgentEditor }) {
   )
 }
 
-function AgentDetailDialog({ agent, open, onOpenChange, onManage, onUse }: {
+export function AgentDetailDialog({ agent, open, onOpenChange, onManage, onUse }: {
   agent: AgentCardData | null
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -1190,7 +1190,6 @@ export function AgentListPage({ sidebarCollapsed, onSidebar, navigate }: { sideb
           <Button size="sm" onClick={openCreate}><Plus size={14} />新建专家</Button>
         </div>
         {resource.error && <p className="fox-page-error">{resource.error}</p>}
-        {(resource.syncing || resource.syncError) && <div className={`fox-agent-sync-notice ${resource.syncError ? 'is-offline' : ''}`} title={resource.syncError ?? undefined}>{resource.syncing ? <LoaderCircle className="animate-spin" /> : <Info />}<span>{resource.syncing ? '正在后台同步知识库专家，本地专家可正常使用。' : '知识库服务暂不可用或未登录，已显示缓存专家。'}</span></div>}
         {resource.loading && cards.length === 0 ? <p className="fox-page-empty fox-agent-list-empty">正在加载专家...</p> : filteredCards.length ? <div className="fox-entity-grid fox-shadcn-entity-grid">{filteredCards.map((agent) => <AgentCard key={agent.id} agent={agent} onUse={() => navigate('chat', agent.id)} onViewDetail={() => openView(agent)} />)}</div> : <p className="fox-page-empty fox-agent-list-empty">没有符合当前筛选条件的专家。</p>}
       </section>
       <DigitalColleagueManager open={digitalColleaguesOpen} onOpenChange={setDigitalColleaguesOpen} experts={resource.agents} />

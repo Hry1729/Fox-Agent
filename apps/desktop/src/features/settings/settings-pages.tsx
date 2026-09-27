@@ -26,7 +26,7 @@ import { useMcpServers, type SaveMcpServerInput } from './use-mcp-servers'
 import { useLifecycleHooks } from './use-lifecycle-hooks'
 import type { AgentRecord, KnowledgePreviewCacheStatistics, LifecycleHookRecord, McpServerRecord, ModelProviderRecord, NotificationPreferencesRecord, ObservabilityStatistics, ProjectManagementRecord, ProjectRecord, UsageStatistics } from '@/features/conversations/model/types'
 import { Grainient } from '@/components/effects/grainient'
-import { SpecularButton } from '@/components/effects/specular-button'
+import { BorderBeam } from '@/components/effects/border-beam'
 import { UserProfileDialog, useUserProfile } from '@/features/profile/user-profile'
 import { resolveYuxiLoginReturn, resolveYuxiServiceReturn, YUXI_LOGIN_RETURN_KEY, YUXI_SERVICE_RETURN_KEY } from '@/features/knowledge/knowledge-navigation'
 import { normalizeTextScale, persistTextScale, readTextScale, TEXT_SCALE_MAX, TEXT_SCALE_MIN } from './text-scale'
@@ -187,7 +187,7 @@ export function SettingsPage({ sidebarCollapsed, onSidebar, navigate, dark, onDa
   )
 }
 
-export function OnboardingPage({ navigate, onExit }: { navigate: NavigateWorkspace; onExit: (status: 'completed' | 'skipped') => void }) {
+export function OnboardingPage({ navigate, onExit, dark = false }: { navigate: NavigateWorkspace; onExit: (status: 'completed' | 'skipped') => void; dark?: boolean }) {
   const model = useModelService()
   const yuxi = useYuxiService()
   const [step, setStep] = useState(0)
@@ -258,13 +258,13 @@ export function OnboardingPage({ navigate, onExit }: { navigate: NavigateWorkspa
                 </motion.div>
               </AnimatePresence>
             </div>
-            <footer><Button variant="outline" className="fox-onboarding-prev" disabled={step === 0} onClick={goBack}>上一步</Button><Button className="fox-onboarding-next" disabled={step === 2 && !model.service} onClick={() => step === 2 ? current.action() : advance()}>{step === 2 ? '进入 Fox' : '下一步'}<ChevronRight /></Button></footer>
+            <footer><Button variant="outline" className="fox-onboarding-prev" disabled={step === 0} onClick={goBack}>上一步</Button><BorderBeam active={step === 2 && Boolean(model.service)} className="fox-onboarding-next-beam" colorVariant="colorful" size="md" strength={0.7} theme={dark ? 'dark' : 'light'}><Button className="fox-onboarding-next" disabled={step === 2 && !model.service} onClick={() => step === 2 ? current.action() : advance()}>{step === 2 ? '进入 Fox' : '下一步'}<ChevronRight /></Button></BorderBeam></footer>
             {step === 2 && !model.service && <button type="button" className="fox-onboarding-skip-link" onClick={() => onExit('skipped')}>暂时跳过，稍后在设置中配置</button>}
           </div>
         </main>
       </section>
       <aside className="fox-onboarding-visual">
-        <div className="fox-onboarding-visual-media"><img src="/mascot/fox/status/fox_sayhi.png" alt="Fox 卡通形象" /><div><strong>Fox Desktop</strong><span>轻量、高效的桌面专家工作台</span></div><SpecularButton className="fox-onboarding-enter" size="sm" radius={8} tint="#4f8fdf" tintOpacity={0} textColor="#4777a6" lineColor="#6f9fd2" baseColor="#6f9fd2" intensity={0.96} shineSize={12} shineFade={18} thickness={1.7} speed={1.35} followMouse={false} autoAnimate onClick={() => onExit(model.service ? 'completed' : 'skipped')}>进入 Fox<ChevronRight /></SpecularButton></div>
+        <div className="fox-onboarding-visual-media"><img src="/mascot/fox/status/fox_sayhi.png" alt="Fox 卡通形象" /><div><strong>Fox Desktop</strong><span>轻量、高效的桌面专家工作台</span></div><BorderBeam className="fox-onboarding-enter" colorVariant="colorful" size="md" strength={0.7} theme="light"><Button className="fox-onboarding-enter-button" size="sm" variant="outline" onClick={() => onExit(model.service ? 'completed' : 'skipped')}>进入 Fox<ChevronRight /></Button></BorderBeam></div>
       </aside>
     </div>
   </div>

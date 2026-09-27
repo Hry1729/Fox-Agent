@@ -178,6 +178,18 @@
 
 * { box-sizing: border-box; }
 html, body, #root { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+
+/* Radix ScrollArea sets `overflow: scroll` inline on its viewport and draws its own
+   thumb (mounted only while hovering). The native bar therefore has to be hidden
+   unconditionally: dev WebView2 renders it as an invisible overlay, but the packaged
+   build renders a 15px classic bar that both steals layout width and sits next to the
+   Radix thumb on hover. Hiding it here keeps every ScrollArea identical in both. */
+[data-slot="scroll-area-viewport"] {
+  scrollbar-width: none;
+}
+[data-slot="scroll-area-viewport"]::-webkit-scrollbar {
+  display: none;
+}
 button, input, textarea { font: inherit; }
 button { color: inherit; }
 

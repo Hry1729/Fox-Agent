@@ -3208,8 +3208,9 @@
 .fox-onboarding-main>*{min-width:390px}
 .fox-onboarding-visual{z-index:1;transition:background-color 500ms ease}
 .fox-onboarding-visual-media{position:relative;transition:transform 900ms cubic-bezier(.22,1,.36,1)}
-.fox-onboarding-enter{position:absolute!important;left:50%;top:calc(50% + 112px);min-width:104px;height:34px;opacity:0;visibility:hidden;pointer-events:none;transform:translate(-50%,12px)}
-.fox-onboarding-enter.specular-button{transition:opacity 500ms ease 800ms,transform 500ms cubic-bezier(.22,1,.36,1) 800ms,visibility 0s linear 800ms,filter 150ms ease!important}
+.fox-onboarding-enter{position:absolute!important;left:50%;top:calc(50% + 112px);min-width:104px;height:34px;display:inline-flex;align-items:center;justify-content:center;opacity:0;visibility:hidden;pointer-events:none;transform:translate(-50%,12px)}
+.fox-onboarding-enter-button{width:100%;height:32px;font-size:12px}
+.fox-onboarding-enter{transition:opacity 500ms ease 800ms,transform 500ms cubic-bezier(.22,1,.36,1) 800ms,visibility 0s linear 800ms!important}
 .fox-onboarding-enter svg{width:13px}
 .fox-onboarding-screen.is-finishing .fox-onboarding-skip{opacity:0;visibility:hidden;pointer-events:none;transition:opacity 240ms ease,visibility 0s linear 240ms}
 .fox-onboarding-shell.is-finishing{grid-template-columns:minmax(0,0fr) minmax(0,1fr)}

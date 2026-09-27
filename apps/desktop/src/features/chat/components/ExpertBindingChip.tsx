@@ -3,12 +3,11 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import type { AgentRecord, ConversationExpertBinding } from '@/features/conversations/model/types'
-import { declaredExpertToolAvailability, type ExpertToolAvailability } from './expert-binding-ui'
+import type { ExpertToolAvailability } from './expert-binding-ui'
 
 export type ExpertBindingView = ConversationExpertBinding
 
@@ -19,7 +18,10 @@ function ExpertIcon({ icon, name }: { icon?: string | null; name: string }) {
   </span>
 }
 
-export function ExpertBindingChip({ expert, readOnly, toolAvailability, onView, onChange, onRemove }: {
+// The menu is deliberately just the three actions (details / change / remove): the
+// capability summary row that used to sit on top of it is gone. `toolAvailability`
+// stays in the prop type because callers still pass it, but nothing renders it now.
+export function ExpertBindingChip({ expert, readOnly, onView, onChange, onRemove }: {
   expert: AgentRecord
   readOnly: boolean
   toolAvailability?: ExpertToolAvailability
@@ -27,7 +29,6 @@ export function ExpertBindingChip({ expert, readOnly, toolAvailability, onView, 
   onChange: () => void
   onRemove: () => void | Promise<void>
 }) {
-  const capability = toolAvailability ?? declaredExpertToolAvailability(expert)
   return (
     <DropdownMenu>
       <DropdownMenuTrigger className="fox-expert-chip" title={`当前专家：${expert.name}`}>
@@ -36,11 +37,6 @@ export function ExpertBindingChip({ expert, readOnly, toolAvailability, onView, 
         <ChevronDown size={12} />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" sideOffset={7} className="fox-expert-menu">
-        <DropdownMenuLabel>
-          <span>{capability.label}</span>
-          {capability.emptyIntersection && <small>当前无可用工具，仍可纯文本回答</small>}
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={onView}><Eye />查看详情</DropdownMenuItem>
         <DropdownMenuItem disabled={readOnly} onSelect={onChange}><RefreshCw />更换专家</DropdownMenuItem>
         <DropdownMenuSeparator />

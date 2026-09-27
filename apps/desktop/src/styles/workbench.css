@@ -54,7 +54,7 @@
 }
 
 .fox-window-product nav {
-  height: 22px;
+  height: var(--fox-inline-action-height);
   align-self: center;
   gap: 3px;
   margin-left: -4px;
@@ -64,14 +64,14 @@
   display: flex;
   align-items: center;
   gap: 1px;
-  height: 22px;
+  height: var(--fox-inline-action-height);
   align-self: center;
   margin-left: 1px;
 }
 
 .fox-titlebar-sidebar-controls button {
-  width: 22px;
-  height: 22px;
+  width: var(--fox-inline-action-height);
+  height: var(--fox-inline-action-height);
   display: grid;
   place-items: center;
   padding: 0;
@@ -99,7 +99,7 @@
 }
 
 .fox-window-product nav button {
-  height: 22px;
+  height: var(--fox-inline-action-height);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -944,6 +944,17 @@
   transform: translateY(1px);
 }
 
+/* The shadcn Button base relies on a box-shadow ring for focus-visible, but the
+   scoped .fox-icon-button rules above/in this file reset box-shadow to none, so
+   these buttons had no keyboard focus indicator at all. Use the outline pattern
+   already used by .fox-notification-trigger / .fox-sidebar-search-trigger.
+   Offset is negative so dense rows (overflow: hidden reveal containers) cannot
+   clip the ring. */
+.fox-icon-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
 .fox-sidebar-mode-row {
   min-width: 0;
   display: flex;
@@ -1057,6 +1068,12 @@
   text-align: left;
   cursor: pointer;
   transition: background 130ms ease, color 130ms ease;
+}
+
+/* The project title row stacked the 28px inner control inside 6px padding and ended
+   up 40px tall, four pixels taller than a conversation row. 3px lines them up. */
+.fox-shell .fox-project-row {
+  padding: 3px 10px;
 }
 
 .fox-shell .fox-sidebar-command {
@@ -1260,7 +1277,7 @@
 
 .fox-project-row-main {
   min-width: 0;
-  min-height: 22px;
+  min-height: var(--fox-inline-action-height);
   flex: 1;
   display: flex;
   align-items: center;
@@ -1327,14 +1344,43 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding-left: 9px;
-  color: var(--fox-accent);
+  padding-left: 5px;
+}
+
+/* ThinkingOrb paints into its own canvas and animates itself, so this slot no
+   longer spins an icon (the old `animation: foxSpin` is gone with it). The svg
+   rule only covers the spinner shown while the orb's chunk is still loading. */
+.fox-project-conversation-status > canvas {
+  width: 20px;
+  height: 20px;
 }
 
 .fox-project-conversation-status > svg {
   width: 13px;
   height: 13px;
-  animation: foxSpin 1s linear infinite;
+  color: var(--fox-accent);
+}
+
+/* Metal ring around the send button: a rigid flex item so the composer toolbar
+   keeps its layout, and the halo is free to paint outside the 30px circle. */
+.fox-send-metal {
+  flex: 0 0 auto;
+  display: inline-flex;
+  overflow: visible;
+}
+
+/* The library normalizes the wrapped button's own chrome away (`background:
+   transparent !important`) so its metal surface becomes the button surface, and it
+   sets the matching ink on the root (#1d1d1d light / #f8f8f8 dark). Inherit that
+   instead of our card/text pair, which painted a white arrow on the white light-mode
+   disc. This sits in `components` on purpose: for `!important` declarations the layer
+   order is reversed, so the Button's own `!text-primary-foreground` utility (in
+   `utilities`) would otherwise win. The rule above still styles the plain button
+   until the effect's chunk has loaded. */
+@layer components {
+  .fox-send-metal .fox-send-button {
+    color: inherit !important;
+  }
 }
 
 .fox-sidebar-tree-row {
@@ -2920,7 +2966,8 @@ button.fox-chat-project-row:disabled {
 .fox-expert-picker-dialog {
   width: min(760px, calc(100vw - 32px));
   max-width: 760px !important;
-  max-height: min(760px, calc(100dvh - 48px));
+  /* Kept close to the app window's own 3:2 shape instead of most of the viewport. */
+  max-height: min(520px, calc(100dvh - 96px));
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -4443,7 +4490,15 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-composer-wrap.is-empty .fox-prompt-input > [data-slot='input-group'] {
   min-height: 122px;
+  /* Resting: no shadow at all — the new-conversation card sits flat. */
   box-shadow: none;
+}
+
+/* Activated on the new-conversation page: the shadow appears, but the border keeps
+   the default grey instead of taking the activation colour. */
+.fox-composer-wrap.is-empty .fox-prompt-input.is-focused > [data-slot='input-group'] {
+  border-color: var(--fox-border);
+  box-shadow: var(--fox-composer-elevation), 0 0 0 2px var(--ring);
 }
 
 .fox-user-message.is-editing {
@@ -4528,13 +4583,8 @@ img[src='/avatars/fox-assistant.png'] {
   min-height: 164px;
 }
 
-.fox-composer-wrap.is-empty .fox-prompt-input.is-focused > [data-slot='input-group'] {
-  border-color: #9fc9ee;
-  box-shadow:
-    inset 0 1px 0 var(--fox-card),
-    0 0 0 2px rgba(159, 201, 238, .2),
-    0 5px 14px rgba(159, 201, 238, .14);
-}
+/* The new-conversation composer keeps the same activation ring as a normal
+   conversation, so it inherits the generic `.fox-prompt-input.is-focused` rule. */
 
 .fox-prompt-shell {
   position: relative;
@@ -4843,18 +4893,6 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-prompt-border-beam {
   width: 100%;
   overflow: visible !important;
-}
-
-.fox-prompt-border-beam::after {
-  filter: brightness(0) saturate(100%) invert(73%) sepia(35%) saturate(770%) hue-rotate(176deg) brightness(106%) contrast(101%) drop-shadow(0 0 3px #91caff) !important;
-}
-
-.fox-prompt-border-beam::before {
-  filter: brightness(0) saturate(100%) invert(79%) sepia(31%) saturate(650%) hue-rotate(176deg) brightness(107%) contrast(101%) blur(1.5px) !important;
-}
-
-.fox-prompt-border-beam [data-beam-bloom] {
-  filter: brightness(0) saturate(100%) invert(75%) sepia(36%) saturate(720%) hue-rotate(177deg) brightness(108%) contrast(102%) blur(7px) !important;
 }
 
 .fox-route-loading,
@@ -5263,7 +5301,9 @@ img[src='/avatars/fox-assistant.png'] {
   border-radius: 18px;
   background: color-mix(in oklch, var(--fox-card) 94%, transparent);
   padding: 10px;
-  box-shadow: 0 12px 34px color-mix(in oklch, var(--fox-text) 9%, transparent), 0 3px 10px color-mix(in oklch, var(--fox-text) 4%, transparent), inset 0 1px 0 color-mix(in oklch, var(--fox-card) 80%, transparent);
+  /* One definition for the card's elevation, reused by every activation state. */
+  --fox-composer-elevation: 0 12px 34px color-mix(in oklch, var(--fox-text) 9%, transparent), 0 3px 10px color-mix(in oklch, var(--fox-text) 4%, transparent), inset 0 1px 0 color-mix(in oklch, var(--fox-card) 80%, transparent);
+  box-shadow: var(--fox-composer-elevation);
   backdrop-filter: blur(24px) saturate(1.12);
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }
@@ -5281,9 +5321,11 @@ img[src='/avatars/fox-assistant.png'] {
   background: linear-gradient(180deg, color-mix(in oklch, var(--fox-card) 38%, transparent), transparent 32%);
 }
 
+/* Activation: the border and the glow use the *same* light blue (`--ring`), so the
+   two no longer read as two different colours, and the elevation stays on. */
 .fox-prompt-input.is-focused > [data-slot='input-group'] {
-  border-color: color-mix(in oklch, var(--fox-accent) 32%, var(--fox-border));
-  box-shadow: 0 0 0 2px var(--fox-accent-soft);
+  border-color: var(--ring);
+  box-shadow: var(--fox-composer-elevation), 0 0 0 2px var(--ring);
 }
 
 .fox-composer-attachments {
@@ -5409,15 +5451,22 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 .fox-prompt-textarea {
+  /* Fixed height, so a long prompt scrolls inside the textarea instead of growing
+     the composer (the beam, the toolbar and the send button must not move while
+     typing). `field-sizing: content` is the Tailwind default we are overriding.
+     No max-height: the textarea is the flex item that absorbs slack when the card's
+     min-height rises (chips appear), otherwise the gap shows up under the toolbar. */
+  field-sizing: fixed;
   position: relative;
   z-index: 1;
-  min-height: 32px !important;
-  max-height: 176px !important;
+  min-height: 68px !important;
   width: 100%;
   padding: 4px 0 !important;
   color: var(--fox-text);
   font-size: 15px;
   line-height: 1.45;
+  overflow-y: auto;
+  resize: none;
 }
 
 .fox-prompt-textarea::placeholder {
@@ -5828,8 +5877,12 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-composer-submit {
   flex: 1 1 0;
+  /* The send button is 30px and its metal ring paints a few px outside that; the
+     container must never shrink below it (a cramped toolbar used to clip the button
+     away) and must not clip the ring. The composer card itself already clips. */
+  min-width: 34px;
   justify-content: flex-end;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .fox-composer-tools [data-slot='input-group-button']:first-child {
@@ -11112,6 +11165,13 @@ img[src='/avatars/fox-assistant.png'] {
   gap: 6px;
   color: var(--fox-muted);
   font-size: 10px;
+}
+
+/* The collapsible artifact-group header doubles as a click target, so hold it at
+   the WCAG 2.2 minimum. Scope is limited to the trigger: the plain heading
+   variants of the same class are not interactive and stay at their natural height. */
+.fox-message-file-results-head.fox-message-artifact-group-trigger {
+  min-height: 24px;
 }
 
 .fox-message-file-results-head strong {

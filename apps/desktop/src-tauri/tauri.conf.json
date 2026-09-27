@@ -19,7 +19,8 @@
         "minHeight": 560,
         "decorations": false,
         "resizable": true,
-        "center": true
+        "center": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --enable-features=msEdgeFluentOverlayScrollbar"
       }
     ],
     "security": {
