@@ -4494,11 +4494,11 @@ img[src='/avatars/fox-assistant.png'] {
   box-shadow: none;
 }
 
-/* Activated on the new-conversation page: the shadow appears, but the border keeps
-   the default grey instead of taking the activation colour. */
+/* Activated on the new-conversation page: the card simply picks up the elevation
+   shadow it rests with on a normal conversation — same pale grey border, no colour. */
 .fox-composer-wrap.is-empty .fox-prompt-input.is-focused > [data-slot='input-group'] {
   border-color: var(--fox-border);
-  box-shadow: var(--fox-composer-elevation), 0 0 0 2px var(--fox-blue-soft);
+  box-shadow: var(--fox-composer-elevation);
 }
 
 .fox-user-message.is-editing {
