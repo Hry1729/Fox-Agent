@@ -218,9 +218,9 @@ export function OnboardingPage({ navigate, onExit, dark = false }: { navigate: N
   return <div className={`fox-onboarding-screen${finishing ? ' is-finishing' : ''}`} data-tauri-drag-region>
     <Grainient
       className="fox-onboarding-background"
-      color1="#9fc9ee"
-      color2="#e8f4ff"
-      color3="#ffffff"
+      color1={dark ? '#4b3f8f' : '#9fc9ee'}
+      color2={dark ? '#1e1836' : '#e8f4ff'}
+      color3={dark ? '#0b0918' : '#ffffff'}
       timeSpeed={0.6}
       colorBalance={-0.18}
       warpStrength={1}

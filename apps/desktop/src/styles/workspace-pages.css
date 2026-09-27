@@ -3208,8 +3208,8 @@
 .fox-onboarding-main>*{min-width:390px}
 .fox-onboarding-visual{z-index:1;transition:background-color 500ms ease}
 .fox-onboarding-visual-media{position:relative;transition:transform 900ms cubic-bezier(.22,1,.36,1)}
-.fox-onboarding-enter{position:absolute!important;left:50%;top:calc(50% + 112px);min-width:104px;height:34px;display:inline-flex;align-items:center;justify-content:center;opacity:0;visibility:hidden;pointer-events:none;transform:translate(-50%,12px)}
-.fox-onboarding-enter-button{width:100%;height:32px;font-size:12px}
+.fox-onboarding-enter{position:absolute!important;left:50%;top:calc(50% + 112px);display:inline-flex;align-items:center;justify-content:center;opacity:0;visibility:hidden;pointer-events:none;transform:translate(-50%,12px)}
+.fox-onboarding-enter-button{height:32px;padding-inline:16px!important;font-size:12px}
 .fox-onboarding-enter{transition:opacity 500ms ease 800ms,transform 500ms cubic-bezier(.22,1,.36,1) 800ms,visibility 0s linear 800ms!important}
 .fox-onboarding-enter svg{width:13px}
 .fox-onboarding-screen.is-finishing .fox-onboarding-skip{opacity:0;visibility:hidden;pointer-events:none;transition:opacity 240ms ease,visibility 0s linear 240ms}
@@ -3219,6 +3219,16 @@
 
 @keyframes foxGrainientFallback{0%{background-position:0% 12%}50%{background-position:72% 88%}100%{background-position:100% 20%}}
 @media(prefers-reduced-motion:reduce){.fox-onboarding-shell,.fox-onboarding-main,.fox-onboarding-visual-media,.fox-onboarding-enter{transition-duration:1ms!important;transition-delay:0s!important}}
+
+/* Dark theme: the wizard follows the app instead of staying a light-blue page. The
+   Grainient canvas behind it is recoloured from the component, this is the fallback
+   gradient plus the panel and type on top of it. */
+.dark .fox-onboarding-screen{background:#0b0918!important}
+.dark .fox-onboarding-background{background:linear-gradient(128deg,#2f2657 0%,#1c1636 40%,#120e22 72%,#0b0918 100%)}
+.dark .fox-onboarding-visual{background:rgba(41,32,74,.94)!important;color:#ece7ff!important}
+.dark .fox-onboarding-visual-media strong{color:#f4f1ff!important}
+.dark .fox-onboarding-visual-media span{color:#b7abdd!important}
+.dark .fox-onboarding-enter-button{border-color:rgba(236,231,255,.3)!important;background:rgba(255,255,255,.05)!important;color:#ece7ff!important}
 
 /* Unified Fox typography: scale UI and supporting copy from the saved preference. */
 .fox-shell,
