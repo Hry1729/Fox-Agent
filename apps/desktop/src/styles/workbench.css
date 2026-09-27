@@ -2525,12 +2525,12 @@ button.fox-chat-project-row:disabled {
   --fox-empty-vertical-offset: clamp(18px, 3vh, 30px);
 }
 
-/* With project/knowledge/attachment chips the composer card is 42px taller. The card
+/* With project/knowledge/attachment chips the composer card is 26px taller. The card
    and the mascot/heading/capsules block both consume this offset, so lifting both by
    half the growth keeps the whole group optically centred on the page. */
 .fox-chat-stage.is-empty:has(.fox-composer-context button),
 .fox-chat-stage.is-empty:has(.fox-composer-attachments [data-slot]) {
-  --fox-empty-vertical-offset: calc(clamp(18px, 3vh, 30px) - 21px);
+  --fox-empty-vertical-offset: calc(clamp(18px, 3vh, 30px) - 13px);
 }
 
 .fox-conversation {
@@ -4588,7 +4588,7 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-composer-wrap.is-empty .fox-prompt-input > [data-slot='input-group']:has(.fox-composer-context),
 .fox-composer-wrap.is-empty .fox-prompt-input > [data-slot='input-group']:has(.fox-composer-attachments > [data-slot]) {
-  min-height: 164px;
+  min-height: 148px;
 }
 
 /* The new-conversation composer keeps the same activation ring as a normal

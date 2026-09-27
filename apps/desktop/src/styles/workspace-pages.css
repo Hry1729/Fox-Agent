@@ -3220,15 +3220,22 @@
 @keyframes foxGrainientFallback{0%{background-position:0% 12%}50%{background-position:72% 88%}100%{background-position:100% 20%}}
 @media(prefers-reduced-motion:reduce){.fox-onboarding-shell,.fox-onboarding-main,.fox-onboarding-visual-media,.fox-onboarding-enter{transition-duration:1ms!important;transition-delay:0s!important}}
 
-/* Dark theme: the wizard follows the app instead of staying a light-blue page. The
-   Grainient canvas behind it is recoloured from the component, this is the fallback
-   gradient plus the panel and type on top of it. */
-.dark .fox-onboarding-screen{background:#0b0918!important}
-.dark .fox-onboarding-background{background:linear-gradient(128deg,#2f2657 0%,#1c1636 40%,#120e22 72%,#0b0918 100%)}
-.dark .fox-onboarding-visual{background:rgba(41,32,74,.94)!important;color:#ece7ff!important}
-.dark .fox-onboarding-visual-media strong{color:#f4f1ff!important}
-.dark .fox-onboarding-visual-media span{color:#b7abdd!important}
-.dark .fox-onboarding-enter-button{border-color:rgba(236,231,255,.3)!important;background:rgba(255,255,255,.05)!important;color:#ece7ff!important}
+/* Dark theme: the wizard follows the app instead of staying a light-blue page. Deep
+   blue fading to black; the Grainient canvas behind it is recoloured from the
+   component, this is the fallback gradient plus the panels and type on top of it. */
+.dark .fox-onboarding-screen{background:#04070d!important}
+.dark .fox-onboarding-background{background:linear-gradient(128deg,#12314f 0%,#0a1a2c 40%,#050d18 72%,#03060b 100%)}
+.dark .fox-onboarding-visual{background:rgba(10,22,38,.94)!important;color:#e3eefc!important}
+.dark .fox-onboarding-visual-media strong{color:#f2f7ff!important}
+.dark .fox-onboarding-visual-media span{color:#93b0d0!important}
+.dark .fox-onboarding-enter-button{border-color:rgba(186,214,246,.32)!important;background:rgba(140,190,240,.08)!important;color:#e3eefc!important}
+/* Those two status cards (model service, knowledge service) were pinned to #fff. */
+.dark .fox-onboarding-status{border-color:rgba(118,166,220,.24)!important;background:rgba(11,24,40,.72)!important}
+.dark .fox-onboarding-status>span{background:rgba(118,166,220,.16)!important;color:#9dc4ee!important}
+.dark .fox-onboarding-status [data-slot='badge']{border-color:rgba(118,166,220,.3)!important;background:rgba(118,166,220,.14)!important;color:#bcd8f5!important}
+.dark .fox-onboarding-status.is-ready{border-color:rgba(118,166,220,.34)!important;background:rgba(13,30,50,.82)!important}
+.dark .fox-onboarding-status.is-ready>span{background:rgba(90,170,240,.22)!important;color:#8ec6ff!important}
+.dark .fox-onboarding-status.is-ready [data-slot='badge']{border-color:rgba(120,180,240,.36)!important;background:rgba(80,150,220,.22)!important;color:#a8d2ff!important}
 
 /* Unified Fox typography: scale UI and supporting copy from the saved preference. */
 .fox-shell,
