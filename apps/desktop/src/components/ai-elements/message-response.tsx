@@ -2,11 +2,11 @@
 
 import { cjk } from "@streamdown/cjk";
 import { math } from "@streamdown/math";
-import { mermaid } from "@streamdown/mermaid";
 import { memo, useState, type ComponentProps } from "react";
 import { Streamdown, type CustomRendererProps, type LinkSafetyModalProps } from "streamdown";
 import { ExternalLink } from "lucide-react";
 import { notify as toast } from "@/features/notifications";
+import { beautifulMermaidPlugin } from "./beautiful-mermaid-diagram";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -111,7 +111,9 @@ const codeLanguages = [
 const streamdownPlugins = {
   cjk,
   math,
-  mermaid,
+  // Same DiagramPlugin contract with the beautiful-mermaid engine; the stock renderer
+  // stays the fallback for diagram families it does not implement.
+  mermaid: beautifulMermaidPlugin,
   renderers: [{
     component: CollapsibleCodeRenderer,
     language: [...codeLanguages],
