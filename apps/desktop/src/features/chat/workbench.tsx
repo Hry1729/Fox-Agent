@@ -3658,7 +3658,7 @@ function Composer({ resetKey, draft, setDraft, chatState, showGoal = false, cent
               </PromptInputSelectContent>
             </PromptInputSelect>
             {centered ? <Suspense fallback={sendButton}>
-              <MetalSendButton className="fox-send-metal" paused={!focused && status === 'ready'} theme={dark ? 'dark' : 'light'}>{sendButton}</MetalSendButton>
+              <MetalSendButton className="fox-send-metal" theme={dark ? 'dark' : 'light'}>{sendButton}</MetalSendButton>
             </Suspense> : sendButton}
           </div>
         </PromptInputFooter>

@@ -3224,6 +3224,9 @@
    blue fading to black; the Grainient canvas behind it is recoloured from the
    component, this is the fallback gradient plus the panels and type on top of it. */
 .dark .fox-onboarding-screen{background:#04070d!important}
+/* The step card itself: `--fox-card` is a near-black grey in dark mode, which read as
+   a black slab next to the page. Give it its own deep blue. */
+.dark .fox-onboarding-main{background:#152a47!important}
 .dark .fox-onboarding-background{background:linear-gradient(128deg,#12314f 0%,#0a1a2c 40%,#050d18 72%,#03060b 100%)}
 .dark .fox-onboarding-visual{background:rgba(10,22,38,.94)!important;color:#e3eefc!important}
 .dark .fox-onboarding-visual-media strong{color:#f2f7ff!important}
