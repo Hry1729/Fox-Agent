@@ -3228,7 +3228,10 @@
    a black slab next to the page. Give it its own deep blue. */
 .dark .fox-onboarding-main{background:#152a47!important}
 .dark .fox-onboarding-background{background:linear-gradient(128deg,#12314f 0%,#0a1a2c 40%,#050d18 72%,#03060b 100%)}
-.dark .fox-onboarding-visual{background:rgba(10,22,38,.94)!important;color:#e3eefc!important}
+/* Right-hand panel, and the whole card on the closing step: the previous
+   rgba(10,22,38,.94) read as black against the near-black page. A clearly deep blue,
+   one step lighter than the step card so the split stays visible in steps 1-2. */
+.dark .fox-onboarding-visual{background:rgba(27,53,89,.96)!important;color:#e3eefc!important}
 .dark .fox-onboarding-visual-media strong{color:#f2f7ff!important}
 .dark .fox-onboarding-visual-media span{color:#93b0d0!important}
 .dark .fox-onboarding-enter-button{border-color:rgba(186,214,246,.32)!important;background:rgba(140,190,240,.08)!important;color:#e3eefc!important}
