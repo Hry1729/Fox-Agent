@@ -94,6 +94,36 @@ describe("id isolation", () => {
     expect(second.svg.includes("#gone-")).toBe(false);
     for (const id of idsOf(second.svg)) expect(id.startsWith("stays-")).toBe(true);
   });
+
+  // Regression: only reference contexts may be rewritten. A bare `#abc` is a colour, even when
+  // a node happens to be called `abc`.
+  test("rewrites references but never colour literals", () => {
+    const svg = [
+      '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">',
+      '<defs><marker id="abc"><path d="M0 0"/></marker></defs>',
+      '<rect id="box" fill="#abc" stroke="url(#abc)" marker-end="url(#abc)"/>',
+      '<text fill="#abcdef">文本</text>',
+      '<use xlink:href="#box"/>',
+      '<style>.n{fill:url(#abc)} .m{stroke:#abc}</style>',
+      '<g style="fill:url(#abc);stroke:#abc"><path d="M0 0"/></g>',
+      "</svg>",
+    ].join("");
+    const result = sanitizeAndNamespaceDiagramSvg(svg, "ns");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // Colours untouched.
+    expect(result.svg).toContain('fill="#abc"');
+    expect(result.svg).toContain('fill="#abcdef"');
+    expect(result.svg).toContain("stroke:#abc");
+    // References rewritten everywhere they are references.
+    expect(result.svg).toContain('stroke="url(#ns-abc)"');
+    expect(result.svg).toContain('marker-end="url(#ns-abc)"');
+    expect(result.svg).toContain('xlink:href="#ns-box"');
+    expect(result.svg).toContain('id="ns-abc"');
+    expect(result.svg).toContain('id="ns-box"');
+    expect(result.svg).toContain(".n{fill:url(#ns-abc)}");
+    expect(result.svg).toContain('style="fill:url(#ns-abc);stroke:#abc"');
+  });
 });
 
 describe("render budget", () => {
@@ -115,6 +145,23 @@ describe("render budget", () => {
     const direct = renderFoxDiagram(oversized(), { namespace: "d1" });
     expect(direct.ok).toBe(false);
     expect(direct.ok === false && direct.reason).toBe("too-large");
+  });
+
+  // Regression: the budget used to be checked *after* the supported-type test, so an oversized
+  // pie/gantt skipped beautiful-mermaid and was handed to the stock engine — the very stall the
+  // budget exists to prevent.
+  test("an oversized unsupported family also stops before any engine", async () => {
+    const fallback = fakeFallback();
+    const plugin = createFoxMermaidPlugin({ fallback: fallback.plugin });
+    for (const preamble of ["pie title 占比", "gantt\n  title 排期"]) {
+      const huge = `${preamble}\n${Array.from({ length: 320 }, (_, index) => `  "第${index}项" : ${index % 100}`).join("\n")}`;
+      expect(checkDiagramBudget(huge).ok).toBe(false);
+      const routed = renderFoxDiagram(huge, { namespace: "d9" });
+      expect(routed.ok).toBe(false);
+      expect(routed.ok === false && routed.reason).toBe("too-large");
+      await expect(plugin.getMermaid().render("d9", huge)).rejects.toThrow(DIAGRAM_TOO_LARGE_MESSAGE);
+    }
+    expect(fallback.calls).toEqual([]);
   });
 });
 

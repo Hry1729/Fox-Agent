@@ -133,12 +133,26 @@ const isLocalUrlFunction = (value: string) => {
   return isLocalReference(target);
 };
 
-/** CSS inside `style` / `<style>` may only reach local fragments. */
+/** CSS inside `style` / `<style>` may only reach local fragments; `@import` and external
+ *  `url(…)` targets are removed. Fragment *renaming* is a separate step below, because a
+ *  bare `#abc` in CSS may be a colour and must not be touched. */
 export function sanitizeCssText(css: string): string {
   return css
     .replace(/@import[^;]*;?/gi, "")
     .replace(/url\(\s*(?!#)[^)]*\)/gi, "none")
     .replace(/(?:javascript|vbscript)\s*:/gi, "");
+}
+
+/** Rewrite `url(#id)` inside CSS text to the diagram's namespace; leaves colours alone. */
+export function rewriteCssFragmentIds(css: string, rename: Map<string, string>): string {
+  if (rename.size === 0) return css;
+  return css.replace(/url\(\s*#([\w:.-]+)\s*\)/gi, (whole, id: string) => (rename.has(id) ? `url(#${rename.get(id)})` : whole));
+}
+
+/** `url(#id)` inside an attribute value; a bare `#abc` is a colour and stays untouched. */
+export function rewriteAttributeFragmentIds(value: string, rename: Map<string, string>): string {
+  if (rename.size === 0) return value;
+  return value.replace(/url\(\s*#([\w:.-]+)\s*\)/gi, (whole, id: string) => (rename.has(id) ? `url(#${rename.get(id)})` : whole));
 }
 
 export type SanitizedSvg =
@@ -179,8 +193,6 @@ export function sanitizeAndNamespaceDiagramSvg(svg: string, namespace: string, d
     if (id) rename.set(id, `${prefix}${id}`);
   }
 
-  const rewriteReferences = (value: string) => value.replace(/#([\w:.-]+)/g, (whole, id: string) => (rename.has(id) ? `#${rename.get(id)}` : whole));
-
   for (const element of Array.from(parsed.querySelectorAll("*"))) {
     const name = element.nodeName.toLowerCase();
     if (!ALLOWED_TAGS.has(name)) {
@@ -196,9 +208,11 @@ export function sanitizeAndNamespaceDiagramSvg(svg: string, namespace: string, d
         continue;
       }
       if (attributeName === "style") {
-        const sanitizedStyle = sanitizeCssText(attribute.value);
+        const withoutExternals = sanitizeCssText(attribute.value);
+        const sanitizedStyle = rewriteCssFragmentIds(withoutExternals, rename);
         if (sanitizedStyle !== attribute.value) {
-          if (!removed.includes("外部样式 URL")) removed.push("外部样式 URL");
+          const label = withoutExternals !== attribute.value ? "外部样式 URL" : "样式片段引用";
+          if (!removed.includes(label)) removed.push(label);
           element.setAttribute(attribute.name, sanitizedStyle);
         }
         continue;
@@ -208,9 +222,16 @@ export function sanitizeAndNamespaceDiagramSvg(svg: string, namespace: string, d
         element.removeAttribute(attribute.name);
         continue;
       }
-      if (FRAGMENT_ATTRIBUTES.has(attributeName) && !isLocalReference(attribute.value)) {
-        if (!removed.includes("外部 URL 引用")) removed.push("外部 URL 引用");
-        element.removeAttribute(attribute.name);
+      if (FRAGMENT_ATTRIBUTES.has(attributeName)) {
+        // A fragment attribute is a whole-value reference: validate it, then rename it. It
+        // never falls through to the generic path below.
+        if (!isLocalReference(attribute.value)) {
+          if (!removed.includes("外部 URL 引用")) removed.push("外部 URL 引用");
+          element.removeAttribute(attribute.name);
+        } else {
+          const target = attribute.value.trim().slice(1);
+          if (rename.has(target)) element.setAttribute(attribute.name, `#${rename.get(target)}`);
+        }
         continue;
       }
       if (URL_FUNCTION_ATTRIBUTES.has(attributeName) && !isLocalUrlFunction(attribute.value) && /^url\(/i.test(attribute.value.trim())) {
@@ -219,16 +240,20 @@ export function sanitizeAndNamespaceDiagramSvg(svg: string, namespace: string, d
         continue;
       }
       if (attributeName !== "id") {
-        const rewritten = rewriteReferences(attribute.value);
+        // Only `url(#…)` is a reference. `fill="#abc"` is a colour and is left alone even
+        // when `abc` happens to be an id in this diagram.
+        const rewritten = rewriteAttributeFragmentIds(attribute.value, rename);
         if (rewritten !== attribute.value) element.setAttribute(attribute.name, rewritten);
       }
     }
     const ownId = element.getAttribute("id");
     if (ownId && rename.has(ownId)) element.setAttribute("id", rename.get(ownId) as string);
     if (name === "style" && element.textContent) {
-      const sanitizedStyle = sanitizeCssText(element.textContent);
+      const withoutExternals = sanitizeCssText(element.textContent);
+      const sanitizedStyle = rewriteCssFragmentIds(withoutExternals, rename);
       if (sanitizedStyle !== element.textContent) {
-        if (!removed.includes("外部样式 URL")) removed.push("外部样式 URL");
+        const label = withoutExternals !== element.textContent ? "外部样式 URL" : "样式片段引用";
+        if (!removed.includes(label)) removed.push(label);
         element.textContent = sanitizedStyle;
       }
     }
@@ -272,9 +297,11 @@ export type DiagramRenderOptions = { namespace?: string; parse?: DiagramParser; 
  * layout engine.
  */
 export function renderFoxDiagram(source: string, options: DiagramRenderOptions = {}): DiagramRenderResult {
-  if (!isBeautifulMermaidSource(source)) return { ok: false, reason: "unsupported" };
+  // Budget first, for every source: an oversized pie/gantt must not be routed to the stock
+  // engine either, because that engine lays out synchronously too.
   const budget = checkDiagramBudget(source, options);
   if (!budget.ok) return { ok: false, reason: "too-large", limit: budget.limit };
+  if (!isBeautifulMermaidSource(source)) return { ok: false, reason: "unsupported" };
   try {
     const render = options.renderSvg ?? renderMermaidSVG;
     const sanitized = sanitizeAndNamespaceDiagramSvg(render(source, diagramRenderOptions()), options.namespace ?? "diagram", options.dom);

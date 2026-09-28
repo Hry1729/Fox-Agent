@@ -65,12 +65,13 @@ describe("message component with diagrams", () => {
     await mounted.unmount();
   });
 
-  // SKIPPED, with the reason rather than a passing assertion: Streamdown's diagram path does
-  // not produce a diagram inside happy-dom (it needs a real browser layout/observer surface),
-  // so this cannot be evidence here. The engine itself is covered by the plugin-level tests in
-  // beautiful-mermaid-diagram.test.ts, which call the real render path; proving the diagram
-  // appears in an answer stays a packaged-app / manual acceptance item, and is reported as
-  // unverified rather than papered over.
+  // Covered by a REAL BROWSER instead of happy-dom: run
+  //   node apps/desktop/scripts/mermaid-browser-check.mjs
+  // which mounts this same component and asserts that two diagram blocks in one answer render
+  // as two diagrams with disjoint id namespaces, that the surrounding prose survives, that a
+  // reload renders again, and that an unsupported family is non-fatal. Evidence is written to
+  // output/visual-answers-browser/. Kept here as a skip so the happy-dom limitation stays
+  // visible rather than being mistaken for coverage.
   test.skip("renders a mermaid block through the plugin and keeps the prose", async () => {
     const mounted = await mount(`前一段说明文字。\n\n${FLOWCHART}\n\n图后解释文字。\n`, { expectDiagram: true });
     expect(mounted.text()).toContain("前一段说明文字");
