@@ -2372,7 +2372,8 @@ const MemoizedRuntimeAssistantMessage = memo(RuntimeAssistantMessage, (previous,
 function RuntimeReasoningItem({ detail, running = false }: { detail: string; running?: boolean }) {
   return <RuntimeProcessRow
     icon={<Brain className="fox-runtime-step-icon-glyph" />}
-    label={`深度思考 · ${reasoningSummary(detail)}`}
+    fixedPrefix="深度思考 ·"
+    label={reasoningSummary(detail)}
     active={running}
     status={running ? 'active' : 'complete'}
   >
@@ -2464,7 +2465,7 @@ function RuntimeToolItem({ tool, active, attachmentNames, onOpenFileInSidebar, o
  *  label scrolls horizontally and is pinned to its newest characters, and both
  *  ends fade — but only once the text really clips, so short summaries keep
  *  their full contrast. */
-function StepStatusText({ text, active, children }: { text: string; active: boolean; children?: ReactNode }) {
+function StepStatusText({ text, active, fixedPrefix, children }: { text: string; active: boolean; fixedPrefix?: string; children?: ReactNode }) {
   const labelRef = useRef<HTMLSpanElement>(null)
   const [clamped, setClamped] = useState(false)
   useLayoutEffect(() => {
@@ -2481,13 +2482,16 @@ function StepStatusText({ text, active, children }: { text: string; active: bool
     observer.observe(node)
     return () => observer.disconnect()
   }, [text, children])
-  return <span className={`fox-run-status-text fox-run-status-step${clamped ? ' is-clamped' : ''}`} data-active={active}>
-    <span ref={labelRef} className="fox-run-status-label">{children ?? text}</span>
+  return <span className={`fox-run-status-text fox-run-status-step${fixedPrefix ? ' has-fixed-prefix' : ''}${clamped ? ' is-clamped' : ''}`} data-active={active}>
+    {fixedPrefix && <span className="fox-run-status-prefix">{fixedPrefix}</span>}
+    <span className="fox-run-status-viewport">
+      <span ref={labelRef} className="fox-run-status-label">{children ?? text}</span>
+    </span>
   </span>
 }
 
 /** Every thought segment and every tool call is one independently collapsible row. */
-function RuntimeProcessRow({ icon, label, labelContent, active = false, status = 'complete', children }: { icon: ReactNode; label: string; labelContent?: ReactNode; active?: boolean; status?: 'complete' | 'active' | 'pending'; children: ReactNode }) {
+function RuntimeProcessRow({ icon, label, fixedPrefix, labelContent, active = false, status = 'complete', children }: { icon: ReactNode; label: string; fixedPrefix?: string; labelContent?: ReactNode; active?: boolean; status?: 'complete' | 'active' | 'pending'; children: ReactNode }) {
   const [open, setOpen] = useState(false)
   const [visited, setVisited] = useState(false)
   return (
@@ -2506,7 +2510,7 @@ function RuntimeProcessRow({ icon, label, labelContent, active = false, status =
       </div>
       <div className="fox-runtime-step-body">
         <CollapsibleTrigger className="fox-runtime-step-trigger">
-          <StepStatusText text={label} active={active}>{labelContent}</StepStatusText>
+          <StepStatusText text={label} active={active} fixedPrefix={fixedPrefix}>{labelContent}</StepStatusText>
         </CollapsibleTrigger>
         {visited && <CollapsibleContent forceMount className="fox-runtime-step-content" aria-hidden={!open} inert={!open}>
           <div className="fox-runtime-detail-clip"><div className="fox-runtime-detail-panel">{children}</div></div>

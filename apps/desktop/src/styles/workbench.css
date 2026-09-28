@@ -3611,7 +3611,7 @@ img[src='/avatars/fox-assistant.png'] {
 /* Paint the base and shimmer on one set of glyphs. Separate text overlays can
    drift when the streaming label scrolls or the viewport changes width. */
 @supports ((background-clip: text) or (-webkit-background-clip: text)) {
-  .fox-run-status-text[data-active='true'] > .fox-run-status-label {
+  .fox-run-status-text[data-active='true'] .fox-run-status-label {
     background-image: linear-gradient(90deg, transparent 38%, #1677ff 46%, #56b7ff 50%, #1677ff 54%, transparent 62%), linear-gradient(currentColor, currentColor);
     background-size: 260% 100%, 100% 100%;
     background-repeat: no-repeat;
@@ -3630,7 +3630,7 @@ img[src='/avatars/fox-assistant.png'] {
 [aria-hidden='true'] .fox-run-status-label { animation-play-state: paused; }
 
 @media (forced-colors: active) {
-  .fox-run-status-text[data-active='true'] > .fox-run-status-label {
+  .fox-run-status-text[data-active='true'] .fox-run-status-label {
     background: none;
     -webkit-text-fill-color: currentColor;
     animation: none;
@@ -3787,6 +3787,22 @@ img[src='/avatars/fox-assistant.png'] {
   grid-template-columns: minmax(0, 1fr);
 }
 
+.fox-runtime-step-trigger > .fox-run-status-step.has-fixed-prefix {
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 6px;
+}
+
+.fox-run-status-prefix {
+  white-space: nowrap;
+}
+
+.fox-run-status-viewport {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  overflow: hidden;
+}
+
 /* A step row is exactly one line tall, no matter how long the thought grows.
    The label keeps its newest characters in view (the component pins its
    horizontal scroll to the end), and both ends fade — but only while the text
@@ -3800,9 +3816,8 @@ img[src='/avatars/fox-assistant.png'] {
   white-space: nowrap;
 }
 
-/* The mask lives on the row's status box (not on the scrolling label), so the
-   two fades stay pinned to the visible ends while the text scrolls under them. */
-.fox-runtime-step-trigger .fox-run-status-step.is-clamped {
+/* Only the content viewport fades; the thought title stays fixed and readable. */
+.fox-runtime-step-trigger .fox-run-status-step.is-clamped > .fox-run-status-viewport {
   mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
   -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
 }
