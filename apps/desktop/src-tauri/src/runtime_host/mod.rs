@@ -905,7 +905,7 @@ pub(crate) struct PromptScopeOverrides<'a> {
 /// Additive on purpose — an assistant's own instructions and an explicit user format request
 /// both outrank it — and it advertises only what the client actually renders (Mermaid). Image
 /// generation and retrieval are deliberately absent because Fox has no such capability yet.
-pub(crate) const VISUAL_EXPRESSION_GUIDANCE: &str = "视觉表达：当图表能明显帮助理解流程、分支、状态、交互时序或已有数值比较时，可以自主在正文中输出一个 ```mermaid 代码块，客户端会直接渲染。当前支持 flowchart、stateDiagram-v2、sequenceDiagram、classDiagram、erDiagram、xychart-beta；其他 Mermaid 类型会退化为源码显示。默认一张图，确有必要再拆成少量小图；简单事实、短回答与少量条目用文字即可，不必配图。严格遵守用户对格式的明确要求（例如「只用文字」「给我源码」），本助手自身的既有指令也优先于本段。图旁保留一句简短解释；不得编造数据、单位、时间或关系，缺少数据时说明缺口；图中的名称与数值必须与正文和来源一致。";
+pub(crate) const VISUAL_EXPRESSION_GUIDANCE: &str = "视觉表达：当图表能明显帮助理解流程、分支、状态、交互时序或已有数值比较时，可以自主在正文中输出一个 ```mermaid 代码块，客户端会直接渲染。当前支持 flowchart、stateDiagram-v2、sequenceDiagram、classDiagram、erDiagram、xychart-beta；其他类型尝试兼容渲染；渲染失败或超预算时保留源码供查看。默认一张图，确有必要再拆成少量小图；简单事实、短回答与少量条目用文字即可，不必配图。严格遵守用户对格式的明确要求（例如「只用文字」「给我源码」），本助手自身的既有指令也优先于本段。图旁保留一句简短解释；不得编造数据、单位、时间或关系，缺少数据时说明缺口；图中的名称与数值必须与正文和来源一致。";
 
 /// Host-owned prompts (`pi`) get the guidance appended; a remote engine (Yuxi) keeps its own
 /// instructions, and repeated calls do not append twice.
@@ -934,6 +934,13 @@ mod visual_expression_guidance_tests {
         let once = append_visual_expression_guidance("base".into(), "pi");
         assert_eq!(append_visual_expression_guidance(once.clone(), "pi"), once, "never appended twice");
         assert!(VISUAL_EXPRESSION_GUIDANCE.contains("```mermaid"));
+        // The wording has to match what the client does: other families are attempted by the
+        // compatible renderer (pie/gantt do render), and only a failure or an over-budget
+        // source falls back to showing the source. The old "degrades to source" claim was
+        // wrong for pie, so it is pinned here instead.
+        assert!(VISUAL_EXPRESSION_GUIDANCE.contains("其他类型尝试兼容渲染"));
+        assert!(VISUAL_EXPRESSION_GUIDANCE.contains("渲染失败或超预算时保留源码供查看"));
+        assert!(!VISUAL_EXPRESSION_GUIDANCE.contains("退化为源码显示"));
         // An explicit user format request must win, and the text has to say so.
         assert!(VISUAL_EXPRESSION_GUIDANCE.contains("只用文字"));
         assert!(VISUAL_EXPRESSION_GUIDANCE.contains("给我源码"));
