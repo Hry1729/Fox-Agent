@@ -3598,8 +3598,7 @@ img[src='/avatars/fox-assistant.png'] {
   color: var(--fox-muted);
 }
 
-.fox-run-status-label,
-.fox-run-status-light {
+.fox-run-status-label {
   grid-area: 1 / 1;
   min-width: 0;
   overflow: hidden;
@@ -3609,17 +3608,12 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-run-status-text[data-active='true'] { color: var(--fox-text); }
 
-.fox-run-status-light {
-  display: none;
-  pointer-events: none;
-}
-
+/* Paint the base and shimmer on one set of glyphs. Separate text overlays can
+   drift when the streaming label scrolls or the viewport changes width. */
 @supports ((background-clip: text) or (-webkit-background-clip: text)) {
-  .fox-run-status-light {
-    display: block;
-    color: transparent;
-    background-image: linear-gradient(90deg, transparent 38%, #1677ff 46%, #56b7ff 50%, #1677ff 54%, transparent 62%);
-    background-size: 260% 100%;
+  .fox-run-status-text[data-active='true'] > .fox-run-status-label {
+    background-image: linear-gradient(90deg, transparent 38%, #1677ff 46%, #56b7ff 50%, #1677ff 54%, transparent 62%), linear-gradient(currentColor, currentColor);
+    background-size: 260% 100%, 100% 100%;
     background-repeat: no-repeat;
     background-clip: text;
     -webkit-background-clip: text;
@@ -3633,10 +3627,14 @@ img[src='/avatars/fox-assistant.png'] {
   85%, 100% { background-position: 0% 0; }
 }
 
-[aria-hidden='true'] .fox-run-status-light { animation-play-state: paused; }
+[aria-hidden='true'] .fox-run-status-label { animation-play-state: paused; }
 
 @media (forced-colors: active) {
-  .fox-run-status-light { display: none; }
+  .fox-run-status-text[data-active='true'] > .fox-run-status-label {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+    animation: none;
+  }
 }
 
 .fox-chain-of-thought-header > span > span {
@@ -3795,8 +3793,7 @@ img[src='/avatars/fox-assistant.png'] {
    is really clipped, so a summary that fits keeps its full contrast. The footer
    failure line keeps its own single-line horizontal fade — see
    `.fox-message-failure-meta`. */
-.fox-runtime-step-trigger .fox-run-status-label,
-.fox-runtime-step-trigger .fox-run-status-light {
+.fox-runtime-step-trigger .fox-run-status-label {
   overflow: hidden;
   overflow-wrap: normal;
   text-overflow: clip;
@@ -10367,7 +10364,7 @@ img[src='/avatars/fox-assistant.png'] {
     transition-duration: 1ms !important;
   }
   /* Keep gentle running feedback without displacing the letters or controls. */
-  .fox-run-status-text[data-active='true'] .fox-run-status-light {
+  .fox-run-status-text[data-active='true'] .fox-run-status-label {
     animation-duration: 4.8s !important;
     animation-iteration-count: infinite !important;
   }

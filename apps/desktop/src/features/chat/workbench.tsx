@@ -2466,7 +2466,6 @@ function RuntimeToolItem({ tool, active, attachmentNames, onOpenFileInSidebar, o
  *  their full contrast. */
 function StepStatusText({ text, active, children }: { text: string; active: boolean; children?: ReactNode }) {
   const labelRef = useRef<HTMLSpanElement>(null)
-  const lightRef = useRef<HTMLSpanElement>(null)
   const [clamped, setClamped] = useState(false)
   useLayoutEffect(() => {
     const node = labelRef.current
@@ -2475,8 +2474,6 @@ function StepStatusText({ text, active, children }: { text: string; active: bool
       setClamped(node.scrollWidth > node.clientWidth + 1)
       // Follow the newest text: the tail of a growing thought stays in view.
       node.scrollLeft = node.scrollWidth
-      const light = lightRef.current
-      if (light) light.scrollLeft = light.scrollWidth
     }
     sync()
     if (typeof ResizeObserver === 'undefined') return
@@ -2486,9 +2483,6 @@ function StepStatusText({ text, active, children }: { text: string; active: bool
   }, [text, children])
   return <span className={`fox-run-status-text fox-run-status-step${clamped ? ' is-clamped' : ''}`} data-active={active}>
     <span ref={labelRef} className="fox-run-status-label">{children ?? text}</span>
-    {/* The blue light is decoration only: it repeats the plain text, never the
-        interactive file name, and stays out of pointer and tab order. */}
-    {active && <span ref={lightRef} className="fox-run-status-light" aria-hidden="true">{text}</span>}
   </span>
 }
 
