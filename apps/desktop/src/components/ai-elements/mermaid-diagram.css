@@ -1,0 +1,69 @@
+/* Fallback surface for a diagram block that could not be rendered (unsupported family,
+   invalid syntax, or past the render budget). Fox tokens only — no separate visual system. */
+
+.fox-diagram-notice {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--fox-border);
+  border-radius: 10px;
+  background: color-mix(in oklch, var(--fox-card) 92%, transparent);
+  font-size: var(--fox-type-caption);
+}
+
+.fox-diagram-notice-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.fox-diagram-notice-head strong {
+  font-size: var(--fox-type-caption);
+  color: var(--fox-text);
+}
+
+.fox-diagram-notice-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fox-diagram-notice-actions button {
+  height: var(--fox-inline-action-height);
+  padding-inline: 10px;
+  border: 1px solid var(--fox-border);
+  border-radius: var(--fox-radius-small, 6px);
+  background: transparent;
+  color: var(--fox-muted);
+  font-size: var(--fox-type-caption);
+  cursor: pointer;
+}
+
+.fox-diagram-notice-actions button:hover {
+  color: var(--fox-text);
+  border-color: color-mix(in oklch, var(--fox-accent) 40%, var(--fox-border));
+}
+
+.fox-diagram-notice-actions button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.fox-diagram-notice-reason {
+  margin: 0;
+  color: var(--fox-muted);
+  line-height: 1.5;
+}
+
+.fox-diagram-notice-source {
+  max-height: 220px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: 6px;
+  background: color-mix(in oklch, var(--fox-canvas) 70%, transparent);
+  font-size: var(--fox-type-meta);
+  line-height: 1.5;
+}
