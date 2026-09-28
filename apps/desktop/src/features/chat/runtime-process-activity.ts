@@ -18,7 +18,10 @@ export function runtimeProcessActivity(events: readonly RunEventRecord[], runnin
       reasoning = false
     } else if (item.eventType === 'reasoning.delta' && typeof item.event.delta === 'string' && item.event.delta.trim()) {
       reasoning = item.event.source !== 'yuxi-history' || !answerStarted
-    } else if (item.eventType === 'message.completed' || item.eventType === 'message.delta' && typeof item.event.delta === 'string' && item.event.delta.trim()) {
+    } else if (item.eventType === 'message.completed' || item.eventType === 'message.delta' && (
+      typeof item.event.delta === 'string' && Boolean(item.event.delta.trim())
+      || typeof item.event.deltaLength === 'number' && item.event.deltaLength > 0
+    )) {
       reasoning = false
     }
   }

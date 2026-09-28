@@ -7219,6 +7219,13 @@ fn query_message_page(
     messages
 }
 
+fn answer_delta_fingerprint(delta: &str) -> String {
+    let hash = delta.as_bytes().iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("{hash:016x}")
+}
+
 fn query_runtime_events_window(
     connection: &Connection,
     conversation_id: &str,
@@ -7238,7 +7245,7 @@ fn query_runtime_events_window(
                'run.retrying', 'run.retry.completed',
                'context.compaction.started', 'context.compaction.completed',
                'planner.started', 'planner.completed', 'planner.failed',
-               'message.started', 'reasoning.delta',
+               'message.started', 'message.delta', 'reasoning.delta',
                'tool.started', 'tool.updated', 'tool.completed',
                'user.question.requested', 'user.question.responded',
                'source.added', 'usage.updated', 'message.completed',
@@ -7251,15 +7258,24 @@ fn query_runtime_events_window(
             params![conversation_id, from_ordinal, before_ordinal],
             |row| {
                 let event_json: String = row.get(3)?;
+                let mut event: Value = serde_json::from_str(&event_json).unwrap_or_else(|_| {
+                    serde_json::json!({ "type": "runtime.invalid_persisted_event" })
+                });
+                if row.get::<_, String>(2)? == "message.delta" {
+                    // The durable assistant message already owns answer bytes. The UI only
+                    // needs offsets and fingerprints to place verified segments among events.
+                    let delta = event.get("delta").and_then(Value::as_str);
+                    event = serde_json::json!({
+                        "type": "message.delta",
+                        "deltaLength": delta.map(|text| text.encode_utf16().count() as i64).unwrap_or(-1),
+                        "deltaFingerprint": delta.map(answer_delta_fingerprint),
+                    });
+                }
                 Ok(RunEventRecord {
                     run_id: row.get(0)?,
                     seq: row.get(1)?,
                     event_type: row.get(2)?,
-                    event: serde_json::from_str(&event_json).unwrap_or_else(|_| {
-                        serde_json::json!({
-                            "type": "runtime.invalid_persisted_event"
-                        })
-                    }),
+                    event,
                     created_at: row.get(4)?,
                     trace_id: row.get(5)?,
                     span_id: row.get(6)?,
@@ -9852,20 +9868,37 @@ mod tests {
                 &serde_json::json!({"type": "message.delta", "delta": "hello back"}),
             )
             .expect("apply delta");
+        database
+            .apply_runtime_event(
+                &started.run.id,
+                4,
+                &serde_json::json!({"type": "message.delta", "delta": " 🦊"}),
+            )
+            .expect("apply Unicode delta");
 
         let detail = database
             .load_conversation(&conversation.id)
             .expect("load conversation");
         assert_eq!(detail.messages.len(), 2);
-        assert_eq!(detail.messages[1].content, "hello back");
+        assert_eq!(detail.messages[1].content, "hello back 🦊");
         assert_eq!(
             detail
                 .runtime_events
                 .iter()
                 .map(|event| event.event_type.as_str())
                 .collect::<Vec<_>>(),
-            vec!["run.started", "message.started"]
+            vec!["run.started", "message.started", "message.delta", "message.delta"]
         );
+        assert_eq!(detail.runtime_events[2].event["deltaLength"], 10);
+        assert_eq!(detail.runtime_events[3].event["deltaLength"], 3);
+        assert_eq!(detail.runtime_events[2].event["deltaFingerprint"], answer_delta_fingerprint("hello back"));
+        assert_eq!(detail.runtime_events[3].event["deltaFingerprint"], "0e93180be4fd9c9e");
+        assert!(detail.runtime_events[2].event.get("delta").is_none());
+        assert!(detail.runtime_events[3].event.get("delta").is_none());
+        let history = database
+            .load_conversation_history(&conversation.id, 3, 20)
+            .expect("load conversation history");
+        assert_eq!(history.runtime_events[3].event["deltaLength"], 3);
 
         drop(database);
         let _ = std::fs::remove_file(path);

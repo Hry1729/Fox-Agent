@@ -6,6 +6,7 @@ import { ExpertPickerDialog } from '@/features/agents/ExpertPickerDialog'
 import { HtmlFilePreview } from './html-file-preview'
 import { KernelReconciliationPanel } from './kernel-reconciliation-panel'
 import { runtimeProcessActivity } from './runtime-process-activity'
+import './runtime-process-groups.css'
 import { executionReceiptPresentation, type ExecutionReceiptPresentation } from './execution-receipt'
 import { lazy, memo, Profiler, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction, type ChangeEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { subscribeNotificationRefresh } from '../notification-subscriptions'
@@ -2224,9 +2225,24 @@ function RuntimeArtifacts({ artifacts, onOpenArtifact }: { artifacts: ArtifactRe
   </section>
 }
 
-function RuntimeAssistantMessage({ message, processEvents, running, artifacts, assistantName, modelName, knowledgeBindings, attachmentNames, onOpenSource, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onFork, failureReason, cancelled }: { message: ConversationMessage; processEvents: RunEventRecord[]; running: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; attachmentNames?: ReadonlyMap<string, string>; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; onFork?: (messageId: string) => void; failureReason?: RunFailure; cancelled?: boolean }) {
+type RuntimeGroupHelpers = typeof import('./runtime-process-groups')
+
+function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleRunMessage, running, artifacts, assistantName, modelName, knowledgeBindings, attachmentNames, onOpenSource, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onFork, failureReason, cancelled }: { message: ConversationMessage; processEvents: RunEventRecord[]; groupHelpers: RuntimeGroupHelpers | null; singleRunMessage: boolean; running: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; attachmentNames?: ReadonlyMap<string, string>; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; onFork?: (messageId: string) => void; failureReason?: RunFailure; cancelled?: boolean }) {
+  const { authoritativeRunId } = useContext(TimelineRuntimeContext)
   const parsed = useMemo(() => splitAssistantContent(message.content ?? ''), [message.content])
   const process = useMemo(() => runtimeProcess(processEvents), [processEvents])
+  const orderedGroups = useMemo(() => {
+    // Legacy Host owns one append-only assistant message per run. Kernel display
+    // can replace a same-length preview and does not emit ordered answer deltas.
+    if (!groupHelpers || !message.runId || !singleRunMessage || message.runId === authoritativeRunId
+      || message.id !== `assistant-${message.runId}` || message.kernelPreview
+      || /<\/?(?:(?:mm:)?(?:think|thinking|analysis))>/i.test(message.content)) return null
+    const groups = groupHelpers.projectRuntimeGroups(message.runId, message.content, processEvents)
+    return groups?.length ? groups : null
+  }, [message.id, message.runId, message.kernelPreview, message.content, singleRunMessage, authoritativeRunId, processEvents, groupHelpers])
+  const [turnProcessCollapsed, setTurnProcessCollapsed] = useState(false)
+  const processGroupCount = orderedGroups?.filter(group => group.kind === 'process').length ?? 0
+  const lastProcessIndex = orderedGroups?.reduce((last, group, index) => group.kind === 'process' ? index : last, -1) ?? -1
   const completed = !running && ['completed', 'interrupted', 'failed', 'cancelled'].includes(message.status)
   const replyTime = new Date(message.updatedAt || message.createdAt).toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
   const [feedback, setFeedback] = useState<'positive' | 'negative' | null>(null)
@@ -2264,8 +2280,32 @@ function RuntimeAssistantMessage({ message, processEvents, running, artifacts, a
     <div className="fox-turn-anchor">
       <Message from="assistant" className="fox-message fox-assistant-message">
         <MessageContent className="fox-assistant-content">
-          <RuntimeProcess events={processEvents} process={process} running={running} answerStarted={Boolean(parsed.answer)} leading={<FoxAssistantAvatar />} attachmentNames={attachmentNames} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} />
-          {parsed.answer && <div className="fox-answer-body"><MarkdownResponse className="fox-answer-response">{parsed.answer}</MarkdownResponse></div>}
+          {orderedGroups ? <>
+            {processGroupCount > 1 && <button type="button" className="fox-process-turn-toggle" aria-expanded={!turnProcessCollapsed} onClick={() => setTurnProcessCollapsed(value => !value)}>
+              {turnProcessCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+              {turnProcessCollapsed ? `展开过程 · ${processGroupCount} 组` : `收起过程 · ${processGroupCount} 组`}
+            </button>}
+            {turnProcessCollapsed && orderedGroups[0]?.kind === 'process' && <FoxAssistantAvatar />}
+            {orderedGroups.map((group, index) => group.kind === 'process'
+              ? <div key={group.key} hidden={turnProcessCollapsed} className="fox-process-stage">
+                  <RuntimeProcess
+                    events={group.events} grouped groupHelpers={groupHelpers} running={running && index === orderedGroups.length - 1}
+                    outcome={index === lastProcessIndex ? failureReason ? 'failed' : cancelled ? 'cancelled' : undefined : undefined}
+                    leading={index === 0 ? <FoxAssistantAvatar /> : undefined} attachmentNames={attachmentNames}
+                    onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer}
+                  />
+                </div>
+              : group.kind === 'notice' ? <div key={group.key} className="fox-process-notice" role="status">
+                  {index === 0 && <FoxAssistantAvatar />}{group.label}
+                </div>
+              : <div key={group.key} className="fox-answer-body fox-answer-segment">
+                  {index === 0 && <FoxAssistantAvatar />}
+                  <MarkdownResponse className="fox-answer-response">{group.text}</MarkdownResponse>
+                </div>)}
+          </> : <>
+            <RuntimeProcess events={processEvents} process={process} running={running} answerStarted={Boolean(parsed.answer)} leading={<FoxAssistantAvatar />} attachmentNames={attachmentNames} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} />
+            {parsed.answer && <div className="fox-answer-body"><MarkdownResponse className="fox-answer-response">{parsed.answer}</MarkdownResponse></div>}
+          </>}
           {!running && <RuntimeArtifacts artifacts={artifacts} onOpenArtifact={onOpenArtifact} />}
           <RuntimeSources sources={process.sources} knowledgeBindings={knowledgeBindings} onOpenSource={onOpenSource} />
         </MessageContent>
@@ -2306,6 +2346,8 @@ const MemoizedRuntimeAssistantMessage = memo(RuntimeAssistantMessage, (previous,
   && previous.message.createdAt === next.message.createdAt
   && previous.message.updatedAt === next.message.updatedAt
   && previous.processEvents === next.processEvents
+  && previous.groupHelpers === next.groupHelpers
+  && previous.singleRunMessage === next.singleRunMessage
   && previous.running === next.running
   && previous.artifacts === next.artifacts
   && previous.assistantName === next.assistantName
@@ -2474,7 +2516,7 @@ function RuntimeProcessRow({ icon, label, labelContent, active = false, status =
   )
 }
 
-function RuntimeProcess({ events, process: preparedProcess, running: runtimeRunning, answerStarted = false, leading, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; running: boolean; answerStarted?: boolean; leading?: ReactNode; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
+function RuntimeProcess({ events, process: preparedProcess, groupHelpers, running: runtimeRunning, answerStarted = false, leading, grouped = false, outcome, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; groupHelpers?: RuntimeGroupHelpers | null; running: boolean; answerStarted?: boolean; leading?: ReactNode; grouped?: boolean; outcome?: 'failed' | 'cancelled'; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
   const [open, setOpen] = useState(false)
   const [visited, setVisited] = useState(false)
   const process = useMemo(() => preparedProcess ?? runtimeProcess(events), [events, preparedProcess])
@@ -2487,10 +2529,10 @@ function RuntimeProcess({ events, process: preparedProcess, running: runtimeRunn
   const lifecycleOnly = processStepCount === 0 && hasLifecycle
   const stepCount = lifecycleOnly ? 1 : processStepCount
   const activeTool = [...process.tools].reverse().find((tool) => activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser)
-  const showLiveReasoning = !open && running && Boolean(process.reasoning) && !answerStarted
+  const showLiveReasoning = !grouped && !open && running && Boolean(process.reasoning) && !answerStarted
   const lifecycleFailed = terminalEvent?.eventType === 'run.failed' || terminalEvent?.eventType === 'run.interrupted'
   const lifecycleCancelled = terminalEvent?.eventType === 'run.cancelled'
-  const awaitingUser = terminalEvent?.eventType === 'run.completed'
+  const awaitingUser = process.tools.some(tool => tool.awaitingUser) || terminalEvent?.eventType === 'run.completed'
     && terminalEvent.event.completionReason === 'awaiting_user'
   const lifecycleLabel = running
     ? '正在理解你的请求'
@@ -2501,7 +2543,9 @@ function RuntimeProcess({ events, process: preparedProcess, running: runtimeRunn
       : lifecycleCancelled
         ? '请求已取消'
         : '已完成请求处理'
-  const processTitle = activeTool
+  const processTitle = grouped
+    ? outcome === 'failed' ? '过程未完成' : outcome === 'cancelled' ? '过程已取消' : awaitingUser ? '等待你的回答' : running ? groupHelpers?.activeProcessGroupTitle(activeTool?.name, activeTool?.input) ?? '正在分析请求' : groupHelpers?.processGroupTitle(events) ?? '已完成分析'
+    : activeTool
     ? toolActivity(activeTool, attachmentNames)
     : running
       ? 'Fox 正在思考'
@@ -2604,6 +2648,14 @@ function ConversationBottomDock({ plan }: { plan?: GoalProgressData['planRevisio
 // fixture). Renders the real streaming message path without any Tauri dependency.
 export function RuntimeTimeline({ messages, attachments, artifacts, expertBindings = [], agents = [], pendingMessage, events, runs, activeRunId, activeRunModel, runtimeRunning, state, streamingText, runtimeError, runtimeErrorDetails, assistantName = 'Fox 默认助手', planRevision, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onRetry, onRerun, onFork, onOpenSource, onOpenArtifact, onViewExpert, onOpenFileInSidebar, onRevealFileInExplorer }: { messages: ConversationMessage[]; attachments: AttachmentRecord[]; artifacts: ArtifactRecord[]; expertBindings?: ExpertBindingView[]; agents?: AgentRecord[]; pendingMessage?: ConversationMessage | null; events: RunEventRecord[]; runs?: RunRecord[]; activeRunId?: string; activeRunModel?: string; runtimeRunning: boolean; state: ChatState; streamingText: string; runtimeError?: string | null; runtimeErrorDetails?: DesktopErrorDetails | null; assistantName?: string; planRevision?: GoalProgressData['planRevisions'][number]; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onRetry: () => void; onRerun: (messageId: string, prompt: string) => Promise<boolean>; onFork?: (messageId: string) => void; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onViewExpert?: (expertId: string) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
   const runtimeContext = useContext(TimelineRuntimeContext)
+  const [groupHelpers, setGroupHelpers] = useState<RuntimeGroupHelpers | null>(null)
+  const hasRuntimeEvents = events.length > 0
+  useEffect(() => {
+    if (!hasRuntimeEvents) return
+    let mounted = true
+    void import('./runtime-process-groups').then(helpers => { if (mounted) setGroupHelpers(helpers) })
+    return () => { mounted = false }
+  }, [hasRuntimeEvents])
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null)
   const [editingText, setEditingText] = useState('')
   const [rerunning, setRerunning] = useState(false)
@@ -2678,6 +2730,13 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
       last.set(message.runId, message.id)
     }
     return last
+  }, [visibleMessages])
+  const assistantMessageCountByRun = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const message of visibleMessages) {
+      if (message.role === 'assistant' && message.runId) counts.set(message.runId, (counts.get(message.runId) ?? 0) + 1)
+    }
+    return counts
   }, [visibleMessages])
   const streamTargetId = useMemo(() => latestRunAssistantId(visibleMessages, activeRunId), [visibleMessages, activeRunId])
   const groupedMessages = useMemo(() => groupAssistantContinuations(visibleMessages, streamTargetId, streamingText), [visibleMessages, streamTargetId, streamingText])
@@ -2823,7 +2882,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
           const isRunTail = Boolean(message.runId && lastAssistantMessageIdByRun.get(message.runId) === message.id)
           const failureReason = isRunTail && message.runId ? failureByRunId.get(message.runId) : undefined
           const cancelled = Boolean(isRunTail && message.runId && cancelledRunIds.has(message.runId))
-          return <div id={`fox-turn-${message.id}`} key={message.timelineKey} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} attachmentNames={attachmentNames} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} onFork={onFork} failureReason={failureReason} cancelled={cancelled} /></div>
+          return <div id={`fox-turn-${message.id}`} key={message.timelineKey} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} groupHelpers={groupHelpers} singleRunMessage={Boolean(message.runId && assistantMessageCountByRun.get(message.runId) === 1)} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} attachmentNames={attachmentNames} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} onFork={onFork} failureReason={failureReason} cancelled={cancelled} /></div>
         })}
         {state === 'error' && <div className="fox-turn-anchor"><Message from="assistant" className="fox-message fox-assistant-message"><MessageContent className="fox-assistant-content"><ErrorPrompt onRetry={onRetry} error={runtimeError} errorDetails={runtimeErrorDetails} /></MessageContent></Message></div>}
         {runtimeContext.recoveryPanel}
@@ -3055,7 +3114,7 @@ type ComposerRuntimeContextValue = {
 
 type TimelineRuntimeContextValue = Pick<ComposerRuntimeContextValue,
   'knowledgeBindings' | 'onOpenSource' | 'assistantName' | 'runModel'
-> & { recoveryPanel?: ReactNode; userProfile?: UserProfile }
+> & { recoveryPanel?: ReactNode; userProfile?: UserProfile; authoritativeRunId?: string }
 
 const ComposerRuntimeContext = createContext<ComposerRuntimeContextValue>({ knowledgeBindings: [] })
 const TimelineRuntimeContext = createContext<TimelineRuntimeContextValue>({ knowledgeBindings: [] })
@@ -5577,7 +5636,8 @@ export function Workbench() {
     onOpenSource: handleRuntimeOpenSource,
     recoveryPanel,
     userProfile,
-  }), [desktopConversation.knowledgeBindings, handleRuntimeOpenSource, timelineAssistantName, timelineRunModel, recoveryPanel, userProfile.name, userProfile.avatar, userProfile.initial])
+    authoritativeRunId: desktopConversation.detail?.kernelSnapshot?.runId,
+  }), [desktopConversation.knowledgeBindings, desktopConversation.detail?.kernelSnapshot?.runId, handleRuntimeOpenSource, timelineAssistantName, timelineRunModel, recoveryPanel, userProfile.name, userProfile.avatar, userProfile.initial])
   const composerRuntimeContextValue = useMemo<ComposerRuntimeContextValue>(() => ({
     ...timelineRuntimeContextValue,
     remoteKnowledgeBases: knowledge.items,

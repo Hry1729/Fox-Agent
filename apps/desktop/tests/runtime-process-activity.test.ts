@@ -20,6 +20,9 @@ test('only the current phase glows across reasoning, tools and model continuatio
   expect(activity().reasoning).toBe(true)
   events.push(event(5, 'message.delta', { delta: 'The result is' }))
   expect(activity().reasoning).toBe(false)
+  events.push(event(6, 'reasoning.delta', { delta: 'new thought' }))
+  events.push(event(7, 'message.delta', { deltaLength: 2 }))
+  expect(activity().reasoning).toBe(false)
 })
 
 test('parallel tools stay active independently and suppress reasoning', () => {

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { answerDeltaFingerprint } from '../src/features/conversations/model/runtime-delta-fingerprint'
 import { applyWorkEvent, mergeConversationDetail, reduceRuntimeNotifications } from '../src/features/conversations/model/runtime-event-reducer'
 import { pendingRuntimeQuestion } from '../src/features/conversations/model/pending-interactions'
 import { enqueueRuntimeEvent, takeRuntimeEventFrame } from '../src/features/conversations/model/runtime-event-queue'
@@ -34,6 +35,18 @@ function notification(seq: number, event: RuntimeEventNotification['event']): Ru
 }
 
 describe('runtime event reducer', () => {
+  test('retains only answer offsets while preserving the live assistant text', () => {
+    const result = reduceRuntimeNotifications(detail(), [
+      notification(1, { type: 'run.started' }),
+      notification(2, { type: 'message.started' }),
+      notification(3, { type: 'message.delta', delta: '狐🦊' }),
+    ])
+    expect(result?.messages.find(message => message.role === 'assistant')?.content).toBe('狐🦊')
+    expect(result?.runtimeEvents.find(event => event.seq === 3)?.event).toEqual({
+      type: 'message.delta', deltaLength: 3, deltaFingerprint: answerDeltaFingerprint('狐🦊'),
+    })
+    expect(reduceRuntimeNotifications(result, [notification(3, { type: 'message.delta', delta: '狐🦊' })])).toBe(result)
+  })
   test('a known authoritative run ignores late Legacy lifecycle and text events', () => {
     const current = detail()
     current.kernelSnapshot = {
@@ -132,7 +145,7 @@ describe('runtime event reducer', () => {
       id: 'assistant-run-1', content: 'Live reply', status: 'streaming',
     })
     expect(next.runtimeEvents.map((event) => event.eventType)).toEqual([
-      'run.started', 'reasoning.delta',
+      'run.started', 'reasoning.delta', 'message.delta',
     ])
   })
 
@@ -150,7 +163,7 @@ describe('runtime event reducer', () => {
     expect(assistants).toHaveLength(1)
     expect(assistants[0]).toMatchObject({ id: 'assistant-run-1', content: 'Hello world', status: 'completed' })
     expect(next.runtimeEvents.map((event) => event.eventType)).toEqual([
-      'run.started', 'reasoning.delta', 'message.started', 'message.completed', 'run.completed',
+      'run.started', 'reasoning.delta', 'message.started', 'message.delta', 'message.delta', 'message.completed', 'run.completed',
     ])
     expect(next.lastRun?.status).toBe('completed')
   })

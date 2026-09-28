@@ -12,6 +12,7 @@ import type {
   WorkEventRecord,
 } from './types'
 import { conversationRunIsActive, mergeKernelSnapshot, snapshotForRun } from './kernel-snapshot'
+import { answerDeltaFingerprint } from './runtime-delta-fingerprint'
 import { previewBelongsToSnapshot } from './kernel-model-preview'
 
 export function runRecordIsActive(run: RunRecord | null) {
@@ -176,6 +177,7 @@ const processEventTypes = new Set([
   'planner.completed',
   'planner.failed',
   'message.started',
+  'message.delta',
   'reasoning.delta',
   'tool.started',
   'tool.updated',
@@ -299,7 +301,10 @@ export function applyRuntimeNotification(
         runId: notification.runId,
         seq: notification.seq,
         eventType: event.type,
-        event,
+        event: event.type === 'message.delta'
+          ? { type: 'message.delta', deltaLength: typeof event.delta === 'string' ? event.delta.length : -1,
+              deltaFingerprint: typeof event.delta === 'string' ? answerDeltaFingerprint(event.delta) : null }
+          : event,
         createdAt: timestamp,
       }]
     : current.runtimeEvents
