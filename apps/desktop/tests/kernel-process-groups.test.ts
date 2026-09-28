@@ -50,6 +50,7 @@ test('tool-only rounds, empty replacements, failure notices and foreign events s
   expect(JSON.stringify(groups)).not.toContain('再分析')
   expect(groups.at(-1)).toMatchObject({ kind: 'notice', label: '运行失败' })
   expect(groups.filter(group => group.kind === 'process')).toHaveLength(1)
+  expect(projectKernelGroups('run', [preview], [event(4, 'reasoning.delta', { source: 'kernel-model:12', delta: '过期推理' })])).toEqual([])
 })
 
 test('missing tool ownership or foreign/mixed messages fall back instead of guessing', () => {

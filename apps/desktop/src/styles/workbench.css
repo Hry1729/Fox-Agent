@@ -3608,11 +3608,16 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-run-status-text[data-active='true'] { color: var(--fox-text); }
 
+.fox-run-status-text {
+  --fox-process-shimmer-edge: color-mix(in oklch, var(--fox-text) 43%, #86a9c3);
+  --fox-process-shimmer-center: color-mix(in oklch, var(--fox-text) 28%, #a0bbcf);
+}
+
 /* Paint the base and shimmer on one set of glyphs. Separate text overlays can
    drift when the streaming label scrolls or the viewport changes width. */
 @supports ((background-clip: text) or (-webkit-background-clip: text)) {
   .fox-run-status-text[data-active='true'] .fox-run-status-label {
-    background-image: linear-gradient(90deg, transparent 38%, #1677ff 46%, #56b7ff 50%, #1677ff 54%, transparent 62%), linear-gradient(currentColor, currentColor);
+    background-image: linear-gradient(90deg, transparent 38%, var(--fox-process-shimmer-edge) 46%, var(--fox-process-shimmer-center) 50%, var(--fox-process-shimmer-edge) 54%, transparent 62%), linear-gradient(currentColor, currentColor);
     background-size: 260% 100%, 100% 100%;
     background-repeat: no-repeat;
     background-clip: text;
@@ -3822,6 +3827,13 @@ img[src='/avatars/fox-assistant.png'] {
   -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
 }
 
+.fox-runtime-step-detail[data-state='open'] .fox-run-status-step.has-fixed-prefix {
+  grid-template-columns: auto;
+}
+.fox-runtime-step-detail[data-state='open'] .fox-run-status-step.has-fixed-prefix .fox-run-status-viewport {
+  display: none;
+}
+
 /* A tool row's file name opens in the sidebar; right-click reveals it in the OS
    explorer. It stays a span so it never nests a button inside the row trigger. */
 .fox-runtime-step-path {
@@ -3955,33 +3967,10 @@ img[src='/avatars/fox-assistant.png'] {
   padding: 9px 11px;
 }
 
-.fox-reasoning-text pre {
-  margin: 0;
-  font: inherit;
-  line-height: 1.65;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.fox-reasoning-pagination {
-  position: sticky;
-  top: -9px;
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  padding-block: 5px 9px;
-  background: var(--fox-card);
-  font-size: 11px;
-}
-/* The detail panel is not a scrollport anymore, so paging controls travel with it. */
-.fox-runtime-detail-panel .fox-reasoning-pagination {
-  position: static;
-  background: transparent;
-}
-
-.fox-reasoning-pagination > span { margin-right: auto; }
-.fox-reasoning-pagination button { color: var(--fox-accent); cursor: pointer; }
-.fox-reasoning-pagination button:disabled { color: var(--fox-faint); cursor: default; }
+.fox-reasoning-text { font-size: 12.5px; line-height: 1.55; user-select: text; }
+.fox-reasoning-text :is(p, ul, ol, blockquote) { margin-block: 0 6px; }
+.fox-reasoning-text :is(ul, ol) { padding-left: 20px; }
+.fox-reasoning-text :is(pre, code) { overflow-wrap: anywhere; }
 
 .fox-runtime-process-disclosure {
   display: grid;
@@ -4008,16 +3997,15 @@ img[src='/avatars/fox-assistant.png'] {
   }
 }
 .fox-runtime-process-clip { min-height: 0; overflow: hidden; }
-/* The expanded chain shows every row at once, with no scrollbar of its own. */
+/* The body holds the rows while the group scrollport supplies the height limit. */
 .fox-runtime-process-scroll {
-  display: grid;
-  gap: 10px;
   max-height: none;
   overflow: visible;
   padding: 8px 0 8px 2px;
 }
-.fox-runtime-process-scroll > div { animation: none; }
-.fox-runtime-process-scroll > div > div:first-child { color: var(--fox-faint); }
+.fox-runtime-process-content { display: grid; gap: 8px; }
+.fox-runtime-process-content > div { animation: none; }
+.fox-runtime-process-content > div > div:first-child { color: var(--fox-faint); }
 
 .fox-runtime-step-detail {
   width: 100%;
@@ -4034,7 +4022,7 @@ img[src='/avatars/fox-assistant.png'] {
    and stays there while the detail panel expands underneath it. The generic
    chain-of-thought row rules further down also style this column, so the
    selector is deliberately long enough to win the specificity contest. */
-:is(.fox-runtime-process-scroll, .fox-chain-of-thought-content) > .fox-runtime-step-row.fox-runtime-step-detail > .fox-runtime-step-icon {
+:is(.fox-runtime-process-content, .fox-chain-of-thought-content) > .fox-runtime-step-row.fox-runtime-step-detail > .fox-runtime-step-icon {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -4052,34 +4040,34 @@ img[src='/avatars/fox-assistant.png'] {
   min-width: 0;
 }
 
-:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div {
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-content) > div {
   gap: 9px;
   color: var(--fox-muted);
   font-size: 13px;
   line-height: 1.55;
 }
 
-:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div > div:first-child {
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-content) > div > div:first-child {
   margin-top: 2px;
   color: var(--fox-faint);
 }
 
-:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div > div:first-child > svg {
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-content) > div > div:first-child > svg {
   width: 15px;
   height: 15px;
 }
 
-:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div > div:first-child > div {
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-content) > div > div:first-child > div {
   top: 23px;
   background: color-mix(in oklch, var(--fox-border) 72%, transparent);
 }
 
-:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div > div:last-child {
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-content) > div > div:last-child {
   min-width: 0;
 }
 
-:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div > div:last-child > div:first-child,
-:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-scroll) > div > div:last-child > div:nth-child(2) {
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-content) > div > div:last-child > div:first-child,
+:is(.fox-chain-of-thought-content:not(.fox-runtime-process-disclosure), .fox-runtime-process-content) > div > div:last-child > div:nth-child(2) {
   overflow-wrap: anywhere;
 }
 

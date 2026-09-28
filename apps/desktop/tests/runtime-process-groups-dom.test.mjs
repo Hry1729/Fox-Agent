@@ -17,8 +17,9 @@ const server = await createServer({
   resolve: { alias: { '@': path.join(root, 'src') } }, esbuild: { jsx: 'automatic' },
 })
 const { RuntimeTimeline } = await server.ssrLoadModule('/src/features/chat/workbench.tsx')
+const { persistProcessDisplayMode } = await server.ssrLoadModule('/src/features/chat/process-display-mode.ts')
 const { answerDeltaFingerprint } = await server.ssrLoadModule('/src/features/conversations/model/runtime-delta-fingerprint.ts')
-afterEach(() => cleanup())
+afterEach(() => { cleanup(); persistProcessDisplayMode('standard') })
 after(async () => { await server.close(); if (ownsDomRegistration) await GlobalRegistrator.unregister() })
 
 const messages = [
@@ -47,15 +48,21 @@ test('answer segments remain once and in order while the whole process is collap
   assert.equal(segments.length, 2)
   assert.match(segments[0].textContent, /第一段/)
   assert.match(segments[1].textContent, /第二段/)
+  assert.equal(segments[0].hidden, true)
+  assert.equal(segments[1].hidden, false)
+  assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 2)
+  fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
   fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
   assert.equal(view.container.querySelectorAll('.fox-chain-of-thought-header[aria-expanded="true"]').length, 1)
   fireEvent.click(view.getByRole('button', { name: /收起过程/ }))
   assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 2)
   segments = view.container.querySelectorAll('.fox-answer-segment')
   assert.equal(segments.length, 2)
+  assert.equal(segments[0].hidden, true)
+  assert.equal(segments[1].hidden, false)
   fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
   assert.equal(view.container.querySelectorAll('.fox-runtime-process').length, 2)
-  assert.equal(view.container.querySelectorAll('.fox-chain-of-thought-header[aria-expanded="true"]').length, 1)
+  assert.equal(view.container.querySelectorAll('.fox-chain-of-thought-header[aria-expanded="true"]').length, 0)
 })
 
 test('old history with missing answer deltas keeps one answer body', () => {
@@ -95,8 +102,7 @@ test('failed, cancelled, and waiting groups retain their visible status after gr
 
 test('run notices remain visible when process rows are collapsed', async () => {
   const view = render(timeline([...events, event(6, 'run.retrying')]))
-  await waitFor(() => assert.ok(view.queryByRole('button', { name: /收起过程/ })))
-  fireEvent.click(view.getByRole('button', { name: /收起过程/ }))
+  await waitFor(() => assert.ok(view.queryByRole('button', { name: /展开过程/ })))
   assert.match(view.container.querySelector('.fox-process-notice').textContent, /正在重试/)
 })
 
@@ -124,19 +130,18 @@ test('a failed tool stays visible in its stage and in the collapsed turn summary
   const view = render(timeline(failedToolEvents))
   await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-answer-segment').length, 2))
   assert.match(view.container.querySelectorAll('.fox-runtime-process-summary')[1].textContent, /失败/)
-  fireEvent.click(view.getByRole('button', { name: /收起过程/ }))
   assert.match(view.getByRole('button', { name: /展开过程/ }).textContent, /失败/)
 })
 
-test('a tool still running before a response keeps its own stage active', async () => {
+test('a reply closes its preceding process group even when a tool has no result yet', async () => {
   const liveEvents = events.filter(item => item.seq !== 4)
   const view = render(timeline(liveEvents, {
     runtimeRunning: true, activeRunId: 'run', state: 'streaming',
     messages: [messages[0], { ...messages[1], status: 'streaming' }],
   }))
   await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-answer-segment').length, 2))
-  assert.match(view.container.querySelectorAll('.fox-runtime-process-summary')[1].textContent, /正在读取文件/)
-  assert.equal(view.container.querySelectorAll('.fox-runtime-process-summary.is-running').length, 1)
+  assert.match(view.container.querySelectorAll('.fox-runtime-process-summary')[1].textContent, /读取了文件/)
+  assert.equal(view.container.querySelectorAll('.fox-runtime-process-summary.is-running').length, 0)
   view.rerender(timeline([...liveEvents, event(6, 'run.completed')], {
     runtimeRunning: true, activeRunId: 'run', state: 'streaming',
     messages: [messages[0], { ...messages[1], status: 'streaming' }],
@@ -148,14 +153,14 @@ test('opening a live stage jumps to its end while reopening a completed stage st
   const height = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight')
   Object.defineProperty(HTMLElement.prototype, 'scrollHeight', { configurable: true, get() { return this.classList.contains('fox-runtime-process-scroll') ? 1000 : 0 } })
   try {
-    const liveEvents = events.filter(item => item.seq !== 4)
+    const liveEvents = [...events.filter(item => item.seq !== 4), event(6, 'reasoning.delta', { delta: '继续分析' })]
     const view = render(timeline(liveEvents, {
       runtimeRunning: true, activeRunId: 'run', state: 'streaming',
       messages: [messages[0], { ...messages[1], status: 'streaming' }],
     }))
     await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-answer-segment').length, 2))
     const headers = view.container.querySelectorAll('.fox-chain-of-thought-header')
-    fireEvent.click(headers[1])
+    fireEvent.click(headers[2])
     const liveScroll = view.container.querySelectorAll('.fox-runtime-process-scroll')[0]
     assert.equal(liveScroll.scrollTop, 1000)
     fireEvent.click(headers[0])
@@ -195,4 +200,131 @@ test('Kernel rounds group by Host ownership and retain disclosures across previe
   view.rerender(timeline(kernelEvents, { messages: [messages[0], first, { ...last, kernelPreview: undefined, content: '最终答案', status: 'completed' }] }))
   await waitFor(() => assert.match(view.container.textContent, /整理搜索结果/))
   assert.doesNotMatch(view.container.textContent, /新的推理/)
+})
+
+test('mode changes keep manual group and reasoning disclosure state', async () => {
+  const markdownEvents = events.map(item => item.seq === 1
+    ? event(1, 'reasoning.delta', { delta: '**判断**\n\n- 查证' }) : item)
+  const view = render(timeline(markdownEvents))
+  await waitFor(() => assert.ok(view.queryByRole('button', { name: /展开过程/ })))
+  fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
+  fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
+  const thought = view.container.querySelector('.fox-runtime-step-row')
+  fireEvent.click(thought.querySelector('.fox-runtime-step-trigger'))
+  await waitFor(() => assert.ok(thought.querySelector('.fox-reasoning-text [data-streamdown="strong"]')), { timeout: 3000 })
+  assert.equal(thought.querySelector('.fox-run-status-prefix').textContent, '深度思考')
+  assert.equal(thought.querySelector('.fox-run-status-label').textContent, '')
+  await React.act(async () => persistProcessDisplayMode('verbose'))
+  assert.equal(view.container.querySelectorAll('.fox-runtime-process.is-fully-expanded').length, 2)
+  assert.equal(thought.getAttribute('data-state'), 'open')
+  await React.act(async () => persistProcessDisplayMode('standard'))
+  assert.equal(thought.getAttribute('data-state'), 'open')
+  assert.equal(view.container.querySelectorAll('.fox-chain-of-thought-header[aria-expanded="true"]').length, 1)
+})
+
+test('running turn stays visible and settles to a folded process with its answer exposed', async () => {
+  const live = timeline(events.filter(item => item.seq !== 4), {
+    runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+    messages: [messages[0], { ...messages[1], status: 'streaming' }],
+  })
+  const view = render(live)
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage:not([hidden])').length, 2))
+  assert.equal(view.container.querySelectorAll('.fox-process-turn-toggle.is-status').length, 1)
+  view.rerender(timeline(events))
+  await waitFor(() => assert.ok(view.queryByRole('button', { name: /展开过程/ })))
+  assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 2)
+  assert.equal(view.container.querySelectorAll('.fox-answer-segment:not([hidden])').length, 1)
+})
+
+test('automatic completion fold does not hide a focused process control', async () => {
+  const live = timeline(events.filter(item => item.seq !== 4), {
+    runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+    messages: [messages[0], { ...messages[1], status: 'streaming' }],
+  })
+  const view = render(live)
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 2))
+  fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
+  const row = view.container.querySelector('.fox-runtime-step-trigger')
+  row.focus()
+  assert.equal(document.activeElement, row)
+  view.rerender(timeline(events))
+  await waitFor(() => assert.ok(view.queryByRole('button', { name: /收起过程/ })))
+  assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 0)
+})
+
+test('detailed mode opens only running groups and compact mode hides settled thought previews', async () => {
+  await React.act(async () => persistProcessDisplayMode('detailed'))
+  const live = timeline(events.filter(item => item.seq !== 4), {
+    runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+    messages: [messages[0], { ...messages[1], status: 'streaming' }],
+  })
+  const view = render(live)
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-runtime-process.is-fully-expanded').length, 2))
+  view.rerender(timeline(events))
+  assert.equal(view.container.querySelectorAll('.fox-runtime-process.is-fully-expanded').length, 0)
+  await React.act(async () => persistProcessDisplayMode('compact'))
+  fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
+  fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
+  const thought = view.container.querySelector('.fox-runtime-step-row')
+  assert.equal(thought.querySelector('.fox-run-status-prefix').textContent, '深度思考')
+  assert.equal(thought.querySelector('.fox-run-status-label').textContent, '')
+})
+
+test('prepending an older Kernel reasoning round keeps the existing open group and turn', async () => {
+  const older = { ...messages[1], id: 'kernel-message:run:1', content: '', ordinal: 2,
+    kernelPreview: { checkpointSeq: 1, revision: 1, reasoning: '更早的思考' } }
+  const newest = { ...messages[1], id: 'kernel-message:run:2', content: '最终答案', ordinal: 3,
+    kernelPreview: { checkpointSeq: 2, revision: 1, reasoning: '原有的思考' } }
+  const view = render(timeline([], { messages: [messages[0], newest] }))
+  await waitFor(() => assert.ok(view.queryByRole('button', { name: /展开过程/ })))
+  fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
+  fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
+  const originalStage = view.container.querySelector('.fox-process-stage')
+  await React.act(async () => { view.rerender(timeline([], { messages: [messages[0], older, newest] })) })
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-markdown-loading').length, 0))
+  assert.equal(view.container.querySelector('.fox-process-stage'), originalStage)
+  assert.equal(view.container.querySelector('.fox-chain-of-thought-header').getAttribute('aria-expanded'), 'true')
+  assert.equal(view.getByRole('button', { name: /收起过程/ }).getAttribute('aria-expanded'), 'true')
+  assert.match(view.container.querySelector('.fox-process-stage').textContent, /更早的思考/)
+})
+
+test('a user input after process evidence prevents whole-turn folding', async () => {
+  const assistant = { ...messages[1], id: 'kernel-message:run:1', content: '阶段回复',
+    kernelPreview: { checkpointSeq: 1, revision: 1, reasoning: '先查证' } }
+  const steering = { ...messages[0], id: 'steering', ordinal: 3, content: '继续检查' }
+  const view = render(timeline([], { messages: [messages[0], assistant, steering] }))
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 1))
+  assert.equal(view.container.querySelectorAll('.fox-process-turn-toggle.is-status').length, 1)
+  assert.equal(view.container.querySelectorAll('.fox-process-turn-toggle[aria-expanded]').length, 0)
+  assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 0)
+})
+
+test('an expanded live group follows new rows only while its own scroll remains at bottom', async () => {
+  const height = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight')
+  const client = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight')
+  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', { configurable: true, get() { return this.classList.contains('fox-runtime-process-scroll') ? 1000 : 0 } })
+  Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get() { return this.classList.contains('fox-runtime-process-scroll') ? 400 : 0 } })
+  try {
+    const running = (items) => timeline(items, { runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+      messages: [messages[0], { ...messages[1], status: 'streaming' }] })
+    const tail = [...events.filter(item => item.seq !== 4), event(6, 'reasoning.delta', { delta: '继续分析' })]
+    const view = render(running(tail))
+    await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 3))
+    fireEvent.click(view.container.querySelectorAll('.fox-chain-of-thought-header')[2])
+    const scroll = view.container.querySelector('.fox-runtime-process-scroll')
+    assert.equal(scroll.scrollTop, 1000)
+    scroll.scrollTop = 250
+    fireEvent.scroll(scroll)
+    view.rerender(running([...tail, event(7, 'reasoning.delta', { delta: '更多内容' })]))
+    assert.equal(scroll.scrollTop, 250)
+    scroll.scrollTop = 600
+    fireEvent.scroll(scroll)
+    view.rerender(running([...tail, event(7, 'reasoning.delta', { delta: '更多内容' }), event(8, 'reasoning.delta', { delta: '末尾内容' })]))
+    assert.equal(scroll.scrollTop, 1000)
+  } finally {
+    if (height) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', height)
+    else delete HTMLElement.prototype.scrollHeight
+    if (client) Object.defineProperty(HTMLElement.prototype, 'clientHeight', client)
+    else delete HTMLElement.prototype.clientHeight
+  }
 })

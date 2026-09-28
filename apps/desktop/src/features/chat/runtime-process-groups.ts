@@ -23,7 +23,8 @@ export type RuntimeDisplayGroup = RuntimeProcessGroup | RuntimeResponseGroup | R
 
 export type ProcessActivityKind =
   | 'localKnowledge' | 'remoteKnowledge' | 'knowledge' | 'read' | 'search' | 'write'
-  | 'command' | 'web' | 'office' | 'question' | 'other'
+  | 'command' | 'web' | 'office' | 'question' | 'other' | 'readImage' | 'edit'
+  | 'code' | 'subagents' | 'plan' | 'webSearch' | 'webFetch'
 
 export type ProcessActivityCount = { kind: ProcessActivityKind; count: number }
 
@@ -84,16 +85,16 @@ export function projectKernelGroups(runId: string, messages: readonly Conversati
   for (const [checkpoint, round] of [...rounds].sort(([a], [b]) => BigInt(a) < BigInt(b) ? -1 : 1)) {
     const preview = round.message?.kernelPreview
     // A preview is a full replacement (including empty reasoning), not a delta.
-    const reasoning = preview?.reasoning !== undefined ? [{
+    const reasoning = preview?.reasoning !== undefined ? preview.reasoning.trim() ? [{
       runId, seq: round.reasoning[0]?.seq ?? 0, eventType: 'reasoning.delta',
       event: { type: 'reasoning.delta', delta: preview.reasoning, source: `kernel-model:${checkpoint}` },
       createdAt: round.message!.updatedAt,
-    }] : round.reasoning
+    }] : [] : round.reasoning
     appendProcess(`${runId}:kernel:${checkpoint}:reasoning`, reasoning)
     if (round.message?.content.trim()) groups.push({ kind: 'response', key: `${runId}:kernel:${checkpoint}:response`, text: round.message.content })
     appendProcess(`${runId}:kernel:${checkpoint}:tools`, round.tools)
   }
-  return groups.length ? [...groups, ...notices] : null
+  return [...groups, ...notices]
 }
 
 /** A bounded read projection: the answer lives once in messages.content. */
@@ -163,6 +164,13 @@ export function projectRuntimeGroups(runId: string, content: string, events: rea
 
 export function processActivityKind(name: string, input?: unknown): ProcessActivityKind {
   const value = name.toLowerCase()
+  if (value === 'read_image') return 'readImage'
+  if (value === 'run_code') return 'code'
+  if (value === 'web_search') return 'webSearch'
+  if (value === 'web_fetch') return 'webFetch'
+  if (value === 'subagent' || value.startsWith('subagent_')) return value.endsWith('_inspect') ? 'search' : 'subagents'
+  if (/^(todo_write|create_goal|update_goal|get_goal)$/.test(value)) return 'plan'
+  if (/^(edit|apply_patch)$/.test(value)) return 'edit'
   if (value === 'query_kb') return 'remoteKnowledge'
   if (/^(search_knowledge|read_knowledge_document|list_knowledge_bases)$/.test(value)) {
     const data = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {}
@@ -210,6 +218,8 @@ export function processGroupTitle(events: readonly RunEventRecord[]) {
     localKnowledge: '检索了本地知识库', remoteKnowledge: '检索了远程知识库', knowledge: '检索了知识库',
     read: '读取了文件', search: '已搜索代码', write: '修改了文件', command: '执行了命令',
     web: '访问了网页', office: '调用了办公工具', question: '询问了用户', other: '调用了工具',
+    readImage: '已读取图片', edit: '修改了文件', code: '运行了代码', subagents: '已协调子代理',
+    plan: '更新了计划', webSearch: '已搜索网页', webFetch: '已访问网页',
   }
   const selected = counts.slice(0, 3).map(item => labels[item.kind])
   const title = selected.length < 2 ? selected[0] : `${selected.slice(0, -1).join('、')}并${selected.at(-1)}`
@@ -223,6 +233,25 @@ export function activeProcessGroupTitle(name?: string, input?: unknown) {
     knowledge: '正在检索知识库', read: '正在读取文件', search: '正在搜索代码',
     write: '正在修改文件', command: '正在执行命令', web: '正在访问网页',
     office: '正在调用办公工具', question: '等待你的回答', other: '正在调用工具',
+    readImage: '正在读取图片', edit: '正在编辑文件', code: '正在运行代码', subagents: '正在协调子代理',
+    plan: '正在更新计划', webSearch: '正在搜索网页', webFetch: '正在访问网页',
   }
   return labels[processActivityKind(name, input)]
+}
+
+export function activeProcessDetail(name?: string, input?: unknown): string {
+  if (!name) return ''
+  const data = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {}
+  for (const key of ['title', 'description', 'objective', 'task', 'task_name', 'name', 'question', 'questions', 'prompt', 'message', 'command', 'cmd', 'queries', 'query', 'pattern', 'url', 'uri', 'file_path', 'path', 'target', 'action', 'status']) {
+    const value = data[key]
+    const detail = typeof value === 'string' ? value
+      : Array.isArray(value) && value.every(item => typeof item === 'string') ? value.join(', ')
+      : key === 'questions' && Array.isArray(value) ? value.find(item => item && typeof item === 'object' && typeof item.question === 'string' && item.question.trim())?.question
+      : ''
+    if (typeof detail === 'string' && detail.trim()) {
+      const segments = [...new Intl.Segmenter().segment(detail.replace(/\s+/g, ' ').trim())].map(item => item.segment)
+      return segments.length > 160 ? `${segments.slice(0, 159).join('')}…` : segments.join('')
+    }
+  }
+  return name
 }

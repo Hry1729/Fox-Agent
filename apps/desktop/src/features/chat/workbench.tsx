@@ -6,6 +6,7 @@ import { ExpertPickerDialog } from '@/features/agents/ExpertPickerDialog'
 import { HtmlFilePreview } from './html-file-preview'
 import { KernelReconciliationPanel } from './kernel-reconciliation-panel'
 import { runtimeProcessActivity } from './runtime-process-activity'
+import { useProcessDisplayMode, type ProcessDisplayMode } from './process-display-mode'
 import './runtime-process-groups.css'
 import { executionReceiptPresentation, type ExecutionReceiptPresentation } from './execution-receipt'
 import { lazy, memo, Profiler, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction, type ChangeEvent, type KeyboardEvent, type ReactNode } from 'react'
@@ -259,7 +260,6 @@ import { captureManagementReturnRoutes, managementExitRoute, SETTINGS_WORKSPACE_
 import { WorkspaceShell } from '@/features/workspace/workspace-shell'
 import { LocalKnowledgeSidebarNavigation } from '@/features/local-knowledge/local-knowledge-sidebar'
 import { FOX_ASSISTANT_AVATAR, FoxAssistantAvatar, RunStatusText } from './components/FoxAssistantAvatar'
-import { ReasoningText } from './components/ReasoningText'
 import { NewConversationMascot } from './components/NewConversationMascot'
 import { GoalProgress } from './components/GoalProgress'
 import { ExpertActivationCard, ExpertBindingChip, type ExpertBindingView } from './components/ExpertBindingChip'
@@ -1969,7 +1969,7 @@ function toolIcon(tool: RuntimeToolStep) {
 }
 
 type RuntimeProcessStep =
-  | { kind: 'reasoning'; seq: number; text: string }
+  | { kind: 'reasoning'; id: string; seq: number; text: string }
   | { kind: 'tool'; seq: number; id: string }
 
 function runtimeProcess(events: RunEventRecord[]) {
@@ -2043,7 +2043,7 @@ function runtimeProcess(events: RunEventRecord[]) {
   const steps: RuntimeProcessStep[] = [
     ...reasoningGroups
       .filter((group) => group.text.trim())
-      .map((group) => ({ kind: 'reasoning' as const, seq: group.seq, text: group.text.trim() })),
+      .map((group) => ({ kind: 'reasoning' as const, id: `${group.source}:${group.seq}`, seq: group.seq, text: group.text.trim() })),
     ...sortedTools.map((tool) => ({ kind: 'tool' as const, seq: tool.seq, id: tool.id })),
   ].sort((left, right) => left.seq - right.seq)
   return {
@@ -2227,8 +2227,9 @@ function RuntimeArtifacts({ artifacts, onOpenArtifact }: { artifacts: ArtifactRe
 
 type RuntimeGroupHelpers = typeof import('./runtime-process-groups')
 
-function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleRunMessage, kernelMessages, running, artifacts, assistantName, modelName, knowledgeBindings, attachmentNames, onOpenSource, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onFork, failureReason, cancelled }: { message: ConversationMessage; processEvents: RunEventRecord[]; groupHelpers: RuntimeGroupHelpers | null; singleRunMessage: boolean; kernelMessages?: ConversationMessage[]; running: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; attachmentNames?: ReadonlyMap<string, string>; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; onFork?: (messageId: string) => void; failureReason?: RunFailure; cancelled?: boolean }) {
+function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleRunMessage, kernelMessages, running, runInProgress = false, hasInterleavedInput = false, artifacts, assistantName, modelName, knowledgeBindings, attachmentNames, onOpenSource, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onFork, failureReason, cancelled }: { message: ConversationMessage; processEvents: RunEventRecord[]; groupHelpers: RuntimeGroupHelpers | null; singleRunMessage: boolean; kernelMessages?: ConversationMessage[]; running: boolean; runInProgress?: boolean; hasInterleavedInput?: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; attachmentNames?: ReadonlyMap<string, string>; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; onFork?: (messageId: string) => void; failureReason?: RunFailure; cancelled?: boolean }) {
   const { authoritativeRunId } = useContext(TimelineRuntimeContext)
+  const processDisplayMode = useProcessDisplayMode()
   const parsed = useMemo(() => splitAssistantContent(message.content ?? ''), [message.content])
   const process = useMemo(() => runtimeProcess(processEvents), [processEvents])
   const orderedGroups = useMemo(() => {
@@ -2243,12 +2244,43 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
     const groups = groupHelpers.projectRuntimeGroups(message.runId, message.content, processEvents)
     return groups?.length ? groups : null
   }, [message.id, message.runId, message.kernelPreview, message.content, singleRunMessage, kernelMessages, authoritativeRunId, processEvents, groupHelpers])
-  const [turnProcessCollapsed, setTurnProcessCollapsed] = useState(false)
+  const [turnProcessOpen, setTurnProcessOpen] = useState(false)
+  const [collapseVersion, setCollapseVersion] = useState(0)
+  const processContentRef = useRef<HTMLDivElement>(null)
   const processGroupCount = orderedGroups?.filter(group => group.kind === 'process').length ?? 0
+  const previousProcessGroups = useRef<{ sourceKey: string; renderKey: string; eventIds: Set<string> }[]>([])
+  const renderGroups = useMemo(() => {
+    const used = new Set<string>()
+    return orderedGroups?.map(group => {
+      if (group.kind !== 'process') return { group, renderKey: group.key, eventIds: new Set<string>() }
+      const eventIds = new Set(group.events.map(item => `${item.eventType}:${item.seq}:${item.event.source ?? ''}`))
+      const previous = previousProcessGroups.current.find(item => !used.has(item.renderKey) && item.sourceKey === group.key)
+        ?? previousProcessGroups.current.find(item => !used.has(item.renderKey) && [...eventIds].some(id => item.eventIds.has(id)))
+      const renderKey = previous?.renderKey ?? group.key
+      used.add(renderKey)
+      return { group, renderKey, eventIds }
+    })
+  }, [orderedGroups])
+  useLayoutEffect(() => {
+    previousProcessGroups.current = renderGroups?.filter(item => item.group.kind === 'process')
+      .map(item => ({ sourceKey: item.group.key, renderKey: item.renderKey, eventIds: item.eventIds })) ?? []
+  }, [renderGroups])
   const lastProcessIndex = orderedGroups?.reduce((last, group, index) => group.kind === 'process' ? index : last, -1) ?? -1
   const failedToolCount = process.tools.filter(tool => tool.isError).length
   const runActive = useMemo(() => runtimeProcessActivity(processEvents, running).running, [processEvents, running])
   const completed = !running && ['completed', 'interrupted', 'failed', 'cancelled'].includes(message.status)
+  const canFoldTurn = processGroupCount > 0 && completed && !runInProgress && message.status === 'completed'
+    && !failureReason && !cancelled && !hasInterleavedInput && processDisplayMode !== 'verbose'
+  const turnProcessCollapsed = canFoldTurn && !turnProcessOpen
+  const finalResponseIndex = orderedGroups && completed && message.status === 'completed'
+    ? orderedGroups.reduce((last, group, index) => group.kind === 'response' && index > lastProcessIndex ? index : last, -1)
+    : -1
+  useLayoutEffect(() => {
+    if (!turnProcessCollapsed || !processContentRef.current) return
+    const focused = document.activeElement
+    if (focused && [...processContentRef.current.querySelectorAll('.fox-process-stage, .fox-answer-segment:not(.is-final)')]
+      .some(node => node.contains(focused))) setTurnProcessOpen(true)
+  }, [turnProcessCollapsed])
   const replyTime = new Date(message.updatedAt || message.createdAt).toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
   const [feedback, setFeedback] = useState<'positive' | 'negative' | null>(null)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
@@ -2286,15 +2318,16 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
       <Message from="assistant" className="fox-message fox-assistant-message">
         <MessageContent className="fox-assistant-content">
           {orderedGroups ? <>
-            {processGroupCount > 1 && <button type="button" className={`fox-process-turn-toggle${failedToolCount ? ' has-failed-tools' : ''}`} aria-expanded={!turnProcessCollapsed} onClick={() => setTurnProcessCollapsed(value => !value)}>
+            {processGroupCount > 0 && (canFoldTurn ? <button type="button" className={`fox-process-turn-toggle${failedToolCount ? ' has-failed-tools' : ''}`} aria-expanded={!turnProcessCollapsed} onClick={(event) => { event.currentTarget.focus(); if (turnProcessOpen) setCollapseVersion(value => value + 1); setTurnProcessOpen(value => !value) }}>
               {turnProcessCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-              {turnProcessCollapsed ? `展开过程 · ${processGroupCount} 组` : `收起过程 · ${processGroupCount} 组`}{failedToolCount > 0 && ` · ${failedToolCount} 项失败`}
-            </button>}
+              {turnProcessCollapsed ? '展开过程' : '收起过程'}{failedToolCount > 0 && ` · ${failedToolCount} 项失败`}
+            </button> : <div className={`fox-process-turn-toggle is-status${failedToolCount ? ' has-failed-tools' : ''}`} role="status">{runInProgress ? '正在处理' : failureReason ? '过程未完成' : cancelled ? '过程已取消' : '工作过程'}{failedToolCount > 0 && ` · ${failedToolCount} 项失败`}</div>)}
             {turnProcessCollapsed && orderedGroups[0]?.kind === 'process' && <FoxAssistantAvatar />}
-            {orderedGroups.map((group, index) => group.kind === 'process'
-              ? <div key={group.key} hidden={turnProcessCollapsed} className="fox-process-stage">
+            <div ref={processContentRef} className="fox-process-turn-content">
+            {renderGroups?.map(({ group, renderKey }, index) => group.kind === 'process'
+              ? <div key={`${renderKey}:${collapseVersion}`} hidden={turnProcessCollapsed} className="fox-process-stage">
                   <RuntimeProcess
-                    events={group.events} grouped groupHelpers={groupHelpers} running={runActive && (runtimeProcessActivity(group.events, true).activeToolIds.size > 0 || index === orderedGroups.length - 1)}
+                    events={group.events} grouped groupHelpers={groupHelpers} displayMode={processDisplayMode} runInProgress={runInProgress} running={runActive && index === orderedGroups.length - 1}
                     outcome={index === lastProcessIndex ? failureReason ? 'failed' : cancelled ? 'cancelled' : undefined : undefined}
                     leading={index === 0 ? <FoxAssistantAvatar /> : undefined} attachmentNames={attachmentNames}
                     onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer}
@@ -2303,10 +2336,11 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
               : group.kind === 'notice' ? <div key={group.key} className="fox-process-notice" role="status">
                   {index === 0 && <FoxAssistantAvatar />}{group.label}
                 </div>
-              : <div key={group.key} className="fox-answer-body fox-answer-segment">
+              : <div key={group.key} hidden={turnProcessCollapsed && index !== finalResponseIndex} className={`fox-answer-body fox-answer-segment${index === finalResponseIndex ? ' is-final' : ''}`}>
                   {index === 0 && <FoxAssistantAvatar />}
                   <MarkdownResponse className="fox-answer-response">{group.text}</MarkdownResponse>
                 </div>)}
+            </div>
           </> : <>
             <RuntimeProcess events={processEvents} process={process} running={running} answerStarted={Boolean(parsed.answer)} leading={<FoxAssistantAvatar />} attachmentNames={attachmentNames} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} />
             {parsed.answer && <div className="fox-answer-body"><MarkdownResponse className="fox-answer-response">{parsed.answer}</MarkdownResponse></div>}
@@ -2355,6 +2389,8 @@ const MemoizedRuntimeAssistantMessage = memo(RuntimeAssistantMessage, (previous,
   && previous.singleRunMessage === next.singleRunMessage
   && previous.kernelMessages === next.kernelMessages
   && previous.running === next.running
+  && previous.runInProgress === next.runInProgress
+  && previous.hasInterleavedInput === next.hasInterleavedInput
   && previous.artifacts === next.artifacts
   && previous.assistantName === next.assistantName
   && previous.modelName === next.modelName
@@ -2369,15 +2405,16 @@ const MemoizedRuntimeAssistantMessage = memo(RuntimeAssistantMessage, (previous,
   && previous.cancelled === next.cancelled
 ))
 
-function RuntimeReasoningItem({ detail, running = false }: { detail: string; running?: boolean }) {
+function RuntimeReasoningItem({ detail, running = false, preview = true }: { detail: string; running?: boolean; preview?: boolean }) {
   return <RuntimeProcessRow
     icon={<Brain className="fox-runtime-step-icon-glyph" />}
-    fixedPrefix="深度思考 ·"
-    label={reasoningSummary(detail)}
+    fixedPrefix={preview ? '深度思考 ·' : '深度思考'}
+    label={preview ? reasoningSummary(detail) : ''}
+    hideSummaryWhenOpen
     active={running}
     status={running ? 'active' : 'complete'}
   >
-    <ReasoningText text={detail} />
+    <MarkdownResponse className="fox-reasoning-text">{detail}</MarkdownResponse>
   </RuntimeProcessRow>
 }
 
@@ -2491,7 +2528,7 @@ function StepStatusText({ text, active, fixedPrefix, children }: { text: string;
 }
 
 /** Every thought segment and every tool call is one independently collapsible row. */
-function RuntimeProcessRow({ icon, label, fixedPrefix, labelContent, active = false, status = 'complete', children }: { icon: ReactNode; label: string; fixedPrefix?: string; labelContent?: ReactNode; active?: boolean; status?: 'complete' | 'active' | 'pending'; children: ReactNode }) {
+function RuntimeProcessRow({ icon, label, fixedPrefix, labelContent, hideSummaryWhenOpen = false, active = false, status = 'complete', children }: { icon: ReactNode; label: string; fixedPrefix?: string; labelContent?: ReactNode; hideSummaryWhenOpen?: boolean; active?: boolean; status?: 'complete' | 'active' | 'pending'; children: ReactNode }) {
   const [open, setOpen] = useState(false)
   const [visited, setVisited] = useState(false)
   return (
@@ -2510,7 +2547,7 @@ function RuntimeProcessRow({ icon, label, fixedPrefix, labelContent, active = fa
       </div>
       <div className="fox-runtime-step-body">
         <CollapsibleTrigger className="fox-runtime-step-trigger">
-          <StepStatusText text={label} active={active} fixedPrefix={fixedPrefix}>{labelContent}</StepStatusText>
+          <StepStatusText text={hideSummaryWhenOpen && open ? '' : label} active={active} fixedPrefix={hideSummaryWhenOpen && open ? '深度思考' : fixedPrefix}>{hideSummaryWhenOpen && open ? undefined : labelContent}</StepStatusText>
         </CollapsibleTrigger>
         {visited && <CollapsibleContent forceMount className="fox-runtime-step-content" aria-hidden={!open} inert={!open}>
           <div className="fox-runtime-detail-clip"><div className="fox-runtime-detail-panel">{children}</div></div>
@@ -2520,10 +2557,34 @@ function RuntimeProcessRow({ icon, label, fixedPrefix, labelContent, active = fa
   )
 }
 
-function RuntimeProcess({ events, process: preparedProcess, groupHelpers, running: runtimeRunning, answerStarted = false, leading, grouped = false, outcome, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; groupHelpers?: RuntimeGroupHelpers | null; running: boolean; answerStarted?: boolean; leading?: ReactNode; grouped?: boolean; outcome?: 'failed' | 'cancelled'; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
+function useStableProcessTitle(desired: string, running: boolean) {
+  const [displayed, setDisplayed] = useState(desired)
+  const shown = useRef({ value: desired, at: Date.now() })
+  useEffect(() => {
+    if (!running) {
+      shown.current = { value: desired, at: Date.now() }
+      setDisplayed(desired)
+      return
+    }
+    if (shown.current.value === desired) return
+    const remaining = Math.max(0, 150 - (Date.now() - shown.current.at))
+    const timer = window.setTimeout(() => {
+      shown.current = { value: desired, at: Date.now() }
+      setDisplayed(desired)
+    }, remaining)
+    return () => window.clearTimeout(timer)
+  }, [desired, running])
+  return running ? displayed : desired
+}
+
+function RuntimeProcess({ events, process: preparedProcess, groupHelpers, displayMode = 'standard', runInProgress = false, running: runtimeRunning, answerStarted = false, leading, grouped = false, outcome, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; groupHelpers?: RuntimeGroupHelpers | null; displayMode?: ProcessDisplayMode; runInProgress?: boolean; running: boolean; answerStarted?: boolean; leading?: ReactNode; grouped?: boolean; outcome?: 'failed' | 'cancelled'; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
   const [open, setOpen] = useState(false)
   const [visited, setVisited] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+  const followBottom = useRef(false)
+  const initialScroll = useRef<'top' | 'bottom' | null>(null)
+  const [scrollEdges, setScrollEdges] = useState({ up: false, down: false })
   const process = useMemo(() => preparedProcess ?? runtimeProcess(events), [events, preparedProcess])
   const activity = useMemo(() => runtimeProcessActivity(events, runtimeRunning, answerStarted), [events, runtimeRunning, answerStarted])
   const { running, terminalEvent } = activity
@@ -2532,10 +2593,11 @@ function RuntimeProcess({ events, process: preparedProcess, groupHelpers, runnin
   ))
   const processStepCount = process.steps.length
   const lifecycleOnly = processStepCount === 0 && hasLifecycle
-  const stepCount = lifecycleOnly ? 1 : processStepCount
+  const autoExpanded = grouped && (displayMode === 'verbose' || displayMode === 'detailed' && runInProgress)
+  const groupOpen = autoExpanded || open
   const activeTool = [...process.tools].reverse().find((tool) => activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser)
   const failedToolCount = process.tools.filter(tool => tool.isError).length
-  const showLiveReasoning = !grouped && !open && running && Boolean(process.reasoning) && !answerStarted
+  const showLiveReasoning = !grouped && !groupOpen && running && Boolean(process.reasoning) && !answerStarted
   const lifecycleFailed = terminalEvent?.eventType === 'run.failed' || terminalEvent?.eventType === 'run.interrupted'
   const lifecycleCancelled = terminalEvent?.eventType === 'run.cancelled'
   const awaitingUser = process.tools.some(tool => tool.awaitingUser) || terminalEvent?.eventType === 'run.completed'
@@ -2549,8 +2611,14 @@ function RuntimeProcess({ events, process: preparedProcess, groupHelpers, runnin
       : lifecycleCancelled
         ? '请求已取消'
         : '已完成请求处理'
+  const liveDetail = grouped && running && displayMode === 'standard'
+    ? activeTool ? groupHelpers?.activeProcessDetail(activeTool.name, activeTool.input)
+      : activity.reasoning ? groupHelpers?.activeProcessDetail('reasoning', { title: process.reasoning.split(/\n\s*\n/).at(-1)?.replaceAll('**', '') }) : ''
+    : ''
   const baseProcessTitle = grouped
-    ? outcome === 'failed' ? '过程未完成' : outcome === 'cancelled' ? '过程已取消' : awaitingUser ? '等待你的回答' : running ? groupHelpers?.activeProcessGroupTitle(activeTool?.name, activeTool?.input) ?? '正在分析请求' : groupHelpers?.processGroupTitle(events) ?? '已完成分析'
+    ? outcome === 'failed' ? '过程未完成' : outcome === 'cancelled' ? '过程已取消' : awaitingUser ? '等待你的回答' : running
+      ? `${groupHelpers?.activeProcessGroupTitle(activeTool?.name, activeTool?.input) ?? '正在分析请求'}${liveDetail ? ` · ${liveDetail}` : ''}`
+      : groupHelpers?.processGroupTitle(events) ?? '已完成分析'
     : activeTool
     ? toolActivity(activeTool, attachmentNames)
     : running
@@ -2562,36 +2630,77 @@ function RuntimeProcess({ events, process: preparedProcess, groupHelpers, runnin
         : lifecycleCancelled
           ? '工作过程已取消'
           : '工作过程已完成'
-  const processTitle = grouped && failedToolCount > 0 ? `${baseProcessTitle} · ${failedToolCount} 项失败` : baseProcessTitle
+  const desiredTitle = grouped && failedToolCount > 0 ? `${baseProcessTitle} · ${failedToolCount} 项失败` : baseProcessTitle
+  const processTitle = useStableProcessTitle(desiredTitle, running)
+  const activityKind = activeTool ? groupHelpers?.processActivityKind(activeTool.name, activeTool.input)
+    : groupHelpers?.summarizeProcessActivity(events)[0]?.kind
+  const GroupIcon = activityKind === 'read' || activityKind === 'readImage' ? FileText : activityKind === 'search' ? Search
+    : activityKind === 'write' || activityKind === 'edit' ? FileEdit : activityKind === 'command' || activityKind === 'code' ? Terminal
+    : activityKind === 'web' || activityKind === 'webSearch' || activityKind === 'webFetch' ? Globe2 : activityKind === 'question' ? CircleHelp
+    : activityKind === 'knowledge' || activityKind === 'localKnowledge' || activityKind === 'remoteKnowledge' ? Database
+    : activityKind === 'office' ? FileEdit : activityKind === 'plan' ? ListTodo
+    : activityKind === 'subagents' ? Bot : activityKind === 'other' ? Wrench : Brain
 
   useLayoutEffect(() => {
-    if (!open || !visited) return
+    if (!groupOpen) return
     const scroll = scrollRef.current
-    if (scroll) scroll.scrollTop = running ? scroll.scrollHeight : 0
-  }, [open, visited])
+    if (!scroll) return
+    if (initialScroll.current) {
+      followBottom.current = initialScroll.current === 'bottom'
+      scroll.scrollTop = followBottom.current ? scroll.scrollHeight : 0
+      initialScroll.current = null
+    } else if (followBottom.current) scroll.scrollTop = scroll.scrollHeight
+    const up = scroll.scrollTop > 2
+    const down = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop > 2
+    setScrollEdges(current => current.up === up && current.down === down ? current : { up, down })
+  }, [groupOpen, events, visited])
+  useEffect(() => {
+    if (autoExpanded) setVisited(true)
+  }, [autoExpanded])
+  useEffect(() => {
+    const content = contentRef.current
+    if (!content || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => {
+      const scroll = scrollRef.current
+      if (!groupOpen || !scroll) return
+      if (followBottom.current) scroll.scrollTop = scroll.scrollHeight
+      const up = scroll.scrollTop > 2
+      const down = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop > 2
+      setScrollEdges(current => current.up === up && current.down === down ? current : { up, down })
+    })
+    observer.observe(content)
+    return () => observer.disconnect()
+  }, [groupOpen, visited, autoExpanded])
 
-  if (stepCount === 0 && !running) return leading ? <>{leading}</> : null
+  if (processStepCount === 0 && !running && !lifecycleOnly) return leading ? <>{leading}</> : null
   return (
-    <ChainOfThought open={open} onOpenChange={(next) => { setOpen(next); if (next) setVisited(true) }} className="fox-chain-of-thought fox-runtime-process">
+    <ChainOfThought open={groupOpen} onOpenChange={(next) => { initialScroll.current = next ? running ? 'bottom' : 'top' : null; setOpen(next); if (next) setVisited(true) }} className={`fox-chain-of-thought fox-runtime-process${autoExpanded ? ' is-fully-expanded' : ''}`}>
       {/* The avatar shares the header line but stays outside the disclosure
           trigger, so clicking it is never a toggle. */}
       <div className="fox-runtime-process-head">
         {leading}
-        <ChainOfThoughtHeader className="fox-chain-of-thought-header" leading={<small className="fox-runtime-step-count" aria-label={`${stepCount} 个步骤`}>{stepCount}</small>}>
+        <ChainOfThoughtHeader className="fox-chain-of-thought-header" leading={<GroupIcon className="fox-runtime-group-icon" size={15} aria-hidden="true" />}>
           <span className={`fox-runtime-process-summary ${running ? 'is-running' : ''}`}>
             <RunStatusText text={processTitle} active={running} />
           </span>
         </ChainOfThoughtHeader>
       </div>
       {showLiveReasoning && <LiveReasoning detail={process.reasoning} active={activity.reasoning} />}
-      {visited && <ChainOfThoughtContent forceMount className="fox-chain-of-thought-content fox-runtime-process-disclosure" aria-hidden={!open} inert={!open}>
-        <div className="fox-runtime-process-clip"><div ref={scrollRef} className="fox-runtime-process-scroll">
+      {(visited || autoExpanded) && <ChainOfThoughtContent forceMount className="fox-chain-of-thought-content fox-runtime-process-disclosure" aria-hidden={!groupOpen} inert={!groupOpen}>
+        <div className="fox-runtime-process-clip" data-scroll-up={scrollEdges.up || undefined} data-scroll-down={scrollEdges.down || undefined}><div ref={scrollRef} className="fox-runtime-process-scroll" onScroll={(event) => {
+          const scroll = event.currentTarget
+          followBottom.current = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= 24
+          const up = scroll.scrollTop > 2
+          const down = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop > 2
+          setScrollEdges(current => current.up === up && current.down === down ? current : { up, down })
+        }}>
+        <div ref={contentRef} className="fox-runtime-process-content">
         {processStepCount > 0 ? <>
           {process.steps.map((step) => {
             if (step.kind === 'reasoning') {
               // Only the trailing thought can be live; earlier rows are complete.
               const isLastReasoning = [...process.steps].reverse().find((item) => item.kind === 'reasoning') === step
-              return <RuntimeReasoningItem key={`reason-${step.seq}`} detail={step.text} running={isLastReasoning && activity.reasoning} />
+              return <RuntimeReasoningItem key={`reason-${step.id}`} detail={step.text} running={isLastReasoning && activity.reasoning} preview={displayMode !== 'compact' || running} />
             }
             const tool = process.tools.find((item) => item.id === step.id)
             if (!tool) return null
@@ -2603,6 +2712,7 @@ function RuntimeProcess({ events, process: preparedProcess, groupHelpers, runnin
           label={<RunStatusText text={lifecycleLabel} active={running} />}
           status={running ? 'active' : awaitingUser ? 'pending' : 'complete'}
         />}
+        </div>
         </div></div>
       </ChainOfThoughtContent>}
     </ChainOfThought>
@@ -2662,7 +2772,7 @@ function ConversationBottomDock({ plan }: { plan?: GoalProgressData['planRevisio
 export function RuntimeTimeline({ messages, attachments, artifacts, expertBindings = [], agents = [], pendingMessage, events, runs, activeRunId, activeRunModel, runtimeRunning, state, streamingText, runtimeError, runtimeErrorDetails, assistantName = 'Fox 默认助手', planRevision, hasEarlierMessages, loadingEarlierMessages, onLoadEarlierMessages, onRetry, onRerun, onFork, onOpenSource, onOpenArtifact, onViewExpert, onOpenFileInSidebar, onRevealFileInExplorer }: { messages: ConversationMessage[]; attachments: AttachmentRecord[]; artifacts: ArtifactRecord[]; expertBindings?: ExpertBindingView[]; agents?: AgentRecord[]; pendingMessage?: ConversationMessage | null; events: RunEventRecord[]; runs?: RunRecord[]; activeRunId?: string; activeRunModel?: string; runtimeRunning: boolean; state: ChatState; streamingText: string; runtimeError?: string | null; runtimeErrorDetails?: DesktopErrorDetails | null; assistantName?: string; planRevision?: GoalProgressData['planRevisions'][number]; hasEarlierMessages?: boolean; loadingEarlierMessages?: boolean; onLoadEarlierMessages?: () => void; onRetry: () => void; onRerun: (messageId: string, prompt: string) => Promise<boolean>; onFork?: (messageId: string) => void; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onViewExpert?: (expertId: string) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
   const runtimeContext = useContext(TimelineRuntimeContext)
   const [groupHelpers, setGroupHelpers] = useState<RuntimeGroupHelpers | null>(null)
-  const hasRuntimeEvents = events.length > 0
+  const hasRuntimeEvents = events.length > 0 || messages.some(message => message.role === 'assistant' && Boolean(message.kernelPreview))
   useEffect(() => {
     if (!hasRuntimeEvents) return
     let mounted = true
@@ -2753,6 +2863,19 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
   }, [visibleMessages])
   const streamTargetId = useMemo(() => latestRunAssistantId(visibleMessages, activeRunId), [visibleMessages, activeRunId])
   const groupedMessages = useMemo(() => groupAssistantContinuations(visibleMessages, streamTargetId, streamingText), [visibleMessages, streamTargetId, streamingText])
+  const interleavedRuns = useMemo(() => {
+    const seen = new Set<string>()
+    const interleaved = new Set<string>()
+    for (const item of groupedMessages) {
+      if (item.role === 'assistant' && item.runId) {
+        if (seen.has(item.runId)) interleaved.add(item.runId)
+        seen.add(item.runId)
+      } else if (item.role === 'user' && item.runId && seen.has(item.runId)) {
+        interleaved.add(item.runId)
+      }
+    }
+    return interleaved
+  }, [groupedMessages])
   const timelineEntries = useMemo(() => mergeExpertBindingsIntoTimeline(groupedMessages, expertBindings), [expertBindings, groupedMessages])
   const latestUserMessageId = useMemo(() => {
     for (let index = visibleMessages.length - 1; index >= 0; index -= 1) {
@@ -2895,7 +3018,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
           const isRunTail = Boolean(message.runId && lastAssistantMessageIdByRun.get(message.runId) === message.id)
           const failureReason = isRunTail && message.runId ? failureByRunId.get(message.runId) : undefined
           const cancelled = Boolean(isRunTail && message.runId && cancelledRunIds.has(message.runId))
-          return <div id={`fox-turn-${message.id}`} key={message.timelineKey} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} groupHelpers={groupHelpers} kernelMessages={message.kernelMessages} singleRunMessage={Boolean(message.runId && assistantMessageCountByRun.get(message.runId) === 1)} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} attachmentNames={attachmentNames} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} onFork={onFork} failureReason={failureReason} cancelled={cancelled} /></div>
+          return <div id={`fox-turn-${message.id}`} key={message.runId && !interleavedRuns.has(message.runId) ? `assistant-run-${message.runId}` : message.timelineKey} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} groupHelpers={groupHelpers} kernelMessages={message.kernelMessages} singleRunMessage={Boolean(message.runId && assistantMessageCountByRun.get(message.runId) === 1)} running={running} runInProgress={isCurrentRun && runtimeRunning} hasInterleavedInput={Boolean(message.runId && interleavedRuns.has(message.runId))} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} attachmentNames={attachmentNames} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} onFork={onFork} failureReason={failureReason} cancelled={cancelled} /></div>
         })}
         {state === 'error' && <div className="fox-turn-anchor"><Message from="assistant" className="fox-message fox-assistant-message"><MessageContent className="fox-assistant-content"><ErrorPrompt onRetry={onRetry} error={runtimeError} errorDetails={runtimeErrorDetails} /></MessageContent></Message></div>}
         {runtimeContext.recoveryPanel}
