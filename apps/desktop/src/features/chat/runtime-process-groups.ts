@@ -222,7 +222,9 @@ export function processGroupTitle(events: readonly RunEventRecord[]) {
     plan: '更新了计划', webSearch: '已搜索网页', webFetch: '已访问网页',
   }
   const selected = counts.slice(0, 3).map(item => labels[item.kind])
-  const title = selected.length < 2 ? selected[0] : `${selected.slice(0, -1).join('、')}并${selected.at(-1)}`
+  const title = selected.length === 1 ? selected[0]
+    : selected.length === 2 ? `${selected[0]}并${selected[0].startsWith('已') && selected[1].startsWith('已') ? selected[1].slice(1) : selected[1]}`
+      : selected.join('，')
   return `${title}${counts.length > 3 ? '等' : ''}`
 }
 

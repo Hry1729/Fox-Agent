@@ -53,4 +53,17 @@
 .fox-runtime-process:not(.is-fully-expanded) .fox-runtime-process-clip[data-scroll-up='true'][data-scroll-down='true'] .fox-runtime-process-scroll {
   mask-image: linear-gradient(to bottom, transparent, #000 24px, #000 calc(100% - 24px), transparent);
 }
-.fox-runtime-group-icon { flex: 0 0 15px; color: var(--fox-muted); }
+.fox-runtime-group-icon { flex: 0 0 15px; color: var(--fox-muted); transition: opacity 100ms ease; }
+.fox-runtime-process .fox-chain-of-thought-header > .chain-of-thought-toggle {
+  position: absolute;
+  left: 0;
+  top: calc(50% - 8px);
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+.fox-runtime-process .fox-chain-of-thought-header:is(:hover, :focus-visible, [aria-expanded='true']) > .fox-runtime-group-icon { opacity: 0; }
+.fox-runtime-process .fox-chain-of-thought-header:is(:hover, :focus-visible, [aria-expanded='true']) > .chain-of-thought-toggle { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .fox-runtime-group-icon,
+  .fox-runtime-process .fox-chain-of-thought-header > .chain-of-thought-toggle { transition: none; }
+}

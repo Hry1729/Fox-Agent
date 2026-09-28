@@ -81,7 +81,11 @@ test('ranks distinct call IDs by count and first appearance, including knowledge
   expect(summarizeProcessActivity(events)).toEqual([
     { kind: 'remoteKnowledge', count: 2 }, { kind: 'localKnowledge', count: 1 }, { kind: 'read', count: 1 },
   ])
-  expect(processGroupTitle(events)).toBe('检索了远程知识库、检索了本地知识库并读取了文件')
+  expect(processGroupTitle(events)).toBe('检索了远程知识库，检索了本地知识库，读取了文件')
+  expect(processGroupTitle([
+    event(1, 'tool.started', { toolCallId: 'search', tool: 'search_code' }),
+    event(2, 'tool.started', { toolCallId: 'web', tool: 'web_search' }),
+  ])).toBe('已搜索代码并搜索网页')
   expect(processGroupTitle([])).toBe('已完成分析')
   expect(processGroupTitle([event(1, 'tool.started', { toolCallId: 'mixed', tool: 'search_knowledge', input: { targets: [{ source: 'local' }, { source: 'remote' }] } })])).toBe('检索了知识库')
   expect(processGroupTitle([event(1, 'tool.started', { toolCallId: 'mcp', tool: 'call_mcp_tool', input: { server: 'other' } })])).toBe('调用了工具')

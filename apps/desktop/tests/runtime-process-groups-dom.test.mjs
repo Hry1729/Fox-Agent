@@ -20,7 +20,9 @@ const { RuntimeTimeline } = await server.ssrLoadModule('/src/features/chat/workb
 const { persistProcessDisplayMode } = await server.ssrLoadModule('/src/features/chat/process-display-mode.ts')
 const { answerDeltaFingerprint } = await server.ssrLoadModule('/src/features/conversations/model/runtime-delta-fingerprint.ts')
 afterEach(() => { cleanup(); persistProcessDisplayMode('standard') })
-after(async () => { await server.close(); if (ownsDomRegistration) await GlobalRegistrator.unregister() })
+// Late animation callbacks from rendered controls can outlive the final test.
+// The test file runs in its own process, so leave its DOM registered until exit.
+after(async () => { await server.close() })
 
 const messages = [
   { id: 'user', conversationId: 'conversation', runId: 'run', role: 'user', kind: 'text', content: '请处理', status: 'completed', ordinal: 1, createdAt: 1, updatedAt: 1 },
@@ -222,6 +224,39 @@ test('mode changes keep manual group and reasoning disclosure state', async () =
   assert.equal(view.container.querySelectorAll('.fox-chain-of-thought-header[aria-expanded="true"]').length, 1)
 })
 
+test('streaming thought preview advances only after a paragraph first line completes', async () => {
+  const first = '第一段首行\n第一段续行\n\n第二段未完成'
+  const renderReasoning = (reasoning, streaming) => timeline([], {
+    runtimeRunning: streaming, activeRunId: streaming ? 'run' : undefined,
+    state: streaming ? 'streaming' : 'idle',
+    messages: [messages[0], { ...messages[1], id: 'kernel-message:run:1', content: '',
+      status: streaming ? 'streaming' : 'completed',
+      kernelPreview: { checkpointSeq: 1, revision: reasoning.length, reasoning } }],
+  })
+  const view = render(renderReasoning(first, true))
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 1))
+  fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
+  const label = () => view.container.querySelector('.fox-runtime-step-row .fox-run-status-label')?.textContent
+  await waitFor(() => assert.equal(label(), '第一段首行'))
+  await React.act(async () => { view.rerender(renderReasoning(`${first}继续写`, true)) })
+  assert.equal(label(), '第一段首行')
+  await React.act(async () => { view.rerender(renderReasoning(`${first}继续写\n第二段续行`, true)) })
+  assert.equal(label(), '第二段未完成继续写')
+  await React.act(async () => { view.rerender(renderReasoning('CRLF首行\r\n\r\n第二段未完成', true)) })
+  assert.equal(label(), 'CRLF首行')
+  await React.act(async () => { view.rerender(renderReasoning('带空白首行\r\n  \r\n第二段未完成', true)) })
+  assert.equal(label(), '带空白首行')
+  await React.act(async () => { view.rerender(renderReasoning('尚未换行', true)) })
+  assert.equal(label(), '')
+  assert.equal(view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix').textContent, '深度思考')
+  await React.act(async () => { view.rerender(renderReasoning('**结算首行**\n后续正文', false)) })
+  assert.equal(label(), '结算首行')
+  assert.equal(view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix').textContent, '深度思考 ·')
+  fireEvent.click(view.container.querySelector('.fox-runtime-step-row .fox-runtime-step-trigger'))
+  assert.equal(view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix').textContent, '深度思考')
+  assert.equal(label(), '')
+})
+
 test('running turn stays visible and settles to a folded process with its answer exposed', async () => {
   const live = timeline(events.filter(item => item.seq !== 4), {
     runtimeRunning: true, activeRunId: 'run', state: 'streaming',
@@ -245,11 +280,58 @@ test('automatic completion fold does not hide a focused process control', async 
   await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 2))
   fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
   const row = view.container.querySelector('.fox-runtime-step-trigger')
-  row.focus()
+  await React.act(async () => { row.focus() })
   assert.equal(document.activeElement, row)
-  view.rerender(timeline(events))
+  await React.act(async () => { view.rerender(timeline(events)) })
   await waitFor(() => assert.ok(view.queryByRole('button', { name: /收起过程/ })))
   assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 0)
+  const toggle = view.getByRole('button', { name: /收起过程/ })
+  await React.act(async () => { toggle.focus() })
+  assert.equal(document.activeElement, toggle)
+  assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 0)
+  fireEvent.click(toggle)
+  assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 2)
+})
+
+test('automatic completion fold keeps selected process text until the reader closes it', async () => {
+  const live = timeline(events.filter(item => item.seq !== 4), {
+    runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+    messages: [messages[0], { ...messages[1], status: 'streaming' }],
+  })
+  const view = render(live)
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 2))
+  fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
+  const label = view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix')
+  const range = document.createRange()
+  range.selectNodeContents(label)
+  const selection = document.getSelection()
+  await React.act(async () => {
+    selection.removeAllRanges()
+    selection.addRange(range)
+    document.dispatchEvent(new Event('selectionchange'))
+  })
+  await React.act(async () => { view.rerender(timeline(events)) })
+  assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 0)
+  await React.act(async () => { selection.removeAllRanges(); document.dispatchEvent(new Event('selectionchange')) })
+  assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 0)
+  fireEvent.click(view.getByRole('button', { name: /收起过程/ }))
+  assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 2)
+})
+
+test('compact mode previews only the live reasoning row in a running group', async () => {
+  await React.act(async () => persistProcessDisplayMode('compact'))
+  const thoughts = [
+    event(1, 'reasoning.delta', { source: 'kernel-model:1', delta: '旧首行\n旧续行' }),
+    event(2, 'reasoning.delta', { kernelCheckpointSeq: '1', delta: '最新首行\n最新续行' }),
+  ]
+  const message = { ...messages[1], id: 'kernel-message:run:1', content: '', status: 'streaming' }
+  const view = render(timeline(thoughts, { runtimeRunning: true, activeRunId: 'run', state: 'streaming', messages: [messages[0], message] }))
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 1))
+  fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-runtime-step-row').length, 2))
+  const rows = view.container.querySelectorAll('.fox-runtime-step-row')
+  assert.deepEqual([...rows].map(row => row.querySelector('.fox-run-status-prefix')?.textContent), ['深度思考', '深度思考 ·'])
+  assert.deepEqual([...rows].map(row => row.querySelector('.fox-run-status-label')?.textContent), ['', '最新首行'])
 })
 
 test('detailed mode opens only running groups and compact mode hides settled thought previews', async () => {

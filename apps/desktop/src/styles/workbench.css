@@ -3609,21 +3609,21 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-run-status-text[data-active='true'] { color: var(--fox-text); }
 
 .fox-run-status-text {
-  --fox-process-shimmer-edge: color-mix(in oklch, var(--fox-text) 43%, #86a9c3);
-  --fox-process-shimmer-center: color-mix(in oklch, var(--fox-text) 28%, #a0bbcf);
+  --fox-process-shimmer-edge: color-mix(in oklch, var(--fox-muted) 86%, #a8bfd1);
+  --fox-process-shimmer-center: color-mix(in oklch, var(--fox-muted) 72%, #b8cada);
 }
 
 /* Paint the base and shimmer on one set of glyphs. Separate text overlays can
    drift when the streaming label scrolls or the viewport changes width. */
 @supports ((background-clip: text) or (-webkit-background-clip: text)) {
   .fox-run-status-text[data-active='true'] .fox-run-status-label {
-    background-image: linear-gradient(90deg, transparent 38%, var(--fox-process-shimmer-edge) 46%, var(--fox-process-shimmer-center) 50%, var(--fox-process-shimmer-edge) 54%, transparent 62%), linear-gradient(currentColor, currentColor);
+    background-image: linear-gradient(90deg, transparent 42%, var(--fox-process-shimmer-edge) 47%, var(--fox-process-shimmer-center) 50%, var(--fox-process-shimmer-edge) 53%, transparent 58%), linear-gradient(currentColor, currentColor);
     background-size: 260% 100%, 100% 100%;
     background-repeat: no-repeat;
     background-clip: text;
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
-    animation: foxRunStatusLight 2.4s linear infinite;
+    animation: foxRunStatusLight 2.8s linear infinite;
   }
 }
 
