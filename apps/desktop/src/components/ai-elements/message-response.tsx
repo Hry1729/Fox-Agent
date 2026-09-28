@@ -7,6 +7,7 @@ import { Streamdown, type CustomRendererProps, type LinkSafetyModalProps } from 
 import { ExternalLink } from "lucide-react";
 import { notify as toast } from "@/features/notifications";
 import { beautifulMermaidPlugin } from "./beautiful-mermaid-diagram";
+import { MermaidDiagramNotice } from "./mermaid-diagram-notice";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -161,6 +162,9 @@ const linkSafety = {
   renderModal: (props: LinkSafetyModalProps) => <ExternalLinkDialog {...props} />,
 };
 
+/** A failed or over-budget diagram keeps the answer readable: reason, source and retry. */
+const mermaidOptions = { errorComponent: MermaidDiagramNotice };
+
 export const MessageResponse = memo(
   ({ className, children, ...props }: MessageResponseProps) => {
     const normalizedChildren = typeof children === "string"
@@ -174,6 +178,7 @@ export const MessageResponse = memo(
           className
         )}
         linkSafety={linkSafety}
+        mermaid={mermaidOptions}
         plugins={streamdownPlugins}
         {...props}
       >
