@@ -900,6 +900,50 @@ pub(crate) struct PromptScopeOverrides<'a> {
     pub mcp_server_scope: Option<&'a HashSet<String>>,
 }
 
+/// Appended to Host-owned model prompts: how to use the client's diagram rendering.
+///
+/// Additive on purpose — an assistant's own instructions and an explicit user format request
+/// both outrank it — and it advertises only what the client actually renders (Mermaid). Image
+/// generation and retrieval are deliberately absent because Fox has no such capability yet.
+pub(crate) const VISUAL_EXPRESSION_GUIDANCE: &str = "视觉表达：当图表能明显帮助理解流程、分支、状态、交互时序或已有数值比较时，可以自主在正文中输出一个 ```mermaid 代码块，客户端会直接渲染。当前支持 flowchart、stateDiagram-v2、sequenceDiagram、classDiagram、erDiagram、xychart-beta；其他 Mermaid 类型会退化为源码显示。默认一张图，确有必要再拆成少量小图；简单事实、短回答与少量条目用文字即可，不必配图。严格遵守用户对格式的明确要求（例如「只用文字」「给我源码」），本助手自身的既有指令也优先于本段。图旁保留一句简短解释；不得编造数据、单位、时间或关系，缺少数据时说明缺口；图中的名称与数值必须与正文和来源一致。";
+
+/// Host-owned prompts (`pi`) get the guidance appended; a remote engine (Yuxi) keeps its own
+/// instructions, and repeated calls do not append twice.
+pub(crate) fn append_visual_expression_guidance(system_prompt: String, runtime_type: &str) -> String {
+    if runtime_type != "pi" || system_prompt.contains(VISUAL_EXPRESSION_GUIDANCE) {
+        return system_prompt;
+    }
+    format!("{system_prompt}\n\n{VISUAL_EXPRESSION_GUIDANCE}")
+}
+
+#[cfg(test)]
+mod visual_expression_guidance_tests {
+    use super::{append_visual_expression_guidance, VISUAL_EXPRESSION_GUIDANCE};
+
+    #[test]
+    fn appends_only_for_host_owned_prompts() {
+        let appended = append_visual_expression_guidance("你是自定义助手，请始终用中文回答。".into(), "pi");
+        assert!(appended.starts_with("你是自定义助手，请始终用中文回答。"), "an assistant prompt is preserved verbatim");
+        assert!(appended.ends_with(VISUAL_EXPRESSION_GUIDANCE));
+        // A remote engine owns its instructions, so nothing is appended.
+        assert_eq!(append_visual_expression_guidance("remote prompt".into(), "yuxi"), "remote prompt");
+    }
+
+    #[test]
+    fn is_idempotent_and_advertises_only_real_abilities() {
+        let once = append_visual_expression_guidance("base".into(), "pi");
+        assert_eq!(append_visual_expression_guidance(once.clone(), "pi"), once, "never appended twice");
+        assert!(VISUAL_EXPRESSION_GUIDANCE.contains("```mermaid"));
+        // An explicit user format request must win, and the text has to say so.
+        assert!(VISUAL_EXPRESSION_GUIDANCE.contains("只用文字"));
+        assert!(VISUAL_EXPRESSION_GUIDANCE.contains("给我源码"));
+        // No capability is advertised that Fox does not have.
+        assert!(!VISUAL_EXPRESSION_GUIDANCE.contains("图片生成"));
+        assert!(!VISUAL_EXPRESSION_GUIDANCE.contains("图片检索"));
+        assert!(!VISUAL_EXPRESSION_GUIDANCE.contains("生成图片"));
+    }
+}
+
 pub(crate) fn conversation_prompt_context(
     database: &Database,
     skills_dir: &std::path::Path,
@@ -916,6 +960,10 @@ pub(crate) fn conversation_prompt_context(
         let assistant = database
             .get_agent(&agent_id)?
             .ok_or_else(|| "conversation assistant was not found".to_owned())?;
+        // Single source of truth: every entry point (the app, the Kernel payload constructor
+        // and non-UI callers) builds its prompt here, so the diagram guidance is attached
+        // exactly once — and only when Fox owns the prompt.
+        let system_prompt = append_visual_expression_guidance(system_prompt, &assistant.runtime_type);
         let run_role = match (run_kind, assistant.agent_kind.as_str()) {
             ("child", "expert") => "expert_consultation",
             ("child", _) => "child_worker",

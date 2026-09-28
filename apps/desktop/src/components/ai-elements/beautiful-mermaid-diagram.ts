@@ -138,6 +138,10 @@ const isLocalUrlFunction = (value: string) => {
  *  bare `#abc` in CSS may be a colour and must not be touched. */
 export function sanitizeCssText(css: string): string {
   return css
+    // `@import url(…)` must be removed whole: a naive `@import[^;]*` stops at the first `;`,
+    // and a font URL query (`…wght@400;500;600;700&display=swap`) contains semicolons, which
+    // used to leave a stray fragment behind in the stylesheet.
+    .replace(/@import\s*(?:url\(\s*(?:"[^"]*"|'[^']*'|[^)]*)\s*\)|"[^"]*"|'[^']*')[^;]*;?/gi, "")
     .replace(/@import[^;]*;?/gi, "")
     .replace(/url\(\s*(?!#)[^)]*\)/gi, "none")
     .replace(/(?:javascript|vbscript)\s*:/gi, "");

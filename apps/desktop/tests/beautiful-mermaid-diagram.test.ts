@@ -240,10 +240,15 @@ describe("svg safety boundary", () => {
     // a chat message must not reach out to an external font host.
     expect(clean.removed).toEqual(["外部样式 URL"]);
     expect(clean.svg).not.toContain("fonts.googleapis.com");
+    // Regression: the font URL query contains semicolons (`wght@400;500;600;700`), and a naive
+    // `@import[^;]*` used to leave `500;600;700&display=swap');` behind in the stylesheet.
+    expect(clean.svg).not.toContain("display=swap");
+    expect(clean.svg).not.toContain("@import");
     expect(clean.svg).toContain("开始");
     expect(clean.svg).toContain('fill="none"');
     expect(clean.svg).toContain("var(--");
     expect(sanitizeCssText("@import url(https://evil.example/a.css);\n.x{fill:url(#ok)}")).not.toContain("evil.example");
+    expect(sanitizeCssText("@import url('https://fonts.example/css2?family=Inter:wght@400;500;600&display=swap');\n.m{color:red}")).not.toContain("display=swap");
     expect(sanitizeCssText(".x{fill:url(#ok)}")).toContain("url(#ok)");
   });
 
