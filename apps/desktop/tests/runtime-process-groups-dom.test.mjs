@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 import { createServer } from 'vite'
 
-GlobalRegistrator.register()
+const ownsDomRegistration = !GlobalRegistrator.isRegistered
+if (ownsDomRegistration) GlobalRegistrator.register()
 const React = await import('react')
 const { cleanup, fireEvent, render, waitFor } = await import('@testing-library/react')
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -17,7 +18,7 @@ const server = await createServer({
 const { RuntimeTimeline } = await server.ssrLoadModule('/src/features/chat/workbench.tsx')
 const { answerDeltaFingerprint } = await server.ssrLoadModule('/src/features/conversations/model/runtime-delta-fingerprint.ts')
 afterEach(() => cleanup())
-after(async () => { await server.close(); GlobalRegistrator.unregister() })
+after(async () => { await server.close(); if (ownsDomRegistration) await GlobalRegistrator.unregister() })
 
 const messages = [
   { id: 'user', conversationId: 'conversation', runId: 'run', role: 'user', kind: 'text', content: '请处理', status: 'completed', ordinal: 1, createdAt: 1, updatedAt: 1 },
@@ -32,9 +33,10 @@ const events = [
   event(4, 'tool.completed', { toolCallId: 'read', tool: 'read', result: { content: 'ok' } }),
   answer(5, '第二段'),
 ]
-const timeline = runtimeEvents => React.createElement(RuntimeTimeline, {
+const timeline = (runtimeEvents, overrides = {}) => React.createElement(RuntimeTimeline, {
   messages, attachments: [], artifacts: [], events: runtimeEvents, runtimeRunning: false,
   state: 'idle', streamingText: '', onRetry: () => {}, onRerun: async () => false,
+  ...overrides,
 })
 
 test('answer segments remain once and in order while the whole process is collapsed', async () => {
@@ -75,15 +77,18 @@ test('streaming a later stage keeps an earlier disclosure open', async () => {
   assert.equal(view.container.querySelectorAll('.fox-chain-of-thought-header[aria-expanded="true"]').length, 1)
 })
 
-test('failed, cancelled, and waiting groups retain their visible status', () => {
+test('failed, cancelled, and waiting groups retain their visible status after grouping loads', async () => {
   const failed = render(timeline([...events, event(6, 'run.failed', { code: 'provider_error', message: '失败' })]))
+  await waitFor(() => assert.equal(failed.container.querySelectorAll('.fox-answer-segment').length, 2))
   assert.match(failed.container.querySelector('.fox-assistant-content').textContent, /过程未完成/)
   cleanup()
   const cancelled = render(timeline([...events, event(6, 'run.cancelled')]))
+  await waitFor(() => assert.equal(cancelled.container.querySelectorAll('.fox-answer-segment').length, 2))
   assert.match(cancelled.container.querySelector('.fox-assistant-content').textContent, /过程已取消/)
   cleanup()
   const waiting = render(timeline(events.map(item => item.seq === 4
     ? event(4, 'tool.completed', { toolCallId: 'read', tool: 'read', result: { status: 'awaiting_user' } }) : item)))
+  await waitFor(() => assert.equal(waiting.container.querySelectorAll('.fox-answer-segment').length, 2))
   assert.match(waiting.container.querySelector('.fox-assistant-content').textContent, /等待你的回答/)
 })
 
@@ -94,18 +99,72 @@ test('run notices remain visible when process rows are collapsed', async () => {
   assert.match(view.container.querySelector('.fox-process-notice').textContent, /正在重试/)
 })
 
-test('Kernel messages and multiple assistant messages in one run use the safe legacy display', () => {
-  const kernel = render(React.createElement(RuntimeTimeline, {
-    ...timeline(events).props,
+test('Kernel messages and multiple assistant messages in one run use the safe legacy display after grouping loads', async () => {
+  const kernel = render(timeline(events))
+  await waitFor(() => assert.equal(kernel.container.querySelectorAll('.fox-answer-segment').length, 2))
+  kernel.rerender(timeline(events, {
     messages: [messages[0], { ...messages[1], id: 'kernel-message:run:1' }],
   }))
   assert.equal(kernel.container.querySelectorAll('.fox-answer-segment').length, 0)
   cleanup()
-  const multiple = render(React.createElement(RuntimeTimeline, {
-    ...timeline(events).props,
+  const multiple = render(timeline(events))
+  await waitFor(() => assert.equal(multiple.container.querySelectorAll('.fox-answer-segment').length, 2))
+  multiple.rerender(timeline(events, {
     messages: [messages[0], { ...messages[1], content: '第一段', id: 'earlier' }, { ...messages[1], id: 'assistant-run', content: '第二段', ordinal: 3 }],
   }))
   assert.equal(multiple.container.querySelectorAll('.fox-answer-segment').length, 0)
   assert.match(multiple.container.querySelector('.fox-answer-body').textContent, /第一段/)
   assert.match(multiple.container.querySelector('.fox-answer-body').textContent, /第二段/)
+})
+
+test('a failed tool stays visible in its stage and in the collapsed turn summary', async () => {
+  const failedToolEvents = events.map(item => item.seq === 4
+    ? event(4, 'tool.completed', { toolCallId: 'read', tool: 'read', result: { error: 'permission denied' }, isError: true }) : item)
+  const view = render(timeline(failedToolEvents))
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-answer-segment').length, 2))
+  assert.match(view.container.querySelectorAll('.fox-runtime-process-summary')[1].textContent, /失败/)
+  fireEvent.click(view.getByRole('button', { name: /收起过程/ }))
+  assert.match(view.getByRole('button', { name: /展开过程/ }).textContent, /失败/)
+})
+
+test('a tool still running before a response keeps its own stage active', async () => {
+  const liveEvents = events.filter(item => item.seq !== 4)
+  const view = render(timeline(liveEvents, {
+    runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+    messages: [messages[0], { ...messages[1], status: 'streaming' }],
+  }))
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-answer-segment').length, 2))
+  assert.match(view.container.querySelectorAll('.fox-runtime-process-summary')[1].textContent, /正在读取文件/)
+  assert.equal(view.container.querySelectorAll('.fox-runtime-process-summary.is-running').length, 1)
+  view.rerender(timeline([...liveEvents, event(6, 'run.completed')], {
+    runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+    messages: [messages[0], { ...messages[1], status: 'streaming' }],
+  }))
+  assert.equal(view.container.querySelectorAll('.fox-runtime-process-summary.is-running').length, 0)
+})
+
+test('opening a live stage jumps to its end while reopening a completed stage starts at its top', async () => {
+  const height = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight')
+  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', { configurable: true, get() { return this.classList.contains('fox-runtime-process-scroll') ? 1000 : 0 } })
+  try {
+    const liveEvents = events.filter(item => item.seq !== 4)
+    const view = render(timeline(liveEvents, {
+      runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+      messages: [messages[0], { ...messages[1], status: 'streaming' }],
+    }))
+    await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-answer-segment').length, 2))
+    const headers = view.container.querySelectorAll('.fox-chain-of-thought-header')
+    fireEvent.click(headers[1])
+    const liveScroll = view.container.querySelectorAll('.fox-runtime-process-scroll')[0]
+    assert.equal(liveScroll.scrollTop, 1000)
+    fireEvent.click(headers[0])
+    const completedScroll = view.container.querySelectorAll('.fox-runtime-process-scroll')[0]
+    completedScroll.scrollTop = 200
+    fireEvent.click(headers[0])
+    fireEvent.click(headers[0])
+    assert.equal(completedScroll.scrollTop, 0)
+  } finally {
+    if (height) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', height)
+    else delete HTMLElement.prototype.scrollHeight
+  }
 })
