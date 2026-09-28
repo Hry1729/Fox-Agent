@@ -170,9 +170,20 @@ export const MessageResponse = memo(
     const normalizedChildren = typeof children === "string"
       ? labelUnspecifiedCodeFences(children)
       : children;
+    // Streamdown memoizes Markdown nodes by source position. A Kernel frame
+    // can replace earlier bytes without changing those positions (including
+    // Mermaid labels). Reset only on non-append edits; ordinary token appends
+    // retain the renderer and its controls instead of remounting each token.
+    const [frame, setFrame] = useState({ source: normalizedChildren, generation: 0 });
+    if (frame.source !== normalizedChildren) {
+      const append = typeof normalizedChildren === "string" && typeof frame.source === "string"
+        && normalizedChildren.startsWith(frame.source);
+      setFrame({ source: normalizedChildren, generation: frame.generation + (append ? 0 : 1) });
+    }
 
     return (
       <Streamdown
+        key={frame.generation}
         className={cn(
           "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
           className

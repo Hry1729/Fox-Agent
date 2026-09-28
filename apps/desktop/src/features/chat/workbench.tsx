@@ -2227,19 +2227,22 @@ function RuntimeArtifacts({ artifacts, onOpenArtifact }: { artifacts: ArtifactRe
 
 type RuntimeGroupHelpers = typeof import('./runtime-process-groups')
 
-function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleRunMessage, running, artifacts, assistantName, modelName, knowledgeBindings, attachmentNames, onOpenSource, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onFork, failureReason, cancelled }: { message: ConversationMessage; processEvents: RunEventRecord[]; groupHelpers: RuntimeGroupHelpers | null; singleRunMessage: boolean; running: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; attachmentNames?: ReadonlyMap<string, string>; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; onFork?: (messageId: string) => void; failureReason?: RunFailure; cancelled?: boolean }) {
+function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleRunMessage, kernelMessages, running, artifacts, assistantName, modelName, knowledgeBindings, attachmentNames, onOpenSource, onOpenArtifact, onOpenFileInSidebar, onRevealFileInExplorer, onFork, failureReason, cancelled }: { message: ConversationMessage; processEvents: RunEventRecord[]; groupHelpers: RuntimeGroupHelpers | null; singleRunMessage: boolean; kernelMessages?: ConversationMessage[]; running: boolean; artifacts: ArtifactRecord[]; assistantName: string; modelName?: string; knowledgeBindings?: KnowledgeBindingRecord[]; attachmentNames?: ReadonlyMap<string, string>; onOpenSource?: (source: RuntimeSource) => void; onOpenArtifact?: (artifact: ArtifactRecord) => void; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void; onFork?: (messageId: string) => void; failureReason?: RunFailure; cancelled?: boolean }) {
   const { authoritativeRunId } = useContext(TimelineRuntimeContext)
   const parsed = useMemo(() => splitAssistantContent(message.content ?? ''), [message.content])
   const process = useMemo(() => runtimeProcess(processEvents), [processEvents])
   const orderedGroups = useMemo(() => {
-    // Legacy Host owns one append-only assistant message per run. Kernel display
-    // can replace a same-length preview and does not emit ordered answer deltas.
+    if (groupHelpers && message.runId && (kernelMessages?.length || !message.content && (message.runId === authoritativeRunId
+      || processEvents.some(item => typeof item.event.kernelCheckpointSeq === 'string')))) {
+      return groupHelpers.projectKernelGroups(message.runId, kernelMessages ?? [], processEvents)
+    }
+    // Legacy keeps its verified append-only answer boundaries.
     if (!groupHelpers || !message.runId || !singleRunMessage || message.runId === authoritativeRunId
       || message.id !== `assistant-${message.runId}` || message.kernelPreview
       || /<\/?(?:(?:mm:)?(?:think|thinking|analysis))>/i.test(message.content)) return null
     const groups = groupHelpers.projectRuntimeGroups(message.runId, message.content, processEvents)
     return groups?.length ? groups : null
-  }, [message.id, message.runId, message.kernelPreview, message.content, singleRunMessage, authoritativeRunId, processEvents, groupHelpers])
+  }, [message.id, message.runId, message.kernelPreview, message.content, singleRunMessage, kernelMessages, authoritativeRunId, processEvents, groupHelpers])
   const [turnProcessCollapsed, setTurnProcessCollapsed] = useState(false)
   const processGroupCount = orderedGroups?.filter(group => group.kind === 'process').length ?? 0
   const lastProcessIndex = orderedGroups?.reduce((last, group, index) => group.kind === 'process' ? index : last, -1) ?? -1
@@ -2350,6 +2353,7 @@ const MemoizedRuntimeAssistantMessage = memo(RuntimeAssistantMessage, (previous,
   && previous.processEvents === next.processEvents
   && previous.groupHelpers === next.groupHelpers
   && previous.singleRunMessage === next.singleRunMessage
+  && previous.kernelMessages === next.kernelMessages
   && previous.running === next.running
   && previous.artifacts === next.artifacts
   && previous.assistantName === next.assistantName
@@ -2893,7 +2897,7 @@ export function RuntimeTimeline({ messages, attachments, artifacts, expertBindin
           const isRunTail = Boolean(message.runId && lastAssistantMessageIdByRun.get(message.runId) === message.id)
           const failureReason = isRunTail && message.runId ? failureByRunId.get(message.runId) : undefined
           const cancelled = Boolean(isRunTail && message.runId && cancelledRunIds.has(message.runId))
-          return <div id={`fox-turn-${message.id}`} key={message.timelineKey} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} groupHelpers={groupHelpers} singleRunMessage={Boolean(message.runId && assistantMessageCountByRun.get(message.runId) === 1)} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} attachmentNames={attachmentNames} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} onFork={onFork} failureReason={failureReason} cancelled={cancelled} /></div>
+          return <div id={`fox-turn-${message.id}`} key={message.timelineKey} className="fox-turn-anchor" data-turn-message-id={message.id}><MemoizedRuntimeAssistantMessage message={displayMessage} processEvents={processEvents} groupHelpers={groupHelpers} kernelMessages={message.kernelMessages} singleRunMessage={Boolean(message.runId && assistantMessageCountByRun.get(message.runId) === 1)} running={running} artifacts={messageArtifacts} assistantName={resolvedAssistantName} modelName={eventModel ?? (isCurrentRun ? resolvedRunModel : undefined)} knowledgeBindings={runtimeContext.knowledgeBindings} attachmentNames={attachmentNames} onOpenSource={onOpenSource ?? runtimeContext.onOpenSource} onOpenArtifact={onOpenArtifact} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} onFork={onFork} failureReason={failureReason} cancelled={cancelled} /></div>
         })}
         {state === 'error' && <div className="fox-turn-anchor"><Message from="assistant" className="fox-message fox-assistant-message"><MessageContent className="fox-assistant-content"><ErrorPrompt onRetry={onRetry} error={runtimeError} errorDetails={runtimeErrorDetails} /></MessageContent></Message></div>}
         {runtimeContext.recoveryPanel}

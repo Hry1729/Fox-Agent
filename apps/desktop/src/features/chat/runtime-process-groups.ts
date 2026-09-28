@@ -1,4 +1,4 @@
-import type { RunEventRecord } from '@/features/conversations/model/types'
+import type { ConversationMessage, RunEventRecord } from '@/features/conversations/model/types'
 import { answerDeltaFingerprint } from '@/features/conversations/model/runtime-delta-fingerprint'
 
 export type RuntimeProcessGroup = {
@@ -38,6 +38,63 @@ const boundaryLabels: Record<string, string> = {
 }
 
 const processEvents = new Set(['reasoning.delta', 'tool.started', 'tool.updated', 'tool.completed'])
+
+/** Kernel messages are replaceable round snapshots, never append-only deltas.
+ * Only explicit Host round ownership joins tools to messages. No timestamp or
+ * response-length guesses, and no change to the execution snapshot/history.
+ */
+export function projectKernelGroups(runId: string, messages: readonly ConversationMessage[], events: readonly RunEventRecord[]): RuntimeDisplayGroup[] | null {
+  type Round = { message?: ConversationMessage; reasoning: RunEventRecord[]; tools: RunEventRecord[] }
+  const rounds = new Map<string, Round>()
+  const roundFor = (checkpoint: string) => {
+    if (!/^[1-9]\d{0,18}$/.test(checkpoint)) return null
+    if (!rounds.has(checkpoint)) rounds.set(checkpoint, { reasoning: [], tools: [] })
+    return rounds.get(checkpoint)!
+  }
+  for (const message of messages) {
+    const prefix = `kernel-message:${runId}:`
+    if (message.runId !== runId || !message.id.startsWith(prefix)) return null
+    const round = roundFor(message.id.slice(prefix.length))
+    if (!round || round.message) return null
+    round.message = message
+  }
+  const notices: RuntimeNoticeGroup[] = []
+  const seen = new Set<number>()
+  for (const event of [...events].filter(item => item.runId === runId).sort((a, b) => a.seq - b.seq)) {
+    if (seen.has(event.seq)) continue
+    seen.add(event.seq)
+    if (processEvents.has(event.eventType)) {
+      const source = event.event.source
+      const checkpoint = event.eventType === 'reasoning.delta' && typeof source === 'string' && source.startsWith('kernel-model:')
+        ? source.slice('kernel-model:'.length) : event.event.kernelCheckpointSeq
+      const round = typeof checkpoint === 'string' ? roundFor(checkpoint) : null
+      if (!round) return null // Old/partial history remains readable through the existing fallback.
+      ;(event.eventType === 'reasoning.delta' ? round.reasoning : round.tools).push(event)
+    } else if (Object.hasOwn(boundaryLabels, event.eventType)) {
+      notices.push({ kind: 'notice', key: `${runId}:notice:${event.seq}`, label: boundaryLabels[event.eventType] })
+    }
+  }
+  const groups: RuntimeDisplayGroup[] = []
+  const appendProcess = (key: string, items: RunEventRecord[]) => {
+    if (!items.length) return
+    const previous = groups.at(-1)
+    if (previous?.kind === 'process') previous.events.push(...items)
+    else groups.push({ kind: 'process', key, events: [...items] })
+  }
+  for (const [checkpoint, round] of [...rounds].sort(([a], [b]) => BigInt(a) < BigInt(b) ? -1 : 1)) {
+    const preview = round.message?.kernelPreview
+    // A preview is a full replacement (including empty reasoning), not a delta.
+    const reasoning = preview?.reasoning !== undefined ? [{
+      runId, seq: round.reasoning[0]?.seq ?? 0, eventType: 'reasoning.delta',
+      event: { type: 'reasoning.delta', delta: preview.reasoning, source: `kernel-model:${checkpoint}` },
+      createdAt: round.message!.updatedAt,
+    }] : round.reasoning
+    appendProcess(`${runId}:kernel:${checkpoint}:reasoning`, reasoning)
+    if (round.message?.content.trim()) groups.push({ kind: 'response', key: `${runId}:kernel:${checkpoint}:response`, text: round.message.content })
+    appendProcess(`${runId}:kernel:${checkpoint}:tools`, round.tools)
+  }
+  return groups.length ? [...groups, ...notices] : null
+}
 
 /** A bounded read projection: the answer lives once in messages.content. */
 export function answerDeltaLength(event: RunEventRecord): number | null {

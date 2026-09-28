@@ -13,7 +13,7 @@ export function assistantDisplayContent(message: ConversationMessage, streamTarg
   return message.id === streamTargetId ? streamingText || message.content : message.content
 }
 
-export type RuntimeTimelineMessage = ConversationMessage & { timelineKey: string }
+export type RuntimeTimelineMessage = ConversationMessage & { timelineKey: string; kernelMessages?: ConversationMessage[] }
 
 /** A model continuation is part of its existing run, not another user-facing turn.
  * Keep the first position and a stable React key, but the latest real message ID
@@ -46,6 +46,9 @@ export function groupAssistantContinuations(
     if (content.trim()) parts.push(content)
     const grouped = {
       ...message,
+      kernelMessages: message.runId && message.id.startsWith(`kernel-message:${message.runId}:`) && (!sameRun || previous.kernelMessages)
+        ? [...(sameRun ? previous.kernelMessages ?? [] : []), content === message.content ? message : { ...message, content }]
+        : undefined,
       content: '',
       createdAt: sameRun ? previous.createdAt : message.createdAt,
       ordinal: sameRun ? previous.ordinal : message.ordinal,

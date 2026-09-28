@@ -7,6 +7,7 @@ import { createServer } from 'vite'
 
 const ownsDomRegistration = !GlobalRegistrator.isRegistered
 if (ownsDomRegistration) GlobalRegistrator.register()
+globalThis.IS_REACT_ACT_ENVIRONMENT = true
 const React = await import('react')
 const { cleanup, fireEvent, render, waitFor } = await import('@testing-library/react')
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -167,4 +168,31 @@ test('opening a live stage jumps to its end while reopening a completed stage st
     if (height) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', height)
     else delete HTMLElement.prototype.scrollHeight
   }
+})
+
+
+test('Kernel rounds group by Host ownership and retain disclosures across preview replacement and reload', async () => {
+  const kernelEvents = [
+    event(1, 'tool.started', { toolCallId: 'grep', tool: 'grep', input: { pattern: 'a' }, kernelCheckpointSeq: '2' }),
+    event(2, 'reasoning.delta', { source: 'kernel-model:2', delta: '先分析请求' }),
+    event(3, 'tool.completed', { toolCallId: 'grep', tool: 'grep', kernelCheckpointSeq: '2', result: { content: 'found' } }),
+    event(4, 'reasoning.delta', { source: 'kernel-model:12', delta: '整理搜索结果' }),
+  ]
+  const first = { ...messages[1], id: 'kernel-message:run:2', content: '先搜索代码', status: 'completed' }
+  const last = { ...messages[1], id: 'kernel-message:run:12', content: '旧答案', ordinal: 3,
+    kernelPreview: { checkpointSeq: 12, revision: 1, reasoning: '预览推理' } }
+  const renderKernel = (tail) => timeline(kernelEvents, { messages: [messages[0], first, tail], runtimeRunning: true })
+  const view = render(renderKernel(last))
+  await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 2))
+  assert.deepEqual([...view.container.querySelectorAll('.fox-chain-of-thought-header')].map(el => el.getAttribute('aria-expanded')), ['false', 'false'])
+  fireEvent.click(view.container.querySelectorAll('.fox-chain-of-thought-header')[1])
+  assert.match(view.container.textContent, /预览推理/)
+  await React.act(async () => { view.rerender(renderKernel({ ...last, content: '新答案', kernelPreview: { checkpointSeq: 12, revision: 2, reasoning: '新的推理' } })) })
+  await waitFor(() => { assert.match(view.container.textContent, /新的推理/); assert.match(view.container.textContent, /新答案/) })
+  assert.doesNotMatch(view.container.textContent, /预览推理|旧答案/)
+  assert.equal(view.container.querySelectorAll('.fox-chain-of-thought-header')[1].getAttribute('aria-expanded'), 'true')
+  assert.deepEqual([...view.container.querySelectorAll('.fox-answer-segment')].map(el => el.textContent.trim()), ['先搜索代码', '新答案'])
+  view.rerender(timeline(kernelEvents, { messages: [messages[0], first, { ...last, kernelPreview: undefined, content: '最终答案', status: 'completed' }] }))
+  await waitFor(() => assert.match(view.container.textContent, /整理搜索结果/))
+  assert.doesNotMatch(view.container.textContent, /新的推理/)
 })

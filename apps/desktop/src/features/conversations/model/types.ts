@@ -365,7 +365,7 @@ export interface ConversationSummary {
 
 export interface ConversationMessage {
   /** Ephemeral display cursor; never sent back as persisted model history. */
-  kernelPreview?: { checkpointSeq: number; revision: number }
+  kernelPreview?: { checkpointSeq: number; revision: number; reasoning?: string }
   id: string
   conversationId: string
   runId: string | null

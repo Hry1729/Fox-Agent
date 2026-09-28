@@ -79,7 +79,14 @@ function mergeMessages(persisted: ConversationMessage[], current: ConversationMe
   for (const message of current) {
     const stored = persistedMessages.get(message.id)
     if (stored) {
-      if (stored.id.startsWith('kernel-message:') && stored.status !== 'streaming') continue
+      if (stored.id.startsWith('kernel-message:')) {
+        if (stored.status === 'streaming' && message.updatedAt >= stored.updatedAt && message.kernelPreview) {
+          persistedMessages.set(message.id, message)
+        }
+        // A Kernel display frame replaces the whole prior frame, even when it
+        // is shorter. Never combine one revision's text with another's cursor.
+        continue
+      }
       const statusRank: Record<ConversationMessage['status'], number> = {
         sending: 0,
         streaming: 1,
@@ -140,7 +147,14 @@ export function mergeConversationDetail(persisted: ConversationDetail, current: 
   return {
     ...persisted,
     kernelSnapshot,
-    messages: mergeMessages(persisted.messages, current.messages.filter(message => previewBelongsToSnapshot(message, kernelSnapshot))),
+    messages: mergeMessages(persisted.messages, current.messages.filter(message => {
+      if (!previewBelongsToSnapshot(message, kernelSnapshot)) return false
+      // A complete run window omitting a settled Kernel row means the Host
+      // superseded it. Keep unrelated, previously paged history untouched.
+      return !message.id.startsWith('kernel-message:') || !!message.kernelPreview
+        || persisted.messages.some(item => item.id === message.id)
+        || !persisted.messages.some(item => item.role === 'user' && item.runId === message.runId)
+    })),
     runtimeEvents,
     toolCalls: mergeRecords(persisted.toolCalls, current.toolCalls, (toolCall) => toolCall.id),
     approvals: mergeApprovals(persisted.approvals, current.approvals),

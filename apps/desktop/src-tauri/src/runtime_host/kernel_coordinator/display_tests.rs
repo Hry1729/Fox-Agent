@@ -361,6 +361,13 @@ fn final_response_replaces_partial_and_projects_tool_process_without_duplicate_u
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].content, "short");
     assert_eq!(messages[0].status, "completed");
+    let checkpoint = messages[0].id.rsplit(':').next().unwrap();
+    let projected_tools: Vec<_> = detail.runtime_events.iter().filter(|e| e.event_type.starts_with("tool.")).collect();
+    assert_eq!(projected_tools.len(), 2);
+    assert!(projected_tools.iter().all(|e| e.event["kernelCheckpointSeq"] == checkpoint));
+    assert_eq!(db.load_conversation(&conversation).unwrap().runtime_events.iter()
+        .filter(|e| e.event_type.starts_with("tool.") && e.event["kernelCheckpointSeq"] == checkpoint).count(), 2);
+
     assert_eq!(
         detail
             .runtime_events
@@ -473,4 +480,30 @@ fn projectless_real_xlsx_code_acceptance() {
     let code=std::fs::read_to_string(root.join("analyze.js")).unwrap();
     let actual=exercise_projectless_compute(Some(&root.join("AGV-927-task-acceptance.xlsx")),&code);
     std::fs::write(root.join("product-actual.json"),serde_json::to_vec_pretty(&actual).unwrap()).unwrap();
+}
+
+
+#[test]
+fn kernel_empty_final_reasoning_clears_streaming_display() {
+    let config = worker_configuration();
+    let clock = TestClock::new(1000);
+    let cancellation = CancellationRegistry::default();
+    let (db, root, run) = fixture_with_start_opt(&clock, &config.hash().unwrap(), Some(&config), true, true);
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run, &cancellation).unwrap();
+    let conversation = db.run_control_binding(&run).unwrap().unwrap().conversation_id;
+    coordinator.dispatch_initial("owner", &Allow, |_, frame, _| {
+        db.save_kernel_model_display(&fox_engine_protocol::KernelModelPreview {
+            schema_version: 1, run_id: run.clone(), conversation_id: conversation.clone(), turn_id: frame.input.turn_id.clone(),
+            checkpoint_seq: frame.checkpoint_seq, revision: 1, text: "draft".into(), reasoning: "obsolete".into(), progress_bytes: None,
+        }).unwrap();
+        Ok(fox_engine_protocol::KernelInitialModelResponse { schema_version: 1, run_id: run.clone(),
+            turn_id: frame.input.turn_id.clone(), checkpoint_seq: frame.checkpoint_seq,
+            assistant_message: json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"final"}]}),
+        })
+    }).unwrap();
+    drop(coordinator);
+    drop(db);
+    let detail = Database::open(root.join("facts.db")).unwrap().load_conversation(&conversation).unwrap();
+    assert!(detail.runtime_events.iter().filter(|e| e.event_type == "reasoning.delta").all(|e| e.event["delta"] == ""));
+    assert_eq!(detail.messages.last().unwrap().content, "final");
 }

@@ -81,3 +81,26 @@ test('a new streaming frame replaces the persisted draft instead of adding the s
   expect(updated.messages).toHaveLength(1)
   expect(updated.messages[0].content).toBe('继续输出')
 })
+
+
+test('shorter Kernel previews and reasoning survive a same-checkpoint reload without mixed revisions', () => {
+  const stored = applyKernelModelPreview(detail(), { ...preview, text: '很长的旧草稿', reasoning: '旧思考' }, 10)!
+  stored.messages[0].kernelPreview = undefined
+  const live = applyKernelModelPreview(stored, { ...preview, revision: 2, text: '短答', reasoning: '新思考' }, 11)!
+  const merged = mergeConversationDetail(stored, live)
+  expect(merged.messages[0].content).toBe('短答')
+  expect(merged.messages[0].kernelPreview?.reasoning).toBe('新思考')
+  expect(merged.messages[0].kernelPreview?.revision).toBe(2)
+})
+
+test('a loaded run removes a superseded Kernel row but retains previously paged runs', () => {
+  const current = applyKernelModelPreview(detail(), preview)!
+  current.messages[0].kernelPreview = undefined
+  current.messages[0].status = 'completed'
+  const persisted = detail()
+  persisted.messages = [{ ...current.messages[0], id: 'user-run', role: 'user', content: 'question' }]
+  const old = { ...current.messages[0], id: 'kernel-message:older:2', runId: 'older' }
+  current.messages.push(old)
+  const merged = mergeConversationDetail(persisted, current)
+  expect(merged.messages.map(message => message.id)).toEqual(['user-run', old.id])
+})

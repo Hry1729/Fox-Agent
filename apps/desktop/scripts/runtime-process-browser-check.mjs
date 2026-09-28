@@ -30,7 +30,7 @@ import { answerDeltaFingerprint } from './src/features/conversations/model/runti
 
 const kind = new URLSearchParams(location.search).get('case') || 'live';
 const generation = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
-const page = window as unknown as { __processCheck?: { kind: string; generation: string } };
+const page = window as unknown as { __processCheck?: { kind: string; generation: string }; replaceKernel?: () => void };
 page.__processCheck = { kind, generation };
 const events: any[] = [];
 let seq = 0;
@@ -52,18 +52,37 @@ tools('first', false, false);
 answer('第一段');
 tools('second', kind === 'live', kind === 'failed');
 answer('第二段');
-const running = kind === 'live';
+const running = kind === 'live' || kind === 'kernel';
 const messages: any[] = [
   { id: 'user', conversationId: 'conversation', runId: 'run', role: 'user', kind: 'text', content: '验证过程组织', status: 'completed', ordinal: 1, createdAt: 1, updatedAt: 1 },
   { id: 'assistant-run', conversationId: 'conversation', runId: 'run', role: 'assistant', kind: 'text', content: '第一段第二段', status: running ? 'streaming' : 'completed', ordinal: 2, createdAt: 2, updatedAt: 2 },
 ];
-createRoot(document.getElementById('root') as HTMLElement).render(
+if (kind === 'kernel' || kind === 'kernel-reload') {
+  events.length = 0; seq = 0;
+  add('reasoning.delta', { source: 'kernel-model:2', delta: '分析需求，决定用图说明' });
+  add('tool.started', { toolCallId: 'search', tool: 'grep', input: { pattern: 'kernel' }, kernelCheckpointSeq: '2' });
+  add('tool.completed', { toolCallId: 'search', tool: 'grep', kernelCheckpointSeq: '2', result: { content: 'found' } });
+  add('reasoning.delta', { source: 'kernel-model:12', delta: '结合搜索结果整理图表' });
+  const fence = String.fromCharCode(96).repeat(3);
+  messages.splice(1, 1,
+    { ...messages[1], id: 'kernel-message:run:2', content: '先说明流程\n' + fence + 'mermaid\nflowchart TD\nA[开始] --> B[结束]\n' + fence, status: 'completed' },
+    { ...messages[1], id: 'kernel-message:run:12', ordinal: 3, content: '再说明交互\n' + fence + 'mermaid\nsequenceDiagram\n客户端->>服务端: 请求\n服务端-->>客户端: 结果\n' + fence,
+      status: running ? 'streaming' : 'completed', kernelPreview: running ? { checkpointSeq: 12, revision: 1, reasoning: '结合搜索结果整理图表' } : undefined });
+}
+const root = createRoot(document.getElementById('root') as HTMLElement);
+const render = () => root.render(
   <main style={{ width: 'min(800px, calc(100vw - 40px))', margin: '20px auto' }}>
-    <RuntimeTimeline messages={messages} attachments={[]} artifacts={[]} events={events}
+    <RuntimeTimeline messages={[...messages]} attachments={[]} artifacts={[]} events={events}
       activeRunId="run" runtimeRunning={running} state={running ? 'streaming' : 'idle'} streamingText=""
       onRetry={() => {}} onRerun={async () => false} />
   </main>
 );
+render();
+page.replaceKernel = () => {
+  messages[2] = { ...messages[2], content: messages[2].content.replaceAll('客户端', '浏览器'),
+    kernelPreview: { checkpointSeq: 12, revision: 2, reasoning: '替换后的分析' } };
+  render();
+};
 `
 
 async function freePort() {
@@ -233,6 +252,38 @@ async function run() {
     results.failed = failedCollapsed
     const failedShot = await client.send('Page.captureScreenshot', { format: 'png' })
     if (failedShot?.data) writeFileSync(join(outputRoot, 'failed.png'), Buffer.from(failedShot.data, 'base64'))
+    generation = failed.generation
+    for (const kind of ['kernel', 'kernel-reload']) {
+      await client.send('Page.navigate', { url: `http://127.0.0.1:${vitePort}/${route}?case=${kind}` })
+      const sample = await ready(client, kind, generation)
+      generation = sample.generation
+      check(sample.open.every(value => value === 'false'), 'Kernel stages must default to collapsed')
+      const diagrams = await waitFor(() => client.evaluate(`(() => {
+        const svgs = [...document.querySelectorAll('.fox-answer-segment svg')];
+        const labels = svgs.map(svg => svg.textContent || '');
+        const ids = svgs.flatMap(svg => [...svg.querySelectorAll('[id]')].map(node => node.id));
+        return labels.some(text => text.includes('开始') && text.includes('结束'))
+          && labels.some(text => text.includes('客户端') && text.includes('服务端')) ? { labels, ids } : null;
+      })()`))
+      check(new Set(diagrams.ids).size === diagrams.ids.length, 'Kernel response diagrams have duplicate IDs')
+      await click(client, '.fox-process-stage .fox-chain-of-thought-header', 1)
+      await click(client, '.fox-process-turn-toggle')
+      const collapsed = await metrics(client)
+      check(collapsed.hidden.every(Boolean) && collapsed.answerCount === 2, 'Kernel collapse removed response diagrams')
+      await click(client, '.fox-process-turn-toggle')
+      const reopened = await metrics(client)
+      check(reopened.open[1] === 'true', 'Kernel stage lost disclosure state')
+      if (kind === 'kernel') {
+        await client.evaluate('window.replaceKernel()')
+        await waitFor(() => client.evaluate(`(() => {
+          const text = [...document.querySelectorAll('.fox-answer-segment svg')].map(svg => svg.textContent || '').join('');
+          return text.includes('浏览器') && !text.includes('客户端') && document.body.textContent.includes('替换后的分析');
+        })()`))
+      }
+      results[kind] = { ...reopened, diagramIds: diagrams.ids, diagramsRendered: true }
+      const shot = await client.send('Page.captureScreenshot', { format: 'png' })
+      if (shot?.data) writeFileSync(join(outputRoot, kind + '.png'), Buffer.from(shot.data, 'base64'))
+    }
     writeFileSync(join(outputRoot, 'runtime-process-browser-check.json'), JSON.stringify({ results, vitePort, cdpPort }, null, 2))
     console.log(`runtime-process browser check OK: ${outputRoot}`)
     console.log('real RuntimeTimeline + Fox CSS: live end, completed top, collapse state, response-after-active-tool, partial failure')

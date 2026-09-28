@@ -40,6 +40,13 @@ pub(super) fn reasoning(
             &json!({"type":"reasoning.delta","delta":text,"source":format!("kernel-model:{checkpoint}")}),
             now,
         )?;
+    } else {
+        // The final/preview reasoning is a replacement, including an empty
+        // replacement. Do not leave a superseded streaming draft on reload.
+        tx.execute("UPDATE run_events SET event_json=?2 WHERE id=?1", params![
+            format!("kernel-display:{run}:reasoning:{checkpoint}"),
+            json!({"type":"reasoning.delta","delta":"","source":format!("kernel-model:{checkpoint}")}).to_string(),
+        ])?;
     }
     Ok(())
 }

@@ -7232,6 +7232,23 @@ fn query_runtime_events_window(
     from_ordinal: i64,
     before_ordinal: Option<i64>,
 ) -> rusqlite::Result<Vec<RunEventRecord>> {
+    // Read-only round ownership from committed Kernel responses. Do not order
+    // Kernel rounds by compatibility event insertion time: a tool projection
+    // can be written before the corresponding thinking projection.
+    let mut round_query = connection.prepare(
+        "SELECT e.run_id, json_extract(b.value,'$.id'),
+                CAST(json_extract(e.payload_json,'$.response.checkpointSeq') AS TEXT)
+         FROM kernel_events e JOIN run_control_bindings c ON c.run_id=e.run_id,
+              json_each(e.payload_json,'$.response.assistantMessage.content') b
+         WHERE c.conversation_id=?1 AND c.authority='authoritative'
+           AND e.event_type IN ('engine.initial_response','engine.batch_response','engine.continuation_response')
+           AND json_extract(b.value,'$.type')='toolCall'
+           AND EXISTS(SELECT 1 FROM messages m WHERE m.run_id=e.run_id AND m.role='user'
+                      AND m.ordinal>=?2 AND (?3 IS NULL OR m.ordinal<?3))",
+    )?;
+    let tool_rounds = round_query.query_map(params![conversation_id, from_ordinal, before_ordinal], |row| {
+        Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), row.get::<_, String>(2)?))
+    })?.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
     let mut statement = connection.prepare(
         "SELECT e.run_id, e.seq, e.event_type, e.event_json, e.created_at,
                 e.trace_id, e.span_id
@@ -7261,6 +7278,11 @@ fn query_runtime_events_window(
                 let mut event: Value = serde_json::from_str(&event_json).unwrap_or_else(|_| {
                     serde_json::json!({ "type": "runtime.invalid_persisted_event" })
                 });
+                if let Some(call) = event.get("toolCallId").and_then(Value::as_str) {
+                    if let Some(checkpoint) = tool_rounds.get(&(row.get::<_, String>(0)?, call.to_owned())) {
+                        event["kernelCheckpointSeq"] = Value::String(checkpoint.clone());
+                    }
+                }
                 if row.get::<_, String>(2)? == "message.delta" {
                     // The durable assistant message already owns answer bytes. The UI only
                     // needs offsets and fingerprints to place verified segments among events.

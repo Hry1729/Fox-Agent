@@ -26,7 +26,7 @@ export function applyKernelModelPreview(detail: ConversationDetail | null, value
     id, runId: notice.runId, conversationId: notice.conversationId, role: 'assistant', kind: 'text', status: 'streaming', content: notice.text,
     ordinal: previous?.ordinal ?? Math.max(0, ...detail.messages.map(message => message.ordinal)) + 1,
     createdAt: previous?.createdAt ?? now, updatedAt: now,
-    kernelPreview: { checkpointSeq: notice.checkpointSeq, revision: notice.revision },
+    kernelPreview: { checkpointSeq: notice.checkpointSeq, revision: notice.revision, reasoning: notice.reasoning },
   }
   return { ...detail, messages: [...detail.messages.filter(message => message.id !== id && (!message.kernelPreview || message.runId !== notice.runId)), message] }
 }
