@@ -112,6 +112,7 @@ export function projectRuntimeGroups(runId: string, content: string, events: rea
   const tools = new Map<string, RuntimeProcessGroup>()
   let offset = 0
   let answerEvents = 0
+  let pendingWhitespace = ''
   let current: RuntimeDisplayGroup | undefined
   const flush = () => { current = undefined }
   for (const event of ordered) {
@@ -126,8 +127,12 @@ export function projectRuntimeGroups(runId: string, content: string, events: rea
       offset += length
       if (!text) continue
       if (current?.kind === 'response') current.text += text
+      // A tool-only model round can emit just separators. Keep those bytes for
+      // the next real reply (including indentation), but do not split a process.
+      else if (!text.trim()) pendingWhitespace += text
       else {
-        current = { kind: 'response', key: `${runId}:response:${event.seq}`, text }
+        current = { kind: 'response', key: `${runId}:response:${event.seq}`, text: pendingWhitespace + text }
+        pendingWhitespace = ''
         groups.push(current)
       }
       continue
@@ -159,6 +164,10 @@ export function projectRuntimeGroups(runId: string, content: string, events: rea
     }
   }
   if (offset !== content.length || (!answerEvents && (!groups.length || Boolean(content)))) return null
+  if (pendingWhitespace) {
+    const lastReply = groups.findLast(group => group.kind === 'response')
+    if (lastReply?.kind === 'response') lastReply.text += pendingWhitespace
+  }
   return groups
 }
 

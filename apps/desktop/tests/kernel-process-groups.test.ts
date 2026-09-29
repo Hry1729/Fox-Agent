@@ -58,6 +58,15 @@ test('missing tool ownership or foreign/mixed messages fall back instead of gues
   expect(projectKernelGroups('run', [{ ...message(2, '答'), runId: 'other' }], [])).toBeNull()
 })
 
+test('Kernel whitespace-only round replies keep successive tool rounds in one group', () => {
+  const groups = projectKernelGroups('run', [message(2, '\n\n'), message(12, '  '), message(20, '现在生成报告。')], [
+    ...events, event(5, 'tool.started', { toolCallId: 'write', tool: 'write', kernelCheckpointSeq: '12' }),
+  ])!
+  expect(groups.map(group => group.kind)).toEqual(['process', 'response'])
+  expect(groups[0].kind === 'process' && groups[0].events).toHaveLength(5)
+  expect(groups.at(-1)).toMatchObject({ text: '现在生成报告。' })
+})
+
 test('Mermaid fences remain intact per Kernel response including streaming prefixes', () => {
   const source = '说明\n```mermaid\nflowchart TD\nA[开始] --> B[结束]\n```\n结论'
   for (const content of [source.slice(0, 32), source]) {

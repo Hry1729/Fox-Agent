@@ -40,6 +40,37 @@ test('keeps tool completion with its starting group across answer boundary', () 
   expect(groups[0].kind === 'process' && groups[0].events.map(item => item.seq)).toEqual([1, 3])
 })
 
+test('whitespace-only rounds do not scatter contiguous tools into separate headings', () => {
+  const events = [
+    event(1, 'reasoning.delta', { delta: 'plan' }), answer(2, '\n\n'),
+    event(3, 'tool.started', { toolCallId: 'a', tool: 'read' }), answer(4, '\n\n'),
+    event(5, 'tool.started', { toolCallId: 'b', tool: 'grep' }),
+  ]
+  const before = projectRuntimeGroups('run', '\n\n\n\n', events)!
+  expect(before.map(group => group.kind)).toEqual(['process'])
+  const after = projectRuntimeGroups('run', '\n\n\n\n现在开始生成报告。完成。\n', [
+    ...events, answer(6, '现在开始生成报告。'),
+    event(7, 'tool.completed', { toolCallId: 'a', tool: 'read' }),
+    event(8, 'tool.started', { toolCallId: 'c', tool: 'write' }), answer(9, '完成。'),
+    event(10, 'tool.started', { toolCallId: 'd', tool: 'read' }), answer(11, '\n'),
+  ])!
+  expect(after.map(group => group.kind)).toEqual(['process', 'response', 'process', 'response', 'process'])
+  expect(after[0].key).toBe(before[0].key)
+  expect(after[0].kind === 'process' && after[0].events.map(item => item.seq)).toEqual([1, 3, 5, 7])
+  expect(after.filter(group => group.kind === 'response').map(group => group.text).join(''))
+    .toBe('\n\n\n\n现在开始生成报告。完成。\n')
+})
+
+test('buffered whitespace preserves code indentation and never merges across a notice', () => {
+  const groups = projectRuntimeGroups('run', '    code()\n', [
+    event(1, 'tool.started', { toolCallId: 'a', tool: 'read' }), answer(2, '    '),
+    event(3, 'run.retrying'), event(4, 'reasoning.delta', { delta: 'retry' }),
+    answer(5, 'code()\n'),
+  ])!
+  expect(groups.map(group => group.kind)).toEqual(['process', 'notice', 'process', 'response'])
+  expect(groups.at(-1)).toMatchObject({ text: '    code()\n' })
+})
+
 test('deduplicates replay, sorts late arrivals, and excludes another run', () => {
   const groups = projectRuntimeGroups('run', 'ok', [
     answer(3, 'ok'), event(1, 'reasoning.delta', { delta: 'think' }),
