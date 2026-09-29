@@ -59,14 +59,14 @@ createRoot(document.getElementById('root')!).render(
         window.__sidebarClicks = (window.__sidebarClicks || 0) + 1;
       }}>调整侧边栏</button>
     </aside>
-    <div className="fox-content-surface" style={{flex:'1 1 0',width:'auto',minWidth:0}}>
+    <div className="fox-content-card"><div className="fox-content-surface" style={{flex:'1 1 0',width:'auto',minWidth:0}}>
       <section className="fox-chat-pane" style={{minWidth:0}}>
         <div className="fox-chat-topbar">对话</div>
         <div style={{flex:1,minHeight:0,overflow:'auto',padding:'14px 20px'}}>
           <div className="fox-answer-body"><MessageResponse className="fox-answer-response">{markdown}</MessageResponse></div>
         </div>
       </section>
-    </div>
+    </div></div>
   </div>
 );
 window.__ready = true;
@@ -225,6 +225,8 @@ async function run() {
     await pointer('[data-streamdown="table-wrapper"] button[title="View fullscreen"]')
     await waitFor(async () => evaluate('!!document.querySelector(".fox-chat-local-fullscreen[data-fox-streamdown=table-fullscreen]")'), 'table local fullscreen')
     observations.tableFullscreen = await bounds('.fox-chat-local-fullscreen')
+    observations.tableCorners = await evaluate('({surface:getComputedStyle(document.querySelector(".fox-content-surface")).borderRadius,overlay:getComputedStyle(document.querySelector(".fox-chat-local-fullscreen")).borderRadius})')
+    check(observations.tableCorners.overlay === observations.tableCorners.surface && observations.tableCorners.overlay !== '0px', 'table fullscreen loses conversation corners')
     await screenshot('table-local-fullscreen.png')
     observations.pane = await bounds('.fox-chat-pane')
     check(within(observations.tableFullscreen, observations.pane), 'table fullscreen exceeds chat pane')
@@ -259,6 +261,8 @@ async function run() {
       return {text:Array.from(svg.querySelectorAll('text')).map(node => node.textContent).join(' '),width:r.width,height:r.height,left:r.left,top:r.top,right:r.right,bottom:r.bottom};
     })()`)
     observations.mermaidFullscreen = await bounds('.fox-chat-local-fullscreen')
+    observations.mermaidCorners = await evaluate('({surface:getComputedStyle(document.querySelector(".fox-content-surface")).borderRadius,overlay:getComputedStyle(document.querySelector(".fox-chat-local-fullscreen")).borderRadius})')
+    check(observations.mermaidCorners.overlay === observations.mermaidCorners.surface && observations.mermaidCorners.overlay !== '0px', 'Mermaid fullscreen loses conversation corners')
     check(observations.mermaidDiagram.text.includes('请求入口') && observations.mermaidDiagram.text.includes('任务执行'), 'Mermaid fullscreen labels missing')
     check(observations.mermaidDiagram.width > 20 && observations.mermaidDiagram.height > 20 && within(observations.mermaidDiagram, observations.mermaidFullscreen), 'Mermaid fullscreen SVG hidden or outside pane')
     await screenshot('mermaid-local-fullscreen.png')

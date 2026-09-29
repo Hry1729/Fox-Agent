@@ -28,6 +28,10 @@ function watchFullscreenPortals(): () => void {
     portal.style.setProperty("top", `${top}px`, "important");
     portal.style.setProperty("width", `${width}px`, "important");
     portal.style.setProperty("height", `${height}px`, "important");
+    // Body portals sit outside the conversation surface's rounded clipping box.
+    // Reuse its actual corners rather than covering them with a square overlay.
+    const surface = pane.closest<HTMLElement>(".fox-content-surface") ?? pane;
+    portal.style.setProperty("border-radius", getComputedStyle(surface).borderRadius);
   }
 
   function isFullscreenPortal(element: HTMLElement) {
