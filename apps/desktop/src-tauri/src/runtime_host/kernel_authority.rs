@@ -9,11 +9,9 @@ pub(super) fn select(
         return Ok(authority);
     }
     match configured {
-        Err(VarError::NotPresent) => Ok(if cfg!(feature = "kernel-default") {
-            ExecutionAuthority::Authoritative
-        } else {
-            ExecutionAuthority::Legacy
-        }),
+        // All launch paths (including plain `pnpm tauri.cmd dev`) use Kernel.
+        // Legacy is an explicit process-level opt-in, never a build fallback.
+        Err(VarError::NotPresent) => Ok(ExecutionAuthority::Authoritative),
         Ok(value) if value == "legacy" => Ok(ExecutionAuthority::Legacy),
         Ok(value) if value == "authoritative" => Ok(ExecutionAuthority::Authoritative),
         _ => Err("FOX_KERNEL_MODE must be legacy or authoritative".into()),
@@ -26,12 +24,7 @@ mod tests {
 
     #[test]
     fn absent_environment_uses_the_built_in_default() {
-        let expected = if cfg!(feature = "kernel-default") {
-            ExecutionAuthority::Authoritative
-        } else {
-            ExecutionAuthority::Legacy
-        };
-        assert_eq!(select(None, Err(VarError::NotPresent)).unwrap(), expected);
+        assert_eq!(select(None, Err(VarError::NotPresent)).unwrap(), ExecutionAuthority::Authoritative);
     }
 
     #[test]

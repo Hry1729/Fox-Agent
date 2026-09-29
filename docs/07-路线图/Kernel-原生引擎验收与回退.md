@@ -4,7 +4,7 @@
 
 ## 已实现的选择与冻结
 
-普通构建在未设置 `FOX_KERNEL_MODE` 时继续使用 Legacy；用户于 2026-09-10 要求的新验收包启用 `kernel-default` 编译特性，无环境覆盖时直接使用 Authoritative，普通快捷方式启动即可生效。验收包使用独立应用名与数据目录，详见 [新 Kernel 默认验收包](Kernel-新内核默认验收包.md)。
+2026-09-29 起，普通开发、普通构建和验收包在未设置 `FOX_KERNEL_MODE` 时统一使用 Authoritative，只有显式设置 `FOX_KERNEL_MODE=legacy` 才启用旧路径。`kernel-default` 特性保留旧构建命令兼容性。验收包仍使用独立应用名与数据目录，详见 [新 Kernel 默认验收包](Kernel-新内核默认验收包.md)。
 
 Authoritative 新 Run 可通过进程级 `FOX_KERNEL_ENGINE` 选择 `pi`（默认）、`codex` 或 `deepseek_harness`。显式 `FOX_KERNEL_MODE` 仍可覆盖新任务的内置默认；已有 Run 始终使用自己的持久绑定，不跟随新的环境设置改换引擎。
 

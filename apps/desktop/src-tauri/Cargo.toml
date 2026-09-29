@@ -11,6 +11,7 @@ default = ["local-embedding", "zvec"]
 zvec = ["dep:zvec-rust", "dep:zvec-rust-sys"]
 local-embedding = ["dep:ort", "dep:tokenizers"]
 kernel-acceptance = []
+# Compatibility flag for existing preview build commands; Kernel is now always the default.
 kernel-default = []
 
 [[bin]]

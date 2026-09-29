@@ -95,6 +95,8 @@ pnpm install
 pnpm dev
 ```
 
+本地运行默认使用 **Kernel / Authoritative**，包括在 `apps/desktop` 执行 `pnpm tauri.cmd dev`，无需设置环境变量。只有明确调试旧路径时才在当前 PowerShell 中设置 `$env:FOX_KERNEL_MODE='legacy'`；调试后用 `Remove-Item Env:FOX_KERNEL_MODE` 恢复默认。已有 Run 的持久执行权绑定不改写，新建 Run 才采用新的启动设置。`pi` 是默认模型引擎，不代表 Legacy。
+
 常用验证命令：
 
 ```powershell

@@ -447,7 +447,7 @@ Fox 只在确有差异时做模型家族分支：MiniMax、DeepSeek、Claude、O
 
 ## 隔离 Kernel 模型进程与桌面权威接线
 
-桌面 RuntimeHost 已支持显式 `FOX_KERNEL_MODE=authoritative`。新 Run 冻结执行权、权限、模型、输入与资源范围后，由独占 Host 循环执行；默认仍为 Legacy，已有 Run 不随设置改换执行权。启动恢复读取持久事实与命令队列，不能重发结果不明的 leased 模型请求或已领取 Host 动作。隔离桌面实测使用本机合成 Provider，不代表云模型质量、线上性能或生产默认切换。
+桌面 RuntimeHost 自 2026-09-29 起默认 Authoritative，只有显式 `FOX_KERNEL_MODE=legacy` 才创建 Legacy 新 Run。新 Run 冻结执行权、权限、模型、输入与资源范围后，由独占 Host 循环执行；已有 Run 不随设置改换执行权。启动恢复读取持久事实与命令队列，不能重发结果不明的 leased 模型请求或已领取 Host 动作。隔离桌面实测使用本机合成 Provider，不代表云模型质量或线上性能。
 
 资源入口提供 64 项受支持工具，实际暴露还受冻结 Profile、助手/专家、项目、知识引用、MCP/Office 范围限制。模型只持有描述，读写、命令、通用能力、知识、记忆、附件、工作和子任务操作均由 Host 执行。生命周期 block/require_approval 规则随 Run 冻结；资源执行前复核身份、计数与剩余预算，失败不回落到旧引擎执行。取消不能撤销外部服务已经接受的副作用。
 

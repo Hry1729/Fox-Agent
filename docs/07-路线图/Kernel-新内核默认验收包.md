@@ -33,4 +33,4 @@
 
 这是未签名的验收包。缺少 WebView2 时，安装器会联网获取运行组件。C++ 运行库已随包提供。无需迁移旧测试数据库。
 
-构建入口：`pnpm tauri:build:kernel-preview`。`kernel-default` 编译特性决定无环境覆盖时的新任务默认模式，安装配置决定独立应用名和数据目录。已有持久绑定仍按原绑定运行。
+构建入口：`pnpm tauri:build:kernel-preview`。2026-09-29 起，所有构建在无环境覆盖时均默认 Authoritative，`kernel-default` 特性只保留旧命令兼容性；安装配置决定独立应用名和数据目录。已有持久绑定仍按原绑定运行。
