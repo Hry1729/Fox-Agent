@@ -1,0 +1,85 @@
+/* A shared, low-contrast sweep across status text. The readable glyphs stay in
+   the normal flow; the moving copy is purely decorative and never receives input. */
+.fox-row-shimmer {
+  --fox-row-shimmer-color: color-mix(in oklch, var(--fox-muted) 72%, #a4bfd2);
+}
+
+.fox-row-shimmer[data-active='true'] > .fox-run-status-label,
+.fox-row-shimmer[data-active='true'] > .fox-run-status-viewport > .fox-run-status-label,
+.fox-row-shimmer-highlight .fox-run-status-label {
+  background: none !important;
+  -webkit-text-fill-color: currentColor !important;
+  animation: none !important;
+}
+
+.fox-row-shimmer-decoration {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.fox-row-shimmer-sweep {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  color: var(--fox-row-shimmer-color);
+  mask-image: linear-gradient(105deg, transparent 0%, #000 40% 60%, transparent 100%);
+  -webkit-mask-image: linear-gradient(105deg, transparent 0%, #000 40% 60%, transparent 100%);
+  transform: translateX(-100%);
+  animation: fox-row-shimmer-sweep 1.5s 0.3s steps(48, end) infinite;
+}
+
+.fox-row-shimmer-highlight {
+  width: 100%;
+  height: 100%;
+  transform: translateX(100%);
+  animation: fox-row-shimmer-highlight 1.5s 0.3s steps(48, end) infinite;
+}
+
+.fox-row-shimmer-highlight [data-shimmer-text]::after,
+.fox-row-shimmer-highlight[data-shimmer-text]::after {
+  content: attr(data-shimmer-text);
+}
+
+.fox-row-shimmer-status-copy {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fox-run-status-step-highlight {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+}
+
+.fox-run-status-step-highlight.has-fixed-prefix {
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 6px;
+}
+
+.fox-run-status-step-highlight .fox-run-status-prefix,
+.fox-run-status-step-highlight .fox-run-status-label {
+  color: inherit !important;
+}
+
+@keyframes fox-row-shimmer-sweep {
+  0% { transform: translateX(-100%); }
+  66.6667%, 100% { transform: translateX(100%); }
+}
+
+@keyframes fox-row-shimmer-highlight {
+  0% { transform: translateX(100%); }
+  66.6667%, 100% { transform: translateX(-100%); }
+}
+
+@media (prefers-reduced-motion: reduce), (forced-colors: active) {
+  .fox-row-shimmer-decoration { display: none !important; }
+  .fox-row-shimmer-sweep,
+  .fox-row-shimmer-highlight { animation: none !important; }
+}

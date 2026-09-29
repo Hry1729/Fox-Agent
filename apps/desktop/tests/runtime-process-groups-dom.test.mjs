@@ -13,7 +13,7 @@ const { cleanup, fireEvent, render, waitFor } = await import('@testing-library/r
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const server = await createServer({
   root, configFile: false, appType: 'custom', cacheDir: path.join(root, 'dist', '.vite-test-cache'),
-  optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true },
+  optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true, hmr: false },
   resolve: { alias: { '@': path.join(root, 'src') } }, esbuild: { jsx: 'automatic' },
 })
 const { RuntimeTimeline } = await server.ssrLoadModule('/src/features/chat/workbench.tsx')
@@ -264,7 +264,7 @@ test('running turn stays visible and settles to a folded process with its answer
   })
   const view = render(live)
   await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage:not([hidden])').length, 2))
-  assert.equal(view.container.querySelectorAll('.fox-process-turn-toggle.is-status').length, 1)
+  assert.equal(view.getByRole('button', { name: /收起过程/ }).getAttribute('aria-expanded'), 'true')
   view.rerender(timeline(events))
   await waitFor(() => assert.ok(view.queryByRole('button', { name: /展开过程/ })))
   assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 2)
@@ -370,21 +370,26 @@ test('prepending an older Kernel reasoning round keeps the existing open group a
   assert.match(view.container.querySelector('.fox-process-stage').textContent, /更早的思考/)
 })
 
-test('a user input after process evidence prevents whole-turn folding', async () => {
+test('a user input after process evidence stays visible when the reader folds the process', async () => {
   const assistant = { ...messages[1], id: 'kernel-message:run:1', content: '阶段回复',
     kernelPreview: { checkpointSeq: 1, revision: 1, reasoning: '先查证' } }
   const steering = { ...messages[0], id: 'steering', ordinal: 3, content: '继续检查' }
   const view = render(timeline([], { messages: [messages[0], assistant, steering] }))
   await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 1))
-  assert.equal(view.container.querySelectorAll('.fox-process-turn-toggle.is-status').length, 1)
-  assert.equal(view.container.querySelectorAll('.fox-process-turn-toggle[aria-expanded]').length, 0)
+  assert.equal(view.container.querySelectorAll('.fox-process-turn-toggle.is-status').length, 0)
+  assert.equal(view.container.querySelector('.fox-process-turn-toggle').getAttribute('aria-expanded'), 'true')
   assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 0)
+  fireEvent.click(view.getByRole('button', { name: /收起过程/ }))
+  assert.equal(view.container.querySelectorAll('.fox-process-stage[hidden]').length, 1)
+  assert.ok(view.getByText('继续检查').getBoundingClientRect)
+  assert.equal(view.getByText('继续检查').closest('[hidden]'), null)
 })
 
 test('an expanded live group follows new rows only while its own scroll remains at bottom', async () => {
   const height = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight')
   const client = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight')
-  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', { configurable: true, get() { return this.classList.contains('fox-runtime-process-scroll') ? 1000 : 0 } })
+  let contentHeight = 1000
+  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', { configurable: true, get() { return this.classList.contains('fox-runtime-process-scroll') ? contentHeight : 0 } })
   Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get() { return this.classList.contains('fox-runtime-process-scroll') ? 400 : 0 } })
   try {
     const running = (items) => timeline(items, { runtimeRunning: true, activeRunId: 'run', state: 'streaming',
@@ -394,15 +399,27 @@ test('an expanded live group follows new rows only while its own scroll remains 
     await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 3))
     fireEvent.click(view.container.querySelectorAll('.fox-chain-of-thought-header')[2])
     const scroll = view.container.querySelector('.fox-runtime-process-scroll')
-    assert.equal(scroll.scrollTop, 1000)
+    assert.equal(scroll.scrollTop, 600)
+    const movements = []
+    scroll.scrollTo = (options) => { movements.push(options); if (options.behavior !== 'smooth') scroll.scrollTop = options.top }
     scroll.scrollTop = 250
     fireEvent.scroll(scroll)
+    contentHeight = 1200
     view.rerender(running([...tail, event(7, 'reasoning.delta', { delta: '更多内容' })]))
     assert.equal(scroll.scrollTop, 250)
-    scroll.scrollTop = 600
+    assert.equal(movements.length, 0)
+    scroll.scrollTop = 800
     fireEvent.scroll(scroll)
+    contentHeight = 1400
     view.rerender(running([...tail, event(7, 'reasoning.delta', { delta: '更多内容' }), event(8, 'reasoning.delta', { delta: '末尾内容' })]))
-    assert.equal(scroll.scrollTop, 1000)
+    assert.equal(scroll.scrollTop, 800)
+    assert.deepEqual(movements, [{ top: 1000, behavior: 'smooth' }])
+    contentHeight = 1600
+    view.rerender(running([...tail, event(7, 'reasoning.delta', { delta: '更多内容' }), event(8, 'reasoning.delta', { delta: '末尾内容' }), event(9, 'reasoning.delta', { delta: '新目标' })]))
+    assert.equal(movements.length, 1, 'do not restart native smooth scrolling on every delta')
+    scroll.scrollTop = 1000
+    fireEvent(scroll, new Event('scrollend'))
+    assert.deepEqual(movements.at(-1), { top: 1200, behavior: 'smooth' })
   } finally {
     if (height) Object.defineProperty(HTMLElement.prototype, 'scrollHeight', height)
     else delete HTMLElement.prototype.scrollHeight

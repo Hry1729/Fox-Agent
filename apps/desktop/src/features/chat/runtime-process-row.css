@@ -1,0 +1,35 @@
+/* The thought title remains in place while only the preview follows its tail. */
+.fox-runtime-step-trigger .fox-run-status-step.is-clamped .fox-run-status-step-highlight > .fox-run-status-viewport {
+  mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
+}
+
+/* A clickable tool path stays in the real label. Match the shared sweep's
+   cadence without cloning that interactive child. */
+.fox-runtime-step-trigger .fox-run-status-step:not(.fox-row-shimmer)[data-active='true'] .fox-run-status-label {
+  animation-duration: 1.5s;
+  animation-delay: 0.3s;
+  animation-timing-function: steps(48, end);
+}
+
+/* The group retains its scroll limit. A single expanded thought has no second
+   nested scrollport, and its collapse header stays available while reading. */
+.fox-runtime-process .fox-runtime-step-row.is-reasoning .fox-runtime-detail-panel {
+  max-height: none;
+  overflow: visible;
+}
+
+.fox-runtime-step-row.is-reasoning[data-state='open'] .fox-runtime-step-trigger {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--fox-panel);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fox-runtime-step-trigger .fox-run-status-step:not(.fox-row-shimmer)[data-active='true'] .fox-run-status-label {
+    background: none !important;
+    -webkit-text-fill-color: currentColor !important;
+    animation: none !important;
+  }
+}
