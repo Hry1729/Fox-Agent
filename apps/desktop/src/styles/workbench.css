@@ -11163,8 +11163,15 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-message-file-results {
   width: min(100%, 760px);
   display: grid;
-  gap: 7px;
+  gap: 6px;
   margin-top: 8px;
+}
+
+.fox-message-file-results-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 14px;
 }
 
 .fox-message-file-results-head {
@@ -11172,14 +11179,11 @@ img[src='/avatars/fox-assistant.png'] {
   align-items: center;
   gap: 6px;
   color: var(--fox-muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
-/* The collapsible artifact-group header doubles as a click target, so hold it at
-   the WCAG 2.2 minimum. Scope is limited to the trigger: the plain heading
-   variants of the same class are not interactive and stay at their natural height. */
 .fox-message-file-results-head.fox-message-artifact-group-trigger {
-  min-height: 24px;
+  min-height: 28px;
 }
 
 .fox-message-file-results-head strong {
@@ -11229,30 +11233,27 @@ img[src='/avatars/fox-assistant.png'] {
   color: var(--fox-faint);
 }
 
-/* Deliverables sit above a collapsed group of intermediate work files. */
-.fox-message-artifact-group {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-
-.fox-message-artifact-group-title {
-  color: var(--fox-muted);
-}
-
 .fox-message-artifact-group-trigger {
-  width: max-content;
+  width: auto;
   max-width: 100%;
+  white-space: nowrap;
   border: 0;
-  padding: 0;
+  border-radius: 6px;
+  padding: 2px 4px;
   background: transparent;
   color: var(--fox-muted);
   text-align: left;
   cursor: pointer;
 }
 
-.fox-message-artifact-group-trigger:hover {
+.fox-message-artifact-group-trigger:not(:disabled):hover,
+.fox-message-artifact-group-trigger[aria-expanded="true"] {
   color: var(--fox-text);
+}
+
+.fox-message-artifact-group-trigger:disabled {
+  opacity: .55;
+  cursor: default;
 }
 
 .fox-message-artifact-group-trigger:focus-visible {

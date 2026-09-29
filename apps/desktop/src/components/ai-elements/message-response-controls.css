@@ -1,0 +1,316 @@
+/* Streamdown ships utility class names inside its package. Fox's Tailwind scan only covers
+   application source, so the response controls need explicit styles in the app stylesheet. */
+
+.fox-streamdown-response [data-streamdown="table-wrapper"],
+.fox-streamdown-response [data-streamdown="mermaid-block"] {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  margin-block: 12px;
+  padding: 8px;
+  border: 1px solid var(--fox-border);
+  border-radius: 12px;
+  background: var(--fox-card);
+}
+
+.fox-streamdown-response [data-streamdown="table-wrapper"] > div:first-child:has(> button[title="View fullscreen"]) {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  padding-bottom: 6px;
+}
+
+.fox-streamdown-response [data-streamdown="table-wrapper"] > div:last-child {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: auto;
+  border: 1px solid var(--fox-border);
+  border-radius: 8px;
+  background: var(--fox-canvas);
+}
+
+/* The old answer-table rule sets display:block on every table and display:table on each tr.
+   Restore native table layout inside Streamdown's own scroll area. */
+.fox-answer-body .fox-streamdown-response [data-streamdown="table-wrapper"] table[data-streamdown="table"] {
+  display: table;
+  width: 100%;
+  min-width: 510px;
+  max-width: none;
+  overflow: visible;
+  border: 0;
+  border-collapse: collapse;
+  border-radius: 0;
+  table-layout: auto;
+}
+
+.fox-answer-body .fox-streamdown-response [data-streamdown="table-wrapper"] :is(thead, tbody) {
+  display: table-header-group;
+  width: auto;
+}
+
+.fox-answer-body .fox-streamdown-response [data-streamdown="table-wrapper"] tbody {
+  display: table-row-group;
+}
+
+.fox-answer-body .fox-streamdown-response [data-streamdown="table-wrapper"] tr {
+  display: table-row;
+  width: auto;
+  min-width: 0;
+}
+
+.fox-streamdown-response [data-streamdown="mermaid-block"] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 6px;
+}
+
+.fox-streamdown-response [data-streamdown="mermaid-block"] > div:first-child {
+  display: flex;
+  min-width: 0;
+  height: 28px;
+  align-items: center;
+  color: var(--fox-muted);
+  font-size: var(--fox-type-caption);
+}
+
+.fox-streamdown-response [data-streamdown="mermaid-block"] > div:first-child span {
+  margin-left: 4px;
+}
+
+.fox-streamdown-response [data-streamdown="mermaid-block"] > div:nth-child(2):has([data-streamdown="mermaid-block-actions"]) {
+  position: relative;
+  top: auto;
+  z-index: 4;
+  display: flex;
+  height: auto;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  margin: 0;
+  pointer-events: auto;
+}
+
+.fox-streamdown-response [data-streamdown="mermaid-block"] > div:last-child {
+  grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--fox-border);
+  border-radius: 8px;
+  background: var(--fox-canvas);
+}
+
+.fox-streamdown-response [data-streamdown="mermaid-block-actions"] {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--fox-border);
+  border-radius: 8px;
+  background: var(--fox-card);
+  pointer-events: auto;
+}
+
+.fox-streamdown-response [data-streamdown="table-wrapper"] > div:first-child:has(> button[title="View fullscreen"]) > div,
+.fox-streamdown-response [data-streamdown="mermaid-block-actions"] > div {
+  position: relative;
+}
+
+.fox-streamdown-response [data-streamdown="table-wrapper"] button[title],
+.fox-streamdown-response [data-streamdown="mermaid-block-actions"] button[title],
+.fox-chat-local-fullscreen button[title] {
+  display: inline-flex;
+  min-width: 28px;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: var(--fox-muted);
+  cursor: pointer;
+}
+
+.fox-streamdown-response [data-streamdown="table-wrapper"] button[title]:hover,
+.fox-streamdown-response [data-streamdown="mermaid-block-actions"] button[title]:hover,
+.fox-chat-local-fullscreen button[title]:hover {
+  background: var(--fox-hover);
+  color: var(--fox-text);
+}
+
+.fox-streamdown-response [data-streamdown="table-wrapper"] button[title]:focus-visible,
+.fox-streamdown-response [data-streamdown="mermaid-block-actions"] button[title]:focus-visible,
+.fox-chat-local-fullscreen button[title]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.fox-streamdown-response [data-streamdown="table-wrapper"] > div:first-child:has(> button[title="View fullscreen"]) > div > div,
+.fox-streamdown-response [data-streamdown="mermaid-block-actions"] > div > div,
+.fox-chat-local-fullscreen[data-fox-streamdown="table-fullscreen"] > div > div:first-child > div > div {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  min-width: 120px;
+  max-width: min(220px, calc(100vw - 24px));
+  overflow: hidden;
+  border: 1px solid var(--fox-border);
+  border-radius: 8px;
+  background: var(--fox-card);
+  box-shadow: 0 7px 20px color-mix(in srgb, var(--fox-text) 12%, transparent);
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: keep-all;
+}
+
+.fox-streamdown-response [data-streamdown="table-wrapper"] > div:first-child:has(> button[title="View fullscreen"]) > div > div > button[title],
+.fox-streamdown-response [data-streamdown="mermaid-block-actions"] > div > div > button[title],
+.fox-chat-local-fullscreen[data-fox-streamdown="table-fullscreen"] > div > div:first-child > div > div > button[title] {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  justify-content: flex-start;
+  padding: 7px 12px;
+  border-radius: 0;
+  color: var(--fox-text);
+  font-size: var(--fox-type-caption);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.fox-chat-local-fullscreen {
+  position: fixed !important;
+  inset: auto !important;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--fox-border);
+  background: var(--fox-canvas);
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="table-fullscreen"] > div {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="table-fullscreen"] > div > div:first-child {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--fox-border);
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="table-fullscreen"] > div > div:first-child > div {
+  position: relative;
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="table-fullscreen"] > div > div:last-child {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="table-fullscreen"] table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="table-fullscreen"] :is(th, td) {
+  padding: 9px 12px;
+  border: 1px solid var(--fox-border);
+  color: var(--fox-text);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="table-fullscreen"] th {
+  background: var(--fox-panel);
+  color: var(--fox-muted);
+  font-weight: 600;
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="mermaid-fullscreen"] > button[title="Exit fullscreen"] {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 5;
+  background: var(--fox-card);
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="mermaid-fullscreen"] > div {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 20px;
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="mermaid-fullscreen"] [data-streamdown="mermaid"] {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="mermaid-fullscreen"] [data-streamdown="mermaid"] > div {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="mermaid-fullscreen"] [role="application"] {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="mermaid-fullscreen"] [aria-label="Mermaid chart"] {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.fox-chat-local-fullscreen[data-fox-streamdown="mermaid-fullscreen"] [aria-label="Mermaid chart"] svg {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+}

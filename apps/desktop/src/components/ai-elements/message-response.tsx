@@ -2,7 +2,7 @@
 
 import { cjk } from "@streamdown/cjk";
 import { math } from "@streamdown/math";
-import { memo, useState, type ComponentProps } from "react";
+import { memo, useEffect, useState, type ComponentProps } from "react";
 import { Streamdown, type CustomRendererProps, type LinkSafetyModalProps } from "streamdown";
 import { ExternalLink } from "lucide-react";
 import { notify as toast } from "@/features/notifications";
@@ -24,6 +24,8 @@ import {
   desktopRuntimeAvailable,
 } from "@/features/conversations/api/desktop-client";
 import { CollapsibleCodeBlock } from "./code-block";
+import { installScopedStreamdownFullscreen } from "./streamdown-local-fullscreen";
+import "./message-response-controls.css";
 
 export type MessageResponseProps = ComponentProps<typeof Streamdown>;
 
@@ -167,6 +169,7 @@ const mermaidOptions = { errorComponent: MermaidDiagramNotice };
 
 export const MessageResponse = memo(
   ({ className, children, ...props }: MessageResponseProps) => {
+    useEffect(installScopedStreamdownFullscreen, []);
     const normalizedChildren = typeof children === "string"
       ? labelUnspecifiedCodeFences(children)
       : children;
@@ -185,7 +188,7 @@ export const MessageResponse = memo(
       <Streamdown
         key={frame.generation}
         className={cn(
-          "size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+          "fox-streamdown-response size-full [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
           className
         )}
         linkSafety={linkSafety}

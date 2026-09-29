@@ -39,6 +39,13 @@
 .fox-process-stage[hidden] { display: none; }
 .fox-answer-segment[hidden] { display: none; }
 .fox-process-turn-content { min-width: 0; margin-top: 5px; }
+.fox-chain-of-thought.fox-runtime-process { gap: 0; }
+/* ChainOfThought's space-y utility starts adding end margin to the header once
+   the force-mounted content exists. That margin must not survive a collapse. */
+.fox-chain-of-thought.fox-runtime-process > .fox-runtime-process-head { margin-block-end: 0; }
+.fox-chain-of-thought.fox-runtime-process > .fox-runtime-process-disclosure[data-state='open'] { margin-block-start: 6px; }
+.fox-runtime-process .fox-chain-of-thought-header { min-height: 30px; padding-block: 0; }
+.fox-runtime-process .fox-runtime-process-summary { min-height: 30px; }
 .fox-process-notice {
   display: flex;
   align-items: center;
@@ -57,9 +64,10 @@
 }
 
 .fox-runtime-process .fox-runtime-process-scroll { scrollbar-width: thin; }
+.fox-runtime-process .fox-runtime-process-content { gap: 6px; }
 .fox-runtime-process.is-fully-expanded .fox-chain-of-thought-header { display: none; }
 .fox-runtime-process.is-fully-expanded .fox-runtime-process-scroll { max-height: none; overflow: visible; }
-.fox-runtime-process.is-fully-expanded .fox-runtime-process-content { gap: 16px; }
+.fox-runtime-process.is-fully-expanded .fox-runtime-process-content { gap: 8px; }
 .fox-runtime-process:not(.is-fully-expanded) .fox-runtime-process-clip[data-scroll-up='true'] .fox-runtime-process-scroll {
   mask-image: linear-gradient(to bottom, transparent, #000 24px, #000 100%);
 }
