@@ -1,6 +1,8 @@
 /* Streamdown ships utility class names inside its package. Fox's Tailwind scan only covers
    application source, so the response controls need explicit styles in the app stylesheet. */
 
+.fox-streamdown-response { --fox-response-card-body-height: min(420px, 55vh); }
+
 .fox-streamdown-response [data-streamdown="table-wrapper"],
 .fox-streamdown-response [data-streamdown="mermaid-block"] {
   position: relative;
@@ -24,8 +26,16 @@
   padding-bottom: 6px;
 }
 
+.fox-streamdown-response [data-streamdown="table-wrapper"] > div:first-child:has(> button[title="View fullscreen"])::before {
+  content: "表格";
+  margin-right: auto;
+  color: var(--fox-muted);
+  font-size: var(--fox-type-caption);
+}
+
 .fox-streamdown-response [data-streamdown="table-wrapper"] > div:last-child {
   max-width: 100%;
+  max-height: var(--fox-response-card-body-height);
   overflow-x: auto;
   overflow-y: auto;
   border: 1px solid var(--fox-border);
@@ -99,7 +109,8 @@
 .fox-streamdown-response [data-streamdown="mermaid-block"] > div:last-child {
   grid-column: 1 / -1;
   min-width: 0;
-  overflow: hidden;
+  max-height: var(--fox-response-card-body-height);
+  overflow: auto;
   border: 1px solid var(--fox-border);
   border-radius: 8px;
   background: var(--fox-canvas);

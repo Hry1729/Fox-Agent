@@ -50,7 +50,8 @@ HTMLAnchorElement.prototype.click = function() {
 };
 document.addEventListener('click', event => (window.__clickTrace ||= []).push({ title:event.target.closest?.('button')?.title, text:event.target.textContent?.slice(0,30) }), true);
 document.body.style.margin = '0';
-createRoot(document.getElementById('root')!).render(
+const root = createRoot(document.getElementById('root')!);
+function renderExample(text = markdown) { root.render(
   <div id="shell" style={{display:'flex',height:'100vh',minWidth:0}}>
     <aside id="sidebar" style={{flex:'none',width:230,background:'var(--fox-sidebar)',borderRight:'1px solid var(--fox-border)',padding:12}}>
       <button id="sidebar-toggle" onClick={event => {
@@ -63,12 +64,19 @@ createRoot(document.getElementById('root')!).render(
       <section className="fox-chat-pane" style={{minWidth:0}}>
         <div className="fox-chat-topbar">对话</div>
         <div style={{flex:1,minHeight:0,overflow:'auto',padding:'14px 20px'}}>
-          <div className="fox-answer-body"><MessageResponse className="fox-answer-response">{markdown}</MessageResponse></div>
+          <div className="fox-answer-body"><MessageResponse className="fox-answer-response">{text}</MessageResponse></div>
         </div>
       </section>
     </div></div>
   </div>
-);
+); }
+renderExample();
+window.__showLongCards = () => renderExample([
+  '| 序号 | 内容 |', '| --- | --- |',
+  ...Array.from({length:80}, (_,i) => '| '+(i+1)+' | 第 '+(i+1)+' 行 |'), '',
+  marker+'mermaid', 'flowchart TD',
+  ...Array.from({length:24}, (_,i) => 'A'+i+'[节点'+i+'] --> A'+(i+1)+'[节点'+(i+1)+']'), marker,
+].join('\\n'));
 window.__ready = true;
 `
 
@@ -280,6 +288,20 @@ async function run() {
     check(observations.mermaidRestoredFocus === 'View fullscreen', 'Mermaid focus did not restore')
 
     await screenshot('message-controls.png')
+    await evaluate('window.__showLongCards()')
+    await waitFor(async () => evaluate('document.querySelectorAll("[data-streamdown=table] tbody tr").length === 80 && [...document.querySelectorAll("[data-streamdown=mermaid-block] svg text")].some(e=>e.textContent.includes("节点24"))'), 'long cards rendered', 250)
+    observations.longCards = await evaluate(`(() => {
+      const table = document.querySelector('[data-streamdown="table-wrapper"]');
+      const diagram = document.querySelector('[data-streamdown="mermaid-block"]');
+      const measure = card => {const body=card.lastElementChild;body.scrollTop=60;return {height:body.clientHeight,scrollHeight:body.scrollHeight,scrollTop:body.scrollTop,overflow:getComputedStyle(body).overflowY}};
+      return {limit:Math.min(420,innerHeight*.55),table:measure(table),mermaid:measure(diagram),tableTitle:getComputedStyle(table.firstElementChild,'::before').content};
+    })()`)
+    check(observations.longCards.tableTitle.includes('表格'), 'table card title missing')
+    for (const kind of ['table','mermaid']) {
+      const card=observations.longCards[kind]
+      check(card.height <= observations.longCards.limit+2 && card.scrollHeight > card.height && card.scrollTop > 0 && card.overflow === 'auto', kind+' long card is not bounded and scrollable')
+    }
+    await screenshot('long-cards.png')
     writeFileSync(join(output, 'message-controls-browser-check.json'), JSON.stringify({ observations, failures }, null, 2))
     console.log(JSON.stringify({ observations, failures }, null, 2))
     if (failures.length) process.exitCode = 1
