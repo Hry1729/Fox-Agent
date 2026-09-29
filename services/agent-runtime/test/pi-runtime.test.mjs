@@ -151,6 +151,43 @@ test('runs the real Pi Agent loop through Fox JSONL with a faux provider', async
   await runtime.waitFor((message) => message.runId === 'run-1' && message.payload?.type === 'run.completed')
 })
 
+test('unknown Office name stays an SDK error and recovers through the declared MCP wrapper', async context => {
+  const directory = await mkdtemp(join(tmpdir(), 'fox-office-routing-'))
+  const runtime = startRuntime()
+  registerRuntimeCleanup(context, runtime, directory)
+  const initialize = runtime.send('initialize', { payload: { modelService: {
+    baseUrl: 'faux://fox', modelId: 'fox-test', apiType: 'faux', contextWindow: 16384, maxOutputTokens: 512,
+    fauxResponses: [
+      { content: [{ type: 'toolCall', id: 'bad-name', name: 'office_help', arguments: { format: 'xlsx' } }], stopReason: 'toolUse' },
+      { content: [{ type: 'toolCall', id: 'catalog', name: 'list_mcp_tools', arguments: {} }], stopReason: 'toolUse' },
+      { content: [{ type: 'toolCall', id: 'wrapped', name: 'call_mcp_tool', arguments: { serverId: 'fox-office', tool: 'office_help', arguments: { format: 'xlsx' } } }], stopReason: 'toolUse' },
+      '已查询 Office 帮助。',
+    ],
+  } } })
+  const ready = await runtime.waitFor(message => message.requestId === initialize.id && message.type === 'ready')
+  const declared = new Set(ready.payload.capabilities.tools.map(tool => tool.name))
+  const identity = { conversationId: 'office-c', runtimeSessionId: 'office-s' }
+  const sessionPath = join(directory, 'session.json')
+  const create = runtime.send('create_session', { ...identity, payload: { sessionPath } })
+  await runtime.waitFor(message => message.requestId === create.id && message.type === 'session_created')
+  const runId = 'office-recovery'
+  runtime.send('prompt', { ...identity, runId, payload: { text: '查询 Excel 帮助', projectContext: { projectRoot: null } } })
+  for (const name of ['list_mcp_tools', 'call_mcp_tool']) {
+    const call = await runtime.waitFor(message => message.type === 'tool.execute' && message.runId === runId && message.payload?.tool === name)
+    if (name === 'call_mcp_tool') assert.equal(call.payload.input.tool, 'office_help')
+    runtime.respond(call, 'tool.execute_completed', { isError: false, result: { content: [{ type: 'text', text: 'Office catalog/help' }] } })
+  }
+  await runtime.waitFor(message => message.runId === runId && message.payload?.type === 'run.completed')
+  const events = runtime.messages.filter(message => message.runId === runId).map(message => message.payload)
+  assert.ok(events.some(event => event?.phase === 'tool.rejected' && event.tool === 'office_help'))
+  for (const event of events.filter(event => ['tool.started', 'tool.updated', 'tool.completed'].includes(event?.type))) assert.ok(declared.has(event.tool), event.tool)
+  assert.ok(!runtime.messages.some(message => message.type === 'tool.execute' && message.payload?.tool === 'office_help'))
+  const session = JSON.parse(await readFile(sessionPath, 'utf8'))
+  const rejected = session.messages.find(message => message.role === 'toolResult' && message.toolName === 'office_help')
+  assert.equal(rejected.isError, true)
+  assert.match(rejected.content[0].text, /not found/)
+})
+
 for (const referenceForm of ['object-array', 'serialized-object']) {
 test(`projectless knowledge question reaches Host search and preserves evidence (${referenceForm})`, async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'fox-knowledge-routing-'))

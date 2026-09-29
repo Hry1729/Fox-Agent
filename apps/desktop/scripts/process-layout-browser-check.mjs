@@ -21,7 +21,7 @@ import { persistProcessDisplayMode } from './src/features/chat/process-display-m
 import { RunStatusText } from './src/features/chat/components/FoxAssistantAvatar';
 const query = new URLSearchParams(location.search);
 if(query.get('dark')) document.documentElement.classList.add('dark');
-persistProcessDisplayMode('standard');
+persistProcessDisplayMode(query.has('detailed')?'detailed':'standard');
 const live = query.get('live') === '1';
 const start=Date.now()-62000;
 const event=(seq:number,type:string,data:any={})=>({runId:'run',seq,eventType:type,event:{type,...data},createdAt:start+seq*1000});
@@ -29,6 +29,8 @@ const reply=(seq:number,text:string)=>event(seq,'message.delta',{deltaLength:tex
 const events=[event(1,'run.started'),event(2,'reasoning.delta',{delta:'检查布局与滚动。'.repeat(50)+'\\n首行结束后正文保持独立。'}),reply(3,'阶段说明。'),event(4,'tool.started',{toolCallId:'read',tool:'read',input:{path:'README.md'}}),event(5,'tool.completed',{toolCallId:'read',tool:'read',result:{content:'ok'}}),reply(6,'最终答案保持可见。'),...(live?[]:[event(7,'run.completed')])];
 const messages=[{id:'u',conversationId:'c',runId:'run',role:'user',kind:'text',content:'展示测试',status:'completed',ordinal:1,createdAt:start,updatedAt:start},{id:'assistant-run',conversationId:'c',runId:'run',role:'assistant',kind:'text',content:'阶段说明。最终答案保持可见。',status:live?'streaming':'completed',ordinal:2,createdAt:start,updatedAt:start+7000}];
 if(query.has('shimmer')){events.splice(2);messages[1].content=''}
+if(query.has('fallback')) { messages[1].id='persisted-assistant'; }
+if(query.has('failed')) { messages[1].status='failed'; events[events.length-1]=event(7,'run.failed',{code:'runtime.capability.tool_not_declared',message:'runtime did not declare Runtime tool office_help'}); }
 const artifacts=query.has('artifacts') ? [
   {id:'deliverable',conversationId:'c',runId:'run',displayName:'报告.docx',artifactType:'created_file',artifactClass:'deliverable',artifactOrigin:'project',storagePath:'C:/project/报告.docx',mediaType:null,byteSize:1024,sha256:null,status:'ready',createdAt:start,updatedAt:start},
   {id:'process',conversationId:'c',runId:'run',displayName:'计算.csv',artifactType:'created_file',artifactClass:'process',artifactOrigin:'project',storagePath:'C:/project/计算.csv',mediaType:null,byteSize:1024,sha256:null,status:'ready',createdAt:start,updatedAt:start},
@@ -70,10 +72,10 @@ try {
   let serving=false
   for(let i=0;i<80;i++){try{serving=(await fetch(`http://127.0.0.1:${port}/process-layout-check.html`)).ok;if(serving)break}catch{}await sleep(250)}
   if(!serving)throw Error('fixture dev server unavailable')
-  for(const scenario of [{name:'wide',width:1100,live:false,dark:false},{name:'narrow-dark',width:360,live:false,dark:true},{name:'running',width:850,live:true,dark:false},{name:'artifacts',width:850,live:false,dark:false,artifacts:true}]) {
+  for(const scenario of [{name:'wide',width:1100,live:false,dark:false},{name:'narrow-dark',width:360,live:false,dark:true},{name:'running',width:850,live:true,dark:false},{name:'artifacts',width:850,live:false,dark:false,artifacts:true},{name:'fallback-live',width:850,live:true,fallback:true},{name:'fallback-failed',width:850,live:false,fallback:true,failed:true},{name:'detailed-live',width:850,live:true,detailed:true}]) {
     await client.send('Emulation.setDeviceMetricsOverride',{width:scenario.width,height:900,deviceScaleFactor:1,mobile:false})
     const previous=await client.evaluate('window.__processCase?.generation')
-    await client.send('Page.navigate',{url:`http://127.0.0.1:${port}/process-layout-check.html?live=${scenario.live?1:0}&${scenario.dark?'dark=1':''}&${scenario.artifacts?'artifacts=1':''}`})
+    await client.send('Page.navigate',{url:`http://127.0.0.1:${port}/process-layout-check.html?live=${scenario.live?1:0}&${scenario.dark?'dark=1':''}&${scenario.artifacts?'artifacts=1':''}&${scenario.fallback?'fallback=1':''}&${scenario.failed?'failed=1':''}&${scenario.detailed?'detailed=1':''}`})
     let ready=false
     for(let i=0;i<300;i++) {ready=await client.evaluate(`window.__processCase?.generation!==${JSON.stringify(previous??null)} && !!document.querySelector('.fox-process-stage') && !!document.querySelector('.fox-process-turn-toggle')`);if(ready)break;await sleep(200)}
     if(!ready)throw Error(scenario.name+': fixture did not mount '+JSON.stringify(client.errors)+' pending='+JSON.stringify([...client.requests.values()])+' '+await client.evaluate('JSON.stringify({url:location.href,html:document.documentElement.outerHTML.slice(-1500),case:window.__processCase})'))
@@ -89,6 +91,12 @@ try {
     const result=await client.evaluate(`(()=>{const rect=e=>e.getBoundingClientRect();const turn=document.querySelector('.fox-process-turn-toggle').closest('.fox-turn-anchor');const avatar=turn.querySelector('.fox-assistant-avatar');const toggle=turn.querySelector('.fox-process-turn-toggle');const stages=[...turn.querySelectorAll('.fox-process-stage')];const a=rect(avatar),b=rect(toggle),s=stages.map(rect);const footer=turn.querySelector('.fox-message-footer');const v={sameHeaderRow:Math.abs((a.top+a.height/2)-(b.top+b.height/2))<6,buttonRight:b.left>=a.right-1,allStagesBelow:s.every(r=>r.top>=Math.max(a.bottom,b.bottom)-1),stageAlignment:s.every(r=>Math.abs(r.left-s[0].left)<1),avatarCount:turn.querySelectorAll('.fox-assistant-avatar').length,footerVisible:!!footer&&rect(footer).height>0,finalVisible:[...turn.querySelectorAll('.fox-answer-segment')].some(e=>e.textContent.includes('最终答案')&&!e.hidden),overflow:document.documentElement.scrollWidth>innerWidth+1};return v})()`)
     for(const key of ['sameHeaderRow','buttonRight','allStagesBelow','stageAlignment','footerVisible','finalVisible'])if(!result[key])throw Error(scenario.name+': '+key+' '+JSON.stringify(result))
     if(result.avatarCount!==1||result.overflow)throw Error(scenario.name+': duplicate avatar or overflow '+JSON.stringify(result))
+    if(await client.evaluate('!!document.querySelector(".fox-live-reasoning")'))throw Error(scenario.name+': old reasoning card returned')
+    if(scenario.detailed) {
+      await client.evaluate(`(()=>{const b=document.querySelector('.fox-process-stage .fox-chain-of-thought-header');if(b.getAttribute('aria-expanded')!=='true')b.click();b.click()})()`)
+      await sleep(200)
+      if(await client.evaluate(`document.querySelector('.fox-process-stage .fox-chain-of-thought-header').getAttribute('aria-expanded')!=='false'`))throw Error('detailed mode prevents manual collapse')
+    }
     if(scenario.name==='wide') {
       const measure=()=>client.evaluate(`(()=>{const stages=[...document.querySelectorAll('.fox-process-stage')];const headers=stages.map(stage=>stage.querySelector('.fox-chain-of-thought-header')).filter(Boolean);const rect=e=>e.getBoundingClientRect();const content=document.querySelector('.fox-process-turn-content');const head=stages[0].querySelector('.fox-runtime-process-head');return {positions:headers.map(h=>rect(h).top),stageHeights:stages.map(s=>rect(s).height),contentHeight:rect(content).height,headMargin:getComputedStyle(head).marginBottom}})()`)
       const setGroup=async open=>{await client.evaluate(`(()=>{const b=document.querySelector('.fox-process-stage .fox-chain-of-thought-header');if((b.getAttribute('aria-expanded')==='true')!==${open})b.click()})()`);await sleep(350)}

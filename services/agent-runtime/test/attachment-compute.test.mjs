@@ -23,6 +23,9 @@ test('data expert exposes actual code computation without project or arbitrary s
   assert.ok(prepared.proposalTools.some(t=>t.name==='attachment_compute'))
   assert.match(prepared.systemPrompt,/Never replace tool execution with mental arithmetic/)
   assert.match(prepared.systemPrompt,/isolated conversation workspace are permitted/)
+  assert.match(prepared.systemPrompt,/Never call office_help directly/)
+  assert.ok(!prepared.proposalTools.some(t=>t.name==='office_help'))
+  assert.match(prepared.proposalTools.find(t=>t.name==='call_mcp_tool').description,/NOT top-level function names/)
   assert.ok(!describe({packageManifest:{allowedTools:[]}}).proposalTools.some(t=>t.name==='attachment_compute'))
   const beforeFix={packageManifest:{allowedTools:defaultAssistant.packageManifest.allowedTools.filter(name=>name!=='attachment_compute')}}
   assert.ok(!describe(beforeFix).proposalTools.some(t=>t.name==='attachment_compute'))

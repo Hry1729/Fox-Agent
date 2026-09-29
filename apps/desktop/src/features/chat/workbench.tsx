@@ -2119,7 +2119,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
   const processDisplayMode = useProcessDisplayMode()
   const parsed = useMemo(() => splitAssistantContent(message.content ?? ''), [message.content])
   const process = useMemo(() => runtimeProcess(processEvents), [processEvents])
-  const orderedGroups = useMemo(() => {
+  const projectedGroups = useMemo(() => {
     if (groupHelpers && message.runId && (kernelMessages?.length || !message.content && (message.runId === authoritativeRunId
       || processEvents.some(item => typeof item.event.kernelCheckpointSeq === 'string')))) {
       return groupHelpers.projectKernelGroups(message.runId, kernelMessages ?? [], processEvents)
@@ -2131,6 +2131,14 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
     const groups = groupHelpers.projectRuntimeGroups(message.runId, message.content, processEvents)
     return groups?.length ? groups : null
   }, [message.id, message.runId, message.kernelPreview, message.content, singleRunMessage, kernelMessages, authoritativeRunId, processEvents, groupHelpers])
+  // Incomplete/older histories cannot prove reply boundaries. Keep their
+  // process in one group and the saved answer intact, using the SAME turn UI.
+  // Never fall back to the old live-reasoning card while helpers load or after
+  // an error; no inferred interleaving or duplicated answer text.
+  const orderedGroups = useMemo(() => projectedGroups ?? [
+    ...(processEvents.length || running ? [{ kind: 'process' as const, key: `${message.id}:fallback-process`, events: processEvents }] : []),
+    ...(parsed.answer ? [{ kind: 'response' as const, key: `${message.id}:fallback-answer`, text: parsed.answer }] : []),
+  ], [projectedGroups, processEvents, running, message.id, parsed.answer])
   const [turnProcessChoice, setTurnProcessChoice] = useState<'open' | 'closed' | null>(null)
   const [collapseVersion, setCollapseVersion] = useState(0)
   const processContentRef = useRef<HTMLDivElement>(null)
@@ -2226,7 +2234,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
     <div className="fox-turn-anchor">
       <Message from="assistant" className="fox-message fox-assistant-message">
         <MessageContent className="fox-assistant-content">
-          {orderedGroups ? <>
+          <>
             <TurnProcessHeader avatar={<FoxAssistantAvatar />} events={processEvents} active={running || runInProgress}
               canToggle={canToggleTurn} collapsed={turnProcessCollapsed} status={turnProcessStatus}
               failedToolCount={failedToolCount} onToggle={() => {
@@ -2260,10 +2268,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
                   <MarkdownResponse className="fox-answer-response">{group.text}</MarkdownResponse>
                 </div>)}
             </div>
-          </> : <>
-            <RuntimeProcess events={processEvents} process={process} running={running} answerStarted={Boolean(parsed.answer)} leading={<FoxAssistantAvatar />} attachmentNames={attachmentNames} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} />
-            {parsed.answer && <div className="fox-answer-body"><MarkdownResponse className="fox-answer-response">{parsed.answer}</MarkdownResponse></div>}
-          </>}
+          </>
           {!running && <RuntimeArtifacts artifacts={artifacts} onOpenArtifact={onOpenArtifact} />}
           <RuntimeSources sources={process.sources} knowledgeBindings={knowledgeBindings} onOpenSource={onOpenSource} />
         </MessageContent>
@@ -2359,16 +2364,6 @@ function reasoningSummary(text: string, running: boolean) {
     if (!separator) return summary.replaceAll('**', '')
     start = separator.index + separator[0].length
   }
-}
-
-function LiveReasoning({ detail, active }: { detail: string; active: boolean }) {
-  const tail = detail.slice(-800)
-  return (
-    <div className="fox-live-reasoning" aria-label="深度思考">
-      <div className="fox-live-reasoning-head"><Brain size={14} /><RunStatusText text="深度思考" active={active} /><small>最近进度 · 展开查看全部</small></div>
-      <div className="fox-live-reasoning-scroll">{tail}</div>
-    </div>
-  )
 }
 
 function RuntimeToolItem({ tool, active, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer }: { tool: RuntimeToolStep; active: boolean; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
@@ -2524,7 +2519,7 @@ function useStableProcessTitle(desired: string, running: boolean) {
 }
 
 function RuntimeProcess({ events, process: preparedProcess, groupHelpers, displayMode = 'standard', runInProgress = false, running: runtimeRunning, answerStarted = false, leading, grouped = false, outcome, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer }: { events: RunEventRecord[]; process?: ReturnType<typeof runtimeProcess>; groupHelpers?: RuntimeGroupHelpers | null; displayMode?: ProcessDisplayMode; runInProgress?: boolean; running: boolean; answerStarted?: boolean; leading?: ReactNode; grouped?: boolean; outcome?: 'failed' | 'cancelled'; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState<boolean | null>(null)
   const [visited, setVisited] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -2536,14 +2531,13 @@ function RuntimeProcess({ events, process: preparedProcess, groupHelpers, displa
   ))
   const processStepCount = process.steps.length
   const lifecycleOnly = processStepCount === 0 && hasLifecycle
-  const autoExpanded = grouped && (displayMode === 'verbose' || displayMode === 'detailed' && runInProgress)
-  const groupOpen = autoExpanded || open
+  const autoExpanded = open === null && grouped && (displayMode === 'verbose' || displayMode === 'detailed' && runInProgress)
+  const groupOpen = autoExpanded || open === true
   const { edges: scrollEdges, events: scrollEvents, initialize: initializeScroll } = useProcessScroll(
     scrollRef, contentRef, groupOpen, !autoExpanded, events,
   )
   const activeTool = [...process.tools].reverse().find((tool) => activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser)
   const failedToolCount = process.tools.filter(tool => tool.isError).length
-  const showLiveReasoning = !grouped && !groupOpen && running && Boolean(process.reasoning) && !answerStarted
   const lifecycleFailed = terminalEvent?.eventType === 'run.failed' || terminalEvent?.eventType === 'run.interrupted'
   const lifecycleCancelled = terminalEvent?.eventType === 'run.cancelled'
   const awaitingUser = process.tools.some(tool => tool.awaitingUser) || terminalEvent?.eventType === 'run.completed'
@@ -2604,7 +2598,6 @@ function RuntimeProcess({ events, process: preparedProcess, groupHelpers, displa
           </span>
         </ChainOfThoughtHeader>
       </div>
-      {showLiveReasoning && <LiveReasoning detail={process.reasoning} active={activity.reasoning} />}
       {(visited || autoExpanded) && <ChainOfThoughtContent forceMount className="fox-chain-of-thought-content fox-runtime-process-disclosure" aria-hidden={!groupOpen} inert={!groupOpen}>
         <div className="fox-runtime-process-clip" data-scroll-up={scrollEdges.up || undefined} data-scroll-down={scrollEdges.down || undefined}><div ref={scrollRef} className="fox-runtime-process-scroll" {...scrollEvents}>
         <div ref={contentRef} className="fox-runtime-process-content">

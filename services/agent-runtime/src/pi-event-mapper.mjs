@@ -374,13 +374,22 @@ export function createPiEventMapper(emit, options = {}) {
           break
         }
         case 'tool_execution_start':
+          // Pi emits start/end even for a name it rejects as "not found".
+          // That is not a Host tool execution. Keep the SDK error in the model
+          // transcript, without advertising an undeclared Runtime capability.
+          if (options.isToolRegistered && !options.isToolRegistered(event.toolName)) {
+            emit('run.phase', { phase: 'tool.rejected', code: 'runtime.tool_not_registered', tool: event.toolName })
+            break
+          }
           emit('tool.started', { toolCallId: event.toolCallId, tool: event.toolName,
             input: options.prepareToolInput?.(event.toolName, event.args) ?? event.args })
           break
         case 'tool_execution_update':
+          if (options.isToolRegistered && !options.isToolRegistered(event.toolName)) break
           emit('tool.updated', { toolCallId: event.toolCallId, tool: event.toolName, update: event.partialResult })
           break
         case 'tool_execution_end':
+          if (options.isToolRegistered && !options.isToolRegistered(event.toolName)) break
           if (event.toolName === 'search_knowledge') {
             for (const source of knowledgeSources(event.result)) emit('source.added', source)
           }

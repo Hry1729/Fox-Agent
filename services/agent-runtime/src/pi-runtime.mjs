@@ -487,8 +487,10 @@ async function executePrompt(request) {
   }
   emit('run.started', { model: modelService.modelId, executionProfileId: activeExecutionProfile.id })
   const toolPreparers = new Map()
+  const registeredEventTools = new Set()
   mapper = createPiEventMapper(emit, { deferCompletion: true,
     prepareToolInput: (name, input) => toolPreparers.get(name)?.(input) ?? input,
+    isToolRegistered: name => registeredEventTools.has(name),
   })
   runControl.mapper = mapper
   let agent = null
@@ -591,6 +593,7 @@ async function executePrompt(request) {
     failRun,
   )
   for (const tool of tools) {
+    if (RUNTIME_TOOL_CATALOG.some(entry => entry.name === tool.name)) registeredEventTools.add(tool.name)
     if (tool.prepareArguments) toolPreparers.set(tool.name, tool.prepareArguments)
   }
   const requestSnapshot = {

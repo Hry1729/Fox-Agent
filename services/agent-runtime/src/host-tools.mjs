@@ -1113,7 +1113,7 @@ export function createMcpTools(requestHost) {
     {
       name: 'call_mcp_tool',
       label: 'Call extension tool',
-      description: 'Call one validated MCP or OpenAPI tool through Fox after list_mcp_tools. Calls require explicit user approval and pass declarative lifecycle Hooks.',
+      description: 'Call one validated MCP or OpenAPI tool through Fox after list_mcp_tools. Office tools (office_help, office_read, office_create, etc.) are connector operations, NOT top-level function names: use call_mcp_tool with serverId from the catalog (fox-office for managed Office), tool set to the Office name, and arguments set to its parameters. Calls retain Host permission checks and declarative lifecycle Hooks.',
       parameters: Type.Object({
         serverId: Type.String(),
         tool: Type.String(),
