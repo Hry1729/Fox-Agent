@@ -25,6 +25,7 @@ import {
 } from "@/features/conversations/api/desktop-client";
 import { CollapsibleCodeBlock } from "./code-block";
 import { installScopedStreamdownFullscreen } from "./streamdown-local-fullscreen";
+import { installMermaidWheelIntent } from "./mermaid-wheel-intent";
 import "./message-response-controls.css";
 
 export type MessageResponseProps = ComponentProps<typeof Streamdown>;
@@ -170,6 +171,7 @@ const mermaidOptions = { errorComponent: MermaidDiagramNotice };
 export const MessageResponse = memo(
   ({ className, children, ...props }: MessageResponseProps) => {
     useEffect(installScopedStreamdownFullscreen, []);
+    useEffect(installMermaidWheelIntent, []);
     const normalizedChildren = typeof children === "string"
       ? labelUnspecifiedCodeFences(children)
       : children;

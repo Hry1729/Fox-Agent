@@ -302,6 +302,43 @@ async function run() {
       check(card.height <= observations.longCards.limit+2 && card.scrollHeight > card.height && card.scrollTop > 0 && card.overflow === 'auto', kind+' long card is not bounded and scrollable')
     }
     await screenshot('long-cards.png')
+    const wheelState = () => evaluate(`(() => {
+      const card=document.querySelector('[data-streamdown="mermaid-block"]');
+      const chat=card.closest('.fox-answer-body').parentElement;
+      return {scroll:chat.scrollTop,active:card.hasAttribute('data-fox-wheel-active'),transform:[...card.querySelectorAll('[style]')].map(e=>e.style.transform).filter(Boolean).join('|')};
+    })()`)
+    const wheelAtDiagram = async () => {
+      const point = await evaluate(`(() => {
+        const card=document.querySelector('[data-streamdown="mermaid-block"]');
+        card.scrollIntoView({block:'end'});
+        const r=card.lastElementChild.getBoundingClientRect();
+        return {x:r.left+r.width/2,y:Math.min(r.bottom,innerHeight)-80};
+      })()`)
+      await client.send('Input.dispatchMouseEvent', {type:'mouseMoved',...point})
+      return point
+    }
+    let point=await wheelAtDiagram()
+    const before=await wheelState()
+    await client.send('Input.dispatchMouseEvent', {type:'mouseWheel',...point,deltaX:0,deltaY:-100})
+    await sleep(150)
+    const passive=await wheelState()
+    check(passive.scroll < before.scroll && passive.transform === before.transform, 'unclicked Mermaid traps history wheel or zooms')
+    point=await wheelAtDiagram()
+    await client.send('Input.dispatchMouseEvent', {type:'mousePressed',...point,button:'left',clickCount:1})
+    await client.send('Input.dispatchMouseEvent', {type:'mouseReleased',...point,button:'left',clickCount:1})
+    const activated=await wheelState()
+    await client.send('Input.dispatchMouseEvent', {type:'mouseWheel',...point,deltaX:0,deltaY:-100})
+    await sleep(150)
+    const zoomed=await wheelState()
+    check(activated.active && zoomed.transform !== activated.transform && zoomed.scroll === activated.scroll, 'clicked Mermaid does not exclusively zoom')
+    await client.send('Input.dispatchMouseEvent', {type:'mouseMoved',x:100,y:100})
+    point=await wheelAtDiagram()
+    const left=await wheelState()
+    await client.send('Input.dispatchMouseEvent', {type:'mouseWheel',...point,deltaX:0,deltaY:-100})
+    await sleep(150)
+    const resumed=await wheelState()
+    check(!left.active && resumed.scroll < left.scroll && resumed.transform === left.transform, 'leaving Mermaid does not restore history scrolling')
+    observations.mermaidWheel={before,passive,activated,zoomed,left,resumed}
     writeFileSync(join(output, 'message-controls-browser-check.json'), JSON.stringify({ observations, failures }, null, 2))
     console.log(JSON.stringify({ observations, failures }, null, 2))
     if (failures.length) process.exitCode = 1
