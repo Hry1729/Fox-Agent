@@ -1,4 +1,5 @@
 import type { ApprovalDecision, ApprovalRecord, ApprovalRequest } from './types'
+import { wholeFileReplacementBinding } from './approval-presentation'
 
 const DECISION_ORDER: readonly ApprovalDecision[] = [
   'deny',
@@ -74,7 +75,7 @@ export function repairOverrideApprovalDetails(request: unknown): RepairOverrideA
  * Turns the Host's untrusted decision declaration into the only decisions the UI may send.
  * Missing declarations retain the legacy three-button contract only for ordinary tool approvals.
  */
-export function allowedApprovalDecisions(request: unknown): readonly ApprovalDecision[] {
+function baseApprovalDecisions(request: unknown): readonly ApprovalDecision[] {
   if (!isRecord(request)) return ['deny']
   const category = categoryState(request)
   const declared = explicitDecisions(request)
@@ -95,6 +96,18 @@ export function allowedApprovalDecisions(request: unknown): readonly ApprovalDec
   return DECISION_ORDER.filter((decision) => (
     decision === 'deny' || (declared.has(decision) && categoryLimit.has(decision))
   ))
+}
+
+export function allowedApprovalDecisions(request: unknown): readonly ApprovalDecision[] {
+  const decisions = baseApprovalDecisions(request)
+  if (!isRecord(request) || !hasOwn(request, 'wholeFileReplacement')) return decisions
+  // Kernel stores this purpose-specific declaration inside the binding. Never
+  // offer conversation-wide permission for a one-dispatch replacement ticket.
+  if (!wholeFileReplacementBinding(request) || !isRecord(request.wholeFileReplacement)) return ['deny']
+  const nested = explicitDecisions(request.wholeFileReplacement)
+  if (nested === null) return ['deny']
+  return decisions.filter(decision => decision === 'deny'
+    || decision === 'allow_once' && (nested === undefined || nested.has(decision)))
 }
 
 export function isApprovalDecisionAllowed(request: unknown, decision: ApprovalDecision): boolean {

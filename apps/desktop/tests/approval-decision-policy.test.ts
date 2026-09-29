@@ -24,6 +24,17 @@ function approval(request: ApprovalRequest): Pick<ApprovalRecord, 'id' | 'reques
 }
 
 describe('approval decision policy', () => {
+  test('Kernel replacement binding only grants one dispatch even without top-level decisions', async () => {
+    const binding = { purpose: '整文件替换', requestDigest: 'req', targetIdentity: 'a.md', baselineVersion: 'missing', candidateDigest: 'content', availableDecisions: ['allow_once', 'deny'] }
+    const request = { wholeFileReplacement: binding }
+    expect(allowedApprovalDecisions(request)).toEqual(['deny', 'allow_once'])
+    expect(allowedApprovalDecisions({ ...request, availableDecisions: ['deny', 'allow_conversation', 'allow_once'] })).toEqual(['deny', 'allow_once'])
+    expect(allowedApprovalDecisions({ wholeFileReplacement: { ...binding, availableDecisions: ['deny'] } })).toEqual(['deny'])
+    expect(allowedApprovalDecisions({ wholeFileReplacement: {} })).toEqual(['deny'])
+    let submitted = false
+    expect(await resolveAllowedApprovalDecision(approval(request), 'allow_conversation', () => { submitted = true })).toBe(false)
+    expect(submitted).toBe(false)
+  })
   test('shows only allow once and deny for a repair budget override', () => {
     expect(allowedApprovalDecisions(overrideRequest())).toEqual(['deny', 'allow_once'])
     expect(allowedApprovalDecisions(overrideRequest({

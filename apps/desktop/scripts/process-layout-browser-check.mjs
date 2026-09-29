@@ -19,6 +19,7 @@ import { RuntimeTimeline } from './src/features/chat/workbench';
 import { answerDeltaFingerprint } from './src/features/conversations/model/runtime-delta-fingerprint';
 import { persistProcessDisplayMode } from './src/features/chat/process-display-mode';
 import { RunStatusText } from './src/features/chat/components/FoxAssistantAvatar';
+import { RuntimeApprovalPrompt } from './src/features/chat/components/RuntimeApprovalPrompt';
 const query = new URLSearchParams(location.search);
 if(query.get('dark')) document.documentElement.classList.add('dark');
 persistProcessDisplayMode(query.has('detailed')?'detailed':'standard');
@@ -36,7 +37,8 @@ const artifacts=query.has('artifacts') ? [
   {id:'process',conversationId:'c',runId:'run',displayName:'计算.csv',artifactType:'created_file',artifactClass:'process',artifactOrigin:'project',storagePath:'C:/project/计算.csv',mediaType:null,byteSize:1024,sha256:null,status:'ready',createdAt:start,updatedAt:start},
 ] : [];
 document.body.style.margin='0';
-createRoot(document.getElementById('root')!).render(<div className="fox-conversation-content" style={{padding:16,maxWidth:900,margin:'0 auto'}}><RuntimeTimeline messages={messages as any} attachments={[]} artifacts={artifacts as any} events={events} runtimeRunning={live} activeRunId={live?'run':undefined} state={live?'streaming':'idle'} streamingText="" onRetry={()=>{}} onRerun={async()=>false}/>{query.has('shimmer')&&<div id="status-probe"><RunStatusText text="正在分析请求" active /></div>}</div>);
+const approval={id:'kernel-approval:run:write:v7',toolName:'write_file',requestedAction:'write_file',request:{input:{path:'D:/项目/长目录/fox/20260929-5ce8fd7980d7/report.md',content:('# 报告正文\\n正文内容保持原样。\\n').repeat(150)},wholeFileReplacement:{purpose:'整文件替换',targetIdentity:'D:/项目/长目录/fox/20260929-5ce8fd7980d7/report.md',baselineVersion:'missing',candidateDigest:'sha256:'+ 'a'.repeat(64),requestDigest:'sha256:'+'b'.repeat(64),availableDecisions:['allow_once','deny']}}};
+createRoot(document.getElementById('root')!).render(<div className="fox-conversation-content" style={{padding:16,maxWidth:900,margin:'0 auto'}}>{query.has('approval')?<div className="fox-prompt-shell is-decision is-approval"><div className="fox-decision-card"><div className="fox-decision-approval-list"><RuntimeApprovalPrompt approval={approval as any} onResolve={async(id,decision)=>{(window as any).__approvalResult={id,decision};return true}}/></div></div></div>:<><RuntimeTimeline messages={messages as any} attachments={[]} artifacts={artifacts as any} events={events} runtimeRunning={live} activeRunId={live?'run':undefined} state={live?'streaming':'idle'} streamingText="" onRetry={()=>{}} onRerun={async()=>false}/>{query.has('shimmer')&&<div id="status-probe"><RunStatusText text="正在分析请求" active /></div>}</>}</div>);
 (window as any).__processCase={live,generation:crypto.randomUUID()};
 `
 
@@ -135,6 +137,28 @@ try {
     result.fold=await client.evaluate(`(()=>{const t=document.querySelector('.fox-process-turn-toggle').closest('.fox-turn-anchor');return {hidden:[...t.querySelectorAll('.fox-process-stage')].every(e=>e.hidden),final:[...t.querySelectorAll('.fox-answer-segment')].some(e=>e.textContent.includes('最终答案')&&!e.hidden),footer:t.querySelector('.fox-message-footer').getBoundingClientRect().height>0}})()`)
     if(!result.fold.hidden||!result.fold.final||!result.fold.footer)throw Error(scenario.name+': collapse '+JSON.stringify(result.fold))
     results.push({scenario:scenario.name,...result})
+  }
+  for(const width of [900,360]) {
+    await client.send('Emulation.setDeviceMetricsOverride',{width,height:800,deviceScaleFactor:1,mobile:false})
+    const previous=await client.evaluate('window.__processCase.generation')
+    await client.send('Page.navigate',{url:`http://127.0.0.1:${port}/process-layout-check.html?approval=1&${width===360?'dark=1':''}`})
+    let ready=false
+    for(let i=0;i<150;i++){ready=await client.evaluate(`window.__processCase?.generation!==${JSON.stringify(previous)} && !!document.querySelector('.fox-approval-disclosure')`);if(ready)break;await sleep(150)}
+    if(!ready)throw Error('approval did not mount')
+    const measure=()=>client.evaluate(`(()=>{const root=document.querySelector('.fox-runtime-confirmation'),r=root.getBoundingClientRect(),buttons=[...root.querySelectorAll('button')];return {height:r.height,overflow:document.documentElement.scrollWidth>innerWidth,allClosed:[...root.querySelectorAll('details')].every(e=>!e.open),title:root.querySelector('[data-slot=alert-description]').textContent,actions:buttons.map(b=>b.textContent),buttonsVisible:buttons.every(b=>{const a=b.getBoundingClientRect();const hit=document.elementFromPoint(a.left+a.width/2,a.top+a.height/2);return (hit===b||b.contains(hit))&&a.bottom<=innerHeight}),scrollable:root.querySelector('.fox-approval-details-scroll').scrollHeight>root.querySelector('.fox-approval-details-scroll').clientHeight}})()`)
+    const initial=await measure()
+    if(initial.overflow||!initial.allClosed||!initial.buttonsVisible||initial.actions.length!==2||!initial.title.includes('写入新文件'))throw Error('approval initial '+JSON.stringify(initial))
+    const initialShot=await client.send('Page.captureScreenshot',{format:'png'});writeFileSync(join(output,`approval-${width}-collapsed.png`),Buffer.from(initialShot.data,'base64'))
+    const click=async selector=>{const p=await client.evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});e.scrollIntoView({block:'nearest'});const r=e.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()`);await client.send('Input.dispatchMouseEvent',{type:'mousePressed',...p,button:'left',clickCount:1});await client.send('Input.dispatchMouseEvent',{type:'mouseReleased',...p,button:'left',clickCount:1});await sleep(80)}
+    await click('.fox-approval-details-scroll > details summary')
+    await click('.fox-approval-replacement summary')
+    const expanded=await measure()
+    if(expanded.overflow||!expanded.buttonsVisible||expanded.height>440||!expanded.scrollable)throw Error('approval expansion '+JSON.stringify(expanded))
+    const shot=await client.send('Page.captureScreenshot',{format:'png'});writeFileSync(join(output,`approval-${width}.png`),Buffer.from(shot.data,'base64'))
+    await click('.fox-confirmation-actions button:last-child')
+    const decision=await client.evaluate('window.__approvalResult')
+    if(decision?.id!=='kernel-approval:run:write:v7'||decision?.decision!=='allow_once')throw Error('approval ticket/decision changed')
+    results.push({scenario:'approval-'+width,initial,expanded,decision})
   }
   const generation=await client.evaluate('window.__processCase.generation')
   await client.send('Emulation.setDeviceMetricsOverride',{width:360,height:900,deviceScaleFactor:1,mobile:false})

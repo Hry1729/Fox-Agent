@@ -1,6 +1,6 @@
 // The prompt that asks the user to resolve ONE durable runtime approval.
 //
-// Extracted from workbench.tsx unchanged so the decision surface — including the
+// Extracted from workbench.tsx so the decision surface — including the
 // purpose-specific whole-file replacement binding — can be mounted and clicked in
 // a real DOM test. The identity it submits is `approval.id`, which for a Kernel
 // approval is the versioned ticket the Host minted; the Host re-checks that exact
@@ -60,19 +60,29 @@ export function RuntimeApprovalPrompt({
             : <p><strong>审批详情不完整。</strong>请先拒绝，并让 Fox 带上根因和关联审查问题重新发起。</p>}
         </div>}
         {presentation.command && <div className="fox-approval-command"><Terminal size={13} /><code>{presentation.command}</code></div>}
-        {presentation.diff && <pre className="fox-approval-diff" aria-label="拟修改差异"><code>{presentation.diff}</code></pre>}
-        {presentation.content !== undefined && <div className="fox-approval-context"><strong>拟写入内容</strong><pre className="fox-approval-diff" aria-label="拟写入内容"><code>{presentation.content || '（空文件）'}</code></pre></div>}
-        {presentation.wholeFileReplacement && <div className="fox-approval-context fox-approval-replacement">
-          <p><strong>用途：</strong>{presentation.wholeFileReplacement.purpose}（这不是普通写入审批；它只授权这一次整文件替换）</p>
-          <p><strong>目标：</strong><code>{presentation.wholeFileReplacement.targetIdentity}</code></p>
-          <p><strong>基线版本：</strong><code>{presentation.wholeFileReplacement.baselineVersion}</code></p>
-          <p><strong>候选内容摘要：</strong><code>{presentation.wholeFileReplacement.candidateDigest}</code></p>
-          <p><strong>请求摘要：</strong><code>{presentation.wholeFileReplacement.requestDigest}</code></p>
-          <small>以上四项由 Host 在创建请求时绑定且不可变；确认后仅这一次派发可领取，且必须与这四项完全一致。</small>
+        <div className="fox-approval-details-scroll">
+        {presentation.wholeFileReplacement && <div className="fox-approval-scope">
+          <p className="fox-approval-scope-note">{presentation.wholeFileReplacement.baselineVersion === 'missing' ? '目标文件尚不存在，将写入以下完整内容。' : '将替换目标文件的全部内容，请确认拟写入内容。'}仅授权本次操作。</p>
         </div>}
+        {presentation.diff && <details className="fox-approval-disclosure"><summary>查看拟修改差异</summary><pre className="fox-approval-diff" aria-label="拟修改差异"><code>{presentation.diff}</code></pre></details>}
+        {presentation.content !== undefined && <details className="fox-approval-disclosure"><summary>查看拟写入内容 <span>{presentation.content.split('\n').length} 行</span></summary><pre className="fox-approval-diff" aria-label="拟写入内容"><code>{presentation.content || '（空文件）'}</code></pre></details>}
+        {presentation.wholeFileReplacement && <div className="fox-approval-replacement">
+          <details className="fox-approval-disclosure">
+            <summary>查看授权校验信息</summary>
+            <div className="fox-approval-context">
+              <p><strong>用途：</strong>{presentation.wholeFileReplacement.purpose}（这不是普通写入审批）</p>
+              <p><strong>目标：</strong><code>{presentation.wholeFileReplacement.targetIdentity}</code></p>
+              <p><strong>基线版本：</strong><code>{presentation.wholeFileReplacement.baselineVersion}</code></p>
+              <p><strong>内容指纹：</strong><code>{presentation.wholeFileReplacement.candidateDigest}</code></p>
+              <p><strong>请求指纹：</strong><code>{presentation.wholeFileReplacement.requestDigest}</code></p>
+              <small>授权绑定此文件、版本和内容；内容变化后需要重新确认。</small>
+            </div>
+          </details>
+        </div>}
+        </div>
         <ConfirmationActions className="fox-confirmation-actions">
           <ConfirmationAction variant="ghost" disabled={submitting} onClick={() => void resolve('deny')}>拒绝</ConfirmationAction>
-          {allowedDecisions.includes('allow_once') && <ConfirmationAction variant="outline" disabled={submitting} onClick={() => void resolve('allow_once')}>只允许这一次</ConfirmationAction>}
+          {allowedDecisions.includes('allow_once') && <ConfirmationAction variant={allowedDecisions.includes('allow_conversation') ? 'outline' : 'default'} disabled={submitting} onClick={() => void resolve('allow_once')}>{submitting ? '处理中…' : '只允许这一次'}</ConfirmationAction>}
           {allowedDecisions.includes('allow_conversation') && <ConfirmationAction disabled={submitting} onClick={() => void resolve('allow_conversation')}>{submitting ? '处理中…' : '本次对话始终允许'}</ConfirmationAction>}
         </ConfirmationActions>
       </ConfirmationRequest>

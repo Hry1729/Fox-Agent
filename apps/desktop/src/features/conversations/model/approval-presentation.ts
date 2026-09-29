@@ -12,17 +12,18 @@ function text(value: unknown): string | undefined {
 export function approvalPresentation(approval: Pick<ApprovalRecord, 'request' | 'toolName' | 'requestedAction'>) {
   const request = approval.request
   const input = record(request.input)
+  const replacement = wholeFileReplacementBinding(request)
   return {
-    title: text(request.title) ?? '允许 Fox 执行此操作？',
+    title: text(request.title) ?? (replacement ? replacement.baselineVersion === 'missing' ? '允许 Fox 写入新文件？' : '允许 Fox 替换整个文件？' : '允许 Fox 执行此操作？'),
     target: text(request.target) ?? text(input.path) ?? text(input.file_path) ?? text(request.cwd) ?? text(input.cwd) ?? approval.toolName,
-    summary: text(request.summary) ?? approval.requestedAction,
+    summary: text(request.summary) ?? (replacement ? '请核对目标文件和拟写入内容。' : approval.requestedAction),
     command: text(request.command) ?? text(input.command),
     diff: text(request.diff) ?? text(input.diff),
     content: text(input.content),
     // The purpose-specific whole-file replacement binding, when this approval is
     // one. It is immutable: the Host bound it when the request was created and
     // the claim requires exactly these four facts.
-    wholeFileReplacement: wholeFileReplacementBinding(request),
+    wholeFileReplacement: replacement,
   }
 }
 

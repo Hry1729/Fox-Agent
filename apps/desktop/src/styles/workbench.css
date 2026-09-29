@@ -4662,10 +4662,10 @@ img[src='/avatars/fox-assistant.png'] {
 
 .fox-decision-approval-list {
   min-height: 124px;
-  max-height: 280px;
+  max-height: min(52vh, 440px);
   display: flex;
   align-items: stretch;
-  overflow-y: auto;
+  overflow: hidden;
   scrollbar-width: thin;
 }
 
@@ -5795,6 +5795,23 @@ img[src='/avatars/fox-assistant.png'] {
 .fox-runtime-confirmation {
   width: 100%;
 }
+
+.fox-runtime-confirmation { min-width: 0; justify-content: flex-start; gap: 10px; }
+.fox-runtime-confirmation .fox-confirmation-body,
+.fox-runtime-confirmation .fox-confirmation-actions { flex: 0 0 auto; }
+.fox-runtime-confirmation .fox-confirmation-content { min-height: 0; gap: 4px; }
+.fox-runtime-confirmation .fox-confirmation-content p { margin: 0; }
+.fox-runtime-confirmation .fox-confirmation-body code { overflow-wrap: anywhere; word-break: normal; }
+.fox-approval-details-scroll { min-height: 0; overflow: auto; scrollbar-width: thin; }
+.fox-approval-scope-note { margin: 0 0 8px; color: var(--fox-text); font-size: 13px; line-height: 1.6; }
+.fox-approval-disclosure { border-top: 1px solid var(--fox-border); padding-block: 8px; }
+.fox-approval-disclosure summary { cursor: pointer; color: var(--fox-text); font-size: 13px; line-height: 1.6; }
+.fox-approval-disclosure summary:focus-visible { outline: 2px solid var(--fox-accent); outline-offset: 2px; }
+.fox-approval-disclosure summary span { margin-left: 8px; color: var(--fox-muted); font-size: 12px; }
+.fox-approval-disclosure .fox-approval-context,
+.fox-approval-disclosure .fox-approval-diff { border: 0; border-radius: 0; background: transparent; margin: 8px 0 0; padding: 0; }
+.fox-approval-disclosure .fox-approval-diff { max-height: none; overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.fox-runtime-confirmation .fox-confirmation-actions { margin-top: 0; padding-top: 10px; border-top: 1px solid var(--fox-border); }
 
 .fox-approval-command,
 .fox-approval-diff,
