@@ -2769,7 +2769,7 @@ fn prepare_eval_run_with_budgets(
             crate::runtime_host::delivery::bind_source_distribution(scenario_root, requirement)
         })
         .collect::<Vec<_>>();
-    crate::runtime_host::delivery::attach_requirements_to_seeds(&mut seeds, &requirements);
+    crate::runtime_host::delivery::attach_requirements_to_seeds(&mut seeds, &requirements, prompt);
     db.seed_delivery_checklist(&run_id, &seeds, crate::database::now_ms())
         .map_err(|error| ("prepare:checklist".into(), error))?;
     Ok((db, run_id))
@@ -3012,7 +3012,11 @@ fn drive_real_run_with_approvals(
                 if token.check().is_ok() {
                     Ok((
                         false,
-                        kernel_host::resource_failure_result(tool, &error),
+                        kernel_host::resource_failure_result_with_input(
+                            tool,
+                            Some(&payload["input"]),
+                            &error,
+                        ),
                     ))
                 } else {
                     Err(error)

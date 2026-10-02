@@ -6847,6 +6847,8 @@ enum MigrationTarget {
     V83,
     #[cfg(test)]
     V85,
+    #[cfg(test)]
+    V87,
 }
 
 fn run_with_target(connection: &mut Connection, now: i64, target: MigrationTarget) -> Result<()> {
@@ -7187,6 +7189,13 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
         return finish_transaction(transaction);
     }
     apply_migration(&transaction, 86, MIGRATION_86, now)?;
+    apply_migration(&transaction, 87, MIGRATION_87, now)?;
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V87) {
+        return finish_transaction(transaction);
+    }
+    apply_migration(&transaction, 88, MIGRATION_88, now)?;
+    apply_migration(&transaction, 89, MIGRATION_89, now)?;
     finish_transaction(transaction)
 }
 
@@ -14489,6 +14498,146 @@ DELETE FROM schema_migrations WHERE version=79;
         }
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    /// Regression (2026-10-02 review, P1): migration 88 rebuilds
+    /// `delivery_checklist_items` to widen its status CHECK. The rebuild must
+    /// carry `requirements_json` — the task's structured acceptance demands —
+    /// and not merely have the column re-added afterwards with its `'[]'`
+    /// default, which silently erased every existing row's requirements.
+    #[test]
+    fn migration_88_preserves_existing_structured_requirements() {
+        let root = std::env::temp_dir().join(format!("fox-v88-req-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("facts.db");
+        // The exact shape a real pre-88 row can have: a statistics demand the
+        // Host reports as 未核验, and a chart demand that really gates a pass.
+        let unbound = r#"[{"itemKey":null,"id":"source:unbound","kind":{"kind":"sourceStatsUnbound","demand":"按问题类型统计频次与比例"},"sourceText":"任务要求统计，但未指明可核验的源文件与统计列"}]"#;
+        let charts = r#"[{"itemKey":null,"id":"charts>=2","kind":{"kind":"charts","count":2,"perSheet":false},"sourceText":"任务要求图表：至少 2 张"}]"#;
+        {
+            let mut connection = Connection::open(&path).unwrap();
+            run_with_target(&mut connection, 1, MigrationTarget::V87).unwrap();
+            let version: i64 = connection
+                .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 87, "the fixture must stop before migration 88");
+            connection
+                .execute_batch(&format!(
+                    "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
+                     VALUES('v88-agent','Old','','pi','','model',1,1);
+                     INSERT INTO conversations(id,agent_id,title,status,created_at,updated_at)
+                     VALUES('v88-conv','v88-agent','Old','active',1,1);
+                     INSERT INTO runs(id,conversation_id,status,model,created_at)
+                     VALUES('v88-run','v88-conv','running','model',1);
+                     INSERT INTO delivery_checklist_items
+                        (run_id,item_key,target_path,display_name,checks_json,status,updated_at,requirements_json)
+                     VALUES
+                        ('v88-run','file:a.xlsx','a.xlsx','a.xlsx','[\"exists\"]','pending',1,'{unbound}'),
+                        ('v88-run','slot:docx:1',NULL,'Word 成果 1/1','[\"exists\"]','failed',2,'{charts}');"
+                ))
+                .unwrap();
+            // The pre-88 row really holds the demands (so the test cannot pass
+            // vacuously if the fixture itself failed to store them).
+            let stored: Vec<(String, String)> = {
+                let mut statement = connection
+                    .prepare("SELECT item_key, requirements_json FROM delivery_checklist_items ORDER BY item_key")
+                    .unwrap();
+                let rows = statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                rows
+            };
+            assert!(stored.iter().any(|(_, body)| body.contains("sourceStatsUnbound")));
+            assert!(stored.iter().any(|(_, body)| body.contains("\"count\":2")));
+        }
+
+        // Upgrade to the latest schema — migration 88 rebuilds the table.
+        let db = crate::database::Database::open(path.clone()).unwrap();
+        db.with_connection(|conn| {
+            let version: i64 = conn.query_row(
+                "SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0))?;
+            assert_eq!(version, DATABASE_SCHEMA_VERSION);
+            let rows: Vec<(String, String, String)> = {
+                let mut statement = conn.prepare(
+                    "SELECT item_key, status, requirements_json FROM delivery_checklist_items
+                     ORDER BY item_key",
+                )?;
+                let rows = statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            assert_eq!(rows.len(), 2, "both rows must survive the rebuild");
+            for (item_key, status, requirements) in &rows {
+                assert_ne!(
+                    requirements, "[]",
+                    "{item_key} lost its structured requirements in the v88 rebuild"
+                );
+            }
+            let unbound_row = rows.iter().find(|(key, _, _)| key == "file:a.xlsx").unwrap();
+            assert!(unbound_row.2.contains("sourceStatsUnbound"), "{}", unbound_row.2);
+            assert!(unbound_row.2.contains("按问题类型统计频次与比例"), "{}", unbound_row.2);
+            let charts_row = rows.iter().find(|(key, _, _)| key == "slot:docx:1").unwrap();
+            assert!(charts_row.2.contains("\"count\":2"), "{}", charts_row.2);
+            // The rebuild also copies the statuses verbatim, including the new
+            // one the migration exists for.
+            assert_eq!(charts_row.1, "failed");
+            let fk: i64 = conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))?;
+            let integrity: String = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            assert_eq!((fk, integrity), (0, "ok".into()));
+            Ok(())
+        })
+        .unwrap();
+        drop(db);
+
+        // Re-opening must not lose them either (the upgrade is not a one-shot).
+        let reopened = crate::database::Database::open(path.clone()).unwrap();
+        let surviving: String = reopened
+            .with_connection(|conn| {
+                Ok(conn.query_row(
+                    "SELECT requirements_json FROM delivery_checklist_items WHERE item_key='slot:docx:1'",
+                    [], |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert!(surviving.contains("\"count\":2"), "{surviving}");
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The new status the v88 rebuild exists for must be accepted, and the
+    /// rebuild must keep rejecting anything else.
+    #[test]
+    fn migration_88_accepts_verified_and_rejects_unknown_statuses() {
+        let root = std::env::temp_dir().join(format!("fox-v88-status-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("facts.db");
+        let db = crate::database::Database::open(path.clone()).unwrap();
+        db.with_connection(|conn| {
+            conn.execute_batch(
+                "INSERT INTO agents(id,name,description,runtime_type,system_prompt,default_model,created_at,updated_at)
+                 VALUES('s-agent','A','','pi','','model',1,1);
+                 INSERT INTO conversations(id,agent_id,title,status,created_at,updated_at)
+                 VALUES('s-conv','s-agent','t','active',1,1);
+                 INSERT INTO runs(id,conversation_id,status,model,created_at)
+                 VALUES('s-run','s-conv','running','model',1);
+                 INSERT INTO delivery_checklist_items
+                    (run_id,item_key,display_name,checks_json,status,updated_at)
+                 VALUES('s-run','slot:xlsx:1','x','[]','verified',1);",
+            )?;
+            assert!(conn
+                .execute(
+                    "UPDATE delivery_checklist_items SET status='not-a-status' WHERE item_key='slot:xlsx:1'",
+                    [],
+                )
+                .is_err());
+            Ok(())
+        })
+        .unwrap();
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -14899,6 +15048,88 @@ ALTER TABLE kernel_runs ADD COLUMN wait_accounted_until_wall_ms INTEGER
             AND wait_accounted_until_wall_ms IS NOT NULL
             AND wait_accounted_until_wall_ms > 0
             AND wait_deadline_wall_ms >= wait_accounted_until_wall_ms));
+"#;
+
+/// Business delivery verdicts are staged before the round decision that
+/// consumes them commits, and finalized right after. Both halves are additive
+/// tables: a crash between them leaves a recoverable stage row instead of a
+/// completed Run whose checklist items stay pending forever.
+const MIGRATION_87: &str = r#"
+CREATE TABLE IF NOT EXISTS delivery_outcome_stage (
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    item_key TEXT NOT NULL,
+    passed INTEGER NOT NULL CHECK(passed IN (0,1)),
+    finding_json TEXT NOT NULL,
+    checked_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id,item_key)
+);
+CREATE TABLE IF NOT EXISTS delivery_repair_stage (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    findings_json TEXT NOT NULL,
+    staged_at INTEGER NOT NULL
+);
+"#;
+
+/// The checklist gains one status value, `verified`, widening the CHECK so a row
+/// can record "a verdict was computed for this row but the decision that would
+/// authorize it has not committed yet".
+///
+/// The current write path does **not** use it: a verdict is only written once its
+/// decision committed (see migration 89 and `delivery_checks`), so an abandoned
+/// round leaves no trace at all. The value stays permitted because databases
+/// migrated here already carry it in the CHECK, and a later code revision may
+/// want the intermediate state back without another rebuild.
+///
+/// A table rebuild must carry **every** column the table can have, not only the
+/// ones the original `CREATE` listed: `requirements_json` arrived later (migration
+/// 66) and holds the task's structured acceptance demands. Omitting it here did
+/// not merely drop a column — the column was then re-added with its `'[]'`
+/// default, silently erasing the structured requirements of every existing row.
+const MIGRATION_88: &str = r#"
+CREATE TABLE delivery_checklist_items_v88 (
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    item_key TEXT NOT NULL,
+    target_path TEXT,
+    artifact_id TEXT,
+    display_name TEXT NOT NULL,
+    checks_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','verified','passed','failed')),
+    finding_json TEXT,
+    checked_at INTEGER,
+    updated_at INTEGER NOT NULL,
+    requirements_json TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY(run_id,item_key)
+);
+INSERT INTO delivery_checklist_items_v88
+    (run_id,item_key,target_path,artifact_id,display_name,checks_json,status,finding_json,
+     checked_at,updated_at,requirements_json)
+    SELECT run_id,item_key,target_path,artifact_id,display_name,checks_json,status,finding_json,
+           checked_at,updated_at,COALESCE(requirements_json,'[]')
+    FROM delivery_checklist_items;
+DROP TABLE delivery_checklist_items;
+ALTER TABLE delivery_checklist_items_v88 RENAME TO delivery_checklist_items;
+CREATE INDEX IF NOT EXISTS idx_delivery_items_run ON delivery_checklist_items(run_id,status);
+"#;
+
+/// A decision mark committed **in the same transaction as the decision it
+/// belongs to**.
+///
+/// The delivery ledger stages verdicts before the round decision commits, so it
+/// must be able to ask "did that exact decision commit?". A mark written by the
+/// commit transaction answers it exactly: present means committed, absent means
+/// the decision never landed (crash, cancellation, or a superseded round). The
+/// staging tables carry the mark so recovery can finalize only the verdicts whose
+/// decision really committed.
+const MIGRATION_89: &str = r#"
+CREATE TABLE IF NOT EXISTS kernel_decision_marks (
+    run_id TEXT NOT NULL REFERENCES kernel_runs(run_id) ON DELETE CASCADE,
+    mark TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(run_id, mark)
+);
+ALTER TABLE delivery_outcome_stage ADD COLUMN decision_mark TEXT NOT NULL DEFAULT '';
+ALTER TABLE delivery_repair_stage ADD COLUMN decision_mark TEXT NOT NULL DEFAULT '';
 "#;
 
 /// Column additions applied once under migration 75 (idempotent helper).

@@ -228,6 +228,18 @@ pub(super) fn freeze_scope(
     Ok(scope)
 }
 
+/// The identity a Host-established "the target is absent" observation carries.
+///
+/// It is keyed by the TARGET, not by the dispatch: several writes proposed in one
+/// turn share a dispatch identity, so a dispatch-keyed record would make every
+/// write after the first collide on the observation id and be dropped (the ledger
+/// inserts are `ON CONFLICT DO NOTHING`). That collision is what left the second
+/// and later new-file writes without a baseline and got them refused as
+/// `observation_incomplete` (O11, 2026-10-01 fix verification).
+fn absent_target_observation_id(target: &str) -> String {
+    format!("host-precondition:{target}")
+}
+
 pub(super) struct GatewayPolicy {
     pub binding: RunControlBinding,
     pub scope: KernelHostScope,
@@ -474,9 +486,32 @@ impl GatewayPolicy {
                 if !self.scope.office_tools.contains(remote_tool) {
                     return Err("Office operation is outside frozen scope".into());
                 }
-                // Same Host-resolved authorization as execution, so an
-                // artifactId import is accepted and integrity-checked here.
-                self.prepare_office(remote_tool, &input["arguments"])?;
+                // Office argument preparation is a *contract* check: a malformed
+                // call must reach the model as an actionable rejection with the
+                // reason, not as an opaque policy denial — otherwise the model
+                // retries the same invalid call and burns the task budget.
+                let prepared = self
+                    .prepare_office(remote_tool, &input["arguments"])
+                    .map_err(|error| crate::tool_host::ToolErrorCode::InvalidInput.error(error))?;
+                // A mutating Office call is a managed write like any other, so the
+                // frozen task's own file roles bound it at the same boundary: a
+                // path the task introduced as input material is refused here, and
+                // an approval for one write cannot widen that. A read-only Office
+                // operation is unaffected.
+                if prepared.mutates {
+                    if let (Some(database), Some(root), Some(target)) = (
+                        self.database.as_ref(),
+                        self.binding.permission.project_root.as_deref(),
+                        prepared.target_path(),
+                    ) {
+                        let task_text = database.run_task_text(&self.binding.run_id)?;
+                        crate::tool_host::ensure_writable_target(
+                            task_text.as_deref(),
+                            root,
+                            target,
+                        )?;
+                    }
+                }
             } else if self.current_mode()? == PermissionMode::ReadOnly {
                 return Err("unclassified external MCP calls are unavailable under frozen read-only permission".into());
             }
@@ -498,6 +533,15 @@ impl GatewayPolicy {
                 if let Some(db) = &self.database {
                     let path_text = input["path"].as_str().ok_or("[tool.invalid_input] missing file path")?;
                     let target = crate::tool_host::canonical_file_identity(std::path::Path::new(root), path_text)?;
+                    // The task's own file roles bound this Run's writes: a path it
+                    // introduced as input material is refused at the same boundary
+                    // an approval would otherwise widen.
+                    let task_text = db.run_task_text(&self.binding.run_id)?;
+                    crate::tool_host::ensure_writable_target(
+                        task_text.as_deref(),
+                        root,
+                        std::path::Path::new(&target),
+                    )?;
                     // REV-01: the model's declared `expectedVersion` is a
                     // *precondition claim*. It is verified against this Run's
                     // observations and never silently upgraded to the newest
@@ -507,20 +551,26 @@ impl GatewayPolicy {
                         .and_then(Value::as_str)
                         .map(str::trim)
                         .filter(|value| !value.is_empty());
-                    let baseline = db
-                        .host_observation_for_version(&self.binding.run_id, &target, declared)?
-                        .ok_or_else(|| match declared {
-                            Some(version) => format!(
-                                "[tool.file_conflict] No Host observation of {version} exists in this Run; \
-                                 read the target again and retry with its readVersion"
-                            ),
-                            None => "[tool.file_conflict] Read the target before writing; no Host observation exists".to_owned(),
-                        })?;
-                    checked["expectedVersion"] = json!(baseline.version);
+                    let observed = db
+                        .host_observation_for_version(&self.binding.run_id, &target, declared)?;
+                    // A target that provably does not exist yet needs no
+                    // observation; a new file is created, and its own version
+                    // check still refuses to clobber a concurrent creation.
+                    let baseline = crate::tool_host::write_baseline(
+                        std::path::Path::new(&target),
+                        declared,
+                        observed.as_ref().map(|value| value.version.as_str()),
+                    )?;
+                    checked["expectedVersion"] = json!(baseline);
                     checked.as_object_mut().map(|o| o.remove("readVersion"));
                     // REV-05: a precise edit may rest on a partial read, but the
                     // fragment it replaces must itself have been delivered.
                     if tool == "edit_file" {
+                        let baseline = observed.ok_or_else(|| {
+                            crate::tool_host::ToolErrorCode::Conflict.error(
+                                "edit_file requires an observation of the target",
+                            )
+                        })?;
                         self.require_observed_fragment(db, &baseline, &input)?;
                     }
                 }
@@ -528,6 +578,46 @@ impl GatewayPolicy {
             crate::tool_host::prepare(tool, &checked, root)?;
         }
         Ok(())
+    }
+
+    /// Record the Host's own "this target does not exist" observation for a
+    /// first write, so the credential issued at admission has a real baseline.
+    ///
+    /// The check is the same independent filesystem probe the reader path uses
+    /// (`resource_gateway::observe_missing_file_target`): only a positively
+    /// absent target inside the frozen root produces an observation, and every
+    /// other case leaves the state exactly as it was — an existing file still
+    /// needs a read. Best effort by design: a recording failure cannot make a
+    /// write *more* permitted, and admission refuses the write on its own terms.
+    fn record_absent_target_observation(&self, database: &Database, input: &Value) {
+        let (Some(root), Some(path)) = (
+            self.binding.permission.project_root.as_deref(),
+            input["path"].as_str(),
+        ) else {
+            return;
+        };
+        let Ok(target) = crate::tool_host::canonical_file_identity(std::path::Path::new(root), path)
+        else {
+            return;
+        };
+        if database
+            .host_observation_for(&self.binding.run_id, &target)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return;
+        }
+        let Ok(missing) =
+            crate::resource_gateway::observe_missing_file_target(&self.binding, &target)
+        else {
+            return;
+        };
+        let _ = database.record_host_observation(
+            &self.binding.run_id,
+            &self.binding.conversation_id,
+            &missing.host_observation(&absent_target_observation_id(&target)),
+        );
     }
 
     /// REV-05 fragment coverage: the `oldText` an `edit_file` replaces must lie
@@ -1157,17 +1247,40 @@ impl PolicyDecisionPort for GatewayPolicy {
             .map_err(|_| "[tool.invalid_input] Tool input must be valid JSON".to_owned())
             .and_then(|input| self.validate(tool, input));
         if let Err(error) = validation {
-            if matches!(crate::tool_host::ToolErrorCode::classify(&error),
+            let code = crate::tool_host::ToolErrorCode::classify(&error);
+            if matches!(code,
                 Some(crate::tool_host::ToolErrorCode::InvalidInput | crate::tool_host::ToolErrorCode::Conflict))
             {
                 return PolicyDecision::Reject {
-                    code: crate::tool_host::ToolErrorCode::classify(&error).unwrap().as_str().into(),
+                    code: code.unwrap().as_str().into(),
                     message: super::redact_execution_diagnostic(&error, 2000),
+                };
+            }
+            // A refusal the model can act on keeps its own reason: "the target is
+            // the task's read-only input" or "the path is outside what this Run
+            // may write" tells it to choose a different path, while the generic
+            // sentence only invites the same call again.
+            if matches!(code,
+                Some(crate::tool_host::ToolErrorCode::ReadOnlyInput
+                    | crate::tool_host::ToolErrorCode::PermissionDenied))
+            {
+                return PolicyDecision::Deny {
+                    reason: super::redact_execution_diagnostic(&error, 2000),
                 };
             }
             return PolicyDecision::Deny {
                 reason: "Tool is not permitted by the frozen resource policy".into(),
             };
+        }
+        // The absent-target baseline is established HERE, while the write is
+        // still a proposal: the execution credential is issued later, and the
+        // claim-time host-observation requirement is satisfied by the record
+        // this leaves behind. Without it, a first write of a new file would be
+        // refused as `observation_incomplete` even though nothing is in the way.
+        if matches!(tool, "write_file" | "edit_file") {
+            if let (Some(database), Ok(input)) = (self.database.as_ref(), input.as_ref()) {
+                self.record_absent_target_observation(database, input);
+            }
         }
         if tool == "task_repair_escalate_start" {
             return PolicyDecision::RequireApproval;
@@ -1275,6 +1388,23 @@ impl GatewayPolicy {
 #[cfg(test)]
 mod revision_tests {
     use super::*;
+
+    /// Regression, 2026-10-01 fix verification (O11): two new files proposed in
+    /// one turn must each get their own absent-target observation. A dispatch-
+    /// keyed id collided on the second one, so its credential had no baseline
+    /// and the write was refused as `observation_incomplete`.
+    #[test]
+    fn absent_target_observations_are_keyed_by_target_not_by_dispatch() {
+        let first = absent_target_observation_id("\\\\?\\D:\\p\\out\\a.csv");
+        let second = absent_target_observation_id("\\\\?\\D:\\p\\out\\b.csv");
+        assert_ne!(first, second, "different targets must not share an id");
+        assert_eq!(
+            first,
+            absent_target_observation_id("\\\\?\\D:\\p\\out\\a.csv"),
+            "the same target keeps one stable id"
+        );
+    }
+
     #[test]
     fn r1_matching_errors_are_repairable_but_scope_denials_remain_denials() {
         use fox_engine_protocol::{FrozenPermission, TimeBudgets, ExecutionAuthority, ResourceExecutor};
@@ -1314,5 +1444,91 @@ mod revision_tests {
         assert!(matches!(policy.decide("r","t","edit_file",&input),PolicyDecision::Deny {..}));
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(),"hello hello");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Regression, 2026-10-01 review (R01): the same read-only-input rule bounds
+    /// a **mutating Office call** at the gateway, so the task's own input cannot
+    /// be rewritten through `call_mcp_tool` either. A read-only Office operation
+    /// on the same path stays allowed.
+    #[test]
+    fn an_office_write_cannot_target_the_tasks_read_only_input() {
+        use fox_engine_protocol::{FrozenPermission, TimeBudgets, ExecutionAuthority, ResourceExecutor};
+        let root = std::env::temp_dir().join(format!("fox-office-ro-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("source.xlsx"), b"placeholder").unwrap();
+        let db = Database::open(root.join("facts.db")).unwrap();
+        let conversation = db
+            .create_conversation(db.default_agent_id(), None, Some(root.to_str().unwrap()), Some("ask"))
+            .unwrap();
+        let run = db
+            .create_run(&conversation.id, "读取 source.xlsx，生成 报告.docx。", None)
+            .unwrap()
+            .run
+            .id;
+        let permission = FrozenPermission {
+            mode: PermissionMode::Ask,
+            project_root: Some(root.to_string_lossy().into_owned()),
+            grants: vec![],
+            approval_epoch: None,
+        };
+        let mut policy = GatewayPolicy {
+            binding: RunControlBinding {
+                schema_version: 1, run_id: run.clone(), conversation_id: conversation.id.clone(),
+                engine_id: "pi".into(), execution_profile_id: "legacy".into(),
+                authority: ExecutionAuthority::Authoritative,
+                read_only_executor: ResourceExecutor::Rust,
+                permission_snapshot_id: Database::run_control_permission_hash(&permission).unwrap(),
+                permission, budgets: TimeBudgets::default(),
+            },
+            scope: KernelHostScope {
+                schema_version: 1,
+                tool_names: ["call_mcp_tool".into()].into_iter().collect(),
+                mcp_server_hashes: std::collections::BTreeMap::from([(
+                    crate::office::SERVER_ID.to_owned(),
+                    "office-server-hash".to_owned(),
+                )]),
+                knowledge_reference_hashes: Default::default(),
+                knowledge_connection_hashes: Default::default(),
+                office_tools: ["office_create".into(), "office_read".into()].into_iter().collect(),
+                lifecycle_hooks: vec![],
+            },
+            database: Some(db.clone()),
+            sessions_dir: None,
+            artifacts_dir: None,
+        };
+        // Writing the task's own input back is refused before any side effect,
+        // and the refusal names the reason so the model can pick another path.
+        let write_input = json!({"serverId": crate::office::SERVER_ID, "tool": "office_create",
+            "arguments": {"output": "source.xlsx", "overwrite": true}});
+        let decision = policy.decide(&run, "tc", "call_mcp_tool", &write_input.to_string());
+        let PolicyDecision::Deny { reason } = decision else {
+            panic!("an Office write to a read-only input must be denied: {decision:?}");
+        };
+        assert!(reason.contains("tool.read_only_input"), "{reason}");
+        assert!(reason.contains("source.xlsx"), "{reason}");
+        assert!(
+            !reason.contains("not permitted by the frozen resource policy"),
+            "the refusal must keep its own actionable reason: {reason}"
+        );
+
+        // A different output the task asked for is not affected.
+        let allowed_input = json!({"serverId": crate::office::SERVER_ID, "tool": "office_create",
+            "arguments": {"output": "报告.docx"}});
+        assert!(
+            !matches!(policy.decide(&run, "tc", "call_mcp_tool", &allowed_input.to_string()),
+                PolicyDecision::Deny { reason } if reason.contains("tool.read_only_input")),
+            "a declared output must stay writable"
+        );
+
+        // A read-only Office operation on the input is not a write at all.
+        let read_input = json!({"serverId": crate::office::SERVER_ID, "tool": "office_read",
+            "arguments": {"file": "source.xlsx", "mode": "text"}});
+        assert!(
+            !matches!(policy.decide(&run, "tc", "call_mcp_tool", &read_input.to_string()),
+                PolicyDecision::Deny { reason } if reason.contains("tool.read_only_input")),
+            "reading the input must stay allowed"
+        );
+        policy.database = None;
+        let _ = std::fs::remove_dir_all(root);
     }
 }

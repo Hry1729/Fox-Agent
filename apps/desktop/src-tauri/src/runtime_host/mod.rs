@@ -1332,6 +1332,16 @@ impl RuntimeHost {
         if let Err(error) = database.kernel_jobs_reconcile_orphans() {
             eprintln!("Background job recovery could not finish: {error}");
         }
+        // Recovery half of the two-phase business-delivery write: a process
+        // death between "the Run's decision is durable" and "its item verdicts
+        // are durable" leaves stage rows, and they are completed here from the
+        // same verdicts. Bounded to Runs that really have stage rows, and it
+        // never re-asks a model or replays a tool.
+        match delivery::finalize_staged_outcomes(&database) {
+            Ok(0) => {}
+            Ok(count) => eprintln!("Recovered {count} staged delivery verdict(s) after restart"),
+            Err(error) => eprintln!("Staged delivery recovery could not finish: {error}"),
+        }
         host
     }
 
@@ -2431,7 +2441,7 @@ impl RuntimeHost {
                     })
                     .collect::<Vec<_>>();
                 if !requirements.is_empty() {
-                    delivery::attach_requirements_to_seeds(&mut delivery_seeds, &requirements);
+                    delivery::attach_requirements_to_seeds(&mut delivery_seeds, &requirements, text);
                 }
                 self.database.seed_delivery_checklist(
                     &started.run.id,
@@ -7965,6 +7975,30 @@ fn execute_mcp_tool_request(
                 let access = database.conversation_project_access(conversation_id)?;
                 if access != office_access { return Err("Office 项目或权限在等待期间发生变化，请重新发起操作".into()); }
                 ensure_expert_tool_allowed(database, conversation_id, tool)?;
+                // The frozen task's own file roles bound a mutating Office call
+                // here too, exactly as they bound the Kernel path: a path the task
+                // introduced as input material is refused before any side effect,
+                // and approving this write cannot widen that.
+                if let Some(root) = access.as_ref().map(|(root, _)| root.as_str()) {
+                    if let Ok(prepared) = crate::office::prepare_with_context(
+                        remote_tool,
+                        &arguments,
+                        Some(root),
+                        &database.conversation_permission_mode(conversation_id)?,
+                        office_context.as_ref(),
+                    ) {
+                        if prepared.mutates {
+                            if let Some(target) = prepared.target_path() {
+                                let task_text = database.run_task_text(run_id)?;
+                                crate::tool_host::ensure_writable_target(
+                                    task_text.as_deref(),
+                                    root,
+                                    target,
+                                )?;
+                            }
+                        }
+                    }
+                }
                 let server = database.get_mcp_server(crate::office::SERVER_ID)?.ok_or("Office 连接器不存在")?;
                 let permission = database.conversation_permission_mode(conversation_id)?;
                 crate::office::execute_with_cancellation(
@@ -9444,6 +9478,16 @@ fn execute_host_tool_request(
         }
         let policy = database.execution_policy(conversation_id)?;
         let target = crate::tool_host::canonical_file_identity(Path::new(&project_root), input["path"].as_str().ok_or("missing file path")?)?;
+        // The task's own file roles bound what this Run may write at all: a path
+        // the task introduced as input material is refused here, so the rule
+        // holds at the execution boundary instead of depending on the model (or
+        // on a repair demand) choosing to respect it.
+        let task_text = database.run_task_text(run_id)?;
+        crate::tool_host::ensure_writable_target(
+            task_text.as_deref(),
+            &project_root,
+            Path::new(&target),
+        )?;
         // REV-01: the model's declared `expectedVersion` is a precondition claim.
         // It selects the observation it was based on and is never silently
         // upgraded to the newest one, so a stale candidate cannot ride a later
@@ -9453,22 +9497,46 @@ fn execute_host_tool_request(
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty());
-        let observation = database
-            .host_observation_for_version(run_id, &target, declared)?
-            .ok_or_else(|| match declared {
-                Some(version) => format!(
-                    "[tool.file_conflict] No Host observation of {version} exists in this Run; \
-                     read the target again and retry with its readVersion"
-                ),
-                None => "[tool.file_conflict] Read the target before writing; no Host observation exists".to_owned(),
-            })?;
-        Some((policy.version, observation))
+        let observed = database.host_observation_for_version(run_id, &target, declared)?;
+        // A first write of a new file has no reader observation to ride on. It
+        // must not depend on the model first issuing a doomed `read`: the Host
+        // establishes that baseline itself, through the same independent
+        // filesystem check the reader path uses ("positively absent target"),
+        // and records it as this write's observation. The write therefore never
+        // proceeds without an observation, and its own version check still
+        // refuses to clobber a file that appeared in the meantime.
+        let observed = if observed.is_none() && declared.is_none() {
+            match crate::resource_gateway::observe_missing_file(&binding, &target, &cancellation) {
+                Ok(missing) => {
+                    database.record_host_observation(
+                        run_id,
+                        conversation_id,
+                        &missing.host_observation(tool_call_id),
+                    )?;
+                    database.host_observation_for_version(run_id, &target, Some("missing"))?
+                }
+                // An existing file, an unreadable one, or a root the reader
+                // cannot vouch for stays exactly what it was: no observation,
+                // and the conflict below reports it.
+                Err(_) => None,
+            }
+        } else {
+            observed
+        };
+        let baseline = crate::tool_host::write_baseline(
+            Path::new(&target),
+            declared,
+            observed
+                .as_ref()
+                .map(|observation| observation.version.as_str()),
+        )?;
+        Some((policy.version, baseline, observed))
     } else { None };
-    let prepared = if let Some((_, baseline)) = &file_policy {
-        // `baseline.version` is the observation the DECLARED precondition
-        // selected, so binding it here preserves the claim instead of
-        // replacing it with the newest observation.
-        crate::tool_host::prepare_admitted_file(tool, &input, &project_root, &baseline.version)?
+    let prepared = if let Some((_, baseline, _)) = &file_policy {
+        // `baseline` is the observation the DECLARED precondition selected (or
+        // `missing` for a new file), so binding it here preserves the claim
+        // instead of replacing it with the newest observation.
+        crate::tool_host::prepare_admitted_file(tool, &input, &project_root, baseline)?
     } else { crate::tool_host::prepare(tool, &input, &project_root)? };
     let permission_scope = host_permission_scope(tool, prepared.preview());
     let has_conversation_permission = match permission_scope.as_deref() {
@@ -9511,13 +9579,14 @@ fn execute_host_tool_request(
     // observation AND the model delivery fact together, so a whole-file read
     // whose model view was bounded also lands here.
     let needs_replace_grant = match (&file_policy, tool) {
-        (Some((_, baseline)), "write_file") => database.needs_replace_grant(run_id, baseline)?,
+        (Some((_, _, Some(baseline))), "write_file") => database.needs_replace_grant(run_id, baseline)?,
         _ => false,
     };
     let replace_binding = if needs_replace_grant {
         file_policy
             .as_ref()
-            .and_then(|(_, baseline)| {
+            .and_then(|(_, _, observation)| {
+                let observation = observation.as_ref()?;
                 let target = crate::tool_host::canonical_file_identity(
                     Path::new(&project_root),
                     input["path"].as_str().unwrap_or_default(),
@@ -9530,7 +9599,7 @@ fn execute_host_tool_request(
                         run_id,
                         tool_call_id,
                         &target,
-                        &baseline.version,
+                        &observation.version,
                         content,
                     )
                 })
@@ -9538,8 +9607,12 @@ fn execute_host_tool_request(
     } else {
         None
     };
-    if let (Some(binding), Some(baseline)) = (&replace_binding, file_policy.as_ref().map(|(_, b)| b))
-    {
+    if let (Some(binding), Some(baseline)) = (
+        &replace_binding,
+        file_policy
+            .as_ref()
+            .and_then(|(_, _, observation)| observation.as_ref()),
+    ) {
         // Propose the request now, in `pending`, so the authorization exists
         // before the human is asked and the confirmation has something to bind.
         let _ = database.propose_whole_file_replacement(
@@ -9609,12 +9682,12 @@ fn execute_host_tool_request(
             claim_approved_tool_call_for_execution(database, run_id, tool_call_id)?;
         }
 
-        if let Some((version, baseline)) = &file_policy {
+        if let Some((version, _, observation)) = &file_policy {
             use tauri::Manager;
             let app_state = app.state::<crate::app_state::AppState>();
             return execute_legacy_admitted_file(database, app_state.runtime_host.managed_files_dir(),
                 run_id, conversation_id, tool_call_id, tool, &input, &project_root,
-                *version, baseline, &cancellation);
+                *version, observation.as_ref(), &cancellation);
         }
         if let crate::tool_host::PreparedToolAction::CommandJob {root,input,..} = &prepared {
             let binding=database.run_control_binding(run_id)?.ok_or("command job needs a frozen Run")?;
@@ -9640,7 +9713,7 @@ fn execute_host_tool_request(
 fn execute_legacy_admitted_file(
     database: &Database, backups_dir: &Path, run_id: &str, conversation_id: &str,
     tool_call_id: &str, tool: &str, input: &Value, project_root: &str,
-    policy_version: u64, observed: &fox_engine_protocol::HostObservation,
+    policy_version: u64, observed: Option<&fox_engine_protocol::HostObservation>,
     token: &crate::kernel::CancellationToken,
 ) -> Result<Value, String> {
     let durable = database.get_runtime_tool_call(run_id, tool_call_id)?
@@ -9655,7 +9728,7 @@ fn execute_legacy_admitted_file(
     if credential.intent_digest != crate::database::kernel_execution_admission::launch_params_hash(tool, &input.to_string()) {
         return Err("credential_mismatch: file credential input binding differs".into());
     }
-    if credential.file_baseline.as_ref() != Some(observed) {
+    if credential.file_baseline.as_ref() != observed {
         return Err("observation_conflict: file observation changed during approval".into());
     }
     let outcome = database.claim_execution_attempt(run_id, conversation_id, &credential,
@@ -9682,7 +9755,7 @@ fn execute_legacy_admitted_file(
     }, tool, input, tool_call_id, &credential, Some(token), &mut revalidate);
     let call_outcome = kernel_host::call_outcome(&result);
     kernel_host::settle_execution_outcome(database, run_id, &credential.dispatch_id, &result, evidence, &call_outcome)?;
-    let value = match result { Ok(value) => value, Err(error) => kernel_host::resource_failure_result(tool, &error) };
+    let value = match result { Ok(value) => value, Err(error) => kernel_host::resource_failure_result_with_input(tool, Some(input), &error) };
     kernel_host::with_execution_receipt(database, run_id, &credential.dispatch_id, value)
 }
 

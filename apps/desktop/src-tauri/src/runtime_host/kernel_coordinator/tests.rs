@@ -2656,6 +2656,230 @@ fn host_live_transport_failure_retry_reaches_due_and_exhausts_once() {
         [&run_id], |row| row.get(0),
     ).unwrap();
     assert_eq!(failure, "kernel.model_retry_exhausted");
+
+    // Fix 3 (2026-10-01 capability run): a terminal model failure banks the
+    // progress with the business state attached, so the existing continuation
+    // entry point can finish the reply instead of losing the whole Run.
+    //
+    // R06 (2026-10-01 review): this Run promised no files AND executed no tool
+    // call AND lost its reply, so "no checklist" says only that the file ledger
+    // cannot decide business completion. Calling that satisfied would let the
+    // continuation skip work that never happened, so the state stays unknown and
+    // the next action is to continue the remaining work.
+    let progress: (String, i64, String) = connection.query_row(
+        "SELECT pause_reason, continuable, summary_json FROM kernel_run_progress WHERE run_id=?1",
+        [&run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    assert_eq!(progress.0, "model_failure");
+    assert_eq!(progress.1, 1, "a model failure stays continuable");
+    let summary: Value = serde_json::from_str(&progress.2).unwrap();
+    assert_eq!(summary["pauseReason"], "model_failure");
+    assert_eq!(summary["failureCategory"], "model_transport_failure", "{summary}");
+    assert_eq!(summary["deliverablesSatisfied"], false, "{summary}");
+    assert_eq!(
+        summary["deliverablesSatisfiedReason"],
+        "no_file_checklist_business_state_unknown",
+        "{summary}"
+    );
+    assert_eq!(summary["nextAction"], "continue_remaining_work", "{summary}");
+    assert_eq!(summary["completedToolCalls"], 0);
+    let conversation: String = connection.query_row(
+        "SELECT conversation_id FROM runs WHERE id=?1", [&run_id], |row| row.get(0),
+    ).unwrap();
+    let continuable = db.kernel_list_continuable_runs(&conversation).unwrap();
+    assert!(continuable.iter().any(|run| run.run_id == run_id), "{continuable:?}");
+}
+
+#[test]
+fn a_terminal_model_failure_names_the_deliverable_that_is_still_missing() {
+    let clock = crate::runtime_host::shadow_reconcile::ReconcilerClock;
+    let config = worker_configuration();
+    let budgets = TimeBudgets {
+        model_request_ms: 15_000,
+        model_first_response_ms: 15_000,
+        model_idle_ms: 15_000,
+        run_execution_ms: 45_000,
+        ..TimeBudgets::default()
+    };
+    let (db, root, run_id) = fixture_with_budgets_opt(
+        &clock, &config.hash().unwrap(), Some(&config), true, true, (0, 1), true, budgets,
+    );
+    // One promised artifact that never arrives: the failure must state that work
+    // remains, not that the reply is all that is left.
+    db.seed_delivery_checklist(
+        &run_id,
+        &[crate::database::DeliveryChecklistSeed {
+            item_key: "file:proof.csv".into(),
+            target_path: Some("proof.csv".into()),
+            artifact_id: None,
+            display_name: "proof.csv".into(),
+            checks: vec!["exists".into()],
+            requirements: Vec::new(),
+        }],
+        crate::database::now_ms(),
+    )
+    .unwrap();
+    freeze_host_scope(&db, &run_id);
+    let script = root.join("exit-on-initial-missing.mjs");
+    std::fs::write(
+        &script,
+        include_str!("../../../../../../services/agent-runtime/test/fixtures/lost-live-frame.mjs")
+            .replace("__MODE__", "exit")
+            .replace("__ADAPTER__", crate::kernel_model_config::KERNEL_MODEL_ADAPTER),
+    )
+    .unwrap();
+    let runtime = super::super::RuntimeCommand { program: "node".into(), script: Some(script) };
+    let preview = |_: &fox_engine_protocol::KernelModelPreview| {};
+    super::super::kernel_host::drive_with_actions(
+        &super::super::kernel_host::acquire(&root, &run_id).unwrap(),
+        &db, &clock, &CancellationRegistry::default(), &run_id, &runtime, "local-test-only",
+        &Allow, |_, _, _| panic!("transport failure cannot execute a tool"),
+        |_| Ok(()), |_| Ok(()), &preview,
+    )
+    .unwrap();
+    let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+    let summary: Value = serde_json::from_str(
+        &connection
+            .query_row(
+                "SELECT summary_json FROM kernel_run_progress WHERE run_id=?1",
+                [&run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(summary["deliverablesSatisfied"], false, "{summary}");
+    assert_eq!(summary["deliveryOutstanding"], 1, "{summary}");
+    assert_eq!(summary["nextAction"], "continue_remaining_work", "{summary}");
+    assert_eq!(
+        summary["deliverablesSatisfiedReason"],
+        "promised_deliverables_outstanding",
+        "{summary}"
+    );
+}
+
+/// Regression, 2026-10-01 review (R06): the three cases a terminal model failure
+/// has to tell apart. "No file was expected" is not "the business work is done",
+/// and a task that delivered exactly what it promised must not be sent back to
+/// redo work that already succeeded.
+#[test]
+fn a_terminal_model_failure_separates_unknown_from_done_and_from_missing() {
+    let clock = crate::runtime_host::shadow_reconcile::ReconcilerClock;
+    let config = worker_configuration();
+    let budgets = TimeBudgets {
+        model_request_ms: 15_000,
+        model_first_response_ms: 15_000,
+        model_idle_ms: 15_000,
+        run_execution_ms: 45_000,
+        ..TimeBudgets::default()
+    };
+    let script_source = include_str!(
+        "../../../../../../services/agent-runtime/test/fixtures/lost-live-frame.mjs"
+    )
+    .replace("__MODE__", "exit")
+    .replace("__ADAPTER__", crate::kernel_model_config::KERNEL_MODEL_ADAPTER);
+
+    for (label, promised, delivered, expected_reason, expected_action) in [
+        // Nothing was promised, nothing ran, no reply: unknown, not complete.
+        (
+            "no checklist, no work",
+            0usize,
+            0usize,
+            "no_file_checklist_business_state_unknown",
+            "continue_remaining_work",
+        ),
+        // A file was promised and never delivered: outstanding work.
+        (
+            "promised but missing",
+            1usize,
+            0usize,
+            "promised_deliverables_outstanding",
+            "continue_remaining_work",
+        ),
+        // A file was promised and really delivered: only the reply is left.
+        (
+            "promised and delivered",
+            1usize,
+            1usize,
+            "all_promised_deliverables_passed",
+            "continue_for_final_reply",
+        ),
+    ] {
+        let (db, root, run_id) = fixture_with_budgets_opt(
+            &clock, &config.hash().unwrap(), Some(&config), true, true, (0, 1), true, budgets.clone(),
+        );
+        freeze_host_scope(&db, &run_id);
+        if promised > 0 {
+            let relative = "proof.csv";
+            db.seed_delivery_checklist(
+                &run_id,
+                &[crate::database::DeliveryChecklistSeed {
+                    item_key: format!("file:{relative}"),
+                    target_path: Some(relative.into()),
+                    artifact_id: None,
+                    display_name: relative.into(),
+                    checks: vec!["exists".into()],
+                    requirements: Vec::new(),
+                }],
+                crate::database::now_ms(),
+            )
+            .unwrap();
+            if delivered == 1 {
+                // The promised artifact really was produced and verified before
+                // the model request failed: the verdict is recorded through the
+                // same two-phase write the Host uses — staged under a decision
+                // mark, that mark committed, then finalized — so the item is
+                // `passed` with a real finding.
+                let now = crate::database::now_ms();
+                let mark = format!("test-decision:{}", uuid::Uuid::new_v4());
+                db.stage_delivery_outcome(
+                    &run_id,
+                    &mark,
+                    &[crate::database::StagedDeliveryItem {
+                        item_key: format!("file:{relative}"),
+                        passed: true,
+                        finding_json: format!("{{\"itemKey\":\"file:{relative}\",\"provenance\":\"write_receipt\"}}"),
+                    }],
+                    None,
+                    now,
+                )
+                .unwrap();
+                db.record_decision_mark_for_test(&run_id, &mark, now).unwrap();
+                db.finalize_staged_delivery_outcome(&run_id, &mark, now).unwrap();
+            }
+        }
+        let script_path = root.join(format!("{label}.mjs"));
+        std::fs::write(&script_path, &script_source).unwrap();
+        let runtime = super::super::RuntimeCommand {
+            program: "node".into(),
+            script: Some(script_path),
+        };
+        let preview = |_: &fox_engine_protocol::KernelModelPreview| {};
+        super::super::kernel_host::drive_with_actions(
+            &super::super::kernel_host::acquire(&root, &run_id).unwrap(),
+            &db, &clock, &CancellationRegistry::default(), &run_id, &runtime, "local-test-only",
+            &Allow, |_, _, _| panic!("transport failure cannot execute a tool"),
+            |_| Ok(()), |_| Ok(()), &preview,
+        )
+        .unwrap();
+        let connection = rusqlite::Connection::open(root.join("facts.db")).unwrap();
+        let summary: Value = serde_json::from_str(
+            &connection
+                .query_row(
+                    "SELECT summary_json FROM kernel_run_progress WHERE run_id=?1",
+                    [&run_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            summary["deliverablesSatisfiedReason"], expected_reason,
+            "{label}: {summary}"
+        );
+        assert_eq!(summary["nextAction"], expected_action, "{label}: {summary}");
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[test]

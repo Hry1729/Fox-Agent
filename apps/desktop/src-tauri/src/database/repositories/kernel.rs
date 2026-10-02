@@ -2123,6 +2123,105 @@ impl Database {
                               AND json_extract(e.payload_json,'$.batchId')=kernel_effect_outbox.batch_id)))",
                     params![run_id,effect_key,owner,wall_now_ms,failure.checkpoint_seq+1,if terminal { "completed" } else { "pending" }])?;
                 if changed != 1 { return Err(kernel_err("model retry lost its settled dispatch lease or cancellation won")); }
+                if terminal {
+                    // A terminal model failure is not the same as an
+                    // unaccomplished task: the Run may already have delivered
+                    // every promised artifact and only lost the closing reply.
+                    // Bank the progress with the business state attached, so the
+                    // existing continuation entry point can finish the answer
+                    // without redoing settled work — a continuation never
+                    // replays a dispatched tool call.
+                    let completed_tool_calls: i64 = transaction.query_row(
+                        "SELECT COUNT(*) FROM kernel_tool_calls WHERE run_id=?1 AND state='completed'",
+                        [run_id],
+                        |row| row.get(0),
+                    )?;
+                    let pending_tool_calls: i64 = transaction.query_row(
+                        "SELECT COUNT(*) FROM kernel_tool_calls
+                          WHERE run_id=?1 AND state NOT IN ('completed','failed','cancelled','expired')",
+                        [run_id],
+                        |row| row.get(0),
+                    )?;
+                    let delivery_total: i64 = transaction.query_row(
+                        "SELECT COUNT(*) FROM delivery_checklist_items WHERE run_id=?1",
+                        [run_id],
+                        |row| row.get(0),
+                    )?;
+                    let delivery_outstanding: i64 = transaction.query_row(
+                        "SELECT COUNT(*) FROM delivery_checklist_items
+                          WHERE run_id=?1 AND status<>'passed'",
+                        [run_id],
+                        |row| row.get(0),
+                    )?;
+                    let attempt: i64 = transaction.query_row(
+                        "SELECT attempt FROM kernel_runs WHERE run_id=?1",
+                        [run_id],
+                        |row| row.get(0),
+                    )?;
+                    // No checklist does NOT mean the business work is done: a task
+                    // that promised no files can still have executed nothing at
+                    // all (the first request failed), and "no file was expected"
+                    // only says the file ledger cannot decide this. The model
+                    // failed before writing its closing reply, so the reply is
+                    // never already delivered here, and `terminal_written` only
+                    // records that a terminal run state was committed — it is
+                    // not evidence about the work. Three cases stay distinct:
+                    //   * this task promised files and every one of them passed —
+                    //     the business artifacts are in place;
+                    //   * this task promised files and some are outstanding — the
+                    //     remaining work is those artifacts;
+                    //   * no checklist at all — the file ledger cannot decide, so
+                    //     the state is unknown and the remaining work continues.
+                    let all_promised_delivered = delivery_total > 0 && delivery_outstanding == 0;
+                    let deliverables_satisfied = all_promised_delivered;
+                    let summary = serde_json::json!({
+                        "runId": run_id,
+                        "pauseReason": "model_failure",
+                        "failureCategory": failure.category,
+                        "completedToolCalls": completed_tool_calls,
+                        "pendingToolCalls": pending_tool_calls,
+                        "deliveryItems": delivery_total,
+                        "deliveryOutstanding": delivery_outstanding,
+                        "deliverablesSatisfied": deliverables_satisfied,
+                        "deliverablesSatisfiedReason": if all_promised_delivered {
+                            "all_promised_deliverables_passed"
+                        } else if delivery_total == 0 {
+                            "no_file_checklist_business_state_unknown"
+                        } else {
+                            "promised_deliverables_outstanding"
+                        },
+                        "resumable": true,
+                        "nextAction": if deliverables_satisfied {
+                            "continue_for_final_reply"
+                        } else {
+                            "continue_remaining_work"
+                        },
+                    })
+                    .to_string();
+                    transaction.execute(
+                        "INSERT INTO kernel_run_progress
+                         (run_id, attempt, pause_reason, completed_tool_calls, pending_tool_calls,
+                          terminal_written, running_elapsed_ms, continuable, summary_json, created_at)
+                         VALUES (?1, ?2, 'model_failure', ?3, ?4, ?5, ?6, 1, ?7, ?8)
+                         ON CONFLICT(run_id, attempt, pause_reason) DO UPDATE SET
+                             completed_tool_calls=excluded.completed_tool_calls,
+                             pending_tool_calls=excluded.pending_tool_calls,
+                             terminal_written=excluded.terminal_written,
+                             running_elapsed_ms=excluded.running_elapsed_ms,
+                             continuable=1,
+                             summary_json=excluded.summary_json",
+                        params![
+                            run_id,
+                            attempt,
+                            completed_tool_calls,
+                            pending_tool_calls,
+                            cmd.terminal_written as i64,
+                            cmd.running_elapsed_ms,
+                            summary,
+                            wall_now_ms
+                        ],
+                    )?;
+                }
             }
             if let Some((effect_key, owner, response)) = continuation_lease {
                 let changed = if response {
@@ -3528,6 +3627,22 @@ impl Database {
                 super::cancel_open_steering_in_tx(&transaction, run_id)?;
             }
             super::kernel_projection::project(&transaction, run_id, wall_now_ms, persisted_last_seq)?;
+            // The Host's opaque decision mark lands in the SAME transaction as
+            // the decision it belongs to, so its presence is exact proof that
+            // this decision committed. Everything that stages work for a
+            // decision it must later act on gates that action on this row, and
+            // every refusal above (competition, cancellation, policy change)
+            // returns before it, leaving the stage provably uncommitted.
+            if let Some(mark) = cmd.delivery_decision_mark.as_deref() {
+                if mark.trim().is_empty() {
+                    return Err(kernel_err("delivery decision mark must not be empty"));
+                }
+                transaction.execute(
+                    "INSERT OR REPLACE INTO kernel_decision_marks(run_id, mark, created_at)
+                     VALUES (?1, ?2, ?3)",
+                    params![run_id, mark, wall_now_ms],
+                )?;
+            }
             transaction.commit()?;
             Ok(kernel_mode == "authoritative" && final_last_seq != persisted_last_seq)
         })?;

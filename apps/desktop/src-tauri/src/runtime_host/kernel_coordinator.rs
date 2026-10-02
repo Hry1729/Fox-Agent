@@ -312,17 +312,20 @@ impl<'a> KernelCoordinator<'a> {
         lease: Option<DecisionLease<'_>>,
         action: impl FnOnce(&mut RunController, ClockReading) -> Result<Vec<Effect>, KernelError>,
     ) -> Result<(), String> {
-        self.apply_decision(lease, action, None)
+        self.apply_decision(lease, action, None, None)
     }
 
     /// Same durable decision as [`Self::apply`], additionally transitioning
     /// mid-run steering rows inside the same write-set (the round response
-    /// answers delivered rows; the directive built with it arms new ones).
+    /// answers delivered rows; the directive built with it arms new ones), and
+    /// optionally stamping an opaque Host mark that is committed atomically with
+    /// the decision (see [`kernel::KernelPersistCommand::delivery_decision_mark`]).
     fn apply_decision(
         &self,
         lease: Option<DecisionLease<'_>>,
         action: impl FnOnce(&mut RunController, ClockReading) -> Result<Vec<Effect>, KernelError>,
         steering: Option<&crate::database::SteeringDecision>,
+        decision_mark: Option<&str>,
     ) -> Result<(), String> {
         // Re-read the immutable, hash-verified resource binding on each entry.
         if self
@@ -340,7 +343,12 @@ impl<'a> KernelCoordinator<'a> {
         let mut candidate = guard.clone();
         let now = self.clock.read();
         let effects = action(&mut candidate, now).map_err(|error| error.to_string())?;
-        let command = candidate.persist_command(&effects);
+        let mut command = candidate.persist_command(&effects);
+        // The mark travels with the write-set: the repository writes it inside
+        // the decision's own transaction, so a refused or failed commit leaves
+        // no mark behind and the staged work it belongs to can never be
+        // finalized as if the decision had happened.
+        command.delivery_decision_mark = decision_mark.map(str::to_owned);
         match lease {
             Some(DecisionLease::Approval(version)) => self.database.kernel_commit_decision_with_approval_version(
                 &self.binding.run_id, now.wall_ms, &command, version)?,

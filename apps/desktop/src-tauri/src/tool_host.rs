@@ -50,6 +50,11 @@ pub enum ToolErrorCode {
     Conflict,
     /// The Host refused the call: frozen scope escape, read-only mode.
     PermissionDenied,
+    /// The task itself introduced this path as input material to read, so a
+    /// managed write to it is outside what the Run was authorized to change.
+    /// Distinct from [`Self::PermissionDenied`]: an approval for one ordinary
+    /// write cannot widen the task's own authorization.
+    ReadOnlyInput,
     /// The command ran past its own timeout with its output kept.
     TimedOut,
     /// Run or tool cancellation was requested.
@@ -67,6 +72,7 @@ impl ToolErrorCode {
             Self::InvalidInput => "tool.invalid_input",
             Self::Conflict => "tool.file_conflict",
             Self::PermissionDenied => "tool.permission_denied",
+            Self::ReadOnlyInput => "tool.read_only_input",
             Self::TimedOut => "tool.timed_out",
             Self::Cancelled => "tool.cancelled",
             Self::Unknown => "tool.unknown",
@@ -98,6 +104,7 @@ impl ToolErrorCode {
             (Self::InvalidInput.as_str(), Self::InvalidInput),
             (Self::Conflict.as_str(), Self::Conflict),
             (Self::PermissionDenied.as_str(), Self::PermissionDenied),
+            (Self::ReadOnlyInput.as_str(), Self::ReadOnlyInput),
             (Self::TimedOut.as_str(), Self::TimedOut),
             (Self::Cancelled.as_str(), Self::Cancelled),
             (Self::Unknown.as_str(), Self::Unknown),
@@ -217,6 +224,87 @@ pub(crate) fn prepare_admitted_file(tool: &str, input: &Value, root: &str,
     let object = trusted.as_object_mut().ok_or("file input must be an object")?;
     object.insert("expectedVersion".into(), Value::String(baseline.into()));
     prepare(tool, &trusted, root)
+}
+
+/// The version a managed write may commit against, or the refusal that says why.
+///
+/// The model's declared `expectedVersion` is a precondition claim; the caller
+/// resolves it against observations this Run really delivered and passes the
+/// match here. A missing target is not a conflict: the caller establishes that
+/// baseline itself (see `resource_gateway::observe_missing_file`) and passes the
+/// resulting version in `observed`, so an ordinary first write never has to be
+/// preceded by a doomed read. Only a *proven* absence is read as "new file":
+/// every other filesystem error, and every existing file without an observation,
+/// fails closed instead of being mistaken for an empty slot.
+pub(crate) fn write_baseline(
+    target: &Path,
+    declared: Option<&str>,
+    observed: Option<&str>,
+) -> Result<String, String> {
+    if let Some(version) = observed {
+        return Ok(version.to_owned());
+    }
+    match fs::metadata(target) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("missing".to_owned()),
+        Err(error) => Err(ToolErrorCode::Conflict.error(format!(
+            "cannot inspect the write target {}: {error}",
+            target.display()
+        ))),
+        Ok(metadata) if metadata.is_dir() => Err(ToolErrorCode::InvalidInput.error(format!(
+            "{} is a directory, not a file",
+            target.display()
+        ))),
+        Ok(_) => Err(match declared {
+            Some(version) => ToolErrorCode::Conflict.error(format!(
+                "No Host observation of {version} exists in this Run; read the target again and retry with its readVersion"
+            )),
+            None => ToolErrorCode::Conflict
+                .error("Read the target before writing; no Host observation exists"),
+        }),
+    }
+}
+
+/// Refuse a managed write whose target the frozen task introduced as read-only
+/// input material.
+///
+/// The constraint comes from the task itself, not from an approval click, so
+/// approving one ordinary write cannot widen it; and a task that also asks to
+/// save the same path keeps that path writable (see `read_only_path_roles`).
+/// Path identity is the project-relative path with its separators preserved, so
+/// the rule holds for any user folder layout rather than for names like `in/`,
+/// and `source/a.csv` can never be confused with `source_a.csv`.
+pub(crate) fn ensure_writable_target(
+    task_text: Option<&str>,
+    project_root: &str,
+    target: &Path,
+) -> Result<(), String> {
+    let Some(text) = task_text else {
+        return Ok(());
+    };
+    let roles =
+        crate::runtime_host::delivery::read_only_path_roles(text, Some(project_root));
+    if roles.is_empty() {
+        return Ok(());
+    }
+    let root = canonical_directory(Path::new(project_root), "project folder")?;
+    // Resolve the target the same way a write does, so a file that does not
+    // exist yet still yields the project-relative identity it will be created
+    // under. A target outside the project is not this gate's business; the
+    // write path itself refuses it.
+    let Ok(canonical_target) = resolve_write_target(&root, &target.to_string_lossy()) else {
+        return Ok(());
+    };
+    let Ok(relative) = canonical_target.strip_prefix(&root) else {
+        return Ok(());
+    };
+    let display = relative.to_string_lossy().replace('\\', "/");
+    if roles.contains_relative(&display) {
+        return Err(ToolErrorCode::ReadOnlyInput.error(format!(
+            "「{display}」是任务给出的只读输入材料（任务只要求读取或处理它，没有要求修改或保存它）：\
+             请把结果写到任务指定的输出路径，不要改动输入文件"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn execute_file_with_context(
@@ -3905,6 +3993,117 @@ mod admitted_file_tests {
         assert!(execute_file_with_context(prepared, None, &mut hooks).is_err());
         assert!(!hooks.captured);
         assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"external");
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// Regression, 2026-10-01 capability run: the write gate must create new files
+/// without a read-first dance, keep refusing blind overwrites, and honour the
+/// task's own read-only inputs.
+#[cfg(test)]
+mod write_gate_tests {
+    use super::*;
+
+    fn fresh_dir() -> PathBuf {
+        let root = std::env::temp_dir().join(format!("fox-write-gate-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_missing_target_is_a_new_file_not_a_conflict() {
+        let root = fresh_dir();
+        let target = root.join("out").join("summary.json");
+        // The parent directory does not exist either: creation is allowed, and
+        // the write itself creates it inside the project root.
+        assert_eq!(write_baseline(&target, None, None).unwrap(), "missing");
+        // An observation always wins, so a read-backed write keeps its claim.
+        assert_eq!(
+            write_baseline(&target, Some("sha256:x"), Some("sha256:x")).unwrap(),
+            "sha256:x"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_existing_target_still_requires_a_read_and_fails_closed_otherwise() {
+        let root = fresh_dir();
+        let target = root.join("report.docx");
+        fs::write(&target, b"existing").unwrap();
+        let blind = write_baseline(&target, None, None).unwrap_err();
+        assert!(blind.contains("tool.file_conflict"), "{blind}");
+        let declared = write_baseline(&target, Some("sha256:stale"), None).unwrap_err();
+        assert!(declared.contains("sha256:stale"), "{declared}");
+        // A directory is a malformed target, never a new file.
+        let directory = root.join("folder");
+        fs::create_dir_all(&directory).unwrap();
+        let error = write_baseline(&directory, None, None).unwrap_err();
+        assert!(error.contains("tool.invalid_input"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_target_created_after_admission_is_not_overwritten() {
+        let root = fresh_dir();
+        let action = prepare(
+            "write_file",
+            &json!({"path": "out/new.csv", "content": "mine"}),
+            root.to_str().unwrap(),
+        )
+        .unwrap();
+        // Another process creates the same path between admission and commit.
+        fs::create_dir_all(root.join("out")).unwrap();
+        fs::write(root.join("out").join("new.csv"), b"theirs").unwrap();
+        let error = execute(action).unwrap_err();
+        assert!(error.contains("tool.file_conflict"), "{error}");
+        assert_eq!(
+            fs::read_to_string(root.join("out").join("new.csv")).unwrap(),
+            "theirs"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task_inputs_are_read_only_while_outputs_and_unmentioned_paths_stay_writable() {
+        let root = fresh_dir();
+        fs::create_dir_all(root.join("in")).unwrap();
+        let task = "读取 policy.pdf、sales.csv，清洗 in/messy_sales.csv，生成 out/summary.json。";
+        for blocked in ["policy.pdf", "sales.csv", "in/messy_sales.csv"] {
+            let error = ensure_writable_target(
+                Some(task),
+                root.to_str().unwrap(),
+                &root.join(blocked.replace('/', std::path::MAIN_SEPARATOR_STR)),
+            )
+            .unwrap_err();
+            assert!(error.contains("tool.read_only_input"), "{blocked}: {error}");
+        }
+        for allowed in ["out/summary.json", "notes.txt"] {
+            ensure_writable_target(
+                Some(task),
+                root.to_str().unwrap(),
+                &root.join(allowed.replace('/', std::path::MAIN_SEPARATOR_STR)),
+            )
+            .expect("a declared output or an unmentioned new file is writable");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_explicit_save_keeps_its_path_writable() {
+        let root = fresh_dir();
+        let task = "读取 台账.xlsx，更新内容后保存 台账.xlsx。";
+        ensure_writable_target(Some(task), root.to_str().unwrap(), &root.join("台账.xlsx"))
+            .expect("an explicit in-place save is authorized by the task");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_task_without_file_mentions_leaves_every_path_writable() {
+        let root = fresh_dir();
+        ensure_writable_target(Some("你好，帮我想个名字。"), root.to_str().unwrap(), &root.join("a.txt"))
+            .expect("no mentions means no read-only set");
+        ensure_writable_target(None, root.to_str().unwrap(), &root.join("a.txt"))
+            .expect("no task text means no restriction");
         fs::remove_dir_all(root).unwrap();
     }
 }

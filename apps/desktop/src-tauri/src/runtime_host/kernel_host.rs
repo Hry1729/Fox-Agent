@@ -538,6 +538,68 @@ pub(super) fn consume_approval_step(
     Ok(None)
 }
 
+/// The generic refusal: no local class matched, so nothing beyond "it did not
+/// succeed" is claimed and no body is forwarded.
+fn generic_resource_failure(tool: &str) -> Value {
+    serde_json::json!({"content":[{"type":"text","text":"The resource request failed. No successful result is available."}],
+        "details":{"code":"kernel.resource_failed","tool":tool}})
+}
+
+/// A failure of the **built-in Office connector's local** tool, classified and
+/// sanitized.
+///
+/// The Office connector runs in this process against the user's own project and
+/// the pinned sidecar, so its error text is Host-produced, not a remote body.
+/// Each class keeps a redacted reason plus the one next action that resolves it
+/// — renaming, re-reading, fixing the path, or stopping because the environment
+/// needs repair — instead of the opaque sentence that made the model retry the
+/// same doomed call until the task budget was gone.
+///
+/// Only classified classes are forwarded. Anything unrecognised (including any
+/// remote MCP body, which reaches the model through the generic branch) stays
+/// generic: this is a whitelist of local classes, never a passthrough.
+fn office_resource_failure_result(tool: &str, remote_tool: &str, error: &str) -> Value {
+    let Some(kind) = crate::office::classify_resource_error(error) else {
+        return generic_resource_failure(tool);
+    };
+    let reason = super::redact_execution_diagnostic(error, 600);
+    let text = format!(
+        "内置 Office 操作「{remote_tool}」失败（{}）：{reason}\n下一步：{}",
+        kind.as_str(),
+        kind.next_step()
+    );
+    serde_json::json!({
+        "content":[{"type":"text","text":text}],
+        "details":{
+            "code":"kernel.resource_failed",
+            "tool":tool,
+            "officeTool":remote_tool,
+            "errorCode":kind.as_str(),
+            "retryable":kind.retryable(),
+        }
+    })
+}
+
+/// The same decision, with the call's own input, so a built-in Office failure
+/// can be told apart from a generic MCP one.
+pub(crate) fn resource_failure_result_with_input(
+    tool: &str,
+    input: Option<&Value>,
+    error: &str,
+) -> Value {
+    if tool == "call_mcp_tool" {
+        let remote_tool = input
+            .filter(|input| {
+                input.get("serverId").and_then(Value::as_str) == Some(crate::office::SERVER_ID)
+            })
+            .and_then(|input| input.get("tool").and_then(Value::as_str));
+        if let Some(remote_tool) = remote_tool {
+            return office_resource_failure_result(tool, remote_tool, error);
+        }
+    }
+    generic_resource_failure(tool)
+}
+
 pub(crate) fn resource_failure_result(tool: &str, error: &str) -> Value {
     // Reader errors describe only the authorized path operation (missing path,
     // nonexistent file, OS access failure, scope escape). Keep them actionable.
@@ -572,8 +634,7 @@ pub(crate) fn resource_failure_result(tool: &str, error: &str) -> Value {
         };
         (label, 4_000usize)
     } else {
-        return serde_json::json!({"content":[{"type":"text","text":"The resource request failed. No successful result is available."}],
-            "details":{"code":"kernel.resource_failed","tool":tool}});
+        return resource_failure_result_with_input(tool, None, error);
     };
     let message = format!(
         "{label}{}",
@@ -667,6 +728,64 @@ mod failure_tests {
         let local = super::resource_failure_result("run_command", "the child died oddly");
         assert!(local["details"].get("errorCode").is_none());
         assert!(local["content"][0]["text"].as_str().unwrap().contains("the child died oddly"));
+    }
+
+    /// Regression, 2026-10-01 review (R07): the built-in Office connector's own
+    /// local failures reach the model classified, sanitized and actionable.
+    #[test]
+    fn a_builtin_office_resource_failure_names_a_next_step() {
+        let input = serde_json::json!({"serverId": crate::office::SERVER_ID, "tool": "office_create",
+            "arguments": {"output": "out/report.docx"}});
+        let result = super::resource_failure_result_with_input(
+            "call_mcp_tool",
+            Some(&input),
+            "Office 输出已存在，请选择新文件；覆盖必须显式设置 overwrite=true",
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("office.target_exists"), "{text}");
+        assert!(text.contains("另一个文件名"), "the next step must be actionable: {text}");
+        assert_eq!(result["details"]["errorCode"], "office.target_exists");
+        assert_eq!(result["details"]["officeTool"], "office_create");
+        assert_eq!(result["details"]["retryable"], false);
+
+        // A credentials-bearing diagnostic is still redacted before it travels.
+        let noisy = super::resource_failure_result_with_input(
+            "call_mcp_tool",
+            Some(&input),
+            "Office 输出已存在 Authorization: Bearer super-secret-value",
+        );
+        let text = noisy["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("super-secret-value"), "{text}");
+        assert!(text.contains("[REDACTED]"), "{text}");
+    }
+
+    /// The whitelist is the built-in connector only: a generic MCP call and an
+    /// unrecognised Office error both stay opaque.
+    #[test]
+    fn a_generic_mcp_call_keeps_the_opaque_wording() {
+        let other_server = serde_json::json!({"serverId": "some-remote-server", "tool": "office_create",
+            "arguments": {}});
+        let result = super::resource_failure_result_with_input(
+            "call_mcp_tool",
+            Some(&other_server),
+            "Office 输出已存在，请选择新文件；覆盖必须显式设置 overwrite=true",
+        );
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("No successful result is available"));
+        assert!(result["details"].get("errorCode").is_none());
+
+        let builtin_unknown = serde_json::json!({"serverId": crate::office::SERVER_ID,
+            "tool": "office_future", "arguments": {}});
+        let result = super::resource_failure_result_with_input(
+            "call_mcp_tool",
+            Some(&builtin_unknown),
+            "upstream connector returned {\"message\":\"vendor 502\"}",
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("No successful result is available"), "{text}");
+        assert!(!text.contains("vendor 502"), "{text}");
     }
 
     #[test]
@@ -1250,7 +1369,7 @@ impl super::RuntimeHost {
             self.database.complete_kernel_host_command(run_id,command.seq)?;
         }
         let jobs=self.reconcile_terminal_compute_jobs(run_id);
-        if let Ok(mut state)=self.state.lock() {
+        if let Ok(state)=self.state.lock() {
             state.cancellation.retire_run(run_id);
         }
         jobs
@@ -1488,7 +1607,7 @@ impl super::RuntimeHost {
                 return Err("waiting accounting left a nonterminal Run".into());
             }
             let jobs=self.reconcile_terminal_compute_jobs(run_id);
-            if let Ok(mut state)=self.state.lock() {
+            if let Ok(state)=self.state.lock() {
                 state.cancellation.retire_run(run_id);
             }
             jobs?;
@@ -1830,8 +1949,14 @@ impl super::RuntimeHost {
                     }
                     Err(error) if token.check().is_ok() => {
                         let dispatch_id = fox_engine_protocol::encode_dispatch_id(&binding.run_id, effect.tool_call_id.as_deref().ok_or("missing dispatch identity")?)?;
+                        // The call's own input travels with the failure so a
+                        // built-in Office operation can be classified; a generic
+                        // MCP call keeps the opaque wording.
+                        let call_input = serde_json::from_str::<Value>(&effect.payload_json)
+                            .ok()
+                            .and_then(|payload| payload.get("input").cloned());
                         Ok((false, with_execution_receipt(&self.database, &binding.run_id, &dispatch_id,
-                            resource_failure_result(tool, &error))?))
+                            resource_failure_result_with_input(tool, call_input.as_ref(), &error))?))
                     },
                     Err(error) => Err(error),
                 }

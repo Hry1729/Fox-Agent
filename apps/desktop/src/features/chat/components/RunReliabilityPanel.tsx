@@ -10,6 +10,15 @@ import type { JobSnapshot } from '@/features/jobs/job-presentation'
 import { readRunBudget, saveRunBudget, type RunBudgetSelection } from './run-budget'
 
 interface Snapshot { runId: string | null; contextBudget: ContextBudgetDto | null; jobs: JobSnapshot[]; continuable: { runId: string; pauseReason: string; completedToolCalls: number }[] }
+/** How a paused run reads to the user; the wording names what is still missing. */
+function pauseLabel(pauseReason: string): string {
+  switch (pauseReason) {
+    case 'approval_expired': return '审批已过期'
+    case 'context_limit': return '上下文需要调整'
+    case 'model_failure': return '模型请求失败，已完成的工作可以继续'
+    default: return '执行预算已用完'
+  }
+}
 async function call<T>(command: string, request: unknown): Promise<T> {
   const result = await invoke<ApiResponse<T>>(command, { request })
   if (!result.ok) throw new Error(result.error.message)
@@ -64,7 +73,7 @@ export function RunReliabilityPanel({ conversationId, active }: { conversationId
       <p className="text-xs text-muted-foreground">审批等待不计入执行预算；当前任务的预算保持冻结。</p>
       {snapshot?.contextBudget && <ContextBudgetPanel budget={snapshot.contextBudget} />}
       {snapshot?.continuable.map(run => <div key={run.runId} className="flex items-center justify-between gap-2">
-        <span>{run.pauseReason === 'approval_expired' ? '审批已过期' : run.pauseReason === 'context_limit' ? '上下文需要调整' : '执行预算已用完'} · 已完成 {run.completedToolCalls} 次工具调用</span>
+        <span>{pauseLabel(run.pauseReason)} · 已完成 {run.completedToolCalls} 次工具调用</span>
         <Button size="sm" disabled={active || busy} onClick={() => void continueRun(run.runId)}>保留进度继续</Button>
       </div>)}
       {snapshot?.jobs.map(job => <div key={job.jobId}>

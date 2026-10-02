@@ -845,6 +845,38 @@ impl KernelCoordinator<'_> {
         // and commit again. Detaching here would leave a leased model dispatch
         // behind, which the drive loop must treat as uncertain — turning "the
         // user added one sentence" into a failed task.
+        // The business delivery ledger is written in two phases around the
+        // decision that consumes it, because the decision and the ledger live
+        // in different write-sets and neither can be rolled back afterwards.
+        //
+        // Phase 1 (here, before the commit): the verdicts are computed from
+        // durable facts and staged under a mark that identifies **this round's
+        // decision** — its stage identity plus a unique instance id, so a mark in
+        // the ledger names the round it authorizes. The mark is written by the
+        // decision's own transaction, so staging alone never authorizes a verdict:
+        // a crash here, an abandoned round, or a superseded one leaves a stage
+        // whose mark was never committed, and both the in-process finalizer and
+        // the startup recovery refuse to finalize it.
+        let round_label = match stage {
+            Stage::Initial { .. } => "initial".to_owned(),
+            Stage::Batch { batch_id, .. } => format!("batch:{batch_id}"),
+            Stage::Continuation { effect_key, .. } => format!("continuation:{effect_key}"),
+        };
+        let mut delivery_mark = delivery_outcome
+            .as_ref()
+            .map(|_| format!("delivery:{round_label}:{}", uuid::Uuid::new_v4()));
+        if let (Some(outcome), Some(mark)) = (&delivery_outcome, delivery_mark.as_deref()) {
+            super::super::delivery::stage_outcome(
+                &self.database,
+                &self.binding.run_id,
+                mark,
+                outcome,
+                crate::database::now_ms(),
+            )?;
+        }
+        #[cfg(test)]
+        test_barrier::fire(&format!("{}:delivery:staged", self.binding.run_id));
+
         let mut attempts = 0u8;
         let next_batch = loop {
             #[cfg(test)]
@@ -858,6 +890,7 @@ impl KernelCoordinator<'_> {
                 &next_checkpoint,
                 &stop_followup,
                 steering_decision.as_ref(),
+                delivery_mark.as_deref(),
             ) {
                 Ok(next_batch) => break next_batch,
                 Err(error)
@@ -898,6 +931,11 @@ impl KernelCoordinator<'_> {
                         } else {StopFollowup::Final};
                     }
                     delivery_outcome=None;
+                    // The round is being handed to a job-notice/park/final
+                    // follow-up, so the verdicts staged for it are not part of
+                    // this decision: withdraw them instead of leaving a round
+                    // that no commit will ever authorize.
+                    self.abandon_staged_delivery(&mut delivery_mark)?;
                 }
                 Err(error)
                     if error.starts_with(kernel::STEERING_COMPETITION)
@@ -910,7 +948,8 @@ impl KernelCoordinator<'_> {
                     if arrived.is_empty() {
                         // The queue is empty again (an explicit cancel raced us);
                         // nothing can be planned for it, so this is a real
-                        // refusal.
+                        // refusal. The staged round is dropped with it.
+                        self.abandon_staged_delivery(&mut delivery_mark)?;
                         return Err(error);
                     }
                     // Answer the accepted request with its own lane round, built
@@ -926,6 +965,10 @@ impl KernelCoordinator<'_> {
                         .collect();
                     pending_rows = arrived;
                     delivery_outcome = None;
+                    // Additional user input takes this round over: the delivery
+                    // verdicts computed for the abandoned stop must not be
+                    // finalized by the steering round that replaces it.
+                    self.abandon_staged_delivery(&mut delivery_mark)?;
                     stop_followup = StopFollowup::Steering(input);
                     // Adopt-all: whatever else arrives before the retry commits
                     // rides the same round instead of refusing it again.
@@ -935,7 +978,13 @@ impl KernelCoordinator<'_> {
                         adopt_all_received: true,
                     });
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    // The decision never landed, so its staged verdicts are not
+                    // authorized: drop them rather than leaving a round that
+                    // could only be withdrawn later.
+                    self.abandon_staged_delivery(&mut delivery_mark)?;
+                    return Err(error);
+                }
             }
         };
 
@@ -953,16 +1002,35 @@ impl KernelCoordinator<'_> {
             pending_rows = bound;
         }
 
-        // The business delivery ledger is written only after the stop decision
-        // is durable: a crash in between fails closed (item stays pending)
-        // instead of recording a phantom pass or rewriting history.
-        if let Some(outcome) = &delivery_outcome {
-            super::super::delivery::persist_outcome(
+        // Phase 2: the decision that used these verdicts is durable, so the
+        // staged round may become final. The finalize is gated inside its own
+        // transaction on that decision's mark, so it can only write verdicts a
+        // committed decision authorized. A crash in between is resolved by the
+        // startup resolver from the same stage rows; this call never re-asks a
+        // model and never replays a tool.
+        //
+        // The test barrier sits exactly in that window: it models a process
+        // death after `commit_round_decision` and before the ledger write, which
+        // is the failure the two-phase protocol exists to survive.
+        #[cfg(test)]
+        test_barrier::fire(&format!("{}:delivery:committed", self.binding.run_id));
+        if let Some(mark) = delivery_mark.as_deref() {
+            super::super::delivery::finalize_outcome(
                 &self.database,
                 &self.binding.run_id,
-                outcome,
+                mark,
                 crate::database::now_ms(),
             )?;
+            // The mark was written by the commit taken immediately above, so it
+            // must exist. If it does not, the ledger would be left describing
+            // work no committed decision authorized: surface it rather than
+            // silently leaving the checklist pending.
+            if !self
+                .database
+                .decision_mark_committed(&self.binding.run_id, mark)?
+            {
+                return Err("delivery stage lost its committed decision mark".into());
+            }
         }
 
         if let Some((batch_id, _checkpoint)) = next_batch {
@@ -1131,6 +1199,7 @@ impl KernelCoordinator<'_> {
         next_checkpoint: &Option<(String, fox_engine_protocol::KernelEngineBatchCheckpoint)>,
         stop_followup: &StopFollowup,
         steering_decision: Option<&crate::database::SteeringDecision>,
+        delivery_decision_mark: Option<&str>,
     ) -> Result<Option<(String, fox_engine_protocol::KernelEngineBatchCheckpoint)>, String> {
         let next_checkpoint = next_checkpoint.clone();
         match (answered_batch, stage) {
@@ -1152,6 +1221,7 @@ impl KernelCoordinator<'_> {
                         Ok(effects)
                     },
                     steering_decision,
+                    delivery_decision_mark,
                 )?;
             }
             (None, Stage::Initial { .. }) => {
@@ -1171,6 +1241,7 @@ impl KernelCoordinator<'_> {
                         Ok(effects)
                     },
                     steering_decision,
+                    delivery_decision_mark,
                 )?;
             }
             (None, Stage::Continuation { effect_key, .. }) => {
@@ -1190,11 +1261,28 @@ impl KernelCoordinator<'_> {
                         Ok(effects)
                     },
                     steering_decision,
+                    delivery_decision_mark,
                 )?;
             }
             (None, Stage::Batch { .. }) => return Err("continuation stage mismatch".into()),
         }
         Ok(next_checkpoint)
+    }
+
+    /// Drop the stage of a round whose decision will never commit.
+    ///
+    /// The verdicts it holds were never authorized by a decision, so they must
+    /// not survive as a pending round for recovery to pick up. Scoped by mark,
+    /// so a newer round's stage is never touched, and idempotent.
+    fn abandon_staged_delivery(&self, delivery_mark: &mut Option<String>) -> Result<(), String> {
+        if let Some(mark) = delivery_mark.take() {
+            super::super::delivery::withdraw_outcome(
+                &self.database,
+                &self.binding.run_id,
+                &mark,
+            )?;
+        }
+        Ok(())
     }
 
     /// Run the whole authoritative Run through one live engine session.

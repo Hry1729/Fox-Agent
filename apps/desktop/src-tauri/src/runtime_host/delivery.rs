@@ -24,7 +24,7 @@ use crate::database::{
 };
 use crate::database::{
     DeliveryChecklistSeed as StoredChecklistSeed, DeliveryRequirement as StoredRequirement,
-    RequirementKind as StoredRequirementKind,
+    RequirementKind as StoredRequirementKind, RunWriteReceipt, StagedDeliveryItem,
 };
 use calamine::{open_workbook_auto_from_rs, Data as CellData, Reader};
 use serde_json::{json, Value};
@@ -150,11 +150,35 @@ const CJK_NAME_STOPS: &[char] = &[
     '的', '与', '和',
 ];
 
+/// True when the task states a production verb that is not itself negated: a
+/// task that says "不要生成任何文件" promised no counted deliverable, while a
+/// task that says "不要修改输入，生成两份 Excel" still promised two.
 fn has_production_verb(text: &str) -> bool {
     let lowered = text.to_lowercase();
-    PRODUCTION_VERBS
-        .iter()
-        .any(|verb| lowered.contains(&verb.to_lowercase()))
+    PRODUCTION_VERBS.iter().any(|verb| {
+        let needle = verb.to_lowercase();
+        let mut from = 0usize;
+        while let Some(relative) = lowered[from..].find(&needle) {
+            let at = from + relative;
+            from = at + needle.len();
+            let before = text[..at].trim_end();
+            let tail: String = before
+                .chars()
+                .rev()
+                .take(6)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            if !NEGATED_VERB_MARKERS
+                .iter()
+                .any(|marker| tail.to_lowercase().ends_with(&marker.to_lowercase()))
+            {
+                return true;
+            }
+        }
+        false
+    })
 }
 
 fn is_word_boundary(character: Option<char>) -> bool {
@@ -230,6 +254,7 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
     }
     let mut seeds: Vec<DeliveryChecklistSeed> = Vec::new();
     let mut used_keys = BTreeSet::new();
+    let lower_text = text.to_lowercase();
 
     let push = |seeds: &mut Vec<DeliveryChecklistSeed>,
                     used: &mut BTreeSet<String>,
@@ -242,99 +267,7 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
     // 1) Explicit file names. A name is only accepted at a token boundary so
     //    URLs, e-mail addresses and prose such as "v1.2 release notes" cannot
     //    seed phantom deliverables.
-    let mut hits: Vec<(usize, usize, &str)> = Vec::new();
-    let lower_text = text.to_lowercase();
-    for extension in FILE_EXTENSIONS {
-        let needle = format!(".{extension}");
-        let mut from = 0;
-        while let Some(relative) = lower_text[from..].find(&needle) {
-            let dot = from + relative;
-            let end = dot + needle.len();
-            from = end;
-            if is_extension_end_boundary(text[end..].chars().next()) {
-                hits.push((dot, end, extension));
-            }
-        }
-    }
-    hits.sort_by_key(|(dot, _, _)| *dot);
-    // Pass 1: every mention the syntax accepts, kept with its position. The role
-    // of a mention can only be judged where it stands, so collection and
-    // classification stay apart.
-    struct Mention {
-        name_start: usize,
-        name: String,
-        /// Case-folded, separator-normalized identity of the named file.
-        path_key: String,
-        kind: ArtifactKind,
-    }
-    let mut mentions: Vec<Mention> = Vec::new();
-    let mut claimed_ranges: Vec<(usize, usize)> = Vec::new();
-    for (dot, end, extension) in hits {
-        let Some(kind) = ArtifactKind::from_extension(extension) else {
-            continue;
-        };
-        let mut start = dot;
-        for (index, character) in text.char_indices().rev().filter(|(i, _)| *i < dot) {
-            let extends = if character == ' ' {
-                // Spaces are legal inside a file name, but only between
-                // ASCII name characters: "结果写入 report/x.csv" must
-                // backtrack to "report/x.csv", not swallow the prose.
-                let preceded_by_ascii = text[..index]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|value| value.is_ascii_alphanumeric() || matches!(value, '_' | '-' | '.' | '/'));
-                let followed_by_ascii = text[start..]
-                    .chars()
-                    .next()
-                    .is_some_and(|value| value.is_ascii_alphanumeric() || matches!(value, '_' | '-' | '.' | '/'));
-                preceded_by_ascii && followed_by_ascii
-            } else {
-                is_filename_character(character)
-            };
-            if extends {
-                start = index;
-            } else {
-                break;
-            }
-        }
-        let name = text[start..end].trim();
-        let name_start = end - name.len();
-        let traverses_root = name.replace('\\', "/").split('/').any(|segment| {
-            segment.is_empty() || segment == "." || segment == ".."
-        });
-        // With '/' allowed inside relative names, backtracking can walk into a
-        // URL ("https://host/report.docx"); the whitespace-delimited token
-        // immediately before the name then carries the scheme colon.
-        let preceding_token = text[..name_start]
-            .rsplit(|value: char| value.is_whitespace())
-            .next()
-            .unwrap_or("");
-        if name.is_empty()
-            || name.starts_with('.')
-            || name.contains("://")
-            || name.contains('@')
-            || traverses_root
-            || preceding_token.contains("://")
-            || preceding_token.contains(':')
-            || preceding_token.contains('@')
-            || !is_name_start_boundary(text[..name_start].chars().next_back())
-        {
-            continue;
-        }
-        if claimed_ranges
-            .iter()
-            .any(|(a, b)| name_start >= *a && name_start < *b)
-        {
-            continue;
-        }
-        claimed_ranges.push((name_start, end));
-        mentions.push(Mention {
-            name_start,
-            name: name.to_owned(),
-            path_key: name.replace(['/', '\\'], "_").to_lowercase(),
-            kind,
-        });
-    }
+    let mentions = collect_mentions(text);
 
     // Pass 2: merge the uses a path is named for.
     //
@@ -346,13 +279,15 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
     // for. The exclusion is per path and per mention: a later "保存同一文件" is
     // an explicit deliverable demand, and reading a file first does not cancel
     // it — editing an existing document in place is an ordinary task.
+    let roles = classify_mentions(text, &mentions);
     let written: BTreeSet<String> = mentions
         .iter()
-        .filter(|mention| mention_is_output(text, mention.name_start))
-        .map(|mention| mention.path_key.clone())
+        .zip(roles.iter())
+        .filter(|(mention, role)| is_written_mention(text, mention, role))
+        .map(|(mention, _)| mention.path_key.clone())
         .collect();
-    for mention in mentions {
-        if !written.contains(&mention.path_key) && mention_is_input(text, mention.name_start) {
+    for (mention, role) in mentions.iter().zip(roles.iter()) {
+        if is_input_material_mention(text, mention, role, &written) {
             continue;
         }
         let kind = mention.kind;
@@ -363,7 +298,7 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
                 item_key: format!("file:{}", mention.path_key),
                 target_path: Some(mention.name.replace('\\', "/")),
                 artifact_id: None,
-                display_name: mention.name,
+                display_name: mention.name.clone(),
                 checks: kind
                     .planned_checks()
                     .iter()
@@ -482,6 +417,543 @@ pub(crate) fn expectations_from_task(text: &str) -> Vec<DeliveryChecklistSeed> {
     seeds
 }
 
+/// One file name the task mentions, with the position that names it.
+struct Mention {
+    name_start: usize,
+    name: String,
+    /// Case-folded, separator-normalized identity of the named path.
+    path_key: String,
+    kind: ArtifactKind,
+}
+
+/// The checklist identity of a path, for any path (not just `in/`).
+///
+/// Lossless by construction: the directory separator is escaped as `%2f`
+/// instead of being folded into `_`, so `source/a.csv` and `source_a.csv` are
+/// two different identities and neither can claim the other's verdict. Case is
+/// folded because the gate decides that case-insensitive equality (the rule the
+/// rest of the write path already uses); the fold is applied *after* escaping,
+/// so it cannot introduce a new collision.
+pub(crate) fn path_key(value: &str) -> String {
+    let normalized = value.trim().replace('\\', "/");
+    let mut out = String::with_capacity(normalized.len() + 8);
+    for character in normalized.chars() {
+        match character {
+            '/' => out.push_str("%2f"),
+            '%' => out.push_str("%25"),
+            _ => out.extend(character.to_lowercase()),
+        }
+    }
+    out
+}
+
+/// File roles the frozen task states, as path identities.
+///
+/// The write gate and the delivery checklist read the *same* facts, so a path
+/// the task introduced as input cannot be written by one tool and reported as a
+/// deliverable by the other. Two roles exist because the task can name a
+/// directory ("读取 in/docs/ 的文档"): every file under a read-only directory is
+/// read-only material, which no single-file list can express.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PathRoles {
+    /// Identities of paths the task named as read-only input material.
+    pub read_only_files: BTreeSet<String>,
+    /// Identities of directories whose contents are read-only input material.
+    pub read_only_dirs: BTreeSet<String>,
+}
+
+impl PathRoles {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.read_only_files.is_empty() && self.read_only_dirs.is_empty()
+    }
+
+    /// True when a project-relative path is input material: the path itself, or
+    /// any path below a directory the task named as input.
+    pub(crate) fn contains_relative(&self, relative: &str) -> bool {
+        let key = path_key(relative);
+        if self.read_only_files.contains(&key) {
+            return true;
+        }
+        self.read_only_dirs.iter().any(|directory| {
+            // The directory's own identity, or anything below it. The escaped
+            // separator is what makes the boundary exact: `in/docs-old/` can
+            // never match the `in/docs/` prefix.
+            key == *directory || key.starts_with(&format!("{directory}%2f"))
+        })
+    }
+}
+
+/// The read-only input roles the task text states, resolved against the frozen
+/// task. Absolute paths inside the project are folded to their project-relative
+/// identity, so naming `D:\p\in\a.csv` protects `in/a.csv` exactly like naming
+/// it relatively; a path outside the project stays outside this gate's scope
+/// (the write path refuses it on its own terms).
+pub(crate) fn read_only_path_roles(text: &str, project_root: Option<&str>) -> PathRoles {
+    if text.trim().is_empty() {
+        return PathRoles::default();
+    }
+    let mentions = collect_mentions(text);
+    let roles = classify_mentions(text, &mentions);
+    let written: BTreeSet<String> = mentions
+        .iter()
+        .zip(roles.iter())
+        .filter(|(_, role)| **role == MentionRole::Output)
+        .map(|(mention, _)| mention.path_key.clone())
+        .collect();
+    let mut resolved = PathRoles::default();
+    for (mention, role) in mentions.iter().zip(roles.iter()) {
+        if !is_input_material_mention(text, mention, role, &written) {
+            continue;
+        }
+        if let Some(relative) = project_relative_path(&mention.name, project_root) {
+            if let Some(identity) = directory_identity(&relative) {
+                resolved.read_only_dirs.insert(identity);
+            }
+            resolved.read_only_files.insert(path_key(&relative));
+        }
+    }
+    for directory in collect_directory_mentions(text) {
+        let Some(at) = text.find(directory) else {
+            continue;
+        };
+        if !mention_is_input(text, at) && !mention_names_input_directory(text, directory) {
+            continue;
+        }
+        if let Some(relative) = project_relative_path(directory.trim_end_matches(['/', '\\']), project_root)
+        {
+            if let Some(identity) = directory_identity(&relative) {
+                resolved.read_only_dirs.insert(identity);
+            }
+        }
+    }
+    resolved
+}
+
+/// Directory mentions the task states explicitly: a path-shaped token that ends
+/// in a separator and is followed by the word 目录/文件夹 ("读取 in/docs/ 目录").
+/// A bare `dir/` inside prose is not enough, because the same shape appears in
+/// URLs and in ordinary writing.
+fn collect_directory_mentions(text: &str) -> Vec<&str> {
+    const DIRECTORY_WORDS: [&str; 8] = [
+        "目录", "文件夹", "目录下", "文件夹下", "directory", "folder", "directories", "folders",
+    ];
+    let mut found = Vec::new();
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let character = text[index..].chars().next().unwrap_or(' ');
+        let is_path_character = character.is_ascii_alphanumeric()
+            || matches!(character, '_' | '-' | '.' | '/' | '\\')
+            || ('\u{4e00}'..='\u{9fff}').contains(&character);
+        if !is_path_character {
+            index += character.len_utf8();
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() {
+            let next = text[index..].chars().next().unwrap_or(' ');
+            if next.is_ascii_alphanumeric()
+                || matches!(next, '_' | '-' | '.' | '/' | '\\')
+                || ('\u{4e00}'..='\u{9fff}').contains(&next)
+            {
+                index += next.len_utf8();
+            } else {
+                break;
+            }
+        }
+        let token = &text[start..index];
+        let trimmed = token.trim_end_matches(['/', '\\']);
+        let trailing_separators = token.len() - trimmed.len();
+        if trailing_separators > 0
+            && !trimmed.is_empty()
+            && !trimmed.contains("://")
+            && DIRECTORY_WORDS
+                .iter()
+                .any(|word| text[index..].trim_start().starts_with(word))
+        {
+            found.push(token);
+        }
+    }
+    found
+}
+
+/// The identity a read-only *directory* matches by prefix, in the same escaped
+/// space as [`path_key`] so the segment boundary stays exact.
+fn directory_identity(relative: &str) -> Option<String> {
+    let trimmed = relative.trim_end_matches(['/', '\\']).trim();
+    if trimmed.is_empty() || trimmed.contains("://") {
+        return None;
+    }
+    Some(path_key(trimmed))
+}
+
+/// Fold a named path to its project-relative, forward-slash form when it is
+/// inside the frozen project; `None` for a path this gate has no business
+/// bounding (outside the root, or resolvable only by the OS).
+fn project_relative_path(named: &str, project_root: Option<&str>) -> Option<String> {
+    let normalized = named.trim().replace('\\', "/");
+    let without_prefix = normalized
+        .strip_prefix("//?/")
+        .or_else(|| normalized.strip_prefix("\\\\?\\"))
+        .unwrap_or(&normalized);
+    let candidate = Path::new(without_prefix);
+    if !candidate.is_absolute() {
+        let trimmed = without_prefix.trim_start_matches("./");
+        return (!trimmed.is_empty()).then(|| trimmed.to_owned());
+    }
+    let root = Path::new(project_root?).to_path_buf();
+    let root = normalize(&root);
+    let absolute = normalize(candidate);
+    let relative = absolute.strip_prefix(&root).ok()?;
+    let text = relative.to_string_lossy().replace('\\', "/");
+    (!text.is_empty()).then_some(text)
+}
+
+/// A directory token is named as input when an input verb introduces it, or
+/// when the task reads *from* it ("in/docs/ 目录中的文档").
+fn mention_names_input_directory(text: &str, token: &str) -> bool {
+    let Some(at) = text.find(token) else {
+        return false;
+    };
+    if mention_verb(text, at, SOURCE_INPUT_VERBS) {
+        return true;
+    }
+    let before = text[..at].trim_end();
+    let tail: String = before.chars().rev().take(6).collect::<String>().chars().rev().collect();
+    tail.contains('从') || tail.contains('自') || tail.ends_with("读取") || tail.ends_with("基于")
+}
+
+/// How the task introduces one mention of a file name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MentionRole {
+    /// The task asks for this path to be written.
+    Output,
+    /// The task reads, consumes or references this path: it is input material.
+    Input,
+    /// No verb the Host recognises introduces this mention.
+    Unclassified,
+}
+
+/// Paths the task introduces as read-only source material: mentioned as input
+/// and never demanded as a write target. The write gate uses this set so a
+/// reference file cannot be modified even when a repair demand or the model
+/// asks for it; an explicit "保存同一文件" makes the path writable again.
+pub(crate) fn read_only_input_paths(text: &str) -> BTreeSet<String> {
+    let roles = read_only_path_roles(text, None);
+    let mut paths = roles.read_only_files;
+    paths.extend(roles.read_only_dirs);
+    paths
+}
+
+/// Every file name the task mentions, in text order.
+fn collect_mentions(text: &str) -> Vec<Mention> {
+    let mut hits: Vec<(usize, usize, &str)> = Vec::new();
+    let lower_text = text.to_lowercase();
+    for extension in FILE_EXTENSIONS {
+        let needle = format!(".{extension}");
+        let mut from = 0;
+        while let Some(relative) = lower_text[from..].find(&needle) {
+            let dot = from + relative;
+            let end = dot + needle.len();
+            from = end;
+            if is_extension_end_boundary(text[end..].chars().next()) {
+                hits.push((dot, end, extension));
+            }
+        }
+    }
+    hits.sort_by_key(|(dot, _, _)| *dot);
+    // Pass 1: every mention the syntax accepts, kept with its position. The role
+    // of a mention can only be judged where it stands, so collection and
+    // classification stay apart.
+    let mut mentions: Vec<Mention> = Vec::new();
+    let mut claimed_ranges: Vec<(usize, usize)> = Vec::new();
+    for (dot, end, extension) in hits {
+        let Some(kind) = ArtifactKind::from_extension(extension) else {
+            continue;
+        };
+        let mut start = dot;
+        for (index, character) in text.char_indices().rev().filter(|(i, _)| *i < dot) {
+            let extends = if character == ' ' {
+                // Spaces are legal inside a file name, but only between
+                // ASCII name characters: "结果写入 report/x.csv" must
+                // backtrack to "report/x.csv", not swallow the prose.
+                let preceded_by_ascii = text[..index]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|value| value.is_ascii_alphanumeric() || matches!(value, '_' | '-' | '.' | '/'));
+                let followed_by_ascii = text[start..]
+                    .chars()
+                    .next()
+                    .is_some_and(|value| value.is_ascii_alphanumeric() || matches!(value, '_' | '-' | '.' | '/'));
+                preceded_by_ascii && followed_by_ascii
+            } else {
+                is_filename_character(character)
+            };
+            if extends {
+                start = index;
+            } else {
+                break;
+            }
+        }
+        // A Windows drive prefix is part of the name: "读取 D:\work\a.csv" names
+        // D:\work\a.csv, not "\work\a.csv". Keeping the whole absolute path in
+        // the name is also what keeps the verb next to it, so the role of an
+        // absolute mention is read exactly like a relative one.
+        if let Some(extended) = extend_to_absolute_path(text, start) {
+            start = extended;
+        }
+        let name = text[start..end].trim();
+        let name_start = end - name.len();
+        let traverses_root = name.replace('\\', "/").split('/').any(|segment| {
+            segment.is_empty() || segment == "." || segment == ".."
+        });
+        // With '/' allowed inside relative names, backtracking can walk into a
+        // URL ("https://host/report.docx"). A drive-letter prefix ("D:\work\a.csv",
+        // "C:/work/a.csv") is the opposite case: it is an ordinary absolute path
+        // the task may legitimately name, and the reader/write gates resolve it
+        // against the frozen root, so it must not be mistaken for a URL scheme.
+        let preceding_token = text[..name_start]
+            .rsplit(|value: char| value.is_whitespace())
+            .next()
+            .unwrap_or("");
+        let absolute_path = is_absolute_path_prefix(preceding_token);
+        if name.is_empty()
+            || name.starts_with('.')
+            || name.contains("://")
+            || name.contains('@')
+            || traverses_root
+            || preceding_token.contains("://")
+            || (preceding_token.contains(':') && !absolute_path)
+            || preceding_token.contains('@')
+            || !(is_name_start_boundary(text[..name_start].chars().next_back())
+                || absolute_path)
+        {
+            continue;
+        }
+        if claimed_ranges
+            .iter()
+            .any(|(a, b)| name_start >= *a && name_start < *b)
+        {
+            continue;
+        }
+        claimed_ranges.push((name_start, end));
+        mentions.push(Mention {
+            name_start,
+            name: name.to_owned(),
+            path_key: path_key(name),
+            kind,
+        });
+    }
+    mentions
+}
+
+/// True when the text immediately before a name is a drive-letter absolute path
+/// (`D:\work\` or `D:/work/`) rather than a URL scheme or a prose colon.
+fn is_absolute_path_prefix(preceding_token: &str) -> bool {
+    let mut characters = preceding_token.chars();
+    matches!(characters.next(), Some(value) if value.is_ascii_alphabetic())
+        && characters.next() == Some(':')
+        && matches!(characters.next(), Some('\\') | Some('/'))
+}
+
+/// Extend a backtracked name start backwards over a whole drive-letter path, so
+/// `D:\work\a.csv` is one name rather than the bare `a.csv`.
+///
+/// Only a token that really starts with a drive marker qualifies (`D:\`, `C:/`),
+/// so a URL scheme or a prose colon cannot be swallowed into a file name.
+fn extend_to_absolute_path(text: &str, start: usize) -> Option<usize> {
+    let mut index = start;
+    for (position, character) in text[..start].char_indices().rev() {
+        if character.is_ascii_alphanumeric()
+            || matches!(character, ':' | '\\' | '/' | '_' | '-' | '.')
+        {
+            index = position;
+        } else {
+            break;
+        }
+    }
+    if index == start {
+        return None;
+    }
+    let token = &text[index..start];
+    let mut characters = token.chars();
+    let drive = characters.next()?;
+    if !drive.is_ascii_alphabetic() || characters.next() != Some(':') {
+        return None;
+    }
+    // The separator may already be inside the token (`D:\work\`) or may be the
+    // very character the name starts at (`C:/proj/in/a.csv`).
+    let separator = characters
+        .next()
+        .or_else(|| text[start..].chars().next());
+    matches!(separator, Some('\\') | Some('/')).then_some(index)
+}
+
+/// The role of every mention, in text order.
+fn classify_mentions(text: &str, mentions: &[Mention]) -> Vec<MentionRole> {
+    let mut roles: Vec<MentionRole> = Vec::with_capacity(mentions.len());
+    for (index, mention) in mentions.iter().enumerate() {
+        if mention_is_prohibited(text, mention.name_start) {
+            roles.push(MentionRole::Input);
+            continue;
+        }
+        if mention_is_output(text, mention.name_start)
+            || clause_introduces_write(text, mention.name_start)
+        {
+            roles.push(MentionRole::Output);
+            continue;
+        }
+        let input = mention_is_input(text, mention.name_start)
+            || inherits_input_role(text, mentions, index, &roles);
+        roles.push(if input {
+            MentionRole::Input
+        } else {
+            MentionRole::Unclassified
+        });
+    }
+    roles
+}
+
+/// A name inside an enumerated list inherits the role of the list it belongs to:
+/// only the first name can carry the verb directly, so "读取 a.csv、b.csv 和
+/// c.docx" reads all three. Anything but a list separator between two names ends
+/// the inheritance, and a path the task also writes stays a deliverable (see the
+/// `written` set in [`expectations_from_task`]).
+fn inherits_input_role(
+    text: &str,
+    mentions: &[Mention],
+    index: usize,
+    roles: &[MentionRole],
+) -> bool {
+    let Some(previous) = index.checked_sub(1) else {
+        return false;
+    };
+    if roles.get(previous) != Some(&MentionRole::Input) {
+        return false;
+    }
+    let previous_end = mentions[previous].name_start + mentions[previous].name.len();
+    let Some(between) = text.get(previous_end..mentions[index].name_start) else {
+        return false;
+    };
+    is_list_separator(between)
+}
+
+/// True when a write instruction introduces this mention from anywhere in its
+/// own clause: a separator may stand between the verb and the name
+/// ("生成 out/a.csv、out/b.csv"), other prose may not.
+///
+/// The clause is the widest region around the mention that no sentence-ending
+/// punctuation interrupts, so the search never crosses into an earlier, already
+/// finished instruction.
+fn clause_introduces_write(text: &str, name_start: usize) -> bool {
+    const CLAUSE_STOPS: [char; 9] = ['。', '；', ';', '\n', '，', ',', '：', ':', '！'];
+    let before = &text[..name_start];
+    let start = before
+        .char_indices()
+        .filter(|(_, character)| CLAUSE_STOPS.contains(character))
+        .map(|(index, character)| index + character.len_utf8())
+        .last()
+        .unwrap_or(0);
+    let clause = &before[start..];
+    if TARGET_OUTPUT_VERBS.iter().any(|verb| clause.contains(verb)) {
+        return true;
+    }
+    // No punctuation at all inside this clause: it may still be an enumeration
+    // whose instruction opened in the previous clause. Only the nearest one is
+    // consulted, and only when nothing but separators and further names stands
+    // between them — an earlier, finished instruction must never carry over.
+    let Some((index, character)) = before[..start]
+        .char_indices()
+        .rev()
+        .find(|(_, value)| CLAUSE_STOPS.contains(value))
+    else {
+        return false;
+    };
+    let gap = &before[index + character.len_utf8()..start];
+    if !is_enumeration_gap(gap) {
+        return false;
+    }
+    let clause_start = before[..index]
+        .char_indices()
+        .filter(|(_, value)| CLAUSE_STOPS.contains(value))
+        .map(|(position, value)| position + value.len_utf8())
+        .last()
+        .unwrap_or(0);
+    TARGET_OUTPUT_VERBS
+        .iter()
+        .any(|verb| before[clause_start..index].contains(verb))
+}
+
+/// True when the gap between two clauses carries no instruction of its own: it
+/// is enumeration punctuation, and possibly the name of another member of the
+/// same list.
+fn is_enumeration_gap(gap: &str) -> bool {
+    let trimmed = gap.trim();
+    if trimmed.is_empty() || is_list_separator(trimmed) {
+        return true;
+    }
+    let mut parts = trimmed.split(['、', ',', '，', '和', '与', '及']);
+    parts.all(|part| {
+        let part = part.trim();
+        part.is_empty() || is_list_separator(part) || file_extension_of(part).is_some()
+    })
+}
+
+fn file_extension_of(token: &str) -> Option<String> {
+    let name = token.trim().trim_matches(|value: char| !value.is_ascii_alphanumeric() && value != '.');
+    let extension = name.rsplit('.').next()?.to_lowercase();
+    FILE_EXTENSIONS
+        .contains(&extension.as_str())
+        .then_some(extension)
+}
+
+/// True when nothing but an enumeration separator stands between two names.
+fn is_list_separator(between: &str) -> bool {
+    let trimmed = between.trim();
+    trimmed.is_empty()
+        || matches!(
+            trimmed,
+            "、" | "," | "，" | "/" | "\\" | "和" | "与" | "及" | "以及" | "and" | "&" | "+"
+        )
+}
+
+/// True when this mention asks for its path to be written: the verb that
+/// introduces it is a write verb that is not negated, or a write instruction
+/// earlier in the same clause covers it.
+fn is_written_mention(text: &str, mention: &Mention, role: &MentionRole) -> bool {
+    if mention_is_prohibited(text, mention.name_start) {
+        return false;
+    }
+    *role == MentionRole::Output || clause_introduces_write(text, mention.name_start)
+}
+
+/// True when this mention is input material: the task reads, consumes or
+/// merely references it, and never asks for it to be written.
+///
+/// The final case is the important one. A name the matcher cannot attach any
+/// verb to carries no evidence that the task asked for it to be *produced*,
+/// while treating it as input keeps the task's own material out of reach of a
+/// write. Verbs the Host does know still win: "生成 out/b.json" is an
+/// instruction, and a production instruction in front of an enumeration covers
+/// every name that enumeration adds.
+fn is_input_material_mention(
+    text: &str,
+    mention: &Mention,
+    role: &MentionRole,
+    written: &BTreeSet<String>,
+) -> bool {
+    if written.contains(&mention.path_key) {
+        return false;
+    }
+    if mention_is_prohibited(text, mention.name_start) {
+        return true;
+    }
+    match role {
+        MentionRole::Output => false,
+        MentionRole::Input | MentionRole::Unclassified => true,
+    }
+}
+
 /// One item's deterministic verification result.
 #[derive(Debug, Clone)]
 pub(crate) struct ItemVerdict {
@@ -515,6 +987,14 @@ impl DeliveryStop {
             DeliveryStop::Passed { items }
             | DeliveryStop::Exhausted { items }
             | DeliveryStop::Repair { items, .. } => items,
+        }
+    }
+
+    /// The repair-round audit payload, when this stop armed one.
+    pub(crate) fn repair_findings(&self) -> Option<&str> {
+        match self {
+            DeliveryStop::Repair { findings_json, .. } => Some(findings_json),
+            _ => None,
         }
     }
 }
@@ -555,6 +1035,10 @@ pub(crate) fn evaluate_stop(
 
     let mut verdicts = Vec::with_capacity(checklist.len());
     let mut assigned: BTreeSet<String> = BTreeSet::new();
+    // The task's own write ledger, scoped to this Run and the Runs it
+    // continues: the only evidence that a named deliverable was really produced
+    // by this task rather than touched, pre-existing, or written by someone else.
+    let receipts = run_chain_write_receipts(database, run_id)?;
     for item in &checklist {
         verdicts.push(verify_item(
             database,
@@ -562,11 +1046,34 @@ pub(crate) fn evaluate_stop(
             item,
             root.as_deref(),
             &candidates,
+            &receipts,
             &mut assigned,
-            started_at,
         )?);
     }
     apply_delivery_requirements(run_id, &checklist, &requirements, root.as_deref(), &mut verdicts)?;
+    // Task-stated field conventions on a JSON artifact are checked here: the
+    // Host cannot judge whether evidence was sufficient, but it can decide the
+    // invariant the task wrote down (marker and empty evidence field agree).
+    apply_field_convention(database, run_id, &mut verdicts)?;
+    // Writes this task committed that no checklist item declared. Recorded on
+    // the first item's finding so a passed checklist is never read as "the Run
+    // wrote nothing else", and so an under-read promise is visible.
+    if let Some(root) = root.as_deref() {
+        let declared: BTreeSet<String> = checklist
+            .iter()
+            .filter_map(|item| item.target_path.as_deref())
+            .map(path_key)
+            .collect();
+        let undeclared = undeclared_writes(root, &receipts, &declared);
+        if !undeclared.is_empty() {
+            if let Some(first) = verdicts.first_mut() {
+                let mut finding: Value = serde_json::from_str(&first.finding_json)
+                    .unwrap_or_else(|_| json!({}));
+                finding["undeclaredWrites"] = json!(undeclared);
+                first.finding_json = finding.to_string();
+            }
+        }
+    }
     if verdicts.iter().all(|verdict| verdict.passed) {
         return Ok(DeliveryStop::Passed { items: verdicts });
     }
@@ -593,29 +1100,83 @@ pub(crate) fn evaluate_stop(
     })
 }
 
-/// Persist item results and (for repairs) the bounded repair audit row. Called
-/// by the live loop **after** the Kernel decision commits, so a crash before
-/// this point fails closed (no phantom pass) instead of rewriting history; the
-/// repair *budget* itself is derived from committed continuation events.
-pub(crate) fn persist_outcome(
+/// Stage one round's item results (and, for repairs, the bounded repair audit
+/// row) **before** the Kernel decision that consumes them commits.
+///
+/// The verdicts come from durable facts and the filesystem; the decision that
+/// ends the round comes from a different write-set a moment later. Neither can
+/// be undone once committed, so the two halves are ordered: stage first, commit
+/// the decision, then finalize. The stage carries the decision's mark, and the
+/// mark is written by the decision's own transaction, so a later recovery can
+/// tell "the decision that owns these verdicts committed" from "this round was
+/// abandoned" — the latter leaves no item state behind at all.
+pub(crate) fn stage_outcome(
     database: &Database,
     run_id: &str,
+    decision_mark: &str,
     stop: &DeliveryStop,
     now: i64,
 ) -> Result<(), String> {
-    for item in stop.items() {
-        database.record_delivery_check(
-            run_id,
-            &item.item_key,
-            item.passed,
-            Some(&item.finding_json),
-            now,
-        )?;
+    let items = staged_items(stop);
+    database.stage_delivery_outcome(run_id, decision_mark, &items, stop.repair_findings(), now)
+}
+
+/// Withdraw a staged round that must never be finalized: its decision was
+/// superseded by a steering round, or its commit failed.
+pub(crate) fn withdraw_outcome(
+    database: &Database,
+    run_id: &str,
+    decision_mark: &str,
+) -> Result<(), String> {
+    database.withdraw_staged_delivery_outcome(run_id, decision_mark)
+}
+
+/// Make a staged round final, but **only** if the decision that owns it really
+/// committed. Returns how many item verdicts were written (0 when the decision
+/// is not committed, which the caller resolves by withdrawing the stage).
+pub(crate) fn finalize_outcome(
+    database: &Database,
+    run_id: &str,
+    decision_mark: &str,
+    now: i64,
+) -> Result<usize, String> {
+    database.finalize_staged_delivery_outcome(run_id, decision_mark, now)
+}
+
+/// Resolve every staged round left by a crash: finalize the ones whose decision
+/// committed, withdraw the ones whose decision never landed. Called at Host
+/// startup; it never re-asks a model and never replays a tool.
+pub(crate) fn finalize_staged_outcomes(database: &Database) -> Result<usize, String> {
+    let mut finalized = 0usize;
+    for (run_id, decision_mark) in database.staged_delivery_rounds()? {
+        let now = now_ms();
+        if database.decision_mark_committed(&run_id, &decision_mark)? {
+            finalized += database.finalize_staged_delivery_outcome(&run_id, &decision_mark, now)?;
+        } else {
+            // The decision this round belonged to never committed (or was
+            // superseded). Its verdicts must not become the ledger's history.
+            database.withdraw_staged_delivery_outcome(&run_id, &decision_mark)?;
+        }
     }
-    if let DeliveryStop::Repair { findings_json, .. } = stop {
-        database.record_delivery_repair_round(run_id, findings_json, now)?;
-    }
-    Ok(())
+    Ok(finalized)
+}
+
+fn staged_items(stop: &DeliveryStop) -> Vec<StagedDeliveryItem> {
+    stop.items()
+        .iter()
+        .map(|item| StagedDeliveryItem {
+            item_key: item.item_key.clone(),
+            passed: item.passed,
+            finding_json: item.finding_json.clone(),
+        })
+        .collect()
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone)]
@@ -733,8 +1294,8 @@ fn verify_item(
     item: &DeliveryChecklistItem,
     root: Option<&Path>,
     candidates: &[Candidate],
+    receipts: &[RunWriteReceipt],
     assigned: &mut BTreeSet<String>,
-    started_at: i64,
 ) -> Result<ItemVerdict, String> {
     // Pathless slots carry their expected extension in the key
     // (`slot:xlsx:1`); explicit items carry it in the target path.
@@ -756,38 +1317,46 @@ fn verify_item(
     let mut untouched_target: Option<PathBuf> = None;
     let bound = if let Some(target) = item.target_path.as_deref() {
         let path = resolve_under_root(root, target)?;
-        candidates
-            .iter()
-            .find(|candidate| candidate.path == path
-                && (candidate.source == "artifact"
-                    || (candidate.modified_ms != i64::MAX && candidate.modified_ms >= started_at)))
-            .cloned()
+        // The task's own ledger is asked first, and outranks discovery: a path
+        // this Run (or the Run it continues) really committed is a deliverable
+        // even when the broad scan skipped it, because the scan filters by
+        // modification time and a receipt does not depend on one.
+        receipt_for_path(receipts, &path)
+            .filter(|_| path.is_file())
+            .map(|receipt| Candidate {
+                path: path.clone(),
+                artifact_id: item.artifact_id.clone(),
+                // The receipt's own hash is compared in the receipt check, which
+                // normalizes the ledger's `sha256:` spelling; carrying it here
+                // would have it compared a second time against bare hex.
+                artifact_sha: None,
+                source: "receipt",
+                modified_ms: receipt.created_at,
+            })
+            .or_else(|| {
+                // A named target is bound only to evidence about *authorship*: a
+                // Host-registered artifact. A bare discovery under the project
+                // is not authorship — another Run, a delegated child, or an
+                // external writer produces the same observation — so a declared
+                // deliverable never passes on "a file with that name exists".
+                candidates
+                    .iter()
+                    .find(|candidate| {
+                        candidate.path == path && candidate.source == "artifact"
+                    })
+                    .cloned()
+            })
             .or_else(|| {
                 if !path.is_file() {
                     return None;
                 }
-                // Nothing in this Run's verified artifacts covers the target, so
-                // timestamps can establish freshness, not a content diff. Do
-                // not apply the broad scan's five-second discovery tolerance
-                // to a named target: it would accept a just-uploaded input as
-                // a completed in-place edit before this Run wrote anything.
-                let modified_ms = path
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(modified_ms_since_epoch)
-                    .unwrap_or(i64::MAX);
-                if modified_ms == i64::MAX || modified_ms < started_at {
-                    untouched_target = Some(path.clone());
-                    return None;
-                }
-                Some(Candidate {
-                    path,
-                    artifact_id: item.artifact_id.clone(),
-                    artifact_sha: None,
-                    source: "declared",
-                    modified_ms,
-                })
+                // A named target with nothing in this task's own ledger to
+                // vouch for it. A timestamp cannot establish authorship —
+                // `touch`, an external writer and another Run all move it — so
+                // this is reported as unproven instead of being accepted as a
+                // completed write, and instead of claiming the file is stale.
+                untouched_target = Some(path);
+                None
             })
     } else {
         bind_pathless_slot(kind, candidates, assigned)
@@ -885,9 +1454,8 @@ fn verify_item(
             }
         }
     }
-    // When the artifact came from a settled tool result, the file on disk must
-    // still be byte-identical to what Host verified: a real artifact binding,
-    // not a path-shaped claim.
+    // The strongest evidence is a Host-registered artifact: the file on disk
+    // must still be byte-identical to what the tool result settled with.
     if failure_reason.is_none() {
         if let Some(expected) = &candidate.artifact_sha {
             match sha256_file(&candidate.path) {
@@ -909,6 +1477,96 @@ fn verify_item(
         }
     }
 
+    // A managed-write receipt is the next best evidence: it lives in the Host's
+    // own file-version ledger, names the tool that committed these bytes and
+    // the hash they had afterwards. It is scoped to this Run and the Runs it
+    // continues, so neither a `touch` nor another Run's write can borrow it.
+    // A receipt whose hash no longer matches fails the item: the file changed
+    // after this Run committed it.
+    let mut provenance: &'static str = "unknown";
+    let artifact_verified = matches!(
+        checks.get("artifact_hash"),
+        Some(Value::String(state)) if state == "passed"
+    );
+    if failure_reason.is_none() {
+        if artifact_verified {
+            // The content already matches the artifact the Host registered for
+            // this Run, which is the strongest evidence there is.
+            provenance = "artifact";
+        } else {
+            match receipt_for_path(receipts, &candidate.path) {
+                Some(receipt) => match compare_receipt_hash(receipt, &candidate.path) {
+                    Ok(true) => {
+                        provenance = "write_receipt";
+                        checks.insert(
+                            "write_receipt".to_owned(),
+                            json!({
+                                "state": "passed",
+                                "tool": receipt.tool,
+                                "changeKind": receipt.change_kind,
+                            }),
+                        );
+                    }
+                    Ok(false) => {
+                        provenance = "write_receipt_drifted";
+                        checks.insert(
+                            "write_receipt".to_owned(),
+                            json!({
+                                "state": "failed",
+                                "expected": receipt.after_hash,
+                                "reason": "文件在本 Run 写入之后又被改动",
+                            }),
+                        );
+                        failure_reason = Some(format!(
+                            "交付项「{}」与本次写入回执的内容哈希不一致（文件在写入后被改动过）",
+                            item.display_name
+                        ));
+                    }
+                    Err(error) => {
+                        provenance = "write_receipt_unreadable";
+                        failure_reason = Some(format!("读取交付项失败：{error}"));
+                    }
+                },
+                None if candidate.source == "artifact" => provenance = "artifact",
+                // A **named** target with no receipt at all: the task said this
+                // exact file must exist, and nothing in this Run's own ledger
+                // says it wrote it. A discovery is not authorship, so the item
+                // fails rather than passing on "a file with that name exists".
+                None if item.target_path.is_some() => {
+                    provenance = "unregistered";
+                    checks.insert(
+                        "write_receipt".to_owned(),
+                        json!({
+                            "state": "absent",
+                            "reason": "本 Run（含其续做的 Run）没有对该路径的受管写入回执；\
+                                       文件的出现只能说明 Run 期间出现了这个文件，不能证明内容来自本 Run",
+                        }),
+                    );
+                    failure_reason = Some(format!(
+                        "交付项「{}」缺少本 Run 写入的证据：文件存在，但本次任务没有对该路径的受管写入回执",
+                        item.display_name
+                    ));
+                }
+                // A pathless slot bound to a supported file discovered under
+                // the project: this task promised a file of that kind and one
+                // appeared while it ran, but no Host write registered it, so
+                // the claim is weaker and is reported as such instead of being
+                // silently promoted to a verified write.
+                None => {
+                    provenance = "unregistered";
+                    checks.insert(
+                        "write_receipt".to_owned(),
+                        json!({
+                            "state": "absent",
+                            "reason": "本 Run（含其续做的 Run）没有对该路径的受管写入回执；\
+                                       文件的出现只能说明 Run 期间出现了这个文件，不能证明内容来自本 Run",
+                        }),
+                    );
+                }
+            }
+        }
+    }
+
     if failure_reason.is_none() {
         if let Err(reason) = content_floor(kind, &stats) {
             checks.insert(
@@ -926,6 +1584,7 @@ fn verify_item(
         "boundPath": candidate.path.to_string_lossy(),
         "artifactId": candidate.artifact_id,
         "source": candidate.source,
+        "provenance": provenance,
         "checks": checks,
         "stats": stats,
         "reason": failure_reason,
@@ -954,22 +1613,99 @@ fn missing_verdict(item: &DeliveryChecklistItem) -> ItemVerdict {
     }
 }
 
-/// A named target without evidence of a fresh write. A timestamp is not a
-/// content comparison, so do not claim the bytes are known to be unchanged.
+/// Managed writes by **this Run or a Run it continues**, newest first.
+///
+/// A continuation copies its parent's checklist and re-verifies it under a new
+/// run id, so a receipt the parent committed has to keep counting as this
+/// task's own evidence; anything outside the chain is another Run's work and
+/// must never be mistaken for this one's deliverable.
+fn run_chain_write_receipts(
+    database: &Database,
+    run_id: &str,
+) -> Result<Vec<RunWriteReceipt>, String> {
+    let mut receipts = database.run_write_receipts(run_id)?;
+    let mut current = run_id.to_owned();
+    for _ in 0..100 {
+        let Some(parent) = database.continued_from_run_id(&current)? else {
+            break;
+        };
+        receipts.extend(database.run_write_receipts(&parent)?);
+        current = parent;
+    }
+    Ok(receipts)
+}
+
+/// The newest receipt for one managed path, by commit time.
+///
+/// The comparison is by normalized path text, so the Windows extended-length
+/// prefix one side may carry cannot hide the other side's receipt.
+fn receipt_for_path<'a>(
+    receipts: &'a [RunWriteReceipt],
+    path: &Path,
+) -> Option<&'a RunWriteReceipt> {
+    let wanted = normalize_path_text(&path.to_string_lossy());
+    receipts
+        .iter()
+        .filter(|receipt| normalize_path_text(&receipt.storage_path) == wanted)
+        .max_by_key(|receipt| receipt.created_at)
+}
+
+/// One path spelling for comparisons: no extended-length prefix, forward
+/// slashes, folded case.
+fn normalize_path_text(value: &str) -> String {
+    let without_prefix = value
+        .strip_prefix(r"\\?\")
+        .or_else(|| value.strip_prefix("//?/"))
+        .unwrap_or(value);
+    without_prefix.replace('\\', "/").to_lowercase()
+}
+
+/// Hash the file on disk and compare it with what the receipt recorded.
+///
+/// The ledger stores hashes in its own `sha256:<hex>` form while `sha256_file`
+/// returns bare hex, so the two spellings are normalized before they are
+/// compared: comparing them raw made every legitimate write look like drift.
+fn compare_receipt_hash(receipt: &RunWriteReceipt, path: &Path) -> Result<bool, String> {
+    let Some(expected) = receipt.after_hash.as_deref() else {
+        return Err("该写入回执没有登记内容哈希".to_owned());
+    };
+    let actual = sha256_file(path)?;
+    Ok(hex_digest(expected) == hex_digest(&actual))
+}
+
+/// The bare hex of a digest spelled either way.
+fn hex_digest(value: &str) -> &str {
+    value.strip_prefix("sha256:").unwrap_or(value)
+}
+
+/// A named target without evidence that **this task** produced it.
+///
+/// A modification time is not a content comparison and not an author: a
+/// `touch`, an external process, or another Run's write would all pass it. The
+/// path is a target the task itself declared (see [`expectations_from_task`]),
+/// so the report says which evidence is missing rather than claiming the file
+/// is untouched.
 fn untouched_verdict(item: &DeliveryChecklistItem, path: &Path) -> ItemVerdict {
     let finding = json!({
         "itemKey": item.item_key,
         "displayName": item.display_name,
         "boundPath": path.to_string_lossy(),
-        "source": "untouched",
+        "source": "pre_existing",
+        "provenance": "pre_existing",
         "reason": format!(
-            "交付项「{}」缺少本次任务写入更新的证据：\
-             仅凭文件存在不能算作交付，请完成要求的修改并保存该文件",
+            "任务声明的产物「{}」缺少本 Run 写入的证据：文件存在，但本次任务（含其所续做的 Run）\
+             既没有登记的产物，也没有受管写入回执，因此无法确认这些字节来自本 Run —— \
+             仅更新时间戳不足以证明它是本 Run 的交付结果",
             item.display_name
         ),
         "checks": {
             "exists": "passed",
-            "updatedByRun": {"state": "failed", "reason": "mtime 早于 Run 开始时间或不可读取"}
+            "provenance": {
+                "state": "failed",
+                "evidenceOnly": "mtime",
+                "reason": "只有文件存在与时间戳；没有产物登记或受管写入回执",
+            },
+            "write_receipt": {"state": "absent"}
         },
         "stats": Value::Null,
     });
@@ -979,6 +1715,45 @@ fn untouched_verdict(item: &DeliveryChecklistItem, path: &Path) -> ItemVerdict {
         finding_json: finding.to_string(),
         bound_path: Some(path.to_path_buf()),
     }
+}
+
+/// Paths this task **did** write that no checklist item declared. Reported so
+/// "every declared item passed" and "the Run wrote exactly what it promised"
+/// cannot be confused when a task's own promise was under-read.
+fn undeclared_writes(
+    root: &Path,
+    receipts: &[RunWriteReceipt],
+    declared: &BTreeSet<String>,
+) -> Vec<Value> {
+    let normalized_root = root.to_string_lossy().replace('\\', "/");
+    let mut listed: Vec<(String, String)> = Vec::new();
+    for receipt in receipts {
+        let without_prefix = receipt.storage_path.trim_start_matches(r"\\?");
+        let path = without_prefix.replace('\\', "/");
+        let relative = match path.strip_prefix(&normalized_root) {
+            Some(relative) => relative.trim_start_matches('/').to_owned(),
+            None => continue,
+        };
+        if relative.is_empty() || declared.contains(&path_key(&relative)) {
+            continue;
+        }
+        let entry = (relative, receipt.tool.clone());
+        if !listed.iter().any(|existing| existing.0 == entry.0) {
+            listed.push(entry);
+        }
+    }
+    listed.sort();
+    listed
+        .into_iter()
+        .map(|(path, tool)| json!({"path": path, "tool": tool}))
+        .collect()
+}
+
+/// Path identity for a managed write receipt, whose `storage_path` may carry
+/// the Windows extended-length prefix while the verifier holds the canonical
+/// project-relative path.
+fn same_managed_path(stored: &str, path: &Path) -> bool {
+    normalize_path_text(stored) == normalize_path_text(&path.to_string_lossy())
 }
 
 fn bind_pathless_slot(
@@ -1277,6 +2052,15 @@ pub(crate) enum RequirementKind {
     },
     /// The task demanded statistics without naming a bindable source and column.
     SourceStatsUnbound { demand: String },
+    /// The task stated a machine field convention for one JSON artifact: which
+    /// literal marks the condition, which field must then be declared empty, and
+    /// (when the Host could identify it) which artifact the rule governs.
+    FieldConvention {
+        target_path: Option<String>,
+        marker_field: String,
+        marker_value: String,
+        evidence_field: String,
+    },
 }
 
 impl RequirementKind {
@@ -1287,6 +2071,7 @@ impl RequirementKind {
             RequirementKind::RatioConsistency { .. } => "ratio_consistency",
             RequirementKind::SourceDistribution { .. } => "source_distribution",
             RequirementKind::SourceStatsUnbound { .. } => "source_statistics",
+            RequirementKind::FieldConvention { .. } => "field_convention",
         }
     }
 
@@ -1325,6 +2110,17 @@ impl RequirementKind {
                     demand: demand.clone(),
                 }
             }
+            RequirementKind::FieldConvention {
+                target_path,
+                marker_field,
+                marker_value,
+                evidence_field,
+            } => StoredRequirementKind::FieldConvention {
+                target_path: target_path.clone(),
+                marker_field: marker_field.clone(),
+                marker_value: marker_value.clone(),
+                evidence_field: evidence_field.clone(),
+            },
         }
     }
 
@@ -1361,6 +2157,17 @@ impl RequirementKind {
                     demand: demand.clone(),
                 }
             }
+            StoredRequirementKind::FieldConvention {
+                target_path,
+                marker_field,
+                marker_value,
+                evidence_field,
+            } => RequirementKind::FieldConvention {
+                target_path: target_path.clone(),
+                marker_field: marker_field.clone(),
+                marker_value: marker_value.clone(),
+                evidence_field: evidence_field.clone(),
+            },
         }
     }
 }
@@ -1431,22 +2238,42 @@ pub(crate) fn requirements_from_task(text: &str) -> Vec<DeliveryRequirement> {
     if let Some(demand) = source_statistics_demand(text) {
         requirements.push(demand);
     }
+    // A machine field convention the task states for one JSON artifact. It is
+    // emitted here unbound and bound to its target when the checklist is
+    // attached, because only then is it known which JSON artifacts the task
+    // actually promised; an unbound rule is reported as 未核验, never applied to
+    // every JSON file the Run touched.
+    if let Some(convention) = field_convention_from_task(text) {
+        requirements.push(field_convention_requirement(&convention, None));
+    }
     requirements
 }
 
 /// Verbs that introduce a file as *input* to read, so a name introduced this way
-/// is source data rather than something the task asks Fox to produce.
+/// is source data rather than something the task asks Fox to produce. Besides
+/// explicit reading, these cover ordinary consume-and-process phrasings
+/// ("清洗 in/messy_sales.csv"、"回答 in/questions.json 中的问题"): a name the task
+/// only consumes never becomes a deliverable the Run has to write. A path the
+/// task also writes stays an output — output verbs win.
 const SOURCE_INPUT_VERBS: &[&str] = &[
-    "读取", "读", "基于", "根据", "依据", "参照", "按照", "依照", "输入", "来自", "来源",
-    "分析", "解析",
+    "读取", "读", "阅读", "基于", "根据", "依据", "参照", "参考", "按照", "依照", "结合",
+    "使用", "采用", "输入", "来自", "来源", "分析", "解析", "只读",
+    // Consume / process / answer-with verbs.
+    "清洗", "核对", "审核", "检查", "校验", "比对", "比较", "对比", "处理", "统计", "汇总",
+    "回答", "查询", "检索", "搜索", "查看", "浏览", "打开", "导入", "不改", "不改变", "保持",
+    // English equivalents, matched at a word boundary.
+    "read", "from", "based on", "using", "use", "given", "clean", "check", "review",
+    "compare", "analyze", "parse", "answer", "query", "search", "inspect", "load",
+    "import", "refer",
 ];
 
 /// Verbs that introduce a file as the **target to write**. A file can be both:
 /// "读取 report.docx，修改内容并保存 report.docx" names one path twice, and the
 /// second mention is a save request.
 const TARGET_OUTPUT_VERBS: &[&str] = &[
-    "保存", "另存", "存入", "存成", "写入", "写到", "覆盖", "更新", "修改", "编辑", "改写",
-    "填充", "追加", "导出", "输出", "生成", "创建", "新建", "制作", "整理成", "汇总成",
+    "保存", "另存", "存入", "存成", "写入", "写到", "写回", "回写", "覆盖", "更新", "修改",
+    "改动", "编辑", "改写", "填充", "追加", "导出", "输出", "生成", "创建", "新建", "制作",
+    "整理成", "汇总成", "撰写", "编写", "制备", "出具", "打印成", "交付",
     "save", "write", "append", "overwrite", "update", "modify", "edit", "export",
     "generate", "create", "produce",
 ];
@@ -1691,20 +2518,36 @@ fn is_source_name_character(character: char) -> bool {
 /// characters directly in front of it. Locating the name with `text.find(name)`
 /// cannot answer the question: a task that reads one file and saves it back
 /// names the same path twice, and only the first occurrence is an input.
+///
+/// A negated verb introduces nothing: "不要修改 a.csv" and "禁止写入 a.csv" are
+/// prohibitions, and reading them as a write request would turn the task's own
+/// restriction into an authorization for the very path it protects. Only the
+/// verb is negated, never the sentence: "不要把 b.csv 覆盖，另存为 c.csv" keeps
+/// `c.csv` an output.
 fn mention_verb(text: &str, name_start: usize, verbs: &[&str]) -> bool {
     let tail = text[..name_start].trim_end();
     let window = tail
         .char_indices()
         .rev()
-        .take(10)
+        .take(NAME_WINDOW_CHARS)
         .map(|(index, _)| index)
         .last()
         .map(|index| &tail[index..])
         .unwrap_or(tail);
+    // A short modifier may stand between the verb and the name
+    // ("读取本题 cleaning_rules.md"): strip it, so the verb that introduces the
+    // name is still found without teaching the matcher every phrasing.
+    let mut candidate = window;
+    while let Some(rest) = strip_name_modifier(candidate) {
+        candidate = rest;
+    }
     verbs.iter().any(|verb| {
-        let Some(before) = window.strip_suffix(verb) else {
+        let Some(before) = candidate.strip_suffix(verb) else {
             return false;
         };
+        if negates_verb(before) {
+            return false;
+        }
         // An ASCII verb must start at a word boundary: "reserve x.docx" is not
         // a save request, and "united x.xlsx" is not a create request.
         !verb
@@ -1718,14 +2561,147 @@ fn mention_verb(text: &str, name_start: usize, verbs: &[&str]) -> bool {
     })
 }
 
+/// How far back a verb is looked for. Wide enough for a verb plus a short
+/// modifier ("读取本题"), short enough that prose from an earlier clause cannot
+/// introduce this name.
+const NAME_WINDOW_CHARS: usize = 16;
+
+/// Markers that turn the verb directly in front of a name into a prohibition.
+///
+/// Deliberately literal and position-bound: the marker has to stand immediately
+/// before the verb, so an unrelated earlier negation cannot silence a real
+/// instruction ("没有模板，生成 a.docx" still produces `a.docx`).
+const NEGATED_VERB_MARKERS: &[&str] = &[
+    "不要", "不得", "不能", "不需", "不用", "无需", "无须", "禁止", "严禁", "不准", "不许",
+    "别", "勿", "莫", "免", "不可", "不应该", "避免", "防止", "切勿", "切忌",
+    "do not", "don't", "dont", "never", "must not", "cannot", "can't", "without",
+    "avoid", "no ",
+];
+
+/// Characters a negation marker can end in. A window that clips a long marker
+/// ("……禁止写入") leaves the marker's own tail in front of the verb; that tail
+/// is enough to tell a clipped prohibition from an authorizing verb, because
+/// none of these characters ends an ordinary write instruction.
+const NEGATION_MARKER_TAILS: &[char] = &['不', '禁', '勿', '别', '莫', '准', '许', '得', '免', '要'];
+
+fn negates_verb(before: &str) -> bool {
+    let trimmed = before.trim_end_matches([' ', '　', '\t', '\n', '\r', '，', ',', '。', '、']);
+    // The marker sits immediately before what follows it.
+    let tail: String = trimmed.chars().rev().take(6).collect::<String>().chars().rev().collect();
+    if NEGATED_VERB_MARKERS
+        .iter()
+        .any(|marker| tail.to_lowercase().ends_with(&marker.to_lowercase()))
+    {
+        return true;
+    }
+    // A marker whose last character is itself a negator ("请勿改动" ends with
+    // 改动, so only the marker's own tail is visible here).
+    let visible: Vec<char> = trimmed.chars().rev().take(4).collect();
+    if NEGATED_VERB_MARKERS.iter().any(|marker| {
+        let expected: Vec<char> = marker.chars().rev().collect();
+        expected.len() <= visible.len()
+            && expected
+                .iter()
+                .zip(visible.iter())
+                .all(|(want, got)| want == got)
+    }) {
+        return true;
+    }
+    // Clipped marker: only when the window itself was cut short (no whitespace
+    // in the visible tail), so a complete clause ending in a normal word is not
+    // misread as a prohibition.
+    !trimmed.contains(char::is_whitespace)
+        && tail
+            .chars()
+            .next_back()
+            .is_some_and(|value| NEGATION_MARKER_TAILS.contains(&value))
+}
+
+/// One trailing modifier that may sit between a verb and the file it
+/// introduces. Stripping is repeated, so "读取本地文件 X" resolves to "读取".
+fn strip_name_modifier(value: &str) -> Option<&str> {
+    const MODIFIERS: &[&str] = &[
+        "本题", "本任务", "本次", "本地", "给定", "所给", "上述", "下面", "以下", "附件",
+        "材料", "文件", "这个", "该", "此", "本",
+        "the", "file", "given", "provided", "attached", "a", "an",
+    ];
+    MODIFIERS
+        .iter()
+        .find_map(|modifier| value.strip_suffix(modifier))
+        .map(str::trim_end)
+}
+
 /// True when **this** mention introduces the name as input to read.
 fn mention_is_input(text: &str, name_start: usize) -> bool {
     mention_verb(text, name_start, SOURCE_INPUT_VERBS)
 }
 
-/// True when **this** mention asks for the name to be written.
+/// True when this mention asks for the name to be written.
 fn mention_is_output(text: &str, name_start: usize) -> bool {
-    mention_verb(text, name_start, TARGET_OUTPUT_VERBS)
+    !mention_is_prohibited(text, name_start) && mention_verb(text, name_start, TARGET_OUTPUT_VERBS)
+}
+
+/// True when a negation stands immediately in front of **this** mention.
+///
+/// A second mention of a path the task just protected ("读取 a.csv，不要修改
+/// a.csv") has no verb of its own, so the verb matcher cannot classify it. The
+/// negation in front of it is still a fact about that mention, and reading it as
+/// input material is what keeps the task's own prohibition effective.
+fn mention_is_prohibited(text: &str, name_start: usize) -> bool {
+    // Sentence punctuation between an earlier instruction and this prohibition
+    // is not part of the prohibition: "生成 b.json。请勿改动 a.csv" negates one
+    // verb about one path.
+    let tail: &str = text[..name_start]
+        .trim_end_matches(|value: char| value.is_whitespace() || is_sentence_stop(value));
+    let mut candidate = tail;
+    for _ in 0..4 {
+        if negates_verb(candidate) || has_multichar_negation_near_end(candidate) {
+            return true;
+        }
+        let stripped = strip_name_modifier(candidate)
+            .or_else(|| {
+                TARGET_OUTPUT_VERBS
+                    .iter()
+                    .find_map(|verb| candidate.strip_suffix(verb))
+            })
+            .map(str::trim_end)
+            .filter(|rest| rest.len() < candidate.len());
+        match stripped {
+            Some(rest) => candidate = rest,
+            None => break,
+        }
+    }
+    false
+}
+
+/// True when a multi-character negation stands in the last few characters: the
+/// verb after it may be one the Host does not enumerate ("请勿改动 a.csv"), and
+/// the negation is still the fact that matters.
+///
+/// Only markers of two or more characters take part, so an ordinary word that
+/// merely contains one (`分别生成 a.csv`) cannot be mistaken for a prohibition.
+fn has_multichar_negation_near_end(value: &str) -> bool {
+    const NEAR_END_CHARS: usize = 6;
+    let window: String = value
+        .chars()
+        .rev()
+        .take(NEAR_END_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    NEGATED_VERB_MARKERS
+        .iter()
+        .filter(|marker| marker.chars().count() >= 2)
+        .any(|marker| window.to_lowercase().contains(&marker.to_lowercase()))
+}
+
+/// Punctuation that ends one instruction and starts another.
+fn is_sentence_stop(value: char) -> bool {
+    matches!(
+        value,
+        '。' | '；' | ';' | '\n' | '，' | ',' | '：' | ':' | '！' | '!' | '？' | '?' | '、'
+    )
 }
 
 /// Bind a `SourceDistribution` requirement to a real file under the project
@@ -2882,6 +3858,25 @@ fn evaluate_requirement(
             "任务要求统计，但未能绑定可核验的源数据与统计列，因此未核验：{}",
             demand.chars().take(120).collect::<String>()
         )),
+        RequirementKind::FieldConvention {
+            target_path,
+            marker_field,
+            marker_value,
+            ..
+        } => match target_path {
+            // Unbound: the demand is real but its subject is unknown, so it is
+            // reported as 未核验 instead of being applied to unrelated JSON.
+            None => RequirementVerdict::Unverified(format!(
+                "任务写明了字段约定（{marker_field}={marker_value} 时的配套空值字段），\
+                 但未能确定它约束哪个 JSON 产物，因此未核验"
+            )),
+            // Bound: the checker itself runs in `apply_field_convention`, which
+            // reports passed/failed per artifact with the real violation text, so
+            // this path only exists to keep the item's requirement list complete.
+            Some(target) => RequirementVerdict::Unverified(format!(
+                "字段约定已绑定产物 {target}，核验结果见 field_convention 检查项"
+            )),
+        },
         RequirementKind::SourceDistribution {
             source,
             alternates: _,
@@ -3074,6 +4069,13 @@ pub(crate) fn item_requirements(
                 matches!(item_kind, ArtifactKind::Spreadsheet | ArtifactKind::Slides)
             }
             RequirementKind::Sections { .. } => item_kind == ArtifactKind::Word,
+            // A field convention is stored on the one item it was bound to, so the
+            // gate can verify it against exactly that artifact. An unbound rule
+            // is recorded on a single carrier instead (see the unbound branch in
+            // `attach_requirements_with`), where it is reported as 未核验.
+            RequirementKind::FieldConvention { target_path, .. } => {
+                target_path.is_some() && requirement.item_key.as_deref() == Some(item_key)
+            }
             RequirementKind::RatioConsistency { .. }
             | RequirementKind::SourceDistribution { .. }
             | RequirementKind::SourceStatsUnbound { .. } => false,
@@ -3098,11 +4100,70 @@ pub(crate) fn item_requirements(
 pub(crate) fn attach_requirements_to_seeds(
     seeds: &mut [StoredChecklistSeed],
     requirements: &[DeliveryRequirement],
+    task_text: &str,
 ) {
+    // A field convention is bound to a declared JSON artifact here, where the
+    // checklist the Host actually seeded is in hand: exactly one promised JSON
+    // file is unambiguous, an explicitly named one wins, and anything else stays
+    // unbound (and is then reported as 未核验 rather than swept across the Run).
+    let json_targets: Vec<String> = seeds
+        .iter()
+        .filter_map(|seed| {
+            let target = seed.target_path.as_deref()?;
+            (ArtifactKind::from_extension(
+                Path::new(target)
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(""),
+            ) == Some(ArtifactKind::Json))
+            .then(|| target.replace('\\', "/"))
+        })
+        .collect();
+    let mut requirements: Vec<DeliveryRequirement> = requirements.to_vec();
+    let mut unbound_carriers: Vec<String> = Vec::new();
+    for requirement in requirements.iter_mut() {
+        let RequirementKind::FieldConvention {
+            target_path,
+            marker_field,
+            marker_value,
+            evidence_field,
+        } = &requirement.kind
+        else {
+            continue;
+        };
+        let convention = bind_field_convention(
+            task_text,
+            FieldConvention {
+                marker_field: marker_field.clone(),
+                marker_value: marker_value.clone(),
+                evidence_field: evidence_field.clone(),
+                target_path: target_path.clone(),
+            },
+            &json_targets,
+        );
+        let bound_target = convention.target_path.clone();
+        if let Some(target) = bound_target.as_deref() {
+            requirement.item_key = seeds
+                .iter()
+                .find(|seed| {
+                    seed.target_path.as_deref().is_some_and(|declared| {
+                        path_key(&declared.replace('\\', "/")) == path_key(target)
+                    })
+                })
+                .map(|seed| seed.item_key.clone());
+        }
+        let rebound = field_convention_requirement(&convention, requirement.item_key.clone());
+        requirement.id = rebound.id;
+        requirement.source_text = rebound.source_text;
+        requirement.kind = rebound.kind;
+        if requirement.item_key.is_none() {
+            unbound_carriers.push(requirement.id.clone());
+        }
+    }
     let carrier = seeds.first().map(|seed| seed.item_key.clone());
     for seed in seeds.iter_mut() {
         let include_cross = carrier.as_deref() == Some(seed.item_key.as_str());
-        attach_requirements_with(seed, requirements, include_cross);
+        attach_requirements_with(seed, &requirements, include_cross, &unbound_carriers);
     }
 }
 
@@ -3112,13 +4173,14 @@ pub(crate) fn attach_requirements(
 ) {
     // A single-seed caller has no other item that could own a cross requirement,
     // so this seed carries them too.
-    attach_requirements_with(seed, requirements, true);
+    attach_requirements_with(seed, requirements, true, &[]);
 }
 
 fn attach_requirements_with(
     seed: &mut StoredChecklistSeed,
     requirements: &[DeliveryRequirement],
     include_cross: bool,
+    unbound_carriers: &[String],
 ) {
     let kind = seed
         .target_path
@@ -3138,6 +4200,17 @@ fn attach_requirements_with(
         // gate could not check it at all — the demand was verified only by unit
         // tests that called the checker directly.
         scoped.extend(cross_artifact_requirements(requirements));
+        // A rule whose artifact the Host could not identify still has to be
+        // *recorded*, on one item, so the report can say 未核验 instead of
+        // staying silent about a demand the task really made.
+        for requirement in requirements.iter().filter(|requirement| {
+            unbound_carriers.contains(&requirement.id)
+                && matches!(requirement.kind, RequirementKind::FieldConvention { .. })
+        }) {
+            let mut owned = requirement.clone();
+            owned.item_key = Some(seed.item_key.clone());
+            scoped.push(owned);
+        }
     }
     seed.requirements = scoped
         .iter()
@@ -3232,6 +4305,467 @@ pub(crate) fn apply_requirement_outcomes(
 /// bounded delivery repair with a concrete reason. Requirements that no checker
 /// can decide stay explicitly `unverified`: the gate never upgrades silence into
 /// a pass.
+/// A machine field convention the task states for **one** JSON artifact: a
+/// *marker* field, the literal it must carry, and the *evidence* field whose
+/// declared emptiness has to hold whenever that marker is used.
+///
+/// The Host cannot decide whether evidence is sufficient — that is the model's
+/// judgement. What it can decide is the invariant the task itself wrote down:
+/// "证据不足时 answer 写 insufficient_evidence，source_file 为 null" pairs a
+/// literal with a declared empty value. Any field/literal pair parses the same
+/// way, so nothing here is specific to one task, one question or one answer.
+///
+/// The convention is bound to exactly one declared artifact. It is never swept
+/// across every JSON file the Run touched: an unrelated `stats.json` is not
+/// governed by a rule the task wrote for `out/answers.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FieldConvention {
+    pub marker_field: String,
+    pub marker_value: String,
+    pub evidence_field: String,
+    /// The declared JSON artifact the task bound this convention to, when it
+    /// named one (or promised exactly one JSON file). `None` means the rule
+    /// could not be bound to a target, and the finding then says 未核验 instead
+    /// of being applied to whatever JSON happens to exist.
+    pub target_path: Option<String>,
+}
+
+/// What the task declared the evidence field to be when the marker is used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EvidenceLiteral {
+    /// JSON `null` — the field must be present and null.
+    Null,
+    /// A declared empty string ("为空字符串").
+    EmptyString,
+    /// A declared literal value ("error 为 none").
+    Literal(String),
+}
+
+/// Read a field convention out of the task text, or nothing at all.
+///
+/// Deliberately narrow: both halves must stand in one sentence, each field must
+/// be an identifier, and the marker literal must look like a machine value
+/// (ASCII, no spaces) rather than prose. The roles come from the *literals*, not
+/// from the order the sentence happens to use them in: the field carrying a real
+/// machine token is the marker, the field declared empty is the evidence field,
+/// so "answer 写 X，source_file 为 null" and "source_file 为 null，answer 写 X"
+/// describe the same rule. A task that states no such convention produces no
+/// requirement.
+pub(crate) fn field_convention_from_task(text: &str) -> Option<FieldConvention> {
+    for sentence in text.split(['。', '；', ';', '\n']) {
+        if sentence.trim().is_empty() {
+            continue;
+        }
+        let mut marker: Option<(String, String)> = None;
+        let mut evidence: Option<(String, EvidenceLiteral)> = None;
+        for (field, rest) in identifier_occurrences(sentence) {
+            let Some(literal) = literal_after_introducer(rest) else {
+                continue;
+            };
+            let token = literal.token();
+            if literal.is_empty_literal() {
+                // The declared-empty side is the evidence field. The first one
+                // wins; a second is prose, not a second rule.
+                evidence.get_or_insert((field.to_owned(), literal));
+            } else if is_machine_literal(token) && token != field {
+                marker.get_or_insert((field.to_owned(), token.to_owned()));
+            }
+        }
+        if let (Some((marker_field, marker_value)), Some((evidence_field, _))) =
+            (marker, evidence)
+        {
+            if marker_field != evidence_field {
+                return Some(FieldConvention {
+                    marker_field,
+                    marker_value,
+                    evidence_field,
+                    target_path: None,
+                });
+            }
+        }
+    }
+    None
+}
+
+/// The declared JSON artifact a convention sentence governs.
+///
+/// Two ways to bind, both explicit: the same sentence names a file
+/// ("生成 out/answers.json；证据不足时 answer 写 …"), or the task promises
+/// exactly one JSON artifact overall, which is then unambiguous. Anything else
+/// stays unbound — an unbound rule is reported as 未核验, never applied to
+/// unrelated JSON.
+pub(crate) fn bind_field_convention(
+    task_text: &str,
+    mut convention: FieldConvention,
+    json_targets: &[String],
+) -> FieldConvention {
+    let mut named: Vec<String> = Vec::new();
+    for sentence in task_text.split(['。', '；', ';', '\n']) {
+        if sentence.trim().is_empty() {
+            continue;
+        }
+        if field_convention_from_task(sentence).is_none() {
+            continue;
+        }
+        for mention in collect_mentions(sentence) {
+            named.push(mention.name.replace('\\', "/"));
+        }
+    }
+    // An explicit name must match one of the promised artifacts.
+    for candidate in &named {
+        let key = path_key(candidate);
+        if let Some(target) = json_targets.iter().find(|target| path_key(target) == key) {
+            convention.target_path = Some(target.clone());
+            return convention;
+        }
+    }
+    if json_targets.len() == 1 {
+        convention.target_path = Some(json_targets[0].clone());
+    }
+    convention
+}
+
+/// The rule as a storable requirement, scoped to the bound item.
+pub(crate) fn field_convention_requirement(
+    convention: &FieldConvention,
+    item_key: Option<String>,
+) -> DeliveryRequirement {
+    DeliveryRequirement {
+        item_key,
+        id: match convention.target_path.as_deref() {
+            Some(target) => format!(
+                "field-convention:{target}#{}={}#{}",
+                convention.marker_field, convention.marker_value, convention.evidence_field
+            ),
+            None => format!(
+                "field-convention:unbound#{}={}#{}",
+                convention.marker_field, convention.marker_value, convention.evidence_field
+            ),
+        },
+        kind: RequirementKind::FieldConvention {
+            target_path: convention.target_path.clone(),
+            marker_field: convention.marker_field.clone(),
+            marker_value: convention.marker_value.clone(),
+            evidence_field: convention.evidence_field.clone(),
+        },
+        source_text: format!(
+            "任务写明字段约定：{} 为 {} 时，{} 必须按声明为空",
+            convention.marker_field, convention.marker_value, convention.evidence_field
+        ),
+    }
+}
+
+/// Every ASCII identifier in the sentence with the text that follows it.
+fn identifier_occurrences(sentence: &str) -> Vec<(&str, &str)> {
+    let bytes = sentence.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let start = index;
+        if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            out.push((&sentence[start..index], &sentence[index..]));
+        } else {
+            index += 1;
+        }
+    }
+    out
+}
+
+/// The literal a field is said to carry, read past one introducer.
+fn literal_after_introducer(rest: &str) -> Option<EvidenceLiteral> {
+    let trimmed = rest.trim_start();
+    let after = ["写成", "写为", "写到", "填写", "填为", "取值为", "必须为", "标记为", "写", "填", "为", "是", "用", "=", ":", "："]
+        .iter()
+        .find_map(|introducer| trimmed.strip_prefix(introducer))?;
+    let after = after.trim_start();
+    // A declared empty value is a shape, not a token: it is read before the
+    // token scan so "为空字符串" cannot degrade into the prose word 空.
+    for empty in ["空字符串", "空值", "empty string", "空"] {
+        if after.starts_with(empty) {
+            return Some(EvidenceLiteral::EmptyString);
+        }
+    }
+    let literal: String = after
+        .chars()
+        .take_while(|value| value.is_ascii_alphanumeric() || matches!(value, '_' | '-' | '.'))
+        .collect();
+    if literal.is_empty() {
+        return None;
+    }
+    if literal.eq_ignore_ascii_case("null")
+        || literal.eq_ignore_ascii_case("none")
+        || literal.eq_ignore_ascii_case("nil")
+    {
+        return Some(EvidenceLiteral::Null);
+    }
+    if literal.eq_ignore_ascii_case("empty") {
+        return Some(EvidenceLiteral::EmptyString);
+    }
+    Some(EvidenceLiteral::Literal(literal))
+}
+
+impl EvidenceLiteral {
+    fn is_empty_literal(&self) -> bool {
+        !matches!(self, EvidenceLiteral::Literal(_))
+    }
+
+    /// The literal as the task spelled it, for machine-token screening.
+    fn token(&self) -> &str {
+        match self {
+            EvidenceLiteral::Null => "null",
+            EvidenceLiteral::EmptyString => "empty",
+            EvidenceLiteral::Literal(value) => value,
+        }
+    }
+}
+
+/// A marker literal is a machine value, not prose: ASCII, short, and not a file
+/// name (a path in the sentence is not a field value).
+fn is_machine_literal(literal: &str) -> bool {
+    !literal.is_empty()
+        && literal.len() <= 64
+        && literal.is_ascii()
+        && !literal.contains('.')
+        && !FILE_EXTENSIONS
+            .iter()
+            .any(|extension| literal.to_lowercase().ends_with(extension))
+}
+
+/// Violations of the convention in one JSON artifact, as human-readable lines.
+///
+/// Strict by construction, and in the direction the task declared:
+/// * the **marker present** case demands the evidence field *exist* and carry
+///   the declared empty value — a missing field, an empty string where `null`
+///   was declared, and a wrong type are three different failures, each reported
+///   as itself;
+/// * the **marker absent** case is not a violation. The task wrote "when
+///   evidence is insufficient, write X and leave Y empty"; it never said every
+///   item whose evidence field is empty must be marked X, and reading a
+///   one-way condition as an equivalence would fail correct answers the task
+///   never forbade.
+fn field_convention_violations(
+    value: &Value,
+    convention: &FieldConvention,
+    evidence: &EvidenceLiteral,
+) -> Vec<String> {
+    let items: Vec<&Value> = match value {
+        Value::Array(items) => items.iter().collect(),
+        Value::Object(_) => vec![value],
+        _ => return Vec::new(),
+    };
+    let mut violations = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let Some(object) = item.as_object() else {
+            continue;
+        };
+        // Only records that really carry this field participate: the rule is
+        // about the pair, and a record with neither field is out of its scope.
+        if !object.contains_key(&convention.marker_field)
+            && !object.contains_key(&convention.evidence_field)
+        {
+            continue;
+        }
+        let marker = object.get(&convention.marker_field);
+        let marker_set = matches!(marker, Some(Value::String(text)) if text.trim() == convention.marker_value);
+        if !marker_set {
+            continue;
+        }
+        match object.get(&convention.evidence_field) {
+            None => violations.push(format!(
+                "第 {} 项使用了 {}={}，但完全缺少 {} 字段（任务要求该字段存在且为空值）",
+                index + 1,
+                convention.marker_field,
+                convention.marker_value,
+                convention.evidence_field
+            )),
+            Some(found) => {
+                let satisfied = match (evidence, found) {
+                    (EvidenceLiteral::Null, Value::Null) => true,
+                    (EvidenceLiteral::EmptyString, Value::String(text)) => text.trim().is_empty(),
+                    (EvidenceLiteral::Literal(expected), Value::String(text)) => {
+                        text.trim() == expected
+                    }
+                    _ => false,
+                };
+                if !satisfied {
+                    violations.push(format!(
+                        "第 {} 项使用了 {}={}，但 {} 的类型或取值不符合声明：期望 {}，实际 {}",
+                        index + 1,
+                        convention.marker_field,
+                        convention.marker_value,
+                        convention.evidence_field,
+                        describe_evidence_expectation(evidence),
+                        describe_json_value(found)
+                    ));
+                }
+            }
+        }
+        if violations.len() >= 5 {
+            break;
+        }
+    }
+    violations
+}
+
+fn describe_evidence_expectation(evidence: &EvidenceLiteral) -> String {
+    match evidence {
+        EvidenceLiteral::Null => "JSON null".to_owned(),
+        EvidenceLiteral::EmptyString => "空字符串".to_owned(),
+        EvidenceLiteral::Literal(value) => format!("字符串 {value}"),
+    }
+}
+
+fn describe_json_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_owned(),
+        Value::String(text) if text.trim().is_empty() => "空字符串".to_owned(),
+        Value::String(text) => format!("字符串 {text:?}"),
+        Value::Bool(_) => "布尔值".to_owned(),
+        Value::Number(_) => "数字".to_owned(),
+        Value::Array(_) => "数组".to_owned(),
+        Value::Object(_) => "对象".to_owned(),
+    }
+}
+
+/// Apply the convention to the **one** artifact it was bound to.
+///
+/// The rule lives in the checklist item's own stored requirements, so it is
+/// verified against exactly the artifact that item bound — never against every
+/// JSON file the Run happened to produce. An unbound rule records 未核验 on the
+/// item that carries it instead of being swept across the Run, because a rule
+/// whose target the Host could not identify is not evidence about anything.
+fn apply_field_convention(
+    database: &Database,
+    run_id: &str,
+    verdicts: &mut [ItemVerdict],
+) -> Result<(), String> {
+    let requirements = stored_requirements(&database.delivery_requirements(run_id)?);
+    let conventions: Vec<(DeliveryRequirement, FieldConvention, EvidenceLiteral)> = requirements
+        .iter()
+        .filter_map(|requirement| match &requirement.kind {
+            RequirementKind::FieldConvention {
+                target_path,
+                marker_field,
+                marker_value,
+                evidence_field,
+            } => Some((
+                requirement.clone(),
+                FieldConvention {
+                    marker_field: marker_field.clone(),
+                    marker_value: marker_value.clone(),
+                    evidence_field: evidence_field.clone(),
+                    target_path: target_path.clone(),
+                },
+                EvidenceLiteral::Null,
+            )),
+            _ => None,
+        })
+        .collect();
+    if conventions.is_empty() {
+        return Ok(());
+    }
+    for verdict in verdicts.iter_mut() {
+        let Some(path) = verdict.bound_path.clone() else {
+            continue;
+        };
+        for (requirement, convention, evidence) in &conventions {
+            let bound_to_this_item = requirement.item_key.as_deref() == Some(verdict.item_key.as_str());
+            if !bound_to_this_item {
+                continue;
+            }
+            let Some(target) = convention.target_path.as_deref() else {
+                // Unbound: say so, on the item that carries the rule, and never
+                // invent a verdict from a file that was not the rule's subject.
+                record_field_convention_check(
+                    verdict,
+                    json!({
+                        "state": "unverified",
+                        "markerField": convention.marker_field,
+                        "markerValue": convention.marker_value,
+                        "evidenceField": convention.evidence_field,
+                        "reason": "任务写明了字段约定，但没有指名它约束哪个 JSON 产物，无法绑定核验",
+                    }),
+                    None,
+                );
+                continue;
+            };
+            let same = verdict
+                .bound_path
+                .as_deref()
+                .is_some_and(|bound| path_key(&bound.to_string_lossy()) == path_key(target));
+            if !same {
+                continue;
+            }
+            if !verdict.passed {
+                // The artifact is already failing for its own reasons; adding a
+                // convention violation would only repeat the same repair item.
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+                continue;
+            };
+            let violations = field_convention_violations(&value, convention, evidence);
+            if violations.is_empty() {
+                record_field_convention_check(
+                    verdict,
+                    json!({
+                        "state": "passed",
+                        "target": target,
+                        "markerField": convention.marker_field,
+                        "markerValue": convention.marker_value,
+                        "evidenceField": convention.evidence_field,
+                    }),
+                    None,
+                );
+                continue;
+            }
+            record_field_convention_check(
+                verdict,
+                json!({
+                    "state": "failed",
+                    "target": target,
+                    "markerField": convention.marker_field,
+                    "markerValue": convention.marker_value,
+                    "evidenceField": convention.evidence_field,
+                    "violations": violations.clone(),
+                }),
+                Some(violations),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Write one convention outcome into the item's finding, and fail the item only
+/// when a violation was really found.
+fn record_field_convention_check(
+    verdict: &mut ItemVerdict,
+    check: Value,
+    violations: Option<Vec<String>>,
+) {
+    let mut finding: Value =
+        serde_json::from_str(&verdict.finding_json).unwrap_or_else(|_| json!({}));
+    finding["checks"]["field_convention"] = check;
+    if let Some(violations) = violations {
+        verdict.passed = false;
+        finding["reason"] = json!(format!(
+            "产物「{}」不符合任务写明的字段约定：{}",
+            finding["displayName"].as_str().unwrap_or("交付项"),
+            violations.join("；")
+        ));
+    }
+    verdict.finding_json = finding.to_string();
+}
+
 fn apply_delivery_requirements(
     run_id: &str,
     checklist: &[DeliveryChecklistItem],
@@ -3461,7 +4995,7 @@ pub(crate) fn zip_with_extra_part(bytes: &[u8], name: &str, body: &str) -> Vec<u
 
 fn repair_prompt(findings: &[Value]) -> String {
     let mut body = String::from(
-        "Fox 交付核验：你承诺的文件成果尚未全部通过 Host 的确定性核验。请只修复下列具体未完成项（在已授权工具范围内），不要重复已经完成的操作，也不要用一句“已完成”代替真实产物：\n",
+        "Fox 交付核验：你承诺的文件成果尚未全部通过 Host 的确定性核验。请只修复下列具体未完成项（在已授权工具范围内），不要重复已经完成的操作，也不要用一句“已完成”代替真实产物；任务给出的输入材料保持原样，修复只写入任务要求的产物路径。\n",
     );
     for finding in findings {
         let name = finding["displayName"].as_str().unwrap_or("交付项");
@@ -3503,6 +5037,18 @@ mod tests {
             .unwrap_or_else(|| panic!("missing seed {key}"))
     }
 
+    /// The production two-phase write, minus the round decision that sits
+    /// between its halves: stage under a mark, "commit" that mark exactly as the
+    /// decision transaction would, then finalize. Tests that only need "the
+    /// ledger is durable" call this so they exercise the same protocol — and the
+    /// same gate — the Host runs, instead of a private shortcut.
+    fn commit_test_outcome(db: &Database, run_id: &str, stop: &DeliveryStop) {
+        let mark = format!("test-decision:{}", uuid::Uuid::new_v4());
+        stage_outcome(db, run_id, &mark, stop, now_ms()).unwrap();
+        db.record_decision_mark_for_test(run_id, &mark, now_ms()).unwrap();
+        finalize_outcome(db, run_id, &mark, now_ms()).unwrap();
+    }
+
     #[test]
     fn counts_agv_style_excel_and_word_deliverables() {
         let seeds = expectations_from_task(
@@ -3523,6 +5069,445 @@ mod tests {
         assert!(seeds
             .iter()
             .any(|seed| seed.display_name == "Word 成果 1/1"));
+    }
+
+    /// Regression, 2026-10-01 capability run (O02): the three files the task only
+    /// reads — the first carrying the verb and the rest enumerated after it —
+    /// must not become deliverables the Run has to write.
+    #[test]
+    fn enumerated_read_list_is_not_a_deliverable() {
+        let task = "读取 policy.pdf、sales.csv 和 template.docx。按 PDF 中的 POLICY-2024-Q3 口径统计各地区销售额，\
+                    排除 status=return 的记录，不改变原文件。生成 out/summary.json，包含 policy_id、exclude_status、\
+                    totals_by_region、grand_total；再生成中文正式报告 out/report.docx，引用政策编号。";
+        let seeds = expectations_from_task(task);
+        let targets: Vec<&str> = seeds
+            .iter()
+            .filter_map(|seed| seed.target_path.as_deref())
+            .collect();
+        assert_eq!(targets, vec!["out/report.docx", "out/summary.json"], "{targets:?}");
+        let read_only = read_only_input_paths(task);
+        for name in ["policy.pdf", "sales.csv", "template.docx"] {
+            assert!(read_only.contains(&path_key(name)), "{name} must be read-only: {read_only:?}");
+        }
+        assert!(!read_only.contains(&path_key("out/summary.json")));
+    }
+
+    /// Regression, 2026-10-01 capability run (O09/O11): consume-and-process
+    /// phrasings introduce input material, not deliverables.
+    #[test]
+    fn consume_and_answer_verbs_keep_inputs_out_of_the_checklist() {
+        let o09 = "只根据 in/docs/ 的文档回答 in/questions.json 中的全部问题，生成 out/answers.json。";
+        let o09_seeds = expectations_from_task(o09);
+        let o09_targets: Vec<&str> = o09_seeds
+            .iter()
+            .filter_map(|seed| seed.target_path.as_deref())
+            .collect();
+        assert_eq!(o09_targets, vec!["out/answers.json"], "{o09_targets:?}");
+        assert!(read_only_input_paths(o09).contains(&path_key("in/questions.json")));
+
+        let o11 = "读取本题 cleaning_rules.md，按全部规则清洗 in/messy_sales.csv，结合客户字典和汇率文件，\
+                   生成 out/cleaned_sales.csv、out/reject_ledger.csv。";
+        let o11_seeds = expectations_from_task(o11);
+        let o11_targets: Vec<&str> = o11_seeds
+            .iter()
+            .filter_map(|seed| seed.target_path.as_deref())
+            .collect();
+        assert_eq!(
+            o11_targets,
+            vec!["out/cleaned_sales.csv", "out/reject_ledger.csv"],
+            "{o11_targets:?}"
+        );
+        let read_only = read_only_input_paths(o11);
+        assert!(read_only.contains(&path_key("cleaning_rules.md")), "{read_only:?}");
+        assert!(read_only.contains(&path_key("in/messy_sales.csv")), "{read_only:?}");
+    }
+
+    /// A path the task explicitly saves stays writable, even when the same task
+    /// also reads it: legitimate in-place editing must not be lost.
+    #[test]
+    fn an_in_place_save_stays_writable() {
+        let task = "读取 台账.xlsx、说明.md，更新内容后保存 台账.xlsx。";
+        let seeds = expectations_from_task(task);
+        let targets: Vec<&str> = seeds
+            .iter()
+            .filter_map(|seed| seed.target_path.as_deref())
+            .collect();
+        assert!(targets.contains(&"台账.xlsx"), "{targets:?}");
+        let read_only = read_only_input_paths(task);
+        assert!(!read_only.contains(&path_key("台账.xlsx")), "{read_only:?}");
+        assert!(read_only.contains(&path_key("说明.md")), "{read_only:?}");
+    }
+
+    /// Regression, 2026-10-01 review (R01): a prohibition is not an authorization.
+    ///
+    /// Every one of these tasks reads `a.csv` and either forbids changing it or
+    /// forbids writing it at all. Reading the negated write verb as a write
+    /// request emptied the read-only set, which is exactly what let the file the
+    /// task protected be overwritten.
+    #[test]
+    fn a_negated_write_verb_never_authorizes_writing_its_path() {
+        for task in [
+            "读取 a.csv，不要修改 a.csv，生成 b.json。",
+            "读取 a.csv，生成 b.json。禁止写入 a.csv。",
+            "读取 a.csv，生成 b.json。不得修改 a.csv。",
+            "读取 a.csv，生成 b.json。请勿改动 a.csv。",
+            "读取 a.csv，生成 b.json。不要覆盖 a.csv。",
+            "读取 a.csv，生成 b.json。不要更新 a.csv。",
+            "读取 a.csv，生成 b.json。切勿编辑 a.csv。",
+            "读取 a.csv，生成 b.json。do not modify a.csv.",
+            "读取 a.csv，生成 b.json。never overwrite a.csv.",
+        ] {
+            let read_only = read_only_input_paths(task);
+            assert!(
+                read_only.contains(&path_key("a.csv")),
+                "a prohibition must keep a.csv read-only: {task} -> {read_only:?}"
+            );
+            let seeds = expectations_from_task(task);
+            assert!(
+                !seeds
+                    .iter()
+                    .any(|seed| seed.target_path.as_deref() == Some("a.csv")),
+                "a.csv must not become a deliverable: {task}"
+            );
+            assert!(
+                seeds
+                    .iter()
+                    .any(|seed| seed.target_path.as_deref() == Some("b.json")),
+                "b.json is still the promised output: {task}"
+            );
+        }
+    }
+
+    /// The negation is bound to one verb, not to the sentence: forbidding one
+    /// path must not silence the instruction that follows it.
+    #[test]
+    fn a_prohibition_does_not_silence_a_later_real_instruction() {
+        let task = "读取 a.csv，不要修改 a.csv；把清洗结果另存为 b.csv。";
+        let seeds = expectations_from_task(task);
+        let targets: Vec<&str> = seeds
+            .iter()
+            .filter_map(|seed| seed.target_path.as_deref())
+            .collect();
+        assert_eq!(targets, vec!["b.csv"], "{targets:?}");
+        let read_only = read_only_input_paths(task);
+        assert!(read_only.contains(&path_key("a.csv")), "{read_only:?}");
+        assert!(!read_only.contains(&path_key("b.csv")), "{read_only:?}");
+
+        // An unrelated earlier negation must not silence a real production verb.
+        assert!(has_production_verb("没有现成模板，生成 a.docx。"));
+        assert!(!has_production_verb("不要生成任何文件，只回答我。"));
+    }
+
+    /// Regression, 2026-10-01 review (R01): an absolute path is an ordinary
+    /// path, not a URL. It resolves to the same project-relative identity as the
+    /// relative spelling, so the protection follows the file.
+    #[test]
+    fn absolute_paths_are_resolved_and_protected() {
+        let task = r"读取 D:\work\a.csv，生成 D:\work\b.json。不要修改 D:\work\a.csv。";
+        let roles = read_only_path_roles(task, Some(r"D:\work"));
+        assert!(
+            roles.contains_relative("a.csv"),
+            "an absolute input is read-only by its project-relative identity: {roles:?}"
+        );
+        assert!(!roles.contains_relative("b.json"), "{roles:?}");
+        // A forward-slash absolute path protects the same file.
+        let forward = read_only_path_roles("读取 C:/proj/in/a.csv，生成 out/b.json。", Some("C:/proj"));
+        assert!(forward.contains_relative("in/a.csv"), "{forward:?}");
+        // A path outside the frozen root is not this gate's business.
+        let outside = read_only_path_roles(r"读取 D:\other\a.csv，生成 b.json。", Some(r"D:\work"));
+        assert!(!outside.contains_relative("a.csv"), "{outside:?}");
+    }
+
+    /// Regression, 2026-10-01 review (R02): separators are part of a path's
+    /// identity, so `source/a.csv` and `source_a.csv` are two different files.
+    #[test]
+    fn path_identity_cannot_collide_across_separators() {
+        assert_ne!(path_key("source/a.csv"), path_key("source_a.csv"));
+        assert_ne!(path_key("a/b.csv"), path_key("a_b.csv"));
+        assert_ne!(path_key("a%b.csv"), path_key("a/b.csv"));
+        assert_ne!(path_key("a%2fb.csv"), path_key("a/b.csv"));
+        // Separator spelling and case still fold: they name one file.
+        assert_eq!(path_key("Source\\A.CSV"), path_key("source/a.csv"));
+        assert_eq!(path_key("in/messy_sales.csv"), path_key("IN\\MESSY_SALES.CSV"));
+        // CJK and underscore combinations stay distinct.
+        assert_ne!(path_key("数据/汇总.csv"), path_key("数据_汇总.csv"));
+        assert_ne!(path_key("报表_a/结果.csv"), path_key("报表_a_结果.csv"));
+    }
+
+    /// Regression, 2026-10-01 review (R02): reading one path while writing a
+    /// look-alike must leave the input read-only and seed the output once.
+    #[test]
+    fn look_alike_paths_keep_separate_roles_and_entries() {
+        let task = "读取 source/a.csv，生成 source_a.csv。";
+        let seeds = expectations_from_task(task);
+        let targets: Vec<&str> = seeds
+            .iter()
+            .filter_map(|seed| seed.target_path.as_deref())
+            .collect();
+        assert_eq!(targets, vec!["source_a.csv"], "{targets:?}");
+        assert_eq!(seeds.len(), 1, "{seeds:?}");
+        let read_only = read_only_input_paths(task);
+        assert!(
+            read_only.contains(&path_key("source/a.csv")),
+            "the input stays read-only: {read_only:?}"
+        );
+        assert!(
+            !read_only.contains(&path_key("source_a.csv")),
+            "the declared output is writable: {read_only:?}"
+        );
+    }
+
+    /// Both look-alikes as outputs must produce two independent checklist rows,
+    /// each with its own binding and identity.
+    #[test]
+    fn both_look_alike_outputs_get_their_own_checklist_entry() {
+        let task = "生成 source/a.csv 与 source_a.csv。";
+        let seeds = expectations_from_task(task);
+        assert_eq!(seeds.len(), 2, "{seeds:?}");
+        let keys: Vec<&str> = seeds.iter().map(|seed| seed.item_key.as_str()).collect();
+        assert_ne!(keys[0], keys[1], "{keys:?}");
+        let targets: BTreeSet<&str> = seeds
+            .iter()
+            .filter_map(|seed| seed.target_path.as_deref())
+            .collect();
+        assert_eq!(
+            targets,
+            BTreeSet::from(["source/a.csv", "source_a.csv"]),
+            "{targets:?}"
+        );
+    }
+
+    /// Regression, 2026-10-01 review (R01): a directory the task reads is input
+    /// material, so everything under it is read-only while a sibling directory
+    /// that only shares a prefix is untouched.
+    #[test]
+    fn a_read_only_directory_covers_its_contents_only() {
+        let task = "读取 in/docs/ 目录中的文档，生成 out/answers.json。";
+        let roles = read_only_path_roles(task, None);
+        assert!(
+            roles.contains_relative("in/docs/operations.md"),
+            "any file under the read directory is input material: {roles:?}"
+        );
+        assert!(roles.contains_relative("in/docs/nested/deep.md"), "{roles:?}");
+        assert!(
+            !roles.contains_relative("in/docs-old/operations.md"),
+            "a prefix must not be mistaken for the directory itself: {roles:?}"
+        );
+        assert!(!roles.contains_relative("out/answers.json"), "{roles:?}");
+        assert!(!roles.is_empty(), "the directory really was recognised");
+    }
+
+    /// Regression, 2026-10-01 review (R01): legitimate in-place editing stays
+    /// authorized, in every spelling the task can use for it.
+    #[test]
+    fn legitimate_in_place_edits_survive_the_negation_rule() {
+        for (task, edited) in [
+            ("读取 台账.xlsx、说明.md，更新内容后保存 台账.xlsx。", "台账.xlsx"),
+            ("打开 会议纪要.docx，把第二段改短后保存 会议纪要.docx。", "会议纪要.docx"),
+            ("读取 report.docx，修改内容并保存 report.docx。", "report.docx"),
+            ("读取 in/data.csv，清洗后写回 in/data.csv。", "in/data.csv"),
+        ] {
+            let read_only = read_only_input_paths(task);
+            assert!(
+                !read_only.contains(&path_key(edited)),
+                "an explicitly saved path stays writable ({edited}): {task} -> {read_only:?}"
+            );
+            let seeds = expectations_from_task(task);
+            assert!(
+                seeds
+                    .iter()
+                    .any(|seed| seed.target_path.as_deref() == Some(edited)),
+                "the edited file is still the promised deliverable: {task} -> {seeds:?}"
+            );
+        }
+    }
+
+    /// Regression, 2026-10-01 capability run (O09): the task states a machine field
+    /// convention; the Host checks the invariant it wrote down, generically and
+    /// in the direction the task declared.
+    #[test]
+    fn a_task_stated_field_convention_is_parsed_and_checked() {
+        let task = "只根据 in/docs/ 的文档回答 in/questions.json 中的全部问题，生成 out/answers.json。\
+                    可回答的问题用中文作答，source_file 使用 docs/ 下相对路径。\
+                    证据不足时 answer 写 insufficient_evidence，source_file 为 null，并说明缺少什么证据。";
+        let convention = field_convention_from_task(task).expect("convention");
+        assert_eq!(convention.marker_field, "answer");
+        assert_eq!(convention.marker_value, "insufficient_evidence");
+        assert_eq!(convention.evidence_field, "source_file");
+        let null_evidence = EvidenceLiteral::Null;
+
+        // A sourced answer and a marked no-evidence answer are both consistent.
+        let compliant = json!([
+            {"question_id": "Q1", "answer": "2025-02-14", "source_file": "docs/operations.md"},
+            {"question_id": "Q4", "answer": "insufficient_evidence", "source_file": null},
+        ]);
+        assert!(field_convention_violations(&compliant, &convention, &null_evidence).is_empty());
+
+        // The declared direction only: "when insufficient, write X and leave Y
+        // null" never said every null source must be marked X, so an answer that
+        // chose its own wording is not a violation of *this* rule.
+        let other_wording = json!([
+            {"question_id": "Q4", "answer": "未披露", "source_file": null},
+        ]);
+        assert!(field_convention_violations(&other_wording, &convention, &null_evidence).is_empty());
+
+        // The pair as declared: the marker with a real source violates it.
+        let marker_with_source = json!([
+            {"question_id": "Q4", "answer": "insufficient_evidence", "source_file": "docs/ops.md"},
+        ]);
+        assert_eq!(
+            field_convention_violations(&marker_with_source, &convention, &null_evidence).len(),
+            1
+        );
+    }
+
+    /// Regression, 2026-10-01 review (R04): a missing field, `null`, an empty
+    /// string and a wrong type are four different facts, and only the declared
+    /// one satisfies the rule.
+    #[test]
+    fn field_convention_distinguishes_missing_null_empty_and_wrong_type() {
+        let task = "生成 out/answers.json。证据不足时 answer 写 insufficient_evidence，source_file 为 null。";
+        let convention = field_convention_from_task(task).expect("convention");
+        let null_evidence = EvidenceLiteral::Null;
+        for (label, body) in [
+            ("missing field", json!([{"answer": "insufficient_evidence"}])),
+            ("empty string", json!([{"answer": "insufficient_evidence", "source_file": ""}])),
+            ("wrong type", json!([{"answer": "insufficient_evidence", "source_file": 0}])),
+            ("wrong literal", json!([{"answer": "insufficient_evidence", "source_file": "none"}])),
+        ] {
+            assert_eq!(
+                field_convention_violations(&body, &convention, &null_evidence).len(),
+                1,
+                "{label} must fail"
+            );
+        }
+        assert!(field_convention_violations(
+            &json!([{"answer": "insufficient_evidence", "source_file": null}]),
+            &convention,
+            &null_evidence
+        )
+        .is_empty());
+    }
+
+    /// Regression, 2026-10-01 review (R04): the description order is not the
+    /// rule, so both spellings parse to the same convention.
+    #[test]
+    fn field_convention_parses_the_same_rule_in_either_order() {
+        let forward = field_convention_from_task(
+            "证据不足时 answer 写 insufficient_evidence，source_file 为 null。",
+        )
+        .expect("forward order");
+        let reversed = field_convention_from_task(
+            "证据不足时 source_file 为 null，answer 写 insufficient_evidence。",
+        )
+        .expect("reversed order");
+        assert_eq!(forward.marker_field, reversed.marker_field);
+        assert_eq!(forward.marker_value, reversed.marker_value);
+        assert_eq!(forward.evidence_field, reversed.evidence_field);
+        assert_eq!(forward.marker_field, "answer");
+        assert_eq!(forward.evidence_field, "source_file");
+    }
+
+    /// Regression, 2026-10-01 review (R04): the rule is bound to one declared JSON
+    /// artifact, and an unrelated JSON deliverable is never judged by it. With no
+    /// unambiguous target the rule stays unbound and is reported as 未核验.
+    #[test]
+    fn a_field_convention_governs_only_its_bound_artifact() {
+        // Exactly one promised JSON artifact: the target is unambiguous.
+        let single = "生成 out/answers.json。\
+                      证据不足时 answer 写 insufficient_evidence，source_file 为 null。";
+        let mut seeds = expectations_from_task(single);
+        assert_eq!(seeds.len(), 1, "{seeds:?}");
+        let requirements = requirements_from_task(single);
+        attach_requirements_to_seeds(&mut seeds, &requirements, single);
+        let bound = bound_conventions(&seeds);
+        assert_eq!(bound.len(), 1, "the rule must be bound: {bound:?}");
+        assert_eq!(bound[0].1.as_deref(), Some("out/answers.json"), "{bound:?}");
+
+        // Two JSON artifacts, and the convention sentence narrows to one.
+        let narrowed = "生成 out/answers.json 与 out/stats.json。\
+                        仅 out/answers.json：证据不足时 answer 写 insufficient_evidence，source_file 为 null。";
+        let mut seeds = expectations_from_task(narrowed);
+        assert_eq!(seeds.len(), 2, "{seeds:?}");
+        let requirements = requirements_from_task(narrowed);
+        attach_requirements_to_seeds(&mut seeds, &requirements, narrowed);
+        let bound = bound_conventions(&seeds);
+        assert_eq!(bound.len(), 1, "{bound:?}");
+        assert_eq!(
+            bound[0].1.as_deref(),
+            Some("out/answers.json"),
+            "the named artifact wins, not the first JSON one: {bound:?}"
+        );
+
+        // Two JSON artifacts and no narrowing: unbound, and therefore recorded
+        // as 未核验 rather than applied to either of them.
+        let ambiguous = "生成 out/one.json 与 out/two.json。\
+                         证据不足时 answer 写 insufficient_evidence，source_file 为 null。";
+        let mut seeds = expectations_from_task(ambiguous);
+        let requirements = requirements_from_task(ambiguous);
+        attach_requirements_to_seeds(&mut seeds, &requirements, ambiguous);
+        let bound = bound_conventions(&seeds);
+        assert_eq!(bound.len(), 1, "the rule is still recorded once: {bound:?}");
+        assert_eq!(
+            bound[0].1, None,
+            "an ambiguous rule must not be pinned to a JSON file: {bound:?}"
+        );
+    }
+
+    /// The (item, target) pairs of the field conventions a checklist carries.
+    fn bound_conventions(seeds: &[DeliveryChecklistSeed]) -> Vec<(String, Option<String>)> {
+        seeds
+            .iter()
+            .flat_map(|seed| {
+                seed.requirements.iter().filter_map(|requirement| {
+                    match &requirement.kind {
+                        crate::database::RequirementKind::FieldConvention { target_path, .. } => {
+                            Some((seed.item_key.clone(), target_path.clone()))
+                        }
+                        _ => None,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// An explicit name in the convention sentence wins; with no name at all,
+    /// the rule is unbound and reported as 未核验 rather than applied to every
+    /// JSON file in the Run.
+    #[test]
+    fn an_unbindable_field_convention_is_reported_not_swept() {
+        let task = "生成 out/one.json 与 out/two.json。证据不足时 answer 写 insufficient_evidence，source_file 为 null。";
+        let convention = field_convention_from_task(task).expect("convention");
+        let unbound = bind_field_convention(
+            task,
+            convention.clone(),
+            &["out/one.json".to_owned(), "out/two.json".to_owned()],
+        );
+        assert_eq!(unbound.target_path, None);
+
+        let named = "生成 out/one.json 与 out/two.json。证据不足时 answer 写 insufficient_evidence，source_file 为 null（仅针对 out/two.json）。";
+        let bound = bind_field_convention(
+            named,
+            convention,
+            &["out/one.json".to_owned(), "out/two.json".to_owned()],
+        );
+        assert_eq!(bound.target_path.as_deref(), Some("out/two.json"));
+    }
+
+    /// The same mechanism reads any field/literal pair, and a task that states
+    /// no convention produces nothing.
+    #[test]
+    fn field_conventions_are_not_specific_to_one_task() {
+        let other = "生成 out/review.json。每条记录里 verdict 写 rejected 时，reason 为 null；其余情况写明原因。";
+        let convention = field_convention_from_task(other).expect("convention");
+        assert_eq!(convention.marker_field, "verdict");
+        assert_eq!(convention.marker_value, "rejected");
+        assert_eq!(convention.evidence_field, "reason");
+
+        assert!(field_convention_from_task("生成 out/summary.json，包含各地区金额和合计。").is_none());
+        assert!(field_convention_from_task("读取 data.csv 并统计数量。").is_none());
+        // A sentence with a file name but no empty-evidence pairing states none.
+        assert!(field_convention_from_task("报告写到 out/report.docx。").is_none());
     }
 
     #[test]
@@ -3588,6 +5573,16 @@ mod tests {
             .unwrap()
             .run
             .id;
+        // A Run that can receive a decision needs its kernel row: the delivery
+        // decision mark is an attribute of a kernel decision and references it.
+        let now = now_ms();
+        db.execute_raw_sql(&format!(
+            "INSERT INTO kernel_runs(run_id,engine_id,kernel_mode,capability_manifest_version,
+                permission_snapshot_id,execution_profile_id,prompt_config_hash,frozen_config_json,
+                state,last_event_seq,created_at,updated_at)
+             VALUES('{run}','pi','authoritative',2,'perm','legacy','hash','{{}}','running',0,{now},{now})"
+        ))
+        .unwrap();
         (db, run)
     }
 
@@ -3600,6 +5595,247 @@ mod tests {
             checks: vec!["exists".into(), "parseable".into(), "nonempty".into()],
             requirements: Vec::new(),
         }
+    }
+
+    /// Record a managed-write receipt exactly as the production write path does
+    /// (`managed_files::record_after` registers the same row), so a test can
+    /// stand for "this Run really committed these bytes".
+    fn record_write_receipt(db: &Database, root: &Path, run_id: &str, relative: &str, tool: &str) {
+        let path = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let bytes = std::fs::read(&path).unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let hash = format!("sha256:{}", hex::encode(hasher.finalize()));
+        let conversation: String = db
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT conversation_id FROM runs WHERE id=?1",
+                    [run_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        db.register_managed_file_version(
+            &crate::database::ManagedFileVersionInput {
+                conversation_id: &conversation,
+                run_id: Some(run_id),
+                tool_call_id: Some("test-write"),
+                tool,
+                storage_path: &path.to_string_lossy(),
+                display_name: relative,
+                change_kind: "created",
+                before_hash: None,
+                before_size: None,
+                after_hash: Some(&hash),
+                after_size: Some(bytes.len() as i64),
+                backup_path: None,
+                after_backup_path: None,
+                restored_from_id: None,
+                source: crate::database::ManagedFileSource::HostCapture,
+            },
+            now_ms(),
+        )
+        .unwrap();
+    }
+
+    /// Regression, 2026-10-01 review (R03): existing content that is merely
+    /// touched — or written by someone else — is not this Run's deliverable.
+    #[test]
+    fn a_touched_preexisting_file_is_not_a_completed_deliverable() {
+        let root =
+            std::env::temp_dir().join(format!("fox-delivery-touch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (db, run_id) = conversation_run(&root);
+        // A file that existed before the Run, with the bytes the task wanted.
+        std::fs::write(root.join("summary.json"), br#"{"total":42}"#).unwrap();
+        db.seed_delivery_checklist(
+            &run_id,
+            &expectations_from_task("生成 summary.json"),
+            now_ms(),
+        )
+        .unwrap();
+
+        // Someone (or something) only refreshes the timestamp afterwards.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let bytes = std::fs::read(root.join("summary.json")).unwrap();
+        std::fs::write(root.join("summary.json"), bytes).unwrap();
+
+        let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
+        let items = stop.items();
+        assert!(!items[0].passed, "a touched file must not pass: {}", items[0].finding_json);
+        let finding: Value = serde_json::from_str(&items[0].finding_json).unwrap();
+        assert_eq!(finding["provenance"], json!("pre_existing"), "{finding}");
+        assert_eq!(finding["checks"]["write_receipt"]["state"], json!("absent"));
+        assert!(matches!(stop, DeliveryStop::Repair { .. }), "{stop:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The positive half of the same rule: bytes this Run really committed, with
+    /// a matching hash, do pass — and the evidence is named.
+    #[test]
+    fn a_deliverable_this_run_wrote_passes_on_its_write_receipt() {
+        let root =
+            std::env::temp_dir().join(format!("fox-delivery-receipt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (db, run_id) = conversation_run(&root);
+        std::fs::write(root.join("summary.json"), br#"{"total":42}"#).unwrap();
+        record_write_receipt(&db, &root, &run_id, "summary.json", "write_file");
+        db.seed_delivery_checklist(
+            &run_id,
+            &expectations_from_task("生成 summary.json"),
+            now_ms(),
+        )
+        .unwrap();
+
+        let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
+        match &stop {
+            DeliveryStop::Passed { items } => {
+                assert!(items[0].passed, "{}", items[0].finding_json);
+                let finding: Value = serde_json::from_str(&items[0].finding_json).unwrap();
+                assert_eq!(finding["provenance"], json!("write_receipt"), "{finding}");
+                assert_eq!(finding["checks"]["write_receipt"]["state"], json!("passed"));
+            }
+            other => panic!("expected pass, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Regression, 2026-10-01 review (R03): another Run writing the same path is
+    /// not evidence about this Run, even though the file is new and matches.
+    #[test]
+    fn another_runs_write_is_not_this_runs_deliverable() {
+        let root = std::env::temp_dir()
+            .join(format!("fox-delivery-otherrun-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (db, run_id) = conversation_run(&root);
+        std::fs::write(root.join("summary.json"), br#"{"total":42}"#).unwrap();
+        // A receipt exists for the path — under a different Run's identity.
+        let other_conversation: String = db
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT conversation_id FROM runs WHERE id=?1",
+                    [&run_id],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })
+            .unwrap();
+        db.register_managed_file_version(
+            &crate::database::ManagedFileVersionInput {
+                conversation_id: &other_conversation,
+                run_id: None,
+                tool_call_id: None,
+                tool: "write_file",
+                storage_path: &root.join("summary.json").to_string_lossy(),
+                display_name: "summary.json",
+                change_kind: "created",
+                before_hash: None,
+                before_size: None,
+                after_hash: Some("sha256:0000"),
+                after_size: Some(13),
+                backup_path: None,
+                after_backup_path: None,
+                restored_from_id: None,
+                source: crate::database::ManagedFileSource::HostCapture,
+            },
+            now_ms(),
+        )
+        .unwrap();
+        db.seed_delivery_checklist(
+            &run_id,
+            &expectations_from_task("生成 summary.json"),
+            now_ms(),
+        )
+        .unwrap();
+
+        let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
+        assert!(!stop.items()[0].passed, "{}", stop.items()[0].finding_json);
+        let finding: Value = serde_json::from_str(&stop.items()[0].finding_json).unwrap();
+        assert_eq!(finding["provenance"], json!("pre_existing"), "{finding}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A file committed by the Run this one continues still counts: a
+    /// continuation re-verifies its parent's checklist under a new run id.
+    #[test]
+    fn a_continued_runs_write_still_counts_for_this_run() {
+        let root =
+            std::env::temp_dir().join(format!("fox-delivery-cont-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        // The parent Run is the one that really wrote the file. Both rows are
+        // inserted directly because `create_run` refuses a conversation that
+        // already has an active Run, and this test is about the ledger chain,
+        // not about run admission.
+        let (db, child) = conversation_run(&root);
+        let conversation: String = db
+            .with_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT conversation_id FROM runs WHERE id=?1",
+                    [&child],
+                    |row| row.get::<_, String>(0),
+                )?)
+            })
+            .unwrap();
+        let parent = format!("delivery-parent-{}", uuid::Uuid::new_v4());
+        let now = now_ms();
+        // The fixture already created this Run's kernel row; linking it to a
+        // parent is all this test needs.
+        db.execute_raw_sql(&format!(
+            "INSERT INTO runs(id,conversation_id,status,model,last_seq,created_at)
+             VALUES('{parent}','{conversation}','completed','test',0,{now});
+             UPDATE kernel_runs SET continued_from_run_id='{parent}' WHERE run_id='{child}'"
+        ))
+        .unwrap();
+        std::fs::write(root.join("summary.json"), br#"{"total":42}"#).unwrap();
+        record_write_receipt(&db, &root, &parent, "summary.json", "write_file");
+        db.seed_delivery_checklist(
+            &child,
+            &expectations_from_task("生成 summary.json"),
+            now_ms(),
+        )
+        .unwrap();
+
+        let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &child).unwrap();
+        let finding: Value = serde_json::from_str(&stop.items()[0].finding_json).unwrap();
+        assert!(
+            stop.items()[0].passed,
+            "a continuation must keep accepting its task's earlier write: {finding}"
+        );
+        assert_eq!(finding["provenance"], json!("write_receipt"), "{finding}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A write the task did not declare as a deliverable is reported instead of
+    /// hiding behind a fully passed checklist.
+    #[test]
+    fn writes_outside_the_declared_checklist_are_reported() {
+        let root =
+            std::env::temp_dir().join(format!("fox-delivery-undeclared-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (db, run_id) = conversation_run(&root);
+        std::fs::write(root.join("summary.json"), br#"{"total":42}"#).unwrap();
+        std::fs::write(root.join("scratch.csv"), "a,b\n1,2\n").unwrap();
+        record_write_receipt(&db, &root, &run_id, "summary.json", "write_file");
+        record_write_receipt(&db, &root, &run_id, "scratch.csv", "write_file");
+        db.seed_delivery_checklist(
+            &run_id,
+            &expectations_from_task("生成 summary.json"),
+            now_ms(),
+        )
+        .unwrap();
+
+        let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
+        match &stop {
+            DeliveryStop::Passed { items } => {
+                let finding: Value = serde_json::from_str(&items[0].finding_json).unwrap();
+                assert_eq!(
+                    finding["undeclaredWrites"],
+                    json!([{"path": "scratch.csv", "tool": "write_file"}]),
+                    "{finding}"
+                );
+            }
+            other => panic!("expected pass, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -3619,13 +5855,13 @@ mod tests {
             assert_eq!(items.len(), 1);
             assert!(!items[0].passed);
         }
-        persist_outcome(&db, &run_id, &stop, now_ms()).unwrap();
+        commit_test_outcome(&db, &run_id, &stop);
         assert_eq!(db.delivery_repair_round_count(&run_id).unwrap(), 1);
 
         // Second failure is still within the bounded budget.
         let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
         assert!(matches!(stop, DeliveryStop::Repair { .. }));
-        persist_outcome(&db, &run_id, &stop, now_ms()).unwrap();
+        commit_test_outcome(&db, &run_id, &stop);
 
         // Third failure exhausts the repair budget: the run may finish, but its
         // business delivery stays visibly failed rather than silently passing.
@@ -3667,7 +5903,7 @@ mod tests {
             }
             other => panic!("expected pass, got: {other:?}"),
         }
-        persist_outcome(&db, &run_id, &stop, now_ms()).unwrap();
+        commit_test_outcome(&db, &run_id, &stop);
         let rows = db.delivery_checklist(&run_id).unwrap();
         assert_eq!(rows[0].status, "passed");
         assert!(rows[0].checked_at.is_some());
@@ -3688,6 +5924,10 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let (db, run_id) = conversation_run(&root);
         std::fs::write(root.join("broken.xlsx"), b"not a real workbook").unwrap();
+        // The fixture stands for this Run's own write: the production write path
+        // registers the same managed-write receipt, and provenance is what the
+        // gate requires before it inspects content.
+        record_write_receipt(&db, &root, &run_id, "broken.xlsx", "write_file");
         let seeds = expectations_from_task("请生成 broken.xlsx");
         db.seed_delivery_checklist(&run_id, &seeds, now_ms()).unwrap();
         let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
@@ -3709,6 +5949,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let (db, run_id) = conversation_run(&root);
         std::fs::write(root.join("table.csv"), "a,b,c\n1,2,3\n4,5\n").unwrap();
+        record_write_receipt(&db, &root, &run_id, "table.csv", "write_file");
         let seeds = expectations_from_task("请生成 table.csv");
         db.seed_delivery_checklist(&run_id, &seeds, now_ms()).unwrap();
         let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
@@ -3747,7 +5988,7 @@ mod tests {
             db.seed_delivery_checklist(&run_id, &[excel_slot_seed()], now_ms())
                 .unwrap();
             let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
-            persist_outcome(&db, &run_id, &stop, now_ms()).unwrap();
+            commit_test_outcome(&db, &run_id, &stop);
             run_id
         };
         let db = Database::open(root.join("facts.db")).unwrap();
@@ -4036,6 +6277,7 @@ mod tests {
             std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/office-reading.xlsx"))
                 .unwrap();
         std::fs::write(root.join("统计分布.xlsx"), fixture).unwrap();
+        record_write_receipt(&db, &root, &run_id, "统计分布.xlsx", "write_file");
 
         let task = "请生成 统计分布.xlsx，其中每个 Sheet 配一张图表。";
         let mut seeds = expectations_from_task(task);
@@ -4101,6 +6343,7 @@ mod tests {
             docx_bytes(&["分析概述", "本文档说明统计口径。", "统计结果", "共 12 条记录。", "结论与建议", "建议持续复核。"]),
         )
         .unwrap();
+        record_write_receipt(&db, &good_root, &run_id, "分析报告.docx", "write_file");
         db.seed_delivery_checklist(&run_id, &seeds, now_ms()).unwrap();
         let stop = evaluate_stop(&db, Some(good_root.to_str().unwrap()), &run_id).unwrap();
         match &stop {
@@ -4128,6 +6371,7 @@ mod tests {
             docx_bytes(&["分析概述", "只有概述和结果。", "统计结果", "共 12 条记录。"]),
         )
         .unwrap();
+        record_write_receipt(&db, &bad_root, &run_id, "分析报告.docx", "write_file");
         db.seed_delivery_checklist(&run_id, &seeds, now_ms()).unwrap();
         let stop = evaluate_stop(&db, Some(bad_root.to_str().unwrap()), &run_id).unwrap();
         match stop {
@@ -4600,6 +6844,9 @@ mod tests {
             ]),
         )
         .unwrap();
+        // The deliverable is this Run's own write, exactly as the Host's write
+        // path records it; the input workbook it read is never registered.
+        record_write_receipt(&db, &root, &run_id, "统计分布.xlsx", "write_file");
         let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
         let item = &stop.items()[0];
         let finding: Value = serde_json::from_str(&item.finding_json).unwrap();
@@ -4627,6 +6874,8 @@ mod tests {
             ]),
         )
         .unwrap();
+        // The rewritten artifact is this Run's own write again.
+        record_write_receipt(&db, &root, &run_id, "统计分布.xlsx", "write_file");
         let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
         let item = &stop.items()[0];
         assert!(!item.passed, "stale numbers must fail the gate");
@@ -4667,6 +6916,13 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        record_write_receipt(
+            &vague_db,
+            &vague_root,
+            &vague_run,
+            "统计结果.xlsx",
+            "write_file",
+        );
         let stop = evaluate_stop(&vague_db, Some(vague_root.to_str().unwrap()), &vague_run).unwrap();
         let item = &stop.items()[0];
         let finding: Value = serde_json::from_str(&item.finding_json).unwrap();
@@ -4769,21 +7025,26 @@ mod tests {
             let item = &stop.items()[0];
             assert!(!item.passed, "an untouched file is not a delivery (age {age_ms}ms): {item:?}");
             let finding: Value = serde_json::from_str(&item.finding_json).unwrap();
-            assert_eq!(finding["source"], json!("untouched"), "{finding}");
-            assert!(finding["reason"].as_str().unwrap_or_default().contains("缺少本次任务写入更新的证据"), "{finding}");
+            assert_eq!(finding["source"], json!("pre_existing"), "{finding}");
+            assert!(finding["reason"].as_str().unwrap_or_default().contains("缺少本 Run 写入的证据"), "{finding}");
         }
 
-        // The Run really writes the document back: the same gate now passes it.
+        // The Run really writes the document back — the production write path
+// registers a managed-write receipt for the bytes it committed — and the same
+// gate now passes it. A bare timestamp would not.
         let mut file = std::fs::File::create(&target).unwrap();
         file.write_all(&source_bytes).unwrap();
         file.flush().unwrap();
         drop(file);
+        record_write_receipt(&db, &root, &run_id, "台账.xlsx", "edit_file");
         let stop = evaluate_stop(&db, Some(root.to_str().unwrap()), &run_id).unwrap();
         assert!(
             stop.items()[0].passed,
-            "a rewritten target is delivered: {:?}",
+            "a rewritten target with its own receipt is delivered: {:?}",
             stop.items()[0]
         );
+        let finding: Value = serde_json::from_str(&stop.items()[0].finding_json).unwrap();
+        assert_eq!(finding["provenance"], json!("write_receipt"), "{finding}");
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -2748,6 +2748,14 @@ pub struct KernelPersistCommand {
     pub outbox: Vec<PersistOutboxEffect>,
     pub approval_resolutions: Vec<PersistApprovalResolution>,
     pub settled_dispatch_tool_call_ids: Vec<String>,
+    /// An opaque Host mark committed **atomically with this decision**.
+    ///
+    /// The Host writes work into a staging table before the decision commits and
+    /// must only act on it if the decision really committed. Recording the mark
+    /// inside this same transaction is what makes that check exact: the mark
+    /// exists if and only if the decision it belongs to was committed. The
+    /// Kernel treats it as opaque data — it carries no delivery semantics.
+    pub delivery_decision_mark: Option<String>,
 }
 
 impl RunController {
@@ -2910,6 +2918,9 @@ impl RunController {
             outbox,
             approval_resolutions,
             settled_dispatch_tool_call_ids,
+            // The Host layer stamps this when a decision it must be able to
+            // confirm later carries one (see `KernelPersistCommand`).
+            delivery_decision_mark: None,
         }
     }
 }

@@ -448,14 +448,21 @@ pub(crate) fn execute_with_observation_budget(binding: &RunControlBinding, tool:
 /// independent filesystem NotFound observation within the frozen root.
 pub(crate) fn observe_missing_file(binding: &RunControlBinding, path: &str,
     cancellation: &CancellationToken) -> Result<VerifiedReadObservation, String> {
-    binding.validate()?;
     cancellation.check()?;
+    observe_missing_file_target(binding, path)
+}
+
+/// The same probe without a cancellation token, for callers that only need the
+/// fact (a gateway deciding a write precondition has no run token of its own;
+/// the authoritative execution boundary re-checks with the real one).
+pub(crate) fn observe_missing_file_target(binding: &RunControlBinding, path: &str)
+    -> Result<VerifiedReadObservation, String> {
+    binding.validate()?;
     if binding.read_only_executor != ResourceExecutor::Rust { return Err("reader is not Rust".into()); }
     let root = Path::new(binding.permission.project_root.as_deref().ok_or("missing frozen project root")?);
     let identity = crate::tool_host::canonical_file_identity(root, path)?;
     match fs::symlink_metadata(&identity) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            cancellation.check()?;
             Ok(VerifiedReadObservation {
                 target_identity: identity,
                 version: "missing".into(),

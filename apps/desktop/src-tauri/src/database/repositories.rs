@@ -58,8 +58,12 @@ mod run_steering;
 mod managed_files;
 pub(crate) use delivery_checks::{
     DeliveryArtifactRow, DeliveryChecklistItem, DeliveryChecklistSeed, DeliveryRequirement,
-    RequirementKind,
+    RequirementKind, RunWriteReceipt, StagedDeliveryItem,
 };
+#[cfg(test)]
+pub(crate) use delivery_checks::finalize_fault;
+#[cfg(test)]
+pub(crate) use delivery_checks::stage_fault;
 pub(crate) use managed_files::{ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput, RestoreClaim, RestoreRequestRecord};
 pub(crate) use run_steering::{
     adopt_received_steering_in_tx, apply_delivered_steering_in_tx, cancel_open_steering_in_tx,

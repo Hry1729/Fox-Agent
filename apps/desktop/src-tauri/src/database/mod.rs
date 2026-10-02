@@ -3,7 +3,7 @@ mod kernel_changes;
 mod models;
 mod repositories;
 
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 86;
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 89;
 pub(crate) use repositories::kernel_execution_admission;
 pub(crate) use repositories::kernel_reconciliation::*;
 pub(crate) use repositories::ModelNoticeInput;
@@ -12,6 +12,10 @@ pub(crate) use repositories::{JobSnapshot, JobStartOutcome, JobStartRequest, Job
 pub(crate) use repositories::{
     run_budget_for_tier, PreparedContinuation, VerifiedContinuationPermission,
 };
+#[cfg(test)]
+pub(crate) use repositories::finalize_fault;
+#[cfg(test)]
+pub(crate) use repositories::stage_fault;
 pub use models::*;
 /// Cap on `tool_calls.result_json`. Published here because the model-view binder
 /// uses it to decide whether omitted bytes are recoverable at all — one source
@@ -35,7 +39,7 @@ pub(crate) use repositories::{
     package_snapshot_hash, CreateChildRunInput, DeliveryArtifactRow, DeliveryChecklistItem,
     DeliveryChecklistSeed, DeliveryRequirement, RequirementKind,
     KernelHostScope, ManagedFileSource, ManagedFileVersion, ManagedFileVersionInput,
-    RestoreClaim, RestoreRequestRecord,
+    RestoreClaim, RestoreRequestRecord, RunWriteReceipt, StagedDeliveryItem,
     MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
     SkillActivationRecord, SteeringDecision, SteeringMessage, MAX_STEERING_FOLLOWUPS,
 };

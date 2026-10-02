@@ -15,6 +15,168 @@ use std::{
 };
 
 pub const SERVER_ID: &str = "fox-office";
+
+/// How a failed built-in Office operation reads to the model.
+///
+/// The Office connector is a Host-owned local executor: its errors come from
+/// this process, the user's own project and the pinned sidecar, never from a
+/// remote body. A generic "the resource request failed" leaves the model with
+/// nothing to change, and the observed behaviour was exactly that — it retried
+/// the same `office_create` against an existing path until the task budget ran
+/// out. So the failure is classified once, in the connector, and each class
+/// names the *distinct* next action that actually resolves it. Nothing here
+/// suggests overwriting by default: the conflict class names renaming first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OfficeResourceKind {
+    /// The output path already exists and `overwrite` was not set.
+    TargetExists,
+    /// A source file the operation needs is not there.
+    SourceMissing,
+    /// The frozen project root or the resolved path is outside what is allowed.
+    PermissionDenied,
+    /// The pinned sidecar module is missing, corrupt, or refuses the work.
+    WorkerUnavailable,
+    /// The sidecar ran past its own deadline.
+    TimedOut,
+    /// The call's own arguments are malformed.
+    InvalidInput,
+    /// The target is input material the task told the Run not to change.
+    ReadOnlyInput,
+    /// The target changed underneath the operation.
+    Conflict,
+}
+
+impl OfficeResourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TargetExists => "office.target_exists",
+            Self::SourceMissing => "office.source_missing",
+            Self::PermissionDenied => "office.permission_denied",
+            Self::WorkerUnavailable => "office.worker_unavailable",
+            Self::TimedOut => "office.timed_out",
+            Self::InvalidInput => "tool.invalid_input",
+            Self::ReadOnlyInput => "tool.read_only_input",
+            Self::Conflict => "tool.file_conflict",
+        }
+    }
+
+    /// The one next action that resolves this class. Deliberately specific: the
+    /// model has to be able to tell renaming from overwriting from re-reading,
+    /// which is exactly what the opaque wording destroyed.
+    pub fn next_step(self) -> &'static str {
+        match self {
+            Self::TargetExists => {
+                "目标文件已存在：请改用另一个文件名或另一个输出路径（例如加后缀 v2）；\
+                 只有确实要覆盖该文件时才显式设置 overwrite=true，不要默认覆盖"
+            }
+            Self::SourceMissing => {
+                "源文件不存在：请先确认路径拼写与所在目录，或用 ls/read 重新查看项目里的真实文件名，\
+                 不要对不存在的路径反复重试"
+            }
+            Self::PermissionDenied => {
+                "路径不在授权项目内或当前权限不允许写入：请改用项目目录内的路径；\
+                 权限不足需要用户调整授权，重试同样的调用不会成功"
+            }
+            Self::WorkerUnavailable => {
+                "Office 组件不可用或安装不完整：这是环境问题，重试同样的调用不会成功；\
+                 请告知用户需要修复 Fox 的 Office 组件，并改用其他方式（如直接写出文本或 CSV）继续任务"
+            }
+            Self::TimedOut => {
+                "该操作超出执行时限：请缩小单次操作规模（例如分批导入、减少单元格数量）后再试一次"
+            }
+            Self::InvalidInput => "参数不符合 Office 工具契约：请按上面的原因修正参数后重试",
+            Self::ReadOnlyInput => {
+                "该路径是任务给出的只读输入材料：请把结果写到任务指定的输出路径，不要改动输入文件；\
+                 重复写入同一个输入不会成功"
+            }
+            Self::Conflict => "目标文件在操作期间发生变化：请重新读取该文件，再基于新的内容重试",
+        }
+    }
+
+    pub fn retryable(self) -> bool {
+        matches!(self, Self::TimedOut | Self::Conflict)
+    }
+}
+/// Classify one built-in Office failure. `None` means the text matches no known
+/// local class, and the caller must then keep the failure generic rather than
+/// forward an unclassified body.
+pub fn classify_resource_error(error: &str) -> Option<OfficeResourceKind> {
+    let text = error.trim();
+    if text.is_empty() {
+        return None;
+    }
+    // The Host's own typed refusals are already classified: the wrapper the
+    // gateway adds carries the code verbatim, so it is read before the prose.
+    const TYPED: [(&str, OfficeResourceKind); 4] = [
+        ("[tool.invalid_input]", OfficeResourceKind::InvalidInput),
+        ("[tool.file_conflict]", OfficeResourceKind::Conflict),
+        ("[tool.read_only_input]", OfficeResourceKind::ReadOnlyInput),
+        ("[tool.permission_denied]", OfficeResourceKind::PermissionDenied),
+    ];
+    for (marker, kind) in TYPED {
+        if text.contains(marker) {
+            return Some(kind);
+        }
+    }
+    const TARGET_EXISTS: [&str; 4] = [
+        "Office 输出已存在",
+        "输出已存在",
+        "already exists",
+        "EEXIST",
+    ];
+    const SOURCE_MISSING: [&str; 9] = [
+        "Office 输入文件不存在",
+        "输入文件不存在",
+        "无法读取产物文件",
+        "无法打开产物文件",
+        "无法定位会话的计算产物目录",
+        "无法查询计算产物",
+        "不存在",
+        "not found",
+        "ENOENT",
+    ];
+    const PERMISSION: [&str; 7] = [
+        "超出授权项目",
+        "授权项目",
+        "不能是网络路径",
+        "Office 路径不能包含 ..",
+        "保留名称",
+        "permission",
+        "拒绝访问",
+    ];
+    const WORKER: [&str; 8] = [
+        "Office 组件缺失",
+        "Office 组件大小异常",
+        "Office 组件完整性校验失败",
+        "Office 连接器未启用",
+        "Office 连接器不存在",
+        "Office 执行锁不可用",
+        "首版 Office 连接器仅支持",
+        "worker",
+    ];
+    const TIMED_OUT: [&str; 3] = [
+        "Office execution budget exceeded",
+        "超出执行时限",
+        "timed out",
+    ];
+    let contains_any = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
+    if contains_any(&TARGET_EXISTS) {
+        return Some(OfficeResourceKind::TargetExists);
+    }
+    if contains_any(&TIMED_OUT) {
+        return Some(OfficeResourceKind::TimedOut);
+    }
+    if contains_any(&WORKER) {
+        return Some(OfficeResourceKind::WorkerUnavailable);
+    }
+    if contains_any(&PERMISSION) {
+        return Some(OfficeResourceKind::PermissionDenied);
+    }
+    if contains_any(&SOURCE_MISSING) {
+        return Some(OfficeResourceKind::SourceMissing);
+    }
+    None
+}
 pub const VERSION: &str = "1.0.147";
 const MAX_FILE: u64 = 64 * 1024 * 1024;
 const MAX_OUTPUT: usize = 4 * 1024 * 1024;
@@ -147,7 +309,7 @@ pub fn tool_definitions() -> Vec<Value> {
         }), vec!["format"], json!({})),
         ("office_read", "Read an Office document as text, outline, stats, or a structured node/query. No changes.", json!({"file":file,"mode":{"type":"string","enum":["text","outline","stats","get","query"]},"selector":{"type":"string"}}), vec!["file"], json!({})),
         ("office_create", "Create a DOCX/XLSX/PPTX, optionally copying an existing template, and save it as a user result. Give \"name\" to have the Host place it in the conversation result folder, or \"output\" for an explicit project path.", json!({"output":output,"name":name,"template":file,"overwrite":{"type":"boolean","default":false}}), Vec::<&str>::new(), json!({"anyOf":[{"required":["output"]},{"required":["name"]}]})),
-        ("office_edit", "Apply an atomic batch of add/set/remove to a COPY of a document. operations: [{command, path, type?, props?}]. Use office_help for element properties. Source is preserved unless output is the same path and overwrite=true. No shell/raw XML/plugins/network assets.", json!({"file":file,"output":output,"name":name,"overwrite":{"type":"boolean","default":false},"operations":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["command","path"],"properties":{"command":{"type":"string","enum":["add","set","remove"]},"path":{"type":"string"},"type":{"type":"string"},"props":{"type":"object","additionalProperties":{"type":["string","number","boolean"]}}}}}}), vec!["file","operations"], json!({"anyOf":[{"required":["output"]},{"required":["name"]}]})),
+        ("office_edit", "Apply an atomic batch of add/set/remove to a document. operations: [{command, path, type?, props?}]. `path` is an ABSOLUTE element path that starts with '/': '/body' adds inside the document body, '/body/p[1]' addresses the first paragraph, '/Sheet1/A1' a cell, '/slide[1]' a slide — the bare element names office_help lists take that leading '/'. Exactly one target is required: `output` rewrites that project path (with overwrite=true when it exists), `name` writes a NEW artifact into the conversation result folder. Source is preserved unless output is the same path. No shell/raw XML/plugins/network assets.", json!({"file":file,"output":output,"name":name,"overwrite":{"type":"boolean","default":false},"operations":{"type":"array","minItems":1,"maxItems":100,"items":{"type":"object","additionalProperties":false,"required":["command","path"],"properties":{"command":{"type":"string","enum":["add","set","remove"]},"path":{"type":"string","description":"Absolute element path beginning with '/', e.g. /body, /body/p[1], /Sheet1/A1."},"type":{"type":"string"},"props":{"type":"object","additionalProperties":{"type":["string","number","boolean"]}}}}}}), vec!["file","operations"], json!({"anyOf":[{"required":["output"]},{"required":["name"]}]})),
         ("office_import_data", "Import ONE CSV/TSV data block into an XLSX worksheet atomically; far more compact than many per-cell office_edit operations. Values are typed by the writer (numbers stay numbers); a field starting with = becomes a formula and is screened like office_edit. PREFER the artifact flow: compute and save data once with attachment_compute (saveFile), then pass the returned files[].id here as artifactId — Host reads the saved bytes directly, so the full CSV never has to be rebuilt or copied through the request. data and artifactId are mutually exclusive; artifactId only accepts a compute artifact id from THIS conversation (a compute-artifact: id returned by attachment_compute). Large datasets MUST be split into multiple calls: the response returns nextStartCell for the following block. Re-running the same call with the same startCell overwrites the same cells, it never appends duplicates, so retries are safe. Omit file to create the workbook. Set createSheet=true to add a missing sheet. The sheet receives the data as-is; style it afterwards with office_edit.", json!({
             "file":{"type":"string", "description":"Optional existing .xlsx inside the authorized project. Omit to create a new workbook at output/name."},
             "output":output,
@@ -831,6 +993,22 @@ pub fn prepare(
 /// frozen Run's own conversation; the context is `None` only for paths that
 /// cannot reference an artifact (managed-file pre-flight, legacy callers that
 /// never carry `artifactId`).
+/// Whether a tool's own schema offers `output` or `name` as its target.
+fn schema_requires_output_or_name(schema: &Value) -> bool {
+    schema["anyOf"]
+        .as_array()
+        .is_some_and(|options| {
+            let requires = |field: &str| {
+                options.iter().any(|option| {
+                    option["required"]
+                        .as_array()
+                        .is_some_and(|required| required.iter().any(|value| value == field))
+                })
+            };
+            requires("output") || requires("name")
+        })
+}
+
 pub fn prepare_with_context(
     tool: &str,
     input: &Value,
@@ -842,6 +1020,15 @@ pub fn prepare_with_context(
         .into_iter()
         .find(|v| v["name"] == tool)
         .ok_or("未知 Office 工具")?;
+    // A tool whose schema demands a target states that in the model's own terms
+    // instead of leaving it to decode an `anyOf` failure. Derived from the
+    // schema itself, so it stays true for every tool that has the requirement.
+    if schema_requires_output_or_name(&definition["inputSchema"])
+        && input.get("output").is_none()
+        && input.get("name").is_none()
+    {
+        return Err("Office 需要 output（项目内既有路径，配合 overwrite=true 写回）或 name（新成果文件名，由 Host 放入成果目录）其中之一；只给 file 不会写回原文件。".into());
+    }
     jsonschema::validator_for(&definition["inputSchema"])
         .map_err(|e| e.to_string())?
         .validate(input)
@@ -1055,7 +1242,11 @@ pub fn prepare_with_context(
             for op in input["operations"].as_array().ok_or("缺少 operations")? {
                 let selector = string(op, "path")?;
                 if !selector.starts_with('/') || selector.len() > 4096 {
-                    return Err("Office 元素路径必须以 / 开头且不超过 4096 字符".into());
+                    return Err(format!(
+                        "Office 元素路径必须以 / 开头且不超过 4096 字符（收到 \"{selector}\"）：\
+                         例如 /body 添加段落、/body/p[1] 定位第一段、/Sheet1/A1 定位单元格；\
+                         office_help 列出的元素名称需要加上前导 /"
+                    ));
                 }
                 if let Some(kind) = op["type"].as_str() {
                     if ![
@@ -2037,6 +2228,88 @@ pub(crate) fn execute_with_cancellation(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod resource_error_tests {
+    use super::*;
+
+    /// Regression, 2026-10-01 review (R07): every classified local class names
+    /// the **distinct** next action that resolves it, so the model can tell
+    /// renaming from overwriting from re-reading from stopping.
+    #[test]
+    fn each_local_class_names_its_own_next_step() {
+        let cases: [(&str, OfficeResourceKind); 7] = [
+            (
+                "Office 输出已存在，请选择新文件；覆盖必须显式设置 overwrite=true",
+                OfficeResourceKind::TargetExists,
+            ),
+            ("Office 输入文件不存在", OfficeResourceKind::SourceMissing),
+            (
+                "Office 文件超出授权项目（包括符号链接目标）",
+                OfficeResourceKind::PermissionDenied,
+            ),
+            (
+                "Office 组件完整性校验失败，请修复 Fox 安装。",
+                OfficeResourceKind::WorkerUnavailable,
+            ),
+            (
+                "Office execution budget exceeded",
+                OfficeResourceKind::TimedOut,
+            ),
+            (
+                "[tool.invalid_input] Office 需要 output（项目内既有路径，配合 overwrite=true 写回）或 name（新成果文件名，由 Host 放入成果目录）其中之一；只给 file 不会写回原文件。",
+                OfficeResourceKind::InvalidInput,
+            ),
+            (
+                "[tool.read_only_input] 「in/sales.csv」是任务给出的只读输入材料",
+                OfficeResourceKind::ReadOnlyInput,
+            ),
+        ];
+        for (error, expected) in cases {
+            let kind = classify_resource_error(error).unwrap_or_else(|| panic!("unclassified: {error}"));
+            assert_eq!(kind, expected, "{error}");
+        }
+        // The steps have to be *different* facts, not one generic sentence.
+        let steps: Vec<&str> = cases
+            .iter()
+            .map(|(_, kind)| kind.next_step())
+            .collect();
+        for (index, step) in steps.iter().enumerate() {
+            for (other, competitor) in steps.iter().enumerate() {
+                if index != other {
+                    assert_ne!(step, competitor, "two classes share one next step");
+                }
+            }
+        }
+        // A conflict must not simply recommend overwriting.
+        let exists = OfficeResourceKind::TargetExists.next_step();
+        assert!(exists.contains("另一个文件名"), "{exists}");
+        assert!(
+            exists.find("另一个文件名").unwrap() < exists.find("overwrite=true").unwrap(),
+            "renaming must be named before overwriting: {exists}"
+        );
+        // A broken connector is not retryable; a timeout and a conflict are.
+        assert!(!OfficeResourceKind::WorkerUnavailable.retryable());
+        assert!(!OfficeResourceKind::SourceMissing.retryable());
+        assert!(!OfficeResourceKind::TargetExists.retryable());
+        assert!(!OfficeResourceKind::ReadOnlyInput.retryable());
+        assert!(OfficeResourceKind::TimedOut.retryable());
+        assert!(OfficeResourceKind::Conflict.retryable());
+    }
+
+    /// An unrecognised failure stays unclassified, so the caller keeps it
+    /// generic instead of forwarding a body this Host cannot vouch for.
+    #[test]
+    fn an_unclassified_failure_stays_unclassified() {
+        for error in [
+            "some connector wrote a raw remote body",
+            "{\"error\":{\"message\":\"upstream 502 from the vendor gateway\"}}",
+        ] {
+            assert_eq!(classify_resource_error(error), None, "{error}");
+        }
+        assert_eq!(classify_resource_error("   "), None);
+    }
 }
 
 #[cfg(test)]

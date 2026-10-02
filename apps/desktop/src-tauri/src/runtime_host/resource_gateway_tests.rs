@@ -35,14 +35,14 @@ fn legacy_file_read_claim_commit_and_duplicate_use_the_real_host_chain() {
     for forged in [json!({"path":"note.txt","content":"forged"}),
         json!({"path":"note.txt","content":"committed","createDirectories":true})] {
         let error = execute_legacy_admitted_file(&db, &root.join("backups"), &run.id, &conversation.id,
-            "write-once", "write_file", &forged, root.to_str().unwrap(), version, &observed, &token).unwrap_err();
+            "write-once", "write_file", &forged, root.to_str().unwrap(), version, Some(&observed), &token).unwrap_err();
         assert!(error.contains("credential_mismatch"), "{error}");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
         let dispatch = fox_engine_protocol::encode_dispatch_id(&run.id, "write-once").unwrap();
         assert!(db.read_execution_attempt(&run.id, &dispatch).unwrap().is_none());
     }
     let invoke = || execute_legacy_admitted_file(&db, &root.join("backups"), &run.id, &conversation.id,
-        "write-once", "write_file", &input, root.to_str().unwrap(), version, &observed, &token).unwrap();
+        "write-once", "write_file", &input, root.to_str().unwrap(), version, Some(&observed), &token).unwrap();
     let result = invoke();
     assert_ne!(result["isError"], true, "{result}");
     assert_eq!(result["details"]["executionReceipt"]["executionStarted"], "true");
