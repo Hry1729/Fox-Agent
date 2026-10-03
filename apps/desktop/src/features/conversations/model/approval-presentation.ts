@@ -24,7 +24,17 @@ export function approvalPresentation(approval: Pick<ApprovalRecord, 'request' | 
     // one. It is immutable: the Host bound it when the request was created and
     // the claim requires exactly these four facts.
     wholeFileReplacement: replacement,
+    officeReuse: officeReuseBinding(request),
   }
+}
+
+export function officeReuseBinding(request: unknown): { target: string; selectors: string[] } | null {
+  const candidate = record(record(request).officeReuse)
+  const target = text(candidate.target)
+  const selectors = candidate.selectors
+  if (!target || !Array.isArray(selectors) || selectors.length === 0 || selectors.length > 16
+    || !selectors.every((selector) => typeof selector === 'string' && selector.length <= 320)) return null
+  return { target, selectors }
 }
 
 /// The immutable whole-file replacement binding carried by an approval request.

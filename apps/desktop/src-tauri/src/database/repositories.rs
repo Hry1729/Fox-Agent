@@ -233,6 +233,8 @@ pub struct Database {
     /// wall anchor until fresh progress arrives. Follows the KernelChanges
     /// precedent (process-local hub on the shared Database handle).
     model_progress: Arc<Mutex<BTreeMap<String, i64>>>,
+    /// Only grants created in this Host lifetime may cross Office run boundaries.
+    office_reuse_grants: Arc<Mutex<Vec<kernel_authorization::ProcessOfficeGrant>>>,
 }
 
 fn require_legacy_run_writer(connection: &Connection, run_id: &str) -> rusqlite::Result<()> {
@@ -298,6 +300,7 @@ impl Database {
             data_root_id,
             kernel_changes: Arc::new(super::kernel_changes::KernelChanges::default()),
             model_progress: Arc::new(Mutex::new(BTreeMap::new())),
+            office_reuse_grants: Arc::new(Mutex::new(Vec::new())),
         };
         database.seed_builtin_agents()?;
         database.seed_bundled_experts()?;
@@ -2316,7 +2319,39 @@ impl Database {
         detail
             .approvals
             .extend(self.child_run_approvals_for_conversation(id)?);
+        self.enrich_kernel_approval_preview(&mut detail.approvals);
         Ok(detail)
+    }
+
+    /// Show the user the same Office boundary that the Host will hash into a
+    /// reusable scope. This is presentation only; registration still recomputes
+    /// the scope from the decided call and its frozen project root.
+    fn enrich_kernel_approval_preview(&self, approvals: &mut [super::ApprovalRecord]) {
+        for approval in approvals {
+            if approval.status != "pending" || approval.request["authority"] != "kernel" { continue; }
+            let binding = self.run_control_binding(&approval.run_id).ok().flatten();
+            let root = binding.as_ref().and_then(|binding| binding.permission.project_root.as_deref());
+            let input = &approval.request["input"];
+            let office = approval.tool_name == "call_mcp_tool" && input["serverId"] == crate::office::SERVER_ID;
+            let office_scope = office.then(|| crate::runtime_host::office_grants::reusable_edit_scope(input, root)).flatten();
+            let reusable = if office {
+                office_scope.is_some()
+            } else if approval.tool_name == "task_repair_escalate_start" || approval.request.get("wholeFileReplacement").is_some() {
+                false
+            } else {
+                crate::runtime_host::shadow_reconcile::tool_operation_scope(&approval.tool_name, input, root).is_some()
+            };
+            if let Some(request) = approval.request.as_object_mut() {
+                request.insert("availableDecisions".into(), if reusable {
+                    json!(["allow_once", "allow_conversation", "deny"])
+                } else { json!(["allow_once", "deny"]) });
+                if let Some(scope) = office_scope {
+                    request.insert("target".into(), Value::String(scope.target.clone()));
+                    request.insert("summary".into(), Value::String("仅修改下列单元格及属性；内容可变，文件版本仍需校验。".into()));
+                    request.insert("officeReuse".into(), json!({"target": scope.target, "selectors": scope.selectors}));
+                }
+            }
+        }
     }
 
     #[allow(clippy::type_complexity)]
@@ -2578,7 +2613,7 @@ impl Database {
         limit: usize,
     ) -> Result<super::ConversationHistoryPage, String> {
         let limit = limit.clamp(20, 200);
-        self.with_connection(|connection| {
+        let mut page = self.with_connection(|connection| {
             query_conversation(connection, id)?;
             let messages = query_message_page(connection, id, Some(before_ordinal), limit)?;
             let oldest_ordinal = messages
@@ -2609,7 +2644,9 @@ impl Database {
                 artifacts,
                 has_earlier_messages,
             })
-        })
+        })?;
+        self.enrich_kernel_approval_preview(&mut page.approvals);
+        Ok(page)
     }
 
     pub fn upsert_yuxi_agents(&self, agents: &[YuxiAgentRecord]) -> Result<(), String> {

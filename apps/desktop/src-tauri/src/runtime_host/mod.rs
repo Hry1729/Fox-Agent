@@ -12,6 +12,7 @@ pub(crate) mod kernel_coordinator;
 mod kernel_model_worker;
 mod kernel_run_lock;
 mod kernel_host;
+pub(crate) mod office_grants;
 mod waiting_jobs_wake;
 mod kernel_authority;
 pub(crate) mod process_identity;

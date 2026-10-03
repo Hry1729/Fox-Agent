@@ -81,6 +81,9 @@ function baseApprovalDecisions(request: unknown): readonly ApprovalDecision[] {
   const declared = explicitDecisions(request)
 
   if (declared === undefined) {
+    // Kernel approval cards must receive their supported choices from the Host.
+    // An event arriving before the enriched snapshot stays one-shot.
+    if (request.authority === 'kernel') return ['deny', 'allow_once']
     return category === 'legacy_tool_execution' || category === 'tool_execution'
       ? DECISION_ORDER
       : ['deny']
