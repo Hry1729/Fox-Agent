@@ -1444,7 +1444,11 @@ impl super::RuntimeHost {
             }
             let host = self.clone();
             std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
+                let admission = host.root_run_admission.acquire(&run_id, ||
+                    host.state.lock().map_or(true, |state| state.shutting_down),
+                    "Runtime Host is shutting down");
                 let result = (|| {
+                    let _permit = admission?;
                     let binding = host
                         .database
                         .run_control_binding(&run_id)?
@@ -1463,7 +1467,7 @@ impl super::RuntimeHost {
                     };
                     host.drive_kernel_run(ownership, &binding, &runtime, &cancellation, false)
                 })();
-                if result.is_err() {
+                if result.as_ref().err().is_some_and(|error| error != "Runtime Host is shutting down") {
                     // Failure recording reacquires ownership; it cannot terminate
                     // a Run currently held by another process.
                     let _ = host.record_kernel_start_failure(&run_id);
@@ -1475,7 +1479,8 @@ impl super::RuntimeHost {
                     if retire {
                         state.cancellation.retire_run(&run_id);
                     }
-                    if state.kernel_active_runs.is_empty() {
+                    if state.kernel_active_runs.is_empty() && state.kernel_wake_inflight.is_empty()
+                        && state.worker.as_ref().and_then(|worker| worker.active_run_id.as_ref()).is_none() {
                         state.state = "ready".into();
                     }
                     if result.is_err() {
@@ -1723,6 +1728,20 @@ impl super::RuntimeHost {
         &self, ownership: KernelRunLock, binding: &RunControlBinding,
         prompt: Value, service: Value, force_per_round: bool,
     ) -> Result<(), String> {
+        let gate = if self.run_budget_override.is_some() {
+            &self.child_run_admission
+        } else {
+            &self.root_run_admission
+        };
+        let admission = gate.acquire(&binding.run_id, ||
+            self.state.lock().map_or(true, |state| state.shutting_down
+                || state.cancelled_dispatches.contains(&binding.run_id)),
+            "Runtime Host is shutting down");
+        if admission.is_err() && self.state.lock().map_or(false, |mut state|
+            state.cancelled_dispatches.remove(&binding.run_id)) {
+            return Err(super::CANCELLED_BEFORE_SUBMISSION.into());
+        }
+        let _admission = admission?;
         let cancellation = {
             let _transition = self
                 .run_transition
@@ -1831,7 +1850,8 @@ impl super::RuntimeHost {
             if retire {
                 state.cancellation.retire_run(&binding.run_id);
             }
-            if state.kernel_active_runs.is_empty() {
+            if state.kernel_active_runs.is_empty() && state.kernel_wake_inflight.is_empty()
+                && state.worker.as_ref().and_then(|worker| worker.active_run_id.as_ref()).is_none() {
                 state.state = "ready".into();
             }
         }

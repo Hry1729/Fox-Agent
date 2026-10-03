@@ -9,12 +9,18 @@ use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::mpsc::{self, Receiver},
+    sync::{mpsc::{self, Receiver}, Arc, OnceLock},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 const MAX_FRAME: usize = 1_048_576;
+
+fn model_request_gate() -> &'static Arc<super::run_admission::Gate> {
+    static GATE: OnceLock<Arc<super::run_admission::Gate>> = OnceLock::new();
+    GATE.get_or_init(|| super::run_admission::Gate::new(
+        super::run_admission::configured_limit("FOX_KERNEL_MODEL_REQUEST_CAPACITY", 2)))
+}
 
 /// A bounded, single-line excerpt of a worker payload for stderr diagnostics.
 ///
@@ -723,7 +729,19 @@ fn call_model(
         || config.execution_profile_id != binding.execution_profile_id {
         return Err("isolated Kernel model identity mismatch".into());
     }
-    let budget = binding.budgets.limit_operation_ms(binding.budgets.model_request_ms, 0).min(remaining_budget_ms);
+    let requested_budget = binding.budgets.limit_operation_ms(binding.budgets.model_request_ms, 0).min(remaining_budget_ms);
+    if requested_budget <= 0 { return Err("Kernel worker has no remaining execution budget".into()); }
+    // This quota is independent of the run quota. Its FIFO wait is bounded by
+    // the run's original request budget and responds to cancellation.
+    let wait_started = Instant::now();
+    let request_id = format!("{}:{}", binding.run_id, uuid::Uuid::new_v4());
+    let permit = model_request_gate().acquire(&request_id, ||
+        token.check().is_err() || wait_started.elapsed().as_millis() >= requested_budget as u128,
+        "Kernel model request capacity wait exceeded its budget");
+    if permit.is_err() { token.check()?; }
+    let _request_permit = permit?;
+    token.check()?;
+    let budget = requested_budget.saturating_sub(wait_started.elapsed().as_millis() as i64);
     if budget <= 0 { return Err("Kernel worker has no remaining execution budget".into()); }
     let deadline = Instant::now() + Duration::from_millis(budget.try_into().map_err(|_| "invalid model budget")?);
     let session_id = format!("kernel-once-{}", uuid::Uuid::new_v4());

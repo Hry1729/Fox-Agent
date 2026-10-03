@@ -11,6 +11,7 @@ pub(crate) mod delivery;
 pub(crate) mod kernel_coordinator;
 mod kernel_model_worker;
 mod kernel_run_lock;
+mod run_admission;
 mod kernel_host;
 pub(crate) mod office_grants;
 mod waiting_jobs_wake;
@@ -737,6 +738,7 @@ struct QueuedRun {
     started: StartRunResult,
     text: String,
     attachments: Vec<AttachmentRecord>,
+    kernel: bool,
 }
 
 struct RuntimeCommand {
@@ -781,8 +783,7 @@ struct RuntimeHostState {
     pending_approvals: PendingApprovals,
     active_file_writes: ActiveFileWrites,
     queued_runs: VecDeque<QueuedRun>,
-    dispatching_run_id: Option<String>,
-    dispatching_conversation_id: Option<String>,
+    dispatching_runs: HashMap<String, (String, bool)>,
     cancelled_dispatches: HashSet<String>,
     recovery_attempts: u8,
     last_recovery_at: Option<i64>,
@@ -1139,6 +1140,8 @@ pub struct RuntimeHost {
     digital_scheduler_started: Arc<AtomicBool>,
     digital_scheduler_stop: Arc<AtomicBool>,
     active_tool_handlers: Arc<AtomicUsize>,
+    root_run_admission: Arc<run_admission::Gate>,
+    child_run_admission: Arc<run_admission::Gate>,
 }
 
 impl RuntimeHost {
@@ -1303,8 +1306,7 @@ impl RuntimeHost {
                 pending_approvals: Arc::new(Mutex::new(HashMap::new())),
                 active_file_writes: Arc::new(Mutex::new(HashSet::new())),
                 queued_runs: VecDeque::new(),
-                dispatching_run_id: None,
-                dispatching_conversation_id: None,
+                dispatching_runs: HashMap::new(),
                 cancelled_dispatches: HashSet::new(),
                 recovery_attempts: 0,
                 last_recovery_at: None,
@@ -1328,6 +1330,10 @@ impl RuntimeHost {
             digital_scheduler_started: Arc::new(AtomicBool::new(false)),
             digital_scheduler_stop: Arc::new(AtomicBool::new(false)),
             active_tool_handlers: Arc::new(AtomicUsize::new(0)),
+            root_run_admission: run_admission::Gate::new(
+                run_admission::configured_limit("FOX_KERNEL_RUN_CAPACITY", 1)),
+            child_run_admission: run_admission::Gate::new(
+                run_admission::configured_limit("FOX_KERNEL_CHILD_RUN_CAPACITY", 2)),
         };
         host.reconcile_continuation_proposals();
         if let Err(error) = database.kernel_jobs_reconcile_orphans() {
@@ -1587,7 +1593,9 @@ impl RuntimeHost {
                         worker.active_run_id = None;
                     }
                 }
-                if state.state == "busy" {
+                if state.state == "busy" && state.kernel_active_runs.is_empty()
+                    && state.kernel_wake_inflight.is_empty()
+                    && state.worker.as_ref().and_then(|worker| worker.active_run_id.as_ref()).is_none() {
                     state.state = "ready".to_owned();
                 }
                 state.last_error = Some(error.clone());
@@ -1892,12 +1900,18 @@ impl RuntimeHost {
         attachments: Vec<AttachmentRecord>,
     ) {
         let run_id = started.run.id.clone();
+        let kernel = kernel_authority::select(
+            self.database.run_control_binding(&run_id).ok().flatten()
+                .as_ref().map(|binding| binding.authority),
+            std::env::var("FOX_KERNEL_MODE"),
+        ).is_ok_and(|authority| authority == fox_engine_protocol::ExecutionAuthority::Authoritative);
         let mut queued_at = None;
         if let Ok(mut state) = self.state.lock() {
             state.queued_runs.push_back(QueuedRun {
                 started,
                 text,
                 attachments,
+                kernel,
             });
             queued_at = Some(crate::database::now_ms());
         }
@@ -1912,25 +1926,26 @@ impl RuntimeHost {
             let Ok(mut state) = self.state.lock() else {
                 return;
             };
-            if state.shutting_down || state.dispatching_run_id.is_some() || !state.kernel_active_runs.is_empty()
-                || !state.kernel_wake_inflight.is_empty()
-                || state
-                    .worker
-                    .as_ref()
-                    .and_then(|worker| worker.active_run_id.as_ref())
-                    .is_some()
-                || matches!(
-                    state.state.as_str(),
-                    "busy" | "starting" | "recovering" | "stopping"
-                )
-            {
+            if state.shutting_down {
                 return;
             }
-            let Some(queued) = state.queued_runs.pop_front() else {
+            let mut occupied = state.kernel_active_runs.clone();
+            occupied.extend(state.kernel_wake_inflight.iter().cloned());
+            occupied.extend(state.dispatching_runs.iter()
+                .filter(|(_, (_, kernel))| *kernel).map(|(run_id, _)| run_id.clone()));
+            let kernel_available = occupied.len() < self.root_run_admission.limit();
+            let legacy_available = !state.dispatching_runs.values().any(|(_, kernel)| !kernel)
+                && state.worker.as_ref().and_then(|worker| worker.active_run_id.as_ref()).is_none()
+                && !matches!(state.state.as_str(), "starting" | "stopping");
+            // Pick the oldest eligible item. A blocked Legacy item cannot
+            // prevent a later Kernel conversation from using a free lane.
+            let Some(index) = state.queued_runs.iter().position(|item|
+                if item.kernel { kernel_available } else { legacy_available }) else {
                 return;
             };
-            state.dispatching_run_id = Some(queued.started.run.id.clone());
-            state.dispatching_conversation_id = Some(queued.started.run.conversation_id.clone());
+            let Some(queued) = state.queued_runs.remove(index) else { return; };
+            state.dispatching_runs.insert(queued.started.run.id.clone(),
+                (queued.started.run.conversation_id.clone(), queued.kernel));
             (queued, crate::database::now_ms())
         };
         let (queued, granted_at) = queued;
@@ -1951,7 +1966,9 @@ impl RuntimeHost {
                 if let Err(error) = result {
                     if error == CANCELLED_BEFORE_SUBMISSION {
                         if let Ok(mut state) = runtime_host.state.lock() {
-                            if state.state == "busy" {
+                            if state.state == "busy" && state.kernel_active_runs.is_empty()
+                                && state.kernel_wake_inflight.is_empty()
+                                && state.worker.as_ref().and_then(|worker| worker.active_run_id.as_ref()).is_none() {
                                 state.state = "ready".to_owned();
                             }
                         }
@@ -1961,13 +1978,13 @@ impl RuntimeHost {
                 }
             }
             if let Ok(mut state) = runtime_host.state.lock() {
-                if state.dispatching_run_id.as_deref() == Some(&run_id) {
-                    state.dispatching_run_id = None;
-                    state.dispatching_conversation_id = None;
-                }
+                state.dispatching_runs.remove(&run_id);
             }
             runtime_host.dispatch_next_queued_run();
         }));
+        // Fill another free Kernel slot without waiting for the first run to
+        // finish. The dispatch marker reserves its slot before this recursion.
+        self.dispatch_next_queued_run();
     }
 
     fn cancel_queued_run(&self, run_id: &str) -> Result<bool, String> {
@@ -1976,15 +1993,16 @@ impl RuntimeHost {
                 .state
                 .lock()
                 .map_err(|_| "runtime state lock is poisoned".to_owned())?;
-            if state.dispatching_run_id.as_deref() == Some(run_id)
+            if state.dispatching_runs.contains_key(run_id)
                 && state
                     .worker
                     .as_ref()
                     .and_then(|worker| worker.active_run_id.as_deref())
                     != Some(run_id)
+                && !state.kernel_active_runs.contains(run_id)
             {
                 state.cancelled_dispatches.insert(run_id.to_owned());
-                state.dispatching_conversation_id.clone()
+                state.dispatching_runs.get(run_id).map(|(conversation, _)| conversation.clone())
             } else {
                 let Some(index) = state
                     .queued_runs
@@ -2278,6 +2296,8 @@ impl RuntimeHost {
             digital_scheduler_started: self.digital_scheduler_started.clone(),
             digital_scheduler_stop: self.digital_scheduler_stop.clone(),
             active_tool_handlers: self.active_tool_handlers.clone(),
+            root_run_admission: self.root_run_admission.clone(),
+            child_run_admission: self.child_run_admission.clone(),
         }
     }
 
@@ -2768,6 +2788,8 @@ impl RuntimeHost {
             self.skills_dir.clone(),
             self.yuxi_client.clone(),
         );
+        child_host.root_run_admission = self.root_run_admission.clone();
+        child_host.child_run_admission = self.child_run_admission.clone();
         child_host.run_budget_override = Some(child_run.budget.clone());
         child_host
             .state
@@ -3741,7 +3763,8 @@ impl RuntimeHost {
             if let Some(worker) = state.worker.as_mut() {
                 if worker.active_run_id.as_deref() == Some(run_id) {
                     worker.active_run_id = None;
-                    state.state = "ready".to_owned();
+                    state.state = if state.kernel_active_runs.is_empty()
+                        && state.kernel_wake_inflight.is_empty() { "ready" } else { "busy" }.to_owned();
                     true
                 } else {
                     false
@@ -3758,7 +3781,7 @@ impl RuntimeHost {
     }
 
     fn ensure_worker(&self, conversation_id: &str) -> Result<(), String> {
-        let (current_conversation, current_state) = {
+        let (current_conversation, current_state, worker_busy) = {
             let state = self
                 .state
                 .lock()
@@ -3769,15 +3792,16 @@ impl RuntimeHost {
                     .as_ref()
                     .and_then(|worker| worker.current_conversation_id.clone()),
                 state.state.clone(),
+                state.worker.as_ref().and_then(|worker| worker.active_run_id.as_ref()).is_some(),
             )
         };
 
         if current_conversation.as_deref() == Some(conversation_id)
-            && matches!(current_state.as_str(), "ready" | "busy")
+            && !matches!(current_state.as_str(), "stopping" | "crashed")
         {
             return Ok(());
         }
-        if current_conversation.is_some() && current_state == "busy" {
+        if current_conversation.is_some() && worker_busy {
             return Err("another conversation is currently running".to_owned());
         }
         if current_conversation.is_some() {
@@ -3913,7 +3937,8 @@ impl RuntimeHost {
             .state
             .lock()
             .map_err(|_| "runtime state lock is poisoned".to_owned())?;
-        state.state = "ready".to_owned();
+        state.state = if state.kernel_active_runs.is_empty()
+            && state.kernel_wake_inflight.is_empty() { "ready" } else { "busy" }.to_owned();
         state.runtime = runtime;
         state.runtime_version = runtime_version;
         state.capabilities = capabilities;
