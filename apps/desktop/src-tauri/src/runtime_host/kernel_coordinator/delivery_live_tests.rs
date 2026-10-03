@@ -315,6 +315,303 @@ fn finalized_item_count(db: &Database, run_id: &str) -> i64 {
     .unwrap()
 }
 
+/// Drive one round that proposes a tool call, settle it, and return the batch the
+/// retry lane resumes from.
+///
+/// This reproduces the durable state a provider retry lands in: the tools of the
+/// previous round are settled and the model request for the batch is pending, so
+/// the next response arrives through `dispatch_batch` — the per-round entry point,
+/// not the initial one.
+fn settled_tool_batch(
+    coordinator: &KernelCoordinator<'_>,
+    run_id: &str,
+    root: &Path,
+) -> String {
+    coordinator
+        .dispatch_initial("owner", &Ask, |_, frame, _| {
+            Ok(fox_engine_protocol::KernelInitialModelResponse {
+                schema_version: 1,
+                run_id: run_id.to_owned(),
+                turn_id: frame.input.turn_id.clone(),
+                checkpoint_seq: frame.checkpoint_seq,
+                assistant_message: json!({"role":"assistant","stopReason":"toolUse",
+                    "content":[{"type":"toolCall","id":"write-scratch","name":"write_file",
+                        "arguments":{"path":"scratch.txt","content":"scratch"}}]}),
+            })
+        })
+        .unwrap();
+    coordinator
+        .resolve_approval("write-scratch", kernel::ApprovalDecision::AllowOnce)
+        .unwrap();
+    coordinator
+        .dispatch_tool("write-scratch", "writer", |_, _, _| {
+            std::fs::write(root.join("scratch.txt"), b"scratch").unwrap();
+            Ok((true, json!({"content":[{"type":"text","text":"written"}]})))
+        })
+        .unwrap();
+    coordinator
+        .snapshot()
+        .unwrap()
+        .pending_effects
+        .iter()
+        .find(|effect| effect.kind == kernel::OutboxEffectKind::DeliverToolBatch)
+        .expect("the settled tool batch must be delivered to the model")
+        .batch_id
+        .clone()
+        .unwrap()
+}
+
+fn final_stop_response(run_id: &str, frame: &fox_engine_protocol::KernelBatchResumeFrame) -> fox_engine_protocol::KernelModelResponse {
+    fox_engine_protocol::KernelModelResponse {
+        schema_version: 1,
+        run_id: run_id.to_owned(),
+        turn_id: frame.turn_id.clone(),
+        batch_id: frame.batch_id.clone(),
+        checkpoint_seq: frame.checkpoint_seq,
+        assistant_message: json!({"role":"assistant","stopReason":"stop",
+            "content":[{"type":"text","text":"已完成。"}]}),
+    }
+}
+
+fn committed_marks(db: &Database, run_id: &str) -> i64 {
+    db.with_connection(|connection| {
+        Ok(connection.query_row(
+            "SELECT COUNT(*) FROM kernel_decision_marks WHERE run_id=?1",
+            [run_id],
+            |row| row.get(0),
+        )?)
+    })
+    .unwrap()
+}
+
+/// Regression (2026-10-02 review, P1 completion gap): a Run whose *batch* response
+/// completes it must record the delivery verdict.
+///
+/// This is the entry point a provider retry resumes through: the previous round's
+/// tools are settled and the next response arrives as a batch response, so the
+/// completing decision is committed by `dispatch_batch` rather than by the live
+/// loop. Before the fix that path terminated the Run without ever running the
+/// delivery gate, which is how O02 and O07 completed with `pending` rows.
+#[test]
+fn a_batch_completion_records_a_satisfied_delivery_verdict() {
+    let DeliveryLive { db, root, run_id } = delivery_live_fixture("127.0.0.1:9".parse().unwrap());
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    // The promised workbook really is produced, with its managed-write receipt.
+    std::fs::write(root.join("AGV汇总.xlsx"), real_workbook_bytes()).unwrap();
+    record_managed_write_receipt(&db, &root, &run_id, "AGV汇总.xlsx");
+    let coordinator =
+        KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    let batch = settled_tool_batch(&coordinator, &run_id, &root);
+    coordinator
+        .dispatch_batch(&batch, "reply", &Allow, |_, frame, _| {
+            Ok(final_stop_response(&run_id, frame))
+        })
+        .unwrap();
+    drop(coordinator);
+
+    assert_eq!(
+        item_statuses(&db, &run_id),
+        vec![("slot:xlsx:1".to_owned(), "passed".to_owned())],
+        "the batch entry point must record the verdict, not leave it pending"
+    );
+    assert_eq!(
+        db.kernel_build_full_snapshot(&run_id).unwrap().state,
+        "completed"
+    );
+    assert_eq!(committed_marks(&db, &run_id), 1);
+    assert!(db.staged_delivery_rounds().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The other outcome through the same entry point: the promised artifact is
+/// missing, so the Run must record a failed verdict and arm the bounded repair
+/// round instead of completing.
+#[test]
+fn a_batch_completion_with_a_missing_artifact_arms_the_repair_round() {
+    let DeliveryLive { db, root, run_id } = delivery_live_fixture("127.0.0.1:9".parse().unwrap());
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let coordinator =
+        KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    let batch = settled_tool_batch(&coordinator, &run_id, &root);
+    coordinator
+        .dispatch_batch(&batch, "reply", &Allow, |_, frame, _| {
+            Ok(final_stop_response(&run_id, frame))
+        })
+        .unwrap();
+    drop(coordinator);
+
+    assert_eq!(
+        item_statuses(&db, &run_id),
+        vec![("slot:xlsx:1".to_owned(), "failed".to_owned())],
+        "an artifact that was never produced must be recorded as failed"
+    );
+    assert_ne!(
+        db.kernel_build_full_snapshot(&run_id).unwrap().state,
+        "completed",
+        "a missing deliverable must not complete the Run"
+    );
+    assert_eq!(db.delivery_repair_round_count(&run_id).unwrap(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Regression (2026-10-02 review, P1): a completion whose decision is refused must
+/// not leave its staged verdicts behind.
+///
+/// The refusal path itself (a terminal decision that loses its write-set to a
+/// job-notice competition) needs the notice machinery to trigger; what this test
+/// pins is the handling the refusal depends on: `abandon_completion_delivery`
+/// withdraws exactly the stage of the refused round, writes no verdict, and leaves
+/// nothing for a later recovery to finalize.
+#[test]
+fn a_completion_stage_is_withdrawn_when_its_decision_is_refused() {
+    let DeliveryLive { db, root, run_id } = delivery_live_fixture("127.0.0.1:9".parse().unwrap());
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    std::fs::write(root.join("AGV汇总.xlsx"), real_workbook_bytes()).unwrap();
+    record_managed_write_receipt(&db, &root, &run_id, "AGV汇总.xlsx");
+    let coordinator =
+        KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+
+    // Stage the verdicts this round would commit, exactly as the completing entry
+    // point does before its commit.
+    let completion = coordinator
+        .stage_completion_delivery(&[], &json!({"role":"assistant","content":[]}))
+        .unwrap();
+    assert_eq!(
+        db.staged_delivery_rounds().unwrap().len(),
+        1,
+        "the completing round must have staged its verdicts"
+    );
+
+    // The commit is refused: the round is abandoned, so its stage goes with it.
+    coordinator
+        .abandon_completion_delivery(Some(&completion))
+        .unwrap();
+    assert!(
+        db.staged_delivery_rounds().unwrap().is_empty(),
+        "a refused round must not leave its stage behind"
+    );
+    assert_eq!(
+        item_statuses(&db, &run_id),
+        vec![("slot:xlsx:1".to_owned(), "pending".to_owned())],
+        "no verdict may be written for a decision that never committed"
+    );
+    // And a later recovery must not finalize anything either.
+    assert_eq!(
+        crate::runtime_host::delivery::finalize_staged_outcomes(&db).unwrap(),
+        0
+    );
+    assert_eq!(
+        item_statuses(&db, &run_id),
+        vec![("slot:xlsx:1".to_owned(), "pending".to_owned())]
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Regression (2026-10-02 review, P0): every entry point that can finish a Run
+/// must record the delivery verdict.
+///
+/// `dispatch_initial` used to terminate the Run without ever running the delivery
+/// gate, so a Run that finished through a per-round entry point — which is the
+/// path a provider retry falls back to, and the one the O02 and O07 Runs took
+/// after their 429s — completed with its checklist rows `pending` for ever. The
+/// verdicts are staged before the completing decision, committed with it, and
+/// finalized after it.
+#[test]
+fn a_completion_through_the_per_round_entry_point_finalizes_the_verdict() {
+    let DeliveryLive { db, root, run_id } = delivery_live_fixture("127.0.0.1:9".parse().unwrap());
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    // The promised workbook really is produced, with the receipt the production
+    // write path records for it.
+    std::fs::write(root.join("AGV汇总.xlsx"), real_workbook_bytes()).unwrap();
+    record_managed_write_receipt(&db, &root, &run_id, "AGV汇总.xlsx");
+    let coordinator =
+        KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator
+        .dispatch_initial("owner", &Allow, |_, frame, _| {
+            Ok(fox_engine_protocol::KernelInitialModelResponse {
+                schema_version: 1,
+                run_id: run_id.clone(),
+                turn_id: frame.input.turn_id.clone(),
+                checkpoint_seq: frame.checkpoint_seq,
+                assistant_message: json!({"role":"assistant","stopReason":"stop",
+                    "content":[{"type":"text","text":"已完成。"}]}),
+            })
+        })
+        .unwrap();
+    drop(coordinator);
+
+    let statuses = item_statuses(&db, &run_id);
+    assert_eq!(
+        statuses,
+        vec![("slot:xlsx:1".to_owned(), "passed".to_owned())],
+        "the produced deliverable must be recorded, not left pending"
+    );
+    assert_eq!(finalized_item_count(&db, &run_id), 1);
+    assert_eq!(
+        db.kernel_build_full_snapshot(&run_id).unwrap().state,
+        "completed"
+    );
+    let marks: i64 = db
+        .with_connection(|connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM kernel_decision_marks WHERE run_id=?1",
+                [&run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(marks, 1, "the completing decision must carry its delivery mark");
+    // Nothing is left waiting for a later resolution.
+    assert!(db.staged_delivery_rounds().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The other half of the same entry point: a promised deliverable that is missing
+/// must arm the bounded repair round instead of letting the Run complete. This is
+/// the "retry finished without the artifact" case the review asked to cover.
+#[test]
+fn a_completion_through_the_per_round_entry_point_repairs_a_missing_deliverable() {
+    let DeliveryLive { db, root, run_id } = delivery_live_fixture("127.0.0.1:9".parse().unwrap());
+    let clock = TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let coordinator =
+        KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator
+        .dispatch_initial("owner", &Allow, |_, frame, _| {
+            Ok(fox_engine_protocol::KernelInitialModelResponse {
+                schema_version: 1,
+                run_id: run_id.clone(),
+                turn_id: frame.input.turn_id.clone(),
+                checkpoint_seq: frame.checkpoint_seq,
+                assistant_message: json!({"role":"assistant","stopReason":"stop",
+                    "content":[{"type":"text","text":"我已完成。"}]}),
+            })
+        })
+        .unwrap();
+    drop(coordinator);
+
+    assert_eq!(
+        item_statuses(&db, &run_id),
+        vec![("slot:xlsx:1".to_owned(), "failed".to_owned())],
+        "an artifact that was never produced must be recorded as failed"
+    );
+    assert_ne!(
+        db.kernel_build_full_snapshot(&run_id).unwrap().state,
+        "completed",
+        "a missing deliverable must not complete the Run"
+    );
+    assert_eq!(
+        db.delivery_repair_round_count(&run_id).unwrap(),
+        1,
+        "the failed deliverable must arm exactly one bounded repair round"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// Regression, 2026-10-01 review (R05): the round decision and the delivery
 /// verdicts live in different write-sets, so the window between them is real.
 ///

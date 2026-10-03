@@ -143,6 +143,37 @@ enum DecisionLease<'a> {
     BatchDispatch(&'a str, &'a str, Option<&'a crate::database::ModelNoticeInput<'a>>),
 }
 
+/// What a round that is about to finish the Run must do about the task's promised
+/// deliverables.
+///
+/// Every entry point that can finish a Run runs the same two-phase delivery write
+/// the live loop runs. Without it a Run that finishes through a per-round entry
+/// point — the batch response path a provider retry falls back to, or the initial
+/// request path — completes with its checklist rows still `pending` for ever, and
+/// a failing deliverable never arms its repair round.
+enum CompletionDelivery {
+    /// No checklist, or every promised artifact passed: the Run may complete. The
+    /// mark is stamped on the completing decision when verdicts were staged.
+    Complete { mark: Option<String> },
+    /// A promised artifact failed: this round arms the bounded repair round
+    /// instead of finishing, exactly as the live loop does.
+    Repair {
+        mark: String,
+        prompt: String,
+        input: fox_engine_protocol::KernelInitialModelInput,
+    },
+}
+
+impl CompletionDelivery {
+    /// The mark this completion's decision must carry, when verdicts were staged.
+    fn mark(&self) -> Option<&str> {
+        match self {
+            CompletionDelivery::Complete { mark } => mark.as_deref(),
+            CompletionDelivery::Repair { mark, .. } => Some(mark.as_str()),
+        }
+    }
+}
+
 pub(crate) struct KernelCoordinator<'a> {
     database: &'a Database,
     clock: &'a dyn Clock,
@@ -304,6 +335,101 @@ impl<'a> KernelCoordinator<'a> {
     ) -> Self {
         self.preview = Some(preview);
         self
+    }
+
+    /// Evaluate the task's promised deliverables for a round that would finish the
+    /// Run, and stage the verdicts under a mark the completing decision commits.
+    ///
+    /// The verdicts come from durable facts and the filesystem; the decision comes
+    /// from a different write-set a moment later. Staging first (and gating the
+    /// final write on the committed mark) is what makes the pair crash-safe
+    /// without ever finalizing a verdict no decision authorized.
+    fn stage_completion_delivery(
+        &self,
+        history: &[Value],
+        output: &Value,
+    ) -> Result<CompletionDelivery, String> {
+        let stop = super::delivery::evaluate_stop(
+            &self.database,
+            self.binding.permission.project_root.as_deref(),
+            &self.binding.run_id,
+        )?;
+        match &stop {
+            super::delivery::DeliveryStop::NoChecklist => {
+                Ok(CompletionDelivery::Complete { mark: None })
+            }
+            super::delivery::DeliveryStop::Passed { .. }
+            | super::delivery::DeliveryStop::Exhausted { .. } => {
+                let mark = format!("delivery:completion:{}", uuid::Uuid::new_v4());
+                super::delivery::stage_outcome(
+                    &self.database,
+                    &self.binding.run_id,
+                    &mark,
+                    &stop,
+                    crate::database::now_ms(),
+                )?;
+                Ok(CompletionDelivery::Complete { mark: Some(mark) })
+            }
+            super::delivery::DeliveryStop::Repair { prompt, .. } => {
+                let mark = format!("delivery:completion:{}", uuid::Uuid::new_v4());
+                super::delivery::stage_outcome(
+                    &self.database,
+                    &self.binding.run_id,
+                    &mark,
+                    &stop,
+                    crate::database::now_ms(),
+                )?;
+                let mut input = self.database.kernel_initial_input(&self.binding.run_id)?;
+                input.messages = history.to_vec();
+                input.messages.push(output.clone());
+                input.messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}],
+                    "timestamp": 0
+                }));
+                input.validate()?;
+                Ok(CompletionDelivery::Repair {
+                    mark,
+                    prompt: prompt.clone(),
+                    input,
+                })
+            }
+        }
+    }
+
+    /// Make the staged verdicts of a decision that just committed final.
+    fn finish_completion_delivery(
+        &self,
+        completion: Option<&CompletionDelivery>,
+    ) -> Result<(), String> {
+        let Some(mark) = completion.and_then(CompletionDelivery::mark) else {
+            return Ok(());
+        };
+        super::delivery::finalize_outcome(
+            &self.database,
+            &self.binding.run_id,
+            mark,
+            crate::database::now_ms(),
+        )?;
+        // The mark was written by the commit taken immediately above, so it must
+        // be here; if it is not, the ledger would describe work no committed
+        // decision authorized.
+        if !self.database.decision_mark_committed(&self.binding.run_id, mark)? {
+            return Err("delivery stage lost its committed decision mark".into());
+        }
+        Ok(())
+    }
+
+    /// Drop a refused attempt's stage: its decision never committed, so its
+    /// verdicts must never become the ledger's history.
+    fn abandon_completion_delivery(
+        &self,
+        completion: Option<&CompletionDelivery>,
+    ) -> Result<(), String> {
+        let Some(mark) = completion.and_then(CompletionDelivery::mark) else {
+            return Ok(());
+        };
+        super::delivery::withdraw_outcome(&self.database, &self.binding.run_id, mark)
     }
 
     /// A failed decision transaction never leaves speculative state in memory.
@@ -1046,12 +1172,33 @@ impl<'a> KernelCoordinator<'a> {
         let mut steering_input = steering_input;
         let mut notice_followup = notice_followup;
         let mut attempts = 0u8;
+        // A round that finishes the Run stages its delivery verdicts before the
+        // completing decision commits, and finalizes them after — the same
+        // two-phase write the live loop runs. See `stage_completion_delivery`.
+        let mut completion: Option<CompletionDelivery> = None;
         loop {
             #[cfg(test)]
             live::test_barrier::fire(&self.binding.run_id);
+            // A refused attempt's stage was never authorized by a commit: drop it
+            // before this attempt stages its own verdicts.
+            if let Some(refused) = completion.take() {
+                self.abandon_completion_delivery(Some(&refused))?;
+            }
+            if next.is_none()
+                && steering_input.is_none()
+                && wait_jobs.is_empty()
+                && notice_followup.is_none()
+            {
+                completion = Some(self.stage_completion_delivery(
+                    &initial_history,
+                    &response.assistant_message,
+                )?);
+            }
             let lease=continuation_key.map(|key|DecisionLease::Continuation(key,owner))
                 .unwrap_or(DecisionLease::Initial(owner));
-            let outcome = self.apply(Some(lease), |controller, now| {
+            let outcome = self.apply_decision(
+                Some(lease),
+                |controller, now| {
                 let mut effects=vec![if continuation_key.is_some() {
                     controller.record_continuation_model_response(&encoded)?
                 } else { controller.record_initial_model_response(&encoded)? }];
@@ -1100,13 +1247,28 @@ impl<'a> KernelCoordinator<'a> {
                         &serde_json::to_string(notices)
                             .map_err(|error| KernelError::FailClosed(error.to_string()))?,
                     )?);
+                } else if let Some(CompletionDelivery::Repair { prompt, input, .. }) = &completion {
+                    // A promised artifact failed: this round owes the bounded
+                    // repair round, not a completion.
+                    effects.extend(controller.request_delivery_repair(
+                        prompt,
+                        &serde_json::to_string(input)
+                            .map_err(|error| KernelError::FailClosed(error.to_string()))?,
+                    )?);
                 } else {
                     effects.extend(controller.terminate(kernel::RunOutcome::Completed));
                 }
                 Ok(effects)
-            });
+                },
+                None,
+                completion.as_ref().and_then(CompletionDelivery::mark),
+            );
             match outcome {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.finish_completion_delivery(completion.as_ref())?;
+                    return Ok(());
+                }
+
                 Err(error) if error.starts_with(kernel::JOB_NOTICE_COMPETITION)
                     && attempts < live::STEERING_COMPETITION_ATTEMPTS => {
                     attempts+=1;
@@ -1322,10 +1484,29 @@ impl<'a> KernelCoordinator<'a> {
         let mut steering_input = steering_input;
         let mut notice_followup = notice_followup;
         let mut attempts = 0u8;
+        // A round that finishes the Run stages its delivery verdicts before the
+        // completing decision commits, and finalizes them after — the same
+        // two-phase write the live loop runs. See `stage_completion_delivery`.
+        let mut completion: Option<CompletionDelivery> = None;
         loop {
             #[cfg(test)]
             live::test_barrier::fire(&self.binding.run_id);
-            let outcome = self.apply(
+            // A refused attempt's stage was never authorized by a commit: drop it
+            // before this attempt stages its own verdicts.
+            if let Some(refused) = completion.take() {
+                self.abandon_completion_delivery(Some(&refused))?;
+            }
+            if next.is_none()
+                && steering_input.is_none()
+                && wait_jobs.is_empty()
+                && notice_followup.is_none()
+            {
+                completion = Some(self.stage_completion_delivery(
+                    &batch_history,
+                    &response.assistant_message,
+                )?);
+            }
+            let outcome = self.apply_decision(
                 Some(DecisionLease::Batch(batch_id, owner)),
                 |controller, now| {
                     let mut effects =
@@ -1378,14 +1559,28 @@ impl<'a> KernelCoordinator<'a> {
                             &serde_json::to_string(notices)
                                 .map_err(|error| KernelError::FailClosed(error.to_string()))?,
                         )?);
+                    } else if let Some(CompletionDelivery::Repair { prompt, input, .. }) = &completion {
+                        // A promised artifact failed: this round owes the bounded
+                        // repair round, not a completion.
+                        effects.extend(controller.request_delivery_repair(
+                            prompt,
+                            &serde_json::to_string(input)
+                                .map_err(|error| KernelError::FailClosed(error.to_string()))?,
+                        )?);
                     } else {
                         effects.extend(controller.terminate(kernel::RunOutcome::Completed));
                     }
                     Ok(effects)
                 },
+                None,
+                completion.as_ref().and_then(CompletionDelivery::mark),
             );
             match outcome {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.finish_completion_delivery(completion.as_ref())?;
+                    return Ok(());
+                }
+
                 Err(error) if error.starts_with(kernel::JOB_NOTICE_COMPETITION)
                     && attempts < live::STEERING_COMPETITION_ATTEMPTS => {
                     attempts+=1;
