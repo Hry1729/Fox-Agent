@@ -43,6 +43,49 @@ const timeline = (runtimeEvents, overrides = {}) => React.createElement(RuntimeT
   ...overrides,
 })
 
+test('a run still waiting for an execution slot says so, with its real queue wait', async () => {
+  const promptedAt = Date.now() - 585_000
+  const queued = timeline([], {
+    runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+    messages: [
+      { ...messages[0], createdAt: promptedAt, updatedAt: promptedAt },
+      { ...messages[1], content: '', status: 'streaming' },
+    ],
+  })
+  const view = render(queued)
+  // No run.started yet: this Run is holding a place in the shared execution queue,
+  // which must not be reported as "analysing the request".
+  await waitFor(() => assert.match(view.container.querySelector('.fox-runtime-process-summary')?.textContent ?? '', /排队等待执行/))
+  assert.match(view.container.querySelector('.fox-runtime-process-summary').textContent, /已排队 \d+分/)
+  assert.doesNotMatch(view.container.textContent, /正在分析请求/)
+})
+
+test('a started run reports the model wait and the generation stage separately', async () => {
+  const promptedAt = Date.now() - 90_000
+  const started = { ...event(1, 'run.started'), createdAt: Date.now() - 36_000 }
+  const queuedFirst = timeline([started], {
+    runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+    messages: [
+      { ...messages[0], createdAt: promptedAt, updatedAt: promptedAt },
+      { ...messages[1], content: '', status: 'streaming' },
+    ],
+  })
+  const view = render(queuedFirst)
+  await waitFor(() => assert.match(view.container.querySelector('.fox-runtime-process-summary')?.textContent ?? '', /等待模型响应/))
+  assert.match(view.container.querySelector('.fox-runtime-process-summary').textContent, /已等待 3[0-9]秒/)
+
+  await React.act(async () => {
+    view.rerender(timeline([started, event(2, 'reasoning.delta', { delta: '先分析' })], {
+      runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+      messages: [
+        { ...messages[0], createdAt: promptedAt, updatedAt: promptedAt },
+        { ...messages[1], content: '', status: 'streaming' },
+      ],
+    }))
+  })
+  await waitFor(() => assert.match(view.container.querySelector('.fox-runtime-process-summary')?.textContent ?? '', /正在生成/))
+})
+
 test('answer segments remain once and in order while the whole process is collapsed', async () => {
   const view = render(timeline(events))
   await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-answer-segment').length, 2), { timeout: 5000 })
