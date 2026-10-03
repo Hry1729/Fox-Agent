@@ -25,6 +25,8 @@ export interface ConversationRunOverlayEntry {
    */
   indicator: ConversationRunIndicator | null
   updatedAt: number
+  /** The run that produced this event, so a terminal event cannot hide a later run. */
+  runId?: string
 }
 
 export type ConversationRunOverlay = ReadonlyMap<string, ConversationRunOverlayEntry>
@@ -55,7 +57,7 @@ export function conversationRunIndicator(
  */
 export function applyRunEventToOverlay(
   overlay: ConversationRunOverlay,
-  notification: Pick<RuntimeEventNotification, 'conversationId' | 'event'>,
+  notification: Pick<RuntimeEventNotification, 'conversationId' | 'runId' | 'event'>,
   now: number,
 ): ConversationRunOverlay {
   const conversationId = notification.conversationId
@@ -72,9 +74,9 @@ export function applyRunEventToOverlay(
       : 'running'
   // Unchanged state returns the same map: a long run emits thousands of deltas and
   // must not re-render the sidebar for each of them.
-  if (current?.indicator === indicator) return overlay
+  if (current?.indicator === indicator && current.runId === notification.runId) return overlay
   const next = new Map(overlay)
-  next.set(conversationId, { indicator, updatedAt: now })
+  next.set(conversationId, { indicator, updatedAt: now, runId: notification.runId })
   return next
 }
 
@@ -98,7 +100,7 @@ export function applyApprovalToOverlay(
   }
   if (current?.indicator === 'approval') return overlay
   const next = new Map(overlay)
-  next.set(approval.conversationId, { indicator: 'approval', updatedAt: now })
+  next.set(approval.conversationId, { indicator: 'approval', updatedAt: now, runId: current?.runId })
   return next
 }
 
@@ -109,14 +111,21 @@ export function applyApprovalToOverlay(
  */
 export function pruneRunOverlay(
   overlay: ConversationRunOverlay,
-  conversationIds: ReadonlySet<string>,
+  conversations: readonly Pick<ConversationSummary, 'id' | 'activeRunId'>[],
   snapshotAt: number,
 ): ConversationRunOverlay {
+  const activeRunIds = new Map(conversations.map(({ id, activeRunId }) => [id, activeRunId]))
   let next: Map<string, ConversationRunOverlayEntry> | null = null
   for (const [conversationId, entry] of overlay) {
-    const known = conversationIds.has(conversationId)
+    const known = activeRunIds.has(conversationId)
+    // A list read can lag the terminal event. Keep the tombstone while that same
+    // run is still listed as active; a different run must remain visible.
+    const staleTerminalRun = entry.indicator === null && entry.runId
+      && activeRunIds.get(conversationId) === entry.runId
     const superseded = entry.indicator === null ? entry.updatedAt <= snapshotAt : entry.updatedAt < snapshotAt
-    if (known && !superseded) continue
+    const replacedTerminalRun = entry.indicator === null && entry.runId
+      && activeRunIds.get(conversationId) && activeRunIds.get(conversationId) !== entry.runId
+    if (known && !replacedTerminalRun && (staleTerminalRun || !superseded)) continue
     if (next === null) next = new Map(overlay)
     next.delete(conversationId)
   }
@@ -135,7 +144,13 @@ export function conversationRunIndicators(
   const indicators = new Map<string, ConversationRunIndicator>()
   for (const conversation of conversations) {
     const live = overlay.get(conversation.id)
-    const indicator = live && live.updatedAt > snapshotAt ? live.indicator : conversationRunIndicator(conversation)
+    const terminalForListedRun = live?.indicator === null && live.runId
+      && live.runId === conversation.activeRunId
+    const terminalForOtherRun = live?.indicator === null && live.runId
+      && conversation.activeRunId && live.runId !== conversation.activeRunId
+    const indicator = live && !terminalForOtherRun && (live.updatedAt > snapshotAt || terminalForListedRun)
+      ? live.indicator
+      : conversationRunIndicator(conversation)
     if (indicator) indicators.set(conversation.id, indicator)
   }
   return indicators

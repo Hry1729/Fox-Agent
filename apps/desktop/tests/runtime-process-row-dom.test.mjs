@@ -12,7 +12,7 @@ const { cleanup, fireEvent, render, waitFor } = await import('@testing-library/r
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const server = await createServer({
   root, configFile: false, appType: 'custom', cacheDir: path.join(root, 'dist', '.vite-row-test-cache'),
-  optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true, hmr: false },
+  optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true, hmr: false, watch: { ignored: ['**/*'] } },
   resolve: { alias: { '@': path.join(root, 'src') } }, esbuild: { jsx: 'automatic' },
 })
 const { RuntimeTimeline } = await server.ssrLoadModule('/src/features/chat/workbench.tsx')

@@ -288,7 +288,7 @@ export function useDesktopConversation(): DesktopConversationState {
     setRunOverlaySnapshotAt(snapshotAt)
     setRunOverlay((current) => pruneRunOverlay(
       current,
-      new Set(next.map((conversation) => conversation.id)),
+      next,
       snapshotAt,
     ))
     return next
@@ -307,7 +307,7 @@ export function useDesktopConversation(): DesktopConversationState {
     setRunOverlaySnapshotAt(snapshotAt)
     setRunOverlay((current) => pruneRunOverlay(
       current,
-      new Set(active.map((conversation) => conversation.id)),
+      active,
       snapshotAt,
     ))
   }, [])

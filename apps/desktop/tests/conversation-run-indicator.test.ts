@@ -19,7 +19,7 @@ const summary = (overrides: Partial<Summary> = {}): Summary => ({
 
 const conversation = (id: string, overrides: Partial<Summary> = {}) => ({ id, ...summary(overrides) })
 
-const event = (conversationId: string, type: string) => ({ conversationId, event: { type } })
+const event = (conversationId: string, type: string, runId = `run-${conversationId}`) => ({ conversationId, runId, event: { type } })
 
 describe('conversation run indicator from persisted state', () => {
   test('an idle conversation has no indicator', () => {
@@ -81,8 +81,8 @@ describe('live overlay', () => {
 
   test('malformed notifications never create or move an indicator', () => {
     const started = applyRunEventToOverlay(EMPTY_CONVERSATION_RUN_OVERLAY, event('conversation-a', 'run.started'), 100)
-    expect(applyRunEventToOverlay(started, { conversationId: '', event: { type: 'run.completed' } }, 200)).toBe(started)
-    expect(applyRunEventToOverlay(started, { conversationId: 'conversation-a', event: {} }, 200)).toBe(started)
+    expect(applyRunEventToOverlay(started, { conversationId: '', runId: 'run-a', event: { type: 'run.completed' } }, 200)).toBe(started)
+    expect(applyRunEventToOverlay(started, { conversationId: 'conversation-a', runId: 'run-a', event: {} }, 200)).toBe(started)
   })
 
   test('a pending approval marks the conversation and resolving it clears just the marker', () => {
@@ -124,17 +124,41 @@ describe('reconciling live evidence with the authoritative list', () => {
       ['superseded', { indicator: 'running', updatedAt: 90 }],
       ['ended', { indicator: null, updatedAt: 90 }],
     ])
-    const pruned = pruneRunOverlay(overlay, new Set(['fresh', 'superseded', 'ended']), 100)
+    const pruned = pruneRunOverlay(overlay, [conversation('fresh'), conversation('superseded'), conversation('ended')], 100)
     expect([...pruned.keys()].sort()).toEqual(['fresh'])
   })
 
   test('pruning an already-clean overlay keeps the same map', () => {
     const overlay: ConversationRunOverlay = new Map([['fresh', { indicator: 'running', updatedAt: 150 }]])
-    expect(pruneRunOverlay(overlay, new Set(['fresh']), 100)).toBe(overlay)
+    expect(pruneRunOverlay(overlay, [conversation('fresh')], 100)).toBe(overlay)
   })
 
   test('a conversation that leaves the list loses its indicator', () => {
     const overlay: ConversationRunOverlay = new Map([['conversation-a', { indicator: 'running', updatedAt: 150 }]])
     expect(conversationRunIndicators([conversation('conversation-b')], overlay, 100).size).toBe(0)
+  })
+
+  test('a stale post-terminal list cannot revive the same queued run', () => {
+    const listed = [conversation('conversation-a', { activeRunId: 'run-a', activeRunStatus: 'queued' })]
+    const overlay = applyRunEventToOverlay(EMPTY_CONVERSATION_RUN_OVERLAY, event('conversation-a', 'run.completed', 'run-a'), 200)
+    const pruned = pruneRunOverlay(overlay, listed, 250)
+    expect(pruned.get('conversation-a')?.indicator).toBeNull()
+    expect(conversationRunIndicators(listed, pruned, 250).has('conversation-a')).toBe(false)
+
+    const settled = [conversation('conversation-a')]
+    expect(pruneRunOverlay(pruned, settled, 300).has('conversation-a')).toBe(false)
+  })
+
+  test('an old terminal event cannot hide a new run', () => {
+    const nextRun = [conversation('conversation-a', { activeRunId: 'run-b', activeRunStatus: 'queued' })]
+    const overlay = applyRunEventToOverlay(EMPTY_CONVERSATION_RUN_OVERLAY, event('conversation-a', 'run.completed', 'run-a'), 200)
+    expect(conversationRunIndicators(nextRun, overlay, 100).get('conversation-a')).toBe('queued')
+    expect(pruneRunOverlay(overlay, nextRun, 100).has('conversation-a')).toBe(false)
+  })
+
+  test('a new run event replaces the terminal marker even when it is also running', () => {
+    let overlay = applyRunEventToOverlay(EMPTY_CONVERSATION_RUN_OVERLAY, event('conversation-a', 'run.completed', 'run-a'), 200)
+    overlay = applyRunEventToOverlay(overlay, event('conversation-a', 'run.started', 'run-b'), 210)
+    expect(overlay.get('conversation-a')).toMatchObject({ indicator: 'running', runId: 'run-b' })
   })
 })

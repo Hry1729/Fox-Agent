@@ -1890,12 +1890,18 @@ impl RuntimeHost {
         text: String,
         attachments: Vec<AttachmentRecord>,
     ) {
+        let run_id = started.run.id.clone();
+        let mut queued_at = None;
         if let Ok(mut state) = self.state.lock() {
             state.queued_runs.push_back(QueuedRun {
                 started,
                 text,
                 attachments,
             });
+            queued_at = Some(crate::database::now_ms());
+        }
+        if let Some(at) = queued_at {
+            let _ = self.database.record_host_stage_point(&run_id, &run_id, "queued", at);
         }
         self.dispatch_next_queued_run();
     }
@@ -1924,8 +1930,12 @@ impl RuntimeHost {
             };
             state.dispatching_run_id = Some(queued.started.run.id.clone());
             state.dispatching_conversation_id = Some(queued.started.run.conversation_id.clone());
-            queued
+            (queued, crate::database::now_ms())
         };
+        let (queued, granted_at) = queued;
+        let _ = self.database.record_host_stage_point(
+            &queued.started.run.id, &queued.started.run.id, "dispatch_granted", granted_at,
+        );
         let runtime_host = self.clone();
         std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
             let run_id = queued.started.run.id.clone();
