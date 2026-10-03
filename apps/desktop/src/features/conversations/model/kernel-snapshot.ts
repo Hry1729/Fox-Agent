@@ -2,9 +2,9 @@ import type { ConversationDetail, KernelRunSnapshot } from './types'
 
 const states = new Set([
   'created', 'running', 'waiting_approval', 'retry_scheduled', 'compacting', 'cancelling',
-  'completed', 'cancelled', 'failed', 'budget_exhausted',
+  'completed', 'cancelled', 'failed', 'budget_exhausted', 'approval_expired',
 ])
-const terminalStates = new Set(['completed', 'cancelled', 'failed', 'budget_exhausted'])
+const terminalStates = new Set(['completed', 'cancelled', 'failed', 'budget_exhausted', 'approval_expired'])
 
 /** Do not interpret arbitrary Engine events as authority or compare their sequence here. */
 export function snapshotForRun(detail: ConversationDetail): KernelRunSnapshot | null {

@@ -125,6 +125,22 @@ describe('runtime event reducer', () => {
     })
   })
 
+  test('replaces a stale pending approval with its durable expiry', () => {
+    const current = detail()
+    current.approvals = [{
+      id: 'approval-1', toolCallId: 'tool-1', runId: 'run-1', conversationId: 'conversation-1',
+      toolName: 'office_edit', status: 'pending', requestedAction: 'write', request: {}, decision: null,
+      requestedAt: 1000, resolvedAt: null,
+    }]
+    const persisted = detail()
+    persisted.approvals = [{
+      ...current.approvals[0], status: 'expired', decision: { approved: false }, resolvedAt: 2000,
+    }]
+    expect(mergeConversationDetail(persisted, current).approvals[0]).toMatchObject({
+      status: 'expired', resolvedAt: 2000,
+    })
+  })
+
   test('accepts live events that arrive before run_start returns', () => {
     const pending = detail()
     pending.lastRun = {

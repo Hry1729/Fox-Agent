@@ -1200,7 +1200,20 @@ export function useDesktopConversation(): DesktopConversationState {
       }
       return true
     } catch (cause) {
-      if (previous) {
+      // The ticket may have expired while the user was looking at it. Reload
+      // authority before restoring a local pending card, otherwise a rejected
+      // click can make an expired approval appear actionable forever.
+      const conversationId = activeConversationIdRef.current
+      let refreshed = false
+      if (conversationId) {
+        try {
+          const persisted = await desktopClient.loadConversation(conversationId)
+          setDetail((current) => current?.conversation.id === conversationId ? persisted : current)
+          void refreshList()
+          refreshed = true
+        } catch { /* Keep the error and the prior card when storage is unavailable. */ }
+      }
+      if (!refreshed && previous) {
         setDetail((current) => current ? {
           ...current,
           approvals: current.approvals.map((item) => item.id === approvalId ? previous! : item),
@@ -1209,7 +1222,7 @@ export function useDesktopConversation(): DesktopConversationState {
       setError(cause instanceof Error ? cause.message : String(cause))
       return false
     }
-  }, [])
+  }, [refreshList])
 
   const resolveWorkModeConfirmation = useCallback(async (
     goalId: string,
