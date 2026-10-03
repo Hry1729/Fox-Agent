@@ -1347,21 +1347,17 @@
   padding-left: 5px;
 }
 
-/* ThinkingOrb paints into its own canvas and animates itself, so this slot no
-   longer spins an icon (the old `animation: foxSpin` is gone with it). The svg
-   rule only covers the spinner shown while the orb's chunk is still loading. */
-.fox-project-conversation-status > canvas {
-  width: 20px;
-  height: 20px;
-}
-
-.fox-project-conversation-status > svg {
-  width: 13px;
-  height: 13px;
+/* A persistent SVG stays legible in both project and flat conversation rows.
+   The canvas orb was present in the accessibility tree but visually faint at
+   sidebar size, so it could look like the loading icon had disappeared. */
+.fox-project-conversation-status > .fox-run-indicator-spinner {
+  width: 16px;
+  height: 16px;
   color: var(--fox-accent);
+  animation: foxSpin 1s linear infinite;
 }
 
-/* Queued and waiting-for-approval share the slot with the running orb so a
+/* Queued and waiting-for-approval share the slot with the running spinner so a
    conversation that changes state never shifts the rows around it. */
 .fox-run-indicator-dot {
   width: 8px;
@@ -1387,6 +1383,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .fox-project-conversation-status > .fox-run-indicator-spinner {
+    animation: none;
+  }
   .fox-project-conversation-status.is-approval .fox-run-indicator-dot {
     animation: none;
   }

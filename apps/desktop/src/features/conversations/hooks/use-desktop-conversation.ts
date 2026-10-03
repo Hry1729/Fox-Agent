@@ -312,6 +312,21 @@ export function useDesktopConversation(): DesktopConversationState {
     ))
   }, [])
 
+  const hasListedRun = conversations.some((conversation) => !!conversation.activeRunId)
+  useEffect(() => {
+    if (!desktopRuntimeAvailable || !hasListedRun) return
+    // Kernel state invalidations refresh the open conversation. A background
+    // conversation can miss its terminal notification, so reconcile the small
+    // sidebar list while any run remains active there.
+    let loading = false
+    const timer = window.setInterval(() => {
+      if (loading) return
+      loading = true
+      void refreshList().catch(() => undefined).finally(() => { loading = false })
+    }, 2_500)
+    return () => window.clearInterval(timer)
+  }, [hasListedRun, refreshList])
+
   const refreshRuntimeStatus = useCallback(async () => {
     if (!desktopRuntimeAvailable) return
     try { setRuntimeStatus(await desktopClient.runtimeStatus()) }

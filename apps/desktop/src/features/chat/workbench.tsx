@@ -262,10 +262,8 @@ import { deriveRunTerminalStates, type RunFailure } from '../conversations/model
 
 const OnboardingPage = lazy(() => import('@/features/settings/settings-pages').then((module) => ({ default: module.OnboardingPage })))
 const MessageResponse = lazy(() => import('@/components/ai-elements/message-response').then((module) => ({ default: module.MessageResponse })))
-// Decorative canvas/WebGL effects stay out of the entry bundle: the running orb
-// only matters while a conversation runs, and the send button's metal ring
+// Keep the send button's decorative metal ring out of the entry bundle; it
 // degrades to the plain button until its chunk lands.
-const RunningOrb = lazy(() => import('thinking-orbs').then((module) => ({ default: module.ThinkingOrb })))
 const MetalSendButton = lazy(() => import('@/components/effects/metal-send-button'))
 // Expert details open as a dialog inside chat (same dialog the experts page uses),
 // so a look at an expert never navigates away from the conversation.
@@ -983,7 +981,7 @@ function ConversationRunStatus({ indicator, className = 'fox-project-conversatio
     title={label}
     data-run-indicator={indicator ?? undefined}
   >
-    {indicator === 'running' && <Suspense fallback={<LoaderCircle className="animate-spin" size={13} />}><RunningOrb state="composing" size={20} /></Suspense>}
+    {indicator === 'running' && <LoaderCircle className="fox-run-indicator-spinner" size={16} aria-hidden="true" />}
     {indicator === 'queued' && <span className="fox-run-indicator-dot" aria-hidden="true" />}
     {indicator === 'approval' && <span className="fox-run-indicator-dot" aria-hidden="true" />}
   </span>
