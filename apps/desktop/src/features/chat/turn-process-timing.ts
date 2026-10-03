@@ -1,6 +1,14 @@
 import type { RunEventRecord } from '@/features/conversations/model/types'
 
-const terminalRunEvents = new Set(['run.completed', 'run.failed', 'run.cancelled', 'run.interrupted'])
+/** The four event types that end a Run. Shared so every projection agrees. */
+export const TERMINAL_RUN_EVENT_TYPES = new Set([
+  'run.completed',
+  'run.failed',
+  'run.cancelled',
+  'run.interrupted',
+])
+
+const terminalRunEvents = TERMINAL_RUN_EVENT_TYPES
 
 /** Use persisted lifecycle events only. Message timestamps do not measure a run. */
 export function runElapsedBounds(events: readonly RunEventRecord[]) {

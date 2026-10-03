@@ -16,8 +16,11 @@ const buttonVariants = cva(
           "bg-secondary text-secondary-foreground hover:bg-accent aria-expanded:bg-accent aria-expanded:text-accent-foreground",
         ghost:
           "hover:bg-accent hover:text-accent-foreground aria-expanded:bg-accent aria-expanded:text-accent-foreground",
+        // Neutral resting surface with an explicit danger boundary. A low-opacity
+        // red fill read as pink across whole buttons; the red is now carried by the
+        // border, the label and the icon, and only the interaction states add tint.
         destructive:
-          "bg-destructive/10 text-destructive hover:bg-destructive/20 focus-visible:border-destructive/40 focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30 dark:focus-visible:ring-destructive/40",
+          "border-destructive/35 bg-card text-destructive hover:border-destructive/55 hover:bg-destructive/10 focus-visible:border-destructive/60 focus-visible:ring-destructive/25 active:bg-destructive/15 dark:border-destructive/40 dark:bg-card dark:hover:border-destructive/65 dark:hover:bg-destructive/18 dark:focus-visible:border-destructive/70 dark:focus-visible:ring-destructive/35",
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {

@@ -361,6 +361,11 @@ export interface ConversationSummary {
   createdAt: number
   updatedAt: number
   lastMessageAt: number | null
+  /** This conversation's own non-terminal Run, not the currently open one. */
+  activeRunId?: string | null
+  activeRunStatus?: string | null
+  /** True while that Run still has a pending approval. */
+  awaitingApproval?: boolean
 }
 
 export interface ConversationMessage {
@@ -587,6 +592,14 @@ export interface ArtifactRecord {
   status: string
   createdAt: number
   updatedAt: number
+  delivery?: {
+    versionId: string | null
+    versionNo: number | null
+    sourceToolCallId: string | null
+    purposeSource: 'user_request' | 'host_rule' | 'unknown'
+    verificationStatus: 'passed' | 'limited' | 'failed' | 'stale' | 'unavailable' | 'unverified'
+    summary: string
+  } | null
 }
 
 export interface KnowledgeBindingRecord {

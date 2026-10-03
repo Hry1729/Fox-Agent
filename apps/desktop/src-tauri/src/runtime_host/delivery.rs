@@ -628,6 +628,8 @@ fn mention_names_input_directory(text: &str, token: &str) -> bool {
 enum MentionRole {
     /// The task asks for this path to be written.
     Output,
+    /// The user names this write as temporary work, not a delivered result.
+    Intermediate,
     /// The task reads, consumes or references this path: it is input material.
     Input,
     /// No verb the Host recognises introduces this mention.
@@ -807,6 +809,10 @@ fn classify_mentions(text: &str, mentions: &[Mention]) -> Vec<MentionRole> {
             roles.push(MentionRole::Input);
             continue;
         }
+        if mention_is_intermediate(text, mentions, index) {
+            roles.push(MentionRole::Intermediate);
+            continue;
+        }
         // The verb standing in front of the name decides it: "生成 out/a.csv"
         // promises a file, "读取 in/a.csv" names material, "另存为 b.csv" is the
         // same promise one particle away.
@@ -856,9 +862,65 @@ fn inherited_role(
     }
     match role {
         MentionRole::Output => Some(MentionRole::Output),
+        MentionRole::Intermediate => Some(MentionRole::Intermediate),
         MentionRole::Input if is_list_separator(gap.trim()) => Some(MentionRole::Input),
         _ => None,
     }
+}
+
+fn mention_is_intermediate(text: &str, mentions: &[Mention], index: usize) -> bool {
+    let at = mentions[index].name_start;
+    let previous_end = index.checked_sub(1)
+        .map(|previous| mentions[previous].name_start + mentions[previous].name.len())
+        .unwrap_or(0);
+    let clause_start = text[..at]
+        .char_indices().rev()
+        .find(|(_, character)| matches!(character, '。' | '！' | '？' | '\n' | '；' | ';'))
+        .map(|(position, character)| position + character.len_utf8())
+        .unwrap_or(0)
+        .max(previous_end);
+    let prefix = text[clause_start..at].chars().rev().take(32).collect::<String>()
+        .chars().rev().collect::<String>().to_lowercase();
+    if ["临时", "中间文件", "过程文件", "草稿", "调试文件", "scratch", "temporary", "intermediate"]
+        .iter().any(|marker| prefix.contains(marker)) {
+        return true;
+    }
+    let end = at + mentions[index].name.len();
+    let next = mentions.get(index + 1).map(|mention| mention.name_start).unwrap_or(text.len());
+    let suffix = text[end..next]
+        .split(['。', '！', '？', '\n', '；', ';'])
+        .next().unwrap_or_default()
+        .chars().take(20).collect::<String>().to_lowercase();
+    ["作为临时", "用作临时", "仅作临时", "作为中间", "用作中间", "仅作中间", "for scratch", "as temporary"]
+        .iter().any(|marker| suffix.contains(marker))
+}
+
+/// User-stated purpose for this exact project path. An undecided mention never
+/// changes classification. This is a label only; it grants no write authority.
+pub(crate) fn explicit_file_purpose(
+    text: &str,
+    project_root: &Path,
+    path: &Path,
+) -> Option<crate::runtime_host::artifact_store::ArtifactClass> {
+    use crate::runtime_host::artifact_store::{relative_to, ArtifactClass};
+    let relative = relative_to(project_root, path)?;
+    let relative_key = path_key(&normalize_path_text(&relative.to_string_lossy()));
+    let absolute_key = path_key(&normalize_path_text(&path.to_string_lossy()));
+    let mentions = collect_mentions(text);
+    let roles = classify_mentions(text, &mentions);
+    let mut purpose = None;
+    for (mention, role) in mentions.iter().zip(roles.iter()) {
+        let key = path_key(&normalize_path_text(&mention.name));
+        if key != relative_key && key != absolute_key {
+            continue;
+        }
+        match role {
+            MentionRole::Output => purpose = Some(ArtifactClass::Deliverable),
+            MentionRole::Intermediate => purpose = Some(ArtifactClass::Process),
+            MentionRole::Input | MentionRole::Unclassified => {},
+        }
+    }
+    purpose
 }
 
 /// True when the text between two mentions carries a prohibition of its own, which
@@ -1525,10 +1587,16 @@ fn verify_item(
     }
 
     let passed = failure_reason.is_none();
+    let version = receipt_for_path(receipts, &candidate.path);
     let finding = json!({
         "itemKey": item.item_key,
         "displayName": item.display_name,
         "boundPath": candidate.path.to_string_lossy(),
+        "managedVersionId": version.map(|receipt| receipt.version_id.as_str()),
+        "managedVersionNo": version.map(|receipt| receipt.version_no),
+        "sourceRunId": version.map(|receipt| receipt.source_run_id.as_str()),
+        "sourceToolCallId": version.and_then(|receipt| receipt.tool_call_id.as_deref()),
+        "checkedHash": version.and_then(|receipt| receipt.after_hash.as_deref()),
         "artifactId": candidate.artifact_id,
         "source": candidate.source,
         "provenance": provenance,
@@ -5164,6 +5232,29 @@ fn repair_prompt(findings: &[Value]) -> String {
 mod tests {
     use super::*;
     use crate::database::now_ms;
+
+    #[test]
+    fn explicit_purpose_tracks_output_and_temporary_paths_without_directory_guessing() {
+        use crate::runtime_host::artifact_store::ArtifactClass;
+        let root = Path::new(r"C:\proj");
+        assert_eq!(
+            explicit_file_purpose("请在项目根目录生成 summary.json", root, Path::new(r"C:\proj\summary.json")),
+            Some(ArtifactClass::Deliverable),
+        );
+        assert_eq!(
+            explicit_file_purpose("生成 fox/task/tmp.json 作为临时文件", root, Path::new(r"C:\proj\fox\task\tmp.json")),
+            Some(ArtifactClass::Process),
+        );
+        assert!(expectations_from_task("生成 fox/task/tmp.json 作为临时文件").is_empty());
+        assert_eq!(
+            explicit_file_purpose("读取 input.docx，然后修改并保存 input.docx", root, Path::new(r"C:\proj\input.docx")),
+            Some(ArtifactClass::Deliverable),
+        );
+        assert_eq!(
+            explicit_file_purpose("读取 input.docx", root, Path::new(r"C:\proj\input.docx")),
+            None,
+        );
+    }
 
     fn seed_by_key<'a>(
         seeds: &'a [DeliveryChecklistSeed],

@@ -37,7 +37,7 @@ describe('authoritative snapshot read model', () => {
     for (const state of ['created', 'running', 'waiting_approval', 'retry_scheduled', 'compacting', 'cancelling']) {
       expect(snapshotForRun(detail('1', { state }))?.state).toBe(state)
     }
-    for (const state of ['completed', 'cancelled', 'failed', 'budget_exhausted']) {
+    for (const state of ['completed', 'cancelled', 'failed', 'budget_exhausted', 'approval_expired']) {
       expect(snapshotForRun(detail('1', { state, terminalWritten: true }))?.state).toBe(state)
       expect(snapshotForRun(detail('1', { state }))).toBeNull()
     }

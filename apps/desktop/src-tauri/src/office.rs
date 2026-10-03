@@ -1714,6 +1714,30 @@ fn hash_file_meta(path: &Path) -> Option<(String, i64)> {
     Some((format!("{:x}", hasher.finalize()), total))
 }
 
+fn ensure_unchanged_office_source(path: &Path, expected_hash: &str) -> Result<(), String> {
+    if hash_file_meta(path).is_some_and(|(actual, _)| actual == expected_hash) {
+        Ok(())
+    } else {
+        Err("Office 原文件在编辑期间发生变化；已取消写入，请重新读取后重试".into())
+    }
+}
+
+#[cfg(test)]
+mod source_version_tests {
+    use super::*;
+
+    #[test]
+    fn changed_external_document_refuses_in_place_commit() {
+        let path = std::env::temp_dir().join(format!("fox-office-version-{}.xlsx", uuid::Uuid::new_v4()));
+        fs::write(&path, b"original").unwrap();
+        let original = hash_file_meta(&path).unwrap().0;
+        assert!(ensure_unchanged_office_source(&path, &original).is_ok());
+        fs::write(&path, b"external edit").unwrap();
+        assert!(ensure_unchanged_office_source(&path, &original).is_err());
+        fs::remove_file(path).unwrap();
+    }
+}
+
 pub fn execute(
     server: &McpServerRecord,
     tool: &str,
@@ -1798,6 +1822,7 @@ pub(crate) fn execute_with_cancellation(
         _ => None,
     };
     let mut temporary = None;
+    let mut in_place_baseline: Option<(PathBuf, String)> = None;
     let mut staging_scope: Option<(PathBuf, PathBuf, String)> = None;
     if let Some(output) = &action.output {
         let ext = output
@@ -1817,7 +1842,15 @@ pub(crate) fn execute_with_cancellation(
         }
         if matches!(tool, "office_edit" | "office_create" | "office_import_data") {
             if let Some(source) = &action.source {
+                let baseline = if tool == "office_edit" && action.output.as_deref() == Some(source.as_path()) {
+                    Some(hash_file_meta(source).ok_or("Office 无法读取原文件版本")?.0)
+                } else { None };
                 fs::copy(source, &path).map_err(|e| e.to_string())?;
+                if let Some(hash) = baseline {
+                    ensure_unchanged_office_source(source, &hash)?;
+                    ensure_unchanged_office_source(&path, &hash)?;
+                    in_place_baseline = Some((source.clone(), hash));
+                }
             }
         }
         // The working copy is a real file with the document's own extension:
@@ -2015,6 +2048,9 @@ pub(crate) fn execute_with_cancellation(
                 )?;
             }
             if matches!(tool, "office_edit" | "office_create" | "office_import_data") {
+                if let Some((source, hash)) = &in_place_baseline {
+                    ensure_unchanged_office_source(source, hash)?;
+                }
                 // The undo copy always goes into the Host's own version store,
                 // never next to the user's document.
                 let before = output.exists().then(|| hash_file_meta(output)).flatten();
@@ -2029,6 +2065,12 @@ pub(crate) fn execute_with_cancellation(
                 };
                 if output.exists() && !action.overwrite {
                     return Err("Office 输出在执行期间出现，已保留原文件".into());
+                }
+                if let Some((source, hash)) = &in_place_baseline {
+                    ensure_unchanged_office_source(source, hash)?;
+                    if let Some(backup) = backup.as_ref() {
+                        ensure_unchanged_office_source(backup, hash)?;
+                    }
                 }
                 // One commit primitive: stage on the target volume, then swap.
                 // A direct `fs::copy` over the live file is never described as

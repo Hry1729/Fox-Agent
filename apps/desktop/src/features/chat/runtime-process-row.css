@@ -1,9 +1,3 @@
-/* The thought title remains in place while only the preview follows its tail. */
-.fox-runtime-step-trigger .fox-run-status-step.is-clamped .fox-run-status-step-highlight > .fox-run-status-viewport {
-  mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
-  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
-}
-
 /* A clickable tool path stays in the real label. Match the shared sweep's
    cadence without cloning that interactive child. */
 .fox-runtime-step-trigger .fox-run-status-step:not(.fox-row-shimmer)[data-active='true'] .fox-run-status-label {

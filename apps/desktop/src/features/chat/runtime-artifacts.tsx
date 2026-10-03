@@ -50,13 +50,20 @@ function ArtifactResultCard({ artifact, onOpenArtifact }: { artifact: ArtifactRe
   const ArtifactIcon = isWeb ? Globe2 : artifact.mediaType?.startsWith('image/') ? ImagePlus : FileText
   const changeLabel = artifact.artifactType === 'created_file' ? '新建' : artifact.artifactType === 'modified_file' ? '已修改' : '文件结果'
   const classLabel = isPreviewArtifact(artifact) ? '预览' : null
-  const detail = [classLabel, changeLabel].filter(Boolean).join(' · ')
+  const verificationLabel = {
+    passed: '验收通过', limited: '有限核验', failed: '验收失败',
+    stale: '版本已变化', unavailable: '文件不可用', unverified: '未核验',
+  }[artifact.delivery?.verificationStatus ?? 'unverified']
+  const detail = [classLabel, changeLabel,
+    artifact.delivery?.versionNo ? `v${artifact.delivery.versionNo}` : null,
+    artifact.delivery ? verificationLabel : null].filter(Boolean).join(' · ')
+  const needsAttention = ['failed', 'stale', 'unavailable'].includes(artifact.delivery?.verificationStatus ?? '')
   return <button type="button" className="fox-message-artifact-trigger" onClick={() => onOpenArtifact?.(artifact)}>
     <Artifact className="fox-message-artifact" title={artifact.displayName}>
       <ArtifactHeader className="fox-message-artifact-head">
         <div className="fox-message-artifact-title">
           <span className="fox-message-artifact-icon"><ArtifactIcon size={18} /></span>
-          <div><ArtifactTitle>{artifact.displayName}</ArtifactTitle><ArtifactDescription>{detail} · {formatFileSize(artifact.byteSize)}</ArtifactDescription></div>
+          <div><ArtifactTitle>{artifact.displayName}</ArtifactTitle><ArtifactDescription title={artifact.delivery?.summary}>{detail} · {formatFileSize(artifact.byteSize)}</ArtifactDescription>{needsAttention && <small className="fox-message-artifact-verification">{artifact.delivery?.summary}</small>}</div>
         </div>
         <ChevronRight size={14} />
       </ArtifactHeader>

@@ -90,6 +90,8 @@ mod http_model_fixture_tests;
 mod job_notice_capacity_tests;
 #[path = "run_lease_component_tests.rs"]
 mod run_lease_component_tests;
+#[path = "run_admission_tests.rs"]
+mod run_admission_tests;
 
 /// Record the durable settled result of one authoritative Kernel tool call.
 ///

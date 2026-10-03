@@ -19,7 +19,9 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
-GlobalRegistrator.register()
+// Several DOM suites share one process, so the first one to run owns registration.
+// Registering twice throws and aborts this file's setup mid-run.
+if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
 ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
 
 type RestoreCall = {
@@ -327,12 +329,12 @@ describe('RuntimeApprovalPrompt (real DOM clicks)', () => {
 
     // A replacement approval authorizes exactly one dispatch, so the reusable
     // "allow this whole conversation" choice must not be offered.
-    expect(screen.queryByRole('button', { name: /本次对话始终允许/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /本次(?:运行|对话)内允许/ })).toBeNull()
     expect(screen.getByRole('button', { name: '拒绝' })).toBeDefined()
     expect(screen.getByRole('button', { name: '只允许这一次' })).toBeDefined()
   })
 
-  test('an ordinary approval keeps its three legacy choices and no binding', async () => {
+  test('an ordinary approval exposes run-scoped reuse and no replacement binding', async () => {
     render(
       React.createElement(RuntimeApprovalPrompt, {
         approval: approvalRecord({
@@ -349,7 +351,7 @@ describe('RuntimeApprovalPrompt (real DOM clicks)', () => {
     )
 
     expect(document.querySelector('.fox-approval-replacement')).toBeNull()
-    expect(screen.getByRole('button', { name: /本次对话始终允许/ })).toBeDefined()
+    expect(screen.getByRole('button', { name: '本次运行内允许' })).toBeDefined()
   })
 
   test('confirm and deny submit the exact versioned approval identity', async () => {

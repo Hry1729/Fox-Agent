@@ -681,11 +681,24 @@ impl Database {
         approval_id: &str,
         decision: &str,
     ) -> Result<bool, String> {
-        let ticket:Option<(String,String,u64)>=self.with_connection(|c|c.query_row(
-            "SELECT t.run_id,t.runtime_tool_call_id,k.policy_version FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id JOIN kernel_approvals k ON k.run_id=t.run_id AND k.tool_call_id=t.runtime_tool_call_id WHERE a.id=?1 AND k.policy_version IS NOT NULL AND a.id='kernel-approval:'||k.run_id||':'||k.tool_call_id||':v'||k.policy_version",
-            [approval_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional())?;
-        let (run, tool, version) = ticket.ok_or("stale_approval: ticket no longer current")?;
-        self.queue_kernel_host_command_versioned(&run, Some((&tool, decision)), Some(version))
+        let ticket:Option<(String,String,u64,String,String,String)>=self.with_connection(|c|c.query_row(
+            "SELECT t.run_id,t.runtime_tool_call_id,k.policy_version,t.tool_name,t.input_json,a.request_json FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id JOIN kernel_approvals k ON k.run_id=t.run_id AND k.tool_call_id=t.runtime_tool_call_id WHERE a.id=?1 AND k.policy_version IS NOT NULL AND a.id='kernel-approval:'||k.run_id||':'||k.tool_call_id||':v'||k.policy_version",
+            [approval_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional())?;
+        let (run, tool_call_id, version, tool, input_json, request_json) = ticket.ok_or("stale_approval: ticket no longer current")?;
+        if decision == "allow_conversation" {
+            let binding = self.run_control_binding(&run)?.ok_or("Kernel approval has no frozen binding")?;
+            let input: serde_json::Value = serde_json::from_str(&input_json).map_err(|_| "invalid Kernel approval input")?;
+            let request: serde_json::Value = serde_json::from_str(&request_json).map_err(|_| "invalid Kernel approval request")?;
+            let office = tool == "call_mcp_tool" && input["serverId"] == crate::office::SERVER_ID;
+            let reusable = if office {
+                crate::runtime_host::office_grants::reusable_edit_scope(&input, binding.permission.project_root.as_deref()).is_some()
+            } else {
+                tool != "task_repair_escalate_start" && request.get("wholeFileReplacement").is_none()
+                    && crate::runtime_host::shadow_reconcile::tool_operation_scope(&tool, &input, binding.permission.project_root.as_deref()).is_some()
+            };
+            if !reusable { return Err("this Kernel approval only supports a one-time decision".into()); }
+        }
+        self.queue_kernel_host_command_versioned(&run, Some((&tool_call_id, decision)), Some(version))
     }
 
     fn queue_kernel_host_command_versioned(

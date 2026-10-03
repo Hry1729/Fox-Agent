@@ -1358,9 +1358,9 @@ impl PolicyDecisionPort for GatewayPolicy {
                 serde_json::from_str::<Value>(input_json),
             ) {
                 if let Some(scope) = self.scope_key_for(tool, &parsed) {
-                    if additional.iter().any(|grant| grant.matches(tool, &scope)) {
+                    if let Some(grant) = additional.iter().find(|grant| grant.matches(tool, &scope)) {
                         let _ = database.kernel_note_authorization_grant_use(
-                            &self.binding.run_id,
+                            &grant.source_run_id,
                             tool,
                             &scope,
                         );

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { normalizeProjectPermission, selectProjectRoot, validPickedProjectFolder } from '../src/features/chat/project-access-dialog-state'
+import { canonicalProjectRoot, matchingProject, normalizeProjectRoot, normalizeProjectPermission, selectProjectRoot, validPickedProjectFolder } from '../src/features/chat/project-access-dialog-state'
 import type { ProjectRecord } from '../src/features/conversations/model/types'
 
 function project(rootPath: string, permissionMode: ProjectRecord['permissionMode']): ProjectRecord {
@@ -30,15 +30,32 @@ describe('direct project selection', () => {
     })
   })
 
-  test('uses the saved permission for a matching existing project', () => {
-    const selectedPath = 'd:\\projects\\fox\\'
+  test('uses the saved permission for a matching existing project and writes one canonical path', () => {
     const selected = selectProjectRoot(
-      selectedPath,
+      'd:\\projects\\fox\\',
       [project('D:\\Projects\\Fox', 'allow')],
       'ask',
     )
 
-    expect(selected).toEqual({ path: selectedPath, permissionMode: 'allow' })
+    // One directory must not be recorded twice just because the picker returned a
+    // different separator style or a trailing separator.
+    expect(selected).toEqual({ path: 'd:\\projects\\fox', permissionMode: 'allow' })
+  })
+
+  test('identifies a project by its full path, never by its folder name', () => {
+    const projects = [project('D:\\work\\one\\shared', 'allow'), project('D:\\work\\two\\shared', 'read_only')]
+    // Same leaf name, different project: the full path decides.
+    expect(matchingProject('D:/work/two/shared/', projects)?.permissionMode).toBe('read_only')
+    expect(matchingProject('D:\\work\\three\\shared', projects)).toBeUndefined()
+    expect(normalizeProjectRoot('D:\\WORK\\Two/Shared\\')).toBe('d:\\work\\two\\shared')
+  })
+
+  test('a drive root keeps its separator instead of collapsing to a drive letter', () => {
+    expect(canonicalProjectRoot('D:\\')).toBe('D:\\')
+    expect(canonicalProjectRoot('D:/')).toBe('D:\\')
+    expect(canonicalProjectRoot('  D:\\work\\project\\  ')).toBe('D:\\work\\project')
+    expect(canonicalProjectRoot('\\\\server\\share\\')).toBe('\\\\server\\share')
+    expect(normalizeProjectRoot('D:\\')).toBe('d:\\')
   })
 
   test('accepts only a non-empty path returned by the native folder picker', () => {

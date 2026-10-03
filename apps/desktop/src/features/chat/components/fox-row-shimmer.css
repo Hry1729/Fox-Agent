@@ -1,7 +1,7 @@
 /* A shared, low-contrast sweep across status text. The readable glyphs stay in
    the normal flow; the moving copy is purely decorative and never receives input. */
 .fox-row-shimmer {
-  --fox-row-shimmer-color: color-mix(in oklch, var(--fox-muted) 72%, #a4bfd2);
+  --fox-row-shimmer-color: var(--fox-thinking-shimmer, #6f9fd8);
 }
 
 .fox-row-shimmer[data-active='true'] > .fox-run-status-label,

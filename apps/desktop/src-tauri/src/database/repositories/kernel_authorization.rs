@@ -58,7 +58,7 @@ impl GrantScopeKind {
         let prefix = scope.split(':').next().unwrap_or_default();
         match prefix {
             "host-target" => Some(GrantScopeKind::Path),
-            "office-request" => Some(GrantScopeKind::OfficeRequest),
+            "office-request" | "office-edit-v1" => Some(GrantScopeKind::OfficeRequest),
             "mcp-tool" => Some(GrantScopeKind::McpTool),
             "" => None,
             _ if prefix.starts_with("capability-") => Some(GrantScopeKind::Action),
@@ -74,6 +74,20 @@ pub struct AdditionalGrant {
     pub scope_value: String,
     pub kind: GrantScopeKind,
     pub approval_id: String,
+    pub source_run_id: String,
+}
+
+/// Reusable only while this Database handle lives. The durable grant remains
+/// the source of truth for revocation; a reopened handle has no such leases.
+#[derive(Clone, Debug)]
+pub(crate) struct ProcessOfficeGrant {
+    grant_id: String,
+    source_run_id: String,
+    conversation_id: String,
+    project_root: String,
+    policy_version: u64,
+    tool: String,
+    scope_value: String,
 }
 
 impl AdditionalGrant {
@@ -191,10 +205,21 @@ impl Database {
         let project_root = frozen
             .as_ref()
             .and_then(|binding| binding.permission.project_root.clone());
+        if scope_key.starts_with("office-edit-v1:") {
+            let actual = self.kernel_decided_approval_call(run_id, approval_tool_call_id)?;
+            let actual_scope = actual.and_then(|(actual_tool, input)| {
+                if actual_tool != tool || tool != "call_mcp_tool" { return None; }
+                let input: serde_json::Value = serde_json::from_str(&input).ok()?;
+                crate::runtime_host::office_grants::reusable_edit_scope(&input, project_root.as_deref())
+            });
+            if actual_scope.is_none_or(|scope| scope.key != scope_key) {
+                return Ok(GrantRegistration::Skipped { reason: GrantSkipReason::UnnameableScope });
+            }
+        }
         let run_budget_ms = frozen.and_then(|binding| {
             binding.budgets.run_execution_limited.then_some(binding.budgets.run_execution_ms)
         });
-        self.with_connection(|connection| {
+        let (result, created) = self.with_connection(|connection| {
             // Serialize against policy changes and grant revocation. The early
             // owner lookup only shapes the scope; the version/state check that
             // authorizes the write must share this transaction with the UPSERT.
@@ -209,13 +234,13 @@ impl Database {
                 |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
             ).optional()?;
             let Some((current_conversation, approval_version, policy_version, run_state)) = current else {
-                return Ok(GrantRegistration::Skipped { reason: GrantSkipReason::ForeignOrUnknownApproval });
+                return Ok((GrantRegistration::Skipped { reason: GrantSkipReason::ForeignOrUnknownApproval }, None));
             };
             if current_conversation != conversation_id
                 || approval_version != Some(policy_version)
                 || matches!(run_state.as_str(), "cancelling" | "completed" | "failed" | "cancelled" | "budget_exhausted" | "approval_expired")
             {
-                return Ok(GrantRegistration::Skipped { reason: GrantSkipReason::ForeignOrUnknownApproval });
+                return Ok((GrantRegistration::Skipped { reason: GrantSkipReason::ForeignOrUnknownApproval }, None));
             }
             let existing: Option<(String, Option<i64>)> = transaction.query_row(
                 "SELECT id,revoked_at FROM kernel_authorization_grants
@@ -230,7 +255,7 @@ impl Database {
                     // already has a source; an older approval replay must not
                     // replace that source. A revoked row may be registered by
                     // a new decision at the current policy version.
-                    return Ok(GrantRegistration::Registered { grant_id: existing_id.clone() });
+                    return Ok((GrantRegistration::Registered { grant_id: existing_id.clone() }, None));
                 }
             }
             // Preserve the established TTL for a newly approved scope. An
@@ -254,7 +279,7 @@ impl Database {
                     conversation_id,
                     approval_tool_call_id,
                     tool,
-                    project_root,
+                    &project_root,
                     kind.as_str(),
                     scope_key,
                     SOURCE_CONVERSATION_APPROVAL,
@@ -267,8 +292,25 @@ impl Database {
                 params![run_id, tool, scope_key], |row| row.get(0),
             )?;
             transaction.commit()?;
-            Ok(GrantRegistration::Registered { grant_id: stored_id })
-        })
+            Ok((GrantRegistration::Registered { grant_id: stored_id.clone() },
+                Some((stored_id, policy_version))))
+        })?;
+        if let Some((grant_id, policy_version)) = created {
+            if scope_key.starts_with("office-edit-v1:") && tool == "call_mcp_tool" {
+                if let Some(project_root) = project_root {
+                    let mut leases = self.office_reuse_grants.lock()
+                        .map_err(|_| "Office grant registry lock is poisoned".to_owned())?;
+                    leases.retain(|lease| lease.grant_id != grant_id);
+                    leases.push(ProcessOfficeGrant {
+                            grant_id, source_run_id: run_id.to_owned(), conversation_id,
+                            project_root, policy_version, tool: tool.to_owned(),
+                            scope_value: scope_key.to_owned(),
+                        });
+                    if leases.len() > 256 { leases.remove(0); }
+                }
+            }
+        }
+        Ok(result)
     }
 
     /// The tool and canonical input of a decided approval, so a host can name the
@@ -301,7 +343,7 @@ impl Database {
         run_id: &str,
         now: i64,
     ) -> Result<Vec<AdditionalGrant>, String> {
-        self.with_connection(|connection| {
+        let mut grants = self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "SELECT tool, scope_value, scope_kind, approval_id
                    FROM kernel_authorization_grants
@@ -334,10 +376,44 @@ impl Database {
                     scope_value,
                     kind,
                     approval_id,
+                    source_run_id: run_id.to_owned(),
                 });
             }
             Ok(grants)
-        })
+        })?;
+        // The registry is copied before any database work. It is never a
+        // durable permission and never holds its lock while SQLite is locked.
+        let leases = self.office_reuse_grants.lock()
+            .map_err(|_| "Office grant registry lock is poisoned".to_owned())?.clone();
+        if leases.is_empty() { return Ok(grants); }
+        let Some(binding) = self.run_control_binding(run_id)? else { return Ok(grants); };
+        let Some(root) = binding.permission.project_root.as_deref() else { return Ok(grants); };
+        let policy_version = self.execution_policy(&binding.conversation_id)?.version;
+        for lease in leases {
+            if lease.source_run_id == run_id || lease.conversation_id != binding.conversation_id
+                || lease.project_root != root || lease.policy_version != policy_version
+            { continue; }
+            let live: Option<String> = self.with_connection(|connection| connection.query_row(
+                "SELECT g.approval_id FROM kernel_authorization_grants g
+                   JOIN kernel_approvals a ON a.run_id=g.run_id AND a.tool_call_id=g.approval_id
+                   JOIN kernel_execution_policies p ON p.conversation_id=g.conversation_id
+                  WHERE g.id=?1 AND g.run_id=?2 AND g.conversation_id=?3 AND g.project_root=?4
+                    AND g.tool=?5 AND g.scope_value=?6 AND g.scope_kind='office_request'
+                    AND g.revoked_at IS NULL AND a.state='allow_conversation'
+                    AND a.policy_version=?7 AND p.version=?7",
+                params![lease.grant_id, lease.source_run_id, lease.conversation_id,
+                    lease.project_root, lease.tool, lease.scope_value, lease.policy_version],
+                |row| row.get(0),
+            ).optional())?;
+            if let Some(approval_id) = live {
+                grants.push(AdditionalGrant {
+                    tool: lease.tool, scope_value: lease.scope_value,
+                    kind: GrantScopeKind::OfficeRequest, approval_id,
+                    source_run_id: lease.source_run_id,
+                });
+            }
+        }
+        Ok(grants)
     }
 
     /// Revoke every live grant in a conversation. A user withdrawing permission
@@ -400,6 +476,10 @@ mod tests {
 
     // SQL-seeded component fixture; Host/model behavior is covered separately.
     fn seed_run_with_budget(database: &Database, run_id: &str, conversation: &str, limited: bool) {
+        seed_run_with_budget_root(database, run_id, conversation, limited, None);
+    }
+
+    fn seed_run_with_budget_root(database: &Database, run_id: &str, conversation: &str, limited: bool, project_root: Option<&str>) {
         let tool_call_id = format!("{run_id}-call");
         database
             .with_connection(|connection| {
@@ -407,8 +487,8 @@ mod tests {
                     // Several runs may share one conversation; only the first
                     // seeding creates it.
                     "INSERT OR IGNORE INTO conversations(id, agent_id, title, project_root, status, created_at, updated_at)
-                     VALUES (?1, 'fox-general', 't', NULL, 'active', 0, 0)",
-                    params![conversation],
+                     VALUES (?1, 'fox-general', 't', ?2, 'active', 0, 0)",
+                    params![conversation, project_root],
                 )?;
                 connection.execute(
                     "INSERT INTO runs(id, conversation_id, status, model, started_at, created_at)
@@ -500,6 +580,91 @@ mod tests {
             .unwrap()
             .is_empty());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn existing_grant_reuses_within_its_run_but_not_a_new_run() {
+        let (database, path) = new_database();
+        seed_run(&database, "run-1", "conv-1");
+        assert!(matches!(database.kernel_register_authorization_grant(
+            "run-1", "run-1-call", "allow_conversation", "write_file",
+            Some("host-target:sha256:abc"),
+        ).unwrap(), GrantRegistration::Registered { .. }));
+        assert_eq!(database.kernel_effective_authorization_grants("run-1", now_ms()).unwrap().len(), 1);
+        database.with_connection(|connection| {
+            connection.execute("UPDATE runs SET status='completed' WHERE id='run-1'", [])?;
+            connection.execute("UPDATE kernel_runs SET state='completed' WHERE run_id='run-1'", [])?;
+            Ok(())
+        }).unwrap();
+        seed_run(&database, "run-2", "conv-1");
+        assert!(database.kernel_effective_authorization_grants("run-2", now_ms()).unwrap().is_empty());
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn office_edit_lease_is_same_conversation_and_process_only() {
+        let (database, path) = new_database();
+        let root = std::env::temp_dir().join(format!("fox-office-lease-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("book.xlsx"), b"fixture").unwrap();
+        let root_text = root.to_str().unwrap();
+        seed_run_with_budget_root(&database, "run-1", "conv-1", true, Some(root_text));
+        let input = serde_json::json!({"serverId":crate::office::SERVER_ID,"tool":"office_edit","arguments":{
+            "file":"book.xlsx","output":"book.xlsx","overwrite":true,
+            "operations":[{"command":"set","path":"/Sheet1/A1","props":{"value":"first"}}]}});
+        database.with_connection(|connection| {
+            connection.execute("UPDATE kernel_tool_calls SET tool='call_mcp_tool',canonical_input_json=?2 WHERE run_id=?1",
+                params!["run-1", input.to_string()])?;
+            Ok(())
+        }).unwrap();
+        let scope = crate::runtime_host::office_grants::reusable_edit_scope(&input, Some(root_text)).expect("narrow scope");
+        assert!(matches!(database.kernel_register_authorization_grant(
+            "run-1", "run-1-call", "allow_conversation", "call_mcp_tool",
+            Some("office-edit-v1:sha256:forged"),
+        ).unwrap(), GrantRegistration::Skipped { reason: GrantSkipReason::UnnameableScope }));
+        let registered = database.kernel_register_authorization_grant(
+            "run-1", "run-1-call", "allow_conversation", "call_mcp_tool", Some(&scope.key),
+        ).unwrap();
+        assert!(matches!(registered, GrantRegistration::Registered { .. }));
+        seed_run_with_budget_root(&database, "run-2", "conv-1", true, Some(root_text));
+        let reuse = database.kernel_effective_authorization_grants("run-2", now_ms()).unwrap();
+        assert_eq!(reuse.len(), 1);
+        assert!(reuse[0].matches("call_mcp_tool", &scope.key));
+        assert_eq!(reuse[0].source_run_id, "run-1");
+        seed_run_with_budget_root(&database, "run-other", "conv-other", true, Some(root_text));
+        assert!(database.kernel_effective_authorization_grants("run-other", now_ms()).unwrap().is_empty());
+        drop(database);
+        let reopened = Database::open(path.clone()).unwrap();
+        assert!(reopened.kernel_effective_authorization_grants("run-2", now_ms()).unwrap().is_empty(), "restart clears lease");
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn office_edit_lease_revocation_removes_cross_run_access() {
+        let (database, path) = new_database();
+        let root = std::env::temp_dir().join(format!("fox-office-revoke-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("book.xlsx"), b"fixture").unwrap();
+        let root_text = root.to_str().unwrap();
+        seed_run_with_budget_root(&database, "run-1", "conv-1", true, Some(root_text));
+        let input = serde_json::json!({"serverId":crate::office::SERVER_ID,"tool":"office_edit","arguments":{
+            "file":"book.xlsx","output":"book.xlsx","overwrite":true,
+            "operations":[{"command":"set","path":"/Sheet1/A1","props":{"value":"first"}}]}});
+        database.with_connection(|connection| {
+            connection.execute("UPDATE kernel_tool_calls SET tool='call_mcp_tool',canonical_input_json=?2 WHERE run_id=?1",
+                params!["run-1", input.to_string()])?;
+            Ok(())
+        }).unwrap();
+        let scope = crate::runtime_host::office_grants::reusable_edit_scope(&input, Some(root_text)).unwrap();
+        database.kernel_register_authorization_grant("run-1", "run-1-call", "allow_conversation", "call_mcp_tool", Some(&scope.key)).unwrap();
+        seed_run_with_budget_root(&database, "run-2", "conv-1", true, Some(root_text));
+        assert_eq!(database.kernel_effective_authorization_grants("run-2", now_ms()).unwrap().len(), 1);
+        database.kernel_revoke_authorization_grants("conv-1", "user withdrew").unwrap();
+        assert!(database.kernel_effective_authorization_grants("run-2", now_ms()).unwrap().is_empty());
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

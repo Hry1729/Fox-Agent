@@ -19,6 +19,11 @@ interface RuntimeEventStreamOptions {
   setError: Dispatch<SetStateAction<string | null>>
   setErrorDetails: Dispatch<SetStateAction<DesktopErrorDetails | null>>
   refreshList: () => Promise<unknown>
+  /**
+   * Every notification, including the active run's own events, so per-conversation
+   * activity can be tracked without subscribing to the same Tauri event twice.
+   */
+  onRunActivity?: (notification: RuntimeEventNotification) => void
 }
 
 const terminalEventTypes = new Set([
@@ -42,6 +47,7 @@ export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
     setError,
     setErrorDetails,
     refreshList,
+    onRunActivity,
   } = options
 
   useEffect(() => {
@@ -108,6 +114,7 @@ export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
     }
     const subscription = desktopClient.listenRuntimeEvents((notification) => {
       if (disposed) return
+      onRunActivity?.(notification)
       if (notification.runId === authoritativeRunIdRef.current) return
       const event = notification.event
       if (event.type === 'run.started') {

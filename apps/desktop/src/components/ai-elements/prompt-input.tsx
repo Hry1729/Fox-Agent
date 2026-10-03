@@ -41,6 +41,11 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { clearSubmittedPromptText } from "./prompt-input-reset";
+import {
+  insertPromptNewline,
+  readPromptSendShortcut,
+  resolvePromptEnterAction,
+} from "./prompt-send-shortcut";
 import type { ChatStatus, FileUIPart, SourceDocumentUIPart } from "ai";
 import {
   CornerDownLeftIcon,
@@ -82,55 +87,6 @@ import {
 // An attachment keeps the user's original File so sending never has to re-read the
 // preview URL. `url` stays a blob: URL purely for the thumbnail.
 export type AttachmentItem = FileUIPart & { id: string; file?: File };
-
-/** Read an already-selected file. Rejects instead of resolving a placeholder. */
-const readBlobAsDataUrl = (blob: Blob): Promise<string> =>
-  // FileReader uses callback-based API, wrapping in Promise is necessary
-  // oxlint-disable-next-line eslint-plugin-promise(avoid-new)
-  new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    // oxlint-disable-next-line eslint-plugin-unicorn(prefer-add-event-listener)
-    reader.onload = () => {
-      const result = reader.result;
-      if (typeof result === "string" && result.startsWith("data:")) {
-        resolve(result);
-      } else {
-        reject(new Error("attachment_read_failed"));
-      }
-    };
-    // oxlint-disable-next-line eslint-plugin-unicorn(prefer-add-event-listener)
-    reader.onerror = () => reject(new Error("attachment_read_failed"));
-    // oxlint-disable-next-line eslint-plugin-unicorn(prefer-add-event-listener)
-    reader.onabort = () => reject(new Error("attachment_read_failed"));
-    reader.readAsDataURL(blob);
-  });
-
-/**
- * Fallback for an item that carries only a preview URL (a restored draft, or an
- * attachment added before this fix). It may fail under the app's CSP, and when it
- * does the caller must report the failure — never forward the blob URL.
- */
-const readPreviewUrlAsDataUrl = async (url: string): Promise<string> => {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error("attachment_read_failed");
-  }
-  return readBlobAsDataUrl(await response.blob());
-};
-
-/** Resolve one attachment to the data: URL the conversation layer requires. */
-const attachmentDataUrl = async (item: AttachmentItem): Promise<string> => {
-  if (item.url?.startsWith("data:")) {
-    return item.url;
-  }
-  if (item.file) {
-    return readBlobAsDataUrl(item.file);
-  }
-  if (item.url?.startsWith("blob:")) {
-    return readPreviewUrlAsDataUrl(item.url);
-  }
-  throw new Error("attachment_read_failed");
-};
 
 const captureScreenshot = async (): Promise<File | null> => {
   if (
@@ -904,12 +860,9 @@ export const PromptInput = ({
       // the draft and the attachments so the send can simply be retried.
       let convertedFiles: FileUIPart[];
       try {
-        convertedFiles = await Promise.all(
-          files.map(async ({ id: _id, file: _file, ...item }) => ({
-            ...item,
-            url: await attachmentDataUrl({ ...item, id: _id, file: _file }),
-          }))
-        );
+        convertedFiles = files.length
+          ? await (await import("./prompt-attachment-data")).resolvePromptAttachments(files)
+          : [];
       } catch {
         onError?.({
           code: "attachment_read_failed",
@@ -1006,6 +959,32 @@ export const PromptInputBody = ({
   <div className={cn("contents", className)} {...props} />
 );
 
+/**
+ * Breaks the line at the caret, replacing the current selection.
+ *
+ * The write goes through the native prototype setter and is followed by a real
+ * `input` event. React keeps its own copy of a controlled field's value on the
+ * instance, so assigning `textarea.value` is swallowed as "still unchanged";
+ * bypassing the instance setter leaves React's tracker stale and lets onChange
+ * run, which keeps a controlled draft in sync without a second source of truth.
+ */
+function insertNewlineAtSelection(textarea: HTMLTextAreaElement) {
+  const start = textarea.selectionStart ?? textarea.value.length;
+  const end = textarea.selectionEnd ?? start;
+  const insertion = insertPromptNewline(textarea.value, start, end);
+  const nativeValueSetter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    "value"
+  )?.set;
+  if (nativeValueSetter) {
+    nativeValueSetter.call(textarea, insertion.value);
+  } else {
+    textarea.setRangeText("\n", start, end, "end");
+  }
+  textarea.setSelectionRange(insertion.caret, insertion.caret);
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 export type PromptInputTextareaProps = ComponentProps<
   typeof InputGroupTextarea
 >;
@@ -1032,13 +1011,38 @@ export const PromptInputTextarea = ({
       }
 
       if (e.key === "Enter") {
-        if (isComposing || e.nativeEvent.isComposing) {
+        // The stored preference decides whether Enter or Ctrl/Cmd+Enter sends.
+        // Shift+Enter always breaks the line; an IME confirmation never sends.
+        const action = resolvePromptEnterAction(
+          {
+            key: e.key,
+            shiftKey: e.shiftKey,
+            ctrlKey: e.ctrlKey,
+            metaKey: e.metaKey,
+            altKey: e.altKey,
+            isComposing: isComposing || e.nativeEvent.isComposing,
+            keyCode: e.nativeEvent.keyCode,
+          },
+          readPromptSendShortcut()
+        );
+
+        if (action === "newline") {
+          e.preventDefault();
+          insertNewlineAtSelection(e.currentTarget);
           return;
         }
-        if (e.shiftKey) {
+
+        if (action !== "send") {
           return;
         }
+
         e.preventDefault();
+
+        // An empty draft without attachments has nothing to send, so it must not
+        // run the submit pipeline (which would clear the draft and notify the host).
+        if (!e.currentTarget.value.trim() && attachments.files.length === 0) {
+          return;
+        }
 
         // Check if the submit button is disabled before submitting
         const { form } = e.currentTarget;

@@ -1322,6 +1322,16 @@ pub(crate) fn classify(
     tool: &str,
     host_private: bool,
 ) -> (ArtifactClass, ArtifactOrigin) {
+    classify_with_purpose(project_root, path, tool, host_private, None)
+}
+
+pub(crate) fn classify_with_purpose(
+    project_root: Option<&Path>,
+    path: &Path,
+    tool: &str,
+    host_private: bool,
+    user_purpose: Option<ArtifactClass>,
+) -> (ArtifactClass, ArtifactOrigin) {
     if host_private {
         // The Host's private areas hold rendered *views* and intermediates.
         // A private file is never a deliverable: the user reaches it through the
@@ -1344,6 +1354,9 @@ pub(crate) fn classify(
         return (ArtifactClass::Process, ArtifactOrigin::HostPrivate);
     }
     let origin = ArtifactOrigin::Project;
+    if let Some(class) = user_purpose {
+        return (class, origin);
+    }
     if tool == "office_render" {
         // A rendered preview is normally redirected into the Host's private
         // cache, so reaching the project at all means the caller explicitly

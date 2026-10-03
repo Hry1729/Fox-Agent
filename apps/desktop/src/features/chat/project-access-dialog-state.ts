@@ -9,14 +9,32 @@ export function normalizeProjectPermission(value: unknown, fallback: ProjectReco
   return value === 'read_only' || value === 'ask' || value === 'allow' ? value : fallback
 }
 
-function normalizedProjectRoot(path: string) {
-  return path.trim().replace(/[\\/]+$/, '').toLocaleLowerCase()
+/**
+ * Identity of a project is its full path, never its folder name: two projects can
+ * share a leaf directory, and the same project can arrive with different separators
+ * or a trailing separator. Kept in one place so grouping, permission lookup and
+ * draft creation cannot disagree about which project they mean.
+ */
+export function normalizeProjectRoot(path: string) {
+  return canonicalProjectRoot(path).replace(/\//g, '\\').toLocaleLowerCase()
 }
 
-function matchingProject(path: string, projects: ProjectRecord[]) {
-  const normalized = normalizedProjectRoot(path)
+/**
+ * The single written form of a project path, so one directory can never be recorded
+ * twice. A trailing separator is dropped because Windows treats it as decoration —
+ * except on a drive root, where `D:\` is the root and `D:` is "the current
+ * directory on D", so that separator has to survive.
+ */
+export function canonicalProjectRoot(path: string) {
+  const trimmed = path.trim()
+  if (/^[a-zA-Z]:[\\/]*$/.test(trimmed)) return `${trimmed.slice(0, 2)}\\`
+  return trimmed.replace(/[\\/]+$/, '')
+}
+
+export function matchingProject(path: string, projects: ProjectRecord[]) {
+  const normalized = normalizeProjectRoot(path)
   if (!normalized) return undefined
-  return projects.find((project) => normalizedProjectRoot(project.rootPath) === normalized)
+  return projects.find((project) => normalizeProjectRoot(project.rootPath) === normalized)
 }
 
 export function selectProjectRoot(
@@ -25,7 +43,7 @@ export function selectProjectRoot(
   fallbackPermission: ProjectRecord['permissionMode'],
 ): ProjectAccessSelection {
   return {
-    path,
+    path: canonicalProjectRoot(path),
     permissionMode: matchingProject(path, projects)?.permissionMode ?? fallbackPermission,
   }
 }

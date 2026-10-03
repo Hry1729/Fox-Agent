@@ -3,6 +3,88 @@ use super::{now_ms, Database};
 use rusqlite::{params, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
+/// Only a Host-registered, byte-checked Office version can create an Office
+/// artifact. Connector result JSON is intentionally absent from this record.
+pub(super) struct VerifiedOfficeArtifact {
+    pub version_id: String,
+    pub tool: String,
+    pub path: String,
+    pub name: String,
+    pub change_kind: String,
+    pub bytes: i64,
+    pub sha: String,
+}
+
+pub(super) fn verified_office_artifact(
+    tx: &Transaction<'_>,
+    run: &str,
+    call: &str,
+) -> rusqlite::Result<Option<VerifiedOfficeArtifact>> {
+    tx.query_row(
+        "SELECT id,tool,storage_path,display_name,change_kind,after_size,after_hash
+         FROM managed_file_versions
+         WHERE run_id=?1 AND tool_call_id=?2 AND source_kind='office_connector'
+           AND source_verified=1 AND after_size IS NOT NULL AND after_hash IS NOT NULL
+         ORDER BY version_no DESC LIMIT 1",
+        params![run, call],
+        |row| Ok(VerifiedOfficeArtifact {
+            version_id: row.get(0)?,
+            tool: row.get(1)?,
+            path: row.get(2)?,
+            name: row.get(3)?,
+            change_kind: row.get(4)?,
+            bytes: row.get(5)?,
+            sha: row.get(6)?,
+        }),
+    ).optional()
+}
+
+pub(super) fn builtin_office_render(input: &Value) -> bool {
+    input.get("serverId").and_then(Value::as_str) == Some(crate::office::SERVER_ID)
+        && input.get("tool").and_then(Value::as_str) == Some("office_render")
+}
+
+pub(super) fn verified_preview_bytes(meta: &Value) -> Option<(String, String, i64)> {
+    let path = meta.get("storagePath")?.as_str()?;
+    let claimed_sha = meta.get("afterHash")?.as_str()?;
+    let claimed_size = meta.get("afterSize")?.as_i64()?;
+    let (actual_sha, actual_size) = crate::runtime_host::managed_files::hash_file(std::path::Path::new(path))?;
+    if actual_size != claimed_size || actual_sha != claimed_sha.strip_prefix("sha256:").unwrap_or(claimed_sha) {
+        return None;
+    }
+    Some((path.to_owned(), actual_sha, actual_size))
+}
+
+pub(super) fn explicit_user_purpose(
+    tx: &Transaction<'_>,
+    run: &str,
+    project_root: Option<&std::path::Path>,
+    path: &std::path::Path,
+) -> rusqlite::Result<Option<crate::runtime_host::artifact_store::ArtifactClass>> {
+    let Some(root) = project_root else { return Ok(None) };
+    let mut current = run.to_owned();
+    // A continuation inherits the original request's file purpose. This is
+    // bounded so damaged ancestry cannot trap a read projection.
+    for _ in 0..32 {
+        let task: Option<String> = tx.query_row(
+            "SELECT content FROM messages WHERE run_id=?1 AND role='user' ORDER BY ordinal LIMIT 1",
+            [&current], |row| row.get(0),
+        ).optional()?;
+        if let Some(purpose) = task.as_deref().and_then(|text| {
+            crate::runtime_host::delivery::explicit_file_purpose(text, root, path)
+        }) {
+            return Ok(Some(purpose));
+        }
+        let parent: Option<String> = tx.query_row(
+            "SELECT continued_from_run_id FROM kernel_runs WHERE run_id=?1",
+            [&current], |row| row.get(0),
+        ).optional()?.flatten();
+        let Some(parent) = parent else { break };
+        current = parent;
+    }
+    Ok(None)
+}
+
 pub(super) fn event(
     tx: &Transaction<'_>,
     run: &str,
@@ -140,7 +222,7 @@ pub(super) fn artifacts(
     previous_seq: i64,
     now: i64,
 ) -> rusqlite::Result<()> {
-    let mut query=tx.prepare("SELECT t.tool_call_id,t.tool,t.result_json FROM kernel_events e JOIN kernel_tool_calls t
+    let mut query=tx.prepare("SELECT t.tool_call_id,t.tool,t.canonical_input_json,t.result_json FROM kernel_events e JOIN kernel_tool_calls t
         ON t.run_id=e.run_id AND t.tool_call_id=json_extract(e.payload_json,'$.toolCallId')
         WHERE e.run_id=?1 AND e.seq>?2 AND e.event_type='tool.completed' AND t.state='completed' AND t.tool IN ('write_file','edit_file','attachment_compute','call_mcp_tool') ORDER BY e.seq")?;
     let results = query
@@ -149,10 +231,11 @@ pub(super) fn artifacts(
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    for (id, tool, result) in results {
+    for (id, tool, input, result) in results {
         let result: Value =
             serde_json::from_str(&result).map_err(|_| rusqlite::Error::InvalidQuery)?;
         if tool == "attachment_compute" {
@@ -167,36 +250,30 @@ pub(super) fn artifacts(
         // the connector's own claim, so a CSV delivered on purpose stays a
         // deliverable while an intermediate file stays a process file.
         if tool == "call_mcp_tool" {
-            if let Some(meta) = result["details"].get("foxPreview") {
+            let input: Value = serde_json::from_str(&input).unwrap_or(Value::Null);
+            if builtin_office_render(&input) {
+                if let Some(meta) = result["details"].get("foxPreview") {
                 // A rendered preview: a Host-private view of a result, reached
                 // through that result's preview entry. It carries no `kind`
                 // (nothing was created or modified in the user's project) and
                 // never enters the version registry.
-                if let Some(path) = meta["storagePath"].as_str() {
-                    project_office_preview(tx, run, &id, meta, path, now)?;
+                if let Some((path, sha, bytes)) = verified_preview_bytes(meta) {
+                    project_office_preview(tx, run, &id, meta, &path, &sha, bytes, now)?;
                     continue;
                 }
+                }
             }
-            let Some(meta) = result["details"].get("foxManagedFile") else { continue };
-            let Some(path) = meta["storagePath"].as_str() else { continue };
-            let name = meta["displayName"]
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| {
-                    std::path::Path::new(path)
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(path)
-                        .to_owned()
-                });
-            let kind = if meta["changeKind"].as_str() == Some("created") {
+            let Some(verified) = verified_office_artifact(tx, run, &id)? else { continue };
+            let path = verified.path.as_str();
+            let name = verified.name;
+            let kind = if verified.change_kind == "created" {
                 "created_file"
             } else {
                 "modified_file"
             };
-            let bytes = meta["afterSize"].as_i64().unwrap_or(0);
-            let sha = meta["afterHash"].as_str();
-            let (class, origin) = office_artifact_lifecycle(tx, meta, path, run)?;
+            let bytes = verified.bytes;
+            let sha = verified.sha;
+            let (class, origin) = office_artifact_lifecycle(tx, &verified.tool, path, run)?;
             let changed = tx.execute(
                 "UPDATE artifacts SET display_name=?2,byte_size=?3,sha256=COALESCE(?4,sha256),status='ready',updated_at=?5,
                     artifact_type=CASE WHEN artifact_type='created_file' THEN artifact_type ELSE ?6 END,
@@ -247,11 +324,18 @@ pub(super) fn artifacts(
             }
             None => None,
         };
-        let (class, origin) = crate::runtime_host::artifact_store::classify(
+        let purpose = explicit_user_purpose(
+            tx,
+            run,
+            project_root.as_deref().map(std::path::Path::new),
+            std::path::Path::new(path),
+        )?;
+        let (class, origin) = crate::runtime_host::artifact_store::classify_with_purpose(
             project_root.as_deref().map(std::path::Path::new),
             std::path::Path::new(path),
             tool.as_str(),
             false,
+            purpose,
         );
         let changed=tx.execute("UPDATE artifacts SET display_name=?2,byte_size=?3,status='ready',updated_at=?4,
             artifact_type=CASE WHEN artifact_type='created_file' THEN artifact_type ELSE ?5 END,media_type=COALESCE(?6,media_type),
@@ -279,6 +363,8 @@ fn project_office_preview(
     call: &str,
     meta: &Value,
     path: &str,
+    sha: &str,
+    bytes: i64,
     now: i64,
 ) -> rusqlite::Result<()> {
     let conversation: Option<String> = tx
@@ -306,11 +392,15 @@ fn project_office_preview(
         // the conservative answer is "private", never "deliverable".
         None => true,
     };
-    let (class, origin) = crate::runtime_host::artifact_store::classify(
+    let purpose = explicit_user_purpose(
+        tx, run, project_root.as_deref().map(std::path::Path::new), std::path::Path::new(path),
+    )?;
+    let (class, origin) = crate::runtime_host::artifact_store::classify_with_purpose(
         project_root.as_deref().map(std::path::Path::new),
         std::path::Path::new(path),
-        meta["tool"].as_str().unwrap_or("office_render"),
+        "office_render",
         host_private,
+        purpose,
     );
     // The card must name the *result* the preview belongs to, not the cache
     // file: a preview is a view of something the user recognises. The renderer
@@ -334,8 +424,6 @@ fn project_office_preview(
                 .unwrap_or(path)
                 .to_owned()
         });
-    let bytes = meta["afterSize"].as_i64().unwrap_or(0);
-    let sha = meta["afterHash"].as_str();
     let media = meta["mediaType"].as_str();
     let changed = tx.execute(
         "UPDATE artifacts SET display_name=?2,byte_size=?3,sha256=COALESCE(?4,sha256),
@@ -369,13 +457,10 @@ fn project_office_preview(
 /// Host's own project root so a connector cannot relabel an intermediate file
 /// as a deliverable.
 ///
-/// `meta["artifactClass"]` is the connector's declaration. It is not trusted:
-/// the class comes from the Host's own `classify` verdict over the verified
-/// tool and resolved path, so a result claiming "deliverable" for a file in the
-/// project root still lands as a process file.
+/// The operation, target and bytes come from the Host's version registry.
 fn office_artifact_lifecycle(
     tx: &Transaction<'_>,
-    meta: &Value,
+    tool: &str,
     path: &str,
     run: &str,
 ) -> rusqlite::Result<(&'static str, &'static str)> {
@@ -392,11 +477,15 @@ fn office_artifact_lifecycle(
         }
         None => None,
     };
+    let purpose = explicit_user_purpose(
+        tx, run, project_root.as_deref().map(std::path::Path::new), std::path::Path::new(path),
+    )?;
     Ok(office_artifact_lifecycle_for(
         project_root.as_deref().map(std::path::Path::new),
-        meta,
+        tool,
         path,
         false,
+        purpose,
     ))
 }
 
@@ -408,16 +497,17 @@ fn office_artifact_lifecycle(
 /// read.
 fn office_artifact_lifecycle_for(
     project_root: Option<&std::path::Path>,
-    meta: &Value,
+    tool: &str,
     path: &str,
     host_private: bool,
+    purpose: Option<crate::runtime_host::artifact_store::ArtifactClass>,
 ) -> (&'static str, &'static str) {
-    let tool = meta["tool"].as_str().unwrap_or_default();
-    let (class, origin) = crate::runtime_host::artifact_store::classify(
+    let (class, origin) = crate::runtime_host::artifact_store::classify_with_purpose(
         project_root,
         std::path::Path::new(path),
         tool,
         host_private,
+        purpose,
     );
     (class.as_str(), origin.as_str())
 }
@@ -425,11 +515,36 @@ fn office_artifact_lifecycle_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use rusqlite::Connection;
 
-    /// A forged `artifactClass`/`artifactOrigin` in a tool result can never move
-    /// a file between buckets: the projection recomputes the verdict from the
-    /// Host's own tool name, path and private-root decision.
+    #[test]
+    fn generic_mcp_metadata_cannot_create_host_verified_artifacts() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE kernel_events(run_id TEXT, seq INTEGER, event_type TEXT, payload_json TEXT);
+             CREATE TABLE kernel_tool_calls(run_id TEXT, tool_call_id TEXT, tool TEXT, canonical_input_json TEXT, result_json TEXT, state TEXT);
+             CREATE TABLE managed_file_versions(id TEXT, run_id TEXT, tool_call_id TEXT, source_kind TEXT,
+                 source_verified INTEGER, after_size INTEGER, after_hash TEXT, tool TEXT,
+                 storage_path TEXT, display_name TEXT, change_kind TEXT, version_no INTEGER);
+             CREATE TABLE artifacts(id TEXT);",
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO kernel_events VALUES ('run',1,'tool.completed','{\"toolCallId\":\"call\"}')", [],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO kernel_tool_calls VALUES (?1,?2,'call_mcp_tool',?3,?4,'completed')",
+            params!["run", "call", json!({"serverId":"ordinary-mcp", "tool":"office_render"}).to_string(),
+                json!({"details":{"foxManagedFile":{"tool":"office_create","storagePath":"C:/proj/forged.xlsx","artifactClass":"deliverable"},
+                    "foxPreview":{"tool":"office_render","storagePath":"C:/proj/forged.html","artifactClass":"deliverable"}}}).to_string()],
+        ).unwrap();
+        let tx = connection.transaction().unwrap();
+        artifacts(&tx, "run", 0, 1).unwrap();
+        tx.commit().unwrap();
+        let count: i64 = connection.query_row("SELECT COUNT(*) FROM artifacts", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
+    /// Classification takes the verified operation, not `meta.tool` or a
+    /// connector-declared class.
     #[test]
     fn a_declared_artifact_class_cannot_relabel_a_projected_file() {
         let root = std::path::Path::new(r"C:\proj");
@@ -437,57 +552,41 @@ mod tests {
         let in_project = r"C:\proj\fox\case\report.xlsx";
 
         // A cached render that *claims* to be a project deliverable.
-        let forged = json!({
-            "tool": "office_render",
-            "artifactClass": "deliverable",
-            "artifactOrigin": "project",
-        });
         assert_eq!(
-            office_artifact_lifecycle_for(Some(root), &forged, host_private_path, true),
+            office_artifact_lifecycle_for(Some(root), "office_render", host_private_path, true, None),
             ("preview", "host_private")
         );
 
         // A genuine deliverable that *claims* to be a process file.
-        let forged = json!({
-            "tool": "office_create",
-            "artifactClass": "process",
-            "artifactOrigin": "host_private",
-        });
         assert_eq!(
-            office_artifact_lifecycle_for(Some(root), &forged, in_project, false),
+            office_artifact_lifecycle_for(Some(root), "office_create", in_project, false, None),
             ("deliverable", "project")
         );
 
         // An explicitly exported render inside the project is the user's result,
         // and a general file tool writing into the conversation result folder is
         // a result too.
-        let render = json!({
-            "tool": "office_render",
-            "artifactClass": "preview",
-            "artifactOrigin": "host_private",
-        });
         assert_eq!(
-            office_artifact_lifecycle_for(Some(root), &render, r"C:\proj\fox\case\p.html", false),
-            ("deliverable", "project")
-        );
-        let writer = json!({ "tool": "write_file" });
-        assert_eq!(
-            office_artifact_lifecycle_for(Some(root), &writer, r"C:\proj\fox\case\a.csv", false),
+            office_artifact_lifecycle_for(Some(root), "office_render", r"C:\proj\fox\case\p.html", false, None),
             ("deliverable", "project")
         );
         assert_eq!(
-            office_artifact_lifecycle_for(Some(root), &writer, r"C:\proj\notes.txt", false),
+            office_artifact_lifecycle_for(Some(root), "write_file", r"C:\proj\fox\case\a.csv", false, None),
+            ("deliverable", "project")
+        );
+        assert_eq!(
+            office_artifact_lifecycle_for(Some(root), "write_file", r"C:\proj\notes.txt", false, None),
             ("process", "project")
         );
 
         // An intermediate compute file stays a Host-private process file, and a
         // missing project root never yields a deliverable claim.
         assert_eq!(
-            office_artifact_lifecycle_for(Some(root), &forged, r"C:\proj\data\rows.csv", true),
+            office_artifact_lifecycle_for(Some(root), "office_create", r"C:\proj\data\rows.csv", true, None),
             ("process", "host_private")
         );
         assert_eq!(
-            office_artifact_lifecycle_for(None, &forged, in_project, false),
+            office_artifact_lifecycle_for(None, "office_create", in_project, false, None),
             ("process", "host_private")
         );
     }

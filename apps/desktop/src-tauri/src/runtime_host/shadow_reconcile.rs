@@ -84,7 +84,7 @@ pub(crate) fn kernel_tool_policy(tool: &str) -> PolicyDecision {
 /// (for example a host command with no target), and therefore no grant may ever
 /// cover it. Exposed so an approval-time grant is registered against exactly the
 /// key the policy will later compare.
-pub(super) fn tool_operation_scope(tool: &str, input: &Value, project_root: Option<&str>) -> Option<String> {
+pub(crate) fn tool_operation_scope(tool: &str, input: &Value, project_root: Option<&str>) -> Option<String> {
     if matches!(tool, "write_file" | "edit_file") {
         let root = project_root?;
         // A grant names a target, not a read version or an edit match. Those
@@ -97,6 +97,9 @@ pub(super) fn tool_operation_scope(tool: &str, input: &Value, project_root: Opti
     } else if tool == "run_command" {
         None
     } else if tool == "call_mcp_tool" {
+        if let Some(scope) = super::office_grants::reusable_edit_scope(input, project_root) {
+            return Some(scope.key);
+        }
         super::mcp_permission_scope(tool, input)
     } else {
         super::capability_permission_scope(tool, input)

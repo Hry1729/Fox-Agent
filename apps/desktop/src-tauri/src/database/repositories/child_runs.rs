@@ -7,8 +7,6 @@ use serde_json::Value;
 use uuid::Uuid;
 
 pub(crate) const MAX_CHILD_DEPTH: i64 = 1;
-pub(crate) const MAX_CHILDREN_PER_PARENT: i64 = 8;
-pub(crate) const MAX_ACTIVE_CHILDREN_PER_ROOT: i64 = 3;
 const MIN_CHILD_DURATION_MS: i64 = 1_000;
 const MAX_CHILD_DURATION_MS: i64 = 900_000;
 const MIN_CHILD_TOTAL_TOKENS: i64 = 256;
@@ -159,24 +157,9 @@ pub(super) fn create_child_run_in_transaction(
                 [input.worker_agent_id],
                 |row| row.get(0),
             )?;
-    let child_count: i64 = transaction.query_row(
-        "SELECT COUNT(*) FROM child_run_delegations WHERE parent_run_id = ?1",
-        [input.parent_run_id],
-        |row| row.get(0),
-    )?;
-    if child_count >= MAX_CHILDREN_PER_PARENT {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    let active_count: i64 = transaction.query_row(
-        "SELECT COUNT(*) FROM runs
-                 WHERE root_run_id = ?1 AND run_kind = 'child'
-                   AND status IN ('queued', 'running', 'cancelling')",
-        [&root_run_id],
-        |row| row.get(0),
-    )?;
-    if active_count >= MAX_ACTIVE_CHILDREN_PER_ROOT {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
+    // Child depth and the existing per-run duration/scope/loop safeguards remain.
+    // Neither lifetime child count nor simultaneously active child count is a
+    // separate admission quota.
     if let (Some(team_run_id), Some(team_member_id)) = (input.team_run_id, input.team_member_id) {
         let (team_parent_run_id, team_status, team_json): (String, String, String) = transaction
             .query_row(
@@ -1213,10 +1196,10 @@ mod tests {
     }
 
     #[test]
-    fn child_run_enforces_root_concurrency_without_cumulative_tool_limits() {
+    fn child_runs_have_no_count_quota_and_keep_per_run_boundaries() {
         let (database, path, parent) = test_database();
         let mut first_child_id = String::new();
-        for index in 0..MAX_ACTIVE_CHILDREN_PER_ROOT {
+        for index in 0..9 {
             let tool_call_id = format!("delegate-{index}");
             let (_, child, _) = create_child(&database, &parent.run.id, &tool_call_id);
             if first_child_id.is_empty() {
@@ -1225,7 +1208,7 @@ mod tests {
         }
         assert_eq!(
             database.active_child_run_ids(&parent.run.id).unwrap().len(),
-            MAX_ACTIVE_CHILDREN_PER_ROOT as usize
+            9
         );
         assert!(
             database
@@ -1234,31 +1217,6 @@ mod tests {
                 .is_empty(),
             "a child cancellation must not cascade into sibling Child Runs"
         );
-        database
-            .create_host_tool_call(
-                &parent.run.id,
-                "delegate-over-limit",
-                "child_run_start",
-                &json!({ "objective": "too many" }),
-                "running",
-                false,
-            )
-            .unwrap();
-        let error = database
-            .create_child_run(CreateChildRunInput {
-                parent_run_id: &parent.run.id,
-                tool_call_id: "delegate-over-limit",
-                worker_agent_id: "fox-general",
-                objective: "too many",
-                context: "",
-                budget: &default_budget(),
-                team_run_id: None,
-                team_member_id: None,
-                allowed_tools: None,
-            })
-            .expect_err("fourth active child must be rejected");
-        assert!(!error.is_empty());
-
         let tool_budget = ChildRunBudget {
             max_tool_calls: 1,
             ..default_budget()

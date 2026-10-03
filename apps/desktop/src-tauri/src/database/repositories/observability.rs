@@ -417,6 +417,62 @@ pub(super) fn close_run_trace_in_transaction(
 }
 
 impl Database {
+    /// A zero-length trace point observed by this process. `attempt_id` is a
+    /// fresh identifier for one dispatch invocation, not a durable effect key:
+    /// retries of the same effect must remain separate observations.
+    pub fn record_host_stage_point(
+        &self,
+        run_id: &str,
+        attempt_id: &str,
+        stage: &str,
+        observed_at: i64,
+    ) -> Result<(), String> {
+        if attempt_id.is_empty() || attempt_id.len() > 128
+            || !attempt_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err("invalid host stage attempt".to_owned());
+        }
+        if !matches!(stage,
+            "queued" | "dispatch_granted" | "context_prepare_started"
+            | "context_prepare_finished" | "worker_handoff"
+            | "first_valid_worker_event" | "model_slot_queued" | "model_slot_granted")
+        {
+            return Err("unsupported host stage".to_owned());
+        }
+        self.with_connection(|connection| {
+            let transaction = connection.transaction()?;
+            let (trace_id, root_span_id) = initialize_run_trace(&transaction, run_id, observed_at)?;
+            let conversation_id: String = transaction.query_row(
+                "SELECT conversation_id FROM runs WHERE id = ?1", [run_id], |row| row.get(0),
+            )?;
+            let entity_id = format!("{attempt_id}:{stage}");
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM trace_spans WHERE run_id = ?1 AND category = 'phase' AND entity_id = ?2)",
+                params![run_id, entity_id], |row| row.get(0),
+            )?;
+            if !exists {
+                let attributes = serde_json::to_string(&json!({
+                    "fox.host.stage": stage,
+                    "fox.host.attempt_id": attempt_id,
+                    "fox.host.clock": "host_unix_ms",
+                    "fox.host.boundary": "point"
+                })).unwrap_or_else(|_| "{}".to_owned());
+                transaction.execute(
+                    "INSERT INTO trace_spans(id, trace_id, parent_span_id, run_id, conversation_id,
+                     name, operation, category, status, started_at, ended_at, duration_ms,
+                     attributes_json, entity_id, schema_version)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'host_stage_point', 'phase', 'ok',
+                             ?7, ?7, 0, ?8, ?9, ?10)",
+                    params![new_span_id(), trace_id, root_span_id, run_id, conversation_id,
+                        format!("host.{stage}"), observed_at, attributes, entity_id,
+                        TRACE_SCHEMA_VERSION],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(())
+        })
+    }
+
     pub fn record_ui_metric(
         &self,
         run_id: &str,
@@ -662,7 +718,8 @@ impl Database {
             let mut durations: BTreeMap<String, Vec<i64>> = BTreeMap::new();
             let mut duration_statement = connection.prepare(
                 "SELECT operation, duration_ms FROM trace_spans
-                 WHERE category != 'run' AND duration_ms IS NOT NULL
+                 WHERE category != 'run' AND operation != 'host_stage_point'
+                   AND duration_ms IS NOT NULL
                  ORDER BY started_at DESC LIMIT 2000",
             )?;
             for row in duration_statement.query_map([], |row| {
@@ -670,6 +727,39 @@ impl Database {
             })? {
                 let (operation, duration) = row?;
                 durations.entry(operation).or_default().push(duration);
+            }
+            // Derive only intervals whose two real boundaries were observed on
+            // this Host clock and in the same dispatch attempt. Missing points
+            // stay unknown; no neighboring span is used as a substitute.
+            let mut stage_statement = connection.prepare(
+                "SELECT run_id, entity_id, started_at FROM trace_spans
+                 WHERE operation = 'host_stage_point'
+                 ORDER BY started_at DESC LIMIT 4000",
+            )?;
+            let mut attempts: BTreeMap<(String, String), BTreeMap<String, i64>> = BTreeMap::new();
+            for row in stage_statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?))
+            })? {
+                let (run_id, entity_id, at) = row?;
+                if let Some((attempt, stage)) = entity_id.rsplit_once(':') {
+                    attempts.entry((run_id, attempt.to_owned())).or_default()
+                        .insert(stage.to_owned(), at);
+                }
+            }
+            for stages in attempts.values() {
+                for (from, to, operation) in [
+                    ("queued", "dispatch_granted", "host.queue_wait"),
+                    ("context_prepare_started", "context_prepare_finished", "host.context_prepare"),
+                    ("context_prepare_finished", "worker_handoff", "host.prepare_to_handoff"),
+                    ("worker_handoff", "first_valid_worker_event", "host.worker_to_first_event"),
+                    ("model_slot_queued", "model_slot_granted", "host.model_slot_wait"),
+                ] {
+                    if let (Some(start), Some(end)) = (stages.get(from), stages.get(to)) {
+                        if end >= start {
+                            durations.entry(operation.to_owned()).or_default().push(end - start);
+                        }
+                    }
+                }
             }
             let latency_metrics = durations
                 .into_iter()
@@ -775,6 +865,63 @@ mod tests {
             .create_run(&conversation.id, "trace this", None)
             .expect("run");
         (database, run)
+    }
+
+    #[test]
+    fn host_stage_points_keep_actual_boundaries_and_distinct_attempts() {
+        let (database, run) = setup();
+        let run_id = &run.run.id;
+        database.record_host_stage_point(run_id, "attempt-one", "worker_handoff", 1_000).unwrap();
+        database.record_host_stage_point(run_id, "attempt-one", "first_valid_worker_event", 1_075).unwrap();
+        database.record_host_stage_point(run_id, "attempt-one", "worker_handoff", 9_999).unwrap();
+        database.record_host_stage_point(run_id, "attempt-two", "worker_handoff", 2_000).unwrap();
+        let points = database.with_connection(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT entity_id, started_at, ended_at, duration_ms FROM trace_spans
+                 WHERE run_id = ?1 AND operation = 'host_stage_point' ORDER BY started_at",
+            )?;
+            let rows = statement.query_map([run_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        }).unwrap();
+        assert_eq!(points, vec![
+            ("attempt-one:worker_handoff".into(), 1_000, 1_000, 0),
+            ("attempt-one:first_valid_worker_event".into(), 1_075, 1_075, 0),
+            ("attempt-two:worker_handoff".into(), 2_000, 2_000, 0),
+        ]);
+        assert_eq!(points[1].1 - points[0].1, 75);
+        let metrics = database.observability_statistics().unwrap().latency_metrics;
+        let worker = metrics.iter().find(|metric| metric.operation == "host.worker_to_first_event").unwrap();
+        assert_eq!((worker.sample_count, worker.average_ms), (1, 75));
+        assert!(!metrics.iter().any(|metric| metric.operation == "host.context_prepare"));
+        assert!(database.record_host_stage_point(run_id, "attempt-one", "http_sent", 3_000).is_err());
+    }
+
+    #[test]
+    fn model_capacity_wait_uses_only_the_same_request_attempt() {
+        let (database, run) = setup();
+        let run_id = &run.run.id;
+        database.record_host_stage_point(run_id, "model-one", "model_slot_queued", 1_000).unwrap();
+        database.record_host_stage_point(run_id, "model-one", "model_slot_granted", 1_080).unwrap();
+        database.record_host_stage_point(run_id, "model-two", "model_slot_queued", 1_090).unwrap();
+        let metrics = database.observability_statistics().unwrap().latency_metrics;
+        let wait = metrics.iter().find(|metric| metric.operation == "host.model_slot_wait").unwrap();
+        assert_eq!((wait.sample_count, wait.average_ms), (1, 80));
+    }
+
+    #[test]
+    fn delayed_host_boundary_is_assigned_only_to_its_observed_interval() {
+        let (database, run) = setup();
+        let run_id = &run.run.id;
+        let start = crate::database::now_ms();
+        database.record_host_stage_point(run_id, "delayed-attempt", "context_prepare_started", start).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(45));
+        let end = crate::database::now_ms();
+        database.record_host_stage_point(run_id, "delayed-attempt", "context_prepare_finished", end).unwrap();
+        let metrics = database.observability_statistics().unwrap().latency_metrics;
+        let preparation = metrics.iter().find(|metric| metric.operation == "host.context_prepare").unwrap();
+        assert!(preparation.average_ms >= 40);
+        assert!(!metrics.iter().any(|metric| metric.operation == "host.worker_to_first_event"));
     }
 
     #[test]

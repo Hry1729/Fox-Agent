@@ -3,6 +3,13 @@ import { readFileSync } from 'node:fs'
 import { resolveConversationAgentId } from '../src/features/conversations/model/agent-initialization'
 import { knowledgeReferenceKey, knowledgeReferenceFromLegacyBinding } from '../src/features/conversations/api/desktop-client'
 import { conversationRunFingerprint, conversationRunState, snapshotForRun } from '../src/features/conversations/model/kernel-snapshot'
+import {
+  EMPTY_CONVERSATION_RUN_OVERLAY,
+  applyApprovalToOverlay,
+  applyRunEventToOverlay,
+  conversationRunIndicators,
+  pruneRunOverlay,
+} from '../src/features/chat/conversation-run-indicator'
 
 // Run the production hook's actions with deterministic state/ref slots. Effects
 // are excluded here; these tests exercise selection ordering without a Host or DOM.
@@ -59,10 +66,84 @@ function harness() {
     knowledgeReferenceKey,
     knowledgeReferenceFromLegacyBinding,
     desktopErrorDetails: (error: Error) => ({ message: error.message }),
+    // Sidebar activity: the hook evaluates these eagerly for its derived map, so
+    // they must exist in the sandbox even though its effects never run.
+    EMPTY_CONVERSATION_RUN_OVERLAY,
+    conversationRunIndicators,
+    pruneRunOverlay,
+    applyRunEventToOverlay,
+    applyApprovalToOverlay,
   }
   const hook = new Function(...Object.keys(env), `${body}; return useDesktopConversation`)(...Object.values(env))
   return { render: () => { cursor = 0; return hook() }, creates: () => creates, submitted: () => ({ createdRequest, savedReferences }) }
 }
+
+describe('starting a fresh draft', () => {
+  function beginNewDraftHarness() {
+    const workbench = readFileSync(new URL('../src/features/chat/workbench.tsx', import.meta.url), 'utf8')
+    const slice = workbench.slice(workbench.indexOf('  const beginNewDraft = ('), workbench.indexOf('  const resetConversation = '))
+    const compiled = new Bun.Transpiler({ loader: 'tsx' }).transformSync(slice)
+    const calls: Record<string, unknown> = {}
+    const setter = (name: string) => (value: unknown) => {
+      calls[name] = typeof value === 'function' ? (value as (previous: unknown) => unknown)(5) : value
+    }
+    const beginNewDraft = new Function(
+      'clearWorkflowTimer', 'setChatState', 'setActivePrompt', 'setPendingUserMessage',
+      'setEmptyConversation', 'setComposerDraft', 'setComposerResetKey', 'setActiveEntityId',
+      'setActiveDocumentId', 'setActiveSourceLocator', 'setAssistantMode', 'setActiveView',
+      `${compiled}; return beginNewDraft`,
+    )(
+      () => { calls.clearWorkflowTimer = true },
+      setter('chatState'), setter('activePrompt'), setter('pendingUserMessage'),
+      setter('emptyConversation'), setter('composerDraft'), setter('composerResetKey'),
+      setter('activeEntityId'), setter('activeDocumentId'), setter('activeSourceLocator'),
+      setter('assistantMode'), setter('activeView'),
+    )
+    return { beginNewDraft, calls }
+  }
+
+  test('resets run identity, composer text and temporary state together', () => {
+    const { beginNewDraft, calls } = beginNewDraftHarness()
+    beginNewDraft()
+    // The previous conversation's run state must not survive: a draft that keeps
+    // "running" shows the stop button over an empty composer.
+    expect(calls.chatState).toBe('complete')
+    expect(calls.pendingUserMessage).toBeNull()
+    expect(calls.composerDraft).toBe('')
+    expect(calls.activePrompt).toBe('')
+    expect(calls.emptyConversation).toBe(true)
+    // The composer is remounted so its own internal state cannot linger either.
+    expect(calls.composerResetKey).toBe(6)
+    expect(calls.activeEntityId).toBeNull()
+    expect(calls.activeDocumentId).toBeNull()
+    expect(calls.activeSourceLocator).toBeNull()
+    expect(calls.activeView).toBe('chat')
+    // Nothing cancels the conversation that is still running in the background.
+    expect('cancel' in calls).toBe(false)
+    // The assistant mode is only touched when the caller asks for a change.
+    expect('assistantMode' in calls).toBe(false)
+  })
+
+  test('keeps a pre-filled suggestion visible instead of forcing an empty composer', () => {
+    const { beginNewDraft, calls } = beginNewDraftHarness()
+    beginNewDraft({ suggestion: '帮我总结这份文档' })
+    expect(calls.composerDraft).toBe('帮我总结这份文档')
+    expect(calls.emptyConversation).toBe(false)
+    expect(calls.chatState).toBe('complete')
+  })
+
+  test('an explicit empty draft wins over the layout heuristic', () => {
+    const { beginNewDraft, calls } = beginNewDraftHarness()
+    beginNewDraft({ suggestion: 'ignored layout hint', empty: true })
+    expect(calls.emptyConversation).toBe(true)
+  })
+
+  test('switching assistant mode is applied when requested', () => {
+    const { beginNewDraft, calls } = beginNewDraftHarness()
+    beginNewDraft({ mode: 'knowledge' })
+    expect(calls.assistantMode).toBe('knowledge')
+  })
+})
 
 describe('composable conversation draft selections', () => {
   test('returning to chat does not create a draft, but New conversation does', () => {

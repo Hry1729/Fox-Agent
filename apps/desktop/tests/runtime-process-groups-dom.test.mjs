@@ -13,7 +13,7 @@ const { cleanup, fireEvent, render, waitFor } = await import('@testing-library/r
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const server = await createServer({
   root, configFile: false, appType: 'custom', cacheDir: path.join(root, 'dist', '.vite-test-cache'),
-  optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true, hmr: false },
+  optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true, hmr: false, watch: { ignored: ['**/*'] } },
   resolve: { alias: { '@': path.join(root, 'src') } }, esbuild: { jsx: 'automatic' },
 })
 const { RuntimeTimeline } = await server.ssrLoadModule('/src/features/chat/workbench.tsx')
@@ -41,6 +41,49 @@ const timeline = (runtimeEvents, overrides = {}) => React.createElement(RuntimeT
   messages, attachments: [], artifacts: [], events: runtimeEvents, runtimeRunning: false,
   state: 'idle', streamingText: '', onRetry: () => {}, onRerun: async () => false,
   ...overrides,
+})
+
+test('a run still waiting for an execution slot says so, with its real queue wait', async () => {
+  const promptedAt = Date.now() - 585_000
+  const queued = timeline([], {
+    runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+    messages: [
+      { ...messages[0], createdAt: promptedAt, updatedAt: promptedAt },
+      { ...messages[1], content: '', status: 'streaming' },
+    ],
+  })
+  const view = render(queued)
+  // No run.started yet: this Run is holding a place in the shared execution queue,
+  // which must not be reported as "analysing the request".
+  await waitFor(() => assert.match(view.container.querySelector('.fox-runtime-process-summary')?.textContent ?? '', /排队等待执行/))
+  assert.match(view.container.querySelector('.fox-runtime-process-summary').textContent, /已排队 \d+分/)
+  assert.doesNotMatch(view.container.textContent, /正在分析请求/)
+})
+
+test('a started run reports the model wait and the generation stage separately', async () => {
+  const promptedAt = Date.now() - 90_000
+  const started = { ...event(1, 'run.started'), createdAt: Date.now() - 36_000 }
+  const queuedFirst = timeline([started], {
+    runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+    messages: [
+      { ...messages[0], createdAt: promptedAt, updatedAt: promptedAt },
+      { ...messages[1], content: '', status: 'streaming' },
+    ],
+  })
+  const view = render(queuedFirst)
+  await waitFor(() => assert.match(view.container.querySelector('.fox-runtime-process-summary')?.textContent ?? '', /等待模型响应/))
+  assert.match(view.container.querySelector('.fox-runtime-process-summary').textContent, /已等待 3[0-9]秒/)
+
+  await React.act(async () => {
+    view.rerender(timeline([started, event(2, 'reasoning.delta', { delta: '先分析' })], {
+      runtimeRunning: true, activeRunId: 'run', state: 'streaming',
+      messages: [
+        { ...messages[0], createdAt: promptedAt, updatedAt: promptedAt },
+        { ...messages[1], content: '', status: 'streaming' },
+      ],
+    }))
+  })
+  await waitFor(() => assert.match(view.container.querySelector('.fox-runtime-process-summary')?.textContent ?? '', /正在生成/))
 })
 
 test('answer segments remain once and in order while the whole process is collapsed', async () => {
@@ -235,22 +278,30 @@ test('streaming thought preview advances only after a paragraph first line compl
   })
   const view = render(renderReasoning(first, true))
   await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-process-stage').length, 1))
-  fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
   const label = () => view.container.querySelector('.fox-runtime-step-row .fox-run-status-label')?.textContent
-  await waitFor(() => assert.equal(label(), '第一段首行'))
+  // Grouping helpers arrive asynchronously and can remount the process, which
+  // drops a disclosure click made before they settle. Re-open until the row exists.
+  await waitFor(() => {
+    const header = view.container.querySelector('.fox-chain-of-thought-header')
+    if (header?.getAttribute('aria-expanded') !== 'true') fireEvent.click(header)
+    assert.equal(typeof label(), 'string')
+  }, { timeout: 3000 })
+  // One continuous summary line derived from the current thought: whitespace
+  // collapses, but nothing is dropped while the thought is still streaming.
+  await waitFor(() => assert.equal(label(), '第一段首行 第一段续行 第二段未完成'))
   await React.act(async () => { view.rerender(renderReasoning(`${first}继续写`, true)) })
-  assert.equal(label(), '第一段首行')
+  assert.equal(label(), '第一段首行 第一段续行 第二段未完成继续写')
   await React.act(async () => { view.rerender(renderReasoning(`${first}继续写\n第二段续行`, true)) })
-  assert.equal(label(), '第二段未完成继续写')
+  assert.equal(label(), '第一段首行 第一段续行 第二段未完成继续写 第二段续行')
   await React.act(async () => { view.rerender(renderReasoning('CRLF首行\r\n\r\n第二段未完成', true)) })
-  assert.equal(label(), 'CRLF首行')
+  assert.equal(label(), 'CRLF首行 第二段未完成')
   await React.act(async () => { view.rerender(renderReasoning('带空白首行\r\n  \r\n第二段未完成', true)) })
-  assert.equal(label(), '带空白首行')
+  assert.equal(label(), '带空白首行 第二段未完成')
   await React.act(async () => { view.rerender(renderReasoning('尚未换行', true)) })
-  assert.equal(label(), '')
-  assert.equal(view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix').textContent, '深度思考')
+  assert.equal(label(), '尚未换行')
+  assert.equal(view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix').textContent, '深度思考 ·')
   await React.act(async () => { view.rerender(renderReasoning('**结算首行**\n后续正文', false)) })
-  assert.equal(label(), '结算首行')
+  assert.equal(label(), '结算首行 后续正文')
   assert.equal(view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix').textContent, '深度思考 ·')
   fireEvent.click(view.container.querySelector('.fox-runtime-step-row .fox-runtime-step-trigger'))
   assert.equal(view.container.querySelector('.fox-runtime-step-row .fox-run-status-prefix').textContent, '深度思考')
@@ -331,7 +382,7 @@ test('compact mode previews only the live reasoning row in a running group', asy
   await waitFor(() => assert.equal(view.container.querySelectorAll('.fox-runtime-step-row').length, 2))
   const rows = view.container.querySelectorAll('.fox-runtime-step-row')
   assert.deepEqual([...rows].map(row => row.querySelector('.fox-run-status-prefix')?.textContent), ['深度思考', '深度思考 ·'])
-  assert.deepEqual([...rows].map(row => row.querySelector('.fox-run-status-label')?.textContent), ['', '最新首行'])
+  assert.deepEqual([...rows].map(row => row.querySelector('.fox-run-status-label')?.textContent), ['', '最新首行 最新续行'])
 })
 
 test('detailed mode opens only running groups and compact mode hides settled thought previews', async () => {

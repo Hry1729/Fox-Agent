@@ -432,7 +432,7 @@ impl Worker {
         token: &CancellationToken,
         deadline: Instant,
     ) -> Result<Value, String> {
-        self.exchange_with_preview(request, expected, token, deadline, None)
+        self.exchange_with_preview(request, expected, token, deadline, None, None)
     }
 
     fn exchange_with_preview(
@@ -442,6 +442,7 @@ impl Worker {
         token: &CancellationToken,
         deadline: Instant,
         preview: Option<&PreviewSink>,
+        diagnostic_attempt: Option<&str>,
     ) -> Result<Value, String> {
         let mut bytes = serde_json::to_vec(&request).map_err(|_| "invalid Kernel request")?;
         bytes.push(b'\n');
@@ -456,6 +457,18 @@ impl Worker {
         self.stdin = Some(stdin);
         if let Some(writer) = self.writer.take() { let _ = writer.join(); }
         result?;
+        let model_round = expected == "kernel.model_response";
+        let run_id = request["runId"].as_str().unwrap_or_default();
+        let attempt_id = diagnostic_attempt.unwrap_or_else(|| request["id"].as_str().unwrap_or_default());
+        if model_round {
+            let observed_at = crate::database::now_ms();
+            if let Some(database) = &self.usage_database {
+                let _ = database.record_host_stage_point(
+                    run_id, attempt_id, "worker_handoff", observed_at,
+                );
+            }
+        }
+        let mut first_model_event_seen = false;
         let mut revision = 0;
         loop {
             let response = wait(&self.messages, token, deadline)??;
@@ -498,6 +511,15 @@ impl Worker {
                 }
                 revision = notice.revision;
                 token.check()?;
+                if model_round && !first_model_event_seen {
+                    first_model_event_seen = true;
+                    let observed_at = crate::database::now_ms();
+                    if let Some(database) = &self.usage_database {
+                        let _ = database.record_host_stage_point(
+                            run_id, attempt_id, "first_valid_worker_event", observed_at,
+                        );
+                    }
+                }
                 sink(&notice);
                 continue;
             }
@@ -519,6 +541,14 @@ impl Worker {
                 {
                     return Err("Kernel failure belongs to another model request".into());
                 }
+                if model_round && !first_model_event_seen {
+                    let observed_at = crate::database::now_ms();
+                    if let Some(database) = &self.usage_database {
+                        let _ = database.record_host_stage_point(
+                            run_id, attempt_id, "first_valid_worker_event", observed_at,
+                        );
+                    }
+                }
                 return Err(format!(
                     "{SETTLED_FAILURE_PREFIX}{}",
                     serde_json::to_string(&failure).map_err(|_| "invalid failure")?
@@ -538,6 +568,14 @@ impl Worker {
                     "Kernel worker response identity/type mismatch (expected {expected}, got {}); reconcile delivery",
                     response["type"]
                 ));
+            }
+            if model_round && !first_model_event_seen {
+                let observed_at = crate::database::now_ms();
+                if let Some(database) = &self.usage_database {
+                    let _ = database.record_host_stage_point(
+                        run_id, attempt_id, "first_valid_worker_event", observed_at,
+                    );
+                }
             }
             return Ok(response["payload"].clone());
         }
@@ -559,6 +597,7 @@ pub(crate) fn deliver(
         remaining_budget_ms,
         None,
         None,
+        None,
     )
 }
 
@@ -566,6 +605,7 @@ pub(super) fn deliver_with_preview(
     runtime: &RuntimeCommand, config: &KernelModelConfig, api_key: &str,
     binding: &RunControlBinding, frame: &KernelBatchResumeFrame, token: &CancellationToken,
     remaining_budget_ms: i64, preview: Option<&PreviewSink>, database: Option<&crate::database::Database>,
+    diagnostic_attempt: Option<&str>,
 ) -> Result<KernelModelResponse, String> {
     token.check()?;
     frame.validate()?;
@@ -580,6 +620,7 @@ pub(super) fn deliver_with_preview(
         remaining_budget_ms,
         preview,
         database,
+        diagnostic_attempt,
     )?;
     if payload["idempotencyKey"] != frame.idempotency_key
         || payload["checkpointSeq"] != frame.checkpoint_seq
@@ -613,6 +654,7 @@ pub(crate) fn deliver_initial(
         remaining_budget_ms,
         None,
         None,
+        None,
     )
 }
 
@@ -626,6 +668,7 @@ pub(super) fn deliver_initial_with_preview(
     remaining_budget_ms: i64,
     preview: Option<&PreviewSink>,
     database: Option<&crate::database::Database>,
+    diagnostic_attempt: Option<&str>,
 ) -> Result<fox_engine_protocol::KernelInitialModelResponse, String> {
     token.check()?;
     frame.validate()?;
@@ -643,6 +686,7 @@ pub(super) fn deliver_initial_with_preview(
         remaining_budget_ms,
         preview,
         database,
+        diagnostic_attempt,
     )?;
     if payload["idempotencyKey"] != frame.idempotency_key
         || payload["checkpointSeq"] != frame.checkpoint_seq
@@ -671,6 +715,7 @@ fn call_model(
     remaining_budget_ms: i64,
     preview: Option<&PreviewSink>,
     database: Option<&crate::database::Database>,
+    diagnostic_attempt: Option<&str>,
 ) -> Result<Value, String> {
     config.hash()?;
     binding.validate()?;
@@ -678,9 +723,10 @@ fn call_model(
         || config.execution_profile_id != binding.execution_profile_id {
         return Err("isolated Kernel model identity mismatch".into());
     }
-    let budget = binding.budgets.limit_operation_ms(binding.budgets.model_request_ms, 0).min(remaining_budget_ms);
-    if budget <= 0 { return Err("Kernel worker has no remaining execution budget".into()); }
-    let deadline = Instant::now() + Duration::from_millis(budget.try_into().map_err(|_| "invalid model budget")?);
+    let requested_budget = binding.budgets.limit_operation_ms(binding.budgets.model_request_ms, 0).min(remaining_budget_ms);
+    if requested_budget <= 0 { return Err("Kernel worker has no remaining execution budget".into()); }
+    token.check()?;
+    let deadline = Instant::now() + Duration::from_millis(requested_budget.try_into().map_err(|_| "invalid model budget")?);
     let session_id = format!("kernel-once-{}", uuid::Uuid::new_v4());
     let request = |kind: &str, payload: Value| {
         json!({
@@ -728,7 +774,7 @@ fn call_model(
         host_trace::record(
             &binding.run_id,
             format!(
-                "host:worker_ready kind={kind} ready_ms={} budget_ms={budget}",
+                "host:worker_ready kind={kind} ready_ms={} budget_ms={requested_budget}",
                 spawn_started.elapsed().as_millis()
             ),
         );
@@ -748,6 +794,7 @@ fn call_model(
         token,
         deadline,
         preview,
+        diagnostic_attempt,
     )
 }
 
@@ -786,6 +833,7 @@ pub(super) fn compact_context(
         remaining_ms,
         None,
         database,
+        None,
     )?;
     let response: fox_engine_protocol::KernelCompactionResponse =
         serde_json::from_value(payload).map_err(|_| "invalid compaction response")?;

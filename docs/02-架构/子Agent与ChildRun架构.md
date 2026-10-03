@@ -66,10 +66,10 @@ Child Run 与父 Run 共用 Trace ID。Child root span 的 parent 优先指向�
 | 限制 | 当前值 |
 | --- | --- |
 | 最大深度 | 1 |
-| 每个父 Run 的 Child Run 总数 | 8 |
-| 每个 root Run 的同时活动 Child Run | 3 |
+| 每个父 Run 的 Child Run 总数 | 不单独设数量上限 |
+| 每个 root Run 的同时活动 Child Run | 不单独设数量上限 |
 | 单 Child Run 时长 | 1 秒–15 分钟，默认 5 分钟 |
-模型服务自身仍决定单次响应的上下文窗口和最大输出，这是 Provider 能力边界，不是 Child Run 的累计预算。Host 不再按累计 Token 或工具调用次数终止普通 Child Run；监控线程只检查 wall-clock deadline。Runtime 仍会阻止相同工具和相同参数的连续重复调用，避免无意义死循环。
+模型服务自身仍决定单次响应的上下文窗口和最大输出，这是 Provider 能力边界，不是 Child Run 的累计预算。Host 不再按累计 Token 或工具调用次数终止普通 Child Run；监控线程只检查 wall-clock deadline。深度仍限制为 1，Runtime 仍会阻止相同工具和相同参数的连续重复调用，避免无意义死循环。资源不足或供应商限流按原有错误及有界重试处理，不新增数量队列。
 
 ## 权限、审批与取消
 
@@ -85,4 +85,4 @@ Child Run 与父 Run 共用 Trace ID。Child root span 的 parent 优先指向�
 
 ## 验证
 
-仓储测试覆盖普通模板与专家目录隔离、隐藏会话、幂等启动、Trace 父子关系、终态结果/usage 聚合、并发上限、运行时长、取消只作用于 descendants，以及 Child 审批回投父会话。Runtime 测试覆盖四个委派工具的目录顺序、两种启动模式的 TypeBox 边界、固定隔离角色契约、路径优先上下文和重复同参工具防循环；Host 单元测试覆盖时长规范化和父子工具/MCP 范围交集。
+仓储测试覆盖普通模板与专家目录隔离、隐藏会话、幂等启动、Trace 父子关系、终态结果/usage 聚合、超过旧数量阈值的子运行、运行时长、取消只作用于 descendants，以及 Child 审批回投父会话。Runtime 测试覆盖四个委派工具的目录顺序、两种启动模式的 TypeBox 边界、固定隔离角色契约、路径优先上下文和重复同参工具防循环；Host 单元测试覆盖时长规范化和父子工具/MCP 范围交集。

@@ -877,8 +877,17 @@ impl<'a> KernelCoordinator<'a> {
         runtime: &super::RuntimeCommand,
         api_key: &str,
     ) -> Result<(), String> {
+        let prepare_attempt = uuid::Uuid::new_v4().to_string();
+        let observed_at = crate::database::now_ms();
+        let _ = self.database.record_host_stage_point(
+            &self.binding.run_id, &prepare_attempt, "context_prepare_started", observed_at,
+        );
         self.ensure_context_with_worker("initial", 4096, owner, runtime, api_key)?;
         let config = self.database.kernel_model_config(&self.binding.run_id)?;
+        let observed_at = crate::database::now_ms();
+        let _ = self.database.record_host_stage_point(
+            &self.binding.run_id, &prepare_attempt, "context_prepare_finished", observed_at,
+        );
         self.dispatch_initial(owner, policy, |binding, frame, token| {
             let now = self.clock.read();
             let facts = self
@@ -906,6 +915,7 @@ impl<'a> KernelCoordinator<'a> {
                 remaining,
                 self.preview,
                 Some(self.database),
+                Some(&prepare_attempt),
             )
         })
     }
@@ -918,12 +928,21 @@ impl<'a> KernelCoordinator<'a> {
         runtime: &super::RuntimeCommand,
         api_key: &str,
     ) -> Result<(), String> {
+        let prepare_attempt = uuid::Uuid::new_v4().to_string();
+        let observed_at = crate::database::now_ms();
+        let _ = self.database.record_host_stage_point(
+            &self.binding.run_id, &prepare_attempt, "context_prepare_started", observed_at,
+        );
         let (_,lane,_) = self.database.kernel_continuation_input_with_lane(
             &self.binding.run_id,effect_key)?;
         if lane.as_deref() != Some("job_notice") {
             self.ensure_context_with_worker(effect_key,4096,owner,runtime,api_key)?;
         }
         let config = self.database.kernel_model_config(&self.binding.run_id)?;
+        let observed_at = crate::database::now_ms();
+        let _ = self.database.record_host_stage_point(
+            &self.binding.run_id, &prepare_attempt, "context_prepare_finished", observed_at,
+        );
         self.dispatch_initial_request(owner,policy,Some(effect_key),|binding,frame,token| {
             let now=self.clock.read();
             let facts=self.controller.lock().map_err(|_|"Kernel coordinator lock poisoned")?
@@ -935,7 +954,7 @@ impl<'a> KernelCoordinator<'a> {
                 binding.budgets.model_request_ms.saturating_sub(now.wall_ms.saturating_sub(since)),
                 facts.running_elapsed_ms);
             super::kernel_model_worker::deliver_initial_with_preview(
-                runtime,&config,api_key,binding,frame,token,remaining,self.preview,Some(self.database))
+                runtime,&config,api_key,binding,frame,token,remaining,self.preview,Some(self.database),Some(&prepare_attempt))
         })
     }
 
@@ -1314,20 +1333,40 @@ impl<'a> KernelCoordinator<'a> {
         &self, batch_id: &str, owner: &str, policy: &dyn PolicyDecisionPort,
         runtime: &super::RuntimeCommand, api_key: &str,
     ) -> Result<(), String> {
+        let prepare_attempt = uuid::Uuid::new_v4().to_string();
+        let observed_at = crate::database::now_ms();
+        let _ = self.database.record_host_stage_point(
+            &self.binding.run_id, &prepare_attempt, "context_prepare_started", observed_at,
+        );
         let config = self.database.kernel_model_config(&self.binding.run_id)?;
         let frame = self.prepare_stored_batch_resume(batch_id)?;
         let extra = crate::kernel_compaction::bytes(&frame.assistant_message)?
             .saturating_add(crate::kernel_compaction::bytes(&frame.tools)?)
             .saturating_add(4096);
         self.ensure_context_with_worker(batch_id, extra, owner, runtime, api_key)?;
-        self.dispatch_batch_with_worker(batch_id, owner, policy, runtime, &config, api_key)
+        let observed_at = crate::database::now_ms();
+        let _ = self.database.record_host_stage_point(
+            &self.binding.run_id, &prepare_attempt, "context_prepare_finished", observed_at,
+        );
+        self.dispatch_batch_with_worker_with_attempt(batch_id, owner, policy, runtime, &config, api_key, &prepare_attempt)
     }
 
-    /// Internal transport, with configuration checked before claiming.
+    #[cfg(test)]
     fn dispatch_batch_with_worker(
         &self, batch_id: &str, owner: &str, policy: &dyn PolicyDecisionPort,
         runtime: &super::RuntimeCommand, config: &super::kernel_model_worker::KernelModelConfig,
         api_key: &str,
+    ) -> Result<(), String> {
+        self.dispatch_batch_with_worker_with_attempt(
+            batch_id, owner, policy, runtime, config, api_key, &uuid::Uuid::new_v4().to_string(),
+        )
+    }
+
+    /// Internal transport, with configuration checked before claiming.
+    fn dispatch_batch_with_worker_with_attempt(
+        &self, batch_id: &str, owner: &str, policy: &dyn PolicyDecisionPort,
+        runtime: &super::RuntimeCommand, config: &super::kernel_model_worker::KernelModelConfig,
+        api_key: &str, prepare_attempt: &str,
     ) -> Result<(), String> {
         let stored = self.database.kernel_rehydrate(&self.binding.run_id)?
             .ok_or("Kernel Run is missing")?;
@@ -1359,6 +1398,7 @@ impl<'a> KernelCoordinator<'a> {
                 remaining,
                 self.preview,
                 Some(self.database),
+                Some(&prepare_attempt),
             )
         })
     }

@@ -59,6 +59,12 @@ describe('approval decision policy', () => {
     ])
   })
 
+  test('Kernel choices remain one-shot until the Host supplies its scoped decision list', () => {
+    expect(allowedApprovalDecisions({ authority: 'kernel' })).toEqual(['deny', 'allow_once'])
+    expect(allowedApprovalDecisions({ authority: 'kernel', availableDecisions: ['allow_once', 'allow_conversation', 'deny'] }))
+      .toEqual(['deny', 'allow_once', 'allow_conversation'])
+  })
+
   test('fails closed for empty, duplicate, or unknown decision declarations', () => {
     expect(allowedApprovalDecisions({ availableDecisions: [] })).toEqual(['deny'])
     expect(allowedApprovalDecisions({ availableDecisions: ['allow_once', 'allow_once'] })).toEqual(['deny'])

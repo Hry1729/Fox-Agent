@@ -1,5 +1,5 @@
 use super::{
-    migrations, AgentRecord, AgentResourceRecord, AgentResourcesRecord, ArtifactRecord,
+    migrations, AgentRecord, AgentResourceRecord, AgentResourcesRecord, ArtifactDeliveryView, ArtifactRecord,
     AttachmentRecord, ConversationDetail, ConversationExpertBinding,
     ConversationExpertBindingError, ConversationRuntimeRecord, ConversationSummary,
     ExpertPackageVersionRecord, ExternalRunRecord, InstallExpertPackageVersionRequest,
@@ -26,6 +26,7 @@ use std::{
 use uuid::Uuid;
 
 mod a1_workflow;
+mod artifact_delivery_view;
 mod app_management;
 mod bundled_capabilities;
 mod computed_artifacts;
@@ -233,6 +234,8 @@ pub struct Database {
     /// wall anchor until fresh progress arrives. Follows the KernelChanges
     /// precedent (process-local hub on the shared Database handle).
     model_progress: Arc<Mutex<BTreeMap<String, i64>>>,
+    /// Only grants created in this Host lifetime may cross Office run boundaries.
+    office_reuse_grants: Arc<Mutex<Vec<kernel_authorization::ProcessOfficeGrant>>>,
 }
 
 fn require_legacy_run_writer(connection: &Connection, run_id: &str) -> rusqlite::Result<()> {
@@ -298,6 +301,7 @@ impl Database {
             data_root_id,
             kernel_changes: Arc::new(super::kernel_changes::KernelChanges::default()),
             model_progress: Arc::new(Mutex::new(BTreeMap::new())),
+            office_reuse_grants: Arc::new(Mutex::new(Vec::new())),
         };
         database.seed_builtin_agents()?;
         database.seed_bundled_experts()?;
@@ -1623,8 +1627,11 @@ impl Database {
                  WHERE c.conversation_kind = 'primary' AND c.archived = 0 AND c.trashed_at IS NULL
                  ORDER BY c.pinned DESC, COALESCE(c.last_message_at, c.created_at) DESC",
             )?;
-            let records = statement.query_map([], map_conversation)?.collect();
-            records
+            let mut records: Vec<ConversationSummary> = statement
+                .query_map([], map_conversation)?
+                .collect::<rusqlite::Result<_>>()?;
+            apply_active_run_activity(connection, &mut records)?;
+            Ok(records)
         })
     }
 
@@ -1645,8 +1652,11 @@ impl Database {
                  WHERE c.conversation_kind = 'primary' AND c.archived = 1 AND c.trashed_at IS NULL
                  ORDER BY COALESCE(c.archived_at, c.updated_at) DESC",
             )?;
-            let records = statement.query_map([], map_conversation)?.collect();
-            records
+            let mut records: Vec<ConversationSummary> = statement
+                .query_map([], map_conversation)?
+                .collect::<rusqlite::Result<_>>()?;
+            apply_active_run_activity(connection, &mut records)?;
+            Ok(records)
         })
     }
 
@@ -1667,8 +1677,11 @@ impl Database {
                  WHERE c.conversation_kind = 'primary' AND c.trashed_at IS NOT NULL
                  ORDER BY c.trashed_at DESC",
             )?;
-            let records = statement.query_map([], map_conversation)?.collect();
-            records
+            let mut records: Vec<ConversationSummary> = statement
+                .query_map([], map_conversation)?
+                .collect::<rusqlite::Result<_>>()?;
+            apply_active_run_activity(connection, &mut records)?;
+            Ok(records)
         })
     }
 
@@ -1919,10 +1932,11 @@ impl Database {
                  ORDER BY c.pinned DESC, COALESCE(c.last_message_at, c.created_at) DESC
                  LIMIT ?3",
             )?;
-            let records = statement
+            let mut records: Vec<ConversationSummary> = statement
                 .query_map(params![like, fts_query, limit as i64], map_conversation)?
-                .collect();
-            records
+                .collect::<rusqlite::Result<_>>()?;
+            apply_active_run_activity(connection, &mut records)?;
+            Ok(records)
         })
     }
 
@@ -2022,11 +2036,7 @@ impl Database {
             let transaction = connection.transaction()?;
             transaction.execute(
                 "UPDATE conversations
-                 SET permission_mode = COALESCE(
-                         (SELECT permission_mode FROM projects WHERE id = ?1),
-                         permission_mode
-                     ),
-                     project_root = COALESCE(
+                 SET project_root = COALESCE(
                          project_root,
                          (SELECT root_path FROM projects WHERE id = ?1)
                      ),
@@ -2310,7 +2320,39 @@ impl Database {
         detail
             .approvals
             .extend(self.child_run_approvals_for_conversation(id)?);
+        self.enrich_kernel_approval_preview(&mut detail.approvals);
         Ok(detail)
+    }
+
+    /// Show the user the same Office boundary that the Host will hash into a
+    /// reusable scope. This is presentation only; registration still recomputes
+    /// the scope from the decided call and its frozen project root.
+    fn enrich_kernel_approval_preview(&self, approvals: &mut [super::ApprovalRecord]) {
+        for approval in approvals {
+            if approval.status != "pending" || approval.request["authority"] != "kernel" { continue; }
+            let binding = self.run_control_binding(&approval.run_id).ok().flatten();
+            let root = binding.as_ref().and_then(|binding| binding.permission.project_root.as_deref());
+            let input = &approval.request["input"];
+            let office = approval.tool_name == "call_mcp_tool" && input["serverId"] == crate::office::SERVER_ID;
+            let office_scope = office.then(|| crate::runtime_host::office_grants::reusable_edit_scope(input, root)).flatten();
+            let reusable = if office {
+                office_scope.is_some()
+            } else if approval.tool_name == "task_repair_escalate_start" || approval.request.get("wholeFileReplacement").is_some() {
+                false
+            } else {
+                crate::runtime_host::shadow_reconcile::tool_operation_scope(&approval.tool_name, input, root).is_some()
+            };
+            if let Some(request) = approval.request.as_object_mut() {
+                request.insert("availableDecisions".into(), if reusable {
+                    json!(["allow_once", "allow_conversation", "deny"])
+                } else { json!(["allow_once", "deny"]) });
+                if let Some(scope) = office_scope {
+                    request.insert("target".into(), Value::String(scope.target.clone()));
+                    request.insert("summary".into(), Value::String("仅修改下列单元格及属性；内容可变，文件版本仍需校验。".into()));
+                    request.insert("officeReuse".into(), json!({"target": scope.target, "selectors": scope.selectors}));
+                }
+            }
+        }
     }
 
     #[allow(clippy::type_complexity)]
@@ -2572,7 +2614,7 @@ impl Database {
         limit: usize,
     ) -> Result<super::ConversationHistoryPage, String> {
         let limit = limit.clamp(20, 200);
-        self.with_connection(|connection| {
+        let mut page = self.with_connection(|connection| {
             query_conversation(connection, id)?;
             let messages = query_message_page(connection, id, Some(before_ordinal), limit)?;
             let oldest_ordinal = messages
@@ -2603,7 +2645,9 @@ impl Database {
                 artifacts,
                 has_earlier_messages,
             })
-        })
+        })?;
+        self.enrich_kernel_approval_preview(&mut page.approvals);
+        Ok(page)
     }
 
     pub fn upsert_yuxi_agents(&self, agents: &[YuxiAgentRecord]) -> Result<(), String> {
@@ -3305,7 +3349,7 @@ impl Database {
         artifact_id: &str,
     ) -> Result<Option<ArtifactRecord>, String> {
         self.with_connection(|connection| {
-            connection
+            let mut artifact = connection
                 .query_row(
                     "SELECT id, conversation_id, run_id, display_name, artifact_type,
                             artifact_class, artifact_origin, storage_path,
@@ -3329,10 +3373,15 @@ impl Database {
                             status: row.get(11)?,
                             created_at: row.get(12)?,
                             updated_at: row.get(13)?,
+                            delivery: None,
                         })
                     },
                 )
-                .optional()
+                .optional()?;
+            if let Some(artifact) = artifact.as_mut() {
+                artifact_delivery_view::enrich(connection, artifact)?;
+            }
+            Ok(artifact)
         })
     }
 
@@ -4262,7 +4311,7 @@ impl Database {
                             // resolved inside the conversation deliverable
                             // folder is a deliverable, anything else is a
                             // process file. Independent of the extension.
-                            let (class, origin) = transaction
+                            let project_root = transaction
                                 .query_row(
                                     "SELECT conversation_id FROM run_control_bindings WHERE run_id = ?1",
                                     params![run_id],
@@ -4273,17 +4322,14 @@ impl Database {
                                 .map(|conversation_id| computed_artifacts::conversation_project_root(&transaction, &conversation_id))
                                 .transpose()?
                                 .flatten()
-                                .map(PathBuf::from)
-                                .map(|root| crate::runtime_host::artifact_store::classify(
-                                    Some(root.as_path()),
-                                    Path::new(path),
-                                    tool_name.as_deref().unwrap_or_default(),
-                                    false,
-                                ))
-                                .unwrap_or((
-                                    crate::runtime_host::artifact_store::ArtifactClass::Process,
-                                    crate::runtime_host::artifact_store::ArtifactOrigin::Project,
-                                ));
+                                .map(PathBuf::from);
+                            let purpose = kernel_display::explicit_user_purpose(
+                                &transaction, run_id, project_root.as_deref(), Path::new(path),
+                            )?;
+                            let (class, origin) = crate::runtime_host::artifact_store::classify_with_purpose(
+                                project_root.as_deref(), Path::new(path),
+                                tool_name.as_deref().unwrap_or_default(), false, purpose,
+                            );
                             let updated = transaction.execute(
                                 "UPDATE artifacts
                                  SET display_name = ?1,
@@ -4317,6 +4363,12 @@ impl Database {
                     // xlsx/docx deliverables. Project the Host-verified write
                     // into the artifacts list as well.
                     if tool_name.as_deref() == Some("call_mcp_tool") {
+                        let input_json: String = transaction.query_row(
+                            "SELECT input_json FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id=?2",
+                            params![run_id, runtime_tool_call_id],
+                            |row| row.get(0),
+                        )?;
+                        let tool_input: Value = serde_json::from_str(&input_json).unwrap_or(Value::Null);
                         // A rendered preview is an artifact, not a content
                         // version, and it is Host-private by default. It is
                         // projected separately so it never enters the restore
@@ -4324,8 +4376,10 @@ impl Database {
                         if let Some(preview) = result
                             .get("details")
                             .and_then(|details| details.get("foxPreview"))
+                            .filter(|_| kernel_display::builtin_office_render(&tool_input))
                         {
-                            if let Some(preview_path) = preview.get("storagePath").and_then(Value::as_str) {
+                            if let Some((verified_path, verified_sha, verified_bytes)) = kernel_display::verified_preview_bytes(preview) {
+                                let preview_path = verified_path.as_str();
                                 // Name the *result* the preview depicts, not the
                                 // cache file; the renderer adds the "预览" label,
                                 // and the open action still uses the real path.
@@ -4351,11 +4405,8 @@ impl Database {
                                             .map(str::to_owned)
                                             .unwrap_or_else(|| preview_path.to_owned())
                                     });
-                                let preview_bytes = preview
-                                    .get("afterSize")
-                                    .and_then(Value::as_i64)
-                                    .unwrap_or(0);
-                                let preview_sha = preview.get("afterHash").and_then(Value::as_str);
+                                let preview_bytes = verified_bytes;
+                                let preview_sha = verified_sha.as_str();
                                 let preview_media = preview.get("mediaType").and_then(Value::as_str);
                                 let project_root = transaction
                                     .query_row(
@@ -4382,12 +4433,16 @@ impl Database {
                                     ),
                                     None => true,
                                 };
+                                let purpose = kernel_display::explicit_user_purpose(
+                                    &transaction, run_id, project_root.as_deref(), Path::new(preview_path),
+                                )?;
                                 let (class, origin) = project_root
-                                    .map(|root| crate::runtime_host::artifact_store::classify(
+                                    .map(|root| crate::runtime_host::artifact_store::classify_with_purpose(
                                         Some(root.as_path()),
                                         Path::new(preview_path),
-                                        preview.get("tool").and_then(Value::as_str).unwrap_or("office_render"),
+                                        "office_render",
                                         host_private,
+                                        purpose,
                                     ))
                                     .unwrap_or((
                                         crate::runtime_host::artifact_store::ArtifactClass::Preview,
@@ -4417,21 +4472,14 @@ impl Database {
                                 }
                             }
                         }
-                        if let Some(meta) = result
-                            .get("details")
-                            .and_then(|details| details.get("foxManagedFile"))
-                        {
-                            let path = meta.get("storagePath").and_then(Value::as_str);
-                            let declared = meta.get("displayName").and_then(Value::as_str);
-                            let change_kind = meta
-                                .get("changeKind")
-                                .and_then(Value::as_str)
-                                .unwrap_or("created");
-                            let byte_size = meta
-                                .get("afterSize")
-                                .and_then(Value::as_i64)
-                                .unwrap_or(0);
-                            let sha256 = meta.get("afterHash").and_then(Value::as_str);
+                        if let Some(verified) = kernel_display::verified_office_artifact(
+                            &transaction, run_id, runtime_tool_call_id,
+                        )? {
+                            let path = Some(verified.path.as_str());
+                            let declared = Some(verified.name.as_str());
+                            let change_kind = verified.change_kind.as_str();
+                            let byte_size = verified.bytes;
+                            let sha256 = Some(verified.sha.as_str());
                             if let Some(path) = path {
                                 let display_name = declared
                                     .map(str::to_owned)
@@ -4451,8 +4499,8 @@ impl Database {
                                 // label: derived from the verified operation
                                 // and the resolved path inside this
                                 // conversation's project root.
-                                let inner_operation = meta.get("tool").and_then(Value::as_str).unwrap_or_default();
-                                let (class, origin) = transaction
+                                let inner_operation = verified.tool.as_str();
+                                let project_root = transaction
                                     .query_row(
                                         "SELECT conversation_id FROM run_control_bindings WHERE run_id = ?1",
                                         params![run_id],
@@ -4463,17 +4511,13 @@ impl Database {
                                     .map(|conversation_id| computed_artifacts::conversation_project_root(&transaction, &conversation_id))
                                     .transpose()?
                                     .flatten()
-                                    .map(PathBuf::from)
-                                    .map(|root| crate::runtime_host::artifact_store::classify(
-                                        Some(root.as_path()),
-                                        Path::new(path),
-                                        inner_operation,
-                                        false,
-                                    ))
-                                    .unwrap_or((
-                                        crate::runtime_host::artifact_store::ArtifactClass::Process,
-                                        crate::runtime_host::artifact_store::ArtifactOrigin::Project,
-                                    ));
+                                    .map(PathBuf::from);
+                                let purpose = kernel_display::explicit_user_purpose(
+                                    &transaction, run_id, project_root.as_deref(), Path::new(path),
+                                )?;
+                                let (class, origin) = crate::runtime_host::artifact_store::classify_with_purpose(
+                                    project_root.as_deref(), Path::new(path), inner_operation, false, purpose,
+                                );
                                 let updated = transaction.execute(
                                     "UPDATE artifacts
                                      SET display_name = ?1,
@@ -6925,7 +6969,50 @@ fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationSum
         updated_at: row.get(15)?,
         last_message_at: row.get(16)?,
         permission_mode: row.get(17)?,
+        // Filled in by `apply_active_run_activity` from a single query over the
+        // active runs, so the four conversation list queries stay untouched.
+        active_run_id: None,
+        active_run_status: None,
+        awaiting_approval: false,
     })
+}
+
+/// Projects each conversation's own active Run onto an already-loaded list.
+///
+/// One query for the whole page: only non-terminal runs are read, so this stays
+/// O(active runs) rather than a correlated subquery per conversation. The status
+/// set matches `conversation_has_active_run`.
+fn apply_active_run_activity(
+    connection: &rusqlite::Connection,
+    records: &mut [ConversationSummary],
+) -> rusqlite::Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let mut statement = connection.prepare(
+        "SELECT r.conversation_id, r.id, r.status,
+                EXISTS(SELECT 1 FROM approvals a
+                       JOIN tool_calls t ON t.id = a.tool_call_id
+                       WHERE t.run_id = r.id AND a.status = 'pending')
+         FROM runs r
+         WHERE r.status IN ('queued', 'running', 'cancelling', 'awaiting_confirmation')",
+    )?;
+    let activity = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, bool>(3)?),
+            ))
+        })?
+        .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+    for record in records.iter_mut() {
+        if let Some((run_id, run_status, awaiting_approval)) = activity.get(&record.id) {
+            record.active_run_id = Some(run_id.clone());
+            record.active_run_status = Some(run_status.clone());
+            record.awaiting_approval = *awaiting_approval;
+        }
+    }
+    Ok(())
 }
 
 impl From<rusqlite::Error> for ConversationExpertBindingError {
@@ -7598,7 +7685,7 @@ fn query_artifacts_window(
            ))
          ORDER BY created_at ASC",
     )?;
-    let records = statement
+    let mut records: Vec<ArtifactRecord> = statement
         .query_map(
             params![conversation_id, from_ordinal, before_ordinal],
             |row| {
@@ -7617,11 +7704,16 @@ fn query_artifacts_window(
                     status: row.get(11)?,
                     created_at: row.get(12)?,
                     updated_at: row.get(13)?,
+                    delivery: None,
                 })
             },
         )?
-        .collect();
-    records
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for artifact in &mut records {
+        artifact_delivery_view::enrich(connection, artifact)?;
+    }
+    Ok(records)
 }
 
 fn query_knowledge_bindings(
@@ -8884,6 +8976,94 @@ mod tests {
 
     const LEGACY_EXPERT_V1_FIXTURE: &str =
         "tests/fixtures/expert-packages/v1/legacy-remote-knowledge.json";
+
+    /// A conversation list row must describe that conversation's own Run, because
+    /// the sidebar marks every row and no longer follows the selected one.
+    #[test]
+    fn conversation_list_projects_each_conversations_own_active_run() {
+        let (database, path) = test_database();
+        let idle = database
+            .create_conversation("fox-general", Some("空闲对话"), None, None)
+            .expect("create idle conversation");
+        let busy = database
+            .create_conversation("fox-general", Some("运行中的对话"), None, None)
+            .expect("create busy conversation");
+
+        let summary = |database: &Database, id: &str| {
+            database
+                .list_conversations()
+                .expect("list conversations")
+                .into_iter()
+                .find(|item| item.id == id)
+                .expect("conversation is listed")
+        };
+
+        // No Run yet: nothing to mark.
+        assert_eq!(summary(&database, &idle.id).active_run_id, None);
+
+        let started = database
+            .create_run(&busy.id, "请处理", None)
+            .expect("create run");
+        let queued = summary(&database, &busy.id);
+        assert_eq!(queued.active_run_id.as_deref(), Some(started.run.id.as_str()));
+        assert_eq!(queued.active_run_status.as_deref(), Some("queued"));
+        assert!(!queued.awaiting_approval);
+        // The idle conversation is untouched by its neighbour's Run.
+        assert_eq!(summary(&database, &idle.id).active_run_id, None);
+        assert_eq!(summary(&database, &idle.id).active_run_status, None);
+
+        database
+            .apply_runtime_event(&started.run.id, 1, &json!({ "type": "run.started" }))
+            .expect("apply run.started");
+        assert_eq!(
+            summary(&database, &busy.id).active_run_status.as_deref(),
+            Some("running")
+        );
+
+        // A pending approval is what "等待审批" means, and it is visible without the
+        // conversation being open.
+        database
+            .apply_runtime_event(
+                &started.run.id,
+                2,
+                &json!({ "type": "tool.started", "toolCallId": "call-1", "tool": "write", "input": {} }),
+            )
+            .expect("apply tool.started");
+        let tool_call_id: String = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT id FROM tool_calls WHERE run_id = ?1 LIMIT 1",
+                    [&started.run.id],
+                    |row| row.get(0),
+                )
+            })
+            .expect("tool call exists");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO approvals(id, tool_call_id, status, requested_action, request_json, requested_at)
+                     VALUES ('approval-1', ?1, 'pending', 'write', '{}', 1)",
+                    [&tool_call_id],
+                )?;
+                Ok(())
+            })
+            .expect("insert pending approval");
+        let awaiting = summary(&database, &busy.id);
+        assert!(awaiting.awaiting_approval);
+        assert_eq!(awaiting.active_run_status.as_deref(), Some("running"));
+
+        // A terminal Run clears the marker again.
+        database
+            .apply_runtime_event(&started.run.id, 3, &json!({ "type": "run.completed" }))
+            .expect("apply run.completed");
+        let completed = summary(&database, &busy.id);
+        assert_eq!(completed.active_run_id, None);
+        assert_eq!(completed.active_run_status, None);
+        assert!(!completed.awaiting_approval);
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
 
     fn legacy_expert_v1_fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(LEGACY_EXPERT_V1_FIXTURE)
@@ -13248,6 +13428,45 @@ mod tests {
             .update_conversation_permission_mode(&no_project.id, "unrestricted")
             .is_err());
 
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn project_default_never_rewrites_an_existing_policy_after_reopens_or_delete() {
+        let (database, path) = test_database();
+        let project_root = path.with_extension("project");
+        let root = project_root.to_str().expect("project path");
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, Some(root), Some("ask"))
+            .expect("create project conversation");
+        let project_id = conversation.project_id.expect("linked project");
+        let policy = database.execution_policy(&conversation.id).expect("initial policy");
+        database.change_execution_policy(&conversation.id, "local-choice", policy.version, "read_only")
+            .expect("set explicit conversation permission");
+        drop(database);
+
+        for reopen in 0..2 {
+            let database = Database::open(path.clone()).expect("reopen database");
+            let trigger_count: i64 = database.with_connection(|connection| connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='execution_policy_project_change'",
+                [], |row| row.get(0),
+            )).expect("project propagation trigger count");
+            assert_eq!(trigger_count, 0, "project propagation revived on reopen {reopen}");
+            database.update_project_permission_mode(&project_id, if reopen == 0 { "allow" } else { "ask" })
+                .expect("change project default").expect("project exists");
+            assert_eq!(database.execution_policy(&conversation.id).expect("policy").mode, "read_only");
+            assert_eq!(database.load_conversation(&conversation.id).expect("conversation").conversation.permission_mode, "read_only");
+            if reopen == 1 {
+                assert!(database.delete_project(&project_id).expect("delete project"));
+                let detached = database.load_conversation(&conversation.id).expect("detached conversation").conversation;
+                assert_eq!(detached.project_id, None);
+                assert_eq!(detached.permission_mode, "read_only");
+                assert_eq!(database.execution_policy(&conversation.id).expect("detached policy").mode, "read_only");
+            }
+        }
+        let database = Database::open(path.clone()).expect("reopen after project deletion");
+        assert_eq!(database.execution_policy(&conversation.id).expect("final policy").mode, "read_only");
         drop(database);
         let _ = std::fs::remove_file(path);
     }

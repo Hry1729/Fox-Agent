@@ -9,6 +9,15 @@ import { resolveConversationAgentId } from '../model/agent-initialization'
 import { withWorkspaceInitializationTimeout } from '../model/workspace-initialization'
 import { useRuntimeEventStream } from './use-runtime-event-stream'
 import { useKernelStateStream } from './use-kernel-state-stream'
+import {
+  EMPTY_CONVERSATION_RUN_OVERLAY,
+  applyApprovalToOverlay,
+  applyRunEventToOverlay,
+  conversationRunIndicators,
+  pruneRunOverlay,
+  type ConversationRunIndicator,
+  type ConversationRunOverlay,
+} from '@/features/chat/conversation-run-indicator'
 import type {
   ConversationDetail,
   ChildRunNotification,
@@ -41,6 +50,11 @@ interface DesktopConversationState {
   conversations: ConversationSummary[]
   archivedConversations: ConversationSummary[]
   trashedConversations: ConversationSummary[]
+  /**
+   * Live activity per conversation id, so the sidebar marks each conversation by
+   * its own Run instead of by whichever conversation happens to be open.
+   */
+  runIndicators: ReadonlyMap<string, ConversationRunIndicator>
   runtimeStatus: RuntimeStatus | null
   refreshRuntimeStatus: () => Promise<void>
   detail: ConversationDetail | null
@@ -158,6 +172,11 @@ export function useDesktopConversation(): DesktopConversationState {
   const [conversations, setConversations] = useState<ConversationSummary[]>([])
   const [archivedConversations, setArchivedConversations] = useState<ConversationSummary[]>([])
   const [trashedConversations, setTrashedConversations] = useState<ConversationSummary[]>([])
+  // Live per-conversation activity between list refreshes. Kept as a map plus the
+  // timestamp of the newest authoritative snapshot, so live evidence and the
+  // persisted Run state never fight over the same row.
+  const [runOverlay, setRunOverlay] = useState<ConversationRunOverlay>(EMPTY_CONVERSATION_RUN_OVERLAY)
+  const [runOverlaySnapshotAt, setRunOverlaySnapshotAt] = useState(0)
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
   const [detail, setDetail] = useState<ConversationDetail | null>(null)
   const authoritativeRunIdRef = useRef<string | null>(null)
@@ -221,6 +240,10 @@ export function useDesktopConversation(): DesktopConversationState {
     activeConversationIdRef.current = null
     activeRunIdRef.current = null
     setDetail(null)
+    // A new draft starts clean. A stale error or approval from the conversation the
+    // user just left must not follow them into an empty composer.
+    setError(null)
+    setErrorDetails(null)
   }, [applyDraft, currentDraft, defaultAgentId])
 
   const initializeRuntime = useCallback(() => {
@@ -257,12 +280,22 @@ export function useDesktopConversation(): DesktopConversationState {
   }, [draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftKnowledgeNames, draftPermissionMode, draftProjectRoot])
 
   const refreshList = useCallback(async () => {
+    // Stamp the read BEFORE the query: an event that lands while it is in flight is
+    // newer than this snapshot and keeps its own indicator.
+    const snapshotAt = Date.now()
     const next = await desktopClient.listConversations()
     setConversations(next)
+    setRunOverlaySnapshotAt(snapshotAt)
+    setRunOverlay((current) => pruneRunOverlay(
+      current,
+      next,
+      snapshotAt,
+    ))
     return next
   }, [])
 
   const refreshLifecycleLists = useCallback(async () => {
+    const snapshotAt = Date.now()
     const [active, archived, trashed] = await Promise.all([
       desktopClient.listConversations(),
       desktopClient.listArchivedConversations(),
@@ -271,7 +304,28 @@ export function useDesktopConversation(): DesktopConversationState {
     setConversations(active)
     setArchivedConversations(archived)
     setTrashedConversations(trashed)
+    setRunOverlaySnapshotAt(snapshotAt)
+    setRunOverlay((current) => pruneRunOverlay(
+      current,
+      active,
+      snapshotAt,
+    ))
   }, [])
+
+  const hasListedRun = conversations.some((conversation) => !!conversation.activeRunId)
+  useEffect(() => {
+    if (!desktopRuntimeAvailable || !hasListedRun) return
+    // Kernel state invalidations refresh the open conversation. A background
+    // conversation can miss its terminal notification, so reconcile the small
+    // sidebar list while any run remains active there.
+    let loading = false
+    const timer = window.setInterval(() => {
+      if (loading) return
+      loading = true
+      void refreshList().catch(() => undefined).finally(() => { loading = false })
+    }, 2_500)
+    return () => window.clearInterval(timer)
+  }, [hasListedRun, refreshList])
 
   const refreshRuntimeStatus = useCallback(async () => {
     if (!desktopRuntimeAvailable) return
@@ -636,6 +690,7 @@ export function useDesktopConversation(): DesktopConversationState {
     const stops: Array<() => void> = []
     const updateApproval = (approval: ApprovalRecord) => {
       if (disposed) return
+      setRunOverlay((current) => applyApprovalToOverlay(current, approval, Date.now()))
       setDetail((current) => {
         if (!current) return current
         const belongsToActiveConversation = approval.conversationId === activeConversationIdRef.current
@@ -685,6 +740,11 @@ export function useDesktopConversation(): DesktopConversationState {
     setError,
     setErrorDetails,
     refreshList,
+    // Sidebar activity is keyed by each event's own conversation, so switching to
+    // another conversation never moves or clears another conversation's indicator.
+    onRunActivity: (notification) => {
+      setRunOverlay((current) => applyRunEventToOverlay(current, notification, Date.now()))
+    },
   })
   useKernelStateStream({ conversationId: detail?.conversation.id ?? null, setDetail, setError, setErrorDetails })
 
@@ -1153,7 +1213,20 @@ export function useDesktopConversation(): DesktopConversationState {
       }
       return true
     } catch (cause) {
-      if (previous) {
+      // The ticket may have expired while the user was looking at it. Reload
+      // authority before restoring a local pending card, otherwise a rejected
+      // click can make an expired approval appear actionable forever.
+      const conversationId = activeConversationIdRef.current
+      let refreshed = false
+      if (conversationId) {
+        try {
+          const persisted = await desktopClient.loadConversation(conversationId)
+          setDetail((current) => current?.conversation.id === conversationId ? persisted : current)
+          void refreshList()
+          refreshed = true
+        } catch { /* Keep the error and the prior card when storage is unavailable. */ }
+      }
+      if (!refreshed && previous) {
         setDetail((current) => current ? {
           ...current,
           approvals: current.approvals.map((item) => item.id === approvalId ? previous! : item),
@@ -1162,7 +1235,7 @@ export function useDesktopConversation(): DesktopConversationState {
       setError(cause instanceof Error ? cause.message : String(cause))
       return false
     }
-  }, [])
+  }, [refreshList])
 
   const resolveWorkModeConfirmation = useCallback(async (
     goalId: string,
@@ -1263,12 +1336,20 @@ export function useDesktopConversation(): DesktopConversationState {
     }
   }, [])
 
+  // Derived once per list/overlay change: each conversation is marked by its own
+  // Run, so the sidebar no longer needs to know which conversation is selected.
+  const runIndicators = useMemo(
+    () => conversationRunIndicators(conversations, runOverlay, runOverlaySnapshotAt),
+    [conversations, runOverlay, runOverlaySnapshotAt],
+  )
+
   return useMemo(() => ({
     enabled: desktopRuntimeAvailable,
     ready,
     conversations,
     archivedConversations,
     trashedConversations,
+    runIndicators,
     runtimeStatus,
     refreshRuntimeStatus,
     detail,
@@ -1325,7 +1406,7 @@ export function useDesktopConversation(): DesktopConversationState {
     refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runtimeStatus, searchConversations, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
+  }), [archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {

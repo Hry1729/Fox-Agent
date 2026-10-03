@@ -64,6 +64,11 @@ export function RuntimeApprovalPrompt({
         {presentation.wholeFileReplacement && <div className="fox-approval-scope">
           <p className="fox-approval-scope-note">{presentation.wholeFileReplacement.baselineVersion === 'missing' ? '目标文件尚不存在，将写入以下完整内容。' : '将替换目标文件的全部内容，请确认拟写入内容。'}仅授权本次操作。</p>
         </div>}
+        {presentation.officeReuse && <div className="fox-approval-scope">
+          <p className="fox-approval-scope-note">若选择“本次对话内允许”，本次打开 Fox 期间只可重复修改此文件的以下位置和属性。换文件、换位置、增删文档元素、另存或导出均需重新确认；文件版本仍需校验。</p>
+          <p><strong>文件：</strong><code>{presentation.officeReuse.target}</code></p>
+          <p><strong>允许修改：</strong>{presentation.officeReuse.selectors.join('、')}</p>
+        </div>}
         {presentation.diff && <details className="fox-approval-disclosure"><summary>查看拟修改差异</summary><pre className="fox-approval-diff" aria-label="拟修改差异"><code>{presentation.diff}</code></pre></details>}
         {presentation.content !== undefined && <details className="fox-approval-disclosure"><summary>查看拟写入内容 <span>{presentation.content.split('\n').length} 行</span></summary><pre className="fox-approval-diff" aria-label="拟写入内容"><code>{presentation.content || '（空文件）'}</code></pre></details>}
         {presentation.wholeFileReplacement && <div className="fox-approval-replacement">
@@ -83,7 +88,7 @@ export function RuntimeApprovalPrompt({
         <ConfirmationActions className="fox-confirmation-actions">
           <ConfirmationAction variant="ghost" disabled={submitting} onClick={() => void resolve('deny')}>拒绝</ConfirmationAction>
           {allowedDecisions.includes('allow_once') && <ConfirmationAction variant={allowedDecisions.includes('allow_conversation') ? 'outline' : 'default'} disabled={submitting} onClick={() => void resolve('allow_once')}>{submitting ? '处理中…' : '只允许这一次'}</ConfirmationAction>}
-          {allowedDecisions.includes('allow_conversation') && <ConfirmationAction disabled={submitting} onClick={() => void resolve('allow_conversation')}>{submitting ? '处理中…' : '本次对话始终允许'}</ConfirmationAction>}
+          {allowedDecisions.includes('allow_conversation') && <ConfirmationAction disabled={submitting} onClick={() => void resolve('allow_conversation')}>{submitting ? '处理中…' : presentation.officeReuse ? '本次对话内允许' : '本次运行内允许'}</ConfirmationAction>}
         </ConfirmationActions>
       </ConfirmationRequest>
     </Confirmation>

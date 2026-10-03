@@ -64,6 +64,13 @@
   --fox-border-strong: color-mix(in oklch, var(--border) 72%, var(--foreground) 28%);
   --fox-text: var(--foreground);
   --fox-muted: var(--muted-foreground);
+  /* Thinking/status text is deliberately lighter than body copy, and its sweep is
+     a pale blue rather than a grey wash, so a running thought reads as activity
+     without dropping to an unreadable tint. Both themes set their own pair; the
+     component is never made transparent to fake the effect. */
+  --fox-thinking-text: #6a7381;
+  --fox-thinking-shimmer: #6f9fd8;
+  --fox-thinking-shimmer-soft: #a6c4e6;
   --fox-faint: color-mix(in oklch, var(--muted-foreground) 72%, transparent);
   --fox-accent: var(--fox-blue);
   --fox-accent-soft: var(--fox-blue-soft);
@@ -166,6 +173,11 @@
   --fox-border-strong: color-mix(in oklch, var(--border) 65%, var(--foreground) 35%);
   --fox-text: var(--foreground);
   --fox-muted: var(--muted-foreground);
+  /* Dark theme needs a lighter grey than the muted baseline and a brighter blue,
+     because the same colour on a dark surface loses the sweep entirely. */
+  --fox-thinking-text: #c3cbd6;
+  --fox-thinking-shimmer: #8fbcf0;
+  --fox-thinking-shimmer-soft: #c3dcf8;
   --fox-faint: color-mix(in oklch, var(--muted-foreground) 75%, transparent);
   --fox-accent: var(--fox-blue);
   --fox-accent-soft: var(--fox-blue-soft);
