@@ -1163,6 +1163,128 @@ fn live_delivery_verdict_is_written_even_when_a_model_retry_precedes_the_final_s
 }
 
 #[test]
+fn a_batch_stage_provider_failure_retries_and_still_records_the_verdict() {
+    // Regression (2026-10-02 review, P1 acceptance): the retry evidence so far only
+    // covered a failure on the FIRST model request, and the re-run batch happened to
+    // have no retries at all — so nothing said "a Run completed by a retried batch
+    // response still carries its delivery verdict".
+    //
+    // The script drops the SECOND request: the initial round proposes a tool, the
+    // tool batch is delivered, and the transport failure lands on that batch's
+    // response. The Host's retry lane then re-dispatches, and the Run completes.
+    let (address, server) = delivery_provider(vec!["tool", "drop", "stop"]);
+    let clock = crate::runtime_host::shadow_reconcile::ReconcilerClock;
+    let mut config = worker_configuration();
+    config.model_service = json!({"apiType":"openai-completions","modelId":"delivery-live",
+        "baseUrl":format!("http://{address}/v1")});
+    let budgets = TimeBudgets {
+        model_request_ms: 15_000,
+        model_first_response_ms: 15_000,
+        model_idle_ms: 15_000,
+        run_execution_ms: 45_000,
+        ..TimeBudgets::default()
+    };
+    let (db, root, run_id) = fixture_with_budgets_opt(
+        &clock, &config.hash().unwrap(), Some(&config), true, true, (2, 1), true, budgets,
+    );
+    freeze_host_scope(&db, &run_id);
+    let seeds = crate::runtime_host::delivery::expectations_from_task("请生成一份 Excel 成果");
+    assert_eq!(seeds.len(), 1);
+    db.seed_delivery_checklist(&run_id, &seeds, crate::database::now_ms())
+        .unwrap();
+
+    let cancellation = CancellationRegistry::default();
+    let preview = |_: &fox_engine_protocol::KernelModelPreview| {};
+    let executions = AtomicUsize::new(0);
+    let workbook_bytes = real_workbook_bytes();
+    let execute = |_: &RunControlBinding, _: &kernel::OutboxEffect, _: &kernel::CancellationToken| {
+        executions.fetch_add(1, Ordering::SeqCst);
+        std::fs::write(root.join("AGV汇总.xlsx"), &workbook_bytes).unwrap();
+        Ok((
+            true,
+            json!({"content":[{"type":"text","text":"PROOF-READ-OK"}]}),
+        ))
+    };
+    crate::runtime_host::kernel_host::drive_with_actions(
+        &crate::runtime_host::kernel_host::acquire(&root, &run_id).unwrap(),
+        &db,
+        &clock,
+        &cancellation,
+        &run_id,
+        &real_worker_command(),
+        "local-test-only",
+        &Allow,
+        execute,
+        |_| Ok(()),
+        |_| Ok(()),
+        &preview,
+    )
+    .unwrap();
+
+    let requests = server.join().unwrap();
+    // The dropped round really is the post-tool round: the second request carries the
+    // settled tool result, and only the retry after it can produce the third.
+    assert!(
+        requests.len() >= 3,
+        "expected initial, batch and retried requests, saw {}",
+        requests.len()
+    );
+    assert!(
+        requests[1].to_string().contains("PROOF-READ-OK"),
+        "the dropped request must be the batch stage that follows the tool result"
+    );
+    let retries: i64 = db
+        .with_connection(|connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.retrying'",
+                [&run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        retries, 1,
+        "the batch-stage transport failure must have gone through the retry lane"
+    );
+    assert_eq!(
+        executions.load(Ordering::SeqCst),
+        1,
+        "the tool batch ran exactly once, before the dropped round"
+    );
+
+    // The retried round completed the Run — and the verdict is durable, not pending.
+    assert_eq!(
+        db.kernel_build_full_snapshot(&run_id).unwrap().state,
+        "completed"
+    );
+    let items = db.delivery_checklist(&run_id).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0].status, "passed",
+        "a Run completed by a retried batch response must carry its verdict: {:?}",
+        items[0].finding
+    );
+    assert!(
+        items[0].checked_at.is_some(),
+        "the verdict must be timestamped, not left unchecked"
+    );
+    let marks: i64 = db
+        .with_connection(|connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM kernel_decision_marks WHERE run_id=?1",
+                [&run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(
+        marks >= 1,
+        "the completing decision of the retried round must carry its delivery mark"
+    );
+    assert!(db.staged_delivery_rounds().unwrap().is_empty());
+}
+
+#[test]
 fn live_delivery_repair_budget_exhausts_with_completed_run_and_visibly_failed_item() {
     let (address, server) = delivery_provider(vec!["stop", "stop", "stop"]);
     let DeliveryLive { db, root: _root, run_id } = delivery_live_fixture(address);
