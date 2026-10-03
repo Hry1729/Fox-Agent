@@ -734,13 +734,21 @@ fn call_model(
     // This quota is independent of the run quota. Its FIFO wait is bounded by
     // the run's original request budget and responds to cancellation.
     let wait_started = Instant::now();
-    let request_id = format!("{}:{}", binding.run_id, uuid::Uuid::new_v4());
+    let request_id = uuid::Uuid::new_v4().to_string();
+    if let Some(database) = database {
+        let _ = database.record_host_stage_point(&binding.run_id, &request_id,
+            "model_slot_queued", crate::database::now_ms());
+    }
     let permit = model_request_gate().acquire(&request_id, ||
         token.check().is_err() || wait_started.elapsed().as_millis() >= requested_budget as u128,
         "Kernel model request capacity wait exceeded its budget");
     if permit.is_err() { token.check()?; }
     let _request_permit = permit?;
     token.check()?;
+    if let Some(database) = database {
+        let _ = database.record_host_stage_point(&binding.run_id, &request_id,
+            "model_slot_granted", crate::database::now_ms());
+    }
     let budget = requested_budget.saturating_sub(wait_started.elapsed().as_millis() as i64);
     if budget <= 0 { return Err("Kernel worker has no remaining execution budget".into()); }
     let deadline = Instant::now() + Duration::from_millis(budget.try_into().map_err(|_| "invalid model budget")?);

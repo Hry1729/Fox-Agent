@@ -435,7 +435,7 @@ impl Database {
         if !matches!(stage,
             "queued" | "dispatch_granted" | "context_prepare_started"
             | "context_prepare_finished" | "worker_handoff"
-            | "first_valid_worker_event")
+            | "first_valid_worker_event" | "model_slot_queued" | "model_slot_granted")
         {
             return Err("unsupported host stage".to_owned());
         }
@@ -752,6 +752,7 @@ impl Database {
                     ("context_prepare_started", "context_prepare_finished", "host.context_prepare"),
                     ("context_prepare_finished", "worker_handoff", "host.prepare_to_handoff"),
                     ("worker_handoff", "first_valid_worker_event", "host.worker_to_first_event"),
+                    ("model_slot_queued", "model_slot_granted", "host.model_slot_wait"),
                 ] {
                     if let (Some(start), Some(end)) = (stages.get(from), stages.get(to)) {
                         if end >= start {
@@ -894,6 +895,18 @@ mod tests {
         assert_eq!((worker.sample_count, worker.average_ms), (1, 75));
         assert!(!metrics.iter().any(|metric| metric.operation == "host.context_prepare"));
         assert!(database.record_host_stage_point(run_id, "attempt-one", "http_sent", 3_000).is_err());
+    }
+
+    #[test]
+    fn model_capacity_wait_uses_only_the_same_request_attempt() {
+        let (database, run) = setup();
+        let run_id = &run.run.id;
+        database.record_host_stage_point(run_id, "model-one", "model_slot_queued", 1_000).unwrap();
+        database.record_host_stage_point(run_id, "model-one", "model_slot_granted", 1_080).unwrap();
+        database.record_host_stage_point(run_id, "model-two", "model_slot_queued", 1_090).unwrap();
+        let metrics = database.observability_statistics().unwrap().latency_metrics;
+        let wait = metrics.iter().find(|metric| metric.operation == "host.model_slot_wait").unwrap();
+        assert_eq!((wait.sample_count, wait.average_ms), (1, 80));
     }
 
     #[test]
