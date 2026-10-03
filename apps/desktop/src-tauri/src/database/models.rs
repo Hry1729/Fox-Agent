@@ -376,6 +376,12 @@ pub struct ConversationSummary {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_message_at: Option<i64>,
+    /// The conversation's own non-terminal Run, so every list row can show its own
+    /// activity instead of the activity of whichever conversation happens to be open.
+    pub active_run_id: Option<String>,
+    pub active_run_status: Option<String>,
+    /// True while that Run still has a pending approval.
+    pub awaiting_approval: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

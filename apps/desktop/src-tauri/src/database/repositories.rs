@@ -1623,8 +1623,11 @@ impl Database {
                  WHERE c.conversation_kind = 'primary' AND c.archived = 0 AND c.trashed_at IS NULL
                  ORDER BY c.pinned DESC, COALESCE(c.last_message_at, c.created_at) DESC",
             )?;
-            let records = statement.query_map([], map_conversation)?.collect();
-            records
+            let mut records: Vec<ConversationSummary> = statement
+                .query_map([], map_conversation)?
+                .collect::<rusqlite::Result<_>>()?;
+            apply_active_run_activity(connection, &mut records)?;
+            Ok(records)
         })
     }
 
@@ -1645,8 +1648,11 @@ impl Database {
                  WHERE c.conversation_kind = 'primary' AND c.archived = 1 AND c.trashed_at IS NULL
                  ORDER BY COALESCE(c.archived_at, c.updated_at) DESC",
             )?;
-            let records = statement.query_map([], map_conversation)?.collect();
-            records
+            let mut records: Vec<ConversationSummary> = statement
+                .query_map([], map_conversation)?
+                .collect::<rusqlite::Result<_>>()?;
+            apply_active_run_activity(connection, &mut records)?;
+            Ok(records)
         })
     }
 
@@ -1667,8 +1673,11 @@ impl Database {
                  WHERE c.conversation_kind = 'primary' AND c.trashed_at IS NOT NULL
                  ORDER BY c.trashed_at DESC",
             )?;
-            let records = statement.query_map([], map_conversation)?.collect();
-            records
+            let mut records: Vec<ConversationSummary> = statement
+                .query_map([], map_conversation)?
+                .collect::<rusqlite::Result<_>>()?;
+            apply_active_run_activity(connection, &mut records)?;
+            Ok(records)
         })
     }
 
@@ -1919,10 +1928,11 @@ impl Database {
                  ORDER BY c.pinned DESC, COALESCE(c.last_message_at, c.created_at) DESC
                  LIMIT ?3",
             )?;
-            let records = statement
+            let mut records: Vec<ConversationSummary> = statement
                 .query_map(params![like, fts_query, limit as i64], map_conversation)?
-                .collect();
-            records
+                .collect::<rusqlite::Result<_>>()?;
+            apply_active_run_activity(connection, &mut records)?;
+            Ok(records)
         })
     }
 
@@ -6925,7 +6935,50 @@ fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationSum
         updated_at: row.get(15)?,
         last_message_at: row.get(16)?,
         permission_mode: row.get(17)?,
+        // Filled in by `apply_active_run_activity` from a single query over the
+        // active runs, so the four conversation list queries stay untouched.
+        active_run_id: None,
+        active_run_status: None,
+        awaiting_approval: false,
     })
+}
+
+/// Projects each conversation's own active Run onto an already-loaded list.
+///
+/// One query for the whole page: only non-terminal runs are read, so this stays
+/// O(active runs) rather than a correlated subquery per conversation. The status
+/// set matches `conversation_has_active_run`.
+fn apply_active_run_activity(
+    connection: &rusqlite::Connection,
+    records: &mut [ConversationSummary],
+) -> rusqlite::Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let mut statement = connection.prepare(
+        "SELECT r.conversation_id, r.id, r.status,
+                EXISTS(SELECT 1 FROM approvals a
+                       JOIN tool_calls t ON t.id = a.tool_call_id
+                       WHERE t.run_id = r.id AND a.status = 'pending')
+         FROM runs r
+         WHERE r.status IN ('queued', 'running', 'cancelling', 'awaiting_confirmation')",
+    )?;
+    let activity = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, bool>(3)?),
+            ))
+        })?
+        .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+    for record in records.iter_mut() {
+        if let Some((run_id, run_status, awaiting_approval)) = activity.get(&record.id) {
+            record.active_run_id = Some(run_id.clone());
+            record.active_run_status = Some(run_status.clone());
+            record.awaiting_approval = *awaiting_approval;
+        }
+    }
+    Ok(())
 }
 
 impl From<rusqlite::Error> for ConversationExpertBindingError {
@@ -8884,6 +8937,94 @@ mod tests {
 
     const LEGACY_EXPERT_V1_FIXTURE: &str =
         "tests/fixtures/expert-packages/v1/legacy-remote-knowledge.json";
+
+    /// A conversation list row must describe that conversation's own Run, because
+    /// the sidebar marks every row and no longer follows the selected one.
+    #[test]
+    fn conversation_list_projects_each_conversations_own_active_run() {
+        let (database, path) = test_database();
+        let idle = database
+            .create_conversation("fox-general", Some("空闲对话"), None, None)
+            .expect("create idle conversation");
+        let busy = database
+            .create_conversation("fox-general", Some("运行中的对话"), None, None)
+            .expect("create busy conversation");
+
+        let summary = |database: &Database, id: &str| {
+            database
+                .list_conversations()
+                .expect("list conversations")
+                .into_iter()
+                .find(|item| item.id == id)
+                .expect("conversation is listed")
+        };
+
+        // No Run yet: nothing to mark.
+        assert_eq!(summary(&database, &idle.id).active_run_id, None);
+
+        let started = database
+            .create_run(&busy.id, "请处理", None)
+            .expect("create run");
+        let queued = summary(&database, &busy.id);
+        assert_eq!(queued.active_run_id.as_deref(), Some(started.run.id.as_str()));
+        assert_eq!(queued.active_run_status.as_deref(), Some("queued"));
+        assert!(!queued.awaiting_approval);
+        // The idle conversation is untouched by its neighbour's Run.
+        assert_eq!(summary(&database, &idle.id).active_run_id, None);
+        assert_eq!(summary(&database, &idle.id).active_run_status, None);
+
+        database
+            .apply_runtime_event(&started.run.id, 1, &json!({ "type": "run.started" }))
+            .expect("apply run.started");
+        assert_eq!(
+            summary(&database, &busy.id).active_run_status.as_deref(),
+            Some("running")
+        );
+
+        // A pending approval is what "等待审批" means, and it is visible without the
+        // conversation being open.
+        database
+            .apply_runtime_event(
+                &started.run.id,
+                2,
+                &json!({ "type": "tool.started", "toolCallId": "call-1", "tool": "write", "input": {} }),
+            )
+            .expect("apply tool.started");
+        let tool_call_id: String = database
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT id FROM tool_calls WHERE run_id = ?1 LIMIT 1",
+                    [&started.run.id],
+                    |row| row.get(0),
+                )
+            })
+            .expect("tool call exists");
+        database
+            .with_connection(|connection| {
+                connection.execute(
+                    "INSERT INTO approvals(id, tool_call_id, status, requested_action, request_json, requested_at)
+                     VALUES ('approval-1', ?1, 'pending', 'write', '{}', 1)",
+                    [&tool_call_id],
+                )?;
+                Ok(())
+            })
+            .expect("insert pending approval");
+        let awaiting = summary(&database, &busy.id);
+        assert!(awaiting.awaiting_approval);
+        assert_eq!(awaiting.active_run_status.as_deref(), Some("running"));
+
+        // A terminal Run clears the marker again.
+        database
+            .apply_runtime_event(&started.run.id, 3, &json!({ "type": "run.completed" }))
+            .expect("apply run.completed");
+        let completed = summary(&database, &busy.id);
+        assert_eq!(completed.active_run_id, None);
+        assert_eq!(completed.active_run_status, None);
+        assert!(!completed.awaiting_approval);
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
 
     fn legacy_expert_v1_fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(LEGACY_EXPERT_V1_FIXTURE)
