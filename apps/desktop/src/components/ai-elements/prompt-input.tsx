@@ -79,23 +79,57 @@ import {
 // Helpers
 // ============================================================================
 
-const convertBlobUrlToDataUrl = async (url: string): Promise<string | null> => {
-  try {
-    const response = await fetch(url);
-    const blob = await response.blob();
-    // FileReader uses callback-based API, wrapping in Promise is necessary
-    // oxlint-disable-next-line eslint-plugin-promise(avoid-new)
-    return new Promise((resolve) => {
-      const reader = new FileReader();
-      // oxlint-disable-next-line eslint-plugin-unicorn(prefer-add-event-listener)
-      reader.onloadend = () => resolve(reader.result as string);
-      // oxlint-disable-next-line eslint-plugin-unicorn(prefer-add-event-listener)
-      reader.onerror = () => resolve(null);
-      reader.readAsDataURL(blob);
-    });
-  } catch {
-    return null;
+// An attachment keeps the user's original File so sending never has to re-read the
+// preview URL. `url` stays a blob: URL purely for the thumbnail.
+export type AttachmentItem = FileUIPart & { id: string; file?: File };
+
+/** Read an already-selected file. Rejects instead of resolving a placeholder. */
+const readBlobAsDataUrl = (blob: Blob): Promise<string> =>
+  // FileReader uses callback-based API, wrapping in Promise is necessary
+  // oxlint-disable-next-line eslint-plugin-promise(avoid-new)
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    // oxlint-disable-next-line eslint-plugin-unicorn(prefer-add-event-listener)
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result === "string" && result.startsWith("data:")) {
+        resolve(result);
+      } else {
+        reject(new Error("attachment_read_failed"));
+      }
+    };
+    // oxlint-disable-next-line eslint-plugin-unicorn(prefer-add-event-listener)
+    reader.onerror = () => reject(new Error("attachment_read_failed"));
+    // oxlint-disable-next-line eslint-plugin-unicorn(prefer-add-event-listener)
+    reader.onabort = () => reject(new Error("attachment_read_failed"));
+    reader.readAsDataURL(blob);
+  });
+
+/**
+ * Fallback for an item that carries only a preview URL (a restored draft, or an
+ * attachment added before this fix). It may fail under the app's CSP, and when it
+ * does the caller must report the failure — never forward the blob URL.
+ */
+const readPreviewUrlAsDataUrl = async (url: string): Promise<string> => {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error("attachment_read_failed");
   }
+  return readBlobAsDataUrl(await response.blob());
+};
+
+/** Resolve one attachment to the data: URL the conversation layer requires. */
+const attachmentDataUrl = async (item: AttachmentItem): Promise<string> => {
+  if (item.url?.startsWith("data:")) {
+    return item.url;
+  }
+  if (item.file) {
+    return readBlobAsDataUrl(item.file);
+  }
+  if (item.url?.startsWith("blob:")) {
+    return readPreviewUrlAsDataUrl(item.url);
+  }
+  throw new Error("attachment_read_failed");
 };
 
 const captureScreenshot = async (): Promise<File | null> => {
@@ -180,7 +214,7 @@ const captureScreenshot = async (): Promise<File | null> => {
 // ============================================================================
 
 export interface AttachmentsContext {
-  files: (FileUIPart & { id: string })[];
+  files: AttachmentItem[];
   add: (files: File[] | FileList) => void;
   remove: (id: string) => void;
   clear: () => void;
@@ -256,7 +290,7 @@ export const PromptInputProvider = ({
 
   // ----- attachments state (global when wrapped)
   const [attachmentFiles, setAttachmentFiles] = useState<
-    (FileUIPart & { id: string })[]
+    AttachmentItem[]
   >([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // oxlint-disable-next-line eslint(no-empty-function)
@@ -271,6 +305,7 @@ export const PromptInputProvider = ({
     setAttachmentFiles((prev) => [
       ...prev,
       ...incoming.map((file) => ({
+        file,
         filename: file.name,
         id: nanoid(),
         mediaType: file.type,
@@ -503,14 +538,16 @@ export type PromptInputProps = Omit<
   // bytes
   maxFileSize?: number;
   onError?: (err: {
-    code: "max_files" | "max_file_size" | "accept";
+    code: "max_files" | "max_file_size" | "accept" | "attachment_read_failed" | "attachment_send_failed";
     message: string;
   }) => void;
   onSubmitStart?: (message: PromptInputMessage) => void;
+  // A host that cannot start the send resolves to `false` (or rejects); the
+  // composer then keeps the draft and the attachments so the user can retry.
   onSubmit: (
     message: PromptInputMessage,
     event: FormEvent<HTMLFormElement>
-  ) => void | Promise<void>;
+  ) => void | boolean | Promise<void | boolean>;
 };
 
 export const PromptInput = ({
@@ -536,7 +573,7 @@ export const PromptInput = ({
   const formRef = useRef<HTMLFormElement | null>(null);
 
   // ----- Local attachments (only used when no provider)
-  const [items, setItems] = useState<(FileUIPart & { id: string })[]>([]);
+  const [items, setItems] = useState<AttachmentItem[]>([]);
   const files = usingProvider ? controller.attachments.files : items;
 
   // ----- Local referenced sources (always local to PromptInput)
@@ -618,9 +655,10 @@ export const PromptInput = ({
             message: "Too many files. Some were not added.",
           });
         }
-        const next: (FileUIPart & { id: string })[] = [];
+        const next: AttachmentItem[] = [];
         for (const file of capped) {
           next.push({
+            file,
             filename: file.name,
             id: nanoid(),
             mediaType: file.type,
@@ -861,60 +899,64 @@ export const PromptInput = ({
             return (formData.get("message") as string) || "";
           })();
 
-      // Let the host render an optimistic user turn before attachment conversion
-      // or any asynchronous runtime bridge work begins.
-      onSubmitStart?.({
-        files: files.map(({ id: _id, ...item }) => item),
-        text,
-      });
+      // Resolve every attachment from the user's original File BEFORE the host
+      // renders an optimistic turn or anything is cleared. A failed read must keep
+      // the draft and the attachments so the send can simply be retried.
+      let convertedFiles: FileUIPart[];
+      try {
+        convertedFiles = await Promise.all(
+          files.map(async ({ id: _id, file: _file, ...item }) => ({
+            ...item,
+            url: await attachmentDataUrl({ ...item, id: _id, file: _file }),
+          }))
+        );
+      } catch {
+        onError?.({
+          code: "attachment_read_failed",
+          message: "Attachment could not be read.",
+        });
+        return;
+      }
 
-      // Clear only message text. A native form.reset() also resets controlled
-      // assistant/model selectors, whose callbacks can switch conversations.
-      if (!usingProvider) {
+      // Only now is the send real: let the host show the optimistic user turn.
+      onSubmitStart?.({ files: convertedFiles, text });
+
+      let sent = true;
+      try {
+        const result = onSubmit({ files: convertedFiles, text }, event);
+        const outcome = result instanceof Promise ? await result : result;
+        if (outcome === false) {
+          sent = false;
+        }
+      } catch (error) {
+        // A backend failure is not a successful send: report it and keep the
+        // composer untouched so the user can retry.
+        onError?.({
+          code: "attachment_send_failed",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+      if (!sent) {
+        // The host reported that the send did not start (for example the
+        // attachment could not be saved). Keep draft and attachments.
+        onError?.({
+          code: "attachment_send_failed",
+          message: "发送未开始：附件未保存或消息未提交，可重试。",
+        });
+        return;
+      }
+
+      clear();
+      if (usingProvider) {
+        controller.textInput.clear();
+      } else {
+        // Clear only message text. A native form.reset() also resets controlled
+        // assistant/model selectors, whose callbacks can switch conversations.
         clearSubmittedPromptText(form);
       }
-
-      try {
-        // Convert blob URLs to data URLs asynchronously
-        const convertedFiles: FileUIPart[] = await Promise.all(
-          files.map(async ({ id: _id, ...item }) => {
-            if (item.url?.startsWith("blob:")) {
-              const dataUrl = await convertBlobUrlToDataUrl(item.url);
-              // If conversion failed, keep the original blob URL
-              return {
-                ...item,
-                url: dataUrl ?? item.url,
-              };
-            }
-            return item;
-          })
-        );
-
-        const result = onSubmit({ files: convertedFiles, text }, event);
-
-        // Handle both sync and async onSubmit
-        if (result instanceof Promise) {
-          try {
-            await result;
-            clear();
-            if (usingProvider) {
-              controller.textInput.clear();
-            }
-          } catch {
-            // Don't clear on error - user may want to retry
-          }
-        } else {
-          // Sync function completed without throwing, clear inputs
-          clear();
-          if (usingProvider) {
-            controller.textInput.clear();
-          }
-        }
-      } catch {
-        // Don't clear on error - user may want to retry
-      }
     },
-    [usingProvider, controller, files, onSubmitStart, onSubmit, clear]
+    [usingProvider, controller, files, onSubmitStart, onSubmit, clear, onError]
   );
 
   // Render with or without local provider

@@ -3663,9 +3663,11 @@ function Composer({ resetKey, draft, setDraft, chatState, showGoal = false, cent
           multiple
           maxFiles={8}
           maxFileSize={5 * 1024 * 1024}
-          onError={({ code }) => {
+          onError={({ code, message }) => {
             if (code === 'max_file_size') toast.error('单个附件不能超过 5 MB')
             else if (code === 'max_files') toast.error('一次最多添加 8 个附件')
+            else if (code === 'attachment_read_failed') toast.error('附件读取失败，草稿与附件已保留：请删除该附件后重新选择再发送')
+            else if (code === 'attachment_send_failed') toast.error('附件发送失败，草稿与附件已保留，请重试', { description: message })
             else toast.error('支持 PDF、TXT、MD、DOCX、XLSX、PPTX、CSV、TSV；旧版 DOC、XLS、PPT 请先转换格式')
           }}
           onSubmitStart={({ text, files }) => {
@@ -3698,6 +3700,8 @@ function Composer({ resetKey, draft, setDraft, chatState, showGoal = false, cent
             return
           }
           if (!text.trim() && submittedFiles.length === 0) return
+          const submittedDraft = draft
+          const restoreDraft = () => setDraft(submittedDraft)
           setStatus('streaming')
           setDraft('')
           setCommandOpen(false)
@@ -3705,11 +3709,29 @@ function Composer({ resetKey, draft, setDraft, chatState, showGoal = false, cent
           const selectedModel = conversationModelOverride(activeAgent, model, yuxiModels)
           const prompt = text.trim() || '请分析这些附件'
           const runtimeText = selectedSlashCommand ? slashCommandRuntimeText(selectedSlashCommand, prompt) : undefined
-          const outcome = await onSubmitPrompt?.(prompt, selectedModel, submittedFiles, runtimeText)
-          if (outcome === 'question' || outcome === 'approval' || outcome === 'error') {
+          let outcome: Awaited<ReturnType<NonNullable<typeof onSubmitPrompt>>> | undefined
+          try {
+            outcome = await onSubmitPrompt?.(prompt, selectedModel, submittedFiles, runtimeText)
+          } catch (cause) {
+            restoreDraft()
             setStatus('ready')
             onStatusChange?.('ready')
-            return
+            toast.error('发送失败，草稿与附件已保留，请重试', { description: cause instanceof Error ? cause.message : String(cause) })
+            return false
+          }
+          if (outcome === 'error') {
+            // The send did not start (for example the attachment could not be
+            // saved). Report failure so the composer keeps draft + attachments.
+            restoreDraft()
+            setStatus('ready')
+            onStatusChange?.('ready')
+            return false
+          }
+          if (outcome === 'question' || outcome === 'approval') {
+            // The message was consumed into a question/approval state.
+            setStatus('ready')
+            onStatusChange?.('ready')
+            return true
           }
           setSelectedSlashCommand(null)
           onStatusChange?.('streaming')
@@ -3720,6 +3742,7 @@ function Composer({ resetKey, draft, setDraft, chatState, showGoal = false, cent
             onStatusChange?.('ready')
             submitTimer.current = null
           }, 3600)
+          return true
         }}
           className={`fox-prompt-input ${focused ? 'is-focused' : ''}`}
         >

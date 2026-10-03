@@ -839,6 +839,28 @@ export function useDesktopConversation(): DesktopConversationState {
       }
       const activeConversation = active
       activeConversationIdRef.current = activeConversation.conversation.id
+      // Attachments are read and saved BEFORE anything optimistic is rendered: a
+      // rejected attachment must not leave a turn that never ran, and the caller
+      // keeps the draft so the send can be retried.
+      const attachmentFiles: { filename: string; mediaType?: string; dataUrl: string }[] = []
+      for (const file of files) {
+        if (!file.filename) {
+          throw new Error('附件缺少文件名，请删除该附件后重新选择再发送')
+        }
+        if (!file.url?.startsWith('data:')) {
+          throw new Error(`附件「${file.filename}」读取失败，请删除后重新选择再发送`)
+        }
+        attachmentFiles.push({ filename: file.filename, mediaType: file.mediaType, dataUrl: file.url })
+      }
+      let attachments
+      try {
+        attachments = attachmentFiles.length
+          ? await desktopClient.saveAttachments(activeConversation.conversation.id, attachmentFiles)
+          : []
+      } catch (cause) {
+        throw new Error(`附件保存失败：${cause instanceof Error ? cause.message : String(cause)}`, { cause })
+      }
+
       const pendingRun = optimisticRun(activeConversation.conversation.id, model)
       activeRunIdRef.current = null
       const pendingMessageId = optimisticId('pending-message')
@@ -866,15 +888,6 @@ export function useDesktopConversation(): DesktopConversationState {
           }
         })
       })
-      const attachmentFiles = files.flatMap((file) => file.filename && file.url?.startsWith('data:')
-        ? [{ filename: file.filename, mediaType: file.mediaType, dataUrl: file.url }]
-        : [])
-      if (attachmentFiles.length !== files.length) {
-        throw new Error('部分附件读取失败，请重新选择后再发送')
-      }
-      const attachments = attachmentFiles.length
-        ? await desktopClient.saveAttachments(activeConversation.conversation.id, attachmentFiles)
-        : []
       const isYuxi = activeConversation.conversation.agentId.startsWith('yuxi:')
       const extractedContext = !isYuxi ? await extractedAttachmentContext(files) : ''
       const attachmentNote = attachments.length && !isYuxi
