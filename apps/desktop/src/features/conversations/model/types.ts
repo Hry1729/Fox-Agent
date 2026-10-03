@@ -361,6 +361,11 @@ export interface ConversationSummary {
   createdAt: number
   updatedAt: number
   lastMessageAt: number | null
+  /** This conversation's own non-terminal Run, not the currently open one. */
+  activeRunId?: string | null
+  activeRunStatus?: string | null
+  /** True while that Run still has a pending approval. */
+  awaitingApproval?: boolean
 }
 
 export interface ConversationMessage {

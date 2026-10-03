@@ -1361,6 +1361,62 @@
   color: var(--fox-accent);
 }
 
+/* Queued and waiting-for-approval share the slot with the running orb so a
+   conversation that changes state never shifts the rows around it. */
+.fox-run-indicator-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  border: 1.5px solid var(--fox-muted);
+  background: transparent;
+}
+
+.fox-project-conversation-status.is-queued .fox-run-indicator-dot {
+  border-color: var(--fox-accent);
+}
+
+.fox-project-conversation-status.is-approval .fox-run-indicator-dot {
+  border-color: var(--fox-warning);
+  background: var(--fox-warning);
+  animation: foxRunIndicatorPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes foxRunIndicatorPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fox-project-conversation-status.is-approval .fox-run-indicator-dot {
+    animation: none;
+  }
+}
+
+/* Collapsed rail: one dot in the conversation popover, same three states. */
+.fox-sidebar-collapsed-run {
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  flex: 0 0 7px;
+  border-radius: 999px;
+  border: 1.5px solid var(--fox-muted);
+  background: transparent;
+}
+
+.fox-sidebar-collapsed-run.is-running {
+  border-color: var(--fox-accent);
+  background: var(--fox-accent);
+}
+
+.fox-sidebar-collapsed-run.is-queued {
+  border-color: var(--fox-accent);
+}
+
+.fox-sidebar-collapsed-run.is-approval {
+  border-color: var(--fox-warning);
+  background: var(--fox-warning);
+}
+
 /* Metal ring around the send button: a rigid flex item so the composer toolbar
    keeps its layout, and the halo is free to paint outside the 30px circle. */
 .fox-send-metal {
@@ -3561,10 +3617,17 @@ button.fox-chat-project-row:disabled {
 }
 
 /* The trigger keeps hugging its own content, exactly as it did when the avatar
-   was its first child, so only the badge/summary/chevron stay clickable. */
+   was its first child, so only the badge/summary/chevron stay clickable — but the
+   row itself grows, so the summary can use the full available width. */
 .fox-runtime-process-head > .fox-chain-of-thought-header {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-width: 0;
+}
+
+/* One shrinkable column keeps the label inside the flex remainder, so long text
+   is ellipsized at the right edge instead of pushing the controls. */
+.fox-runtime-process-summary > .fox-run-status-text {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .fox-assistant-avatar {
@@ -3606,11 +3669,13 @@ img[src='/avatars/fox-assistant.png'] {
   white-space: nowrap;
 }
 
-.fox-run-status-text[data-active='true'] { color: var(--fox-text); }
+/* Running status text keeps the lighter thinking grey instead of falling back to
+   the body colour, which made an in-progress thought look like finished copy. */
+.fox-run-status-text[data-active='true'] { color: var(--fox-thinking-text); }
 
 .fox-run-status-text {
-  --fox-process-shimmer-edge: color-mix(in oklch, var(--fox-muted) 86%, #a8bfd1);
-  --fox-process-shimmer-center: color-mix(in oklch, var(--fox-muted) 72%, #b8cada);
+  --fox-process-shimmer-edge: var(--fox-thinking-shimmer-soft);
+  --fox-process-shimmer-center: var(--fox-thinking-shimmer);
 }
 
 /* Paint the base and shimmer on one set of glyphs. Separate text overlays can
@@ -3642,9 +3707,12 @@ img[src='/avatars/fox-assistant.png'] {
   }
 }
 
+/* The summary owns whatever the fixed label and the trailing controls leave, and
+   clips on the right. It must not be capped to a content-sized box: the row would
+   then sit mostly empty while the text was cut short. */
 .fox-chain-of-thought-header > span > span {
   min-width: 0;
-  max-width: 270px;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -3809,22 +3877,13 @@ img[src='/avatars/fox-assistant.png'] {
 }
 
 /* A step row is exactly one line tall, no matter how long the thought grows.
-   The label keeps its newest characters in view (the component pins its
-   horizontal scroll to the end), and both ends fade — but only while the text
-   is really clipped, so a summary that fits keeps its full contrast. The footer
-   failure line keeps its own single-line horizontal fade — see
-   `.fox-message-failure-meta`. */
+   Overflow is ellipsized at the right edge: the row never scrolls sideways to
+   chase the newest characters, so the text cannot drift while it streams. */
 .fox-runtime-step-trigger .fox-run-status-label {
   overflow: hidden;
   overflow-wrap: normal;
-  text-overflow: clip;
+  text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* Only the content viewport fades; the thought title stays fixed and readable. */
-.fox-runtime-step-trigger .fox-run-status-step.is-clamped > .fox-run-status-viewport {
-  mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
-  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 28px, #000 calc(100% - 28px), transparent 100%);
 }
 
 .fox-runtime-step-detail[data-state='open'] .fox-run-status-step.has-fixed-prefix {

@@ -41,6 +41,11 @@ import {
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { clearSubmittedPromptText } from "./prompt-input-reset";
+import {
+  insertPromptNewline,
+  readPromptSendShortcut,
+  resolvePromptEnterAction,
+} from "./prompt-send-shortcut";
 import type { ChatStatus, FileUIPart, SourceDocumentUIPart } from "ai";
 import {
   CornerDownLeftIcon,
@@ -964,6 +969,32 @@ export const PromptInputBody = ({
   <div className={cn("contents", className)} {...props} />
 );
 
+/**
+ * Breaks the line at the caret, replacing the current selection.
+ *
+ * The write goes through the native prototype setter and is followed by a real
+ * `input` event. React keeps its own copy of a controlled field's value on the
+ * instance, so assigning `textarea.value` is swallowed as "still unchanged";
+ * bypassing the instance setter leaves React's tracker stale and lets onChange
+ * run, which keeps a controlled draft in sync without a second source of truth.
+ */
+function insertNewlineAtSelection(textarea: HTMLTextAreaElement) {
+  const start = textarea.selectionStart ?? textarea.value.length;
+  const end = textarea.selectionEnd ?? start;
+  const insertion = insertPromptNewline(textarea.value, start, end);
+  const nativeValueSetter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    "value"
+  )?.set;
+  if (nativeValueSetter) {
+    nativeValueSetter.call(textarea, insertion.value);
+  } else {
+    textarea.setRangeText("\n", start, end, "end");
+  }
+  textarea.setSelectionRange(insertion.caret, insertion.caret);
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 export type PromptInputTextareaProps = ComponentProps<
   typeof InputGroupTextarea
 >;
@@ -990,13 +1021,38 @@ export const PromptInputTextarea = ({
       }
 
       if (e.key === "Enter") {
-        if (isComposing || e.nativeEvent.isComposing) {
+        // The stored preference decides whether Enter or Ctrl/Cmd+Enter sends.
+        // Shift+Enter always breaks the line; an IME confirmation never sends.
+        const action = resolvePromptEnterAction(
+          {
+            key: e.key,
+            shiftKey: e.shiftKey,
+            ctrlKey: e.ctrlKey,
+            metaKey: e.metaKey,
+            altKey: e.altKey,
+            isComposing: isComposing || e.nativeEvent.isComposing,
+            keyCode: e.nativeEvent.keyCode,
+          },
+          readPromptSendShortcut()
+        );
+
+        if (action === "newline") {
+          e.preventDefault();
+          insertNewlineAtSelection(e.currentTarget);
           return;
         }
-        if (e.shiftKey) {
+
+        if (action !== "send") {
           return;
         }
+
         e.preventDefault();
+
+        // An empty draft without attachments has nothing to send, so it must not
+        // run the submit pipeline (which would clear the draft and notify the host).
+        if (!e.currentTarget.value.trim() && attachments.files.length === 0) {
+          return;
+        }
 
         // Check if the submit button is disabled before submitting
         const { form } = e.currentTarget;

@@ -6,6 +6,7 @@ import { ExpertPickerDialog } from '@/features/agents/ExpertPickerDialog'
 import { HtmlFilePreview } from './html-file-preview'
 import { KernelReconciliationPanel } from './kernel-reconciliation-panel'
 import { runtimeProcessActivity } from './runtime-process-activity'
+import type { ConversationRunIndicator } from './conversation-run-indicator'
 import { useProcessScroll } from './use-process-scroll'
 import { useProcessDisplayMode, type ProcessDisplayMode } from './process-display-mode'
 import { TurnProcessHeader } from './turn-process-header'
@@ -95,7 +96,7 @@ import { BorderBeam } from '@/components/effects/border-beam'
 import { asAgentCard } from '@/features/agents/agent-card-data'
 import { adoptBlockedStyles } from '@/components/effects/adopted-styles'
 import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable, knowledgeReferenceFromLegacyBinding, knowledgeReferenceKey } from '@/features/conversations/api/desktop-client'
-import { normalizeProjectPermission, selectProjectRoot, validPickedProjectFolder } from './project-access-dialog-state'
+import { canonicalProjectRoot, matchingProject, normalizeProjectPermission, normalizeProjectRoot, selectProjectRoot, validPickedProjectFolder } from './project-access-dialog-state'
 import { filterKnowledgePickerItems, localKnowledgePickerState } from './knowledge-picker-state'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -968,6 +969,32 @@ function WindowMenu({ label, children }: { label: string; children: ReactNode })
   )
 }
 
+const CONVERSATION_RUN_LABELS: Record<ConversationRunIndicator, string> = {
+  running: '正在运行',
+  queued: '排队中',
+  approval: '等待审批',
+}
+
+/**
+ * The activity slot of one sidebar row. It is always laid out so a conversation
+ * starting or finishing a run never shifts the rows around it, and it reports the
+ * state as a `status` only when there is something to announce.
+ */
+function ConversationRunStatus({ indicator, className = 'fox-project-conversation-status' }: { indicator?: ConversationRunIndicator; className?: string }) {
+  const label = indicator ? CONVERSATION_RUN_LABELS[indicator] : undefined
+  return <span
+    className={`${className}${indicator ? ` is-${indicator}` : ''}`}
+    role={label ? 'status' : undefined}
+    aria-label={label}
+    title={label}
+    data-run-indicator={indicator ?? undefined}
+  >
+    {indicator === 'running' && <Suspense fallback={<LoaderCircle className="animate-spin" size={13} />}><RunningOrb state="composing" size={20} /></Suspense>}
+    {indicator === 'queued' && <span className="fox-run-indicator-dot" aria-hidden="true" />}
+    {indicator === 'approval' && <span className="fox-run-indicator-dot" aria-hidden="true" />}
+  </span>
+}
+
 function Sidebar({
   collapsed,
   assistantMode,
@@ -996,7 +1023,7 @@ function Sidebar({
   onGlobalSearch,
   activeConversationId,
   newChatActive,
-  running = false,
+  runIndicators,
   yuxiService,
   yuxiUser,
   activeView,
@@ -1030,8 +1057,11 @@ function Sidebar({
   onGlobalSearch?: (query: string) => Promise<GlobalSearchRecord[]>
   activeConversationId?: string
   newChatActive: boolean
-  /** True while the active conversation's run is still working. */
-  running?: boolean
+  /**
+   * Activity keyed by each conversation's own id. Selection only decides the
+   * highlight, never whether a conversation looks busy.
+   */
+  runIndicators?: ReadonlyMap<string, ConversationRunIndicator>
   yuxiService?: { name: string; status: string; connectionType: 'local' | 'lan' | 'remote' } | null
   yuxiUser?: YuxiUserRecord | null
   activeView: WorkspaceView
@@ -1125,13 +1155,15 @@ function Sidebar({
   const projectGroups = Array.from(visibleProjectConversations.reduce((groups, item) => {
     const projectRoot = item.projectRoot?.trim()
     if (!projectRoot) return groups
-    const normalizedRoot = projectRoot.replace(/[\\/]+$/, '').replace(/\//g, '\\').toLocaleLowerCase()
+    // Grouped by full path, never by folder name: two projects can share a leaf name.
+    const normalizedRoot = normalizeProjectRoot(projectRoot)
+    const canonicalRoot = canonicalProjectRoot(projectRoot)
     const existing = groups.get(normalizedRoot)
     if (existing) existing.items.push(item)
     else groups.set(normalizedRoot, {
       key: normalizedRoot,
-      root: projectRoot.replace(/[\\/]+$/, ''),
-      name: projectRoot.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) || projectRoot,
+      root: canonicalRoot,
+      name: canonicalRoot.split(/[\\/]/).at(-1) || projectRoot,
       items: [item],
     })
     return groups
@@ -1318,11 +1350,7 @@ function Sidebar({
                   <ContextMenu key={item.id}>
                     <ContextMenuTrigger asChild>
                       <div className={`fox-sidebar-tree-row fox-project-conversation-row ${item.active ? 'is-active' : ''}`}>
-                        <span
-                          className={`fox-project-conversation-status ${item.active && running ? 'is-running' : ''}`}
-                          role={item.active && running ? 'status' : undefined}
-                          aria-label={item.active && running ? '正在运行' : undefined}
-                        >{item.active && running && <Suspense fallback={<LoaderCircle className="animate-spin" size={13} />}><RunningOrb state="composing" size={20} /></Suspense>}</span>
+                        <ConversationRunStatus indicator={runIndicators?.get(item.id)} />
                         <button type="button" className="fox-sidebar-tree-main" title={item.title} onClick={() => onOpenConversation(item.id)}><span>{item.title}</span></button>
                         <span className="fox-sidebar-row-time">{item.time}</span>
                         <span className="fox-sidebar-row-actions">
@@ -1372,6 +1400,7 @@ function Sidebar({
                 <ContextMenu key={item.id}>
                   <ContextMenuTrigger asChild>
                     <div className={`fox-sidebar-tree-row ${item.active ? 'is-active' : ''}`}>
+                      <ConversationRunStatus indicator={runIndicators?.get(item.id)} />
                       <button type="button" className="fox-sidebar-tree-main" title={item.title} onClick={() => onOpenConversation(item.id)}><MessageCircleMore size={14} /><span>{item.title}</span></button>
                       <span className="fox-sidebar-row-time">{item.time}</span>
                       <span className="fox-sidebar-row-actions">
@@ -1485,11 +1514,15 @@ function Sidebar({
               </button>
               {collapsedProjectKey === project.key && <div className="fox-sidebar-collapsed-popover fox-sidebar-conversations-popover" role="menu" aria-label={`${project.name} 对话`}>
                 <header>{project.name}</header>
-                {project.items.map((item) => <button type="button" role="menuitem" key={item.id} className={item.active ? 'is-active' : undefined} onClick={() => onOpenConversation(item.id)} title={item.title}>
+                {project.items.map((item) => {
+                  const indicator = runIndicators?.get(item.id)
+                  return <button type="button" role="menuitem" key={item.id} className={item.active ? 'is-active' : undefined} onClick={() => onOpenConversation(item.id)} title={indicator ? `${item.title} · ${CONVERSATION_RUN_LABELS[indicator]}` : item.title}>
                   <MessageCircleMore />
                   <span>{item.title}</span>
+                  {indicator && <span className={`fox-sidebar-collapsed-run is-${indicator}`} role="status" aria-label={CONVERSATION_RUN_LABELS[indicator]} />}
                   {item.time && <time>{item.time}</time>}
-                </button>)}
+                </button>
+                })}
               </div>}
             </div>) : <p className="fox-sidebar-collapsed-empty">暂无项目</p>}
           </div>}
@@ -1512,11 +1545,15 @@ function Sidebar({
           </button>
           {collapsedSection === 'conversations' && <div className="fox-sidebar-collapsed-popover fox-sidebar-conversations-list-popover" role="menu" aria-label="对话列表">
             <header>对话</header>
-            {visibleConversations.length ? visibleConversations.map((item) => <button type="button" role="menuitem" key={item.id} className={item.active ? 'is-active' : undefined} onClick={() => onOpenConversation(item.id)} title={item.title}>
+            {visibleConversations.length ? visibleConversations.map((item) => {
+              const indicator = runIndicators?.get(item.id)
+              return <button type="button" role="menuitem" key={item.id} className={item.active ? 'is-active' : undefined} onClick={() => onOpenConversation(item.id)} title={indicator ? `${item.title} · ${CONVERSATION_RUN_LABELS[indicator]}` : item.title}>
               <MessageCircleMore />
               <span>{item.title}</span>
+              {indicator && <span className={`fox-sidebar-collapsed-run is-${indicator}`} role="status" aria-label={CONVERSATION_RUN_LABELS[indicator]} />}
               {item.time && <time>{item.time}</time>}
-            </button>) : <p className="fox-sidebar-collapsed-empty">暂无对话</p>}
+            </button>
+            }) : <p className="fox-sidebar-collapsed-empty">暂无对话</p>}
           </div>}
         </div>
       </div>}
@@ -2330,7 +2367,7 @@ const MemoizedRuntimeAssistantMessage = memo(RuntimeAssistantMessage, (previous,
 ))
 
 function RuntimeReasoningItem({ detail, running = false, preview = true }: { detail: string; running?: boolean; preview?: boolean }) {
-  const summary = preview ? reasoningSummary(detail, running) : ''
+  const summary = preview ? reasoningSummary(detail) : ''
   return <RuntimeProcessRow
     icon={<Brain className="fox-runtime-step-icon-glyph" />}
     fixedPrefix={summary ? '深度思考 ·' : '深度思考'}
@@ -2344,26 +2381,23 @@ function RuntimeReasoningItem({ detail, running = false, preview = true }: { det
   </RuntimeProcessRow>
 }
 
-/** Only a completed first line can become a streaming preview. Once settled,
- * show the first line of the final thought; the content after the fixed title
- * still scrolls horizontally when that one line exceeds its viewport. */
-function reasoningSummary(text: string, running: boolean) {
-  if (!running) return text.split(/\r?\n/, 1)[0].trim().replaceAll('**', '')
-  let summary = ''
-  let start = 0
-  const paragraphs = /\r?\n(?:[\t ]*\r?\n)+/g
-  for (;;) {
-    const separator = paragraphs.exec(text)
-    // For CRLF the first newline is the LF at index + 1, not the CR.
-    const end = separator ? separator.index + separator[0].indexOf('\n') : text.length
-    const newline = text.indexOf('\n', start)
-    if (newline >= start && newline <= end) {
-      const candidate = text.slice(start, newline).trim()
-      if (candidate) summary = candidate
-    }
-    if (!separator) return summary.replaceAll('**', '')
-    start = separator.index + separator[0].length
-  }
+/** The row paints exactly one line, so the summary is the current thought
+ *  collapsed into that line: whitespace and newlines become single spaces and the
+ *  text keeps growing in place while it streams. Waiting for a *completed* line
+ *  left the row blank for long unbroken replies and made settled thoughts show
+ *  only their shortest first line. Short content therefore keeps its natural
+ *  spacing and is never padded; anything longer is ellipsized on the right by
+ *  CSS. The scan is bounded because a thought can reach tens of kilobytes while
+ *  only its first line is ever visible. */
+const REASONING_SUMMARY_SCAN_LIMIT = 512
+function reasoningSummary(text: string) {
+  const window = text.length > REASONING_SUMMARY_SCAN_LIMIT ? text.slice(0, REASONING_SUMMARY_SCAN_LIMIT) : text
+  return window
+    .replace(/\s+/gu, ' ')
+    .replaceAll('**', '')
+    // A cut surrogate pair would render as a replacement glyph at the edge.
+    .replace(/[\uD800-\uDBFF]$/u, '')
+    .trim()
 }
 
 function RuntimeToolItem({ tool, active, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer }: { tool: RuntimeToolStep; active: boolean; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
@@ -2424,43 +2458,24 @@ function RuntimeToolItem({ tool, active, attachmentNames, onOpenFileInSidebar, o
   </RuntimeProcessRow>
 }
 
-/** A step row is exactly one line tall, however long the thought grows. The
- *  label scrolls horizontally and is pinned to its newest characters, and both
- *  ends fade — but only once the text really clips, so short summaries keep
- *  their full contrast. */
+/** A step row is exactly one line tall, however long the thought grows. The label
+ *  is clipped at the right edge by CSS; the row never scrolls sideways to follow
+ *  the newest characters, so a streaming thought cannot drift or jitter. */
 function StepStatusText({ text, active, fixedPrefix, children }: { text: string; active: boolean; fixedPrefix?: string; children?: ReactNode }) {
-  const labelRef = useRef<HTMLSpanElement>(null)
-  const decorativeLabelRef = useRef<HTMLSpanElement>(null)
-  const [clamped, setClamped] = useState(false)
   // An interactive tool path must never be rendered a second time. Plain text
   // can use one inert decorative layer for a shared title/preview sweep.
   const decorate = active && children === undefined
-  useLayoutEffect(() => {
-    const node = labelRef.current
-    if (!node) return
-    const sync = () => {
-      setClamped(node.scrollWidth > node.clientWidth + 1)
-      // Follow the newest text: the tail of a growing thought stays in view.
-      node.scrollLeft = node.scrollWidth
-      if (decorativeLabelRef.current) decorativeLabelRef.current.scrollLeft = node.scrollLeft
-    }
-    sync()
-    if (typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(sync)
-    observer.observe(node)
-    return () => observer.disconnect()
-  }, [text, children, fixedPrefix, decorate])
-  return <span className={`fox-run-status-text fox-run-status-step${fixedPrefix ? ' has-fixed-prefix' : ''}${clamped ? ' is-clamped' : ''}${decorate ? ' fox-row-shimmer' : ''}`} data-active={active}>
+  return <span className={`fox-run-status-text fox-run-status-step${fixedPrefix ? ' has-fixed-prefix' : ''}${decorate ? ' fox-row-shimmer' : ''}`} data-active={active}>
     {fixedPrefix && <span className="fox-run-status-prefix">{fixedPrefix}</span>}
     <span className="fox-run-status-viewport">
-      <span ref={labelRef} className="fox-run-status-label">{children ?? text}</span>
+      <span className="fox-run-status-label">{children ?? text}</span>
     </span>
     {decorate && <span className="fox-row-shimmer-decoration" aria-hidden="true" inert>
       <span className="fox-row-shimmer-sweep">
         <span className={`fox-row-shimmer-highlight fox-run-status-step-highlight${fixedPrefix ? ' has-fixed-prefix' : ''}`}>
           {fixedPrefix && <span className="fox-run-status-prefix" data-shimmer-text={fixedPrefix} />}
           <span className="fox-run-status-viewport">
-            <span ref={decorativeLabelRef} className="fox-run-status-label" data-shimmer-text={text} />
+            <span className="fox-run-status-label" data-shimmer-text={text} />
           </span>
         </span>
       </span>
@@ -3322,7 +3337,6 @@ function Composer({ resetKey, draft, setDraft, chatState, showGoal = false, cent
   const openKnowledge = onKnowledge ?? runtimeContext.onKnowledge
   const [status, setStatus] = useState<'ready' | 'streaming'>('ready')
   const [focused, setFocused] = useState(false)
-  const sendWithModifier = typeof window !== 'undefined' && window.localStorage.getItem('fox.preferences.sendKey') === 'mod-enter'
   const spellcheckEnabled = typeof window === 'undefined' || window.localStorage.getItem('fox.preferences.spellcheck') !== '0'
   const allowYuxiModelOverride = yuxiModelOverrideAllowed(activeAgent)
   const isYuxiAgent = activeAgent?.runtimeType === 'yuxi'
@@ -3455,7 +3469,12 @@ function Composer({ resetKey, draft, setDraft, chatState, showGoal = false, cent
   }
 
   const onComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (commandOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp' || (event.key === 'Enter' && !event.nativeEvent.isComposing))) {
+    // Only a bare Enter drives the slash menu. Ctrl/Cmd+Enter and Shift+Enter stay
+    // with the textarea so they can break the line instead of picking a command.
+    const menuEnter = event.key === 'Enter'
+      && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
+      && !event.nativeEvent.isComposing
+    if (commandOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp' || menuEnter)) {
       event.preventDefault()
       commandMenuRef.current?.dispatchEvent(new globalThis.KeyboardEvent('keydown', {
         key: event.key,
@@ -3468,13 +3487,6 @@ function Composer({ resetKey, draft, setDraft, chatState, showGoal = false, cent
       setCommandOpen(false)
       setCommandView('commands')
       setMentionOpen(false)
-    }
-    if (event.key === 'Enter' && sendWithModifier) {
-      if (event.ctrlKey || event.metaKey) return
-      event.preventDefault()
-      const textarea = event.currentTarget
-      textarea.setRangeText('\n', textarea.selectionStart, textarea.selectionEnd, 'end')
-      setDraft(textarea.value)
     }
   }
 
@@ -4956,7 +4968,7 @@ export function Workbench() {
     ? latestExpertToolAvailability(desktopConversation.detail?.runtimeEvents ?? [], activeExpert)
     : undefined, [activeExpert, desktopConversation.detail?.runtimeEvents])
   const activeProject = projects.find((item) => item.id === desktopConversation.detail?.conversation.projectId)
-    ?? projects.find((item) => item.rootPath === desktopConversation.draftProjectRoot)
+    ?? (desktopConversation.draftProjectRoot ? matchingProject(desktopConversation.draftProjectRoot, projects) : undefined)
     ?? null
   const conversationUsage = useMemo(() => latestConversationContextUsage(desktopConversation.detail?.runtimeEvents ?? []), [desktopConversation.detail?.runtimeEvents])
   const runtimeQuestion = useMemo(() => pendingRuntimeQuestion(desktopConversation.detail), [desktopConversation.detail])
@@ -5236,20 +5248,41 @@ export function Workbench() {
         if (!started) setChatState('error')
       })
   }
-  const resetConversation = (suggestion = '') => {
+  /**
+   * The single entry point for starting a fresh draft.
+   *
+   * Everything that identifies "the session on screen" is reset together: the
+   * conversation identity (already cleared by the hook), the run identity, the
+   * composer text, the temporary optimistic message and the view selection. The
+   * previous conversation is never cancelled — it keeps running in the background,
+   * and its later events are routed by their own conversation id, so they cannot
+   * touch this draft. Resetting piecemeal left a draft wearing the old run's
+   * "stop" button over an empty composer.
+   */
+  const beginNewDraft = (options: {
+    suggestion?: string
+    mode?: AssistantMode
+    /** Force the empty-composer layout even when a suggestion is pre-filled. */
+    empty?: boolean
+  } = {}) => {
     clearWorkflowTimer()
-    if (desktopConversation.enabled) {
-      void desktopConversation.createConversation()
-    }
     setChatState('complete')
+    setActivePrompt('')
     setPendingUserMessage(null)
-    setEmptyConversation(!suggestion)
-    setComposerDraft(suggestion)
+    setEmptyConversation(options.empty ?? !options.suggestion)
+    setComposerDraft(options.suggestion ?? '')
     setComposerResetKey((value) => value + 1)
     setActiveEntityId(null)
     setActiveDocumentId(null)
     setActiveSourceLocator(null)
+    if (options.mode) setAssistantMode(options.mode)
     setActiveView('chat')
+  }
+  const resetConversation = (suggestion = '') => {
+    if (desktopConversation.enabled) {
+      void desktopConversation.createConversation()
+    }
+    beginNewDraft({ suggestion })
   }
   const prepareDraft = (agentId: string, mode: AssistantMode, projectRoot?: string, permissionMode?: ProjectRecord['permissionMode'], knowledgeBases: KnowledgeBaseRecord[] = []) => {
     void desktopConversation.createConversationForAgent(agentId, projectRoot, permissionMode).then(async (created) => {
@@ -5261,17 +5294,7 @@ export function Workbench() {
         toast.error(desktopConversation.error ?? '无法为对话启用知识库')
         return
       }
-      clearWorkflowTimer()
-      setAssistantMode(mode)
-      setChatState('complete')
-      setPendingUserMessage(null)
-      setEmptyConversation(true)
-      setComposerDraft('')
-      setComposerResetKey((value) => value + 1)
-      setActiveEntityId(null)
-      setActiveDocumentId(null)
-      setActiveSourceLocator(null)
-      setActiveView('chat')
+      beginNewDraft({ mode, empty: true })
     })
   }
   const askKnowledgeBase = (knowledgeBase: KnowledgeBaseRecord) => {
@@ -5310,9 +5333,9 @@ export function Workbench() {
       ?? desktopConversation.detail?.conversation.projectRoot
       ?? desktopConversation.draftProjectRoot
       ?? desktopConversation.conversations.find((conversation) => conversation.projectRoot)?.projectRoot
-    const requestedProject = requestedProjectRoot
-      ? projects.find((project) => project.rootPath.replace(/[\\/]+$/, '').toLocaleLowerCase() === requestedProjectRoot.replace(/[\\/]+$/, '').toLocaleLowerCase())
-      : activeProject
+    // The directory that was asked for wins over whatever conversation is open, and
+    // it is matched on its full path so a same-named folder elsewhere cannot be used.
+    const requestedProject = requestedProjectRoot ? matchingProject(requestedProjectRoot, projects) : activeProject
     const permissionMode = requestedProject?.permissionMode ?? desktopConversation.draftPermissionMode ?? readDefaultProjectPermission()
     if (!projectRoot) {
       void addProject()
@@ -5323,8 +5346,8 @@ export function Workbench() {
       toast.error('请先选择一个专家')
       return
     }
-    desktopConversation.selectProject(projectRoot, permissionMode)
-    setActiveView('chat')
+    desktopConversation.selectProject(canonicalProjectRoot(projectRoot), permissionMode)
+    beginNewDraft()
   }
   const pickProjectFolder = async () => {
     try {
@@ -5340,8 +5363,8 @@ export function Workbench() {
     if (!selected) return
     const projectSelection = selectProjectRoot(selected, projects, readDefaultProjectPermission())
     desktopConversation.selectProject(projectSelection.path, projectSelection.permissionMode)
-    setActiveView('chat')
-    toast.success(`项目“${selected.split(/[\\/]/).filter(Boolean).at(-1) ?? selected}”已加入当前对话`)
+    beginNewDraft()
+    toast.success(`项目“${projectSelection.path.split(/[\\/]/).filter(Boolean).at(-1) ?? projectSelection.path}”已加入当前对话`)
   }
   const changeProjectPermission = async (permissionMode: ProjectRecord['permissionMode']) => {
     const conversationId = desktopConversation.detail?.conversation.id
@@ -5878,7 +5901,7 @@ export function Workbench() {
     <main className="fox-shell" style={shellStyle}>
       <MemoizedWindowTitlebar leftSidebarCollapsed={sidebarCollapsed || compactLayout} onNewChat={handleNewChat} onOpenProject={handleComposerProject} onSettings={handleOpenSettings} onAbout={handleOpenAbout} onToggleSidebar={handleToggleSidebar} onZoom={handleZoom} />
       <div className="fox-workbench">
-        <MemoizedSidebar collapsed={sidebarCollapsed || compactLayout} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.detail?.conversation.id} newChatActive={activeView === 'chat' && timelineEmpty} running={desktopRunning} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
+        <MemoizedSidebar collapsed={sidebarCollapsed || compactLayout} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.detail?.conversation.id} newChatActive={activeView === 'chat' && timelineEmpty} runIndicators={desktopConversation.enabled ? desktopConversation.runIndicators : undefined} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
         {!sidebarCollapsed && !compactLayout && <SidebarResizeDivider onResize={(delta) => setSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
         <div className="fox-content-card">
         <div className={`fox-content-surface ${rightPanelMaximized && showConversationRightSidebar && !rightSidebarCollapsed ? 'is-right-maximized' : ''}`}>

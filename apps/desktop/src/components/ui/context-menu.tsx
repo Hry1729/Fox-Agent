@@ -28,7 +28,7 @@ function ContextMenuItem({ className, variant = "default", ...props }: React.Com
     <ContextMenuPrimitive.Item
       data-slot="context-menu-item"
       data-variant={variant}
-      className={cn("relative flex min-h-7 cursor-default select-none items-center gap-2 rounded-md px-2 py-1 text-xs/relaxed outline-hidden focus:bg-accent focus:text-accent-foreground data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:bg-destructive/10 data-disabled:pointer-events-none data-disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-3.5 [&_svg]:shrink-0", className)}
+      className={cn("relative flex min-h-7 cursor-default select-none items-center gap-2 rounded-md px-2 py-1 text-xs/relaxed outline-hidden focus:bg-accent focus:text-accent-foreground data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:text-destructive data-[variant=destructive]:focus:ring-1 data-[variant=destructive]:focus:ring-inset data-[variant=destructive]:focus:ring-destructive/40 dark:data-[variant=destructive]:focus:ring-destructive/55 data-disabled:pointer-events-none data-disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-3.5 [&_svg]:shrink-0", className)}
       {...props}
     />
   )
