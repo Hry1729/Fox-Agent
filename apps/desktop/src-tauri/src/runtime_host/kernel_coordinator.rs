@@ -1348,11 +1348,22 @@ impl<'a> KernelCoordinator<'a> {
         let _ = self.database.record_host_stage_point(
             &self.binding.run_id, &prepare_attempt, "context_prepare_finished", observed_at,
         );
-        self.dispatch_batch_with_worker(batch_id, owner, policy, runtime, &config, api_key, &prepare_attempt)
+        self.dispatch_batch_with_worker_with_attempt(batch_id, owner, policy, runtime, &config, api_key, &prepare_attempt)
+    }
+
+    #[cfg(test)]
+    fn dispatch_batch_with_worker(
+        &self, batch_id: &str, owner: &str, policy: &dyn PolicyDecisionPort,
+        runtime: &super::RuntimeCommand, config: &super::kernel_model_worker::KernelModelConfig,
+        api_key: &str,
+    ) -> Result<(), String> {
+        self.dispatch_batch_with_worker_with_attempt(
+            batch_id, owner, policy, runtime, config, api_key, &uuid::Uuid::new_v4().to_string(),
+        )
     }
 
     /// Internal transport, with configuration checked before claiming.
-    fn dispatch_batch_with_worker(
+    fn dispatch_batch_with_worker_with_attempt(
         &self, batch_id: &str, owner: &str, policy: &dyn PolicyDecisionPort,
         runtime: &super::RuntimeCommand, config: &super::kernel_model_worker::KernelModelConfig,
         api_key: &str, prepare_attempt: &str,

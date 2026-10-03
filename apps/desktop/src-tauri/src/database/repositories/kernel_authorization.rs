@@ -503,6 +503,26 @@ mod tests {
     }
 
     #[test]
+    fn existing_grant_reuses_within_its_run_but_not_a_new_run() {
+        let (database, path) = new_database();
+        seed_run(&database, "run-1", "conv-1");
+        assert!(matches!(database.kernel_register_authorization_grant(
+            "run-1", "run-1-call", "allow_conversation", "write_file",
+            Some("host-target:sha256:abc"),
+        ).unwrap(), GrantRegistration::Registered { .. }));
+        assert_eq!(database.kernel_effective_authorization_grants("run-1", now_ms()).unwrap().len(), 1);
+        database.with_connection(|connection| {
+            connection.execute("UPDATE runs SET status='completed' WHERE id='run-1'", [])?;
+            connection.execute("UPDATE kernel_runs SET state='completed' WHERE run_id='run-1'", [])?;
+            Ok(())
+        }).unwrap();
+        seed_run(&database, "run-2", "conv-1");
+        assert!(database.kernel_effective_authorization_grants("run-2", now_ms()).unwrap().is_empty());
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn unknown_or_stale_approval_version_cannot_register_a_grant() {
         let (database, path) = new_database();
         seed_run(&database, "run-1", "conv-1");

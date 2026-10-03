@@ -2032,11 +2032,7 @@ impl Database {
             let transaction = connection.transaction()?;
             transaction.execute(
                 "UPDATE conversations
-                 SET permission_mode = COALESCE(
-                         (SELECT permission_mode FROM projects WHERE id = ?1),
-                         permission_mode
-                     ),
-                     project_root = COALESCE(
+                 SET project_root = COALESCE(
                          project_root,
                          (SELECT root_path FROM projects WHERE id = ?1)
                      ),
@@ -13389,6 +13385,45 @@ mod tests {
             .update_conversation_permission_mode(&no_project.id, "unrestricted")
             .is_err());
 
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn project_default_never_rewrites_an_existing_policy_after_reopens_or_delete() {
+        let (database, path) = test_database();
+        let project_root = path.with_extension("project");
+        let root = project_root.to_str().expect("project path");
+        let conversation = database
+            .create_conversation(DEFAULT_AGENT_ID, None, Some(root), Some("ask"))
+            .expect("create project conversation");
+        let project_id = conversation.project_id.expect("linked project");
+        let policy = database.execution_policy(&conversation.id).expect("initial policy");
+        database.change_execution_policy(&conversation.id, "local-choice", policy.version, "read_only")
+            .expect("set explicit conversation permission");
+        drop(database);
+
+        for reopen in 0..2 {
+            let database = Database::open(path.clone()).expect("reopen database");
+            let trigger_count: i64 = database.with_connection(|connection| connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='execution_policy_project_change'",
+                [], |row| row.get(0),
+            )).expect("project propagation trigger count");
+            assert_eq!(trigger_count, 0, "project propagation revived on reopen {reopen}");
+            database.update_project_permission_mode(&project_id, if reopen == 0 { "allow" } else { "ask" })
+                .expect("change project default").expect("project exists");
+            assert_eq!(database.execution_policy(&conversation.id).expect("policy").mode, "read_only");
+            assert_eq!(database.load_conversation(&conversation.id).expect("conversation").conversation.permission_mode, "read_only");
+            if reopen == 1 {
+                assert!(database.delete_project(&project_id).expect("delete project"));
+                let detached = database.load_conversation(&conversation.id).expect("detached conversation").conversation;
+                assert_eq!(detached.project_id, None);
+                assert_eq!(detached.permission_mode, "read_only");
+                assert_eq!(database.execution_policy(&conversation.id).expect("detached policy").mode, "read_only");
+            }
+        }
+        let database = Database::open(path.clone()).expect("reopen after project deletion");
+        assert_eq!(database.execution_policy(&conversation.id).expect("final policy").mode, "read_only");
         drop(database);
         let _ = std::fs::remove_file(path);
     }

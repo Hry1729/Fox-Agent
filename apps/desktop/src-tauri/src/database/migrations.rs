@@ -7043,8 +7043,15 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
             [now],
         )?;
     }
-    transaction.execute_batch(MIGRATION_77)?;
-    transaction.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (77, ?1)", [now])?;
+    let v77_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 77)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !v77_applied {
+        transaction.execute_batch(MIGRATION_77)?;
+        transaction.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (77, ?1)", [now])?;
+    }
     ensure_column_if_missing(&transaction, "kernel_approvals", "policy_version", "INTEGER")?;
     ensure_column_if_missing(&transaction, "kernel_host_commands", "policy_version", "INTEGER")?;
     transaction.execute_batch("CREATE TRIGGER IF NOT EXISTS execution_approval_version AFTER INSERT ON kernel_approvals BEGIN
@@ -7106,6 +7113,9 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
             [now],
         )?;
     }
+    // Earlier builds replayed M77 on every open after M80 had removed this
+    // project-to-conversation trigger. Remove any trigger they recreated, too.
+    transaction.execute_batch("DROP TRIGGER IF EXISTS execution_policy_project_change;")?;
     let v81_applied = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 81)",
         [],
@@ -14014,11 +14024,25 @@ VALUES ('run-old','conv-old','target-old','v-old','read-old',1);
             assert_eq!(version, crate::database::DATABASE_SCHEMA_VERSION);
         }
 
-        // --- 重开幂等。---
+        // Simulate a database reopened by the old code, which replayed M77 and
+        // recreated this trigger even though M80 was already recorded.
+        Connection::open(&path).expect("open old-reopen fixture").execute_batch(
+            "CREATE TRIGGER execution_policy_project_change AFTER UPDATE OF permission_mode ON projects BEGIN
+               UPDATE kernel_execution_policies SET version=version+1,mode=NEW.permission_mode
+               WHERE conversation_id IN (SELECT id FROM conversations WHERE project_id=NEW.id);
+             END;",
+        ).expect("seed revived old trigger");
+
+        // --- 重开幂等，并清理历史重开产生的旧触发器。---
         {
             let database = crate::database::Database::open(path.clone()).expect("reopen");
             database
                 .with_connection(|c| {
+                    let project_trigger: i64 = c.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='execution_policy_project_change'",
+                        [], |r| r.get(0),
+                    )?;
+                    assert_eq!(project_trigger, 0, "reopening must not replay the old project propagation trigger");
                     let observations: i64 = c
                         .query_row("SELECT COUNT(*) FROM kernel_host_observations", [], |r| r.get(0))
                         .expect("observations");

@@ -879,8 +879,9 @@ mod tests {
                 "SELECT entity_id, started_at, ended_at, duration_ms FROM trace_spans
                  WHERE run_id = ?1 AND operation = 'host_stage_point' ORDER BY started_at",
             )?;
-            statement.query_map([run_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()
+            let rows = statement.query_map([run_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
         }).unwrap();
         assert_eq!(points, vec![
             ("attempt-one:worker_handoff".into(), 1_000, 1_000, 0),
