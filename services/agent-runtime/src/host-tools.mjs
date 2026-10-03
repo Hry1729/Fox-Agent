@@ -721,7 +721,7 @@ export function createHostTools(requestHost) {
     {
       name: 'child_run_start',
       label: 'Start child run',
-      description: 'Start one isolated asynchronous Child Run. Use mode=worker with an optional agentId from child_agent_list.agents for ordinary delegated work. Use mode=expert_consultation with an exact expertId from child_agent_list.experts for a one-off specialist report; this never attaches, replaces, or removes the conversation expert. Prefer project-relative paths and bounded context. Fox enforces depth, concurrency, duration, and permission limits.',
+      description: 'Start one isolated asynchronous Child Run. Use mode=worker with an optional agentId from child_agent_list.agents for ordinary delegated work. Use mode=expert_consultation with an exact expertId from child_agent_list.experts for a one-off specialist report; this never attaches, replaces, or removes the conversation expert. Prefer project-relative paths and bounded context. Fox enforces depth, duration, and permission boundaries without a separate Child Run count limit.',
       parameters: Type.Object({
         mode: Type.Optional(Type.Union([
           Type.Literal('worker'),
