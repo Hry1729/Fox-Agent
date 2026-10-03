@@ -2,10 +2,7 @@ import { UserMessageBubble } from './components/UserMessageBubble'
 import { RunSteeringStrip } from './components/RunSteeringStrip'
 import { ManagedFilesPanel } from './components/ManagedFilesPanel'
 import { RuntimeApprovalPrompt } from './components/RuntimeApprovalPrompt'
-import { ActivityDetailPanel, type ActivityDetailPanelProps } from './components/ActivityDetailPanel'
-import { ExpertPickerDialog } from '@/features/agents/ExpertPickerDialog'
-import { HtmlFilePreview } from './html-file-preview'
-import { KernelReconciliationPanel } from './kernel-reconciliation-panel'
+import type { ActivityDetailPanelProps } from './components/ActivityDetailPanel'
 import { runtimeProcessActivity } from './runtime-process-activity'
 import { runPhaseTiming, runPhaseTitle } from './run-phase'
 import type { ConversationRunIndicator } from './conversation-run-indicator'
@@ -192,7 +189,6 @@ import {
   Attachments
 } from '@/components/ai-elements/attachments'
 import { FileTree, FileTreeFile, FileTreeFolder } from '@/components/ai-elements/file-tree'
-import { KnowledgeResourceExplorer } from '@/features/knowledge/knowledge-resource-explorer'
 import { normalizeKnowledgeSourceLocator } from '@/features/knowledge/knowledge-source-locator'
 import { Suggestion, Suggestions } from '@/components/ai-elements/suggestion'
 import {
@@ -274,6 +270,11 @@ const MetalSendButton = lazy(() => import('@/components/effects/metal-send-butto
 // Expert details open as a dialog inside chat (same dialog the experts page uses),
 // so a look at an expert never navigates away from the conversation.
 const AgentDetailDialog = lazy(() => import('@/features/agents/agent-pages').then((module) => ({ default: module.AgentDetailDialog })))
+const ActivityDetailPanel = lazy(() => import('./components/ActivityDetailPanel').then((module) => ({ default: module.ActivityDetailPanel })))
+const HtmlFilePreview = lazy(() => import('./html-file-preview').then((module) => ({ default: module.HtmlFilePreview })))
+const KernelReconciliationPanel = lazy(() => import('./kernel-reconciliation-panel').then((module) => ({ default: module.KernelReconciliationPanel })))
+const KnowledgeResourceExplorer = lazy(() => import('@/features/knowledge/knowledge-resource-explorer').then((module) => ({ default: module.KnowledgeResourceExplorer })))
+const ExpertPickerDialog = lazy(() => import('@/features/agents/ExpertPickerDialog').then((module) => ({ default: module.ExpertPickerDialog })))
 
 const LOCAL_KNOWLEDGE_WORKSPACE_VIEWS: WorkspaceView[] = [
   'local-knowledge-home',
@@ -1450,11 +1451,11 @@ function Sidebar({
               : contextItems.map(({ view, label, icon: Icon }) => <button key={view} className={`fox-sidebar-command ${activeView === view ? 'is-active' : ''}`} onClick={() => onNavigate(view, activeEntityId ?? undefined)}><Icon size={18} /><span>{label}</span></button>)}
         </div>
         {!collapsed && sidebarMode === 'knowledge' && (
-          <KnowledgeResourceExplorer
+          <Suspense fallback={null}><KnowledgeResourceExplorer
             knowledgeId={activeEntityId}
             selectedDocumentId={activeDocumentId}
             navigate={onNavigate}
-          />
+          /></Suspense>
         )}
       </> : null}
 
@@ -4062,7 +4063,7 @@ function ProjectFilePreviewPane({ conversationId, path, displayPath }: { convers
           ? <div className="fox-panel-loading"><LoaderCircle className="animate-spin" />正在读取文件</div>
           : error
             ? <div className="fox-result-unavailable"><AlertTriangle size={21} /><strong>无法预览文件</strong><span>{error}</span></div>
-            : /\.html?$/i.test(path) && preview?.content ? <HtmlFilePreview key={path} name={displayPath} content={preview.content} /> : <pre>{preview?.content ?? ''}</pre>}
+            : /\.html?$/i.test(path) && preview?.content ? <Suspense fallback={<pre>正在加载预览…</pre>}><HtmlFilePreview key={path} name={displayPath} content={preview.content} /></Suspense> : <pre>{preview?.content ?? ''}</pre>}
         {preview?.truncated && <small className="fox-result-truncated">预览已截断，仅显示文件开头部分。</small>}
       </div>
     </div>
@@ -4179,7 +4180,7 @@ function ArtifactFilePreview({ detail, artifactId, displayPath }: { detail: Conv
         {feedback && <p className="fox-result-feedback" role="status">{feedback}</p>}
         <div className="fox-result-raw">
           {inspection?.preview.available && inspection.preview.content !== null
-            ? inspection.preview.kind === 'html' ? <HtmlFilePreview key={artifact.id} name={artifact.displayName} content={inspection.preview.content} /> : <pre>{inspection.preview.content}</pre>
+            ? inspection.preview.kind === 'html' ? <Suspense fallback={<pre>正在加载预览…</pre>}><HtmlFilePreview key={artifact.id} name={artifact.displayName} content={inspection.preview.content} /></Suspense> : <pre>{inspection.preview.content}</pre>
             : <div className="fox-result-unavailable"><FileText size={21} /><strong>{inspection?.preview.reason ?? (loading ? '正在请求 Host 预览…' : '暂时没有可用预览')}</strong><span>{inspection?.preview.kind === 'html' ? 'HTML 预览暂不可用，可使用顶部“打开方式”查看原文件。' : '可使用顶部“打开方式”查看原文件。'}</span></div>}
           {inspection?.preview.truncated && <small className="fox-result-truncated">预览已截断，仅显示前 512 KB。</small>}
         </div>
@@ -4597,7 +4598,7 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, onO
       </div>
     )
   }
-  if (mode === 'activity') return <ActivityDetailPanel detail={detail} {...activity} />
+  if (mode === 'activity') return <Suspense fallback={<div className="fox-context-empty">正在加载活动详情…</div>}><ActivityDetailPanel detail={detail} {...activity} /></Suspense>
   if (mode === 'browser') {
     return <BrowserPanel detail={detail} />
   }
@@ -5618,7 +5619,7 @@ export function Workbench() {
     if (recoveryConversationId) await desktopConversation.openConversation(recoveryConversationId)
   })
   const recoveryPanel = useMemo(() => recoveryConversationId && recoveryRunId
-    ? <KernelReconciliationPanel key={recoveryRunId} conversationId={recoveryConversationId} runId={recoveryRunId} onResumed={handleRecoveryResumed} />
+    ? <Suspense fallback={null}><KernelReconciliationPanel key={recoveryRunId} conversationId={recoveryConversationId} runId={recoveryRunId} onResumed={handleRecoveryResumed} /></Suspense>
     : null, [recoveryConversationId, recoveryRunId, handleRecoveryResumed])
   const timelineRuntimeContextValue = useMemo<TimelineRuntimeContextValue>(() => ({
     knowledgeBindings: desktopConversation.knowledgeBindings,
@@ -5845,7 +5846,7 @@ export function Workbench() {
         <div className="fox-content-card">
         <div className={`fox-content-surface ${rightPanelMaximized && showConversationRightSidebar && !rightSidebarCollapsed ? 'is-right-maximized' : ''}`}>
         <section className="fox-chat-pane">
-          <ExpertPickerDialog open={expertPickerOpen} onOpenChange={setExpertPickerOpen} agents={agentResource.agents} selectedExpertId={desktopConversation.selectedExpertId} readOnly={expertReadOnly} onSelect={selectExpert} />
+          {expertPickerOpen && <Suspense fallback={null}><ExpertPickerDialog open={expertPickerOpen} onOpenChange={setExpertPickerOpen} agents={agentResource.agents} selectedExpertId={desktopConversation.selectedExpertId} readOnly={expertReadOnly} onSelect={selectExpert} /></Suspense>}
           {expertDetailId && <Suspense fallback={null}><AgentDetailDialog
             agent={(() => { const record = agentResource.agents.find((item) => item.id === expertDetailId); return record ? asAgentCard(record) : null })()}
             open
