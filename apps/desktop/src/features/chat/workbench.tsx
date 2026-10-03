@@ -2,6 +2,7 @@ import { UserMessageBubble } from './components/UserMessageBubble'
 import { RunSteeringStrip } from './components/RunSteeringStrip'
 import { ManagedFilesPanel } from './components/ManagedFilesPanel'
 import { RuntimeApprovalPrompt } from './components/RuntimeApprovalPrompt'
+import { ActivityDetailPanel, type ActivityDetailPanelProps } from './components/ActivityDetailPanel'
 import { ExpertPickerDialog } from '@/features/agents/ExpertPickerDialog'
 import { HtmlFilePreview } from './html-file-preview'
 import { KernelReconciliationPanel } from './kernel-reconciliation-panel'
@@ -109,7 +110,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Sheet, SheetContent } from '@/components/ui/sheet'
-import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   Dialog,
   DialogContent,
@@ -194,15 +195,6 @@ import { FileTree, FileTreeFile, FileTreeFolder } from '@/components/ai-elements
 import { KnowledgeResourceExplorer } from '@/features/knowledge/knowledge-resource-explorer'
 import { normalizeKnowledgeSourceLocator } from '@/features/knowledge/knowledge-source-locator'
 import { Suggestion, Suggestions } from '@/components/ai-elements/suggestion'
-import {
-  Queue,
-  QueueItem,
-  QueueItemActions,
-  QueueItemContent,
-  QueueItemDescription,
-  QueueItemIndicator,
-  QueueList
-} from '@/components/ai-elements/queue'
 import {
   WebPreview,
   WebPreviewBody,
@@ -378,7 +370,7 @@ const licenseAnswerMarkdown = `### 企业内部使用
 | 营利企业内部业务使用 | 需要商业授权 |
 | SaaS、商业产品集成或转售 | 需要商业授权 |`
 
-type RightMode = 'todo' | 'changes' | 'browser' | 'files' | 'knowledge' | 'agents'
+type RightMode = 'activity' | 'changes' | 'browser' | 'files' | 'knowledge' | 'agents'
 interface OpenFileTab {
   id: string
   path: string
@@ -440,7 +432,7 @@ function readStoredRightMode(): RightMode | null {
   if (typeof window === 'undefined') return 'files'
   const value = window.localStorage.getItem(layoutStorage.rightMode)
   if (value === 'results') return 'files'
-  return value === 'todo' || value === 'changes' || value === 'browser' || value === 'files' || value === 'knowledge' || value === 'agents'
+  return value === 'activity' || value === 'changes' || value === 'browser' || value === 'files' || value === 'knowledge' || value === 'agents'
     ? value
     : value === 'closed' ? null : 'files'
 }
@@ -451,7 +443,7 @@ function readStoredRightTabs(): RightMode[] {
     const value: unknown = JSON.parse(window.localStorage.getItem(layoutStorage.rightTabs) ?? 'null')
     if (Array.isArray(value)) {
       return [...new Set(value.filter((item): item is RightMode => (
-        item === 'todo' || item === 'changes' || item === 'browser' || item === 'files' || item === 'knowledge' || item === 'agents'
+        item === 'activity' || item === 'changes' || item === 'browser' || item === 'files' || item === 'knowledge' || item === 'agents'
       )))]
     }
   } catch {
@@ -3213,27 +3205,6 @@ type TimelineRuntimeContextValue = Pick<ComposerRuntimeContextValue,
 const ComposerRuntimeContext = createContext<ComposerRuntimeContextValue>({ knowledgeBindings: [] })
 const TimelineRuntimeContext = createContext<TimelineRuntimeContextValue>({ knowledgeBindings: [] })
 
-const goalStateCopy: Record<ChatState, { label: string; detail: string; time: string }> = {
-  complete: { label: '已完成', detail: '确认 Kun 授权范围与 Fox 开发边界', time: '刚刚' },
-  running: { label: '进行中', detail: '正在整理当前问题的依据与结论', time: '12 分钟' },
-  question: { label: '等待回答', detail: '需要你选择文件处理方式后继续', time: '待你确认' },
-  approval: { label: '等待批准', detail: '需要授权后才能写入本地工作区', time: '待你批准' },
-  error: { label: '连接错误', detail: '知识库服务暂时无响应，可重试当前步骤', time: '需处理' },
-  denied: { label: '已取消', detail: '已取消本次写入，工作区没有变更', time: '刚刚' }
-}
-
-function formatGoalElapsed(start: string, end?: string | null) {
-  const startTime = Date.parse(start)
-  const endTime = end ? Date.parse(end) : Date.now()
-  if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) return ''
-  const seconds = Math.max(0, Math.floor((endTime - startTime) / 1000))
-  if (seconds < 60) return `${seconds}秒`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}分钟`
-  const hours = Math.floor(minutes / 60)
-  return `${hours}小时 ${String(minutes % 60).padStart(2, '0')}分`
-}
-
 function isFileChangeTool(toolName: string) {
   return toolName === 'write_file' || toolName === 'edit_file'
 }
@@ -3292,65 +3263,7 @@ function readStoredSeenChanges() {
   }
 }
 
-function GoalFloater({ chatState, data, onDelete, onRunningChange, onEvidenceClick, onResolveConfirmation, onResolvePlanRevision, onResolveWorkflowGate }: { chatState: ChatState; data?: GoalProgressData | null; onDelete?: (goalId: string) => Promise<boolean> | void; onRunningChange?: (goalId: string, expectedVersion: number, running: boolean) => Promise<boolean> | void; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onResolveConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean> | void; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean> | void; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean> | void }) {
-  const [open, setOpen] = useState(false)
-  const [deleting, setDeleting] = useState(false)
-  const [changingRunning, setChangingRunning] = useState(false)
-  const [, setClock] = useState(0)
-  useEffect(() => {
-    if (!data || !['active', 'blocked'].includes(data.goal.status)) return
-    const timer = window.setInterval(() => setClock((value) => value + 1), 1000)
-    return () => window.clearInterval(timer)
-  }, [data?.goal.id, data?.goal.status])
-  const visualState = data?.goal.status === 'active'
-    ? 'running'
-    : data?.goal.status === 'blocked'
-      ? 'paused'
-      : data?.goal.status === 'completed'
-        ? 'complete'
-        : data?.goal.status === 'proposed'
-          ? 'question'
-          : chatState
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverAnchor asChild>
-        <div className={`fox-goal-floater is-${visualState}`}>
-          <PopoverTrigger asChild>
-            <button type="button" className="fox-goal-trigger" aria-label={open ? '收起当前目标详情' : '打开当前目标详情'}>
-              <span className="fox-goal-icon"><Target size={12} /></span>
-              <strong>{data?.goal.title || goalStateCopy[chatState].label}</strong>
-              {data && <span className="fox-goal-time">{formatGoalElapsed(data.goal.createdAt, ['completed', 'cancelled'].includes(data.goal.status) ? data.goal.completedAt ?? data.goal.updatedAt : null)}</span>}
-            </button>
-          </PopoverTrigger>
-          {data && onRunningChange && ['active', 'blocked'].includes(data.goal.status) && <button type="button" className="fox-goal-running" disabled={changingRunning} aria-label={data.goal.status === 'active' ? '暂停目标并停止当前运行' : '继续目标并唤醒专家'} title={data.goal.status === 'active' ? '暂停目标并停止当前运行' : '继续目标并唤醒专家'} onClick={async () => {
-            setChangingRunning(true)
-            const changed = await onRunningChange(data.goal.id, data.goal.version, data.goal.status !== 'active')
-            setChangingRunning(false)
-            if (!changed) toast.error('目标状态更新失败')
-            else toast.success(data.goal.status === 'active' ? '目标已暂停，正在停止当前运行' : '目标已继续运行')
-          }}>{changingRunning ? <LoaderCircle className="animate-spin" size={11} /> : data.goal.status === 'active' ? <Pause size={11} /> : <Play size={11} />}</button>}
-          <button type="button" className="fox-goal-expand" aria-label={open ? '收起当前目标详情' : '打开当前目标详情'} title={open ? '收起' : '展开'} onClick={() => setOpen((value) => !value)}>{open ? <ChevronUp size={12} /> : <ChevronDown size={12} />}</button>
-          {data && onDelete && <button type="button" className="fox-goal-delete" disabled={deleting} aria-label="删除目标" title="删除目标" onClick={async () => {
-            setDeleting(true)
-            const deleted = await onDelete(data.goal.id)
-            setDeleting(false)
-            if (deleted) {
-              setOpen(false)
-              toast.success('目标已删除')
-            } else {
-              toast.error('目标删除失败，请先停止当前生成后重试')
-            }
-          }}><Trash2 size={11} /></button>}
-        </div>
-      </PopoverAnchor>
-      {data && <PopoverContent align="start" side="top" sideOffset={8} className="fox-goal-popover">
-        <GoalProgress data={data} defaultExpanded onEvidenceClick={onEvidenceClick} onResolveConfirmation={onResolveConfirmation} onResolvePlanRevision={onResolvePlanRevision} onResolveWorkflowGate={onResolveWorkflowGate} />
-      </PopoverContent>}
-    </Popover>
-  )
-}
-
-function Composer({ resetKey, draft, setDraft, chatState, showGoal = false, centered = false, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], usage, knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onDeleteGoal, onGoalRunningChange, onEvidenceClick, onStatusChange, onCancel }: { resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; showGoal?: boolean; centered?: boolean; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; usage?: ConversationUsage; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onDeleteGoal?: (goalId: string) => Promise<boolean>; onGoalRunningChange?: (goalId: string, expectedVersion: number, running: boolean) => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
+function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark = false, runtimeControlled = false, runtimeInitializing = false, projectRoot, projectPermissionMode, activeAgent, activeExpert, expertReadOnly = false, expertToolAvailability, agents = [], modelService, runtimeCapabilities, yuxiModels = [], usage, knowledgeBindings = [], questionRequest, goalProgressData, runtimeApprovals = [], steeringConversationId, steeringActive = false, onProject, onPermissionModeChange, onKnowledge, onAgentChange, onViewExpert, onChangeExpert, onRemoveExpert, onHeightChange, onPromptCommit, onSubmitPrompt, onSubmitQuestion, onApprove, onDeny, onAnswer, onResolveApproval, onResolveWorkModeConfirmation, onResolvePlanRevision, onResolveWorkflowGate, onEvidenceClick, onStatusChange, onCancel }: { resetKey: number; draft: string; setDraft: Dispatch<SetStateAction<string>>; chatState: ChatState; centered?: boolean; dark?: boolean; runtimeControlled?: boolean; runtimeInitializing?: boolean; projectRoot?: string | null; projectPermissionMode?: ProjectRecord['permissionMode'] | null; activeAgent?: AgentRecord | null; activeExpert?: AgentRecord | null; expertReadOnly?: boolean; expertToolAvailability?: ExpertToolAvailability; agents?: AgentRecord[]; modelService?: ModelServiceRecord | null; runtimeCapabilities?: Record<string, unknown>; yuxiModels?: YuxiModelRecord[]; usage?: ConversationUsage; knowledgeBindings?: KnowledgeBindingRecord[]; questionRequest?: RuntimeQuestionRequest | null; goalProgressData?: GoalProgressData | null; runtimeApprovals?: ApprovalRecord[]; steeringConversationId?: string; steeringActive?: boolean; onProject?: () => void; onPermissionModeChange?: (permissionMode: ProjectRecord['permissionMode']) => void | Promise<void>; onKnowledge?: () => void; onAgentChange?: (agentId: string) => void; onViewExpert?: () => void; onChangeExpert?: () => void; onRemoveExpert?: () => void | Promise<void>; onHeightChange?: (height: number) => void; onPromptCommit?: (prompt: string) => void; onSubmitPrompt?: (prompt: string, model?: string, files?: Array<{ filename?: string; mediaType?: string; url?: string }>, runtimeText?: string) => 'complete' | 'question' | 'approval' | 'error' | void | Promise<'complete' | 'question' | 'approval' | 'error' | void>; onSubmitQuestion?: (text: string, answers: Record<string, string | string[]>) => Promise<boolean>; onApprove?: () => void; onDeny?: () => void; onAnswer?: (answer: string) => void; onResolveApproval?: (approvalId: string, decision: ApprovalDecision) => void | Promise<boolean>; onResolveWorkModeConfirmation?: (goalId: string, expectedVersion: number, approved: boolean) => Promise<boolean>; onResolvePlanRevision?: (planRevisionId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onResolveWorkflowGate?: (workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => Promise<boolean>; onEvidenceClick?: (evidence: TaskEvidenceRecord) => void; onStatusChange?: (status: 'ready' | 'streaming') => void; onCancel?: () => boolean | void | Promise<boolean | void> }) {
   const runtimeContext = useContext(ComposerRuntimeContext)
   const resolveRuntimeApproval = onResolveApproval
   const activeQuestionRequest = questionRequest ?? runtimeContext.questionRequest
@@ -3595,7 +3508,8 @@ function Composer({ resetKey, draft, setDraft, chatState, showGoal = false, cent
   const planRevisionPending = Boolean(
     onResolvePlanRevision && goalProgressData?.planRevisions.some((plan) => plan.status === 'proposed'),
   )
-  const decisionPending = demoApprovalPending || demoQuestionPending || pendingApprovals.length > 0 || Boolean(activeQuestionRequest) || goalConfirmationPending || planRevisionPending
+  const workflowGatePending = Boolean(onResolveWorkflowGate && goalProgressData?.expertWorkflow?.gates.some((gate) => gate.status === 'pending'))
+  const decisionPending = demoApprovalPending || demoQuestionPending || pendingApprovals.length > 0 || Boolean(activeQuestionRequest) || goalConfirmationPending || planRevisionPending || workflowGatePending
   const approvalDecisionPending = demoApprovalPending || pendingApprovals.length > 0
 
   // Rendered both as the metal ring's child and as the fallback the Suspense
@@ -3626,7 +3540,6 @@ function Composer({ resetKey, draft, setDraft, chatState, showGoal = false, cent
 
   return (
     <div ref={composerRef} className={`fox-composer-wrap ${centered ? 'is-empty' : ''}`}>
-      {(showGoal || goalProgressData) && <GoalFloater chatState={chatState} data={goalProgressData} onDelete={onDeleteGoal} onRunningChange={onGoalRunningChange} onEvidenceClick={onEvidenceClick} onResolveConfirmation={onResolveWorkModeConfirmation} onResolvePlanRevision={onResolvePlanRevision} onResolveWorkflowGate={onResolveWorkflowGate} />}
       <div ref={promptRef} className={`fox-prompt-shell ${decisionPending ? 'is-decision' : ''} ${approvalDecisionPending ? 'is-approval' : ''}`} onFocusCapture={() => setFocused(true)} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false) }}>
         {decisionPending ? <div className="fox-decision-card">
           {demoApprovalPending && onApprove && onDeny && <ApprovalPrompt onApprove={onApprove} onDeny={onDeny} />}
@@ -3661,7 +3574,7 @@ function Composer({ resetKey, draft, setDraft, chatState, showGoal = false, cent
               <Button disabled={questionSubmitting} onClick={() => void submitQuestionAnswer()}>{questionSubmitting ? '正在提交…' : '确认并继续'}</Button>
             </div>
           </div>}
-          {pendingApprovals.length === 0 && !demoApprovalPending && !demoQuestionPending && !activeQuestionRequest && (goalConfirmationPending || planRevisionPending) && goalProgressData && <div className="fox-goal-decision-content">
+          {pendingApprovals.length === 0 && !demoApprovalPending && !demoQuestionPending && !activeQuestionRequest && (goalConfirmationPending || planRevisionPending || workflowGatePending) && goalProgressData && <div className="fox-goal-decision-content">
             <GoalProgress data={goalProgressData} defaultExpanded={false} onEvidenceClick={onEvidenceClick} onResolveConfirmation={onResolveWorkModeConfirmation} onResolvePlanRevision={onResolvePlanRevision} onResolveWorkflowGate={onResolveWorkflowGate} />
           </div>}
         </div> : <BorderBeam
@@ -4599,7 +4512,7 @@ function ChildAgentConversationPanel({ run, avatarIndex, onBack }: { run: ChildR
   )
 }
 
-function ContextContent({ mode, detail, fileTabs, activeFileTabId, onOpenFile, onOpenEvidence, onOpenChildAgent }: { mode: RightMode; detail: ConversationDetail | null; fileTabs: OpenFileTab[]; activeFileTabId: string | null; onOpenFile: (path: string, artifactId: string | null) => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void }) {
+function ContextContent({ mode, detail, fileTabs, activeFileTabId, activity, onOpenFile, onOpenEvidence, onOpenChildAgent }: { mode: RightMode; detail: ConversationDetail | null; fileTabs: OpenFileTab[]; activeFileTabId: string | null; activity: Omit<ActivityDetailPanelProps, "detail">; onOpenFile: (path: string, artifactId: string | null) => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void }) {
   const conversationId = detail?.conversation.id ?? null
   const [selectedChange, setSelectedChange] = useState('')
   const [fileSearch, setFileSearch] = useState('')
@@ -4684,28 +4597,7 @@ function ContextContent({ mode, detail, fileTabs, activeFileTabId, onOpenFile, o
       </div>
     )
   }
-  if (mode === 'todo') {
-    const workTasks = detail?.tasks ?? []
-    const toolCalls = detail?.toolCalls ?? []
-    if (!workTasks.length && !toolCalls.length) return <div className="fox-empty-panel"><ListTodo size={29} /><strong>当前会话暂无待办</strong><span>创建计划任务或开始调用工具后，执行状态会显示在这里。</span></div>
-    return (
-      <div className="fox-todo-panel">
-        <Queue className="fox-ai-queue">
-          <QueueList className="fox-ai-queue-list">
-            {workTasks.length > 0
-              ? workTasks.map((item) => {
-                  const done = item.status === 'completed' || item.status === 'skipped'
-                  const active = item.status === 'in_progress'
-                  const failed = item.status === 'blocked' || item.status === 'interrupted'
-                  const statusLabel = item.status === 'completed' ? '已完成' : item.status === 'skipped' ? '已跳过' : active ? '进行中' : item.status === 'blocked' ? '已阻塞' : item.status === 'interrupted' ? '已中断' : '待处理'
-                  return <QueueItem key={item.id} className="fox-ai-queue-item"><div className="fox-ai-queue-row"><QueueItemIndicator completed={done} className={active ? 'is-progress' : ''} /><QueueItemContent completed={done}>{item.title}</QueueItemContent><QueueItemActions><Badge variant={failed ? 'destructive' : done ? 'secondary' : 'outline'}>{statusLabel}</Badge></QueueItemActions></div>{(item.detail || item.blockedReason) && <QueueItemDescription completed={done}>{item.detail || item.blockedReason}</QueueItemDescription>}</QueueItem>
-                })
-              : toolCalls.map((item) => { const done = item.status === 'completed'; const active = !done && !['failed', 'denied', 'cancelled'].includes(item.status); return <QueueItem key={item.id} className="fox-ai-queue-item"><div className="fox-ai-queue-row"><QueueItemIndicator completed={done} className={active ? 'is-progress' : ''} /><QueueItemContent completed={done}>{toolActivity({ id: item.id, seq: 0, name: item.toolName, input: item.input, output: item.result, isError: item.status === 'failed', completed: done, awaitingUser: false })}</QueueItemContent><QueueItemActions><Badge variant={item.status === 'failed' ? 'destructive' : done ? 'secondary' : 'outline'}>{item.status === 'failed' ? '失败' : done ? '已完成' : active ? '进行中' : '待处理'}</Badge></QueueItemActions></div><QueueItemDescription completed={done}>{toolTarget(item)}</QueueItemDescription></QueueItem> })}
-          </QueueList>
-        </Queue>
-      </div>
-    )
-  }
+  if (mode === 'activity') return <ActivityDetailPanel detail={detail} {...activity} />
   if (mode === 'browser') {
     return <BrowserPanel detail={detail} />
   }
@@ -4719,12 +4611,12 @@ const rightItems: Array<[RightMode, string, ReactNode]> = [
   ['knowledge', '知识库', <BookOpen size={16} />],
   ['files', '文件', <Folders size={16} />],
   ['changes', '更改', <FileEdit size={16} />],
-  ['todo', '待办', <ListTodo size={16} />],
+  ['activity', '运行详情', <Activity size={16} />],
   ['browser', '网页与网络', <Globe2 size={16} />],
   ['agents', '子 Agent', <Bot size={16} />]
 ]
 
-function RightPanel({ mode, tabs, detail, width, compact = false, maximized = false, fileTabs, activeFileTabId, activeChildAgent, onMode, onCloseMode, onOpenFile, onActivateFile, onCloseFile, onOpenChildAgent, onBackChildAgent, onOpenEvidence, onToggleMaximized, onCollapse }: { mode: RightMode | null; tabs: RightMode[]; detail: ConversationDetail | null; width: number; compact?: boolean; maximized?: boolean; fileTabs: OpenFileTab[]; activeFileTabId: string | null; activeChildAgent: ChildAgentSelection | null; onMode: (mode: RightMode) => void; onCloseMode: (mode: RightMode) => void; onOpenFile: (path: string, artifactId: string | null) => void; onActivateFile: (tabId: string) => void; onCloseFile: (tabId: string) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void; onBackChildAgent: () => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onToggleMaximized: () => void; onCollapse: () => void }) {
+function RightPanel({ mode, tabs, detail, activity, width, compact = false, maximized = false, fileTabs, activeFileTabId, activeChildAgent, onMode, onCloseMode, onOpenFile, onActivateFile, onCloseFile, onOpenChildAgent, onBackChildAgent, onOpenEvidence, onToggleMaximized, onCollapse }: { mode: RightMode | null; tabs: RightMode[]; detail: ConversationDetail | null; activity: Omit<ActivityDetailPanelProps, 'detail'>; width: number; compact?: boolean; maximized?: boolean; fileTabs: OpenFileTab[]; activeFileTabId: string | null; activeChildAgent: ChildAgentSelection | null; onMode: (mode: RightMode) => void; onCloseMode: (mode: RightMode) => void; onOpenFile: (path: string, artifactId: string | null) => void; onActivateFile: (tabId: string) => void; onCloseFile: (tabId: string) => void; onOpenChildAgent: (run: ChildRunRecord, avatarIndex: number) => void; onBackChildAgent: () => void; onOpenEvidence?: (evidence: TaskEvidenceRecord) => void; onToggleMaximized: () => void; onCollapse: () => void }) {
   const activeChildAgentRun = activeChildAgent
     ? detail?.childRuns.find((run) => run.childRunId === activeChildAgent.run.childRunId) ?? activeChildAgent.run
     : null
@@ -4732,7 +4624,7 @@ function RightPanel({ mode, tabs, detail, width, compact = false, maximized = fa
     knowledge: detail?.knowledgeBindings.filter((binding) => binding.enabled !== false).length ?? 0,
     files: detail?.artifacts.length ?? 0,
     changes: detail?.toolCalls.filter((item) => isChangeOrCommandTool(item.toolName)).length ?? 0,
-    todo: detail?.tasks.length ?? 0,
+    activity: detail?.toolCalls.length ?? 0,
     browser: detail?.toolCalls.filter(isWebToolCall).length ?? 0,
     agents: detail?.childRuns.length ?? 0,
   }
@@ -4771,7 +4663,7 @@ function RightPanel({ mode, tabs, detail, width, compact = false, maximized = fa
       {mode === 'agents' && activeChildAgent && activeChildAgentRun
         ? <ChildAgentConversationPanel key={activeChildAgentRun.childRunId} run={activeChildAgentRun} avatarIndex={activeChildAgent.avatarIndex} onBack={onBackChildAgent} />
         : mode
-        ? <ContextContent mode={mode} detail={detail} fileTabs={fileTabs} activeFileTabId={activeFileTabId} onOpenFile={onOpenFile} onOpenEvidence={onOpenEvidence} onOpenChildAgent={onOpenChildAgent} />
+        ? <ContextContent mode={mode} detail={detail} activity={activity} fileTabs={fileTabs} activeFileTabId={activeFileTabId} onOpenFile={onOpenFile} onOpenEvidence={onOpenEvidence} onOpenChildAgent={onOpenChildAgent} />
         : <div className="fox-context-home"><nav aria-label="侧边栏功能">{rightItems.map(([id, label, icon]) => {
             const count = homeItemCounts[id]
             return <button type="button" key={id} onClick={() => onMode(id)}>{icon}<span>{label}</span>{count > 0 && <small>{count}</small>}</button>
@@ -4821,11 +4713,11 @@ function ConversationSummaryPopover({ detail, modelName, usage, contextWindow, o
   ].filter(Boolean).join(' · ')
   const summaryItems: Array<{ icon: ReactNode; label: string; count: number; detail: string; mode: RightMode }> = [
     { icon: <FileText size={15} />, label: '文件输出', count: artifacts.length, detail: artifacts.slice(0, 2).map((item) => item.displayName).join('、'), mode: 'files' },
-    { icon: <ListTodo size={15} />, label: '任务计划', count: tasks.length, detail: tasks.slice(0, 2).map((item) => item.title).join('、'), mode: 'todo' },
-    { icon: <Terminal size={15} />, label: '后台进程', count: activeProcesses.length, detail: activeProcesses.slice(0, 2).map((item) => item.toolName).join('、'), mode: 'todo' },
+    { icon: <ListTodo size={15} />, label: '任务计划', count: tasks.length, detail: tasks.slice(0, 2).map((item) => item.title).join('、'), mode: 'activity' },
+    { icon: <Terminal size={15} />, label: '后台进程', count: activeProcesses.length, detail: activeProcesses.slice(0, 2).map((item) => item.toolName).join('、'), mode: 'activity' },
     { icon: <Bot size={15} />, label: '子专家', count: subAgents.length, detail: subAgents.slice(-2).map((item) => `${item.workerAgentName} · ${item.status}`).join('、'), mode: 'agents' },
     { icon: <BookOpen size={15} />, label: '来源', count: sources.length, detail: sources.slice(0, 2).map((item) => item.title).join('、'), mode: 'knowledge' },
-    { icon: <Wrench size={15} />, label: '运行诊断', count: diagnostics.toolCount, detail: diagnosticDetail, mode: 'todo' },
+    { icon: <Wrench size={15} />, label: '运行诊断', count: diagnostics.toolCount, detail: diagnosticDetail, mode: 'activity' },
   ]
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -4942,6 +4834,7 @@ export function Workbench() {
   const [openFileTabs, setOpenFileTabs] = useState<OpenFileTab[]>([])
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null)
   const [activeChildAgent, setActiveChildAgent] = useState<ChildAgentSelection | null>(null)
+  const [focusedEvidence, setFocusedEvidence] = useState<TaskEvidenceRecord | null>(null)
   const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(true)
   const [rightPanelMaximized, setRightPanelMaximized] = useState(false)
   const [rightWidth, setRightWidth] = useState(() => childAgentVisualQaPanelWidth() ?? readStoredNumber(layoutStorage.rightWidth, 360, 280, 760))
@@ -5040,6 +4933,7 @@ export function Workbench() {
     setOpenFileTabs([])
     setActiveFileTabId(null)
     setActiveChildAgent(null)
+    setFocusedEvidence(null)
     if (rightMode === 'files' && !openRightTabs.includes('files')) {
       setRightMode(openRightTabs.at(-1) ?? null)
     }
@@ -5246,7 +5140,8 @@ export function Workbench() {
       }
     }
     if (evidence.refKind === 'tool_call' || evidence.refKind === 'run_event') {
-      selectRightMode(evidence.evidenceType === 'file_diff' ? 'changes' : 'todo')
+      setFocusedEvidence(evidence)
+      selectRightMode(evidence.evidenceType === 'file_diff' ? 'changes' : 'activity')
       return
     }
     toast.info('该证据的原始对象已不可用')
@@ -5869,9 +5764,17 @@ export function Workbench() {
   const handleComposerResolveApproval = useStableCallback((approvalId: string, decision: ApprovalDecision) => desktopConversation.resolveApproval(approvalId, decision))
   const handleComposerResolveWorkModeConfirmation = useStableCallback((goalId: string, expectedVersion: number, approved: boolean) => desktopConversation.resolveWorkModeConfirmation(goalId, expectedVersion, approved))
   const handleComposerResolvePlanRevision = useStableCallback((planRevisionId: string, decision: 'approved' | 'rejected') => desktopConversation.resolvePlanRevision(planRevisionId, decision))
+  const handleComposerResolveWorkflowGate = useStableCallback((workflowRunId: string, stageId: string, decision: 'approved' | 'rejected') => desktopConversation.resolveExpertWorkflowGate(workflowRunId, stageId, decision))
   const handleComposerDeleteGoal = useStableCallback((goalId: string) => desktopConversation.deleteGoal(goalId))
   const handleComposerGoalRunningChange = useStableCallback((goalId: string, expectedVersion: number, running: boolean) => desktopConversation.setGoalRunning(goalId, expectedVersion, running))
   const handleComposerEvidenceClick = useStableCallback((evidence: TaskEvidenceRecord) => openEvidence(evidence))
+  const activityPanelProps: Omit<ActivityDetailPanelProps, 'detail'> = {
+    goal: goalProgressData,
+    focusedEvidence,
+    onEvidenceClick: handleComposerEvidenceClick,
+    onDeleteGoal: handleComposerDeleteGoal,
+    onGoalRunningChange: handleComposerGoalRunningChange,
+  }
   const handleComposerStatusChange = useStableCallback((status: 'ready' | 'streaming') => {
     if (!desktopConversation.enabled && status === 'ready' && chatState === 'running') setChatState('complete')
   })
@@ -5953,17 +5856,17 @@ export function Workbench() {
           <TimelineRuntimeContext.Provider value={timelineRuntimeContextValue}>
           <ComposerRuntimeContext.Provider value={composerRuntimeContextValue}>
           {workspacePage ?? <>{!timelineEmpty && <ChatTopbar rightSidebarCollapsed={rightSidebarCollapsed} onRightSidebarExpand={openRightSidebarHome} onOpenRightMode={selectRightMode} conversation={desktopConversation.detail?.conversation} detail={desktopConversation.detail} modelName={timelineRunModel || modelService.service?.modelId || (activeAgent?.defaultModel !== 'configured-model' ? activeAgent?.defaultModel : undefined) || '未配置模型'} usage={conversationUsage} contextWindow={modelService.service?.contextWindow ?? 0} state={chatState} onPinConversation={(conversation) => void pinManagedConversation(conversation)} onRenameConversation={(conversation) => setConversationDialog({ conversation, mode: 'rename' })} onArchiveConversation={(conversation) => void archiveManagedConversation(conversation)} />}
-<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRuns={desktopConversation.enabled ? desktopConversation.detail?.runs : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} /></Profiler><Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? desktopConversation.detail?.approvals ?? EMPTY_RUNTIME_APPROVALS : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopRunning} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onDeleteGoal={handleComposerDeleteGoal} onGoalRunningChange={handleComposerGoalRunningChange} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
+<div className={`fox-chat-stage ${timelineEmpty ? 'is-empty' : ''}`}><Profiler id="conversation-timeline" onRender={recordRegionRender}><MemoizedTimeline hasEarlierMessages={desktopConversation.detail?.hasEarlierMessages} loadingEarlierMessages={desktopConversation.loadingEarlierMessages} onLoadEarlierMessages={handleTimelineLoadEarlierMessages} empty={timelineEmpty} state={chatState} prompt={visiblePrompt} openingSuggestions={activeAgent?.openingSuggestions} runtimeMessages={desktopConversation.enabled ? desktopConversation.detail?.messages ?? EMPTY_CONVERSATION_MESSAGES : undefined} runtimeAttachments={desktopConversation.enabled ? desktopConversation.detail?.attachments ?? EMPTY_CONVERSATION_ATTACHMENTS : undefined} runtimeArtifacts={desktopConversation.enabled ? desktopConversation.detail?.artifacts ?? EMPTY_RUNTIME_ARTIFACTS : undefined} expertBindings={desktopConversation.expertBindings} agents={agentResource.agents} pendingMessage={pendingUserMessage} runtimeEvents={desktopConversation.enabled ? desktopConversation.detail?.runtimeEvents : undefined} runtimeRuns={desktopConversation.enabled ? desktopConversation.detail?.runs : undefined} runtimeRunId={desktopConversation.detail?.lastRun?.id} runtimeRunning={desktopRunning} runtimeReply={visibleReply} runtimeError={desktopConversation.error} runtimeErrorDetails={desktopConversation.errorDetails} planRevisions={goalProgressData?.planRevisions} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onRetry={handleTimelineRetry} onRerun={handleTimelineRerun} onAnswer={handleTimelineAnswer} onStart={handleTimelineStart} onOpenArtifact={handleTimelineOpenArtifact} onViewExpert={handleTimelineViewExpert} onOpenFileInSidebar={handleTimelineOpenToolFile} onRevealFileInExplorer={handleTimelineRevealToolFile} /></Profiler><Profiler id="conversation-composer" onRender={recordRegionRender}><MemoizedComposer resetKey={composerResetKey} draft={composerDraft} setDraft={setComposerDraft} chatState={chatState} centered={timelineEmpty} dark={dark} runtimeControlled={desktopConversation.enabled} runtimeInitializing={desktopConversation.enabled && !desktopConversation.ready && !desktopConversation.error} projectRoot={desktopConversation.detail?.conversation.projectRoot ?? desktopConversation.draftProjectRoot} projectPermissionMode={desktopConversation.detail?.conversation.permissionMode ?? activeProject?.permissionMode ?? desktopConversation.draftPermissionMode} activeAgent={activeAgent} activeExpert={activeExpert} expertReadOnly={expertReadOnly} expertToolAvailability={expertToolAvailability} agents={agentResource.agents} modelService={modelService.service} runtimeCapabilities={desktopConversation.runtimeStatus?.capabilities} yuxiModels={yuxiModels.models} usage={conversationUsage} goalProgressData={goalProgressData} runtimeApprovals={desktopConversation.enabled ? desktopConversation.detail?.approvals ?? EMPTY_RUNTIME_APPROVALS : EMPTY_RUNTIME_APPROVALS} steeringConversationId={desktopConversation.enabled ? desktopConversation.detail?.conversation.id : undefined} steeringActive={desktopConversation.enabled && desktopRunning} onProject={handleComposerProject} onPermissionModeChange={handleComposerPermissionModeChange} onAgentChange={handleComposerAgentChange} onViewExpert={handleComposerViewExpert} onChangeExpert={handleComposerChangeExpert} onRemoveExpert={handleComposerRemoveExpert} onHeightChange={setComposerHeight} onPromptCommit={handleComposerPromptCommit} onSubmitPrompt={handleComposerSubmitPrompt} onApprove={handleTimelineApprove} onDeny={handleTimelineDeny} onAnswer={handleTimelineAnswer} onResolveApproval={handleComposerResolveApproval} onResolveWorkModeConfirmation={handleComposerResolveWorkModeConfirmation} onResolvePlanRevision={handleComposerResolvePlanRevision} onResolveWorkflowGate={handleComposerResolveWorkflowGate} onEvidenceClick={handleComposerEvidenceClick} onStatusChange={handleComposerStatusChange} onCancel={desktopConversation.enabled ? handleComposerCancel : undefined} /></Profiler></div></>}
           </ComposerRuntimeContext.Provider>
           </TimelineRuntimeContext.Provider>
         </section>
-        {showConversationRightSidebar && !rightSidebarCollapsed && !compactLayout && <>{!rightPanelMaximized && <ResizeDivider onResize={(delta) => setRightWidth((value) => Math.min(760, Math.max(280, value + delta)))} />}<RightPanel mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} activeChildAgent={activeChildAgent} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenChildAgent={openChildAgent} onBackChildAgent={() => setActiveChildAgent(null)} onOpenEvidence={openEvidence} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} /></>}
+        {showConversationRightSidebar && !rightSidebarCollapsed && !compactLayout && <>{!rightPanelMaximized && <ResizeDivider onResize={(delta) => setRightWidth((value) => Math.min(760, Math.max(280, value + delta)))} />}<RightPanel mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} activity={activityPanelProps} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} activeChildAgent={activeChildAgent} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenChildAgent={openChildAgent} onBackChildAgent={() => setActiveChildAgent(null)} onOpenEvidence={openEvidence} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} /></>}
         </div>
         </div>
       </div>
       <Sheet open={showConversationRightSidebar && !rightSidebarCollapsed && compactLayout && compactRightOpen} onOpenChange={(open) => { if (open) setCompactRightOpen(true); else collapseRightSidebar() }}>
         <SheetContent side="right" showCloseButton={false} className={`fox-compact-context-sheet ${rightPanelMaximized ? 'is-maximized' : ''}`}>
-          <RightPanel compact mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} activeChildAgent={activeChildAgent} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenChildAgent={openChildAgent} onBackChildAgent={() => setActiveChildAgent(null)} onOpenEvidence={openEvidence} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} />
+          <RightPanel compact mode={rightMode} tabs={openRightTabs} detail={desktopConversation.detail} activity={activityPanelProps} width={rightWidth} maximized={rightPanelMaximized} fileTabs={openFileTabs} activeFileTabId={activeFileTabId} activeChildAgent={activeChildAgent} onMode={selectRightMode} onCloseMode={closeRightMode} onOpenFile={openFile} onActivateFile={activateFile} onCloseFile={closeFile} onOpenChildAgent={openChildAgent} onBackChildAgent={() => setActiveChildAgent(null)} onOpenEvidence={openEvidence} onToggleMaximized={() => setRightPanelMaximized((value) => !value)} onCollapse={collapseRightSidebar} />
         </SheetContent>
       </Sheet>
       <KnowledgeBindingDialog open={knowledgeDialogOpen} remoteItems={knowledge.items} localItems={localKnowledgeBases} localLoading={localKnowledgeLoading} remoteLoading={knowledge.loading} remoteError={knowledge.error} onRetry={refreshKnowledgeChoices} references={desktopConversation.knowledgeReferences} bindings={desktopConversation.knowledgeBindings} busy={knowledgeDialogBusy} error={knowledgeDialogError} onOpenChange={setKnowledgeDialogOpen} onConfirm={(references, names) => void saveKnowledgeBindings(references, names)} />
