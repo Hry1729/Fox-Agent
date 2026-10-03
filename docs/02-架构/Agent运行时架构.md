@@ -81,7 +81,7 @@ Pi 是首个本地 Runtime Adapter，不是 Fox 对话架构本身。未来增�
 - Runtime stderr 尾部、最后错误和恢复次数；
 - Runtime 名称、版本和 Capability Manifest。
 
-Primary Run 继续使用单 Worker FIFO，保证普通会话的既有顺序语义。A5 在这一主队列之外增加 Host-owned Child Runtime 池：每个 Child Run 使用独立 RuntimeHost、Sidecar 和 Session，同一 root 最多并发 3 个、深度 1。它不是复用一个全局多 Agent 进程，也不会让普通会话绕过 FIFO。父子身份、运行时长、权限交集、审批、取消和结果聚合见[子 Agent 与 Child Run 架构](子Agent与ChildRun架构.md)。
+Legacy Primary Run 保留单 Worker FIFO；Kernel 不对独立会话、模型请求或 Child Run 设置同时运行数量上限。每个 Child Run 使用独立 RuntimeHost、Sidecar 和 Session，深度仍为 1。授权、取消、文件锁和每次运行的预算继续独立生效。父子身份、运行时长、权限交集、审批、取消和结果聚合见[子 Agent 与 Child Run 架构](子Agent与ChildRun架构.md)。
 
 ### Sidecar 启动
 
@@ -504,7 +504,7 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml runtime_host
 
 ## 已知限制
 
-- 普通 Primary Run 仍按单 Worker FIFO 调度；只有显式 Child Run 使用最多 3 个隔离进程的有限并发。
+- Legacy Primary Run 仍按单 Worker FIFO 调度；Kernel 不设独立会话及 Child Run 的数量闸门。设备资源不足或模型服务限流会按原有错误和有界重试路径呈现。
 - 混合文本 reasoning 的拆分存在模型特异性，需要持续回归。
 - `openai-responses` 尚未作为完整 UI/Host 配置能力发布。
 - Planner 仍是单轮建议器；持久化 PlanRevision、独立 Reviewer 与 Acceptance 由 Host-owned A1 工作闭环承接。

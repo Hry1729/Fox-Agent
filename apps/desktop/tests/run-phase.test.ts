@@ -14,7 +14,7 @@ describe('run phase from durable events', () => {
     // 585 seconds waiting for an execution slot, as observed in the production runs.
     expect(timing.queueMs).toBe(585_000)
     expect(timing.executionMs).toBeNull()
-    expect(runPhaseTitle(timing)).toBe('排队等待执行 · 已排队 9分45秒')
+    expect(runPhaseTitle(timing)).toBe('准备执行 · 已等待 9分45秒')
   })
 
   test('an unknown enqueue time stays unknown instead of being estimated', () => {
@@ -22,7 +22,7 @@ describe('run phase from durable events', () => {
     expect(timing.phase).toBe('queued')
     expect(timing.queueMs).toBeNull()
     expect(timing.executionMs).toBeNull()
-    expect(runPhaseTitle(timing)).toBe('排队等待执行')
+    expect(runPhaseTitle(timing)).toBe('准备执行')
   })
 
   test('after run.started the phases are distinguished and the waits are split', () => {

@@ -963,7 +963,7 @@ function WindowMenu({ label, children }: { label: string; children: ReactNode })
 
 const CONVERSATION_RUN_LABELS: Record<ConversationRunIndicator, string> = {
   running: '正在运行',
-  queued: '排队中',
+  queued: '准备中',
   approval: '等待审批',
 }
 

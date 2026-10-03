@@ -32,7 +32,7 @@ export type RunPhase =
   | 'settled'
 
 export const RUN_PHASE_LABELS: Record<RunPhase, string> = {
-  queued: '排队等待执行',
+  queued: '准备执行',
   preparing: '正在准备上下文',
   awaiting_response: '等待模型响应',
   streaming: '正在生成',
@@ -132,14 +132,13 @@ export function runPhaseTiming(
 }
 
 /**
- * Header text for a live Run. Queue wait and execution time are reported
- * separately, because they answer different questions: how long the request waited
- * for its turn, and how long the model has been working.
+ * Header text for a live Run. Time before dispatch and execution time are
+ * reported separately without attributing pre-dispatch delay to a capacity gate.
  */
 export function runPhaseTitle(timing: RunPhaseTiming): string {
   const label = RUN_PHASE_LABELS[timing.phase]
   if (timing.phase === 'queued') {
-    return timing.queueMs === null ? label : `${label} · 已排队 ${formatRunElapsed(timing.queueMs)}`
+    return timing.queueMs === null ? label : `${label} · 已等待 ${formatRunElapsed(timing.queueMs)}`
   }
   if (timing.phase === 'awaiting_response' || timing.phase === 'preparing') {
     return timing.executionMs === null ? label : `${label} · 已等待 ${formatRunElapsed(timing.executionMs)}`

@@ -3,7 +3,7 @@ use std::time::Duration;
 use tauri::Manager;
 
 #[test]
-fn independent_conversations_reach_two_model_endpoints_before_either_finishes() {
+fn independent_conversations_reach_three_model_endpoints_before_either_finishes() {
     let (first_arrived_tx, first_arrived_rx) = std::sync::mpsc::channel();
     let (first_release_tx, first_release_rx) = std::sync::mpsc::channel();
     let (first_address, first_server) = start_http_model_fixture_with_response_hook(
@@ -85,10 +85,9 @@ fn independent_conversations_reach_two_model_endpoints_before_either_finishes() 
     let mut context = tauri::generate_context!();
     for window in &mut context.config_mut().app.windows { window.create = false; }
     let app = tauri::Builder::default().any_thread().build(context).unwrap();
-    let mut host = crate::runtime_host::RuntimeHost::new(app.handle().clone(), db.clone(),
+    let host = crate::runtime_host::RuntimeHost::new(app.handle().clone(), db.clone(),
         root.clone(), root.join("attachments"), root.join("skills"),
         crate::yuxi::YuxiClient::new().unwrap());
-    host.root_run_admission = crate::runtime_host::run_admission::Gate::new(2);
     let first_binding = db.run_control_binding(&first).unwrap().unwrap();
     let host_a = host.clone();
     let root_a = root.clone();
@@ -102,11 +101,9 @@ fn independent_conversations_reach_two_model_endpoints_before_either_finishes() 
     second_arrived_rx.recv_timeout(Duration::from_secs(20))
         .expect("second model request was blocked by the first conversation");
     host.start_run_detached(third_started, "Third conversation".into(), vec![]);
-    assert!(third_arrived_rx.recv_timeout(Duration::from_millis(300)).is_err(),
-        "third conversation exceeded the configured two-run capacity");
-    second_release_tx.send(()).unwrap();
     third_arrived_rx.recv_timeout(Duration::from_secs(20))
-        .expect("third conversation did not enter after a slot was released");
+        .expect("third conversation was blocked by a run or model-request count gate");
+    second_release_tx.send(()).unwrap();
     first_release_tx.send(()).unwrap();
     first_task.join().unwrap().unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(20);

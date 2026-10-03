@@ -9,18 +9,12 @@ use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{mpsc::{self, Receiver}, Arc, OnceLock},
+    sync::mpsc::{self, Receiver},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 const MAX_FRAME: usize = 1_048_576;
-
-fn model_request_gate() -> &'static Arc<super::run_admission::Gate> {
-    static GATE: OnceLock<Arc<super::run_admission::Gate>> = OnceLock::new();
-    GATE.get_or_init(|| super::run_admission::Gate::new(
-        super::run_admission::configured_limit("FOX_KERNEL_MODEL_REQUEST_CAPACITY", 2)))
-}
 
 /// A bounded, single-line excerpt of a worker payload for stderr diagnostics.
 ///
@@ -731,27 +725,8 @@ fn call_model(
     }
     let requested_budget = binding.budgets.limit_operation_ms(binding.budgets.model_request_ms, 0).min(remaining_budget_ms);
     if requested_budget <= 0 { return Err("Kernel worker has no remaining execution budget".into()); }
-    // This quota is independent of the run quota. Its FIFO wait is bounded by
-    // the run's original request budget and responds to cancellation.
-    let wait_started = Instant::now();
-    let request_id = uuid::Uuid::new_v4().to_string();
-    if let Some(database) = database {
-        let _ = database.record_host_stage_point(&binding.run_id, &request_id,
-            "model_slot_queued", crate::database::now_ms());
-    }
-    let permit = model_request_gate().acquire(&request_id, ||
-        token.check().is_err() || wait_started.elapsed().as_millis() >= requested_budget as u128,
-        "Kernel model request capacity wait exceeded its budget");
-    if permit.is_err() { token.check()?; }
-    let _request_permit = permit?;
     token.check()?;
-    if let Some(database) = database {
-        let _ = database.record_host_stage_point(&binding.run_id, &request_id,
-            "model_slot_granted", crate::database::now_ms());
-    }
-    let budget = requested_budget.saturating_sub(wait_started.elapsed().as_millis() as i64);
-    if budget <= 0 { return Err("Kernel worker has no remaining execution budget".into()); }
-    let deadline = Instant::now() + Duration::from_millis(budget.try_into().map_err(|_| "invalid model budget")?);
+    let deadline = Instant::now() + Duration::from_millis(requested_budget.try_into().map_err(|_| "invalid model budget")?);
     let session_id = format!("kernel-once-{}", uuid::Uuid::new_v4());
     let request = |kind: &str, payload: Value| {
         json!({
@@ -799,7 +774,7 @@ fn call_model(
         host_trace::record(
             &binding.run_id,
             format!(
-                "host:worker_ready kind={kind} ready_ms={} budget_ms={budget}",
+                "host:worker_ready kind={kind} ready_ms={} budget_ms={requested_budget}",
                 spawn_started.elapsed().as_millis()
             ),
         );

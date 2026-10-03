@@ -499,12 +499,12 @@ fn run_parked_stop(live: bool, expire: bool) {
 
 /// A second real Run is submitted through the public detached queue while the
 /// first Run's automatic wake owns both its OS lock and wake-inflight marker.
-/// It must actually reach its separate local Provider after that owner exits.
+/// A different conversation must reach its Provider before that owner exits.
 #[test]
-fn real_host_queued_run_dispatches_after_auto_wake_releases_ownership() {
+fn real_host_independent_run_dispatches_during_auto_wake() {
     if std::env::var_os("FOX_TEST_AUTO_WAKE_QUEUE_CHILD").is_none() {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("real_host_queued_run_dispatches_after_auto_wake_releases_ownership")
+            .arg("real_host_independent_run_dispatches_during_auto_wake")
             .arg("--test-threads=1")
             .env("FOX_TEST_AUTO_WAKE_QUEUE_CHILD", "1")
             .stdout(std::process::Stdio::piped())
@@ -515,7 +515,7 @@ fn real_host_queued_run_dispatches_after_auto_wake_releases_ownership() {
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!("automatic wake queue test exceeded 55 seconds");
+                panic!("automatic wake independent-run test exceeded 55 seconds");
             }
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -563,7 +563,7 @@ fn real_host_queued_run_dispatches_after_auto_wake_releases_ownership() {
     // A distinct conversation satisfies the real create_run active-run guard.
     let conversation = db.create_conversation(db.default_agent_id(), None,
         Some(root.to_str().unwrap()), Some("read_only")).unwrap();
-    let started = db.create_run(&conversation.id, "Queued Run local Provider fixture", None).unwrap();
+    let started = db.create_run(&conversation.id, "Independent Run local Provider fixture", None).unwrap();
     let second = started.run.id.clone();
     let mut second_binding = db.run_control_binding(&first).unwrap().unwrap();
     second_binding.run_id = second.clone();
@@ -639,16 +639,10 @@ fn real_host_queued_run_dispatches_after_auto_wake_releases_ownership() {
     }
     assert!(matches!(crate::runtime_host::kernel_host::acquire(&root, &first),
         Err(error) if error == crate::runtime_host::kernel_run_lock::KERNEL_RUN_ALREADY_OWNED));
-    host.start_run_detached(started, "Queued Run local Provider fixture".into(), vec![]);
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(matches!(second_request_rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
-        "the second Provider was called while the first wake owned its admission gate");
-    assert_eq!(db.kernel_host_run_state(&second).unwrap().as_deref(), Some("created"));
-    assert!(host.state.lock().unwrap().queued_runs.iter().any(|queued| queued.started.run.id == second));
-    wake_release_tx.send(()).unwrap();
-
+    host.start_run_detached(started, "Independent Run local Provider fixture".into(), vec![]);
     second_request_rx.recv_timeout(Duration::from_secs(20))
-        .expect("queued Run never reached its local Provider after wake ownership released");
+        .expect("independent Provider was blocked by another Run's wake");
+    wake_release_tx.send(()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let first_state = db.kernel_host_run_state(&first).unwrap();
@@ -656,7 +650,7 @@ fn real_host_queued_run_dispatches_after_auto_wake_releases_ownership() {
         if first_state.as_deref() == Some("completed")
             && second_state.as_deref() == Some("completed") { break; }
         assert!(Instant::now() < deadline,
-            "queued Run did not finish after wake: first={first_state:?} second={second_state:?}");
+            "independent Run did not finish after wake: first={first_state:?} second={second_state:?}");
         std::thread::sleep(Duration::from_millis(20));
     }
     crate::runtime_host::attachment_compute::jobs::test_hooks::set_at_settle(None);

@@ -1330,10 +1330,8 @@ impl RuntimeHost {
             digital_scheduler_started: Arc::new(AtomicBool::new(false)),
             digital_scheduler_stop: Arc::new(AtomicBool::new(false)),
             active_tool_handlers: Arc::new(AtomicUsize::new(0)),
-            root_run_admission: run_admission::Gate::new(
-                run_admission::configured_limit("FOX_KERNEL_RUN_CAPACITY", 1)),
-            child_run_admission: run_admission::Gate::new(
-                run_admission::configured_limit("FOX_KERNEL_CHILD_RUN_CAPACITY", 2)),
+            root_run_admission: run_admission::Gate::new(),
+            child_run_admission: run_admission::Gate::new(),
         };
         host.reconcile_continuation_proposals();
         if let Err(error) = database.kernel_jobs_reconcile_orphans() {
@@ -1922,6 +1920,7 @@ impl RuntimeHost {
     }
 
     fn dispatch_next_queued_run(&self) {
+        loop {
         let queued = {
             let Ok(mut state) = self.state.lock() else {
                 return;
@@ -1929,18 +1928,13 @@ impl RuntimeHost {
             if state.shutting_down {
                 return;
             }
-            let mut occupied = state.kernel_active_runs.clone();
-            occupied.extend(state.kernel_wake_inflight.iter().cloned());
-            occupied.extend(state.dispatching_runs.iter()
-                .filter(|(_, (_, kernel))| *kernel).map(|(run_id, _)| run_id.clone()));
-            let kernel_available = occupied.len() < self.root_run_admission.limit();
             let legacy_available = !state.dispatching_runs.values().any(|(_, kernel)| !kernel)
                 && state.worker.as_ref().and_then(|worker| worker.active_run_id.as_ref()).is_none()
                 && !matches!(state.state.as_str(), "starting" | "stopping");
-            // Pick the oldest eligible item. A blocked Legacy item cannot
-            // prevent a later Kernel conversation from using a free lane.
+            // Kernel conversations dispatch independently. Preserve the
+            // single Legacy worker boundary without delaying Kernel work.
             let Some(index) = state.queued_runs.iter().position(|item|
-                if item.kernel { kernel_available } else { legacy_available }) else {
+                if item.kernel { true } else { legacy_available }) else {
                 return;
             };
             let Some(queued) = state.queued_runs.remove(index) else { return; };
@@ -1982,9 +1976,9 @@ impl RuntimeHost {
             }
             runtime_host.dispatch_next_queued_run();
         }));
-        // Fill another free Kernel slot without waiting for the first run to
-        // finish. The dispatch marker reserves its slot before this recursion.
-        self.dispatch_next_queued_run();
+        // Drain queued Kernel work iteratively; no capacity wait or recursive
+        // dispatch stack remains. Legacy still waits for its one worker.
+        }
     }
 
     fn cancel_queued_run(&self, run_id: &str) -> Result<bool, String> {

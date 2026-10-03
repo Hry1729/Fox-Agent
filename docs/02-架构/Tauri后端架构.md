@@ -47,7 +47,9 @@ flowchart TD
 ## 并发与锁
 
 - SQLite 使用 WAL、5 秒 busy timeout，并通过 `Database` 封装访问。
-- Runtime Host 管理 Worker 与待运行队列，单 Run 的事件按 `seq` 去重。
+- Kernel 的不同会话及模型请求没有应用自设的同时运行数量上限；`FOX_KERNEL_RUN_CAPACITY`、`FOX_KERNEL_CHILD_RUN_CAPACITY`、`FOX_KERNEL_MODEL_REQUEST_CAPACITY` 不再生效。Host 仍按 Run 身份防重复启动，单会话状态和事件按 `seq` 去重。Legacy 保留单 Worker 顺序执行。
+- 工具执行与同一文件写入仍遵守各自的锁、权限、审批及版本检查；这类等待不能显示成并发容量排队。单次运行的时长、重试和防重复工具调用边界不因去限额而放宽。
+- 本机资源不足或模型服务限流时，运行按既有错误与有界重试路径结束或报告；Host 不增加隐藏容量队列，也不无限重试。
 - 扩展连接池按 source 串行请求，复用 stdio 进程或 HTTP MCP Session；配置变化使旧连接失效。
 - 知识预览以 `cache_key` 获取异步互斥锁，避免同一原件重复下载。
 - 下载与预览使用取消注册表；完成路径必须注销操作。
