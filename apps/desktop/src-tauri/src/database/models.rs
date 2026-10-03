@@ -1447,6 +1447,20 @@ pub struct ArtifactRecord {
     pub status: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Read projection over the Host's version ledger and delivery checklist.
+    /// Historical rows without a matching version remain unverified.
+    pub delivery: Option<ArtifactDeliveryView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactDeliveryView {
+    pub version_id: Option<String>,
+    pub version_no: Option<i64>,
+    pub source_tool_call_id: Option<String>,
+    pub purpose_source: String,
+    pub verification_status: String,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

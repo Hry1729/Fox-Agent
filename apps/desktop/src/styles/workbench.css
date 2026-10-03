@@ -6704,6 +6704,15 @@ img[src='/avatars/fox-assistant.png'] {
   font-variant-numeric: tabular-nums;
 }
 
+.fox-message-artifact-verification {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--fox-muted);
+  font-size: var(--fox-type-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .fox-activity-detail {
   min-width: 0;
   min-height: 0;

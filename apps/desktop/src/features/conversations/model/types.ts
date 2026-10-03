@@ -592,6 +592,14 @@ export interface ArtifactRecord {
   status: string
   createdAt: number
   updatedAt: number
+  delivery?: {
+    versionId: string | null
+    versionNo: number | null
+    sourceToolCallId: string | null
+    purposeSource: 'user_request' | 'host_rule' | 'unknown'
+    verificationStatus: 'passed' | 'limited' | 'failed' | 'stale' | 'unavailable' | 'unverified'
+    summary: string
+  } | null
 }
 
 export interface KnowledgeBindingRecord {

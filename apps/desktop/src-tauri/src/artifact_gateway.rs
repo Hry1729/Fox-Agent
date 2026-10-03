@@ -995,6 +995,7 @@ mod tests {
             status: "ready".to_owned(),
             created_at: 1,
             updated_at: 1,
+            delivery: None,
         }
     }
 

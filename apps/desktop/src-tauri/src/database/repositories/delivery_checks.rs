@@ -132,6 +132,10 @@ pub(crate) struct DeliveryChecklistItem {
 /// modification time.
 #[derive(Debug, Clone)]
 pub(crate) struct RunWriteReceipt {
+    pub version_id: String,
+    pub version_no: i64,
+    pub source_run_id: String,
+    pub tool_call_id: Option<String>,
     pub storage_path: String,
     pub change_kind: String,
     pub tool: String,
@@ -689,17 +693,21 @@ impl Database {
     pub(crate) fn run_write_receipts(&self, run_id: &str) -> Result<Vec<RunWriteReceipt>, String> {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT storage_path, change_kind, tool, after_hash, created_at
+                "SELECT id, version_no, run_id, tool_call_id, storage_path, change_kind, tool, after_hash, created_at
                  FROM managed_file_versions WHERE run_id=?1 ORDER BY created_at ASC, rowid ASC",
             )?;
             let rows = stmt
                 .query_map(params![run_id], |row| {
                     Ok(RunWriteReceipt {
-                        storage_path: row.get(0)?,
-                        change_kind: row.get(1)?,
-                        tool: row.get(2)?,
-                        after_hash: row.get(3)?,
-                        created_at: row.get(4)?,
+                        version_id: row.get(0)?,
+                        version_no: row.get(1)?,
+                        source_run_id: row.get(2)?,
+                        tool_call_id: row.get(3)?,
+                        storage_path: row.get(4)?,
+                        change_kind: row.get(5)?,
+                        tool: row.get(6)?,
+                        after_hash: row.get(7)?,
+                        created_at: row.get(8)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;

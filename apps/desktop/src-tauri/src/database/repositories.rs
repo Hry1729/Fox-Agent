@@ -1,5 +1,5 @@
 use super::{
-    migrations, AgentRecord, AgentResourceRecord, AgentResourcesRecord, ArtifactRecord,
+    migrations, AgentRecord, AgentResourceRecord, AgentResourcesRecord, ArtifactDeliveryView, ArtifactRecord,
     AttachmentRecord, ConversationDetail, ConversationExpertBinding,
     ConversationExpertBindingError, ConversationRuntimeRecord, ConversationSummary,
     ExpertPackageVersionRecord, ExternalRunRecord, InstallExpertPackageVersionRequest,
@@ -26,6 +26,7 @@ use std::{
 use uuid::Uuid;
 
 mod a1_workflow;
+mod artifact_delivery_view;
 mod app_management;
 mod bundled_capabilities;
 mod computed_artifacts;
@@ -3348,7 +3349,7 @@ impl Database {
         artifact_id: &str,
     ) -> Result<Option<ArtifactRecord>, String> {
         self.with_connection(|connection| {
-            connection
+            let mut artifact = connection
                 .query_row(
                     "SELECT id, conversation_id, run_id, display_name, artifact_type,
                             artifact_class, artifact_origin, storage_path,
@@ -3372,10 +3373,15 @@ impl Database {
                             status: row.get(11)?,
                             created_at: row.get(12)?,
                             updated_at: row.get(13)?,
+                            delivery: None,
                         })
                     },
                 )
-                .optional()
+                .optional()?;
+            if let Some(artifact) = artifact.as_mut() {
+                artifact_delivery_view::enrich(connection, artifact)?;
+            }
+            Ok(artifact)
         })
     }
 
@@ -4305,7 +4311,7 @@ impl Database {
                             // resolved inside the conversation deliverable
                             // folder is a deliverable, anything else is a
                             // process file. Independent of the extension.
-                            let (class, origin) = transaction
+                            let project_root = transaction
                                 .query_row(
                                     "SELECT conversation_id FROM run_control_bindings WHERE run_id = ?1",
                                     params![run_id],
@@ -4316,17 +4322,14 @@ impl Database {
                                 .map(|conversation_id| computed_artifacts::conversation_project_root(&transaction, &conversation_id))
                                 .transpose()?
                                 .flatten()
-                                .map(PathBuf::from)
-                                .map(|root| crate::runtime_host::artifact_store::classify(
-                                    Some(root.as_path()),
-                                    Path::new(path),
-                                    tool_name.as_deref().unwrap_or_default(),
-                                    false,
-                                ))
-                                .unwrap_or((
-                                    crate::runtime_host::artifact_store::ArtifactClass::Process,
-                                    crate::runtime_host::artifact_store::ArtifactOrigin::Project,
-                                ));
+                                .map(PathBuf::from);
+                            let purpose = kernel_display::explicit_user_purpose(
+                                &transaction, run_id, project_root.as_deref(), Path::new(path),
+                            )?;
+                            let (class, origin) = crate::runtime_host::artifact_store::classify_with_purpose(
+                                project_root.as_deref(), Path::new(path),
+                                tool_name.as_deref().unwrap_or_default(), false, purpose,
+                            );
                             let updated = transaction.execute(
                                 "UPDATE artifacts
                                  SET display_name = ?1,
@@ -4360,6 +4363,12 @@ impl Database {
                     // xlsx/docx deliverables. Project the Host-verified write
                     // into the artifacts list as well.
                     if tool_name.as_deref() == Some("call_mcp_tool") {
+                        let input_json: String = transaction.query_row(
+                            "SELECT input_json FROM tool_calls WHERE run_id=?1 AND runtime_tool_call_id=?2",
+                            params![run_id, runtime_tool_call_id],
+                            |row| row.get(0),
+                        )?;
+                        let tool_input: Value = serde_json::from_str(&input_json).unwrap_or(Value::Null);
                         // A rendered preview is an artifact, not a content
                         // version, and it is Host-private by default. It is
                         // projected separately so it never enters the restore
@@ -4367,8 +4376,10 @@ impl Database {
                         if let Some(preview) = result
                             .get("details")
                             .and_then(|details| details.get("foxPreview"))
+                            .filter(|_| kernel_display::builtin_office_render(&tool_input))
                         {
-                            if let Some(preview_path) = preview.get("storagePath").and_then(Value::as_str) {
+                            if let Some((verified_path, verified_sha, verified_bytes)) = kernel_display::verified_preview_bytes(preview) {
+                                let preview_path = verified_path.as_str();
                                 // Name the *result* the preview depicts, not the
                                 // cache file; the renderer adds the "预览" label,
                                 // and the open action still uses the real path.
@@ -4394,11 +4405,8 @@ impl Database {
                                             .map(str::to_owned)
                                             .unwrap_or_else(|| preview_path.to_owned())
                                     });
-                                let preview_bytes = preview
-                                    .get("afterSize")
-                                    .and_then(Value::as_i64)
-                                    .unwrap_or(0);
-                                let preview_sha = preview.get("afterHash").and_then(Value::as_str);
+                                let preview_bytes = verified_bytes;
+                                let preview_sha = verified_sha.as_str();
                                 let preview_media = preview.get("mediaType").and_then(Value::as_str);
                                 let project_root = transaction
                                     .query_row(
@@ -4425,12 +4433,16 @@ impl Database {
                                     ),
                                     None => true,
                                 };
+                                let purpose = kernel_display::explicit_user_purpose(
+                                    &transaction, run_id, project_root.as_deref(), Path::new(preview_path),
+                                )?;
                                 let (class, origin) = project_root
-                                    .map(|root| crate::runtime_host::artifact_store::classify(
+                                    .map(|root| crate::runtime_host::artifact_store::classify_with_purpose(
                                         Some(root.as_path()),
                                         Path::new(preview_path),
-                                        preview.get("tool").and_then(Value::as_str).unwrap_or("office_render"),
+                                        "office_render",
                                         host_private,
+                                        purpose,
                                     ))
                                     .unwrap_or((
                                         crate::runtime_host::artifact_store::ArtifactClass::Preview,
@@ -4460,21 +4472,14 @@ impl Database {
                                 }
                             }
                         }
-                        if let Some(meta) = result
-                            .get("details")
-                            .and_then(|details| details.get("foxManagedFile"))
-                        {
-                            let path = meta.get("storagePath").and_then(Value::as_str);
-                            let declared = meta.get("displayName").and_then(Value::as_str);
-                            let change_kind = meta
-                                .get("changeKind")
-                                .and_then(Value::as_str)
-                                .unwrap_or("created");
-                            let byte_size = meta
-                                .get("afterSize")
-                                .and_then(Value::as_i64)
-                                .unwrap_or(0);
-                            let sha256 = meta.get("afterHash").and_then(Value::as_str);
+                        if let Some(verified) = kernel_display::verified_office_artifact(
+                            &transaction, run_id, runtime_tool_call_id,
+                        )? {
+                            let path = Some(verified.path.as_str());
+                            let declared = Some(verified.name.as_str());
+                            let change_kind = verified.change_kind.as_str();
+                            let byte_size = verified.bytes;
+                            let sha256 = Some(verified.sha.as_str());
                             if let Some(path) = path {
                                 let display_name = declared
                                     .map(str::to_owned)
@@ -4494,8 +4499,8 @@ impl Database {
                                 // label: derived from the verified operation
                                 // and the resolved path inside this
                                 // conversation's project root.
-                                let inner_operation = meta.get("tool").and_then(Value::as_str).unwrap_or_default();
-                                let (class, origin) = transaction
+                                let inner_operation = verified.tool.as_str();
+                                let project_root = transaction
                                     .query_row(
                                         "SELECT conversation_id FROM run_control_bindings WHERE run_id = ?1",
                                         params![run_id],
@@ -4506,17 +4511,13 @@ impl Database {
                                     .map(|conversation_id| computed_artifacts::conversation_project_root(&transaction, &conversation_id))
                                     .transpose()?
                                     .flatten()
-                                    .map(PathBuf::from)
-                                    .map(|root| crate::runtime_host::artifact_store::classify(
-                                        Some(root.as_path()),
-                                        Path::new(path),
-                                        inner_operation,
-                                        false,
-                                    ))
-                                    .unwrap_or((
-                                        crate::runtime_host::artifact_store::ArtifactClass::Process,
-                                        crate::runtime_host::artifact_store::ArtifactOrigin::Project,
-                                    ));
+                                    .map(PathBuf::from);
+                                let purpose = kernel_display::explicit_user_purpose(
+                                    &transaction, run_id, project_root.as_deref(), Path::new(path),
+                                )?;
+                                let (class, origin) = crate::runtime_host::artifact_store::classify_with_purpose(
+                                    project_root.as_deref(), Path::new(path), inner_operation, false, purpose,
+                                );
                                 let updated = transaction.execute(
                                     "UPDATE artifacts
                                      SET display_name = ?1,
@@ -7684,7 +7685,7 @@ fn query_artifacts_window(
            ))
          ORDER BY created_at ASC",
     )?;
-    let records = statement
+    let mut records: Vec<ArtifactRecord> = statement
         .query_map(
             params![conversation_id, from_ordinal, before_ordinal],
             |row| {
@@ -7703,11 +7704,16 @@ fn query_artifacts_window(
                     status: row.get(11)?,
                     created_at: row.get(12)?,
                     updated_at: row.get(13)?,
+                    delivery: None,
                 })
             },
         )?
-        .collect();
-    records
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for artifact in &mut records {
+        artifact_delivery_view::enrich(connection, artifact)?;
+    }
+    Ok(records)
 }
 
 fn query_knowledge_bindings(
