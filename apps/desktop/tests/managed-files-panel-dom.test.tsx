@@ -19,7 +19,9 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
-GlobalRegistrator.register()
+// Several DOM suites share one process, so the first one to run owns registration.
+// Registering twice throws and aborts this file's setup mid-run.
+if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register()
 ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
 
 type RestoreCall = {

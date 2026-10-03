@@ -9,10 +9,18 @@ const { act, cleanup, render, screen } = await import('@testing-library/react')
 const { Button } = await import('../src/components/ui/button')
 const { Badge } = await import('../src/components/ui/badge')
 const { Alert } = await import('../src/components/ui/alert')
-const { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger } = await import('../src/components/ui/context-menu')
-const { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } = await import('../src/components/ui/dropdown-menu')
+const { ContextMenuItem } = await import('../src/components/ui/context-menu')
+const { DropdownMenuItem } = await import('../src/components/ui/dropdown-menu')
+// Radix's portal stops mounting once another suite in the same process has used
+// `react-dom/server`; rendering the menu content inline through the primitives
+// keeps the assertion on the item classes and removes the cross-file coupling.
+const { DropdownMenu: DropdownMenuPrimitive, ContextMenu: ContextMenuPrimitive } = await import('radix-ui')
 
 afterEach(cleanup)
+
+/** Radix mounts menu content into a portal, so wait for it instead of assuming
+ *  the first commit already contains it. */
+const menuItem = (name: string | RegExp) => waitFor(() => screen.getByRole('menuitem', { name }))
 
 /** Radix popper mounts state after render; keep the noise out of the assertions. */
 const mount = (element: React.ReactElement) => act(async () => { render(element) })
@@ -69,11 +77,11 @@ describe('public destructive styling', () => {
   })
 
   test('a destructive dropdown item uses the neutral focus background with a danger outline', async () => {
-    await mount(React.createElement(
-      DropdownMenu,
+    render(React.createElement(
+      DropdownMenuPrimitive.Root,
       { open: true },
-      React.createElement(DropdownMenuTrigger, null, '更多'),
-      React.createElement(DropdownMenuContent, { forceMount: true },
+      React.createElement(DropdownMenuPrimitive.Trigger, null, '更多'),
+      React.createElement(DropdownMenuPrimitive.Content, { forceMount: true },
         React.createElement(DropdownMenuItem, { variant: 'destructive' }, '删除项目')),
     ))
     const item = screen.getByRole('menuitem', { name: '删除项目' })
@@ -89,11 +97,11 @@ describe('public destructive styling', () => {
   })
 
   test('a destructive context menu item matches the dropdown contract', async () => {
-    await mount(React.createElement(
-      ContextMenu,
+    render(React.createElement(
+      ContextMenuPrimitive.Root,
       { open: true },
-      React.createElement(ContextMenuTrigger, null, React.createElement('div', null, '目标')),
-      React.createElement(ContextMenuContent, { forceMount: true },
+      React.createElement(ContextMenuPrimitive.Trigger, null, React.createElement('div', null, '目标')),
+      React.createElement(ContextMenuPrimitive.Content, { forceMount: true },
         React.createElement(ContextMenuItem, { variant: 'destructive' }, '移入回收站')),
     ))
     const item = screen.getByRole('menuitem', { name: '移入回收站' })
@@ -105,11 +113,11 @@ describe('public destructive styling', () => {
   })
 
   test('a non-destructive menu item carries no unconditional danger colour', async () => {
-    await mount(React.createElement(
-      DropdownMenu,
+    render(React.createElement(
+      DropdownMenuPrimitive.Root,
       { open: true },
-      React.createElement(DropdownMenuTrigger, null, '更多'),
-      React.createElement(DropdownMenuContent, { forceMount: true },
+      React.createElement(DropdownMenuPrimitive.Trigger, null, '更多'),
+      React.createElement(DropdownMenuPrimitive.Content, { forceMount: true },
         React.createElement(DropdownMenuItem, null, '重命名对话')),
     ))
     const item = screen.getByRole('menuitem', { name: '重命名对话' })

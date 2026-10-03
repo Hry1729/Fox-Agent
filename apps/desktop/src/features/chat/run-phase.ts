@@ -21,7 +21,7 @@
  */
 
 import type { RunEventRecord } from '@/features/conversations/model/types'
-import { formatRunElapsed } from './turn-process-timing'
+import { TERMINAL_RUN_EVENT_TYPES, formatRunElapsed } from './turn-process-timing'
 
 export type RunPhase =
   | 'queued'
@@ -40,7 +40,7 @@ export const RUN_PHASE_LABELS: Record<RunPhase, string> = {
   settled: '已完成',
 }
 
-const TERMINAL_EVENT_TYPES = new Set(['run.completed', 'run.cancelled', 'run.failed', 'run.interrupted'])
+const TERMINAL_EVENT_TYPES = TERMINAL_RUN_EVENT_TYPES
 
 /** Durable proof that the model has produced something the user can read. */
 const CONTENT_EVENT_TYPES = new Set([

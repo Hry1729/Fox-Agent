@@ -13,6 +13,7 @@
  */
 
 import type { ConversationSummary, RuntimeEventNotification } from '@/features/conversations/model/types'
+import { TERMINAL_RUN_EVENT_TYPES } from './turn-process-timing'
 
 export type ConversationRunIndicator = 'queued' | 'running' | 'approval'
 
@@ -30,12 +31,7 @@ export type ConversationRunOverlay = ReadonlyMap<string, ConversationRunOverlayE
 
 export const EMPTY_CONVERSATION_RUN_OVERLAY: ConversationRunOverlay = new Map()
 
-const TERMINAL_EVENT_TYPES = new Set([
-  'run.completed',
-  'run.cancelled',
-  'run.failed',
-  'run.interrupted',
-])
+const TERMINAL_EVENT_TYPES = TERMINAL_RUN_EVENT_TYPES
 
 /** Run statuses that still mean the conversation is busy. */
 const QUEUED_RUN_STATUSES = new Set(['queued'])
