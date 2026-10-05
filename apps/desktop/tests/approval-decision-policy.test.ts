@@ -35,6 +35,67 @@ describe('approval decision policy', () => {
     expect(await resolveAllowedApprovalDecision(approval(request), 'allow_conversation', () => { submitted = true })).toBe(false)
     expect(submitted).toBe(false)
   })
+  test('offers the conversation decision for a new file the Host declared reusable', async () => {
+    // 新建（目标不存在）不是整文件替换：没有已有内容可被破坏，因此按 Host 的
+    // 顶层声明给出会话级授权；后端确实接受它（scope 可精确命名）。
+    const create = {
+      authority: 'kernel',
+      input: { path: 'notes.md', content: 'hello\n' },
+      availableDecisions: ['allow_once', 'allow_conversation', 'deny'],
+    }
+    expect(allowedApprovalDecisions(create)).toEqual([
+      'deny',
+      'allow_once',
+      'allow_conversation',
+    ])
+    const sent: Array<[string, string]> = []
+    expect(await resolveAllowedApprovalDecision(approval(create), 'allow_conversation', (id, decision) => {
+      sent.push([id, decision])
+      return true
+    })).toBeTrue()
+    expect(sent).toEqual([['approval-1', 'allow_conversation']])
+  })
+
+  test('keeps a real replacement one-dispatch even when the Host declares a conversation decision', async () => {
+    // 已有内容的整份覆盖：一次性替换凭据，绝不升级为会话级授权。
+    const replacement = {
+      authority: 'kernel',
+      availableDecisions: ['allow_once', 'allow_conversation', 'deny'],
+      wholeFileReplacement: {
+        purpose: '整文件替换',
+        requestDigest: 'req',
+        targetIdentity: 'a.md',
+        baselineVersion: 'sha256:existing',
+        candidateDigest: 'content',
+        availableDecisions: ['allow_once', 'deny'],
+      },
+    }
+    expect(allowedApprovalDecisions(replacement)).toEqual(['deny', 'allow_once'])
+    const sent: Array<[string, string]> = []
+    expect(await resolveAllowedApprovalDecision(approval(replacement), 'allow_conversation', (id, decision) => {
+      sent.push([id, decision])
+      return true
+    })).toBeFalse()
+    expect(sent).toEqual([])
+  })
+
+  test('never widens a layer that withheld the conversation decision for a new file', () => {
+    // 新建也不放宽：嵌套声明里没有的选项不会被补回来。
+    const create = {
+      authority: 'kernel',
+      availableDecisions: ['allow_once', 'allow_conversation', 'deny'],
+      wholeFileReplacement: {
+        purpose: '整文件替换',
+        requestDigest: 'req',
+        targetIdentity: 'a.md',
+        baselineVersion: 'missing',
+        candidateDigest: 'content',
+        availableDecisions: ['allow_once', 'deny'],
+      },
+    }
+    expect(allowedApprovalDecisions(create)).toEqual(['deny', 'allow_once'])
+  })
+
   test('shows only allow once and deny for a repair budget override', () => {
     expect(allowedApprovalDecisions(overrideRequest())).toEqual(['deny', 'allow_once'])
     expect(allowedApprovalDecisions(overrideRequest({

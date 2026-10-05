@@ -1130,6 +1130,104 @@ pub(crate) fn stage_outcome(
     database.stage_delivery_outcome(run_id, decision_mark, &items, stop.repair_findings(), now)
 }
 
+/// Stage the verifications of a Run that is ending in **failure**.
+///
+/// A failing Run still owes the ledger a truthful verdict for the artifacts it
+/// promised: the same deterministic checks the stop gate runs (existence, receipts,
+/// content), written through the failing decision's own committed mark. It arms no
+/// repair round — the Run is over — and it never claims a pass from mere existence.
+/// True when this task text explicitly continues an interrupted task of the same
+/// conversation **and** names one of the artifacts that task promised.
+///
+/// Deliberately narrow, in both directions:
+///  * a bare "check this file" is not a resume — the text must say the earlier work
+///    was interrupted or must be continued;
+///  * mentioning an unrelated new path is not a resume either — it must name one of
+///    the source task's promised artifacts (by its relative path or file name).
+///    A shared parent folder is deliberately NOT enough: "继续，生成 out/other.json"
+///    must not inherit "out/progress.csv".
+pub(crate) fn resumes_previous_deliverables(
+    task_text: &str,
+    source_items: &[DeliveryChecklistItem],
+    project_root: Option<&str>,
+) -> bool {
+    const CONTINUE_MARKERS: &[&str] = &[
+        "取消", "中止", "中断", "续跑", "继续", "接着", "刚才", "上次", "只补", "缺失部分",
+        "已完成", "resume", "continue",
+    ];
+    let lowered = task_text.to_lowercase();
+    if !CONTINUE_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(&marker.to_lowercase()))
+    {
+        return false;
+    }
+    let haystack = task_text.replace('\\', "/").to_lowercase();
+    source_items.iter().any(|item| {
+        let named = item
+            .target_path
+            .clone()
+            .unwrap_or_else(|| item.display_name.clone());
+        let Some(relative) = project_relative_path(&named, project_root) else {
+            return false;
+        };
+        let relative = relative.to_lowercase();
+        if haystack.contains(&relative) {
+            return true;
+        }
+        if let Some(name) = relative.rsplit('/').next() {
+            if !name.is_empty() && haystack.contains(name) {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+/// Inherit the delivery requirements of the interrupted task this Run resumes.
+///
+/// Called at Run start for authoritative user-facing Runs. Returns how many
+/// requirements were added. Bounded to ONE source: the immediately preceding Run of
+/// the same conversation that ended without a delivery verdict, and only when this
+/// task text explicitly continues it while naming one of its promised artifacts.
+/// Never crosses conversations, never copies the source's verdicts, and never touches
+/// write permission (the write gate derives read-only inputs from the current text).
+pub(crate) fn inherit_interrupted_deliverables(
+    database: &Database,
+    run_id: &str,
+    conversation_id: &str,
+    project_root: Option<&str>,
+    task_text: &str,
+) -> Result<usize, String> {
+    if database.continued_from_run_id(run_id)?.is_some() {
+        return Ok(0);
+    }
+    let Some(source) = database.previous_unfinished_run(conversation_id, run_id)? else {
+        return Ok(0);
+    };
+    let source_items = database.delivery_checklist(&source)?;
+    if source_items.is_empty() || !resumes_previous_deliverables(task_text, &source_items, project_root)
+    {
+        return Ok(0);
+    }
+    let inherited = database.inherit_delivery_checklist(run_id, &source, now_ms())?;
+    if inherited > 0 {
+        database.link_resumed_task(run_id, &source)?;
+    }
+    Ok(inherited)
+}
+
+pub(crate) fn stage_failure_outcome(
+    database: &Database,
+    run_id: &str,
+    decision_mark: &str,
+    stop: &DeliveryStop,
+    now: i64,
+) -> Result<(), String> {
+    let items = staged_items(stop);
+    database.stage_delivery_outcome(run_id, decision_mark, &items, None, now)
+}
+
 /// Withdraw a staged round that must never be finalized: its decision was
 /// superseded by a steering round, or its commit failed.
 pub(crate) fn withdraw_outcome(
@@ -5560,6 +5658,322 @@ mod tests {
         // An unrelated earlier negation must not silence a real production verb.
         assert!(has_production_verb("没有现成模板，生成 a.docx。"));
         assert!(!has_production_verb("不要生成任何文件，只回答我。"));
+    }
+
+    fn resume_seed(key: &str, path: &str) -> DeliveryChecklistSeed {
+        DeliveryChecklistSeed {
+            item_key: key.to_owned(),
+            target_path: Some(path.to_owned()),
+            artifact_id: None,
+            display_name: path.to_owned(),
+            checks: vec!["exists".to_owned()],
+            requirements: Vec::new(),
+        }
+    }
+
+    fn resume_checklist_item(key: &str, path: &str) -> DeliveryChecklistItem {
+        DeliveryChecklistItem {
+            item_key: key.to_owned(),
+            target_path: Some(path.to_owned()),
+            artifact_id: None,
+            display_name: path.to_owned(),
+            checks: vec!["exists".to_owned()],
+            status: "pending".to_owned(),
+            finding: None,
+            checked_at: None,
+            updated_at: 0,
+            inherited_from_run_id: None,
+        }
+    }
+
+    /// The resume trigger is narrow in both directions: it needs an explicit
+    /// continuation AND a reference to something the interrupted task promised.
+    #[test]
+    fn resume_inheritance_needs_an_explicit_continuation_and_a_promised_path() {
+        let items = vec![
+            resume_checklist_item("file:out%2fprogress.csv", "out/progress.csv"),
+            resume_checklist_item("file:out%2fsummary.md", "out/summary.md"),
+        ];
+        // The real F09 resume round: it says the task was cancelled and names a
+        // promised artifact (which the current round's own text did not declare).
+        assert!(resumes_previous_deliverables(
+            "刚才任务被我取消了。请核对 out/details/ 和 out/progress.csv，以实际完整的文件为准，只继续缺失部分；\
+             修正不一致的进度记录。不要重复生成已完成项，全部完成后生成 summary.md。",
+            &items,
+            None,
+        ));
+        // A plain read-only check is not a resume, even of the same path.
+        assert!(!resumes_previous_deliverables(
+            "请核对 out/progress.csv 的记录是否完整。",
+            &items,
+            None,
+        ));
+        // A continuation of something else never inherits this task's artifacts.
+        assert!(!resumes_previous_deliverables(
+            "继续做另一个任务，生成 out/other.json。",
+            &items,
+            None,
+        ));
+        // No source items means nothing to inherit from.
+        assert!(!resumes_previous_deliverables(
+            "刚才任务被我取消了，请继续。",
+            &[],
+            None,
+        ));
+        // A promised path outside the frozen project root cannot be matched: the
+        // source declared an absolute path under a different project.
+        let outside = vec![resume_checklist_item(
+            "file:d%3a%2fother-project%2fout%2fprogress.csv",
+            "D:/other-project/out/progress.csv",
+        )];
+        assert!(!resumes_previous_deliverables(
+            "刚才任务被我取消了，请继续处理 out/progress.csv。",
+            &outside,
+            Some("D:/work"),
+        ));
+        // The same relative declaration IS this project's file, so it matches.
+        assert!(resumes_previous_deliverables(
+            "刚才任务被我取消了，请继续处理 out/progress.csv。",
+            &items,
+            Some("D:/work"),
+        ));
+    }
+
+    /// Independent assertion (P2 requirement 6): the expected deliverable set is
+    /// written out by hand here, and compared against what the Run really carries.
+    #[test]
+    fn a_resumed_task_inherits_the_promised_deliverables_of_the_interrupted_run() {
+        let root = std::env::temp_dir().join(format!("fox-resume-inherit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (db, source_run) = conversation_run(&root);
+        let conversation: String = db
+            .with_connection(|conn| {
+                Ok(conn.query_row(
+                    "SELECT conversation_id FROM runs WHERE id=?1",
+                    [&source_run],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        db.seed_delivery_checklist(
+            &source_run,
+            &[
+                resume_seed("file:out%2fprogress.csv", "out/progress.csv"),
+                resume_seed("file:out%2fsummary.md", "out/summary.md"),
+            ],
+            now_ms(),
+        )
+        .unwrap();
+        // The interrupted task already reached a verdict for one file; a resumed Run
+        // must re-verify the current version instead of reusing it.
+        db.execute_raw_sql(&format!(
+            "UPDATE delivery_checklist_items SET status='passed', checked_at=1,
+                 finding_json='{{\"passed\":true}}' WHERE run_id='{source_run}'
+                 AND item_key='file:out%2fprogress.csv'"
+        ))
+        .unwrap();
+        db.execute_raw_sql(&format!(
+            "UPDATE runs SET status='cancelled' WHERE id='{source_run}'"
+        ))
+        .unwrap();
+
+        let text = "刚才任务被我取消了。请核对 out/details/ 和 out/progress.csv，以实际完整的文件为准，\
+                    只继续缺失部分；修正不一致的进度记录。不要重复生成已完成项，全部完成后生成 summary.md。";
+        let new_run = db
+            .create_run(&conversation, text, None)
+            .unwrap()
+            .run
+            .id;
+        // Production always has the kernel row by the time a Run is seeded; the
+        // continuation link lives on it.
+        let now = now_ms();
+        db.execute_raw_sql(&format!(
+            "INSERT INTO kernel_runs(run_id,engine_id,kernel_mode,capability_manifest_version,
+                permission_snapshot_id,execution_profile_id,prompt_config_hash,frozen_config_json,
+                state,last_event_seq,created_at,updated_at)
+             VALUES('{new_run}','pi','authoritative',2,'perm','legacy','hash','{{}}','running',0,{now},{now})"
+        ))
+        .unwrap();
+        // This round's own text declares only the summary.
+        db.seed_delivery_checklist(
+            &new_run,
+            &[resume_seed("file:out%2fsummary.md", "out/summary.md")],
+            now_ms(),
+        )
+        .unwrap();
+        assert_eq!(
+            db.delivery_checklist(&new_run).unwrap().len(),
+            1,
+            "before inheritance the resume round only knows its own declaration"
+        );
+
+        let inherited = inherit_interrupted_deliverables(
+            &db,
+            &new_run,
+            &conversation,
+            root.to_str(),
+            text,
+        )
+        .unwrap();
+        assert_eq!(inherited, 1, "exactly the missing promised file is inherited");
+
+        // Hand-written expectation, not re-derived from the parser under test.
+        let mut keys: Vec<String> = db
+            .delivery_checklist(&new_run)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.item_key)
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["file:out%2fprogress.csv".to_owned(), "file:out%2fsummary.md".to_owned()],
+            "a resumed Run must cover every deliverable the interrupted task promised"
+        );
+        let inherited_item = db
+            .delivery_checklist(&new_run)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.item_key == "file:out%2fprogress.csv")
+            .unwrap();
+        assert_eq!(inherited_item.status, "pending", "the old verdict is not reused");
+        assert!(inherited_item.checked_at.is_none());
+        assert!(inherited_item.finding.is_none());
+        assert_eq!(
+            inherited_item.inherited_from_run_id.as_deref(),
+            Some(source_run.as_str()),
+            "the inherited requirement records where it came from"
+        );
+        assert_eq!(
+            db.continued_from_run_id(&new_run).unwrap().as_deref(),
+            Some(source_run.as_str()),
+            "delivery evidence follows the same task"
+        );
+        // The source Run keeps its own verdict untouched.
+        assert_eq!(
+            db.delivery_checklist(&source_run).unwrap()[0].status,
+            "passed"
+        );
+
+        // Re-running the inheritance (a recovery, a re-seed) changes nothing.
+        let again = inherit_interrupted_deliverables(
+            &db,
+            &new_run,
+            &conversation,
+            root.to_str(),
+            text,
+        )
+        .unwrap();
+        assert_eq!(again, 0, "inheritance is idempotent");
+        assert_eq!(db.delivery_checklist(&new_run).unwrap().len(), 2);
+
+        // Another conversation never inherits: same text, different conversation.
+        let other = db
+            .create_conversation(
+                db.default_agent_id(),
+                None,
+                Some(root.to_str().unwrap()),
+                Some("read_only"),
+            )
+            .unwrap();
+        let other_run = db.create_run(&other.id, text, None).unwrap().run.id;
+        assert_eq!(
+            inherit_interrupted_deliverables(&db, &other_run, &other.id, root.to_str(), text)
+                .unwrap(),
+            0,
+            "inheritance must never cross conversations"
+        );
+
+        // A brand-new task in the same conversation inherits nothing either. The
+        // resumed Run is finished first: one active Run per conversation.
+        db.execute_raw_sql(&format!(
+            "UPDATE runs SET status='completed' WHERE id='{new_run}'"
+        ))
+        .unwrap();
+        let fresh_run = db
+            .create_run(&conversation, "请分析 in/other.csv 并生成 out/fresh.json", None)
+            .unwrap()
+            .run
+            .id;
+        assert_eq!(
+            inherit_interrupted_deliverables(
+                &db,
+                &fresh_run,
+                &conversation,
+                root.to_str(),
+                "请分析 in/other.csv 并生成 out/fresh.json",
+            )
+            .unwrap(),
+            0,
+            "an unrelated new task inherits nothing"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The interrupted Run spelled the file `summary.md`; this Run declares
+    /// `out/summary.md`. Same artifact, so inheriting must not add a second row.
+    #[test]
+    fn resume_inheritance_does_not_duplicate_an_artifact_under_another_spelling() {
+        let root = std::env::temp_dir().join(format!("fox-resume-dedup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (db, source_run) = conversation_run(&root);
+        let conversation: String = db
+            .with_connection(|conn| {
+                Ok(conn.query_row(
+                    "SELECT conversation_id FROM runs WHERE id=?1",
+                    [&source_run],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        db.seed_delivery_checklist(
+            &source_run,
+            &[
+                resume_seed("progress.csv", "progress.csv"),
+                resume_seed("summary.md", "summary.md"),
+            ],
+            now_ms(),
+        )
+        .unwrap();
+        db.execute_raw_sql(&format!("UPDATE runs SET status='cancelled' WHERE id='{source_run}'"))
+            .unwrap();
+
+        let text = "刚才任务被我取消了。请核对 out/details/ 和 out/progress.csv，以实际完整的文件为准，\
+                    只继续缺失部分；全部完成后生成 out/summary.md。";
+        let new_run = db.create_run(&conversation, text, None).unwrap().run.id;
+        let now = now_ms();
+        db.execute_raw_sql(&format!(
+            "INSERT INTO kernel_runs(run_id,engine_id,kernel_mode,capability_manifest_version,
+                permission_snapshot_id,execution_profile_id,prompt_config_hash,frozen_config_json,
+                state,last_event_seq,created_at,updated_at)
+             VALUES('{new_run}','pi','authoritative',2,'perm','legacy','hash','{{}}','running',0,{now},{now})"
+        ))
+        .unwrap();
+        // This Run's own declaration uses the project-relative spelling.
+        db.seed_delivery_checklist(
+            &new_run,
+            &[resume_seed("file:out%2fsummary.md", "out/summary.md")],
+            now,
+        )
+        .unwrap();
+
+        let inherited =
+            inherit_interrupted_deliverables(&db, &new_run, &conversation, root.to_str(), text)
+                .unwrap();
+        assert_eq!(inherited, 1, "only the file this Run did not already promise");
+        let mut keys: Vec<String> = db
+            .delivery_checklist(&new_run)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.item_key)
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["file:out%2fsummary.md".to_owned(), "progress.csv".to_owned()],
+            "the same artifact must not appear twice under two spellings"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Regression, 2026-10-01 review (R01): an absolute path is an ordinary

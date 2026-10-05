@@ -7,17 +7,18 @@
 }
 
 /* The group retains its scroll limit. A single expanded thought has no second
-   nested scrollport, and its collapse header stays available while reading. */
+   nested scrollport. */
 .fox-runtime-process .fox-runtime-step-row.is-reasoning .fox-runtime-detail-panel {
   max-height: none;
   overflow: visible;
 }
 
+/* The open title stays in normal flow, directly above its own body: no sticky
+   positioning and no plate, so long, streaming or code-heavy content can never
+   scroll underneath it and the row matches every other disclosure title. */
 .fox-runtime-step-row.is-reasoning[data-state='open'] .fox-runtime-step-trigger {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background: var(--fox-panel);
+  position: static;
+  background: transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {

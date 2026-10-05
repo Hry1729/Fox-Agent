@@ -179,7 +179,10 @@ test('pins stable_v1 Runtime prefix bytes and the knowledge-routing instruction 
   // Cursor metadata is model-visible; complete refers only to stored bytes.
   // 2026-10-01: the runtime rules gained the task-stated field-convention rule
   // (use a task's machine literal verbatim), so the pinned prefix hash moved.
-  assert.equal(composed.stablePromptHash, '720249384d6a3fef')
+  // 2026-10-04: the runtime rules gained the user-facing language contract
+  // (Simplified Chinese by default; code, commands, paths and identifiers keep
+  // their original form), so the pinned prefix hash moved again.
+  assert.equal(composed.stablePromptHash, 'f03293074bc03c6e')
 })
 
 test('separates stable-prefix and dynamic-tail cache identities', () => {

@@ -1,5 +1,6 @@
 //! Frozen resource policy shared by proposal admission and final dispatch.
 use crate::{
+    database::kernel_execution_admission::{write_operation_kind, WriteOperationKind},
     database::{Database, KernelHostScope},
     kernel::{CancellationToken, PolicyDecision, PolicyDecisionPort},
 };
@@ -729,6 +730,16 @@ impl GatewayPolicy {
             .map(str::trim)
             .filter(|value| !value.is_empty());
         let observation = db.host_observation_for_version(&self.binding.run_id, &target, declared)?;
+        // Item 5: a write bound to the Host's own verified-absent target CREATES a
+        // file that does not exist. It replaces nothing, so it is not a whole-file
+        // replacement and must not be gated on one: the ordinary permission mode
+        // decides it — `allow` proceeds without a per-file prompt, `ask` still
+        // asks with the ordinary decision surface, `read_only` still refuses. The
+        // version precondition is untouched, so a file that appeared meanwhile is
+        // still refused as a conflict rather than silently clobbered.
+        if write_operation_kind(observation.as_ref()) == Some(WriteOperationKind::Create) {
+            return Ok(None);
+        }
         match observation {
             // The source fact AND the model delivery fact must both hold. A
             // whole-file read whose model projection was bounded (the durable

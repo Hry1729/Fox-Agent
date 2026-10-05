@@ -2,12 +2,31 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   APPROVAL_DEMO_TURN_INSTRUCTIONS,
+  FOX_LANGUAGE_CONTRACT,
   FOX_RUNTIME_INSTRUCTIONS,
   isApprovalDemoFollowup,
   isApprovalDemoRequest,
   replaceLatestAssistantText,
   runtimeSystemPrompt,
 } from '../src/runtime-instructions.mjs'
+
+test('requires Simplified Chinese for user-facing text and preserves machine text', () => {
+  // One fragment, embedded verbatim, so the rule cannot drift between composers.
+  assert.ok(FOX_RUNTIME_INSTRUCTIONS.startsWith(FOX_LANGUAGE_CONTRACT))
+  assert.match(FOX_LANGUAGE_CONTRACT, /Simplified Chinese \(简体中文\)/)
+  for (const channel of ['progress notes', 'action descriptions', 'failure', 'stage and phase summaries', 'final response']) {
+    assert.ok(FOX_LANGUAGE_CONTRACT.includes(channel), `the rule must name the ${channel} channel`)
+  }
+  // User instruction outranks the default.
+  assert.match(FOX_LANGUAGE_CONTRACT, /explicit user language choice outranks this default/)
+  // Code, commands, paths, identifiers and necessary quotations keep their form.
+  assert.match(FOX_LANGUAGE_CONTRACT, /code, commands, shell flags, paths, file names, URLs, identifiers/)
+  assert.match(FOX_LANGUAGE_CONTRACT, /A necessary original quotation stays in its own language/)
+  // Private reasoning stays a non-user-facing channel.
+  assert.match(FOX_LANGUAGE_CONTRACT, /Private reasoning and internal planning are not user-facing/)
+  assert.equal(runtimeSystemPrompt('Base prompt').includes(FOX_LANGUAGE_CONTRACT), true)
+  assert.equal(runtimeSystemPrompt('Base prompt', { approvalDemo: true }).includes(FOX_LANGUAGE_CONTRACT), true)
+})
 
 test('publishes protected tools and truthful approval rules in the system prompt', () => {
   const prompt = runtimeSystemPrompt('Base prompt')

@@ -1347,14 +1347,23 @@
   padding-left: 5px;
 }
 
-/* A persistent SVG stays legible in both project and flat conversation rows.
-   The canvas orb was present in the accessibility tree but visually faint at
-   sidebar size, so it could look like the loading icon had disappeared. */
-.fox-project-conversation-status > .fox-run-indicator-spinner {
-  width: 16px;
-  height: 16px;
+/* The sidebar shows the thinking orb in its tuned 20px preset — the size the
+   package designs for inline text, and the one that stays legible in a row. The
+   slot keeps its 26px reservation, so the row height, the title and the icon
+   alignment are exactly what they were with the 16px spinner. */
+.fox-project-conversation-status > .fox-run-indicator-orb {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--fox-accent);
-  animation: foxSpin 1s linear infinite;
+}
+
+.fox-project-conversation-status > .fox-run-indicator-orb > canvas {
+  display: block;
+  width: 20px;
+  height: 20px;
 }
 
 /* Queued and waiting-for-approval share the slot with the running spinner so a
@@ -1383,9 +1392,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .fox-project-conversation-status > .fox-run-indicator-spinner {
-    animation: none;
-  }
+  /* The orb reads the same preference through its own `paused` prop; the dot's
+     pulse is suppressed here. */
   .fox-project-conversation-status.is-approval .fox-run-indicator-dot {
     animation: none;
   }
@@ -4088,9 +4096,15 @@ img[src='/avatars/fox-assistant.png'] {
   color: var(--fox-faint);
 }
 
+/* Title and body are one column: the body can never overlap the title, whatever
+   the detail grows into (long prose, code blocks, streamed additions). */
 .fox-runtime-step-detail > .fox-runtime-step-body {
   width: 100%;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
 }
 
 .fox-runtime-step-detail > .fox-runtime-step-content {
@@ -5387,11 +5401,31 @@ img[src='/avatars/fox-assistant.png'] {
   background: linear-gradient(180deg, color-mix(in oklch, var(--fox-card) 38%, transparent), transparent 32%);
 }
 
-/* Activation: border and glow share one very light blue (`--fox-blue-soft`), so the
-   two never read as two different colours, and the card keeps its elevation. */
+/* Activation is the card's own 1px border turning the pale blue. The grey elevation
+   stays exactly as it rests, so nothing grows, jumps or gains a second outline. */
 .fox-prompt-input.is-focused > [data-slot='input-group'] {
   border-color: var(--fox-blue-soft);
-  box-shadow: var(--fox-composer-elevation), 0 0 0 2px var(--fox-blue-soft);
+  box-shadow: var(--fox-composer-elevation);
+}
+
+/* The input-group primitive paints its own `ring-2` through Tailwind's ring custom
+   properties, which would show as a second (wider) blue edge on keyboard focus.
+   Neutralising the two properties keeps every activation state to the thin border. */
+.fox-prompt-input > [data-slot='input-group'] {
+  --tw-ring-shadow: 0 0 #0000;
+  --tw-ring-offset-shadow: 0 0 #0000;
+}
+
+/* Keyboard focus stays unmistakable without a halo: the same thin border, one step
+   stronger. The new-conversation page keeps its own flat, colourless card below. */
+.fox-prompt-input > [data-slot='input-group']:has([data-slot='input-group-control']:focus-visible) {
+  border-color: var(--fox-blue);
+}
+
+.fox-composer-wrap.is-empty
+  .fox-prompt-input
+  > [data-slot='input-group']:has([data-slot='input-group-control']:focus-visible) {
+  border-color: var(--fox-border);
 }
 
 .fox-composer-attachments {
@@ -11757,33 +11791,93 @@ img[src='/avatars/fox-assistant.png'] {
   color: var(--fox-faint);
   text-decoration: line-through;
 }
-.fox-steering-editor textarea {
-  width: 100%;
-  resize: vertical;
-  min-height: 42px;
-  max-height: 160px;
+.fox-steering-item.is-queued .fox-steering-status {
+  color: var(--fox-muted);
+  border-style: dashed;
+}
+.fox-steering-lane {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--fox-border);
+  color: var(--fox-faint);
+  font-size: 10px;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+.fox-steering-lane.is-next-turn {
+  color: var(--fox-muted);
+  border-style: dashed;
+}
+.fox-steering-lane-badge {
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px dashed var(--fox-border);
+  color: var(--fox-muted);
+  font-size: 10px;
+  line-height: 16px;
+}
+.fox-steering-retained {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding: 8px 10px;
   border-radius: 10px;
-  border: 1px solid var(--fox-border);
+  border: 1px dashed var(--fox-border);
   background: var(--fox-card);
-  color: var(--fox-text);
-  font: inherit;
+}
+.fox-steering-retained p {
+  margin: 0;
+  color: var(--fox-muted);
   line-height: 1.5;
 }
-.fox-steering-editor textarea:focus-visible {
-  outline: none;
-  border-color: var(--fox-accent);
+.fox-steering-item .fox-steering-carry,
+.fox-steering-item .fox-steering-discard {
+  flex: none;
+  height: 22px;
+  padding: 0 7px;
+  font-size: 11px;
 }
-.fox-steering-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 6px;
-}
-.fox-steering-budget { color: var(--fox-faint); }
 .fox-steering-error {
   margin: 0;
   color: var(--destructive);
+  line-height: 1.5;
+}
+
+/* Main composer: the two submit lanes stay beside the Run's own Stop control,
+   which never doubles as a submit path. */
+.fox-steering-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.fox-steering-submit {
+  height: 30px;
+  padding: 0 10px;
+  gap: 5px;
+  font-size: 12px;
+}
+.fox-steering-queue-button {
+  height: 30px;
+  padding: 0 10px;
+  gap: 5px;
+  font-size: 12px;
+}
+.fox-stop-button {
+  height: 30px;
+  padding: 0 10px;
+  gap: 5px;
+  font-size: 12px;
+  border: 1px solid var(--fox-border);
+}
+.fox-steering-composer-notice {
+  margin: 0 10px 6px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px dashed var(--fox-border);
+  background: var(--fox-card);
+  color: var(--fox-muted);
+  font-size: var(--fox-type-meta, 12px);
   line-height: 1.5;
 }
 

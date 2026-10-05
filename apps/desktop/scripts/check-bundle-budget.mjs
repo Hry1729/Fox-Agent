@@ -6,8 +6,16 @@ import path from 'node:path'
 const distDir = fileURLToPath(new URL('../dist/', import.meta.url))
 const indexPath = path.join(distDir, 'index.html')
 const reportPath = path.join(distDir, 'bundle-stats.html')
-const entryGzipBudget = 220 * 1024
-const initialJavaScriptGzipBudget = 300 * 1024
+// This ceiling has been raised deliberately, each time with a named cause:
+//   220 -> 222 KiB  the sidebar running indicator (the entry had ~100 bytes of headroom);
+//   222 -> 224 KiB  the user-facing language contract and approval-decision surface;
+//   224 -> 240 KiB  the mid-run interjection composer. The main input box lives in the
+//                   entry by design, so its lane/queue UI cannot be lazy-loaded.
+// The entry is now the app shell plus the composer: treat further growth as a diet task
+// (heavy editors/viewers must stay behind their own lazy boundaries) rather than a
+// routine bump. The initial-JavaScript budget moved once, for the same composer.
+const entryGzipBudget = 240 * 1024
+const initialJavaScriptGzipBudget = 316 * 1024
 const allowedPreloads = [
   /^\/assets\/react-vendor-[\w-]+\.js$/,
   /^\/assets\/icons-vendor-[\w-]+\.js$/,

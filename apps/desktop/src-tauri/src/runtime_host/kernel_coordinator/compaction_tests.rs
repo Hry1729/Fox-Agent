@@ -175,6 +175,165 @@ fn response(
         usage:json!({"input":100,"output":20,"totalTokens":120})}
 }
 
+    fn settled_provider_rejection(request: &fox_engine_protocol::KernelCompactionRequest, status: u16) -> String {
+        format!("kernel.settled_model_failure:{}", json!({
+            "schemaVersion": 1, "runId": request.run_id, "turnId": request.turn_id,
+            "checkpointSeq": 1, "category": "provider_unavailable",
+            "httpStatus": status, "retryAfterMs": 2000,
+        }))
+    }
+
+    fn compaction_failure_events(db: &Database, run_id: &str) -> Vec<Value> {
+        db.with_connection(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT payload_json FROM kernel_events
+                  WHERE run_id=?1 AND event_type='context.compaction.failed' ORDER BY seq",
+            )?;
+            let rows = statement
+                .query_map([run_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            Ok(rows
+                .into_iter()
+                .map(|body| serde_json::from_str::<Value>(&body).unwrap_or(Value::Null))
+                .collect::<Vec<Value>>())
+        })
+        .unwrap()
+    }
+
+    fn model_request_since(db: &Database, run_id: &str) -> Option<i64> {
+        db.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT model_request_since_wall_ms FROM kernel_runs WHERE run_id=?1",
+                [run_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )?)
+        })
+        .unwrap()
+    }
+
+    /// A settled provider rejection is safe to re-ask: the provider answered, so it
+    /// cannot already be generating this summary. One retry, inside the SAME window.
+    #[test]
+    fn a_settled_provider_rejection_is_retried_once_inside_the_same_deadline() {
+        let clock = TestClock::new(1000);
+        let cancellation = CancellationRegistry::default();
+        let (db, _root, run_id) = compaction_fixture(&clock);
+        let coordinator =
+            KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+        assert!(coordinator
+            .prepare_context_if_needed("initial", 4096)
+            .unwrap());
+        let deadline_before = model_request_since(&db, &run_id);
+        let attempts = std::cell::Cell::new(0u32);
+        coordinator
+            .dispatch_pending_compaction("retry-owner", |_, request, _, remaining| {
+                attempts.set(attempts.get() + 1);
+                assert!(remaining > 0, "every attempt shares the original window");
+                if attempts.get() == 1 {
+                    Err(settled_provider_rejection(request, 429))
+                } else {
+                    Ok(response(request))
+                }
+            })
+            .unwrap();
+        assert_eq!(attempts.get(), 2, "exactly one retry was spent");
+        // The window is never renewed: the durable request start is unchanged.
+        assert_eq!(
+            model_request_since(&db, &run_id),
+            deadline_before,
+            "a retry must not reset the request deadline"
+        );
+        // The compaction really completed, so the Run is not stuck.
+        assert!(coordinator.snapshot().unwrap().compaction.pending.is_none());
+        let failures = compaction_failure_events(&db, &run_id);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert_eq!(failures[0]["failure"], "settled_rejection");
+        assert_eq!(failures[0]["attempt"], 1);
+        assert_eq!(failures[0]["category"], "provider_unavailable");
+        assert_eq!(failures[0]["httpStatus"], 429);
+        assert_eq!(failures[0]["retryable"], true);
+        assert!(failures[0]["remainingMs"].as_i64().unwrap() > 0);
+        // The event carries no request or summary content.
+        let body = failures[0].to_string();
+        assert!(!body.contains("Prior discussion is context only"));
+    }
+
+    /// The retry is bounded: a second settled rejection stops with one classified
+    /// reason, and the pending request keeps its owner so recovery cannot replay it.
+    #[test]
+    fn an_exhausted_retry_reports_one_classified_reason_and_stops() {
+        let clock = TestClock::new(1000);
+        let cancellation = CancellationRegistry::default();
+        let (db, _root, run_id) = compaction_fixture(&clock);
+        let coordinator =
+            KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+        assert!(coordinator
+            .prepare_context_if_needed("initial", 4096)
+            .unwrap());
+        let attempts = std::cell::Cell::new(0u32);
+        let error = coordinator
+            .dispatch_pending_compaction("exhausted-owner", |_, request, _, _| {
+                attempts.set(attempts.get() + 1);
+                Err(settled_provider_rejection(request, 503))
+            })
+            .unwrap_err();
+        assert_eq!(error, context::FAILED);
+        assert_eq!(attempts.get(), 2, "bounded: initial attempt plus one retry");
+        let failures = compaction_failure_events(&db, &run_id);
+        assert_eq!(failures.len(), 2, "{failures:?}");
+        assert_eq!(failures[0]["retryable"], true);
+        assert_eq!(failures[1]["retryable"], false, "the last attempt must not claim a retry");
+        assert_eq!(failures[1]["attempt"], 2);
+        // The durable owner stays set, so a restart never re-dispatches this request.
+        let pending = coordinator.snapshot().unwrap().compaction.pending.expect("pending kept");
+        assert_eq!(pending.owner.as_deref(), Some("exhausted-owner"));
+    }
+
+    /// An unknown outcome is never replayed: the provider may be generating the
+    /// summary right now, so a second request could duplicate it.
+    #[test]
+    fn an_unknown_compaction_outcome_is_never_replayed() {
+        let clock = TestClock::new(1000);
+        let cancellation = CancellationRegistry::default();
+        let (db, _root, run_id) = compaction_fixture(&clock);
+        let coordinator =
+            KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+        assert!(coordinator
+            .prepare_context_if_needed("initial", 4096)
+            .unwrap());
+        let attempts = std::cell::Cell::new(0u32);
+        let error = coordinator
+            .dispatch_pending_compaction("unknown-owner", |_, _, _, _| {
+                attempts.set(attempts.get() + 1);
+                Err(crate::runtime_host::kernel_model_worker::MODEL_WINDOW_EXPIRED.to_owned())
+            })
+            .unwrap_err();
+        assert_eq!(error, context::FAILED);
+        assert_eq!(attempts.get(), 1, "an unknown outcome is never replayed");
+        let failures = compaction_failure_events(&db, &run_id);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0]["failure"], "unknown_outcome");
+        assert_eq!(failures[0]["retryable"], false);
+    }
+
+    /// Only a settled rejection may be retried; the classifier is the single place
+    /// that decides, so a cancelled Run or an unclassified error never re-asks.
+    #[test]
+    fn only_a_settled_rejection_is_retryable() {
+        assert!(context::CompactionFailure::SettledRejection.is_retryable());
+        for kind in [
+            context::CompactionFailure::UnknownOutcome,
+            context::CompactionFailure::InvalidResult,
+            context::CompactionFailure::Cancelled,
+            context::CompactionFailure::Unclassified,
+        ] {
+            assert!(!kind.is_retryable(), "{kind:?} must not be retried");
+            assert!(!kind.as_str().is_empty());
+        }
+        assert_eq!(context::RETRY_LIMIT, 1, "bounded recovery only");
+        assert!(context::MIN_RETRY_BUDGET_MS > 0);
+    }
+
 #[test]
 fn kernel_compaction_prepared_and_committed_views_survive_reopen_without_repeating_model() {
     let clock = TestClock::new(1000);

@@ -2227,8 +2227,8 @@ impl RuntimeHost {
             run_execution_budget_ms: budgets.run_execution_ms,
             run_execution_limited: budgets.run_execution_limited,
             approval_wait_timeout_ms: budgets.approval_wait_ms,
-            provider_max_retries: 2,
-            turn_max_retries: 1,
+            provider_max_retries: 5,
+            turn_max_retries: 5,
             experimental_compute_job_notice: false,
         };
         let prepared = crate::database::PreparedContinuation {
@@ -2474,6 +2474,16 @@ impl RuntimeHost {
                     crate::database::now_ms(),
                 )?;
             }
+            // A user-authored resume of an interrupted task keeps that task's
+            // promised deliverables, even when this round declares nothing of its
+            // own. See `delivery::inherit_interrupted_deliverables` for the bound.
+            delivery::inherit_interrupted_deliverables(
+                &self.database,
+                &started.run.id,
+                &control_binding.conversation_id,
+                control_binding.permission.project_root.as_deref(),
+                text,
+            )?;
         }
         // Host-decided placement for user-facing files. The folder is decided
         // once per (conversation, project) and persisted, so a continuation,

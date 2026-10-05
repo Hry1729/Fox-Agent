@@ -725,3 +725,334 @@ fn delivered_rows_apply_inside_the_response_write_set_only() {
     assert!(rows[0].applied_event_seq.is_some());
     assert_eq!(coordinator.snapshot().unwrap().state, "completed");
 }
+
+// --- item 6: the `next-turn` lane is held out of the active Run -------------
+
+/// "排队，下一轮处理" must be durable but provably absent from every model input
+/// of the active Run: a queued request is not a request the running task was
+/// ever asked to answer.
+#[test]
+fn a_next_turn_request_is_held_out_of_every_model_input_read() {
+    let clock = TestClock::new(1000);
+    let (db, _root, run_id) = steering_model_fixture(&clock);
+    let now = crate::database::now_ms();
+    db.enqueue_run_steering_on_lane(
+        &run_id,
+        "queued-1",
+        "下一轮再处理：把产物放到 D:\\out",
+        crate::database::STEERING_LANE_NEXT_TURN,
+        now,
+    )
+    .unwrap();
+    // The same run also holds one request on the current lane: the two must not
+    // be conflated by any read.
+    db.enqueue_run_steering(&run_id, "current-1", "当前任务补充", now + 1)
+        .unwrap();
+
+    // Every read that feeds a model dispatch sees only the `current` lane.
+    let pending = db.pending_run_steering(&run_id).unwrap();
+    assert_eq!(
+        pending.iter().map(|row| row.message_id.as_str()).collect::<Vec<_>>(),
+        ["current-1"],
+    );
+    let active = db.active_run_steering(&run_id).unwrap();
+    assert_eq!(
+        active.iter().map(|row| row.message_id.as_str()).collect::<Vec<_>>(),
+        ["current-1"],
+    );
+    // Arming a dispatch binds the current lane only; the queued row stays put.
+    let bound = db
+        .deliver_steering_for_dispatch(&run_id, "initial-model-delivery")
+        .unwrap();
+    assert_eq!(
+        bound.iter().map(|row| row.message_id.as_str()).collect::<Vec<_>>(),
+        ["current-1"],
+    );
+    assert!(db
+        .bound_run_steering(&run_id, "initial-model-delivery")
+        .unwrap()
+        .iter()
+        .all(|row| row.lane == crate::database::STEERING_LANE_CURRENT));
+
+    // The queued row is still there, still `received`, still readable.
+    let queued = db.pending_next_turn_steering(&run_id).unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].message_id, "queued-1");
+    assert_eq!(queued[0].status, "received");
+    let listed = db.run_steering_messages(&run_id).unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        listed.iter().map(|row| (row.message_id.as_str(), row.lane.as_str())).collect::<Vec<_>>(),
+        [("queued-1", "next-turn"), ("current-1", "current")],
+    );
+}
+
+/// The terminal decision cancels the current lane — that Run owed those rows an
+/// answer — but must never cancel text the user queued for the next task.
+#[test]
+fn a_terminal_decision_cancels_only_the_current_lane() {
+    let clock = TestClock::new(1000);
+    let (db, _root, run_id) = steering_model_fixture(&clock);
+    let now = crate::database::now_ms();
+    db.enqueue_run_steering(&run_id, "current-1", "当前任务补充", now)
+        .unwrap();
+    db.enqueue_run_steering_on_lane(
+        &run_id,
+        "queued-1",
+        "下一轮再处理",
+        crate::database::STEERING_LANE_NEXT_TURN,
+        now + 1,
+    )
+    .unwrap();
+
+    db.with_connection(|conn| {
+        let tx = conn.transaction()?;
+        crate::database::cancel_open_steering_in_tx(&tx, &run_id)?;
+        tx.commit()
+    })
+    .unwrap();
+
+    let rows = db.run_steering_messages(&run_id).unwrap();
+    let by_id = |id: &str| rows.iter().find(|row| row.message_id == id).unwrap();
+    assert_eq!(
+        by_id("current-1").status,
+        "cancelled",
+        "the Run owed the current-lane request an answer it never gave"
+    );
+    assert_eq!(
+        by_id("queued-1").status,
+        "received",
+        "text the Run never promised to answer must survive it ending"
+    );
+    // The surviving queue is visible through its own read, which is the entry
+    // point the UI offers to carry it into a new task.
+    assert_eq!(db.pending_next_turn_steering(&run_id).unwrap().len(), 1);
+}
+
+/// A queued `next-turn` request costs the active Run nothing: it neither spends
+/// the additional-input budget nor competes for the current lane's byte cap.
+#[test]
+fn the_next_turn_lane_neither_spends_the_budget_nor_shares_the_byte_cap() {
+    let clock = TestClock::new(1000);
+    let (db, root, run_id) = steering_model_fixture(&clock);
+    let now = crate::database::now_ms();
+    // Spend every additional-request round this Run has.
+    record_steering_lane_rounds(&root.join("facts.db"), &run_id, crate::database::MAX_STEERING_FOLLOWUPS);
+    let refused = db
+        .enqueue_run_steering(&run_id, "too-late", "再补充一条", now)
+        .expect_err("the current lane is closed once the budget is spent");
+    assert!(refused.contains("additional-request"), "unexpected error: {refused}");
+    // Queueing for the next task is still accepted: this Run will never carry it.
+    db.enqueue_run_steering_on_lane(
+        &run_id,
+        "queued-after-budget",
+        "下一轮再处理",
+        crate::database::STEERING_LANE_NEXT_TURN,
+        now + 1,
+    )
+    .expect("a next-turn request does not depend on this Run's steering budget");
+}
+
+/// The 64 KiB cap bounds each lane against the input it can actually affect: a
+/// full `current` lane cannot block queueing for the next task, and queued text
+/// cannot exhaust the frozen context window of the active dispatch.
+#[test]
+fn the_byte_cap_is_enforced_per_lane() {
+    let clock = TestClock::new(1000);
+    let (db, _root, run_id) = steering_model_fixture(&clock);
+    let now = crate::database::now_ms();
+    let block = "x".repeat(8_000);
+    for index in 0..8 {
+        db.enqueue_run_steering(&run_id, &format!("cap-{index}"), &block, now + index)
+            .expect("eight blocks fill the current lane");
+    }
+    assert!(
+        db.enqueue_run_steering(&run_id, "cap-full", &block, now + 100)
+            .is_err(),
+        "the current lane must be full",
+    );
+    db.enqueue_run_steering_on_lane(
+        &run_id,
+        "queued-bytes",
+        &block,
+        crate::database::STEERING_LANE_NEXT_TURN,
+        now + 101,
+    )
+    .expect("queued text cannot exhaust the active dispatch's context budget");
+    // The queued lane is now itself full, and says so without touching the
+    // current lane's rows. `queued-bytes` already holds one 8000-byte block, so
+    // seven more reach 64 000 bytes and an eighth block would exceed 64 KiB.
+    for index in 0..7 {
+        db.enqueue_run_steering_on_lane(
+            &run_id,
+            &format!("queued-{index}"),
+            &block,
+            crate::database::STEERING_LANE_NEXT_TURN,
+            now + 102 + index,
+        )
+        .expect("the queued lane has its own 64 KiB");
+    }
+    assert!(db
+        .enqueue_run_steering_on_lane(
+            &run_id,
+            "queued-full",
+            &block,
+            crate::database::STEERING_LANE_NEXT_TURN,
+            now + 200,
+        )
+        .is_err());
+    assert_eq!(
+        db.pending_run_steering(&run_id).unwrap().len(),
+        8,
+        "filling the queued lane must not disturb the current lane",
+    );
+    assert_eq!(db.pending_next_turn_steering(&run_id).unwrap().len(), 8);
+}
+
+/// Only a held `next-turn` row is removable. Removing a current-lane row would
+/// drop a request the Run may already be answering.
+#[test]
+fn only_a_held_next_turn_row_can_be_removed() {
+    let clock = TestClock::new(1000);
+    let (db, _root, run_id) = steering_model_fixture(&clock);
+    let now = crate::database::now_ms();
+    db.enqueue_run_steering(&run_id, "current-1", "当前任务补充", now)
+        .unwrap();
+    db.enqueue_run_steering_on_lane(
+        &run_id,
+        "queued-1",
+        "下一轮再处理",
+        crate::database::STEERING_LANE_NEXT_TURN,
+        now + 1,
+    )
+    .unwrap();
+
+    assert!(!db.discard_run_steering(&run_id, "current-1").unwrap());
+    assert!(!db.discard_run_steering(&run_id, "absent").unwrap());
+    assert!(db.discard_run_steering(&run_id, "queued-1").unwrap());
+    assert!(!db.discard_run_steering(&run_id, "queued-1").unwrap());
+    let rows = db.run_steering_messages(&run_id).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.message_id.as_str()).collect::<Vec<_>>(),
+        ["current-1"],
+        "removing the queued row leaves the current lane untouched",
+    );
+    // A repeated enqueue of the same identity is still idempotent after removal:
+    // it re-inserts under the same id rather than duplicating a second row.
+    db.enqueue_run_steering_on_lane(
+        &run_id,
+        "queued-1",
+        "下一轮再处理",
+        crate::database::STEERING_LANE_NEXT_TURN,
+        now + 2,
+    )
+    .unwrap();
+    assert_eq!(db.pending_next_turn_steering(&run_id).unwrap().len(), 1);
+}
+
+/// An unknown lane is refused at the receipt boundary instead of being stored as
+/// a row no read would ever collect.
+#[test]
+fn an_unknown_lane_is_refused() {
+    let clock = TestClock::new(1000);
+    let (db, _root, run_id) = steering_model_fixture(&clock);
+    let error = db
+        .enqueue_run_steering_on_lane(
+            &run_id,
+            "bad-lane",
+            "无通道",
+            "sometime",
+            crate::database::now_ms(),
+        )
+        .expect_err("an unknown lane must be refused");
+    assert!(error.contains("unknown steering lane"), "unexpected error: {error}");
+    assert!(db.run_steering_messages(&run_id).unwrap().is_empty());
+}
+
+/// The queued lane is a conversation-level promise: it survives the end of the
+/// Run that accepted it, and it is read and removed by conversation rather than
+/// by run id — so a queue the user is still waiting on stays visible and
+/// actionable when the next task creates a new Run.
+#[test]
+fn the_queued_lane_is_scoped_to_the_conversation_not_to_one_run() {
+    let clock = TestClock::new(1000);
+    let (db, _root, run_id) = steering_model_fixture(&clock);
+    let now = crate::database::now_ms();
+    let conversation_id: String = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT conversation_id FROM run_control_bindings WHERE run_id=?1",
+                [run_id.as_str()],
+                |row| row.get::<_, String>(0),
+            )?)
+        })
+        .unwrap();
+    let foreign_conversation = db
+        .create_conversation(db.default_agent_id(), None, None, Some("read_only"))
+        .unwrap();
+
+    db.enqueue_run_steering_on_lane(
+        &run_id,
+        "queued-carried",
+        "下一轮再处理：产物放到 D:\\out",
+        crate::database::STEERING_LANE_NEXT_TURN,
+        now,
+    )
+    .unwrap();
+    db.enqueue_run_steering(&run_id, "current-1", "当前任务补充", now + 1)
+        .unwrap();
+
+    // The Run ends. The terminal decision cancels the current lane only.
+    db.with_connection(|conn| {
+        let tx = conn.transaction()?;
+        crate::database::cancel_open_steering_in_tx(&tx, &run_id)?;
+        tx.commit()
+    })
+    .unwrap();
+    let rows = db.run_steering_messages(&run_id).unwrap();
+    let state_of = |id: &str| rows.iter().find(|row| row.message_id == id).unwrap().status.clone();
+    assert_eq!(state_of("current-1"), "cancelled");
+    assert_eq!(state_of("queued-carried"), "received");
+
+    // The promise is still there, read by conversation rather than by run id.
+    let carried = db
+        .queued_next_turn_steering_for_conversation(&conversation_id)
+        .unwrap();
+    assert_eq!(
+        carried.iter().map(|row| row.message_id.as_str()).collect::<Vec<_>>(),
+        ["queued-carried"],
+    );
+    assert_eq!(carried[0].run_id, run_id);
+    assert!(db.pending_run_steering(&run_id).unwrap().is_empty());
+
+    // No cross-talk into another conversation: the same database, a different
+    // conversation, an empty queue.
+    assert!(db
+        .queued_next_turn_steering_for_conversation(&foreign_conversation.id)
+        .unwrap()
+        .is_empty());
+    // A conversation-scoped removal cannot reach a foreign conversation's queue
+    // (there is nothing to reach) and cannot pull a row that already entered the
+    // Run or that does not exist.
+    assert!(!db
+        .discard_queued_next_turn_steering_for_conversation(&foreign_conversation.id, "queued-carried")
+        .unwrap());
+    assert_eq!(
+        db.queued_next_turn_steering_for_conversation(&conversation_id).unwrap().len(),
+        1,
+    );
+    assert!(!db
+        .discard_queued_next_turn_steering_for_conversation(&conversation_id, "current-1")
+        .unwrap());
+    assert!(!db
+        .discard_queued_next_turn_steering_for_conversation(&conversation_id, "absent")
+        .unwrap());
+    // The user can still take their own queued request back.
+    assert!(db
+        .discard_queued_next_turn_steering_for_conversation(&conversation_id, "queued-carried")
+        .unwrap());
+    assert!(db
+        .queued_next_turn_steering_for_conversation(&conversation_id)
+        .unwrap()
+        .is_empty());
+}

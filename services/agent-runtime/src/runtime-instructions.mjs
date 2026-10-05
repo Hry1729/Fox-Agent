@@ -6,7 +6,21 @@ const IMPLICIT_APPROVAL_DIALOG_PATTERN = /(?:触发|测试|演示|展示|再来|
 
 export const APPROVAL_DEMO_NO_TOOL_MESSAGE = '这次没有触发审批：模型没有实际调用任何工具，因此 Fox 没有创建审批请求。请重试；审批弹窗只能由 write_file、edit_file、run_command、网络/系统/SQLite、质量检查或 call_mcp_tool 等受保护 Host 工具的真实调用产生。'
 
+// The single source of the user-facing language rule. Every prompt composer
+// that renders its own runtime block must keep this fragment, so the rule cannot
+// drift between the Kernel, Legacy, planner, and graph-preview entries.
+export const FOX_LANGUAGE_CONTRACT = `
+Fox user-facing language contract:
+- Default every user-facing word to Simplified Chinese (简体中文): progress notes before a tool call, action descriptions, failure, blocker or limitation explanations, stage and phase summaries, questions you put to the user, and the final response.
+- An explicit user language choice outranks this default. If the latest user message asks for another language, or the user writes in one and clearly wants that one back, answer in that language instead.
+- Machine text is never translated, renamed, or transliterated: code, commands, shell flags, paths, file names, URLs, identifiers, API/tool/parameter names, JSON or config keys, log lines, and error strings stay exactly as they are. A necessary original quotation stays in its own language. Do not append a translation of such text unless the user asks for one.
+- Private reasoning and internal planning are not user-facing and may stay in whatever language you think in. Never paste that reasoning into a user-facing progress note or into the final response; state the conclusion, action, or blocker in Simplified Chinese instead.
+- When a tool result, provider message, or file body is in another language, explain and summarize it in Simplified Chinese instead of forwarding the raw foreign text as your own explanation.
+`.trim()
+
 export const FOX_RUNTIME_INSTRUCTIONS = `
+${FOX_LANGUAGE_CONTRACT}
+
 Runtime presentation rules:
 - Keep private chain-of-thought, internal planning, tool inventories, and self-directed notes out of assistant text.
 - Do not narrate hidden reasoning with phrases such as "The user wants", "Let me think", "I should", or "Looking at my tools".

@@ -7206,6 +7206,56 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
     }
     apply_migration(&transaction, 88, MIGRATION_88, now)?;
     apply_migration(&transaction, 89, MIGRATION_89, now)?;
+    // v90: a resumed task records which Run its inherited delivery requirements
+    // came from, so the ledger can show provenance instead of guessing it.
+    let v90_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 90)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !v90_applied {
+        ensure_column_if_missing(
+            &transaction,
+            "delivery_checklist_items",
+            "inherited_from_run_id",
+            "TEXT",
+        )?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (90, ?1)",
+            [now],
+        )?;
+    }
+    // v91 (2026-10-03 design supplements, item 6): mid-run supplementary input
+    // gains an explicit lane. `current` is the pre-existing behaviour — the text
+    // is spliced into the active Run's next dispatch boundary. `next-turn` is
+    // accepted durably but bound to no dispatch of the active Run: it waits for
+    // the next task the user starts, so the user can queue work without
+    // interrupting what is running.
+    //
+    // A default of `current` keeps every existing row on its recorded meaning;
+    // SQLite's ALTER TABLE ... ADD COLUMN with a constant NOT NULL default is a
+    // metadata-only change, so no historical row is rewritten.
+    let v91_applied = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 91)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !v91_applied {
+        ensure_column_if_missing(
+            &transaction,
+            "run_steering_messages",
+            "lane",
+            "TEXT NOT NULL DEFAULT 'current'",
+        )?;
+        transaction.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_run_steering_lane
+                 ON run_steering_messages(run_id,lane,status)",
+        )?;
+        transaction.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (91, ?1)",
+            [now],
+        )?;
+    }
     finish_transaction(transaction)
 }
 

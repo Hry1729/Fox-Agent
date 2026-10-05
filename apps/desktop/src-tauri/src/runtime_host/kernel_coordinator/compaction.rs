@@ -147,7 +147,7 @@ impl KernelCoordinator<'_> {
     pub(super) fn dispatch_pending_compaction(
         &self,
         owner: &str,
-        deliver: impl FnOnce(
+        mut deliver: impl FnMut(
             &RunControlBinding,
             &fox_engine_protocol::KernelCompactionRequest,
             &kernel::CancellationToken,
@@ -187,14 +187,59 @@ impl KernelCoordinator<'_> {
         if now.wall_ms < since {
             return Err(context::FAILED.into());
         }
-        let remaining = self.binding.budgets.limit_operation_ms(
-            self.binding.budgets.model_request_ms.saturating_sub(now.wall_ms.saturating_sub(since)),
-            facts.running_elapsed_ms,
-        );
-        // Owner and input are durable before the first external request. On an
-        // unknown result, recovery never renews this request or its deadline.
-        let response = deliver(&self.binding, &plan.request, &token, remaining)
-            .map_err(|_| context::FAILED)?;
+        // Owner and input are durable before the first external request, and every
+        // attempt below shares this ONE deadline: a retry never renews the window,
+        // and an unknown result is never replayed (recovery refuses a request whose
+        // durable owner is already set).
+        let deadline_wall_ms = since.saturating_add(self.binding.budgets.model_request_ms);
+        let mut attempt: u32 = 0;
+        let response = loop {
+            let attempt_now = self.clock.read();
+            let attempt_facts = self
+                .controller
+                .lock()
+                .map_err(|_| "Kernel coordinator lock poisoned")?
+                .shadow_checkpoint(attempt_now.monotonic_ms);
+            let remaining = self.binding.budgets.limit_operation_ms(
+                deadline_wall_ms.saturating_sub(attempt_now.wall_ms),
+                attempt_facts.running_elapsed_ms,
+            );
+            let outcome = deliver(&self.binding, &plan.request, &token, remaining);
+            match outcome {
+                Ok(response) => break response,
+                Err(error) => {
+                    let failure = classify_compaction_failure(&error, &token);
+                    let elapsed_ms = attempt_now.wall_ms.saturating_sub(since);
+                    // A retry needs a settled, retryable failure, a fresh attempt
+                    // inside the same window, and enough of that window left to be
+                    // worth spending.
+                    let retry = failure.is_retryable()
+                        && attempt < context::RETRY_LIMIT
+                        && remaining >= context::MIN_RETRY_BUDGET_MS;
+                    let (category, http_status) = compaction_failure_evidence(&error);
+                    self.apply(None, |controller, _| {
+                        controller.fail_context_compaction(
+                            &pending.id,
+                            owner,
+                            attempt + 1,
+                            elapsed_ms,
+                            remaining,
+                            failure.as_str(),
+                            category.as_deref(),
+                            http_status,
+                            retry,
+                        )
+                    })?;
+                    if !retry {
+                        return Err(context::FAILED.into());
+                    }
+                    // Cancellation outranks a retry: a cancelled Run must not spend
+                    // another provider call.
+                    token.check()?;
+                    attempt += 1;
+                }
+            }
+        };
         self.tick()?;
         token.check()?;
         let result = CompactionResult::new(&plan, response).map_err(|_| context::FAILED)?;
@@ -237,5 +282,43 @@ impl KernelCoordinator<'_> {
             self.resume_context_compaction(owner, runtime, api_key)?;
         }
         Ok(())
+    }
+}
+
+/// Classify one failed compaction attempt so the Host can tell a settled
+/// provider rejection (safe to re-ask) from an unknown outcome (never replayed).
+fn classify_compaction_failure(error: &str, token: &kernel::CancellationToken) -> context::CompactionFailure {
+    use super::super::kernel_model_worker;
+    if token.is_cancelled() {
+        return context::CompactionFailure::Cancelled;
+    }
+    if let Some(evidence) = kernel_model_worker::settled_failure(error) {
+        // Only a rejection that happened before generation is retryable.
+        return if evidence.category == "provider_unavailable" {
+            context::CompactionFailure::SettledRejection
+        } else {
+            context::CompactionFailure::UnknownOutcome
+        };
+    }
+    if kernel_model_worker::is_reaped_transport_failure(error) {
+        return context::CompactionFailure::UnknownOutcome;
+    }
+    if error.contains("invalid compaction response")
+        || error.contains("identity mismatch")
+        || error.contains("invalid compaction")
+    {
+        return context::CompactionFailure::InvalidResult;
+    }
+    if error.to_ascii_lowercase().contains("cancel") {
+        return context::CompactionFailure::Cancelled;
+    }
+    context::CompactionFailure::Unclassified
+}
+
+/// The provider-side evidence of a settled failure, for the durable event only.
+fn compaction_failure_evidence(error: &str) -> (Option<String>, Option<u16>) {
+    match super::super::kernel_model_worker::settled_failure(error) {
+        Some(evidence) => (Some(evidence.category), evidence.http_status),
+        None => (None, None),
     }
 }

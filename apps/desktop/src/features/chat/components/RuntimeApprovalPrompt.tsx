@@ -62,7 +62,9 @@ export function RuntimeApprovalPrompt({
         {presentation.command && <div className="fox-approval-command"><Terminal size={13} /><code>{presentation.command}</code></div>}
         <div className="fox-approval-details-scroll">
         {presentation.wholeFileReplacement && <div className="fox-approval-scope">
-          <p className="fox-approval-scope-note">{presentation.wholeFileReplacement.baselineVersion === 'missing' ? '目标文件尚不存在，将写入以下完整内容。' : '将替换目标文件的全部内容，请确认拟写入内容。'}仅授权本次操作。</p>
+          {presentation.wholeFileReplacement.baselineVersion === 'missing'
+            ? <p className="fox-approval-scope-note">目标文件尚不存在，本次将新建该文件并写入以下完整内容。新建不覆盖任何已有内容；写入前仍会校验目标版本，若文件已被并发创建，本次写入会被拒绝而不是覆盖它。</p>
+            : <p className="fox-approval-scope-note">将替换目标文件的全部内容，请确认拟写入内容。该授权绑定此文件、基线与内容，仅授权本次操作。</p>}
         </div>}
         {presentation.officeReuse && <div className="fox-approval-scope">
           <p className="fox-approval-scope-note">若选择“本次对话内允许”，本次打开 Fox 期间只可重复修改此文件的以下位置和属性。换文件、换位置、增删文档元素、另存或导出均需重新确认；文件版本仍需校验。</p>
@@ -85,10 +87,13 @@ export function RuntimeApprovalPrompt({
           </details>
         </div>}
         </div>
+        {allowedDecisions.includes('allow_conversation') && !presentation.officeReuse && <div className="fox-approval-scope">
+          <p className="fox-approval-scope-note">“本次对话内允许”只登记本会话内该确切工具与这一个写入目标的授权（不会扩到目录内的其他文件），可随时撤销。撤销之后，或者会话权限模式发生任何变化（含切到更严格的模式）时，该授权立即失效，后续写入必须重新确认。它只覆盖这一项写入，不包含执行任何脚本或命令。</p>
+        </div>}
         <ConfirmationActions className="fox-confirmation-actions">
           <ConfirmationAction variant="ghost" disabled={submitting} onClick={() => void resolve('deny')}>拒绝</ConfirmationAction>
           {allowedDecisions.includes('allow_once') && <ConfirmationAction variant={allowedDecisions.includes('allow_conversation') ? 'outline' : 'default'} disabled={submitting} onClick={() => void resolve('allow_once')}>{submitting ? '处理中…' : '只允许这一次'}</ConfirmationAction>}
-          {allowedDecisions.includes('allow_conversation') && <ConfirmationAction disabled={submitting} onClick={() => void resolve('allow_conversation')}>{submitting ? '处理中…' : presentation.officeReuse ? '本次对话内允许' : '本次运行内允许'}</ConfirmationAction>}
+          {allowedDecisions.includes('allow_conversation') && <ConfirmationAction disabled={submitting} onClick={() => void resolve('allow_conversation')}>{submitting ? '处理中…' : '本次对话内允许'}</ConfirmationAction>}
         </ConfirmationActions>
       </ConfirmationRequest>
     </Confirmation>

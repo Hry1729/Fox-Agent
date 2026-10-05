@@ -72,6 +72,11 @@ pub(super) fn project(
     // block and can therefore never be read as a replacement authorization.
     project_whole_file_replacement_requests(tx, run_id, &conversation)?;
 
+    // Item 5: the card must declare exactly the decisions the Kernel will accept.
+    // The binding above decides whether "本次对话允许" is available, so the
+    // declaration is written after it.
+    declare_kernel_approval_decisions(tx, run_id)?;
+
     super::kernel_display::activity(tx, run_id, now)?;
     super::kernel_display::artifacts(tx, run_id, previous_seq, now)?;
 
@@ -518,13 +523,19 @@ fn project_whole_file_replacement_requests(
         // delivery. A whole-file read whose model view was bounded never
         // reached the model whole, so it still needs the purpose-specific
         // replacement confirmation. An unreadable/missing delivery fact is
-        // treated as "not covered", which proposes the confirmation rather than
-        // silently authorizing a replacement.
-        if super::kernel_execution_admission::model_delivery_covered_whole_file_in_tx(
-            tx, run_id, &baseline,
-        )
-        .unwrap_or(false)
-        {
+        // treated as "still required", which proposes the confirmation rather
+        // than silently authorizing a replacement.
+        //
+        // A create is not a replacement at all (item 5): its bound observation is
+        // the Host's own verified-absent target, so there is no existing version
+        // to bind and the approval keeps the ordinary decision surface.
+        let replacement_required =
+            super::kernel_execution_admission::replace_authorization_required_in_tx(
+                tx, run_id, &baseline,
+            )
+            // Fail closed toward asking: an unknown delivery is not eligibility.
+            .unwrap_or(true);
+        if !replacement_required {
             continue;
         }
         let binding = super::kernel_execution_admission::replace_request_binding(
@@ -602,5 +613,157 @@ fn project_whole_file_replacement_requests(
         }
     }
     Ok(())
+}
+
+/// Whether the Kernel will accept a reusable ("本次对话允许") decision for one
+/// approval.
+///
+/// A reusable decision is stored as an exact `(tool, scope)` grant, so it can
+/// only be accepted when the Host can NAME that scope: an unnamed scope would
+/// either authorize more than the user chose or leave an authorization that no
+/// later call can ever match. This is the SINGLE predicate behind both the
+/// declared decision surface and the acceptance check in
+/// `queue_kernel_host_approval`, so the button the user is shown and the
+/// permission the Kernel grants can never drift apart.
+pub(crate) fn kernel_approval_reusable(
+    tool: &str,
+    input: &Value,
+    replacement_bound: bool,
+    project_root: Option<&str>,
+) -> bool {
+    // A repair budget override is explicitly one-time, and a purpose-specific
+    // replacement ticket is bound to one dispatch: neither may become reusable.
+    tool != "task_repair_escalate_start"
+        && !replacement_bound
+        && crate::runtime_host::shadow_reconcile::tool_operation_scope(tool, input, project_root)
+            .is_some()
+}
+
+/// The decisions the Kernel accepts for one approval, as the card must declare
+/// them. Absence is not a declaration: the renderer refuses to invent a
+/// conversation-wide option the Host never offered.
+pub(crate) fn kernel_approval_available_decisions(
+    tool: &str,
+    input: &Value,
+    replacement_bound: bool,
+    project_root: Option<&str>,
+) -> Value {
+    if kernel_approval_reusable(tool, input, replacement_bound, project_root) {
+        serde_json::json!(["allow_once", "allow_conversation", "deny"])
+    } else {
+        serde_json::json!(["allow_once", "deny"])
+    }
+}
+
+/// Declare the accepted decision surface on every pending Kernel approval card
+/// of this Run, in the same transaction that projects it.
+///
+/// A card that omits its declaration falls back to a one-shot-only surface, so
+/// an ordinary in-directory write would never offer the conversation-scoped
+/// decision the backend fully supports (item 5). Only cards that carry no
+/// declaration yet and belong to the Kernel authority are touched, so an
+/// explicit one-time-only surface (the repair override) is never widened.
+fn declare_kernel_approval_decisions(tx: &Transaction<'_>, run_id: &str) -> rusqlite::Result<()> {
+    let project_root: Option<String> = tx
+        .query_row(
+            "SELECT json_extract(b.binding_json,'$.permission.projectRoot')
+               FROM run_control_bindings b WHERE b.run_id=?1",
+            [run_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let rows: Vec<(String, String, String, i64)> = tx
+        .prepare(
+            "SELECT a.id, t.tool_name, t.input_json,
+                    CASE WHEN json_type(a.request_json,'$.wholeFileReplacement') IS NULL
+                         THEN 0 ELSE 1 END
+               FROM approvals a JOIN tool_calls t ON t.id = a.tool_call_id
+              WHERE t.run_id=?1 AND a.status='pending'
+                AND json_extract(a.request_json,'$.authority')='kernel'
+                AND json_type(a.request_json,'$.availableDecisions') IS NULL",
+        )?
+        .query_map([run_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    for (approval_id, tool, input_json, replacement_bound) in rows {
+        let input: Value = serde_json::from_str(&input_json).unwrap_or(Value::Null);
+        let decisions = kernel_approval_available_decisions(
+            &tool,
+            &input,
+            replacement_bound != 0,
+            project_root.as_deref(),
+        );
+        tx.execute(
+            "UPDATE approvals
+                SET request_json = json_set(request_json,'$.availableDecisions',json(?2))
+              WHERE id=?1 AND json_type(request_json,'$.availableDecisions') IS NULL",
+            params![approval_id, decisions.to_string()],
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod item5_decision_surface_tests {
+    use super::{kernel_approval_available_decisions, kernel_approval_reusable};
+    use serde_json::json;
+
+    /// 写入与执行分别判定：写入目标能被精确命名，所以它可以被一条会话级授权
+    /// 覆盖；执行动作不可命名，所以任何写入授权都无法冒充执行授权，执行脚本
+    /// 永远保留它自己的人工审批（项5 第4条）。
+    #[test]
+    fn item5_writing_a_script_never_authorizes_running_it() {
+        let root = std::env::temp_dir()
+            .join(format!("fox-item5-decision-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&root).expect("temp root");
+        let root = root.to_string_lossy().into_owned();
+        let write = json!({"path":"deploy.ps1","content":"Write-Host ok\n"});
+        let execute = json!({"action":"sync","command":"pwsh -File deploy.ps1"});
+
+        assert!(
+            kernel_approval_reusable("write_file", &write, false, Some(&root)),
+            "写入目标必须能被精确命名，否则会话级授权无法落地"
+        );
+        assert!(
+            !kernel_approval_reusable("run_command", &execute, false, Some(&root)),
+            "执行不能被同一个可命名范围覆盖：允许写文件不得自动允许执行"
+        );
+        assert_eq!(
+            kernel_approval_available_decisions("write_file", &write, false, Some(&root)),
+            json!(["allow_once", "allow_conversation", "deny"])
+        );
+        assert_eq!(
+            kernel_approval_available_decisions("run_command", &execute, false, Some(&root)),
+            json!(["allow_once", "deny"]),
+            "执行脚本只能一次性批准，不得提供会话级授权"
+        );
+        // 一次性替换凭据与 repair override 都不得升级成可复用授权。
+        assert!(!kernel_approval_reusable(
+            "write_file",
+            &write,
+            true,
+            Some(&root)
+        ));
+        assert!(!kernel_approval_reusable(
+            "task_repair_escalate_start",
+            &json!({}),
+            false,
+            Some(&root)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 没有可授权的项目目录时，写入同样无法被精确命名 → 不得声明会话级决策。
+    #[test]
+    fn item5_a_write_without_a_named_directory_cannot_be_authorized_for_the_conversation() {
+        let write = json!({"path":"deploy.ps1","content":"x"});
+        assert!(!kernel_approval_reusable("write_file", &write, false, None));
+        assert_eq!(
+            kernel_approval_available_decisions("write_file", &write, false, None),
+            json!(["allow_once", "deny"])
+        );
+    }
 }
 

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { activeProcessGroupTitle, processGroupTitle, projectRuntimeGroups, summarizeProcessActivity } from '../src/features/chat/runtime-process-groups'
+import { activeProcessDetail, activeProcessGroupTitle, processGroupTitle, projectRuntimeGroups, summarizeProcessActivity } from '../src/features/chat/runtime-process-groups'
 import { answerDeltaFingerprint } from '../src/features/conversations/model/runtime-delta-fingerprint'
 import type { RunEventRecord } from '../src/features/conversations/model/types'
 
@@ -123,4 +123,18 @@ test('ranks distinct call IDs by count and first appearance, including knowledge
   expect(processGroupTitle([event(1, 'tool.started', { toolCallId: 'office', tool: 'call_mcp_tool', input: { server: 'fox-office' } })])).toBe('调用了办公工具')
   expect(activeProcessGroupTitle()).toBe('正在分析请求')
   expect(activeProcessGroupTitle('search_code')).toBe('正在搜索代码')
+})
+
+test('the process header never quotes non-Chinese private reasoning', () => {
+  // The header line is user-facing. Raw model thinking may be English, so the
+  // reasoning caller falls back to a Chinese status instead of echoing it.
+  expect(activeProcessDetail('reasoning', { title: 'The user wants me to inspect the file and then' })).toBe('正在思考')
+  expect(activeProcessDetail('reasoning', { title: '' })).toBe('正在思考')
+  expect(activeProcessDetail('reasoning')).toBe('正在思考')
+  // Genuine Chinese thinking still wins: the summary keeps the real state.
+  expect(activeProcessDetail('reasoning', { title: '正在核对表格的合计行' })).toBe('正在核对表格的合计行')
+  // Tool callers keep their own identifiers, paths and commands verbatim.
+  expect(activeProcessDetail('read', { path: 'src/main.rs' })).toBe('src/main.rs')
+  expect(activeProcessDetail('run_command', { command: 'pnpm exec tsc --noEmit' })).toBe('pnpm exec tsc --noEmit')
+  expect(activeProcessDetail('read')).toBe('read')
 })

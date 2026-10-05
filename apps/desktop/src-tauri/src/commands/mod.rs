@@ -3024,6 +3024,9 @@ pub struct RunSteeringEnqueueRequest {
     /// Optional client-generated idempotency id; a UUIDv4 is generated when
     /// absent. Re-submitting the same id returns the original row, never a copy.
     pub message_id: Option<String>,
+    /// `current` (default) delivers at the active Run's next dispatch boundary;
+    /// `next-turn` holds the text for the conversation's next task instead.
+    pub lane: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3033,6 +3036,8 @@ pub struct RunSteeringRecord {
     pub message_id: String,
     pub content: String,
     pub status: String,
+    /// `current` or `next-turn`; see `run_steering_messages.lane`.
+    pub lane: String,
     pub received_at: i64,
     pub applied_at: Option<i64>,
     pub applied_event_seq: Option<i64>,
@@ -3059,6 +3064,20 @@ pub struct RunSteeringEnqueueResponse {
     pub seq: i64,
     pub message_id: String,
     pub status: String,
+    pub lane: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSteeringDiscardRequest {
+    pub conversation_id: String,
+    pub message_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSteeringDiscardResponse {
+    pub removed: bool,
 }
 
 /// Durably accept one additional user request for the conversation's active
@@ -3073,6 +3092,20 @@ pub fn run_steering_enqueue(
         .message_id
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let lane = request
+        .lane
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| crate::database::STEERING_LANE_CURRENT.to_owned());
+    if lane != crate::database::STEERING_LANE_CURRENT
+        && lane != crate::database::STEERING_LANE_NEXT_TURN
+    {
+        return ApiResponse::failure(
+            "steering.unknown_lane",
+            "无法识别的补充要求投递方式。",
+            false,
+        );
+    }
     let run_id = match state
         .database
         .active_kernel_run_for_conversation(&request.conversation_id)
@@ -3087,10 +3120,11 @@ pub fn run_steering_enqueue(
         }
         Err(error) => return ApiResponse::failure("steering.lookup_failed", error, true),
     };
-    match state.database.enqueue_run_steering(
+    match state.database.enqueue_run_steering_on_lane(
         &run_id,
         &message_id,
         &request.content,
+        &lane,
         crate::database::now_ms(),
     ) {
         Ok(seq) => {
@@ -3106,9 +3140,40 @@ pub fn run_steering_enqueue(
                 seq,
                 message_id,
                 status,
+                lane,
             })
         }
         Err(error) => ApiResponse::failure("steering.enqueue_failed", error, false),
+    }
+}
+
+/// Remove one `next-turn` request the user queued but no longer wants held.
+///
+/// Deletion is deliberately narrow: only a still-`received` `next-turn` row of
+/// this conversation's relevant Run can be removed. A `current` row is either
+/// already inside a model dispatch or still owed an answer, and a terminal row
+/// is the audit record of what happened to it.
+#[tauri::command]
+pub fn run_steering_discard(
+    state: State<'_, AppState>,
+    request: RunSteeringDiscardRequest,
+) -> ApiResponse<RunSteeringDiscardResponse> {
+    // Removal is scoped to the conversation, not to one run: a queue the user
+    // still waits on must stay removable after the next task created a new Run.
+    match state
+        .database
+        .discard_queued_next_turn_steering_for_conversation(
+            &request.conversation_id,
+            &request.message_id,
+        )
+    {
+        Ok(true) => ApiResponse::success(RunSteeringDiscardResponse { removed: true }),
+        Ok(false) => ApiResponse::failure(
+            "steering.not_discardable",
+            "该补充要求已经进入当前任务，或不在此队列中，无法移除。",
+            false,
+        ),
+        Err(error) => ApiResponse::failure("steering.discard_failed", error, true),
     }
 }
 
@@ -3157,25 +3222,44 @@ pub fn run_steering_list(
         .ok()
         .flatten();
     match state.database.run_steering_messages(&run_id) {
-        Ok(rows) => ApiResponse::success(RunSteeringListResponse {
-            run_id: Some(run_id),
-            run_state,
-            accepts_steering,
-            messages: rows
-                .into_iter()
-                .map(|row| RunSteeringRecord {
-                    seq: row.seq,
-                    message_id: row.message_id,
-                    content: row.content,
-                    status: row.status,
-                    received_at: row.received_at,
-                    applied_at: row.applied_at,
-                    applied_event_seq: row.applied_event_seq,
-                    applied_dispatch_key: row.applied_dispatch_key,
-                })
-                .collect(),
-        }),
+        Ok(rows) => {
+            let mut records: Vec<RunSteeringRecord> = rows.into_iter().map(to_steering_record).collect();
+            // The `next-turn` queue outlives the Run that received it, including
+            // across the start of the next task (a new Run). Carry every still
+            // held row of this conversation into the listing, or a queue the user
+            // is still waiting on would silently disappear from view.
+            if let Ok(queued) = state
+                .database
+                .queued_next_turn_steering_for_conversation(&conversation_id)
+            {
+                for row in queued {
+                    if !records.iter().any(|record| record.message_id == row.message_id) {
+                        records.push(to_steering_record(row));
+                    }
+                }
+            }
+            ApiResponse::success(RunSteeringListResponse {
+                run_id: Some(run_id),
+                run_state,
+                accepts_steering,
+                messages: records,
+            })
+        }
         Err(error) => ApiResponse::failure("steering.list_failed", error, true),
+    }
+}
+
+fn to_steering_record(row: crate::database::SteeringMessage) -> RunSteeringRecord {
+    RunSteeringRecord {
+        seq: row.seq,
+        message_id: row.message_id,
+        content: row.content,
+        status: row.status,
+        lane: row.lane,
+        received_at: row.received_at,
+        applied_at: row.applied_at,
+        applied_event_seq: row.applied_event_seq,
+        applied_dispatch_key: row.applied_dispatch_key,
     }
 }
 

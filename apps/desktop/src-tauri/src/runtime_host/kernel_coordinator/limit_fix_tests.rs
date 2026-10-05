@@ -290,7 +290,9 @@ fn assert_live_total_retry(continuation: bool) {
     assert!(rejection["failure"]["telemetry"]["toolParamBytes"].as_u64().unwrap() > 0);
     assert!(db.kernel_rehydrate(&run_id).unwrap().unwrap().model_request_since_wall_ms.is_none());
     drop(conn); drop(coordinator); drop(db);
-    std::thread::sleep(Duration::from_millis(1_100));
+    // The retry interval is a fixed 10s of wall time, so the wait before the
+    // reopened coordinator may claim it must span that interval.
+    std::thread::sleep(Duration::from_millis(10_100));
     let db = Database::open(root.join("facts.db")).unwrap();
     let coordinator = KernelCoordinator::reopen(&db,&clock,&run_id,&cancellation).unwrap().with_preview(&preview);
     coordinator.tick().unwrap();

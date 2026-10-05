@@ -169,7 +169,8 @@ fn bound_initial_frame_messages_on(
         messages=bound_context_on(tx,run,target,effect_key,messages)?;
     }
     let mut rows=tx.prepare("SELECT content,received_at,applied_dispatch_key
-        FROM run_steering_messages WHERE run_id=?1 AND status='delivered' ORDER BY seq")?;
+        FROM run_steering_messages WHERE run_id=?1 AND lane='current' AND status='delivered'
+        ORDER BY seq")?;
     let steering=rows.query_map([run],|row|Ok((row.get::<_,String>(0)?,
         row.get::<_,i64>(1)?,row.get::<_,Option<String>>(2)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -263,7 +264,8 @@ fn bound_batch_steering_on(
         }).collect())
     } else {
         let mut stmt = tx.prepare("SELECT message_id,content,received_at
-             FROM run_steering_messages WHERE run_id=?1 AND status='delivered' ORDER BY seq")?;
+             FROM run_steering_messages WHERE run_id=?1 AND lane='current'
+               AND status='delivered' ORDER BY seq")?;
         let notices = stmt.query_map([run], |row| Ok(fox_engine_protocol::KernelSteeringNotice {
             message_id:row.get(0)?,content:row.get(1)?,received_at:Some(row.get(2)?),
         }))?
@@ -612,7 +614,8 @@ fn checked_job_notice_input(
     if unfinished != 0 { return Err(kernel_err(format!("{}unfinished Jobs changed",
         crate::kernel::JOB_NOTICE_COMPETITION))); }
     let received: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM run_steering_messages WHERE run_id=?1 AND status='received'",
+        "SELECT COUNT(*) FROM run_steering_messages
+          WHERE run_id=?1 AND lane='current' AND status='received'",
         [run], |row| row.get(0))?;
     if received != 0 {
         return Err(kernel_err(format!("{}{received}", crate::kernel::STEERING_COMPETITION)));
@@ -884,7 +887,8 @@ fn validate_job_wait_decision(
             return Err(kernel_err("job wait deadline or accounting cursor changed"));
         }
         let undelivered: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM run_steering_messages WHERE run_id=?1 AND status='received'",
+            "SELECT COUNT(*) FROM run_steering_messages
+              WHERE run_id=?1 AND lane='current' AND status='received'",
             [run], |row| row.get(0))?;
         if undelivered > 0 {
             return Err(kernel_err(format!("{}{undelivered}",crate::kernel::STEERING_COMPETITION)));
@@ -3608,7 +3612,7 @@ impl Database {
                 if cmd.run_state == crate::kernel::RunState::Completed {
                     let undelivered: i64 = transaction.query_row(
                         "SELECT COUNT(*) FROM run_steering_messages
-                          WHERE run_id=?1 AND status='received'",
+                          WHERE run_id=?1 AND lane='current' AND status='received'",
                         params![run_id],
                         |row| row.get(0),
                     )?;

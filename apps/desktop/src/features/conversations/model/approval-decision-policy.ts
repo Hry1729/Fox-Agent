@@ -101,14 +101,29 @@ function baseApprovalDecisions(request: unknown): readonly ApprovalDecision[] {
   ))
 }
 
+/**
+ * The decisions the UI may send for one approval.
+ *
+ * A purpose-specific replacement ticket is bound to one dispatch and one
+ * candidate, so it can never become a conversation-wide permission. A binding
+ * whose baseline is the Host's own verified-absent target is NOT a replacement:
+ * the call creates a file that does not exist, so no existing content can be
+ * destroyed and the ordinary decision surface — including the
+ * conversation-scoped one — applies. That decision still has to come from the
+ * Host: the answer is always filtered to what some layer actually declared, so
+ * this can only ever keep a decision, never invent one.
+ */
 export function allowedApprovalDecisions(request: unknown): readonly ApprovalDecision[] {
   const decisions = baseApprovalDecisions(request)
   if (!isRecord(request) || !hasOwn(request, 'wholeFileReplacement')) return decisions
-  // Kernel stores this purpose-specific declaration inside the binding. Never
-  // offer conversation-wide permission for a one-dispatch replacement ticket.
-  if (!wholeFileReplacementBinding(request) || !isRecord(request.wholeFileReplacement)) return ['deny']
+  const replacement = wholeFileReplacementBinding(request)
+  if (!replacement || !isRecord(request.wholeFileReplacement)) return ['deny']
   const nested = explicitDecisions(request.wholeFileReplacement)
   if (nested === null) return ['deny']
+  if (replacement.baselineVersion === 'missing') {
+    // New file: the one-dispatch replacement restriction does not apply.
+    return decisions.filter(decision => nested === undefined || nested.has(decision))
+  }
   return decisions.filter(decision => decision === 'deny'
     || decision === 'allow_once' && (nested === undefined || nested.has(decision)))
 }

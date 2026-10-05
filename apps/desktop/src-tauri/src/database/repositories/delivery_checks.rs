@@ -123,6 +123,9 @@ pub(crate) struct DeliveryChecklistItem {
     pub finding: Option<String>,
     pub checked_at: Option<i64>,
     pub updated_at: i64,
+    /// The interrupted Run this requirement was inherited from, when this Run
+    /// resumes an earlier task of the same conversation.
+    pub inherited_from_run_id: Option<String>,
 }
 
 /// One managed write this Run committed to a path, as recorded by the Host's own
@@ -212,6 +215,36 @@ pub(crate) mod stage_fault {
     }
 }
 
+/// One artifact's comparable path: separators unified, the Windows verbatim prefix
+/// removed, case folded (Windows paths are case-insensitive), `./` dropped.
+fn normalize_delivery_path(named: &str) -> String {
+    let unified = named.trim().replace('\\', "/");
+    let without_prefix = unified
+        .strip_prefix("//?/")
+        .or_else(|| unified.strip_prefix("\\?\\"))
+        .unwrap_or(&unified);
+    let trimmed = without_prefix.trim_start_matches("./");
+    let mut normalized = trimmed.to_ascii_lowercase();
+    while normalized.contains("//") {
+        normalized = normalized.replace("//", "/");
+    }
+    normalized.trim_end_matches('/').to_owned()
+}
+
+/// True when two normalized artifact paths name the same file: equal, or one is the
+/// other's path suffix ("summary.md" is the same artifact as "out/summary.md", while
+/// "out/progress.csv" stays distinct).
+fn same_delivery_artifact(left: &str, right: &str) -> bool {
+    if left.is_empty() || right.is_empty() {
+        return false;
+    }
+    if left == right {
+        return true;
+    }
+    let (short, long) = if left.len() <= right.len() { (left, right) } else { (right, left) };
+    long.ends_with(short) && long.as_bytes()[long.len() - short.len() - 1] == b'/'
+}
+
 impl Database {
     /// Insert checklist items that were not planned yet. Existing items (a
     /// repaired run may re-check the same target) keep their identity.
@@ -275,6 +308,133 @@ impl Database {
                 }
             }
             Ok(requirements)
+        })
+    }
+
+    /// The immediately preceding Run of this conversation that ended without a
+    /// delivery verdict, when it promised deliverables.
+    ///
+    /// This is what a user-authored resume continues: the same conversation (and
+    /// therefore the same project root) and nothing older. A Run that completed its
+    /// delivery — or that promised nothing — is not a resume source.
+    pub(crate) fn previous_unfinished_run(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+    ) -> Result<Option<String>, String> {
+        self.with_connection(|conn| {
+            conn.query_row(
+                "SELECT r.id FROM runs r
+                  WHERE r.conversation_id = ?1
+                    AND r.id <> ?2
+                    AND r.status IN ('cancelled', 'failed', 'interrupted')
+                    AND EXISTS(
+                          SELECT 1 FROM delivery_checklist_items i WHERE i.run_id = r.id)
+                  ORDER BY r.created_at DESC, r.rowid DESC
+                  LIMIT 1",
+                params![conversation_id, run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+    }
+
+    /// Copy a previous Run's promised deliverables into this Run as **new, pending**
+    /// requirements, recording where they came from.
+    ///
+    /// Deliberately not copied: `artifact_id` (the old artifact belongs to the old
+    /// Run; this Run must verify the current file version), the old status, the old
+    /// finding and `checked_at`. `INSERT OR IGNORE` on (run_id, item_key) is what
+    /// keeps re-seeding or a recovery from duplicating a row.
+    pub(crate) fn inherit_delivery_checklist(
+        &self,
+        run_id: &str,
+        source_run_id: &str,
+        now: i64,
+    ) -> Result<usize, String> {
+        self.with_connection(|conn| {
+            // The declared spellings differ between rounds ("summary.md" in the
+            // interrupted Run, "file:out%2fsummary.md" here), so key equality alone
+            // left the same file in the checklist twice. Compare normalized paths and
+            // treat one as the same artifact when it is the other's path suffix.
+            let mut current: Vec<(String, String)> = Vec::new();
+            {
+                let mut statement = conn.prepare(
+                    "SELECT item_key, COALESCE(target_path, display_name)
+                       FROM delivery_checklist_items WHERE run_id = ?1",
+                )?;
+                let rows = statement.query_map(params![run_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                for row in rows {
+                    current.push(row?);
+                }
+            }
+            let mut source: Vec<(String, Option<String>, String, String, String, String)> = Vec::new();
+            {
+                let mut statement = conn.prepare(
+                    "SELECT item_key, target_path, display_name, checks_json,
+                            requirements_json, COALESCE(target_path, display_name)
+                       FROM delivery_checklist_items WHERE run_id = ?1",
+                )?;
+                let rows = statement.query_map(params![source_run_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                })?;
+                for row in rows {
+                    source.push(row?);
+                }
+            }
+            let mut inserted = 0usize;
+            for (item_key, target_path, display_name, checks, requirements, named) in source {
+                let candidate = normalize_delivery_path(&named);
+                let duplicate = current.iter().any(|(existing_key, existing_named)| {
+                    existing_key == &item_key
+                        || same_delivery_artifact(&normalize_delivery_path(existing_named), &candidate)
+                });
+                if duplicate {
+                    continue;
+                }
+                let changed = conn.execute(
+                    "INSERT OR IGNORE INTO delivery_checklist_items(
+                         run_id, item_key, target_path, artifact_id, display_name,
+                         checks_json, requirements_json, status, updated_at,
+                         inherited_from_run_id)
+                     VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, 'pending', ?7, ?8)",
+                    params![run_id, item_key, target_path, display_name, checks, requirements, now, source_run_id],
+                )?;
+                inserted += changed;
+                current.push((item_key, named));
+            }
+            Ok(inserted)
+        })
+    }
+
+    /// Link this Run to the interrupted task it resumes.
+    ///
+    /// The link scopes delivery *evidence* (managed write receipts) to this task, so
+    /// an inherited requirement can be verified against the file the task itself
+    /// wrote earlier. It never widens write permission: the write gate derives
+    /// read-only inputs from the current task text, not from this link.
+    pub(crate) fn link_resumed_task(
+        &self,
+        run_id: &str,
+        source_run_id: &str,
+    ) -> Result<(), String> {
+        self.with_connection(|conn| {
+            conn.execute(
+                "UPDATE kernel_runs SET continued_from_run_id = ?2
+                  WHERE run_id = ?1 AND continued_from_run_id IS NULL",
+                params![run_id, source_run_id],
+            )?;
+            Ok(())
         })
     }
 
@@ -542,7 +702,7 @@ impl Database {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT item_key, target_path, artifact_id, display_name, checks_json,
-                        status, finding_json, checked_at, updated_at
+                        status, finding_json, checked_at, updated_at, inherited_from_run_id
                  FROM delivery_checklist_items WHERE run_id=?1 ORDER BY item_key",
             )?;
             let rows = stmt
@@ -558,6 +718,7 @@ impl Database {
                         finding: row.get(6)?,
                         checked_at: row.get(7)?,
                         updated_at: row.get(8)?,
+                        inherited_from_run_id: row.get(9)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;

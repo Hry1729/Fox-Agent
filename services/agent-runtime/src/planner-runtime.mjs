@@ -7,6 +7,7 @@ import {
 import { createReadOnlyTools } from './read-only-tools.mjs'
 import { selectToolsForProjectContext } from './expert-package.mjs'
 import { composeFoxPrompt, stablePromptHash } from './prompt-composer.mjs'
+import { FOX_LANGUAGE_CONTRACT } from './runtime-instructions.mjs'
 import { adaptFoxToolsToPi } from './tool-adapter.mjs'
 
 const MAX_PLAN_STEPS = 8
@@ -121,7 +122,7 @@ export async function runPlanner({
   })
   const composition = composeFoxPrompt({
     systemPrompt: FOX_PLANNER_INSTRUCTIONS,
-    runtimeInstructions: 'The planner is advisory and must not mutate Fox Host state.',
+    runtimeInstructions: `${FOX_LANGUAGE_CONTRACT}\n\nThe planner is advisory and must not mutate Fox Host state.`,
     context,
     turn: { cwd },
   })

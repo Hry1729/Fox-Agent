@@ -69,6 +69,7 @@ pub(crate) use managed_files::{ManagedFileSource, ManagedFileVersion, ManagedFil
 pub(crate) use run_steering::{
     adopt_received_steering_in_tx, apply_delivered_steering_in_tx, cancel_open_steering_in_tx,
     deliver_steering_in_tx, SteeringMessage, SteeringDecision, MAX_STEERING_FOLLOWUPS,
+    STEERING_LANE_CURRENT, STEERING_LANE_NEXT_TURN,
 };
 pub(crate) use skill_activations::SkillActivationRecord;
 mod kernel_model_config;

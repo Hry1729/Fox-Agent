@@ -361,6 +361,7 @@ pub fn run() {
             commands::approval_resolve,
             commands::run_steering_enqueue,
             commands::run_steering_list,
+            commands::run_steering_discard,
             commands::managed_file_versions_list,
             commands::managed_file_restore,
             commands::plan_revision_resolve,

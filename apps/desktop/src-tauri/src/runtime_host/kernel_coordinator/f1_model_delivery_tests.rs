@@ -1216,3 +1216,506 @@ fn f1_legacy_entry_conservatively_requires_replacement_grant_for_large_read() {
         "不需要专门替换确认时不得留下请求记录"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 项5：自动模式与写文件授权
+//
+// 被锁定的规则（全部走真实入口：真实 Database、真实冻结绑定、真实
+// `KernelCoordinator` 提案、真实 GatewayPolicy 决策、真实 Host 准入与提交缝）：
+//  * 新建（Host 自己证明目标不存在）不是整文件替换：自动模式不逐文件打断，
+//    需要审批时给出"仅本次 / 本次对话 / 拒绝"，且不绑定一次性替换凭据；
+//  * 已有内容的整份覆盖仍然保留一次性专门替换授权（REV-05 不放宽）；
+//  * 会话级授权只覆盖它被批准的那一个确切目标，且撤销后立即失效；
+//  * 写入与执行分别判定：不可命名的执行范围永远拿不到会话级授权。
+// ---------------------------------------------------------------------------
+
+/// 冻结并真实启动一个 Run，`first_calls` 作为模型首轮提案。
+fn build_item5_with_first_calls(
+    label: &str,
+    mode: &str,
+    first_calls: Vec<(&str, &str, Value)>,
+) -> F1Run {
+    let (db, root, conversation, run, scope) =
+        kernel_gateway_fixture_with_model(label, mode, &rev_consumer_model_config());
+    let clock = crate::kernel::TestClock::new(crate::database::now_ms());
+    let cancellation = CancellationRegistry::default();
+    let policy = rev_gateway_policy_existing(&db, &run, scope.clone());
+    let content: Vec<Value> = first_calls
+        .iter()
+        .map(|(call, tool, arguments)| {
+            json!({"type":"toolCall","id":call,"name":tool,"arguments":arguments})
+        })
+        .collect();
+    let coordinator = KernelCoordinator::start_prepared(&db, &clock, &run, &cancellation)
+        .expect("real Run start");
+    coordinator
+        .dispatch_initial("owner-item5", &policy, move |binding, frame, _| {
+            Ok(fox_engine_protocol::KernelInitialModelResponse {
+                schema_version: 1,
+                run_id: binding.run_id.clone(),
+                turn_id: frame.input.turn_id.clone(),
+                checkpoint_seq: frame.checkpoint_seq,
+                assistant_message: json!({
+                    "role":"assistant","stopReason":"toolUse","content":content}),
+            })
+        })
+        .expect("the first proposal is recorded through the real policy");
+    drop(coordinator);
+    F1Run {
+        db,
+        root,
+        run_id: run,
+        conversation_id: conversation,
+        scope,
+        clock,
+        read_input: Value::Null,
+        read_call: String::new(),
+        version: "missing".into(),
+        target_path: String::new(),
+    }
+}
+
+/// 在已启动的 Run 上再走一轮真实提案。
+fn item5_propose(run: &F1Run, call: &str, tool: &str, input: Value) -> Result<(), String> {
+    let cancellation = CancellationRegistry::default();
+    let policy = rev_gateway_policy_existing(&run.db, &run.run_id, run.scope.clone());
+    let coordinator = KernelCoordinator::reopen(&run.db, &run.clock, &run.run_id, &cancellation)
+        .map_err(|error| error.to_string())?;
+    coordinator
+        .propose_tools(
+            // A batch identity is one durable turn: reusing it across proposals is
+            // refused as a conflict, so it is keyed by the call it carries.
+            &format!("item5-propose-{call}"),
+            vec![kernel::ToolCallRequest {
+                tool_call_id: call.into(),
+                tool: tool.into(),
+                canonical_input_json: input.to_string(),
+                source_order: 0,
+            }],
+            &policy,
+        )
+        .map_err(|error| error.to_string())
+}
+
+/// 该调用当前悬而未决的审批卡（真实投影行）。
+fn item5_approval_request(run: &F1Run, call: &str) -> Value {
+    let raw: String = run
+        .db
+        .with_connection(|c| {
+            c.query_row(
+                "SELECT a.request_json FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id
+                  WHERE t.run_id=?1 AND t.runtime_tool_call_id=?2 AND a.status='pending'",
+                rusqlite::params![run.run_id, call],
+                |r| r.get(0),
+            )
+        })
+        .expect("a pending approval card for this call");
+    serde_json::from_str(&raw).expect("approval request json")
+}
+
+fn item5_decisions(request: &Value) -> Vec<String> {
+    request
+        .get("availableDecisions")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn item5_replace_grant_count(run: &F1Run) -> i64 {
+    run.db
+        .with_connection(|c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM kernel_whole_file_replace_grants WHERE run_id=?1",
+                [&run.run_id],
+                |r| r.get(0),
+            )
+        })
+        .expect("replacement grant count")
+}
+
+/// 自动模式的核心验收：连续新建多份 Markdown + 更新进度 CSV 都不逐文件打断。
+#[test]
+fn item5_auto_mode_creates_reports_and_updates_the_progress_csv_without_per_file_prompts() {
+    let run = build_item5_with_first_calls(
+        "item5-auto",
+        "allow",
+        vec![
+            (
+                "report-a",
+                "write_file",
+                json!({"path":"report-a.md","content":"# Report A\n"}),
+            ),
+            (
+                "report-b",
+                "write_file",
+                json!({"path":"report-b.md","content":"# Report B\n"}),
+            ),
+            (
+                "progress",
+                "write_file",
+                json!({"path":"progress.csv","content":"step,state\n1,done\n"}),
+            ),
+        ],
+    );
+    let results = execute_pending_dispatches(
+        &run.db,
+        &run.root,
+        &run.scope,
+        &run.run_id,
+        &run.clock,
+    )
+    .expect("auto-mode dispatch seam");
+    assert_eq!(
+        results.len(),
+        3,
+        "自动模式下同轮的三次新建必须全部直接执行，不得逐文件打断：{results:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(run.root.join("report-a.md")).expect("report a"),
+        "# Report A\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(run.root.join("report-b.md")).expect("report b"),
+        "# Report B\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(run.root.join("progress.csv")).expect("progress csv"),
+        "step,state\n1,done\n"
+    );
+    assert_eq!(
+        item5_replace_grant_count(&run),
+        0,
+        "新建不是整文件替换：不得签发一次性替换凭据"
+    );
+    assert_ne!(
+        f1_run_state(&run.db, &run.run_id),
+        "waiting_approval",
+        "自动模式的新建不得停在审批上"
+    );
+
+    // 第二轮：读回自己写的 CSV，再整份覆盖为进度更新（源事实与模型交付都覆盖全文）。
+    item5_propose(&run, "read-csv", "read", json!({"path":"progress.csv"}))
+        .expect("read the report back");
+    let read = execute_pending_dispatches(
+        &run.db,
+        &run.root,
+        &run.scope,
+        &run.run_id,
+        &run.clock,
+    )
+    .expect("read the report back");
+    assert_eq!(read.len(), 1);
+    let version = read_version(&read[0]);
+    item5_propose(
+        &run,
+        "update-csv",
+        "write_file",
+        json!({
+            "path":"progress.csv","content":"step,state\n1,done\n2,done\n",
+            "expectedVersion":version,
+        }),
+    )
+    .expect("progress update proposal");
+    assert_ne!(
+        f1_run_state(&run.db, &run.run_id),
+        "waiting_approval",
+        "已完整读回的进度更新不得再弹窗"
+    );
+    let updated = execute_pending_dispatches(
+        &run.db,
+        &run.root,
+        &run.scope,
+        &run.run_id,
+        &run.clock,
+    )
+    .expect("progress update dispatch");
+    assert_eq!(updated.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(run.root.join("progress.csv")).expect("updated csv"),
+        "step,state\n1,done\n2,done\n"
+    );
+}
+
+/// 需要审批的新建：给出三个选项、不绑定替换凭据，且越界目标不进入审批面。
+#[test]
+fn item5_ask_mode_offers_the_conversation_decision_for_a_new_file_and_never_leaves_the_directory() {
+    let run = build_item5_with_first_calls(
+        "item5-ask",
+        "ask",
+        vec![(
+            "write-1",
+            "write_file",
+            json!({"path":"notes.md","content":"hello\n"}),
+        )],
+    );
+    assert_eq!(f1_run_state(&run.db, &run.run_id), "waiting_approval");
+    assert_eq!(
+        item5_replace_grant_count(&run),
+        0,
+        "新建不得预先提出一次性替换请求"
+    );
+    let request = item5_approval_request(&run, "write-1");
+    assert!(
+        request.get("wholeFileReplacement").is_none(),
+        "新建不是整文件替换：不得绑定一次性替换凭据（这正是'目标不存在也只给仅本次'的成因）"
+    );
+    let decisions = item5_decisions(&request);
+    assert!(decisions.iter().any(|d| d == "allow_once"), "{decisions:?}");
+    assert!(
+        decisions.iter().any(|d| d == "allow_conversation"),
+        "普通写入必须提供会话级授权，且后端确实接受它：{decisions:?}"
+    );
+    assert!(decisions.iter().any(|d| d == "deny"), "{decisions:?}");
+    assert!(
+        std::fs::symlink_metadata(run.root.join("notes.md")).is_err(),
+        "未批准的写入不得落盘"
+    );
+
+    // 越界路径不是"可被授权的操作范围"：不产生审批卡，也不产生文件。
+    let escaped = run
+        .root
+        .parent()
+        .expect("project parent")
+        .join("item5-escape.md");
+    let _ = item5_propose(
+        &run,
+        "write-escape",
+        "write_file",
+        json!({"path":"../item5-escape.md","content":"x"}),
+    );
+    assert!(
+        std::fs::symlink_metadata(&escaped).is_err(),
+        "越界写入不得落到授权目录之外"
+    );
+    let escape_card: Option<String> = run
+        .db
+        .with_connection(|c| {
+            c.query_row(
+                "SELECT a.id FROM approvals a JOIN tool_calls t ON t.id=a.tool_call_id
+                  WHERE t.run_id=?1 AND t.runtime_tool_call_id='write-escape'",
+                [&run.run_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .expect("escape approval lookup");
+    assert!(
+        escape_card.is_none(),
+        "越界目标不得成为可被授权的操作（审批不能授予目录之外的权限）"
+    );
+}
+
+/// 自动模式不放宽破坏性覆盖：已有内容的整份覆盖仍保留一次性专门替换授权。
+#[test]
+fn item5_auto_mode_still_requires_the_one_dispatch_ticket_to_overwrite_existing_content() {
+    let body = f1_big_body();
+    let run = build_f1_run("item5-overwrite", "allow", &body, &body);
+    assert_eq!(
+        f1_run_state(&run.db, &run.run_id),
+        "waiting_approval",
+        "自动模式不得凭权限模式放行对已有内容的整份覆盖"
+    );
+    assert_eq!(
+        f1_replace_grant_state(&run.db, &run.run_id).as_deref(),
+        Some("pending")
+    );
+    let request = item5_approval_request(&run, "write-1");
+    assert!(
+        request.get("wholeFileReplacement").is_some(),
+        "覆盖已有内容必须保留一次性的专门替换授权"
+    );
+    assert_eq!(
+        item5_decisions(&request),
+        vec!["allow_once".to_owned(), "deny".to_owned()],
+        "一次性替换凭据不得声明会话级授权"
+    );
+    assert_eq!(target_disk_bytes(&run), body.as_bytes());
+    assert_eq!(version_row_count(&run), 0);
+}
+
+/// 会话级授权：只覆盖被批准的那一个目标，别的会话拿不到，撤销后立即失效。
+#[test]
+fn item5_session_authorization_is_limited_to_its_exact_target_and_dies_on_revocation() {
+    let run = build_item5_with_first_calls(
+        "item5-scope",
+        "ask",
+        vec![("read-1", "read", json!({"path":"target.txt"}))],
+    );
+    std::fs::write(run.root.join("target.txt"), "alpha beta\n").expect("target file");
+    let read = execute_pending_dispatches(
+        &run.db,
+        &run.root,
+        &run.scope,
+        &run.run_id,
+        &run.clock,
+    )
+    .expect("initial read");
+    assert_eq!(read.len(), 1);
+    let version = read_version(&read[0]);
+
+    // 一次局部修改 → 用户选择"本次对话内允许"。
+    item5_propose(
+        &run,
+        "write-1",
+        "edit_file",
+        json!({
+            "path":"target.txt","oldText":"alpha","newText":"ALPHA",
+            "expectedVersion":version,
+        }),
+    )
+    .expect("first precise edit proposal");
+    assert_eq!(f1_run_state(&run.db, &run.run_id), "waiting_approval");
+    let decisions = item5_decisions(&item5_approval_request(&run, "write-1"));
+    assert!(
+        decisions.iter().any(|d| d == "allow_conversation"),
+        "局部修改必须能选择会话级授权：{decisions:?}"
+    );
+    settle_f1_host_approval(
+        &run,
+        kernel::ApprovalDecision::AllowConversation,
+        "allow_conversation",
+    );
+    // The Host registers the reusable grant inside `consume_approval_step`
+    // (`register_approval_grant`), which this fixture's settle helper does not
+    // drive; the full drive-loop registration and reuse is covered by
+    // `F3Case::ConversationGrantReuse`. Registering here through the same Host API
+    // with the same exact scope key keeps this case about the POLICY effect: a
+    // live grant covers one named target and nothing else.
+    let scope = crate::runtime_host::shadow_reconcile::tool_operation_scope(
+        "edit_file",
+        &json!({"path":"target.txt"}),
+        Some(run.root.to_str().expect("project root")),
+    )
+    .expect("the edit target must be nameable, or no grant could ever cover it");
+    assert!(
+        matches!(
+            run.db
+                .kernel_register_authorization_grant(
+                    &run.run_id,
+                    "write-1",
+                    "allow_conversation",
+                    "edit_file",
+                    Some(&scope),
+                )
+                .expect("register the conversation authorization"),
+            crate::database::GrantRegistration::Registered { .. }
+        ),
+        "a real conversation decision on a nameable scope must register a grant"
+    );
+    assert_eq!(
+        run.db
+            .kernel_effective_authorization_grants(&run.run_id, crate::database::now_ms())
+            .expect("grants")
+            .len(),
+        1
+    );
+    assert_eq!(
+        execute_pending_dispatches(&run.db, &run.root, &run.scope, &run.run_id, &run.clock)
+            .expect("approved edit")
+            .len(),
+        1
+    );
+
+    // 同一目标上的同类修改：授权覆盖，不再弹窗。
+    item5_propose(&run, "read-2", "read", json!({"path":"target.txt"})).expect("re-read");
+    let read = execute_pending_dispatches(
+        &run.db,
+        &run.root,
+        &run.scope,
+        &run.run_id,
+        &run.clock,
+    )
+    .expect("re-read dispatch");
+    let version = read_version(&read[0]);
+    item5_propose(
+        &run,
+        "write-2",
+        "edit_file",
+        json!({
+            "path":"target.txt","oldText":"beta","newText":"BETA",
+            "expectedVersion":version,
+        }),
+    )
+    .expect("second precise edit proposal");
+    assert_ne!(
+        f1_run_state(&run.db, &run.run_id),
+        "waiting_approval",
+        "同一目标上的同类写入已被会话授权覆盖，不得再次弹窗"
+    );
+    assert_eq!(
+        execute_pending_dispatches(&run.db, &run.root, &run.scope, &run.run_id, &run.clock)
+            .expect("granted edit")
+            .len(),
+        1
+    );
+    assert_eq!(
+        std::fs::read_to_string(run.root.join("target.txt")).expect("edited"),
+        "ALPHA BETA\n"
+    );
+
+    // 会话切换不串权：另一个会话即使同一个项目也没有这条授权。
+    let other = run
+        .db
+        .create_conversation(
+            run.db.default_agent_id(),
+            None,
+            Some(run.root.to_str().expect("root")),
+            Some("ask"),
+        )
+        .expect("second conversation");
+    let other_run = run
+        .db
+        .create_run(&other.id, "item5 other conversation", None)
+        .expect("run")
+        .run
+        .id;
+    assert!(
+        run.db
+            .kernel_effective_authorization_grants(&other_run, crate::database::now_ms())
+            .expect("grants")
+            .is_empty(),
+        "另一个会话不得继承本会话的写入授权"
+    );
+
+    // 撤销后旧授权不得再生效。
+    run.db
+        .kernel_revoke_authorization_grants(&run.conversation_id, "user withdrew")
+        .expect("revoke the session authorization");
+    item5_propose(&run, "read-3", "read", json!({"path":"target.txt"})).expect("third read");
+    let read = execute_pending_dispatches(
+        &run.db,
+        &run.root,
+        &run.scope,
+        &run.run_id,
+        &run.clock,
+    )
+    .expect("third read dispatch");
+    let version = read_version(&read[0]);
+    item5_propose(
+        &run,
+        "write-3",
+        "edit_file",
+        json!({
+            "path":"target.txt","oldText":"ALPHA","newText":"alpha",
+            "expectedVersion":version,
+        }),
+    )
+    .expect("post-revocation edit proposal");
+    assert_eq!(
+        f1_run_state(&run.db, &run.run_id),
+        "waiting_approval",
+        "撤销后同一范围的写入必须重新审批"
+    );
+    assert_eq!(
+        std::fs::read_to_string(run.root.join("target.txt")).expect("unchanged"),
+        "ALPHA BETA\n",
+        "撤销后未批准的写入不得落盘"
+    );
+}
+

@@ -520,8 +520,8 @@ mod tests {
             run_execution_budget_ms: 600_000,
             run_execution_limited: true,
             approval_wait_timeout_ms: 300_000,
-            provider_max_retries: 2,
-            turn_max_retries: 1,
+            provider_max_retries: 5,
+            turn_max_retries: 5,
             experimental_compute_job_notice: false,
         };
         database

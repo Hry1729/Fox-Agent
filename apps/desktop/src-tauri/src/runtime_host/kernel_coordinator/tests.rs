@@ -361,7 +361,7 @@ fn worker_model_timeout_retries_only_the_model_request_without_replaying_tools()
     assert!(coordinator.dispatch_batch("worker-batch", "early", &Allow, |_, _, _| panic!("retry is not due")).is_err());
     drop(coordinator);
     drop(db);
-    clock.advance(2000);
+    clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS);
     let db = Database::open(root.join("facts.db")).unwrap();
     let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
     coordinator.tick().unwrap();
@@ -1732,7 +1732,7 @@ fn agv_shaped_stalled_tool_argument_stream_times_out_idle_and_retries_without_re
     // and completes the run without re-executing any tool.
     drop(coordinator);
     drop(db);
-    clock.advance(2_000);
+    clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS);
     let db = Database::open(root.join("facts.db")).unwrap();
     let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
     coordinator.tick().unwrap();
@@ -1761,7 +1761,7 @@ fn settled_incomplete_http_reply_continues_after_reopen_with_completed_tool_resu
     assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
     drop(coordinator);
     drop(db);
-    clock.advance(1000);
+    clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS);
     let db = Database::open(root.join("facts.db")).unwrap();
     let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
     coordinator.tick().unwrap();
@@ -1804,7 +1804,7 @@ fn settled_incomplete_http_recovery_after_new_compute_error_keeps_prior_progress
     let worker = real_worker_command();
     coordinator.dispatch_batch_with_worker("worker-batch", "preface", &Allow, &worker, &config, "local-test-only").unwrap();
     assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
-    clock.advance(1000);
+    clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS);
     coordinator.dispatch_batch_with_worker("worker-batch", "after-preface", &Allow, &worker, &config, "local-test-only").unwrap();
     let batch = coordinator.snapshot().unwrap().tool_calls.iter().find(|tool| tool.tool_call_id == "compute-invalid").unwrap().batch_id.clone();
     let source = root.join("data.csv");
@@ -1826,7 +1826,7 @@ fn settled_incomplete_http_recovery_after_new_compute_error_keeps_prior_progress
     assert_eq!(coordinator.snapshot().unwrap().retry.turn_attempts, 0);
     drop(coordinator);
     drop(db);
-    clock.advance(1000);
+    clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS);
     let db = Database::open(root.join("facts.db")).unwrap();
     let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
     coordinator.dispatch_batch_with_worker(&batch, "repair-after-reopen", &Allow, &worker, &config, "local-test-only").unwrap();
@@ -1881,7 +1881,7 @@ fn settled_incomplete_answer_uses_one_request_retry_across_reopen_without_reexec
     let db = Database::open(root.join("facts.db")).unwrap();
     let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
     assert_eq!(coordinator.snapshot().unwrap().retry.completion_attempts, 1);
-    clock.advance(1000);
+    clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS);
     coordinator.dispatch_batch("worker-batch", "second", &Allow, |binding, frame, token| {
         assert!(frame.history.last().unwrap()["content"][0]["text"].as_str().unwrap().contains("Fox 续答提示"));
         reject(binding, frame, token)
@@ -1919,7 +1919,7 @@ fn settled_initial_retry_survives_reopen_and_honors_server_delay() {
     drop(db);
     let db = Database::open(root.join("facts.db")).unwrap();
     let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
-    clock.advance(1999);
+    clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS - 1);
     coordinator.tick().unwrap();
     assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
     clock.advance(1);
@@ -1935,6 +1935,305 @@ fn settled_initial_retry_survives_reopen_and_honors_server_delay() {
 }
 
 #[test]
+fn first_response_stall_on_a_batch_delivery_is_settled_and_retried_to_completion() {
+    // Regression (2026-10-04, F09 incident). A provider that produces no first byte
+    // aborts the round from inside the worker; that internal abort used to be read as a
+    // user cancellation, so the settled model timeout never reached the Host: the retry
+    // was refused, the delivery lease stayed held and the Run died in the session-loop
+    // fallback. Rounds are driven explicitly so the retry's due time can be advanced.
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let stall_ms = 1_200_u64;
+    let server = std::thread::spawn(move || {
+        let read_request = |stream: &mut std::net::TcpStream, deadline: Instant| -> bool {
+            let mut bytes = Vec::new();
+            let mut buffer = [0u8; 8192];
+            loop {
+                assert!(Instant::now() < deadline, "stall fixture request deadline exceeded");
+                stream.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+                match stream.read(&mut buffer) {
+                    Ok(0) => return false,
+                    Ok(n) => bytes.extend_from_slice(&buffer[..n]),
+                    Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+                    // A worker that gives up on the stalled request lets the OS reset the
+                    // connection. That is the end of this connection, not a fixture failure.
+                    Err(error) if matches!(error.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::UnexpectedEof) => return false,
+                    Err(error) => panic!("stall fixture read failed: {error}"),
+                }
+                if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n").map(|offset| offset + 4) {
+                    let headers = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .map(|value| value.trim().parse().unwrap())
+                        .unwrap_or(0);
+                    if bytes.len() >= end + length {
+                        return true;
+                    }
+                }
+            }
+        };
+        let accept_request = |deadline: Instant, label: &str| {
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if read_request(&mut stream, deadline) {
+                            break stream;
+                        }
+                        eprintln!("stall fixture ignored an empty connection before {label}");
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "{label} was not received");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            }
+        };
+        let sse = |stream: &mut std::net::TcpStream, body: String| {
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{}\r\n0\r\n\r\n", body.len(), body).unwrap();
+            stream.flush().unwrap();
+        };
+
+        // Request 1: accept, then answer NOTHING AT ALL — zero first bytes.
+        let stalled = accept_request(Instant::now() + Duration::from_secs(30), "the stalled request");
+        std::thread::sleep(Duration::from_millis(stall_ms + 900));
+
+        // Request 2: the admitted retry completes the Run.
+        let mut retried = accept_request(Instant::now() + Duration::from_secs(30), "the retried request");
+        let final_delta = json!({"role":"assistant","content":"已按新要求完成。\n<fox-final/>"});
+        let chunks = [
+            json!({"id":"stall-2","object":"chat.completion.chunk","created":1,"model":"stall","choices":[{"index":0,"delta":final_delta,"finish_reason":null}]}),
+            json!({"id":"stall-2","object":"chat.completion.chunk","created":1,"model":"stall","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+        ];
+        sse(&mut retried, format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", chunks[0], chunks[1]));
+        drop(stalled);
+    });
+
+    let mut config = worker_configuration();
+    config.model_service = json!({"apiType":"openai-completions","modelId":"stall","baseUrl":format!("http://{address}/v1")});
+    let budgets = TimeBudgets {
+        model_request_ms: 20_000,
+        model_first_response_ms: stall_ms as i64,
+        model_idle_ms: 20_000,
+        run_execution_ms: 60_000,
+        ..TimeBudgets::default()
+    };
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, _root, run_id) = fixture_with_budgets_opt(
+        &clock, &config.hash().unwrap(), Some(&config), false, false, (5, 5), true, budgets,
+    );
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+
+    // Round 1: the real worker must report a settled first-response timeout.
+    let first = coordinator.dispatch_batch_with_worker(
+        "worker-batch", "stall-first", &Allow, &real_worker_command(), &config, "local-test-only",
+    );
+    assert!(
+        first.is_ok(),
+        "a settled first-response timeout must be admitted for retry, got {first:?}"
+    );
+    assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
+    let leased_after_failure: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND status='leased'",
+                [&run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(
+        leased_after_failure, 0,
+        "a settled timeout must settle the delivery instead of holding its lease"
+    );
+
+    // Round 2: the retry, at its due time, completes the Run.
+    clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS);
+    let second = coordinator.dispatch_batch_with_worker(
+        "worker-batch", "stall-second", &Allow, &real_worker_command(), &config, "local-test-only",
+    );
+    assert!(second.is_ok(), "the retried round must be accepted, got {second:?}");
+    assert_eq!(coordinator.snapshot().unwrap().state, "completed");
+    let retries: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.retrying'",
+                [&run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(retries, 1, "exactly one bounded retry was scheduled");
+    let leased_after_retry: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND status='leased'",
+                [&run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(leased_after_retry, 0, "the completed Run holds no lease");
+    server.join().unwrap();
+}
+
+#[test]
+fn injection_probe_timeout_classification_boundary() {
+    // CONTROLLED INJECTION (2026-10-04): reproduces the classification boundary of the
+    // F09 batch that died after a silent first-response stall. Two shapes are injected:
+    // the structured settled failure the worker is *supposed* to send, and the raw
+    // timeout text it may send instead. Prints observations; asserts nothing yet.
+    for (label, raw) in [
+        ("A: structured settled model_timeout", false),
+        ("B: raw worker timeout text", true),
+    ] {
+        let clock = TestClock::new(1_000);
+        let cancellation = CancellationRegistry::default();
+        let (db, _, run_id) = fixture_with_retry_opt(&clock, "test-prompt", None, false, false, (5, 5));
+        let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+        settle_worker_batch(&coordinator);
+        let first = coordinator.dispatch_batch("worker-batch", "probe-first", &Allow, |binding, frame, _| {
+            if raw {
+                Err("Kernel batch resume exceeded its frozen time budget (first_response)".to_string())
+            } else {
+                Err(format!(
+                    "kernel.settled_model_failure:{}",
+                    json!({"schemaVersion":1,"runId":binding.run_id,"turnId":frame.turn_id,
+                           "checkpointSeq":frame.checkpoint_seq,"category":"model_timeout",
+                           "httpStatus":null,"retryAfterMs":null})
+                ))
+            }
+        });
+        let snapshot = coordinator.snapshot().unwrap();
+        let leased: i64 = db
+            .with_connection(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM kernel_effect_outbox WHERE run_id=?1 AND status='leased'",
+                    [&run_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        println!(
+            "[injection] {label}: dispatch_ok={} state={} turn_attempts={} run_retrying={} leased_effects={} err={:?}",
+            first.is_ok(),
+            snapshot.state,
+            snapshot.retry.turn_attempts,
+            db.with_connection(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.retrying'",
+                    [&run_id],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap(),
+            leased,
+            first.err(),
+        );
+        // If a retry was admitted, prove it can still complete the Run.
+        if snapshot.state == "retry_scheduled" {
+            clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS);
+            let done = coordinator.dispatch_batch("worker-batch", "probe-second", &Allow, |binding, frame, _| {
+                Ok(fox_engine_protocol::KernelModelResponse {
+                    schema_version: 1,
+                    run_id: binding.run_id.clone(),
+                    turn_id: frame.turn_id.clone(),
+                    batch_id: frame.batch_id.clone(),
+                    checkpoint_seq: frame.checkpoint_seq,
+                    assistant_message: json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"probe done"}]}),
+                })
+            });
+            println!(
+                "[injection] {label}: retry_dispatch_ok={} final_state={}",
+                done.is_ok(),
+                coordinator.snapshot().unwrap().state
+            );
+        }
+    }
+}
+
+#[test]
+fn a_frame_from_an_earlier_attempt_is_refused_by_attempt_identity() {
+    // Review requirement (2026-10-04): a late frame from the PREVIOUS attempt must be
+    // refused by attempt identity, not merely because the Run happens to be running.
+    // The frame arrives while the current attempt legitimately owns the model request,
+    // so a generic "is a request in flight" guard would accept it.
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, _, run_id) = fixture_with_retry_opt(&clock, "test-prompt", None, false, false, (5, 5));
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+
+    let first_seq = std::cell::Cell::new(0u64);
+    coordinator
+        .dispatch_batch("worker-batch", "attempt-one", &Allow, |binding, frame, _| {
+            first_seq.set(frame.checkpoint_seq);
+            Err(format!(
+                "kernel.settled_model_failure:{}",
+                json!({"schemaVersion":1,"runId":binding.run_id,"turnId":frame.turn_id,
+                       "checkpointSeq":frame.checkpoint_seq,"category":"model_timeout",
+                       "httpStatus":null,"retryAfterMs":null})
+            ))
+        })
+        .unwrap();
+    assert_eq!(coordinator.snapshot().unwrap().state, "retry_scheduled");
+    clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS);
+
+    // Attempt 2 owns the model request. From inside that window, the previous attempt's
+    // frame is replayed: same Run, same owner string, older checkpoint.
+    let refused = std::cell::RefCell::new(None);
+    coordinator
+        .dispatch_batch("worker-batch", "attempt-two", &Allow, |binding, frame, _| {
+            let late = format!(
+                "kernel.settled_model_failure:{}",
+                json!({"schemaVersion":1,"runId":binding.run_id,"turnId":frame.turn_id,
+                       "checkpointSeq":first_seq.get(),"category":"model_timeout",
+                       "httpStatus":null,"retryAfterMs":null})
+            );
+            *refused.borrow_mut() =
+                coordinator.retry_settled_model("deliver-batch:worker-batch", "attempt-two", frame.checkpoint_seq, late).err();
+            Ok(fox_engine_protocol::KernelModelResponse {
+                schema_version: 1,
+                run_id: binding.run_id.clone(),
+                turn_id: frame.turn_id.clone(),
+                batch_id: frame.batch_id.clone(),
+                checkpoint_seq: frame.checkpoint_seq,
+                assistant_message: json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"done"}]}),
+            })
+        })
+        .unwrap();
+
+    let refused = refused.borrow().clone();
+    println!("[identity] late_attempt_frame_err={refused:?}");
+    assert!(
+        refused.as_deref().is_some_and(|error| error.contains("another dispatch")),
+        "a frame whose checkpoint belongs to an earlier attempt must be refused by identity, got {refused:?}"
+    );
+    let retries: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.retrying'",
+                [&run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(retries, 1, "the late frame must not schedule a second retry");
+    assert_eq!(
+        coordinator.snapshot().unwrap().state,
+        "completed",
+        "the late frame must not disturb the current attempt"
+    );
+}
+
+#[test]
 fn settled_batch_retry_never_reexecutes_completed_resources() {
     let clock = TestClock::new(1_000);
     let cancellation = CancellationRegistry::default();
@@ -1945,7 +2244,7 @@ fn settled_batch_retry_never_reexecutes_completed_resources() {
     coordinator.dispatch_batch("worker-batch", "first", &Allow, |binding, frame, _| {
         Err(settled_provider_rejection(&binding.run_id, &frame.turn_id, frame.checkpoint_seq))
     }).unwrap();
-    clock.advance(2000);
+    clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS);
     coordinator.dispatch_batch("worker-batch", "second", &Allow, |binding, frame, _| Ok(fox_engine_protocol::KernelModelResponse {
         schema_version: 1, run_id: binding.run_id.clone(), turn_id: frame.turn_id.clone(), batch_id: frame.batch_id.clone(),
         checkpoint_seq: frame.checkpoint_seq,
@@ -1969,11 +2268,11 @@ fn settled_model_retry_cancellation_and_frozen_budget_block_more_dispatch() {
         if cancel {
             coordinator.cancel().unwrap();
             coordinator.settle_cancellation().unwrap();
-            clock.advance(2000);
+            clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS);
             assert!(coordinator.dispatch_initial("cancelled", &Allow, |_, _, _| panic!("cancelled retry must not dispatch")).is_err());
             assert_eq!(coordinator.snapshot().unwrap().state, "cancelled");
         } else {
-            clock.advance(2000);
+            clock.advance(crate::runtime_host::kernel_coordinator::MODEL_RETRY_INTERVAL_MS);
             coordinator.dispatch_initial("last", &Allow, |binding, frame, _| {
                 Err(settled_provider_rejection(&binding.run_id, &frame.input.turn_id, frame.checkpoint_seq))
             }).unwrap();
@@ -2627,7 +2926,8 @@ fn host_live_transport_failure_retry_reaches_due_and_exhausts_once() {
         [&run_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).unwrap();
     assert_eq!(retry.0, "model_transport_failure");
-    assert_eq!(retry.2 - retry.1, 1_000);
+    // The retry interval is a fixed 10s (2026-10-04 policy), not the old backoff.
+    assert_eq!(retry.2 - retry.1, 10_000);
     let dispatch_times: Vec<i64> = {
         let mut query = connection.prepare(
             "SELECT created_at FROM kernel_events

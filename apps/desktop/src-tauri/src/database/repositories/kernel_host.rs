@@ -693,8 +693,14 @@ impl Database {
             let reusable = if office {
                 crate::runtime_host::office_grants::reusable_edit_scope(&input, binding.permission.project_root.as_deref()).is_some()
             } else {
-                tool != "task_repair_escalate_start" && request.get("wholeFileReplacement").is_none()
-                    && crate::runtime_host::shadow_reconcile::tool_operation_scope(&tool, &input, binding.permission.project_root.as_deref()).is_some()
+                // The same predicate the projected card declares its decisions
+                // with: what the user is offered is exactly what is accepted.
+                super::kernel_projection::kernel_approval_reusable(
+                    &tool,
+                    &input,
+                    request.get("wholeFileReplacement").is_some(),
+                    binding.permission.project_root.as_deref(),
+                )
             };
             if !reusable { return Err("this Kernel approval only supports a one-time decision".into()); }
         }

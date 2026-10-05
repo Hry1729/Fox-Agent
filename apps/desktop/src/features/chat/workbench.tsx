@@ -1,5 +1,7 @@
 import { UserMessageBubble } from './components/UserMessageBubble'
 import { RunSteeringStrip } from './components/RunSteeringStrip'
+import { steeringComposerView, steeringSubmitMode } from './components/steering-presentation'
+import { useRunSteering } from './hooks/use-run-steering'
 import { ManagedFilesPanel } from './components/ManagedFilesPanel'
 import { RuntimeApprovalPrompt } from './components/RuntimeApprovalPrompt'
 import type { ActivityDetailPanelProps } from './components/ActivityDetailPanel'
@@ -9,6 +11,8 @@ import type { ConversationRunIndicator } from './conversation-run-indicator'
 import { useProcessScroll } from './use-process-scroll'
 import { useProcessDisplayMode, type ProcessDisplayMode } from './process-display-mode'
 import { TurnProcessHeader } from './turn-process-header'
+import { ThinkingOrb } from 'thinking-orbs'
+import { toolAttemptReason, toolAttemptState, TOOL_ATTEMPT_REASON_LABELS, TOOL_ATTEMPT_STATE_LABELS, type ToolAttemptState } from './tool-attempt-status'
 import { RuntimeArtifacts } from './runtime-artifacts'
 import './runtime-process-groups.css'
 import './runtime-process-row.css'
@@ -50,6 +54,8 @@ import {
   House,
   CircleHelp,
   CircleDot,
+  Clock3,
+  CornerDownLeft,
   ImagePlus,
   Library,
   ListTodo,
@@ -94,7 +100,7 @@ import { flushSync } from 'react-dom'
 import { BorderBeam } from '@/components/effects/border-beam'
 import { asAgentCard } from '@/features/agents/agent-card-data'
 import { adoptBlockedStyles } from '@/components/effects/adopted-styles'
-import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable, knowledgeReferenceFromLegacyBinding, knowledgeReferenceKey } from '@/features/conversations/api/desktop-client'
+import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable, knowledgeReferenceFromLegacyBinding, knowledgeReferenceKey, type RunSteeringLane } from '@/features/conversations/api/desktop-client'
 import { canonicalProjectRoot, matchingProject, normalizeProjectPermission, normalizeProjectRoot, selectProjectRoot, validPickedProjectFolder } from './project-access-dialog-state'
 import { filterKnowledgePickerItems, localKnowledgePickerState } from './knowledge-picker-state'
 import { Button } from '@/components/ui/button'
@@ -270,6 +276,9 @@ const MetalSendButton = lazy(() => import('@/components/effects/metal-send-butto
 const AgentDetailDialog = lazy(() => import('@/features/agents/agent-pages').then((module) => ({ default: module.AgentDetailDialog })))
 const ActivityDetailPanel = lazy(() => import('./components/ActivityDetailPanel').then((module) => ({ default: module.ActivityDetailPanel })))
 const HtmlFilePreview = lazy(() => import('./html-file-preview').then((module) => ({ default: module.HtmlFilePreview })))
+// The sidebar's running state uses the package's own orb. It stays a lazy chunk so
+// the entry bundle keeps its budget; the 20px slot is reserved either way, so the
+// row never shifts while the chunk lands.
 const KernelReconciliationPanel = lazy(() => import('./kernel-reconciliation-panel').then((module) => ({ default: module.KernelReconciliationPanel })))
 const KnowledgeResourceExplorer = lazy(() => import('@/features/knowledge/knowledge-resource-explorer').then((module) => ({ default: module.KnowledgeResourceExplorer })))
 const ExpertPickerDialog = lazy(() => import('@/features/agents/ExpertPickerDialog').then((module) => ({ default: module.ExpertPickerDialog })))
@@ -972,8 +981,24 @@ const CONVERSATION_RUN_LABELS: Record<ConversationRunIndicator, string> = {
  * starting or finishing a run never shifts the rows around it, and it reports the
  * state as a `status` only when there is something to announce.
  */
+/** The reduced-motion preference, watched live so the orb can settle instantly. */
+function usePrefersReducedMotion() {
+  const [reduced, setReduced] = useState(() =>
+    typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches)
+  useEffect(() => {
+    if (typeof matchMedia !== 'function') return
+    const query = matchMedia('(prefers-reduced-motion: reduce)')
+    const update = () => setReduced(query.matches)
+    update()
+    query.addEventListener('change', update)
+    return () => query.removeEventListener('change', update)
+  }, [])
+  return reduced
+}
+
 function ConversationRunStatus({ indicator, className = 'fox-project-conversation-status' }: { indicator?: ConversationRunIndicator; className?: string }) {
   const label = indicator ? CONVERSATION_RUN_LABELS[indicator] : undefined
+  const reducedMotion = usePrefersReducedMotion()
   return <span
     className={`${className}${indicator ? ` is-${indicator}` : ''}`}
     role={label ? 'status' : undefined}
@@ -981,7 +1006,12 @@ function ConversationRunStatus({ indicator, className = 'fox-project-conversatio
     title={label}
     data-run-indicator={indicator ?? undefined}
   >
-    {indicator === 'running' && <LoaderCircle className="fox-run-indicator-spinner" size={16} aria-hidden="true" />}
+    {/* A running conversation is the only state that animates. Reduced motion keeps
+        the specified orb, frozen on its current frame, so the row still reads as busy
+        without any motion and the glyph never changes identity. */}
+    {indicator === 'running' && <span className="fox-run-indicator-orb" aria-hidden="true">
+      <ThinkingOrb state="composing" size={20} paused={reducedMotion} />
+    </span>}
     {indicator === 'queued' && <span className="fox-run-indicator-dot" aria-hidden="true" />}
     {indicator === 'approval' && <span className="fox-run-indicator-dot" aria-hidden="true" />}
   </span>
@@ -1799,6 +1829,7 @@ function LicenseInlineCitation() {
 type RuntimeToolStep = {
   id: string
   seq: number
+  lastSeq: number
   name: string
   input: unknown
   output?: unknown
@@ -1930,7 +1961,7 @@ function toolActivity(tool: RuntimeToolStep, attachmentNames?: ReadonlyMap<strin
   if (tool.isError) {
     const errorName = category === 'office' ? officeToolSubject(tool) || tool.name : tool.name
     const errorDetail = category === 'attachment' || category === 'compute' ? attachmentDetail : detail
-    return `执行失败 · ${errorName}${errorDetail}`
+    return `工具调用未成功 · ${errorName}${errorDetail}`
   }
 
   // Named tools stay verbed so every call reads as its own status line.
@@ -2042,12 +2073,14 @@ function runtimeProcess(events: RunEventRecord[]) {
     const current = tools.get(toolCallId) ?? {
       id: toolCallId,
       seq: item.seq,
+      lastSeq: item.seq,
       name: typeof item.event.tool === 'string' ? item.event.tool : 'tool',
       input: item.event.input ?? {},
       isError: false,
       completed: false,
       awaitingUser: false,
     }
+    current.lastSeq = item.seq
     if (item.event.input !== undefined) current.input = item.event.input
     if (item.eventType === 'tool.completed') {
       current.output = item.event.result
@@ -2214,7 +2247,10 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
       .map(item => ({ sourceKey: item.group.key, renderKey: item.renderKey, eventIds: item.eventIds })) ?? []
   }, [renderGroups])
   const lastProcessIndex = orderedGroups?.reduce((last, group, index) => group.kind === 'process' ? index : last, -1) ?? -1
-  const failedToolCount = process.tools.filter(tool => tool.isError).length
+  const latestProcessSeq = processEvents.reduce((latest, event) => Math.max(latest, event.seq), 0)
+  const runAttemptState = failureReason ? 'failed' : cancelled ? 'cancelled' : running || runInProgress ? 'running' : 'completed'
+  const pendingToolAttempt = process.tools.some((tool) => tool.isError
+    && toolAttemptState(tool, process.tools, latestProcessSeq, runAttemptState) === 'pending')
   const runActive = useMemo(() => runtimeProcessActivity(processEvents, running).running, [processEvents, running])
   const completed = !running && ['completed', 'interrupted', 'failed', 'cancelled'].includes(message.status)
   const canToggleTurn = processGroupCount > 0 && processDisplayMode !== 'verbose'
@@ -2273,7 +2309,7 @@ function RuntimeAssistantMessage({ message, processEvents, groupHelpers, singleR
           <>
             <TurnProcessHeader avatar={<FoxAssistantAvatar />} events={processEvents} active={running || runInProgress}
               canToggle={canToggleTurn} collapsed={turnProcessCollapsed} status={turnProcessStatus}
-              failedToolCount={failedToolCount} onToggle={() => {
+              toolStatus={pendingToolAttempt ? '工具调用待调整' : undefined} onToggle={() => {
                 if (!turnProcessCollapsed) setCollapseVersion(value => value + 1)
                 setProcessFocusInside(false)
                 setProcessSelectionInside(false)
@@ -2393,6 +2429,14 @@ function RuntimeReasoningItem({ detail, running = false, preview = true }: { det
 const REASONING_SUMMARY_SCAN_LIMIT = 512
 function reasoningSummary(text: string) {
   const window = text.length > REASONING_SUMMARY_SCAN_LIMIT ? text.slice(0, REASONING_SUMMARY_SCAN_LIMIT) : text
+  const summary = rawReasoningSummary(window)
+  // This line is addressed to the user, so a model that reasoned in another language
+  // must not paste that prose here. The expanded detail below keeps the original
+  // reasoning verbatim; only this one-line progress summary falls back to Chinese.
+  return /\p{Script=Han}/u.test(summary) ? summary : (summary ? '正在思考' : '')
+}
+
+function rawReasoningSummary(window: string) {
   return window
     .replace(/\s+/gu, ' ')
     .replaceAll('**', '')
@@ -2401,7 +2445,7 @@ function reasoningSummary(text: string) {
     .trim()
 }
 
-function RuntimeToolItem({ tool, active, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer }: { tool: RuntimeToolStep; active: boolean; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
+function RuntimeToolItem({ tool, active, attemptState, attachmentNames, onOpenFileInSidebar, onRevealFileInExplorer }: { tool: RuntimeToolStep; active: boolean; attemptState?: ToolAttemptState; attachmentNames?: ReadonlyMap<string, string>; onOpenFileInSidebar?: (path: string) => void; onRevealFileInExplorer?: (path: string) => void }) {
   const execution = executionReceiptPresentation(tool.output)
   const ToolIcon = tool.isError || execution?.requiresAttention
     ? AlertTriangle
@@ -2414,12 +2458,14 @@ function RuntimeToolItem({ tool, active, attachmentNames, onOpenFileInSidebar, o
   const suffix = path ? ` · ${path}` : ''
   const pathIsClickable = Boolean(path && suffix && label.endsWith(suffix) && (onOpenFileInSidebar || onRevealFileInExplorer))
   const openPathInSidebar = () => onOpenFileInSidebar?.(path)
+  const attemptContext = tool.isError && attemptState
+    ? `${TOOL_ATTEMPT_REASON_LABELS[toolAttemptReason(tool.output)]}问题 · ${TOOL_ATTEMPT_STATE_LABELS[attemptState]}` : undefined
   const executionError = execution?.requiresAttention
     ? `${execution.statusLabel}${execution.code ? `（${execution.code}）` : ''}`
     : tool.isError && execution
-      ? `${execution.statusLabel} · 工具执行失败`
+      ? `${execution.statusLabel} · ${attemptContext ?? '工具调用未成功'}`
       : tool.isError
-        ? '工具执行失败'
+        ? attemptContext ?? '工具调用未成功'
         : undefined
   return <RuntimeProcessRow
     icon={<ToolIcon className="fox-runtime-step-icon-glyph" />}
@@ -2565,7 +2611,6 @@ function RuntimeProcess({ events, process: preparedProcess, groupHelpers, displa
     scrollRef, contentRef, groupOpen, !autoExpanded, events,
   )
   const activeTool = [...process.tools].reverse().find((tool) => activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser)
-  const failedToolCount = process.tools.filter(tool => tool.isError).length
   const lifecycleFailed = terminalEvent?.eventType === 'run.failed' || terminalEvent?.eventType === 'run.interrupted'
   const lifecycleCancelled = terminalEvent?.eventType === 'run.cancelled'
   const awaitingUser = process.tools.some(tool => tool.awaitingUser) || terminalEvent?.eventType === 'run.completed'
@@ -2600,7 +2645,7 @@ function RuntimeProcess({ events, process: preparedProcess, groupHelpers, displa
         : lifecycleCancelled
           ? '工作过程已取消'
           : '工作过程已完成'
-  const desiredTitle = grouped && failedToolCount > 0 ? `${baseProcessTitle} · ${failedToolCount} 项失败` : baseProcessTitle
+  const desiredTitle = baseProcessTitle
   const processTitle = useStableProcessTitle(desiredTitle, running)
   const activityKind = activeTool ? groupHelpers?.processActivityKind(activeTool.name, activeTool.input)
     : running ? undefined : groupHelpers?.summarizeProcessActivity(events)[0]?.kind
@@ -2641,7 +2686,9 @@ function RuntimeProcess({ events, process: preparedProcess, groupHelpers, displa
             }
             const tool = process.tools.find((item) => item.id === step.id)
             if (!tool) return null
-            return <RuntimeToolItem key={tool.id} tool={tool} active={activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser} attachmentNames={attachmentNames} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} />
+            const runState = outcome === 'failed' || lifecycleFailed ? 'failed' : outcome === 'cancelled' || lifecycleCancelled ? 'cancelled' : runInProgress || running ? 'running' : 'completed'
+            const attemptState = tool.isError ? toolAttemptState(tool, process.tools, events.reduce((latest, event) => Math.max(latest, event.seq), 0), runState) : undefined
+            return <RuntimeToolItem key={tool.id} tool={tool} attemptState={attemptState} active={activity.activeToolIds.has(tool.id) && !tool.completed && !tool.awaitingUser} attachmentNames={attachmentNames} onOpenFileInSidebar={onOpenFileInSidebar} onRevealFileInExplorer={onRevealFileInExplorer} />
           })}
         </> : <ChainOfThoughtStep
           className={`fox-runtime-empty-step ${running ? 'is-running' : 'is-complete'}`}
@@ -3308,6 +3355,7 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
   const [commandView, setCommandView] = useState<'commands' | 'knowledge'>('commands')
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<SlashCommand | null>(null)
   const [mentionOpen, setMentionOpen] = useState(false)
+  const [steeringStripOpen, setSteeringStripOpen] = useState(false)
   const submitTimer = useRef<number | null>(null)
   const cancelPendingRef = useRef(false)
   const questionSubmittingRef = useRef(false)
@@ -3421,7 +3469,7 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
     // with the textarea so they can break the line instead of picking a command.
     const menuEnter = event.key === 'Enter'
       && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
-      && !event.nativeEvent.isComposing
+      && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229
     if (commandOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp' || menuEnter)) {
       event.preventDefault()
       commandMenuRef.current?.dispatchEvent(new globalThis.KeyboardEvent('keydown', {
@@ -3511,31 +3559,131 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
   const decisionPending = demoApprovalPending || demoQuestionPending || pendingApprovals.length > 0 || Boolean(activeQuestionRequest) || goalConfirmationPending || planRevisionPending || workflowGatePending
   const approvalDecisionPending = demoApprovalPending || pendingApprovals.length > 0
 
+  // Mid-run supplementary requests ("运行中补充要求"). One hook owns the durable
+  // listing and both submit lanes; the composer is the single editor for them.
+  const steering = useRunSteering({
+    conversationId: steeringConversationId,
+    active: runtimeControlled && (steeringActive || status === 'streaming'),
+    enabled: runtimeControlled,
+  })
+  const steeringView = useMemo(
+    () =>
+      steeringComposerView({
+        active: runtimeControlled && (steeringActive || status === 'streaming'),
+        runId: steering.runId,
+        runState: steering.runState,
+        acceptsSteering: steering.acceptsSteering,
+        rows: steering.rows.map((row) => ({
+          messageId: row.messageId,
+          content: row.content,
+          status: row.status,
+          lane: row.lane,
+        })),
+      }),
+    [runtimeControlled, steering.acceptsSteering, steering.rows, steering.runId, steering.runState, steeringActive, status],
+  )
+  // A decision (approval or question) always owns the composer: supplementary
+  // text must never be able to stand in for an approval, and a Run parked on an
+  // approval is not accepting steering input anyway.
+  const steeringMode = steeringSubmitMode({
+    runtimeControlled,
+    status,
+    acceptsSteering: steering.acceptsSteering,
+    decisionPending,
+    hasActiveQuestion: Boolean(activeQuestionRequest),
+  })
+
+  const submitDraftToSteering = async (lane: RunSteeringLane) => {
+    const content = draft.trim()
+    if (!content) return false
+    const stored = await steering.submit(content, lane)
+    if (!stored) return false
+    setDraft('')
+    setCommandOpen(false)
+    setMentionOpen(false)
+    // Never claim the model acted on it: the Host has only durably accepted it.
+    toast.success(
+      lane === 'current'
+        ? '已接收：将在当前任务的下一个安全边界交给模型'
+        : '已排队：保留到下一轮，当前任务不会处理它',
+    )
+    return true
+  }
+
+  const stopRun = () => {
+    if (cancelPendingRef.current) return
+    if (submitTimer.current !== null) {
+      window.clearTimeout(submitTimer.current)
+      submitTimer.current = null
+    }
+    cancelPendingRef.current = true
+    void Promise.resolve(onCancel?.()).then((stopped) => {
+      if (stopped === false) return
+      setStatus('ready')
+      onStatusChange?.('ready')
+    }).finally(() => {
+      cancelPendingRef.current = false
+    })
+  }
+
   // Rendered both as the metal ring's child and as the fallback the Suspense
   // boundary shows until the (lazily loaded) metal engine arrives.
   const sendButton = <PromptInputSubmit
     status={status}
     disabled={runtimeInitializing && status === 'ready'}
     title={runtimeInitializing ? '正在准备默认专家' : undefined}
-    onStop={() => {
-      if (cancelPendingRef.current) return
-      if (submitTimer.current !== null) {
-        window.clearTimeout(submitTimer.current)
-        submitTimer.current = null
-      }
-      cancelPendingRef.current = true
-      void Promise.resolve(onCancel?.()).then((stopped) => {
-        if (stopped === false) return
-        setStatus('ready')
-        onStatusChange?.('ready')
-      }).finally(() => {
-        cancelPendingRef.current = false
-      })
-    }}
+    onStop={stopRun}
     className="fox-send-button"
   >
     {runtimeInitializing ? <LoaderCircle className="animate-spin" size={17} /> : status === 'streaming' ? <CircleStop size={17} /> : <ArrowUp size={18} />}
   </PromptInputSubmit>
+
+  // While the Run is in flight the composer owns two submit lanes and Stop
+  // stays a third, separate control. Enter reaches the first `type="submit"`
+  // button in the form, which is the steering submit — never Stop, and never a
+  // path that starts a second task over the same workspace.
+  const steeringControls = <div className="fox-steering-actions" data-testid="fox-steering-actions">
+    <Button
+      type="submit"
+      size="sm"
+      className="fox-steering-submit"
+      data-testid="fox-steering-submit"
+      disabled={steering.busy || !draft.trim()}
+      title="补充到当前任务：在下一个安全分发边界交给模型，不停止当前任务，不新增工具授权"
+    >
+      {steering.busy ? <LoaderCircle className="animate-spin" size={13} /> : <CornerDownLeft size={13} />}
+      {steeringView.primaryLabel}
+    </Button>
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      className="fox-steering-queue-button"
+      data-testid="fox-steering-queue"
+      disabled={steering.busy || !draft.trim()}
+      title="排队，下一轮处理：保存到队列，当前任务结束后由你发起下一轮时再处理"
+      onClick={() => void submitDraftToSteering('next-turn')}
+    >
+      <Clock3 size={13} />
+      {steeringView.secondaryLabel}
+    </Button>
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      className="fox-stop-button"
+      data-testid="fox-steering-stop"
+      title="停止当前任务（与补充要求互不影响）"
+      onClick={stopRun}
+    >
+      <CircleStop size={15} />
+      停止
+    </Button>
+  </div>
+
+  const sendControls = centered
+    ? <Suspense fallback={sendButton}><MetalSendButton className="fox-send-metal" theme={dark ? 'dark' : 'light'}>{sendButton}</MetalSendButton></Suspense>
+    : sendButton
 
   return (
     <div ref={composerRef} className={`fox-composer-wrap ${centered ? 'is-empty' : ''}`}>
@@ -3616,7 +3764,12 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
           </CommandList>
         </Command>}
         {mentionOpen && <div className="fox-mention-menu"><div className="fox-command-title"><span>引用工作区文件</span><kbd>@</kbd></div>{['docs/FOX_ARCHITECTURE.md', 'apps/desktop/src/features/chat/workbench.tsx', 'apps/desktop/src/styles/workbench.css'].map((path) => <button type="button" key={path} onMouseDown={(event) => event.preventDefault()} onClick={() => applyMention(path)}><FileText size={14} /><span>{path}</span></button>)}</div>}
-        {runtimeControlled && <RunSteeringStrip conversationId={steeringConversationId} active={steeringActive} />}
+        {runtimeControlled && <RunSteeringStrip steering={steering} open={steeringStripOpen} onOpenChange={setSteeringStripOpen} onQueueForNextTask={(content) => setDraft((value) => (value.trim() ? `${value}\n${content}` : content))} />}
+        {runtimeControlled && steeringView.retainedForNextTask && steeringView.retainedNotice && (
+          <p className="fox-steering-composer-notice" data-testid="fox-steering-retained">
+            {steeringView.retainedNotice}
+          </p>
+        )}
         {runtimeControlled && <ManagedFilesPanel conversationId={steeringConversationId} />}
         <PromptInput
           accept={supportsImageInput ? 'image/*,.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv' : '.pdf,.txt,.md,.docx,.xls,.xlsx,.ppt,.pptx,.csv,.tsv'}
@@ -3632,6 +3785,10 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
           }}
           onSubmitStart={({ text, files }) => {
             if (runtimeInitializing) return
+            // A supplementary request is not a new turn: it never adds an
+            // optimistic user message to the timeline. Its only receipt is the
+            // durable steering row the Host stores.
+            if (steeringMode) return
             const prompt = text.trim() || (files.length ? '请分析这些附件' : '')
             if (!prompt && !activeQuestionRequest) return
             if (!activeQuestionRequest) flushSync(() => onPromptCommit?.(prompt))
@@ -3660,6 +3817,24 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
             return
           }
           if (!text.trim() && submittedFiles.length === 0) return
+          if (steeringMode) {
+            // The text belongs to the running task, not to a new one. Anything
+            // the steering queue cannot carry is refused with a reason instead of
+            // being dropped on the floor, and the draft is kept.
+            if (submittedFiles.length > 0) {
+              toast.error('补充要求只支持文字', {
+                description: '附件无法进入运行中任务的补充通道，请等本任务结束后作为新任务发送。',
+              })
+              return false
+            }
+            const stored = await submitDraftToSteering('current')
+            if (!stored) {
+              // The Run may have ended between this view and the Host call; the
+              // hook already reconciled, and the draft is still here to resubmit.
+              return false
+            }
+            return true
+          }
           const submittedDraft = draft
           const restoreDraft = () => setDraft(submittedDraft)
           setStatus('streaming')
@@ -3742,9 +3917,7 @@ function Composer({ resetKey, draft, setDraft, chatState, centered = false, dark
                 {selectableAgents.map((item) => <PromptInputSelectItem key={item.id} value={item.id} disabled={!item.available}>{item.name}</PromptInputSelectItem>)}
               </PromptInputSelectContent>
             </PromptInputSelect>
-            {centered ? <Suspense fallback={sendButton}>
-              <MetalSendButton className="fox-send-metal" theme={dark ? 'dark' : 'light'}>{sendButton}</MetalSendButton>
-            </Suspense> : sendButton}
+            {steeringMode ? steeringControls : sendControls}
           </div>
         </PromptInputFooter>
         </PromptInput>
@@ -5862,7 +6035,7 @@ export function Workbench() {
     <main className="fox-shell" style={shellStyle}>
       <MemoizedWindowTitlebar leftSidebarCollapsed={sidebarCollapsed || compactLayout} onNewChat={handleNewChat} onOpenProject={handleComposerProject} onSettings={handleOpenSettings} onAbout={handleOpenAbout} onToggleSidebar={handleToggleSidebar} onZoom={handleZoom} />
       <div className="fox-workbench">
-        <MemoizedSidebar collapsed={sidebarCollapsed || compactLayout} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.detail?.conversation.id} newChatActive={activeView === 'chat' && timelineEmpty} runIndicators={desktopConversation.enabled ? desktopConversation.runIndicators : undefined} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
+        <MemoizedSidebar collapsed={sidebarCollapsed || compactLayout} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.selectedConversationId ?? undefined} newChatActive={activeView === 'chat' && timelineEmpty && !desktopConversation.selectedConversationId} runIndicators={desktopConversation.enabled ? desktopConversation.runIndicators : undefined} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
         {!sidebarCollapsed && !compactLayout && <SidebarResizeDivider onResize={(delta) => setSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
         <div className="fox-content-card">
         <div className={`fox-content-surface ${rightPanelMaximized && showConversationRightSidebar && !rightSidebarCollapsed ? 'is-right-maximized' : ''}`}>

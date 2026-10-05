@@ -21,6 +21,49 @@ pub(crate) const NO_REDUCTION: &str = "kernel.context_compaction_no_reduction";
 pub(crate) const SINGLE_TOO_LARGE: &str = "kernel.context_compaction_single_item_too_large";
 pub(crate) const UNCERTAIN: &str = "kernel.context_compaction_uncertain";
 pub(crate) const FAILED: &str = "kernel.context_compaction_failed";
+/// How many *extra* attempts one pending compaction request may spend. A retry
+/// never renews the window: every attempt shares the request's original deadline.
+pub(crate) const RETRY_LIMIT: u32 = 1;
+/// A retry that cannot fit at least this much of the original window is skipped
+/// rather than spent: it would only burn the Run's remaining budget.
+pub(crate) const MIN_RETRY_BUDGET_MS: i64 = 5_000;
+
+/// Why one dispatched compaction attempt failed.
+///
+/// Only [`CompactionFailure::SettledRejection`] is safe to re-ask: the provider
+/// answered, so it cannot already be generating this summary. Everything else
+/// preserves the existing fail-closed boundary, and an unknown outcome is never
+/// replayed (the provider may be generating it right now).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompactionFailure {
+    /// The provider rejected the request (HTTP 429/5xx) before generating.
+    SettledRejection,
+    /// Dispatched, but its outcome is unknown (worker reaped, window expired).
+    UnknownOutcome,
+    /// A response arrived but did not satisfy this request (identity/shape).
+    InvalidResult,
+    /// The Run was cancelled while the request was in flight.
+    Cancelled,
+    /// Not classified, therefore never retried.
+    Unclassified,
+}
+
+impl CompactionFailure {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::SettledRejection => "settled_rejection",
+            Self::UnknownOutcome => "unknown_outcome",
+            Self::InvalidResult => "invalid_result",
+            Self::Cancelled => "cancelled",
+            Self::Unclassified => "unclassified",
+        }
+    }
+
+    /// True only for a failure that is known to have produced nothing.
+    pub(crate) fn is_retryable(self) -> bool {
+        matches!(self, Self::SettledRejection)
+    }
+}
 /// Fixed user-shaped recovery text used only after a durable incomplete-model
 /// rejection. The model-frame builder and lease verifier share these bytes.
 pub(crate) const INCOMPLETE_MODEL_RETRY_PROMPT: &str = "Fox 续答提示：上一条模型回复已经停止，但没有给出有效的最终答复。请根据原始用户请求、已有对话以及本轮已完成的工具结果，继续执行尚未完成的工作。不要重复已经完成的操作，不要只说明你将开始分析。需要更多操作时请直接调用可用工具；确实完成、遇到具体阻碍或需要补充信息时，给出有用的答复，并遵守系统提示中的最终答复格式。";

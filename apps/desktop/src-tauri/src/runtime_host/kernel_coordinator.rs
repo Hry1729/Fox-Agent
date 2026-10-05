@@ -174,6 +174,10 @@ impl CompletionDelivery {
     }
 }
 
+/// The fixed wait between model retries. One definition, so the policy cannot drift
+/// between the scheduler and the tests that guard the retry lane.
+pub(crate) const MODEL_RETRY_INTERVAL_MS: i64 = 10_000;
+
 pub(crate) struct KernelCoordinator<'a> {
     database: &'a Database,
     clock: &'a dyn Clock,
@@ -792,13 +796,63 @@ impl<'a> KernelCoordinator<'a> {
         self.apply(None, |controller, _| Ok(controller.settle_cancellation()))
     }
 
+    /// Terminate the Run as failed, after recording a real delivery verdict for
+    /// whatever the task promised.
+    ///
+    /// The verification is the ordinary deterministic gate, and it is written only
+    /// through this failing decision's own committed mark. The Run is still failed:
+    /// a verdict is evidence about files, never a claim that the task succeeded, and
+    /// no repair round is armed for a Run that is already over. An evaluation error
+    /// never blocks the terminal (a stuck Run is worse than a missing verdict), but
+    /// it is reported to the caller's caller through the same failure.
     pub(crate) fn fail(&self, code: &str, message: &str) -> Result<(), String> {
-        self.apply(None, |controller, _| {
-            Ok(controller.terminate(kernel::RunOutcome::Failed {
-                code: code.into(),
-                message: message.into(),
-            }))
-        })
+        let mark = self.stage_failure_delivery().unwrap_or(None);
+        self.apply_decision(
+            None,
+            |controller, _| {
+                Ok(controller.terminate(kernel::RunOutcome::Failed {
+                    code: code.into(),
+                    message: message.into(),
+                }))
+            },
+            None,
+            mark.as_deref(),
+        )?;
+        if let Some(mark) = mark.as_deref() {
+            super::delivery::finalize_outcome(
+                &self.database,
+                &self.binding.run_id,
+                mark,
+                crate::database::now_ms(),
+            )?;
+            // The mark was written by the commit taken immediately above, so it must
+            // be here; otherwise the ledger would carry verdicts no decision owned.
+            if !self.database.decision_mark_committed(&self.binding.run_id, mark)? {
+                return Err("delivery failure stage lost its committed decision mark".into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify what this Run promised, staged for the failing decision to own.
+    fn stage_failure_delivery(&self) -> Result<Option<String>, String> {
+        let stop = super::delivery::evaluate_stop(
+            &self.database,
+            self.binding.permission.project_root.as_deref(),
+            &self.binding.run_id,
+        )?;
+        if matches!(stop, super::delivery::DeliveryStop::NoChecklist) {
+            return Ok(None);
+        }
+        let mark = format!("delivery:failure:{}", uuid::Uuid::new_v4());
+        super::delivery::stage_failure_outcome(
+            &self.database,
+            &self.binding.run_id,
+            &mark,
+            &stop,
+            crate::database::now_ms(),
+        )?;
+        Ok(Some(mark))
     }
 
     pub(crate) fn snapshot(&self) -> Result<kernel::KernelSnapshot, String> {
@@ -1002,8 +1056,10 @@ impl<'a> KernelCoordinator<'a> {
             |controller, now| {
                 let (providers, _, turns, _) = controller.retry_counters();
                 let provider = failure.category == "provider_unavailable";
-                let attempt = if provider { providers } else { turns };
-                let delay = (1_000_i64.saturating_mul(1_i64 << attempt.min(5)))
+                // A fixed interval between retries: predictable for the provider and
+                // for the user watching the Run. A provider that asks for longer
+                // still wins, because that is its rate-limit contract, not our backoff.
+                let delay = MODEL_RETRY_INTERVAL_MS
                     .max(failure.retry_after_ms.unwrap_or(0) as i64);
                 controller.schedule_model_retry(
                     now.monotonic_ms,

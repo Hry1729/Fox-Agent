@@ -510,6 +510,56 @@ fn a_completion_stage_is_withdrawn_when_its_decision_is_refused() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// Regression (2026-10-04 review, P1): a Run that ends in failure still records a
+/// real verdict for what it promised.
+///
+/// The F09 evidence was 200/200 artifacts plus progress.csv and summary.md with every
+/// checklist row still `pending` and no marks, because the Run died in compaction
+/// before any stop evaluation. The verdict below is the ordinary deterministic gate,
+/// written through the failing decision's own mark; the Run stays failed, and a
+/// missing artifact is still recorded as failed rather than passed.
+#[test]
+fn a_failed_run_still_records_the_verified_delivery_verdict() {
+    for artifact_present in [true, false] {
+        let DeliveryLive { db, root, run_id } = delivery_live_fixture("127.0.0.1:9".parse().unwrap());
+        let clock = TestClock::new(crate::database::now_ms());
+        let cancellation = CancellationRegistry::default();
+        if artifact_present {
+            std::fs::write(root.join("AGV汇总.xlsx"), real_workbook_bytes()).unwrap();
+            record_managed_write_receipt(&db, &root, &run_id, "AGV汇总.xlsx");
+        }
+        let coordinator =
+            KernelCoordinator::start_prepared(&db, &clock, &run_id, &cancellation).unwrap();
+        coordinator
+            .fail("kernel.context_compaction_failed", "compaction stopped the Run")
+            .unwrap();
+        drop(coordinator);
+
+        let expected = if artifact_present { "passed" } else { "failed" };
+        assert_eq!(
+            item_statuses(&db, &run_id),
+            vec![("slot:xlsx:1".to_owned(), expected.to_owned())],
+            "the failing Run must close its checklist with a real verdict"
+        );
+        assert_eq!(
+            db.kernel_build_full_snapshot(&run_id).unwrap().state,
+            "failed",
+            "a verdict about files never turns the Run into a pass"
+        );
+        assert!(
+            committed_marks(&db, &run_id) >= 1,
+            "the verdict must be owned by the failing decision's committed mark"
+        );
+        assert!(db.staged_delivery_rounds().unwrap().is_empty());
+        let items = db.delivery_checklist(&run_id).unwrap();
+        assert!(
+            items[0].checked_at.is_some(),
+            "a closed verdict carries when it was verified"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
 /// Regression (2026-10-02 review, P0): every entry point that can finish a Run
 /// must record the delivery verdict.
 ///

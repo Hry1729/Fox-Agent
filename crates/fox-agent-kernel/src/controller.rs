@@ -2043,6 +2043,55 @@ impl RunController {
         Ok(effects)
     }
 
+    /// Record one failed compaction attempt as a durable event.
+    ///
+    /// The pending request is deliberately kept: the caller either retries inside
+    /// the same deadline or fails the Run, and the durable `owner` is what keeps
+    /// recovery from replaying a request whose outcome is unknown.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fail_context_compaction(
+        &mut self,
+        id: &str,
+        owner: &str,
+        attempt: u32,
+        elapsed_ms: i64,
+        remaining_ms: i64,
+        failure: &str,
+        category: Option<&str>,
+        http_status: Option<u16>,
+        retryable: bool,
+    ) -> Result<Vec<Effect>, KernelError> {
+        if self.state != RunState::Compacting
+            || !self.model_request_in_flight
+            || owner.trim().is_empty()
+            || owner.len() > 512
+            || id.len() > 512
+            || self
+                .compaction
+                .pending
+                .as_ref()
+                .is_none_or(|pending| pending.id != id || pending.owner.as_deref() != Some(owner))
+        {
+            return Err(KernelError::FailClosed(
+                "compaction failure lost its dispatch owner".into(),
+            ));
+        }
+        Ok(vec![self.append_event(
+            "context.compaction.failed",
+            serde_json::json!({
+                "id": id,
+                "owner": owner,
+                "attempt": attempt,
+                "elapsedMs": elapsed_ms,
+                "remainingMs": remaining_ms,
+                "failure": failure,
+                "category": category,
+                "httpStatus": http_status,
+                "retryable": retryable,
+            }),
+        )])
+    }
+
     /// Periodic budget/timeout check. `monotonic_ms` drives in-process execution
     /// and tool timeouts; `wall_ms` drives the persistent approval deadline.
     pub fn tick(&mut self, monotonic_ms: i64, wall_ms: i64) -> Vec<Effect> {

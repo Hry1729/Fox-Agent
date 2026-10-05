@@ -8,6 +8,7 @@ import {
 } from './pi-adapter.mjs'
 import { createReadOnlyTools } from './read-only-tools.mjs'
 import { composeFoxPrompt } from './prompt-composer.mjs'
+import { FOX_LANGUAGE_CONTRACT } from './runtime-instructions.mjs'
 import { GRAPH_READONLY_TOOL_NAME } from './runtime-contract.mjs'
 import { adaptFoxToolsToPi, defineFoxTools } from './tool-adapter.mjs'
 
@@ -351,7 +352,7 @@ async function runReadonlyNodeAgent({
   })
   const composition = composeFoxPrompt({
     systemPrompt: GRAPH_NODE_INSTRUCTIONS,
-    runtimeInstructions: 'This is an ephemeral graph preview node. Its report is a candidate until the parent graph tool mechanically accepts a non-empty terminal result.',
+    runtimeInstructions: `${FOX_LANGUAGE_CONTRACT}\n\nThis is an ephemeral graph preview node. Its report is a candidate until the parent graph tool mechanically accepts a non-empty terminal result.`,
     context: {
       projectRoot: cwd,
       permissionMode: 'read-only',

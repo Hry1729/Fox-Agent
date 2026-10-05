@@ -291,10 +291,11 @@ pub fn issue_dispatch_credential_with_resolver_in_tx(
     // REV-05: a whole-file replacement whose bound observation did not deliver
     // the whole content carries its own, purpose-specific authorization,
     // recorded here in the SAME transaction as the credential so the two can
-    // never disagree.
+    // never disagree. A create replaces nothing and therefore issues NO such
+    // ticket: its authority is the ordinary permission mode (item 5).
     if tool == "write_file" {
         if let Some(baseline) = file_baseline.as_ref() {
-            if !model_delivery_covered_whole_file_in_tx(transaction, run_id, baseline)? {
+            if replace_authorization_required_in_tx(transaction, run_id, baseline)? {
                 let input: serde_json::Value = serde_json::from_str(canonical_input_json)
                     .map_err(|error| format!("invalid file input: {error}"))?;
                 let content = input
@@ -460,6 +461,60 @@ pub fn replace_request_binding(
         candidate_digest: candidate,
         request_digest: request,
     }
+}
+
+/// The kind of project-file write a dispatch is actually performing.
+///
+/// Named from Host facts only: the observation the write is bound to. A write
+/// bound to the Host's own *verified absent target* record CREATES a file that
+/// does not exist, so it replaces nothing and can destroy nothing; a write bound
+/// to a real prior version REPLACES content that exists. File size, extension,
+/// path shape and the model's own description of the call never take part in
+/// this classification (a `.csv` progress file and a `.md` report are classified
+/// by whether content already exists, not by their name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOperationKind {
+    /// `write_file` on a target the Host itself proved absent.
+    Create,
+    /// `write_file` on a bound, existing version.
+    ReplaceExisting,
+}
+
+/// Classify a `write_file` from the observation it is bound to.
+///
+/// `None` means the classification is *unknown* (no bound observation at all),
+/// which is deliberately NOT a create: an unprovable target keeps the
+/// conservative replacement path, and the version precondition refuses it
+/// separately as a conflict.
+pub fn write_operation_kind(observation: Option<&HostObservation>) -> Option<WriteOperationKind> {
+    let observation = observation?;
+    // Both halves are Host-set facts: `view_kind` is the shape of the record the
+    // independent filesystem probe produced, and `version` is the sentinel that
+    // probe writes. A model-declared `expectedVersion` never mutates either.
+    if observation.view_kind == fox_engine_protocol::ObservationView::Missing
+        && observation.version == "missing"
+    {
+        return Some(WriteOperationKind::Create);
+    }
+    Some(WriteOperationKind::ReplaceExisting)
+}
+
+/// Whether this `write_file` still needs its OWN purpose-specific, one-dispatch
+/// replacement authorization (REV-05).
+///
+/// A create never does: there is no existing content for the candidate to
+/// replace, and the write's own version check still refuses to clobber a file
+/// that appeared in the meantime. Everything else keeps the rule that BOTH the
+/// source observation and the model delivery must cover the whole version.
+pub fn replace_authorization_required_in_tx(
+    transaction: &Transaction<'_>,
+    run_id: &str,
+    observation: &HostObservation,
+) -> Result<bool, String> {
+    if write_operation_kind(Some(observation)) != Some(WriteOperationKind::ReplaceExisting) {
+        return Ok(false);
+    }
+    Ok(!model_delivery_covered_whole_file_in_tx(transaction, run_id, observation)?)
 }
 
 /// Whether the model view of the observation's durable result kept every byte.
@@ -1578,11 +1633,23 @@ impl Database {
 
     /// The single admission rule for a whole-file replacement: BOTH the Host's
     /// source observation and the model delivery must cover the whole version.
+    ///
+    /// A create is not a replacement: it is bound to the Host's verified-absent
+    /// target, so there is nothing to replace and no dedicated ticket. A create
+    /// inside an authorized directory therefore follows the ordinary permission
+    /// mode (`allow` runs without a per-file prompt; `ask` still asks with the
+    /// ordinary decision surface), which is what makes "auto mode writes several
+    /// Markdown reports and updates a progress CSV" possible without a prompt
+    /// per file. No content that already exists is ever overwritten this way: an
+    /// existing target is `ReplaceExisting` and keeps the REV-05 rule.
     pub fn needs_replace_grant(
         &self,
         run_id: &str,
         observation: &HostObservation,
     ) -> Result<bool, String> {
+        if write_operation_kind(Some(observation)) == Some(WriteOperationKind::Create) {
+            return Ok(false);
+        }
         Ok(!self.model_delivery_covered_whole_file(run_id, observation)?)
     }
 

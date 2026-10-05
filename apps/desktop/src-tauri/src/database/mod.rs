@@ -3,7 +3,7 @@ mod kernel_changes;
 mod models;
 mod repositories;
 
-pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 89;
+pub(crate) const DATABASE_SCHEMA_VERSION: i64 = 91;
 pub(crate) use repositories::kernel_execution_admission;
 pub(crate) use repositories::kernel_reconciliation::*;
 pub(crate) use repositories::ModelNoticeInput;
@@ -42,7 +42,10 @@ pub(crate) use repositories::{
     RestoreClaim, RestoreRequestRecord, RunWriteReceipt, StagedDeliveryItem,
     MIN_DIGITAL_COLLEAGUE_OUTPUT_TOKENS,
     SkillActivationRecord, SteeringDecision, SteeringMessage, MAX_STEERING_FOLLOWUPS,
+    STEERING_LANE_CURRENT, STEERING_LANE_NEXT_TURN,
 };
+#[cfg(test)]
+pub(crate) use repositories::cancel_open_steering_in_tx;
 #[allow(unused_imports)]
 pub use repositories::{
     GraphLeadActivationResult, GraphLeadEdgeSnapshot, GraphLeadNodeFinishResult,

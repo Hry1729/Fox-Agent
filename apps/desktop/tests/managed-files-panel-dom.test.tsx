@@ -334,7 +334,7 @@ describe('RuntimeApprovalPrompt (real DOM clicks)', () => {
     expect(screen.getByRole('button', { name: '只允许这一次' })).toBeDefined()
   })
 
-  test('an ordinary approval exposes run-scoped reuse and no replacement binding', async () => {
+  test('an ordinary approval exposes the conversation-scoped reuse and its real limits', async () => {
     render(
       React.createElement(RuntimeApprovalPrompt, {
         approval: approvalRecord({
@@ -351,7 +351,47 @@ describe('RuntimeApprovalPrompt (real DOM clicks)', () => {
     )
 
     expect(document.querySelector('.fox-approval-replacement')).toBeNull()
-    expect(screen.getByRole('button', { name: '本次运行内允许' })).toBeDefined()
+    // The grant is stored against the conversation (and is revoked when the
+    // policy generation moves), so the label must not claim a narrower lifetime.
+    expect(screen.getByRole('button', { name: '本次对话内允许' })).toBeDefined()
+    // The user is told the real scope, that it is revocable, and that revoking or
+    // changing the mode ends it — instead of an unqualified "allow this run".
+    expect(document.querySelector('.fox-approval-scope-note')?.textContent).toContain('可随时撤销')
+    expect(document.querySelector('.fox-approval-scope-note')?.textContent).toContain('立即失效')
+    expect(document.querySelector('.fox-approval-scope-note')?.textContent).toContain('不包含执行任何脚本或命令')
+  })
+
+  test('a new file is described as a creation, not as a one-dispatch replacement', async () => {
+    render(
+      React.createElement(RuntimeApprovalPrompt, {
+        approval: approvalRecord({
+          request: {
+            category: 'tool_execution',
+            availableDecisions: ['allow_once', 'allow_conversation', 'deny'],
+            title: '允许 Fox 写入新文件？',
+            target: 'C:/tmp/notes.md',
+            input: { path: 'C:/tmp/notes.md', content: 'hello\n' },
+            // A legacy card may still carry the binding with the absent-target
+            // baseline; it must never be read as a replacement ticket.
+            wholeFileReplacement: {
+              ...replacementRequest.wholeFileReplacement,
+              baselineVersion: 'missing',
+            },
+          },
+        }) as any,
+        onResolve: async () => true,
+      }),
+    )
+
+    const scope = document.querySelector('.fox-approval-scope-note')?.textContent ?? ''
+    expect(scope).toContain('新建')
+    expect(scope).toContain('不覆盖任何已有内容')
+    expect(scope).not.toContain('仅授权本次操作')
+    // Nothing existing is destroyed, so the conversation-scoped decision the Host
+    // declared stays available.
+    expect(screen.getByRole('button', { name: '本次对话内允许' })).toBeDefined()
+    expect(screen.getByRole('button', { name: '只允许这一次' })).toBeDefined()
+    expect(screen.getByRole('button', { name: '拒绝' })).toBeDefined()
   })
 
   test('confirm and deny submit the exact versioned approval identity', async () => {

@@ -250,6 +250,15 @@ export function activeProcessGroupTitle(name?: string, input?: unknown) {
   return labels[processActivityKind(name, input)]
 }
 
+/** The process header is a user-facing status line, never a transcript of the
+ *  model's private thinking. Raw reasoning may legitimately be written in
+ *  English, so the `reasoning` caller falls back to a neutral Chinese status
+ *  whenever the candidate text carries no Han character. The full reasoning
+ *  still renders inside the expanded row, and machine text (identifiers, paths,
+ *  commands) keeps its original form. */
+const HAN_PATTERN = /\p{Script=Han}/u
+const REASONING_STATUS_FALLBACK = '正在思考'
+
 export function activeProcessDetail(name?: string, input?: unknown): string {
   if (!name) return ''
   const data = input && typeof input === 'object' && !Array.isArray(input) ? input as Record<string, unknown> : {}
@@ -261,8 +270,11 @@ export function activeProcessDetail(name?: string, input?: unknown): string {
       : ''
     if (typeof detail === 'string' && detail.trim()) {
       const segments = [...new Intl.Segmenter().segment(detail.replace(/\s+/g, ' ').trim())].map(item => item.segment)
-      return segments.length > 160 ? `${segments.slice(0, 159).join('')}…` : segments.join('')
+      const text = segments.length > 160 ? `${segments.slice(0, 159).join('')}…` : segments.join('')
+      if (name === 'reasoning' && !HAN_PATTERN.test(text)) return REASONING_STATUS_FALLBACK
+      return text
     }
   }
+  if (name === 'reasoning') return REASONING_STATUS_FALLBACK
   return name
 }

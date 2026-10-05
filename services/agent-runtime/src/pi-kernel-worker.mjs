@@ -185,8 +185,20 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
         onSettled: settled => { loopSettlement.current = settled },
       })
     } catch (error) {
+      // Structured model evidence outranks the abort signal. A first-response /
+      // idle / total bound aborts the round from the inside, so `signal.aborted`
+      // only proves a cancellation happened — never why. Treating that internal
+      // abort as a user cancellation is what hid a settled model timeout from the
+      // Host and cost a Run; only an abort WITHOUT evidence is a cancellation.
+      if (error?.evidence) {
+        throw Object.assign(new Error('Kernel model round failed'), {
+          evidence: {
+            schemaVersion: 1, runId: request.runId, turnId: prepared.turnId,
+            checkpointSeq: prepared.checkpointSeq, ...error.evidence,
+          },
+        })
+      }
       if (abort.signal.aborted) throw error
-      if (error?.evidence) throw error
       const rejection = observed?.lastRejection?.() ?? null
       const final = session?.agent?.state?.messages?.at(-1)
       const evidence = error instanceof KernelIncompleteResponseError
@@ -265,8 +277,11 @@ export function createKernelWorker(write, { cwd = process.cwd() } = {}) {
             if (process.env.FOX_KERNEL_WORKER_DEBUG) {
               console.error(diagnosticLine('kernel-worker model round failed', describeKernelError(error)))
             }
-            const evidence = abort.signal.aborted ? null : error?.evidence
-              ?? (error instanceof KernelIncompleteResponseError
+            // The error's own structured evidence wins over the abort flag: an
+            // internal budget abort still produced a settled model failure, and the
+            // Host needs it to settle the attempt and admit a bounded retry.
+            const evidence = error?.evidence
+              ?? (abort.signal.aborted ? null : error instanceof KernelIncompleteResponseError
                 ? { schemaVersion: 1, runId: request.runId, turnId: prepared.turnId, checkpointSeq: prepared.checkpointSeq,
                     category: 'incomplete_response', httpStatus: null, retryAfterMs: null }
                 : modelFailure?.failureFor?.(request) ?? null)

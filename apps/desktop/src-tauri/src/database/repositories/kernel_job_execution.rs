@@ -563,7 +563,7 @@ mod notice_tests {
                 run_execution_budget_ms: binding.budgets.run_execution_ms,
                 run_execution_limited: binding.budgets.run_execution_limited,
                 approval_wait_timeout_ms: binding.budgets.approval_wait_ms,
-                provider_max_retries: 2, turn_max_retries: 1,
+                provider_max_retries: 5, turn_max_retries: 5,
                 experimental_compute_job_notice: enabled,
             };
             db.kernel_create_run(&run, "pi", "authoritative", 2,

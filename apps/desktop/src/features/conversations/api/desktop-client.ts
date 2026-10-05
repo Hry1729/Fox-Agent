@@ -396,6 +396,17 @@ function normalizeExpertBinding(binding: ConversationExpertBinding): Conversatio
 }
 
 /**
+ * Which lane a supplementary request is received on.
+ *
+ * - `current` — "补充到当前任务": bound to the active Run's next dispatch
+ *   boundary (the only lane the Run's model input ever carries).
+ * - `next-turn` — "排队，下一轮处理": durably held for the conversation's next
+ *   task; excluded from every model input of the active Run and never cancelled
+ *   by that Run ending.
+ */
+export type RunSteeringLane = 'current' | 'next-turn'
+
+/**
  * One durable mid-run supplementary request ("运行中补充要求"). The text never
  * grants tools and never rewrites a frozen request; the Host splices it into
  * model input only at the next dispatch boundary.
@@ -406,6 +417,7 @@ export interface RunSteeringRecord {
   messageId: string
   content: string
   status: 'received' | 'delivered' | 'applied' | 'cancelled' | string
+  lane: RunSteeringLane | string
   receivedAt: number
   appliedAt: number | null
   appliedEventSeq: number | null
@@ -417,6 +429,11 @@ export interface RunSteeringEnqueueResponse {
   seq: number
   messageId: string
   status: string
+  lane: RunSteeringLane | string
+}
+
+export interface RunSteeringDiscardResponse {
+  removed: boolean
 }
 
 /**
@@ -722,10 +739,25 @@ export const desktopClient = {
   cancelRun: (runId: string) => command<boolean>('run_cancel', { runId }),
   // Durably accept a supplementary request for the conversation's active
   // authoritative Run. Re-submitting an existing messageId is idempotent.
-  enqueueRunSteering: (conversationId: string, content: string, messageId?: string) =>
-    command<RunSteeringEnqueueResponse>('run_steering_enqueue', { conversationId, content, messageId }),
+  // `lane: 'current'` delivers at the Run's next dispatch boundary;
+  // `lane: 'next-turn'` holds the text for the conversation's next task.
+  enqueueRunSteering: (
+    conversationId: string,
+    content: string,
+    options: { messageId?: string; lane?: RunSteeringLane } = {},
+  ) =>
+    command<RunSteeringEnqueueResponse>('run_steering_enqueue', {
+      conversationId,
+      content,
+      messageId: options.messageId,
+      lane: options.lane,
+    }),
   listRunSteering: (conversationId: string) =>
     command<RunSteeringListResponse>('run_steering_list', { conversationId }),
+  // Remove one still-undelivered `next-turn` request. Refused for any row that
+  // already entered the active Run or that is a terminal audit record.
+  discardRunSteering: (conversationId: string, messageId: string) =>
+    command<RunSteeringDiscardResponse>('run_steering_discard', { conversationId, messageId }),
   // Append-only Host-managed file versions. Restore is a pure Host file copy
   // against a registered backup; it never replays tools or creates Runs.
   listManagedFileVersions: (conversationId: string, storagePath?: string) =>
