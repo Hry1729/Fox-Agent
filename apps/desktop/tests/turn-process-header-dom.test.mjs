@@ -134,6 +134,27 @@ test('failed and cancelled turns keep a clear status and an accessible process t
   assert.ok(cancelled.getByRole('button', { name: /收起过程.*过程已取消/ }))
 })
 
+test('a recoverable tool error stays in the process while a completed run has no failure count', async () => {
+  const runEvents = [
+    event(1, 'run.started'),
+    event(2, 'tool.started', { toolCallId: 'first', tool: 'read_file', input: { path: 'missing.txt' } }),
+    event(3, 'tool.completed', { toolCallId: 'first', tool: 'read_file', isError: true, result: { code: 'not_found', message: 'missing.txt' } }),
+    event(4, 'tool.started', { toolCallId: 'retry', tool: 'read_file', input: { path: 'README.md' } }),
+    event(5, 'tool.completed', { toolCallId: 'retry', tool: 'read_file', result: { content: 'ok' } }),
+    answer(6, '完成'),
+    event(7, 'run.completed'),
+  ]
+  const view = render(timeline(runEvents, { messages: [user, { ...assistant, content: '完成' }] }))
+  await waitFor(() => assert.ok(view.container.querySelector('.fox-process-turn-header')))
+  assert.doesNotMatch(view.container.querySelector('.fox-process-turn-header').textContent, /项失败/)
+  fireEvent.click(view.getByRole('button', { name: /展开过程/ }))
+  fireEvent.click(view.container.querySelector('.fox-chain-of-thought-header'))
+  await waitFor(() => assert.match(view.container.textContent, /工具调用未成功/))
+  fireEvent.click(view.container.querySelector('.fox-runtime-step-trigger'))
+  assert.match(view.container.textContent, /not_found|missing.txt/)
+  assert.doesNotMatch(view.container.querySelector('.fox-process-turn-header').textContent, /过程未完成/)
+})
+
 test('reader focus protects the process at automatic completion; verbose mode remains expanded', async () => {
   const view = render(live())
   await waitFor(() => assert.equal(stages(view).length, 2))
@@ -144,6 +165,6 @@ test('reader focus protects the process at automatic completion; verbose mode re
   assert.equal(stages(view).filter(stage => stage.hidden).length, 0)
   await React.act(async () => persistProcessDisplayMode('verbose'))
   assert.equal(stages(view).filter(stage => stage.hidden).length, 0)
-  assert.equal(view.container.querySelectorAll('.fox-runtime-process.is-fully-expanded').length, 2)
+  assert.equal(view.container.querySelectorAll('.fox-runtime-process-disclosure[aria-hidden="false"]').length, 2)
 })
 

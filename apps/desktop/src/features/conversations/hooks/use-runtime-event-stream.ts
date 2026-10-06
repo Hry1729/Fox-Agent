@@ -99,7 +99,8 @@ export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
         terminal.conversationId,
       ).then((persisted) => {
         if (disposed || activeConversationIdRef.current !== terminal.conversationId) return
-        flushSync(() => setDetail((current) => mergeConversationDetail(persisted, current)))
+        flushSync(() => setDetail((current) => current?.conversation.id === terminal.conversationId
+          ? mergeConversationDetail(persisted, current) : current))
       }).catch((cause) => {
         if (disposed || activeConversationIdRef.current !== terminal.conversationId) return
         const message = cause instanceof Error ? cause.message : String(cause)
@@ -117,7 +118,7 @@ export function useRuntimeEventStream(options: RuntimeEventStreamOptions) {
       onRunActivity?.(notification)
       if (notification.runId === authoritativeRunIdRef.current) return
       const event = notification.event
-      if (event.type === 'run.started') {
+      if (event.type === 'run.started' && notification.conversationId === activeConversationIdRef.current) {
         setError(null)
         setErrorDetails(null)
       }

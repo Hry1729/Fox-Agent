@@ -295,6 +295,7 @@ pub fn run() {
             commands::memory_revisions_list,
             commands::memory_recalls_list,
             commands::projects_list,
+            commands::projects_set_pinned,
             app_capabilities::projects_management_list,
             app_capabilities::project_path_update,
             app_capabilities::project_archive,

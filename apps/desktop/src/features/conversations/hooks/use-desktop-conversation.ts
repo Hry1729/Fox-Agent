@@ -58,6 +58,7 @@ interface DesktopConversationState {
   runtimeStatus: RuntimeStatus | null
   refreshRuntimeStatus: () => Promise<void>
   detail: ConversationDetail | null
+  selectedConversationId: string | null
   defaultAgentId: string | null
   selectedAgentId: string | null
   selectedExpertId: string | null
@@ -177,8 +178,11 @@ export function useDesktopConversation(): DesktopConversationState {
   // persisted Run state never fight over the same row.
   const [runOverlay, setRunOverlay] = useState<ConversationRunOverlay>(EMPTY_CONVERSATION_RUN_OVERLAY)
   const [runOverlaySnapshotAt, setRunOverlaySnapshotAt] = useState(0)
+  const listRequestVersionRef = useRef(0)
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null)
-  const [detail, setDetail] = useState<ConversationDetail | null>(null)
+  const [detail, setDetailState] = useState<ConversationDetail | null>(null)
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null)
+  const selectionVersionRef = useRef(0)
   const authoritativeRunIdRef = useRef<string | null>(null)
   authoritativeRunIdRef.current = detail ? snapshotForRun(detail)?.runId ?? null : null
   const [draftAgentId, setDraftAgentId] = useState<string | null>(null)
@@ -213,6 +217,22 @@ export function useDesktopConversation(): DesktopConversationState {
   const runtimeInitializationRef = useRef<Promise<RuntimeInitialization> | null>(null)
   const fallbackAgentId = 'fox-general'
 
+  // A detail is display state, not navigation state. Async work for another
+  // conversation may finish after the user has selected a different one.
+  const setDetail = useCallback<typeof setDetailState>((update) => {
+    setDetailState((current) => {
+      const next = typeof update === 'function' ? update(current) : update
+      return next && next.conversation.id !== activeConversationIdRef.current ? current : next
+    })
+  }, [])
+  const clearSelection = useCallback(() => {
+    selectionVersionRef.current += 1
+    activeConversationIdRef.current = null
+    activeRunIdRef.current = null
+    setSelectedConversationId(null)
+    setDetail(null)
+  }, [setDetail])
+
   const applyDraft = useCallback((nextDraft: typeof draftRef.current) => {
     draftRef.current = nextDraft
     setDraftAgentId(nextDraft.agentId)
@@ -237,14 +257,12 @@ export function useDesktopConversation(): DesktopConversationState {
   const selectProject = useCallback((projectRoot: string, permissionMode: ProjectRecord['permissionMode']) => {
     const draft = currentDraft()
     applyDraft({ ...draft, agentId: draft.agentId ?? defaultAgentId, projectRoot, permissionMode })
-    activeConversationIdRef.current = null
-    activeRunIdRef.current = null
-    setDetail(null)
+    clearSelection()
     // A new draft starts clean. A stale error or approval from the conversation the
     // user just left must not follow them into an empty composer.
     setError(null)
     setErrorDetails(null)
-  }, [applyDraft, currentDraft, defaultAgentId])
+  }, [applyDraft, clearSelection, currentDraft, defaultAgentId])
 
   const initializeRuntime = useCallback(() => {
     if (runtimeInitializationRef.current) return runtimeInitializationRef.current
@@ -258,12 +276,9 @@ export function useDesktopConversation(): DesktopConversationState {
     return runtimeInitializationRef.current
   }, [])
 
-  // Fast Refresh and draft-to-conversation transitions can preserve React state
-  // while recreating refs. Keep the routing refs derived from visible state so
-  // live runtime events are never filtered against a stale/null conversation.
+  // The selected id is set by user navigation, never by a late detail response.
   useLayoutEffect(() => {
-    activeConversationIdRef.current = detail?.conversation.id ?? null
-    const runId = detail?.lastRun?.id
+    const runId = detail?.conversation.id === activeConversationIdRef.current ? detail?.lastRun?.id : null
     activeRunIdRef.current = runId && !runId.startsWith('pending-run-') ? runId : null
   }, [detail?.conversation.id, detail?.lastRun?.id])
 
@@ -283,7 +298,9 @@ export function useDesktopConversation(): DesktopConversationState {
     // Stamp the read BEFORE the query: an event that lands while it is in flight is
     // newer than this snapshot and keeps its own indicator.
     const snapshotAt = Date.now()
+    const version = ++listRequestVersionRef.current
     const next = await desktopClient.listConversations()
+    if (version !== listRequestVersionRef.current) return next
     setConversations(next)
     setRunOverlaySnapshotAt(snapshotAt)
     setRunOverlay((current) => pruneRunOverlay(
@@ -296,11 +313,13 @@ export function useDesktopConversation(): DesktopConversationState {
 
   const refreshLifecycleLists = useCallback(async () => {
     const snapshotAt = Date.now()
+    const version = ++listRequestVersionRef.current
     const [active, archived, trashed] = await Promise.all([
       desktopClient.listConversations(),
       desktopClient.listArchivedConversations(),
       desktopClient.listTrashedConversations(),
     ])
+    if (version !== listRequestVersionRef.current) return
     setConversations(active)
     setArchivedConversations(archived)
     setTrashedConversations(trashed)
@@ -344,8 +363,17 @@ export function useDesktopConversation(): DesktopConversationState {
   }, [conversations])
 
   const openConversation = useCallback(async (conversationId: string) => {
-    const next = await desktopClient.loadConversation(conversationId)
+    const version = ++selectionVersionRef.current
     activeConversationIdRef.current = conversationId
+    activeRunIdRef.current = null
+    setSelectedConversationId(conversationId)
+    // Keep the previous conversation's detail on screen while the new one loads. Clearing
+    // it here made the workbench fall back to the empty "new conversation" page for the
+    // whole round-trip, which is the cross-project switch flash. Stale data cannot leak:
+    // the version/active-id guard below drops a load that lost the race.
+    setDetail((current) => current?.conversation.id === conversationId ? current : current)
+    const next = await desktopClient.loadConversation(conversationId)
+    if (version !== selectionVersionRef.current || activeConversationIdRef.current !== conversationId) return
     activeRunIdRef.current = runIsActive(next) ? next.lastRun?.id ?? null : null
     applyDraft({
       agentId: next.conversation.agentId,
@@ -357,7 +385,14 @@ export function useDesktopConversation(): DesktopConversationState {
     setDetail(next)
     setError(null)
     setErrorDetails(null)
-  }, [applyDraft])
+  }, [applyDraft, setDetail])
+
+  const refreshSelectedConversation = useCallback(async (conversationId: string) => {
+    const next = await desktopClient.loadConversation(conversationId)
+    if (activeConversationIdRef.current !== conversationId) return
+    setDetail((current) => current?.conversation.id === conversationId
+      ? mergeConversationDetail(next, current) : current)
+  }, [setDetail])
 
   const createConversation = useCallback(async (projectRoot?: string, permissionMode?: ProjectRecord['permissionMode']) => {
     if (!defaultAgentId) return false
@@ -365,8 +400,7 @@ export function useDesktopConversation(): DesktopConversationState {
       ? detail?.conversation.agentId ?? draftAgentId ?? defaultAgentId
       : defaultAgentId
     setError(null)
-    activeConversationIdRef.current = null
-    activeRunIdRef.current = null
+    clearSelection()
     const nextDraft = {
       agentId: selectedAgentId,
       expertId: null,
@@ -375,9 +409,8 @@ export function useDesktopConversation(): DesktopConversationState {
       knowledgeBases: [],
     }
     applyDraft(nextDraft)
-    setDetail(null)
     return true
-  }, [applyDraft, defaultAgentId, detail?.conversation.agentId, draftAgentId])
+  }, [applyDraft, clearSelection, defaultAgentId, detail?.conversation.agentId, draftAgentId])
 
   const loadEarlierMessages = useCallback(async () => {
     const current = detail
@@ -411,8 +444,7 @@ export function useDesktopConversation(): DesktopConversationState {
   const createConversationForAgent = useCallback(async (agentId: string, projectRoot?: string, permissionMode?: ProjectRecord['permissionMode']) => {
     setError(null)
     setErrorDetails(null)
-    activeConversationIdRef.current = null
-    activeRunIdRef.current = null
+    clearSelection()
     const nextDraft = {
       agentId,
       expertId: null,
@@ -421,9 +453,8 @@ export function useDesktopConversation(): DesktopConversationState {
       knowledgeBases: [],
     }
     applyDraft(nextDraft)
-    setDetail(null)
     return true
-  }, [applyDraft])
+  }, [applyDraft, clearSelection])
 
   const createConversationForExpert = useCallback(async (
     expertId: string,
@@ -437,13 +468,17 @@ export function useDesktopConversation(): DesktopConversationState {
       setErrorDetails(invalid)
       return { success: false, error: invalid }
     }
+    const version = ++selectionVersionRef.current
+    activeConversationIdRef.current = null
+    activeRunIdRef.current = null
+    setSelectedConversationId(null)
+    setDetail(null)
     try {
       const resolvedAgent = await resolveConversationAgentId([defaultAgentId], initializeRuntime)
+      if (selectionVersionRef.current !== version) return { success: false, error: null }
       if (resolvedAgent.initialized) setDefaultAgentId(resolvedAgent.agentId)
       setError(null)
       setErrorDetails(null)
-      activeConversationIdRef.current = null
-      activeRunIdRef.current = null
       const draft = currentDraft()
       applyDraft({
         ...draft,
@@ -452,7 +487,6 @@ export function useDesktopConversation(): DesktopConversationState {
         projectRoot: projectRoot?.trim() || draft.projectRoot,
         permissionMode: permissionMode ?? draft.permissionMode,
       })
-      setDetail(null)
       return { success: true, error: null }
     } catch (cause) {
       const details = desktopErrorDetails(cause)
@@ -460,7 +494,7 @@ export function useDesktopConversation(): DesktopConversationState {
       setErrorDetails(details)
       return { success: false, error: details }
     }
-  }, [applyDraft, currentDraft, defaultAgentId, initializeRuntime])
+  }, [applyDraft, currentDraft, defaultAgentId, initializeRuntime, setDetail])
 
   const setDraftPermission = useCallback((permissionMode: ProjectRecord['permissionMode']) => {
     draftRef.current = { ...draftRef.current, permissionMode }
@@ -468,9 +502,9 @@ export function useDesktopConversation(): DesktopConversationState {
   }, [])
 
   const renameConversation = useCallback(async (conversationId: string, title: string) => {
-    try { await desktopClient.renameConversation(conversationId, title); await refreshList(); await openConversation(conversationId); return true }
+    try { await desktopClient.renameConversation(conversationId, title); await refreshList(); await refreshSelectedConversation(conversationId); return true }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return false }
-  }, [openConversation, refreshList])
+  }, [refreshList, refreshSelectedConversation])
 
   const setConversationPinned = useCallback(async (conversationId: string, pinned: boolean) => {
     try {
@@ -491,17 +525,15 @@ export function useDesktopConversation(): DesktopConversationState {
       await desktopClient.archiveConversation(conversationId)
       await refreshLifecycleLists()
       if (activeConversationIdRef.current === conversationId) {
-        activeConversationIdRef.current = null
-        activeRunIdRef.current = null
+        clearSelection()
         applyDraft({ agentId: defaultAgentId, expertId: null, projectRoot: null, permissionMode: null, knowledgeBases: [] })
-        setDetail(null)
       }
       return true
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
       return false
     }
-  }, [applyDraft, defaultAgentId, refreshLifecycleLists])
+  }, [applyDraft, clearSelection, defaultAgentId, refreshLifecycleLists])
 
   const unarchiveConversation = useCallback(async (conversationId: string) => {
     try {
@@ -532,10 +564,8 @@ export function useDesktopConversation(): DesktopConversationState {
       await desktopClient.deleteConversation(conversationId)
       await refreshLifecycleLists()
       if (activeConversationIdRef.current === conversationId) {
-        activeConversationIdRef.current = null
-        activeRunIdRef.current = null
+        clearSelection()
         applyDraft({ agentId: defaultAgentId, expertId: null, projectRoot: null, permissionMode: null, knowledgeBases: [] })
-        setDetail(null)
       }
       return { deleted: true, error: null }
     } catch (cause) {
@@ -544,7 +574,7 @@ export function useDesktopConversation(): DesktopConversationState {
         error: cause instanceof Error ? cause.message : String(cause),
       }
     }
-  }, [applyDraft, defaultAgentId, refreshLifecycleLists])
+  }, [applyDraft, clearSelection, defaultAgentId, refreshLifecycleLists])
 
   const purgeConversation = useCallback(async (conversationId: string) => {
     try {
@@ -561,11 +591,12 @@ export function useDesktopConversation(): DesktopConversationState {
 
   const forkConversation = useCallback(async (messageId: string, title?: string) => {
     const conversationId = activeConversationIdRef.current
+    const version = selectionVersionRef.current
     if (!conversationId) return null
     try {
       const fork = await desktopClient.forkConversation(conversationId, messageId, title)
       await refreshLifecycleLists()
-      await openConversation(fork.id)
+      if (version === selectionVersionRef.current && activeConversationIdRef.current === conversationId) await openConversation(fork.id)
       setError(null)
       return fork
     } catch (cause) {
@@ -596,7 +627,7 @@ export function useDesktopConversation(): DesktopConversationState {
     }
     try {
       await desktopClient.removeConversationExpert(current.conversation.id)
-      await openConversation(current.conversation.id)
+      await refreshSelectedConversation(current.conversation.id)
       setErrorDetails(null)
       return { success: true, error: null }
     } catch (cause) {
@@ -605,7 +636,7 @@ export function useDesktopConversation(): DesktopConversationState {
       setErrorDetails(details)
       return { success: false, error: details }
     }
-  }, [applyDraft, detail, openConversation])
+  }, [applyDraft, detail, refreshSelectedConversation])
 
   const setKnowledgeReferences = useCallback(async (references: KnowledgeReference[], names: Record<string, string>) => {
     const conversationId = activeConversationIdRef.current
@@ -615,13 +646,13 @@ export function useDesktopConversation(): DesktopConversationState {
     }
     try {
       await desktopClient.setKnowledgeReferences(conversationId, references, names)
-      await openConversation(conversationId)
+      await refreshSelectedConversation(conversationId)
       return true
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
       return false
     }
-  }, [applyDraft, openConversation])
+  }, [applyDraft, refreshSelectedConversation])
 
   const setKnowledgeBindings = useCallback(async (knowledgeBases: KnowledgeBaseRecord[]) => {
     const conversationId = activeConversationIdRef.current
@@ -650,6 +681,7 @@ export function useDesktopConversation(): DesktopConversationState {
   useEffect(() => {
     if (!desktopRuntimeAvailable) return
     let cancelled = false
+    const version = selectionVersionRef.current
     void (async () => {
       try {
         const { agentId } = await resolveConversationAgentId([], initializeRuntime)
@@ -664,9 +696,9 @@ export function useDesktopConversation(): DesktopConversationState {
           withWorkspaceInitializationTimeout(refreshLifecycleLists(), '对话列表加载'),
         ])
         if (cancelled) return
-        activeConversationIdRef.current = null
-        setDetail(null)
-        setError(null)
+        if (version === selectionVersionRef.current) {
+          setError(null)
+        }
         setReady(true)
       } catch (cause) {
         if (!cancelled) {
@@ -682,7 +714,7 @@ export function useDesktopConversation(): DesktopConversationState {
       }
     })()
     return () => { cancelled = true }
-  }, [applyDraft, initializeRuntime, refreshLifecycleLists, refreshRuntimeStatus])
+  }, [applyDraft, initializeRuntime, refreshLifecycleLists, refreshRuntimeStatus, setDetail])
 
   useEffect(() => {
     if (!desktopRuntimeAvailable) return
@@ -807,7 +839,7 @@ export function useDesktopConversation(): DesktopConversationState {
         if (runtimeEventQueueRef.current.length > 0 || lastRuntimeEventAtRef.current !== lastRuntimeEventAt) return
         if (persisted.lastRun?.id !== activeRunId) {
           keepPolling = false
-          activeRunIdRef.current = runIsActive(persisted) ? persisted.lastRun?.id ?? null : null
+          if (activeConversationIdRef.current === activeConversationId) activeRunIdRef.current = runIsActive(persisted) ? persisted.lastRun?.id ?? null : null
           setDetail((current) => mergeConversationDetail(persisted, current))
           void refreshList()
           return
@@ -819,7 +851,7 @@ export function useDesktopConversation(): DesktopConversationState {
         setDetail((current) => mergeConversationDetail(persisted, current))
         if (!runIsActive(persisted)) {
           keepPolling = false
-          activeRunIdRef.current = null
+          if (activeConversationIdRef.current === activeConversationId) activeRunIdRef.current = null
           void refreshList()
         }
       } catch {
@@ -842,6 +874,7 @@ export function useDesktopConversation(): DesktopConversationState {
       const payload = (event as CustomEvent<{ conversationId: string; started: { run: { id: string } } }>).detail
         if (!payload?.conversationId || !payload.started?.run?.id) return
         if (detail?.conversation.id !== payload.conversationId) return
+      if (activeConversationIdRef.current !== payload.conversationId) return
       activeRunIdRef.current = payload.started.run.id
       void desktopClient.loadConversation(payload.conversationId).then(persisted => {
         setDetail(current => current?.conversation.id === payload.conversationId ? persisted : current)
@@ -852,6 +885,7 @@ export function useDesktopConversation(): DesktopConversationState {
     }, [detail?.conversation.id])
 
   const send = useCallback(async (text: string, model?: string, files: Array<{ filename?: string; mediaType?: string; url?: string }> = [], runtimeText?: string) => {
+    const selectionVersion = selectionVersionRef.current
     const cleanText = text.trim()
     const cleanRuntimeText = runtimeText?.trim() || cleanText
     if (!cleanText) return false
@@ -877,7 +911,10 @@ export function useDesktopConversation(): DesktopConversationState {
           permissionMode: draft.permissionMode ?? draftPermissionMode ?? undefined,
         })
         active = await desktopClient.loadConversation(conversation.id)
-        activeConversationIdRef.current = conversation.id
+        if (selectionVersion === selectionVersionRef.current) {
+          activeConversationIdRef.current = conversation.id
+          setSelectedConversationId(conversation.id)
+        }
         const knowledgeBases = draft.knowledgeBases.length ? draft.knowledgeBases : draftKnowledgeBases
         if (draft.knowledgeReferences !== undefined) {
           await desktopClient.setKnowledgeReferences(conversation.id, draft.knowledgeReferences, draft.knowledgeNames ?? {})
@@ -889,7 +926,7 @@ export function useDesktopConversation(): DesktopConversationState {
           )
           active = { ...active, knowledgeBindings: bindings }
         }
-        applyDraft({
+        if (selectionVersion === selectionVersionRef.current) applyDraft({
           agentId: active.conversation.agentId,
           expertId: activeConversationExpertBinding(active)?.expertId ?? draft.expertId ?? draftExpertId,
           projectRoot: null,
@@ -898,7 +935,6 @@ export function useDesktopConversation(): DesktopConversationState {
         })
       }
       const activeConversation = active
-      activeConversationIdRef.current = activeConversation.conversation.id
       // Attachments are read and saved BEFORE anything optimistic is rendered: a
       // rejected attachment must not leave a turn that never ran, and the caller
       // keeps the draft so the send can be retried.
@@ -922,7 +958,7 @@ export function useDesktopConversation(): DesktopConversationState {
       }
 
       const pendingRun = optimisticRun(activeConversation.conversation.id, model)
-      activeRunIdRef.current = null
+      if (activeConversationIdRef.current === activeConversation.conversation.id) activeRunIdRef.current = null
       const pendingMessageId = optimisticId('pending-message')
       const now = Date.now()
       const nextOrdinal = activeConversation.messages.reduce((highest, message) => Math.max(highest, message.ordinal), 0) + 1
@@ -940,6 +976,7 @@ export function useDesktopConversation(): DesktopConversationState {
       }
       flushSync(() => {
         setDetail((current) => {
+          if (activeConversationIdRef.current !== activeConversation.conversation.id) return current
           const base = current?.conversation.id === activeConversation.conversation.id ? current : activeConversation
           return {
             ...base,
@@ -962,10 +999,10 @@ export function useDesktopConversation(): DesktopConversationState {
         model,
         attachmentIds: attachments.map((item) => item.id),
       })
-      activeRunIdRef.current = started.run.id
+      if (activeConversationIdRef.current === activeConversation.conversation.id) activeRunIdRef.current = started.run.id
       void desktopClient.runtimeStatus().then(setRuntimeStatus).catch(() => undefined)
       setDetail((current) => {
-        if (!current) return current
+        if (!current || current.conversation.id !== activeConversation.conversation.id) return current
         const runState = current.lastRun?.id === started.run.id ? current.lastRun : null
         const pendingState = current.lastRun?.id.startsWith('pending-run-') ? current.lastRun : null
         return {
@@ -995,13 +1032,15 @@ export function useDesktopConversation(): DesktopConversationState {
     } catch (cause) {
       if (active) uiDispatchStartedRef.current.delete(active.conversation.id)
       const details = desktopErrorDetails(cause)
-      if (active) await openConversation(active.conversation.id).catch(() => undefined)
+      if (active) await refreshSelectedConversation(active.conversation.id).catch(() => undefined)
       await refreshList().catch(() => undefined)
-      setError(details.message)
-      setErrorDetails(details)
+      if (selectionVersion === selectionVersionRef.current) {
+        setError(details.message)
+        setErrorDetails(details)
+      }
       return false
     }
-  }, [applyDraft, defaultAgentId, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftPermissionMode, draftProjectRoot, initializeRuntime, openConversation, refreshList])
+  }, [applyDraft, defaultAgentId, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftPermissionMode, draftProjectRoot, initializeRuntime, refreshList, refreshSelectedConversation])
 
   const rerunFromMessage = useCallback(async (messageId: string, text: string, model?: string) => {
     const active = detail
@@ -1046,7 +1085,7 @@ export function useDesktopConversation(): DesktopConversationState {
         text: cleanText,
         model,
       })
-      activeRunIdRef.current = started.run.id
+      if (activeConversationIdRef.current === active.conversation.id) activeRunIdRef.current = started.run.id
       const persisted = await desktopClient.loadConversation(active.conversation.id)
       setDetail(persisted)
       void desktopClient.runtimeStatus().then(setRuntimeStatus).catch(() => undefined)
@@ -1054,12 +1093,12 @@ export function useDesktopConversation(): DesktopConversationState {
       return true
     } catch (cause) {
       const details = desktopErrorDetails(cause)
-      await openConversation(active.conversation.id).catch(() => undefined)
+      await refreshSelectedConversation(active.conversation.id).catch(() => undefined)
       setError(details.message)
       setErrorDetails(details)
       return false
     }
-  }, [detail, openConversation, refreshList])
+  }, [detail, refreshList, refreshSelectedConversation])
 
   const resumeQuestion = useCallback(async (
     parentRunId: string,
@@ -1097,7 +1136,7 @@ export function useDesktopConversation(): DesktopConversationState {
       event: { type: 'user.question.responded', childRunId: pendingRun.id },
       createdAt: now,
     }
-    activeRunIdRef.current = null
+    if (activeConversationIdRef.current === active.conversation.id) activeRunIdRef.current = null
     flushSync(() => setDetail((current) => current?.conversation.id === active.conversation.id
       ? { ...current, messages: [...current.messages, optimisticMessage], runtimeEvents: [...current.runtimeEvents, respondedEvent], lastRun: pendingRun }
       : current))
@@ -1109,9 +1148,9 @@ export function useDesktopConversation(): DesktopConversationState {
         text: cleanText,
         answers,
       })
-      activeRunIdRef.current = started.run.id
+      if (activeConversationIdRef.current === active.conversation.id) activeRunIdRef.current = started.run.id
       setDetail((current) => {
-        if (!current) return current
+        if (!current || current.conversation.id !== active.conversation.id) return current
         const runState = current.lastRun?.id === started.run.id ? current.lastRun : null
         const pendingState = current.lastRun?.id.startsWith('pending-run-') ? current.lastRun : null
         return {
@@ -1134,11 +1173,11 @@ export function useDesktopConversation(): DesktopConversationState {
       return true
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
-      await openConversation(active.conversation.id).catch(() => undefined)
+      await refreshSelectedConversation(active.conversation.id).catch(() => undefined)
       await refreshList().catch(() => undefined)
       return false
     }
-  }, [detail, openConversation, refreshList])
+  }, [detail, refreshList, refreshSelectedConversation])
 
   const cancel = useCallback(async () => {
     const conversationId = activeConversationIdRef.current ?? detail?.conversation.id
@@ -1165,7 +1204,7 @@ export function useDesktopConversation(): DesktopConversationState {
         setErrorDetails(details)
         return false
       }
-      activeRunIdRef.current = null
+      if (activeConversationIdRef.current === conversationId) activeRunIdRef.current = null
       uiDispatchStartedRef.current.delete(conversationId)
       setDetail(persisted)
       void refreshList()
@@ -1247,7 +1286,7 @@ export function useDesktopConversation(): DesktopConversationState {
     try {
       await desktopClient.resolveWorkModeConfirmation(conversationId, goalId, expectedVersion, approved)
       const persisted = await desktopClient.loadConversation(conversationId)
-      activeRunIdRef.current = runIsActive(persisted) ? persisted.lastRun?.id ?? null : null
+      if (activeConversationIdRef.current === conversationId) activeRunIdRef.current = runIsActive(persisted) ? persisted.lastRun?.id ?? null : null
       setDetail((current) => mergeConversationDetail(persisted, current))
       setError(null)
       void refreshList()
@@ -1267,7 +1306,7 @@ export function useDesktopConversation(): DesktopConversationState {
     try {
       await desktopClient.resolvePlanRevision(conversationId, planRevisionId, decision)
       const persisted = await desktopClient.loadConversation(conversationId)
-      activeRunIdRef.current = runIsActive(persisted) ? persisted.lastRun?.id ?? null : null
+      if (activeConversationIdRef.current === conversationId) activeRunIdRef.current = runIsActive(persisted) ? persisted.lastRun?.id ?? null : null
       setDetail((current) => mergeConversationDetail(persisted, current))
       setError(null)
       return true
@@ -1294,7 +1333,7 @@ export function useDesktopConversation(): DesktopConversationState {
         }
       })
       const persisted = await desktopClient.loadConversation(conversationId)
-      activeRunIdRef.current = runIsActive(persisted) ? persisted.lastRun?.id ?? null : null
+      if (activeConversationIdRef.current === conversationId) activeRunIdRef.current = runIsActive(persisted) ? persisted.lastRun?.id ?? null : null
       setDetail((current) => current?.conversation.id === conversationId ? persisted : current)
       setError(null)
       void refreshList()
@@ -1310,7 +1349,7 @@ export function useDesktopConversation(): DesktopConversationState {
     if (!conversationId) return false
     try {
       const result = await desktopClient.setGoalRunning(conversationId, goalId, expectedVersion, running)
-      activeRunIdRef.current = running ? result.startedRun?.run.id ?? null : null
+      if (activeConversationIdRef.current === conversationId) activeRunIdRef.current = running ? result.startedRun?.run.id ?? null : null
       const persisted = await desktopClient.loadConversation(conversationId)
       setDetail((current) => mergeConversationDetail(persisted, current))
       setError(null)
@@ -1353,6 +1392,7 @@ export function useDesktopConversation(): DesktopConversationState {
     runtimeStatus,
     refreshRuntimeStatus,
     detail,
+    selectedConversationId,
     defaultAgentId,
     selectedAgentId: detail?.conversation.agentId ?? draftAgentId,
     selectedExpertId: detail ? activeConversationExpertBinding(detail)?.expertId ?? null : draftExpertId,
@@ -1406,7 +1446,7 @@ export function useDesktopConversation(): DesktopConversationState {
     refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
+  }), [archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {

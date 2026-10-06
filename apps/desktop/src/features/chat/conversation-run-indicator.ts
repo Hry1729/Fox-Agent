@@ -15,11 +15,12 @@
 import type { ConversationSummary, RuntimeEventNotification } from '@/features/conversations/model/types'
 import { TERMINAL_RUN_EVENT_TYPES } from './turn-process-timing'
 
-export type ConversationRunIndicator = 'queued' | 'running' | 'approval'
+export type ConversationRunIndicator = 'queued' | 'running' | 'approval' | 'reply' | 'completed'
 
 export interface ConversationRunOverlayEntry {
   /**
-   * `null` records "this conversation just ended". It lets a terminal event beat
+   * `completed` records success; `null` settles other terminal outcomes. Both
+   * let a terminal event beat
    * a list snapshot that was fetched before the run finished, so the indicator
    * always stops on time.
    */
@@ -41,9 +42,10 @@ const APPROVAL_RUN_STATUSES = new Set(['awaiting_confirmation'])
 
 /** The indicator a sidebar row shows from its own persisted Run state. */
 export function conversationRunIndicator(
-  summary: Pick<ConversationSummary, 'activeRunId' | 'activeRunStatus' | 'awaitingApproval'>,
+  summary: Pick<ConversationSummary, 'activeRunId' | 'activeRunStatus' | 'awaitingApproval' | 'lastRunId' | 'lastRunStatus' | 'awaitingReply'>,
 ): ConversationRunIndicator | null {
-  if (!summary.activeRunId) return null
+  if (summary.awaitingReply) return 'reply'
+  if (!summary.activeRunId) return summary.lastRunStatus === 'completed' ? 'completed' : null
   const status = summary.activeRunStatus ?? 'running'
   if (summary.awaitingApproval || APPROVAL_RUN_STATUSES.has(status)) return 'approval'
   if (QUEUED_RUN_STATUSES.has(status)) return 'queued'
@@ -53,7 +55,7 @@ export function conversationRunIndicator(
 /**
  * Live events for one conversation. Events never leak into another conversation:
  * the key is the event's own `conversationId`, and a terminal event only clears
- * that conversation's entry.
+ * that conversation's entry; successful completion retains the green check.
  */
 export function applyRunEventToOverlay(
   overlay: ConversationRunOverlay,
@@ -67,11 +69,20 @@ export function applyRunEventToOverlay(
   const current = overlay.get(conversationId)
   // Waiting for approval outranks "running" until the approval is resolved or the
   // run ends; the run keeps emitting unrelated events while the user decides.
-  const indicator: ConversationRunIndicator | null = TERMINAL_EVENT_TYPES.has(eventType)
-    ? null
-    : eventType === 'run.waiting_approval' || current?.indicator === 'approval'
-      ? 'approval'
-      : 'running'
+  const sameRun = current?.runId === notification.runId
+  if (sameRun && (current?.indicator === null || current?.indicator === 'completed')
+    && !TERMINAL_EVENT_TYPES.has(eventType) && eventType !== 'user.question.requested') return overlay
+  const indicator: ConversationRunIndicator | null = eventType === 'user.question.requested'
+    ? 'reply'
+    : eventType === 'user.question.responded'
+      ? 'running'
+      : TERMINAL_EVENT_TYPES.has(eventType)
+        ? eventType === 'run.completed'
+          ? notification.event.completionReason === 'awaiting_user' ? 'reply' : 'completed'
+          : null
+        : eventType === 'run.waiting_approval' || (sameRun && current?.indicator === 'approval')
+          ? 'approval'
+          : sameRun && current?.indicator === 'reply' ? 'reply' : 'running'
   // Unchanged state returns the same map: a long run emits thousands of deltas and
   // must not re-render the sidebar for each of them.
   if (current?.indicator === indicator && current.runId === notification.runId) return overlay
@@ -120,10 +131,11 @@ export function pruneRunOverlay(
     const known = activeRunIds.has(conversationId)
     // A list read can lag the terminal event. Keep the tombstone while that same
     // run is still listed as active; a different run must remain visible.
-    const staleTerminalRun = entry.indicator === null && entry.runId
+    const terminal = entry.indicator === null || entry.indicator === 'completed'
+    const staleTerminalRun = terminal && entry.runId
       && activeRunIds.get(conversationId) === entry.runId
-    const superseded = entry.indicator === null ? entry.updatedAt <= snapshotAt : entry.updatedAt < snapshotAt
-    const replacedTerminalRun = entry.indicator === null && entry.runId
+    const superseded = terminal ? entry.updatedAt <= snapshotAt : entry.updatedAt < snapshotAt
+    const replacedTerminalRun = terminal && entry.runId
       && activeRunIds.get(conversationId) && activeRunIds.get(conversationId) !== entry.runId
     if (known && !replacedTerminalRun && (staleTerminalRun || !superseded)) continue
     if (next === null) next = new Map(overlay)
@@ -144,10 +156,12 @@ export function conversationRunIndicators(
   const indicators = new Map<string, ConversationRunIndicator>()
   for (const conversation of conversations) {
     const live = overlay.get(conversation.id)
-    const terminalForListedRun = live?.indicator === null && live.runId
+    const terminal = live?.indicator === null || live?.indicator === 'completed'
+    const terminalForListedRun = terminal && live?.runId
       && live.runId === conversation.activeRunId
-    const terminalForOtherRun = live?.indicator === null && live.runId
-      && conversation.activeRunId && live.runId !== conversation.activeRunId
+    const listedRun = conversation.activeRunId ?? conversation.lastRunId
+    const terminalForOtherRun = terminal && live?.runId
+      && listedRun && live.runId !== listedRun
     const indicator = live && !terminalForOtherRun && (live.updatedAt > snapshotAt || terminalForListedRun)
       ? live.indicator
       : conversationRunIndicator(conversation)

@@ -11,7 +11,9 @@ import type { ConversationRunIndicator } from './conversation-run-indicator'
 import { useProcessScroll } from './use-process-scroll'
 import { useProcessDisplayMode, type ProcessDisplayMode } from './process-display-mode'
 import { TurnProcessHeader } from './turn-process-header'
-import { ThinkingOrb } from 'thinking-orbs'
+import { ConversationStatusIcon } from './conversation-status-icon'
+import { sidebarProjectGroups, type SidebarProjectGroup } from './sidebar-project-groups'
+import { useProjectCatalog } from '@/features/conversations/hooks/use-project-catalog'
 import { toolAttemptReason, toolAttemptState, TOOL_ATTEMPT_REASON_LABELS, TOOL_ATTEMPT_STATE_LABELS, type ToolAttemptState } from './tool-attempt-status'
 import { RuntimeArtifacts } from './runtime-artifacts'
 import './runtime-process-groups.css'
@@ -101,7 +103,7 @@ import { BorderBeam } from '@/components/effects/border-beam'
 import { asAgentCard } from '@/features/agents/agent-card-data'
 import { adoptBlockedStyles } from '@/components/effects/adopted-styles'
 import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable, knowledgeReferenceFromLegacyBinding, knowledgeReferenceKey, type RunSteeringLane } from '@/features/conversations/api/desktop-client'
-import { canonicalProjectRoot, matchingProject, normalizeProjectPermission, normalizeProjectRoot, selectProjectRoot, validPickedProjectFolder } from './project-access-dialog-state'
+import { canonicalProjectRoot, matchingProject, normalizeProjectPermission, selectProjectRoot, validPickedProjectFolder } from './project-access-dialog-state'
 import { filterKnowledgePickerItems, localKnowledgePickerState } from './knowledge-picker-state'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -971,9 +973,11 @@ function WindowMenu({ label, children }: { label: string; children: ReactNode })
 }
 
 const CONVERSATION_RUN_LABELS: Record<ConversationRunIndicator, string> = {
-  running: '正在运行',
-  queued: '准备中',
-  approval: '等待审批',
+  running: '运行中',
+  queued: '运行中',
+  approval: '等待审批或回复',
+  reply: '等待审批或回复',
+  completed: '任务结束',
 }
 
 /**
@@ -981,24 +985,9 @@ const CONVERSATION_RUN_LABELS: Record<ConversationRunIndicator, string> = {
  * starting or finishing a run never shifts the rows around it, and it reports the
  * state as a `status` only when there is something to announce.
  */
-/** The reduced-motion preference, watched live so the orb can settle instantly. */
-function usePrefersReducedMotion() {
-  const [reduced, setReduced] = useState(() =>
-    typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches)
-  useEffect(() => {
-    if (typeof matchMedia !== 'function') return
-    const query = matchMedia('(prefers-reduced-motion: reduce)')
-    const update = () => setReduced(query.matches)
-    update()
-    query.addEventListener('change', update)
-    return () => query.removeEventListener('change', update)
-  }, [])
-  return reduced
-}
-
-function ConversationRunStatus({ indicator, className = 'fox-project-conversation-status' }: { indicator?: ConversationRunIndicator; className?: string }) {
+function ConversationRunStatus({ indicator, className = 'fox-sidebar-conversation-status' }: { indicator?: ConversationRunIndicator; className?: string }) {
   const label = indicator ? CONVERSATION_RUN_LABELS[indicator] : undefined
-  const reducedMotion = usePrefersReducedMotion()
+  const state = !indicator ? 'idle' : indicator === 'approval' || indicator === 'reply' ? 'waiting' : indicator === 'completed' ? 'complete' : 'running'
   return <span
     className={`${className}${indicator ? ` is-${indicator}` : ''}`}
     role={label ? 'status' : undefined}
@@ -1006,18 +995,11 @@ function ConversationRunStatus({ indicator, className = 'fox-project-conversatio
     title={label}
     data-run-indicator={indicator ?? undefined}
   >
-    {/* A running conversation is the only state that animates. Reduced motion keeps
-        the specified orb, frozen on its current frame, so the row still reads as busy
-        without any motion and the glyph never changes identity. */}
-    {indicator === 'running' && <span className="fox-run-indicator-orb" aria-hidden="true">
-      <ThinkingOrb state="composing" size={20} paused={reducedMotion} />
-    </span>}
-    {indicator === 'queued' && <span className="fox-run-indicator-dot" aria-hidden="true" />}
-    {indicator === 'approval' && <span className="fox-run-indicator-dot" aria-hidden="true" />}
+    <ConversationStatusIcon state={state} />
   </span>
 }
 
-function Sidebar({
+export function Sidebar({
   collapsed,
   assistantMode,
   onModeChange,
@@ -1028,6 +1010,7 @@ function Sidebar({
   onOpenConversation,
   onRenameConversation,
   onPinConversation,
+  onPinProject,
   onArchiveConversation,
   onUnarchiveConversation,
   onTrashConversation,
@@ -1046,6 +1029,7 @@ function Sidebar({
   activeConversationId,
   newChatActive,
   runIndicators,
+  projects = [],
   yuxiService,
   yuxiUser,
   activeView,
@@ -1062,6 +1046,7 @@ function Sidebar({
   onOpenConversation: (conversationId?: string) => void
   onRenameConversation: (conversation: ConversationSummary) => void
   onPinConversation: (conversation: ConversationSummary) => void
+  onPinProject?: (project: SidebarProjectGroup) => void
   onArchiveConversation: (conversation: ConversationSummary) => void
   onUnarchiveConversation: (conversation: ConversationSummary) => void
   onTrashConversation: (conversation: ConversationSummary) => void
@@ -1084,6 +1069,7 @@ function Sidebar({
    * highlight, never whether a conversation looks busy.
    */
   runIndicators?: ReadonlyMap<string, ConversationRunIndicator>
+  projects?: readonly ProjectRecord[]
   yuxiService?: { name: string; status: string; connectionType: 'local' | 'lan' | 'remote' } | null
   yuxiUser?: YuxiUserRecord | null
   activeView: WorkspaceView
@@ -1174,22 +1160,7 @@ function Sidebar({
     ? conversationItems.filter((item) => !item.projectRoot)
     : conversationItems
   const visibleProjectConversations = projectConversationItems
-  const projectGroups = Array.from(visibleProjectConversations.reduce((groups, item) => {
-    const projectRoot = item.projectRoot?.trim()
-    if (!projectRoot) return groups
-    // Grouped by full path, never by folder name: two projects can share a leaf name.
-    const normalizedRoot = normalizeProjectRoot(projectRoot)
-    const canonicalRoot = canonicalProjectRoot(projectRoot)
-    const existing = groups.get(normalizedRoot)
-    if (existing) existing.items.push(item)
-    else groups.set(normalizedRoot, {
-      key: normalizedRoot,
-      root: canonicalRoot,
-      name: canonicalRoot.split(/[\\/]/).at(-1) || projectRoot,
-      items: [item],
-    })
-    return groups
-  }, new Map<string, { key: string; root: string; name: string; items: typeof visibleProjectConversations }>()).values())
+  const projectGroups = sidebarProjectGroups(visibleProjectConversations, projects)
   const visibleConversations = regularConversationItems
   const toggleSearch = () => changeSearchOpen(!searchOpen)
   const changeNotificationsOpen = (open: boolean) => {
@@ -1346,6 +1317,7 @@ function Sidebar({
                       <button type="button" className="fox-project-row-main" title={project.root} aria-expanded={open} onClick={() => setProjectOpen((current) => ({ ...current, [project.key]: !open }))}>
                         {open ? <FolderOpen size={15} /> : <Folder size={15} />}
                         <strong>{project.name}</strong>
+                        {project.pinned && <Pin size={11} aria-label="已置顶项目" />}
                       </button>
                       <span className="fox-project-row-actions">
                         <IconButton label={`在 ${project.name} 中新建对话`} className="fox-project-add" onClick={() => onNewProjectChat(project.root)}><Plus size={13} /></IconButton>
@@ -1354,6 +1326,7 @@ function Sidebar({
                           <DropdownMenuContent align="end" side="right" sideOffset={5} className="fox-project-menu">
                             <DropdownMenuItem onSelect={() => onNewProjectChat(project.root)}><MessageSquarePlus />新建对话</DropdownMenuItem>
                             <DropdownMenuItem onSelect={() => onNavigate('settings-projects')}><ShieldCheck />项目与权限</DropdownMenuItem>
+                            <DropdownMenuItem disabled={!project.id} onSelect={() => onPinProject?.(project)}>{project.pinned ? <PinOff /> : <Pin />}{project.pinned ? '取消置顶项目' : '置顶项目'}</DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem variant="destructive" onSelect={() => onDeleteProject(project)}><Trash2 />删除项目</DropdownMenuItem>
                           </DropdownMenuContent>
@@ -1364,6 +1337,7 @@ function Sidebar({
                   <ContextMenuContent className="fox-project-menu">
                     <ContextMenuItem onSelect={() => onNewProjectChat(project.root)}><MessageSquarePlus />新建对话</ContextMenuItem>
                     <ContextMenuItem onSelect={() => onNavigate('settings-projects')}><ShieldCheck />项目与权限</ContextMenuItem>
+                    <ContextMenuItem disabled={!project.id} onSelect={() => onPinProject?.(project)}>{project.pinned ? <PinOff /> : <Pin />}{project.pinned ? '取消置顶项目' : '置顶项目'}</ContextMenuItem>
                     <ContextMenuSeparator />
                     <ContextMenuItem variant="destructive" onSelect={() => onDeleteProject(project)}><Trash2 />删除项目</ContextMenuItem>
                   </ContextMenuContent>
@@ -1372,8 +1346,8 @@ function Sidebar({
                   <ContextMenu key={item.id}>
                     <ContextMenuTrigger asChild>
                       <div className={`fox-sidebar-tree-row fox-project-conversation-row ${item.active ? 'is-active' : ''}`}>
-                        <ConversationRunStatus indicator={runIndicators?.get(item.id)} />
                         <button type="button" className="fox-sidebar-tree-main" title={item.title} onClick={() => onOpenConversation(item.id)}><span>{item.title}</span></button>
+                        <ConversationRunStatus indicator={runIndicators?.get(item.id)} />
                         <span className="fox-sidebar-row-time">{item.time}</span>
                         <span className="fox-sidebar-row-actions">
                           <DropdownMenu>
@@ -1422,8 +1396,8 @@ function Sidebar({
                 <ContextMenu key={item.id}>
                   <ContextMenuTrigger asChild>
                     <div className={`fox-sidebar-tree-row ${item.active ? 'is-active' : ''}`}>
-                      <ConversationRunStatus indicator={runIndicators?.get(item.id)} />
                       <button type="button" className="fox-sidebar-tree-main" title={item.title} onClick={() => onOpenConversation(item.id)}><MessageCircleMore size={14} /><span>{item.title}</span></button>
+                      <ConversationRunStatus indicator={runIndicators?.get(item.id)} />
                       <span className="fox-sidebar-row-time">{item.time}</span>
                       <span className="fox-sidebar-row-actions">
                         <DropdownMenu>
@@ -1541,7 +1515,7 @@ function Sidebar({
                   return <button type="button" role="menuitem" key={item.id} className={item.active ? 'is-active' : undefined} onClick={() => onOpenConversation(item.id)} title={indicator ? `${item.title} · ${CONVERSATION_RUN_LABELS[indicator]}` : item.title}>
                   <MessageCircleMore />
                   <span>{item.title}</span>
-                  {indicator && <span className={`fox-sidebar-collapsed-run is-${indicator}`} role="status" aria-label={CONVERSATION_RUN_LABELS[indicator]} />}
+                  <ConversationRunStatus indicator={indicator} className="fox-sidebar-collapsed-run" />
                   {item.time && <time>{item.time}</time>}
                 </button>
                 })}
@@ -1572,7 +1546,7 @@ function Sidebar({
               return <button type="button" role="menuitem" key={item.id} className={item.active ? 'is-active' : undefined} onClick={() => onOpenConversation(item.id)} title={indicator ? `${item.title} · ${CONVERSATION_RUN_LABELS[indicator]}` : item.title}>
               <MessageCircleMore />
               <span>{item.title}</span>
-              {indicator && <span className={`fox-sidebar-collapsed-run is-${indicator}`} role="status" aria-label={CONVERSATION_RUN_LABELS[indicator]} />}
+              <ConversationRunStatus indicator={indicator} className="fox-sidebar-collapsed-run" />
               {item.time && <time>{item.time}</time>}
             </button>
             }) : <p className="fox-sidebar-collapsed-empty">暂无对话</p>}
@@ -5049,7 +5023,7 @@ export function Workbench() {
   const [conversationDialogError, setConversationDialogError] = useState<string | null>(null)
   const [projectDeleteDialog, setProjectDeleteDialog] = useState<{ name: string; root: string; items: Array<{ id: string; title: string }> } | null>(null)
   const [projectDeleteBusy, setProjectDeleteBusy] = useState(false)
-  const [projects, setProjects] = useState<ProjectRecord[]>([])
+  const { projects, setProjects, refreshProjects, setProjectPinned } = useProjectCatalog(desktopConversation.enabled, desktopConversation.detail?.conversation.projectId)
   const [chatState, setChatState] = useState<ChatState>('complete')
   const [activePrompt, setActivePrompt] = useState('Kun 的协议是什么协议，我可以拿来二次开发并且企业内部使用吗？')
   const [expertPickerOpen, setExpertPickerOpen] = useState(false)
@@ -5172,10 +5146,6 @@ export function Workbench() {
     if (!activeConversationId || rightMode !== 'changes' || rightSidebarCollapsed) return
     setSeenChangeCounts((current) => current[activeConversationId] === totalChangeCount ? current : { ...current, [activeConversationId]: totalChangeCount })
   }, [activeConversationId, rightMode, rightSidebarCollapsed, totalChangeCount])
-  useEffect(() => {
-    if (!desktopConversation.enabled) return
-    void desktopClient.listProjects().then(setProjects).catch(() => undefined)
-  }, [desktopConversation.enabled, desktopConversation.detail?.conversation.projectId])
   useEffect(() => {
     if (!knowledgeDialogOpen) return
     refreshKnowledgeChoices()
@@ -5504,11 +5474,11 @@ export function Workbench() {
           conversationId, permissionMode, crypto.randomUUID(), policy.version,
         )
         await desktopConversation.openConversation(conversationId)
-        if (projectId) setProjects(await desktopClient.listProjects())
+        if (projectId) await refreshProjects()
       } else if (projectId) {
         const updated = await desktopClient.updateProjectPermission(projectId, permissionMode)
         setProjects((current) => current.some((project) => project.id === updated.id)
-          ? current.map((project) => project.id === updated.id ? updated : project)
+          ? current.map((project) => project.id === updated.id ? { ...updated, pinned: project.pinned } : project)
           : [...current, updated])
       }
       desktopConversation.setDraftPermission(permissionMode)
@@ -5567,6 +5537,15 @@ export function Workbench() {
       return
     }
     toast.success(pinned ? '对话已置顶' : '已取消置顶')
+  }
+  const pinManagedProject = async (project: SidebarProjectGroup) => {
+    if (!project.id) return
+    try {
+      await setProjectPinned(project.id, !project.pinned)
+      toast.success(project.pinned ? '已取消项目置顶' : '项目已置顶')
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : '无法更新项目置顶状态')
+    }
   }
   const archiveManagedConversation = async (conversation: ConversationSummary) => {
     if (!await desktopConversation.archiveConversation(conversation.id)) {
@@ -5989,6 +5968,9 @@ export function Workbench() {
   const handlePinConversation = useStableCallback((conversation: ConversationSummary) => {
     void pinManagedConversation(conversation)
   })
+  const handlePinProject = useStableCallback((project: SidebarProjectGroup) => {
+    void pinManagedProject(project)
+  })
   const handleArchiveConversation = useStableCallback((conversation: ConversationSummary) => {
     void archiveManagedConversation(conversation)
   })
@@ -6035,7 +6017,7 @@ export function Workbench() {
     <main className="fox-shell" style={shellStyle}>
       <MemoizedWindowTitlebar leftSidebarCollapsed={sidebarCollapsed || compactLayout} onNewChat={handleNewChat} onOpenProject={handleComposerProject} onSettings={handleOpenSettings} onAbout={handleOpenAbout} onToggleSidebar={handleToggleSidebar} onZoom={handleZoom} />
       <div className="fox-workbench">
-        <MemoizedSidebar collapsed={sidebarCollapsed || compactLayout} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.selectedConversationId ?? undefined} newChatActive={activeView === 'chat' && timelineEmpty && !desktopConversation.selectedConversationId} runIndicators={desktopConversation.enabled ? desktopConversation.runIndicators : undefined} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
+        <MemoizedSidebar collapsed={sidebarCollapsed || compactLayout} assistantMode={assistantMode} onModeChange={handleAssistantModeChange} onNewChat={handleNewChat} onNewProjectChat={handleNewProjectChat} onAddProject={handleComposerProject} onCreateLocalKnowledge={handleCreateLocalKnowledge} onOpenConversation={handleOpenConversation} onRenameConversation={handleRenameConversation} projects={projects} onPinProject={handlePinProject} onPinConversation={handlePinConversation} onArchiveConversation={handleArchiveConversation} onUnarchiveConversation={handleUnarchiveConversation} onTrashConversation={handleTrashConversation} onRestoreConversation={handleRestoreConversation} onPurgeConversation={handlePurgeConversation} onDeleteProject={handleDeleteProject} onNavigate={handleWorkspaceNavigate} onExitManagement={handleExitManagement} onExpand={handleExpandSidebar} onTheme={handleToggleTheme} onSettings={handleOpenSettings} runtimeConversations={desktopConversation.enabled ? desktopConversation.conversations : undefined} archivedConversations={desktopConversation.enabled ? desktopConversation.archivedConversations : undefined} trashedConversations={desktopConversation.enabled ? desktopConversation.trashedConversations : undefined} onGlobalSearch={desktopRuntimeAvailable ? desktopClient.globalSearch : undefined} activeConversationId={desktopConversation.selectedConversationId ?? undefined} newChatActive={activeView === 'chat' && timelineEmpty && !desktopConversation.selectedConversationId} runIndicators={desktopConversation.enabled ? desktopConversation.runIndicators : undefined} yuxiService={sidebarYuxiService} yuxiUser={yuxiUser.user} activeView={activeView} activeEntityId={activeEntityId} activeDocumentId={activeDocumentId} />
         {!sidebarCollapsed && !compactLayout && <SidebarResizeDivider onResize={(delta) => setSidebarWidth((value) => Math.min(456, Math.max(220, value + delta)))} />}
         <div className="fox-content-card">
         <div className={`fox-content-surface ${rightPanelMaximized && showConversationRightSidebar && !rightSidebarCollapsed ? 'is-right-maximized' : ''}`}>

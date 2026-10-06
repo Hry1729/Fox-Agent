@@ -17,25 +17,25 @@ function TurnElapsed({ events, active }: { events: readonly RunEventRecord[]; ac
   return <span className="fox-process-turn-elapsed" role="timer">{endedAt === null ? '已用时' : '用时'} {formatRunElapsed(duration)}</span>
 }
 
-export function TurnProcessHeader({ avatar, events, active, canToggle, collapsed, status, failedToolCount, onToggle }: {
+export function TurnProcessHeader({ avatar, events, active, canToggle, collapsed, status, toolStatus, onToggle }: {
   avatar: ReactNode
   events: readonly RunEventRecord[]
   active: boolean
   canToggle: boolean
   collapsed: boolean
   status: string
-  failedToolCount: number
+  toolStatus?: string
   onToggle: () => void
 }) {
   const statusSuffix = status === '工作过程' ? '' : ` · ${status}`
-  const failureSuffix = failedToolCount > 0 ? ` · ${failedToolCount} 项失败` : ''
+  const toolSuffix = toolStatus ? ` · ${toolStatus}` : ''
   return <div className="fox-process-turn-header">
     {avatar}
-    {canToggle ? <button type="button" className={`fox-process-turn-toggle${failedToolCount ? ' has-failed-tools' : ''}`}
+    {canToggle ? <button type="button" className="fox-process-turn-toggle"
       aria-expanded={!collapsed} onClick={(event) => { event.currentTarget.focus(); onToggle() }}>
       {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-      <span>{collapsed ? '展开过程' : '收起过程'}{statusSuffix}{failureSuffix}</span>
-    </button> : <span className={`fox-process-turn-toggle is-status${failedToolCount ? ' has-failed-tools' : ''}`} role="status">{status}{failureSuffix}</span>}
+      <span>{collapsed ? '展开过程' : '收起过程'}{statusSuffix}{toolSuffix}</span>
+    </button> : <span className="fox-process-turn-toggle is-status" role="status">{status}{toolSuffix}</span>}
     <TurnElapsed events={events} active={active} />
   </div>
 }

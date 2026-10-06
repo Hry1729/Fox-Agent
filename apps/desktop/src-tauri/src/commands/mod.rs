@@ -1385,6 +1385,19 @@ pub fn projects_list(state: State<'_, AppState>) -> ApiResponse<Vec<ProjectRecor
     }
 }
 
+#[tauri::command]
+pub fn projects_set_pinned(
+    state: State<'_, AppState>,
+    project_id: String,
+    pinned: bool,
+) -> ApiResponse<ProjectRecord> {
+    match state.database.set_project_pinned(&project_id, pinned) {
+        Ok(Some(project)) => ApiResponse::success(project),
+        Ok(None) => ApiResponse::failure("project.not_found", "项目不存在", false),
+        Err(error) => storage_error(error),
+    }
+}
+
 /// Only the bundled main desktop document may mutate user authority. The
 /// Window is supplied by Tauri; no request field can assert this provenance.
 pub(crate) fn require_trusted_local_window(window: &tauri::WebviewWindow) -> Result<(), String> {

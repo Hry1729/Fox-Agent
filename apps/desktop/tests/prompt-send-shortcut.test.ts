@@ -15,8 +15,8 @@ describe('send shortcut preference', () => {
     expect(DEFAULT_PROMPT_SEND_SHORTCUT).toBe('enter')
   })
 
-  test('keeps the legacy Ctrl/Cmd + Enter value working', () => {
-    expect(readPromptSendShortcut({ getItem: () => 'mod-enter' })).toBe('mod-enter')
+  test('a stored legacy shortcut cannot override the main composer keys', () => {
+    expect(readPromptSendShortcut({ getItem: () => 'mod-enter' })).toBe('enter')
   })
 
   test('normalizes unknown, empty and malformed values to Enter sending', () => {
@@ -32,7 +32,7 @@ describe('send shortcut preference', () => {
     expect(readPromptSendShortcut(null)).toBe('enter')
   })
 
-  test('the preference key is the one the settings page writes', () => {
+  test('recognizes the legacy preference key for migration', () => {
     expect(PROMPT_SEND_SHORTCUT_KEY).toBe('fox.preferences.sendKey')
   })
 })
@@ -44,10 +44,10 @@ describe('enter resolution', () => {
     expect(resolvePromptEnterAction({ key: 'Enter', metaKey: true }, 'enter')).toBe('newline')
   })
 
-  test('the legacy preference swaps the two without losing either', () => {
-    expect(resolvePromptEnterAction({ key: 'Enter' }, 'mod-enter')).toBe('newline')
-    expect(resolvePromptEnterAction({ key: 'Enter', ctrlKey: true }, 'mod-enter')).toBe('send')
-    expect(resolvePromptEnterAction({ key: 'Enter', metaKey: true }, 'mod-enter')).toBe('send')
+  test('the legacy preference still uses Enter to send and Ctrl/Cmd to break the line', () => {
+    expect(resolvePromptEnterAction({ key: 'Enter' }, 'mod-enter')).toBe('send')
+    expect(resolvePromptEnterAction({ key: 'Enter', ctrlKey: true }, 'mod-enter')).toBe('newline')
+    expect(resolvePromptEnterAction({ key: 'Enter', metaKey: true }, 'mod-enter')).toBe('newline')
   })
 
   test('Shift + Enter always breaks the line, in both modes', () => {

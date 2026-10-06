@@ -28,6 +28,9 @@ function harness() {
   let createdRequest: any
   let savedReferences: any
   let active: any
+  let conversationLoader: (id: string) => Promise<any> = async () => active
+  let listLoader: () => Promise<any[]> = async () => []
+  let runtimeStreamOptions: any
   const env = {
     useState: (initial: any) => { const i = slot(initial); return [slots[i], (value: any) => { slots[i] = typeof value === 'function' ? value(slots[i]) : value }] },
     useRef: (initial: any) => slots[slot({ current: initial })],
@@ -35,7 +38,7 @@ function harness() {
     useMemo: (callback: any) => callback(),
     useEffect: () => {},
     useLayoutEffect: () => {},
-    useRuntimeEventStream: () => {},
+    useRuntimeEventStream: (options: any) => { runtimeStreamOptions = options },
     useKernelStateStream: () => {},
     desktopRuntimeAvailable: false,
     desktopClient: {
@@ -46,9 +49,11 @@ function harness() {
         active = { conversation: { ...request, id: 'conversation-1' }, messages: [], attachments: [], knowledgeBindings: [], expertBindings: [], lastRun: null }
         return active.conversation
       },
-      loadConversation: async () => active,
+      loadConversation: (id: string) => conversationLoader(id),
       setKnowledgeReferences: async (_id: string, references: any, names: any) => { savedReferences = { references, names }; active.knowledgeReferences = references },
-      listConversations: async () => [],
+      listConversations: () => listLoader(),
+      listArchivedConversations: async () => [],
+      listTrashedConversations: async () => [],
       runtimeStatus: async () => ({}),
       startRun: async () => ({ run: { id: 'run-1' }, userMessage: { id: 'message-1' }, attachments: [] }),
     },
@@ -75,8 +80,69 @@ function harness() {
     applyApprovalToOverlay,
   }
   const hook = new Function(...Object.keys(env), `${body}; return useDesktopConversation`)(...Object.values(env))
-  return { render: () => { cursor = 0; return hook() }, creates: () => creates, submitted: () => ({ createdRequest, savedReferences }) }
+  return {
+    render: () => { cursor = 0; return hook() },
+    setConversationLoader: (loader: (id: string) => Promise<any>) => { conversationLoader = loader },
+    setListLoader: (loader: () => Promise<any[]>) => { listLoader = loader },
+    deliverDetail: (detail: any) => runtimeStreamOptions.setDetail(() => detail),
+    creates: () => creates,
+    submitted: () => ({ createdRequest, savedReferences }),
+  }
 }
+
+describe('conversation navigation ownership', () => {
+  const detail = (id: string) => ({
+    conversation: { id, agentId: 'fox-general', permissionMode: 'ask', projectRoot: `D:/work/${id}` },
+    messages: [], attachments: [], knowledgeBindings: [], expertBindings: [], lastRun: null,
+  })
+
+  test('late A load cannot replace a later B selection, including an A background update', async () => {
+    const h = harness()
+    const pending = new Map<string, (value: any) => void>()
+    h.setConversationLoader((id) => new Promise((resolve) => pending.set(id, resolve)))
+    const openA = h.render().openConversation('A')
+    expect(h.render().selectedConversationId).toBe('A')
+    const openB = h.render().openConversation('B')
+    expect(h.render().selectedConversationId).toBe('B')
+    pending.get('B')!(detail('B'))
+    await openB
+    pending.get('A')!(detail('A'))
+    await openA
+    h.deliverDetail(detail('A'))
+    expect(h.render().selectedConversationId).toBe('B')
+    expect(h.render().detail?.conversation.id).toBe('B')
+    expect(h.render().detail?.conversation.projectRoot).toBe('D:/work/B')
+  })
+
+  test('leaving a conversation for a new project draft rejects an old detail response', async () => {
+    const h = harness()
+    let finishA!: (value: any) => void
+    h.setConversationLoader(() => new Promise((resolve) => { finishA = resolve }))
+    const openA = h.render().openConversation('A')
+    h.render().selectProject('D:/work/new-project', 'ask')
+    finishA(detail('A'))
+    await openA
+    expect(h.render().selectedConversationId).toBeNull()
+    expect(h.render().detail).toBeNull()
+    expect(h.render().draftProjectRoot).toBe('D:/work/new-project')
+  })
+
+  test('an older sidebar list response cannot replace a newer project list or selection', async () => {
+    const h = harness()
+    h.setConversationLoader(async (id) => detail(id))
+    await h.render().openConversation('B')
+    const pending: Array<(value: any[]) => void> = []
+    h.setListLoader(() => new Promise((resolve) => pending.push(resolve)))
+    const oldRefresh = h.render().refreshLifecycleLists()
+    const newRefresh = h.render().refreshLifecycleLists()
+    pending[1]([{ id: 'B', projectRoot: 'D:/work/B', title: 'B' }])
+    await newRefresh
+    pending[0]([{ id: 'A', projectRoot: 'D:/work/A', title: 'A' }])
+    await oldRefresh
+    expect(h.render().selectedConversationId).toBe('B')
+    expect(h.render().conversations.map((item: any) => item.id)).toEqual(['B'])
+  })
+})
 
 describe('starting a fresh draft', () => {
   function beginNewDraftHarness() {

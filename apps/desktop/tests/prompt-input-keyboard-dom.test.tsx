@@ -121,19 +121,19 @@ describe('prompt textarea keyboard behaviour', () => {
     await waitFor(() => expect(sent).toEqual(['你好']))
   })
 
-  test('the legacy preference swaps the keys without losing either', async () => {
+  test('the legacy preference cannot make Ctrl + Enter send', async () => {
     window.localStorage.setItem(PROMPT_SEND_SHORTCUT_KEY, 'mod-enter')
     const { sent, textarea, draft } = mount('hello')
-    fireEvent.keyDown(textarea, { key: 'Enter' })
+    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
     expect(draft()).toBe('hello\n')
     await settled()
     expect(sent).toEqual([])
     textarea.setSelectionRange(textarea.value.length, textarea.value.length)
-    fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
     await waitFor(() => expect(sent).toEqual(['hello\n']))
   })
 
-  test('the preference is read per keypress, so changing it applies immediately', async () => {
+  test('changing the old preference during typing does not change the keys', async () => {
     const { sent, textarea, draft } = mount('hello')
     fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
     expect(draft()).toBe('hello\n')
@@ -141,7 +141,11 @@ describe('prompt textarea keyboard behaviour', () => {
     expect(sent).toEqual([])
     window.localStorage.setItem(PROMPT_SEND_SHORTCUT_KEY, 'mod-enter')
     fireEvent.keyDown(textarea, { key: 'Enter', ctrlKey: true })
-    await waitFor(() => expect(sent).toEqual(['hello\n']))
+    expect(draft()).toBe('hello\n\n')
+    await settled()
+    expect(sent).toEqual([])
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await waitFor(() => expect(sent).toEqual(['hello\n\n']))
   })
 
   test('holding Enter on one draft sends it exactly once', async () => {

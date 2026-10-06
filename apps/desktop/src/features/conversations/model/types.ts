@@ -159,6 +159,7 @@ export interface ProjectRecord {
   createdAt: number
   updatedAt: number
   lastOpenedAt: number | null
+  pinned?: boolean
 }
 
 export interface UsageAgentStat {
@@ -366,6 +367,9 @@ export interface ConversationSummary {
   activeRunStatus?: string | null
   /** True while that Run still has a pending approval. */
   awaitingApproval?: boolean
+  lastRunId?: string | null
+  lastRunStatus?: string | null
+  awaitingReply?: boolean
 }
 
 export interface ConversationMessage {

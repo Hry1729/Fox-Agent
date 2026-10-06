@@ -1,16 +1,9 @@
 /**
  * Enter-key resolution for the chat prompt textarea.
  *
- * `fox.preferences.sendKey` names the key that **sends**:
- *
- * - `'enter'` (default) — Enter sends; Ctrl/Cmd+Enter and Shift+Enter insert a newline.
- * - `'mod-enter'` — Ctrl/Cmd+Enter sends; Enter and Shift+Enter insert a newline.
- *
- * Compatibility: `'mod-enter'` is the legacy stored value and keeps its original
- * meaning, so a profile that already selected "Ctrl / Cmd + Enter 发送" is not
- * silently inverted by this change. Ctrl/Cmd+Enter can therefore never both send
- * and break the line at the same time — the preference decides which one it does,
- * and the settings page states the trade-off explicitly.
+ * Enter sends; Ctrl/Cmd+Enter and Shift+Enter insert a newline. The old
+ * `mod-enter` preference is accepted as stored data but no longer changes the
+ * main chat composer. This keeps the shortcut consistent across conversations.
  */
 
 export const PROMPT_SEND_SHORTCUT_KEY = 'fox.preferences.sendKey'
@@ -27,8 +20,8 @@ export function isPromptSendShortcut(value: unknown): value is PromptSendShortcu
 }
 
 /** Unknown, missing and malformed stored values fall back to the default. */
-export function normalizePromptSendShortcut(value: unknown): PromptSendShortcut {
-  return isPromptSendShortcut(value) ? value : DEFAULT_PROMPT_SEND_SHORTCUT
+export function normalizePromptSendShortcut(_value: unknown): PromptSendShortcut {
+  return DEFAULT_PROMPT_SEND_SHORTCUT
 }
 
 export function readPromptSendShortcut(
@@ -69,13 +62,12 @@ export function promptEnterIsComposing(event: PromptEnterKeyEvent) {
  */
 export function resolvePromptEnterAction(
   event: PromptEnterKeyEvent,
-  shortcut: PromptSendShortcut,
+  _shortcut: PromptSendShortcut,
 ): PromptEnterAction {
   if (event.key !== 'Enter' || event.altKey) return 'default'
   if (promptEnterIsComposing(event)) return 'default'
   if (event.shiftKey) return 'newline'
   const modifier = event.ctrlKey === true || event.metaKey === true
-  if (shortcut === 'mod-enter') return modifier ? 'send' : 'newline'
   return modifier ? 'newline' : 'send'
 }
 

@@ -1,0 +1,36 @@
+.fox-status-matrix {
+  --fox-status-blue: #397fc7;
+  --fox-status-yellow: #f0c400;
+  --fox-status-green: #159c6c;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  overflow: hidden;
+}
+/* boxSize already scales the matrix; flex must preserve its square source grid. */
+.fox-status-matrix .dmx-root { flex: none; }
+.dark .fox-status-matrix, [data-theme="dark"] .fox-status-matrix {
+  --fox-status-blue: #83b9f3;
+  --fox-status-yellow: #ffd64b;
+  --fox-status-green: #64d3a3;
+}
+.fox-status-matrix.is-running .dmx-distance-ripple-3 {
+  animation: foxStatusRipple 1.16s cubic-bezier(.4,0,.2,1) infinite;
+  animation-delay: calc(-1.16s + var(--dmx-distance) * .148s);
+  will-change: opacity;
+}
+@keyframes foxStatusRipple {
+  0%,100% { opacity: .2; }
+  27% { opacity: 1; }
+  56% { opacity: .48; }
+  82% { opacity: .22; }
+}
+.fox-status-check { position: relative; flex: none; transform-origin: center; }
+.fox-status-check-dot { position: absolute; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.fox-status-matrix.is-animated .fox-status-check { animation: foxStatusCheckBreathe 3s ease-in-out infinite; will-change: opacity; }
+@keyframes foxStatusCheckBreathe { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .fox-status-matrix.is-running .dmx-distance-ripple-3,
+  .fox-status-matrix.is-animated .fox-status-check { animation: none !important; }
+}

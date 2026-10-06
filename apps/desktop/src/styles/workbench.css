@@ -1333,95 +1333,36 @@
   padding-left: 0;
 }
 
-/* Reserved gutter: the running spinner sits in front of the conversation title
-   while the model works. The row has no left padding of its own, so the slot is
-   wider than the glyph and the glyph is nudged right until it lines up with the
-   folder icon of the project row above (and the title with the project name). */
-.fox-project-conversation-status {
-  width: 26px;
-  min-width: 26px;
-  flex: 0 0 26px;
+/* A fixed trailing slot keeps status changes from moving the conversation title. */
+.fox-sidebar-conversation-status {
+  width: 20px;
+  min-width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding-left: 5px;
+  margin-right: 6px;
 }
 
-/* The sidebar shows the thinking orb in its tuned 20px preset — the size the
-   package designs for inline text, and the one that stays legible in a row. The
-   slot keeps its 26px reservation, so the row height, the title and the icon
-   alignment are exactly what they were with the 16px spinner. */
-.fox-project-conversation-status > .fox-run-indicator-orb {
-  width: 20px;
-  height: 20px;
+/* Align the glyph with the title's optical center, above its line-box center. */
+.fox-sidebar-conversation-status > .fox-status-matrix,
+.fox-sidebar-collapsed-run > .fox-status-matrix {
+  transform: translateY(-1px);
+}
+
+/* All sidebar surfaces use a 14px matrix in the existing fixed slot. */
+.fox-sidebar-collapsed-run {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--fox-accent);
-}
-
-.fox-project-conversation-status > .fox-run-indicator-orb > canvas {
-  display: block;
   width: 20px;
   height: 20px;
-}
-
-/* Queued and waiting-for-approval share the slot with the running spinner so a
-   conversation that changes state never shifts the rows around it. */
-.fox-run-indicator-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  border: 1.5px solid var(--fox-muted);
-  background: transparent;
-}
-
-.fox-project-conversation-status.is-queued .fox-run-indicator-dot {
-  border-color: var(--fox-accent);
-}
-
-.fox-project-conversation-status.is-approval .fox-run-indicator-dot {
-  border-color: var(--fox-warning);
-  background: var(--fox-warning);
-  animation: foxRunIndicatorPulse 1.6s ease-in-out infinite;
-}
-
-@keyframes foxRunIndicatorPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.45; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  /* The orb reads the same preference through its own `paused` prop; the dot's
-     pulse is suppressed here. */
-  .fox-project-conversation-status.is-approval .fox-run-indicator-dot {
-    animation: none;
-  }
-}
-
-/* Collapsed rail: one dot in the conversation popover, same three states. */
-.fox-sidebar-collapsed-run {
-  width: 7px;
-  height: 7px;
+  flex: 0 0 20px;
   margin-left: auto;
-  flex: 0 0 7px;
-  border-radius: 999px;
-  border: 1.5px solid var(--fox-muted);
+  padding: 0;
+  border: 0;
   background: transparent;
-}
-
-.fox-sidebar-collapsed-run.is-running {
-  border-color: var(--fox-accent);
-  background: var(--fox-accent);
-}
-
-.fox-sidebar-collapsed-run.is-queued {
-  border-color: var(--fox-accent);
-}
-
-.fox-sidebar-collapsed-run.is-approval {
-  border-color: var(--fox-warning);
-  background: var(--fox-warning);
 }
 
 /* Metal ring around the send button: a rigid flex item so the composer toolbar
@@ -1483,6 +1424,11 @@
   padding: 0 8px;
   color: inherit;
   text-align: left;
+}
+
+/* Project child titles retain their indentation without a leading status slot. */
+.fox-project-conversation-row > .fox-sidebar-tree-main {
+  padding-left: 34px;
 }
 
 .fox-shell .fox-sidebar-tree-main span {

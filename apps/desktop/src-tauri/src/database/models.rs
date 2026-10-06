@@ -382,6 +382,11 @@ pub struct ConversationSummary {
     pub active_run_status: Option<String>,
     /// True while that Run still has a pending approval.
     pub awaiting_approval: bool,
+    /// Latest Run and pending question survive reloads, including completed Runs
+    /// that paused to ask the user for a choice.
+    pub last_run_id: Option<String>,
+    pub last_run_status: Option<String>,
+    pub awaiting_reply: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1163,6 +1168,7 @@ pub struct ProjectRecord {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_opened_at: Option<i64>,
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

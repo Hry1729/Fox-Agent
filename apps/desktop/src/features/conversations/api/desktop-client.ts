@@ -620,6 +620,8 @@ export const desktopClient = {
   searchConversations: (query: string, limit = 50) =>
     command<ConversationSummary[]>('conversations_search', { query, limit }),
   listProjects: () => command<ProjectRecord[]>('projects_list'),
+  setProjectPinned: (projectId: string, pinned: boolean) =>
+    command<ProjectRecord>('projects_set_pinned', { projectId, pinned }),
   listManagedProjects: () => command<ProjectManagementRecord[]>('projects_management_list'),
   updateProjectPath: (projectId: string, rootPath: string) =>
     command<ProjectManagementRecord>('project_path_update', { projectId, rootPath }),

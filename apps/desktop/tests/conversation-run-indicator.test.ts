@@ -63,7 +63,7 @@ describe('live overlay', () => {
     overlay = applyRunEventToOverlay(overlay, event('conversation-a', 'run.started'), 100)
     overlay = applyRunEventToOverlay(overlay, event('conversation-b', 'run.started'), 110)
     overlay = applyRunEventToOverlay(overlay, event('conversation-a', 'run.completed'), 200)
-    expect(overlay.get('conversation-a')?.indicator).toBeNull()
+    expect(overlay.get('conversation-a')?.indicator).toBe('completed')
     expect(overlay.get('conversation-b')?.indicator).toBe('running')
     for (const terminal of ['run.cancelled', 'run.failed', 'run.interrupted']) {
       const next = applyRunEventToOverlay(overlay, event('conversation-b', terminal), 250)
@@ -142,8 +142,8 @@ describe('reconciling live evidence with the authoritative list', () => {
     const listed = [conversation('conversation-a', { activeRunId: 'run-a', activeRunStatus: 'queued' })]
     const overlay = applyRunEventToOverlay(EMPTY_CONVERSATION_RUN_OVERLAY, event('conversation-a', 'run.completed', 'run-a'), 200)
     const pruned = pruneRunOverlay(overlay, listed, 250)
-    expect(pruned.get('conversation-a')?.indicator).toBeNull()
-    expect(conversationRunIndicators(listed, pruned, 250).has('conversation-a')).toBe(false)
+    expect(pruned.get('conversation-a')?.indicator).toBe('completed')
+    expect(conversationRunIndicators(listed, pruned, 250).get('conversation-a')).toBe('completed')
 
     const settled = [conversation('conversation-a')]
     expect(pruneRunOverlay(pruned, settled, 300).has('conversation-a')).toBe(false)
@@ -161,4 +161,43 @@ describe('reconciling live evidence with the authoritative list', () => {
     overlay = applyRunEventToOverlay(overlay, event('conversation-a', 'run.started', 'run-b'), 210)
     expect(overlay.get('conversation-a')).toMatchObject({ indicator: 'running', runId: 'run-b' })
   })
+})
+
+
+describe('four approved icon states', () => {
+  test('a successful completion survives a list refresh while failures do not become green checks', () => {
+    expect(conversationRunIndicator(summary({ lastRunId: 'done', lastRunStatus: 'completed' }))).toBe('completed')
+    for (const status of ['failed', 'cancelled', 'interrupted']) {
+      expect(conversationRunIndicator(summary({ lastRunId: 'ended', lastRunStatus: status }))).toBeNull()
+    }
+  })
+  test('a persisted pending choice outranks completion', () => {
+    expect(conversationRunIndicator(summary({ lastRunId: 'question', lastRunStatus: 'completed', awaitingReply: true }))).toBe('reply')
+  })
+  test('question completion remains waiting until the user responds', () => {
+    let overlay = applyRunEventToOverlay(EMPTY_CONVERSATION_RUN_OVERLAY, event('a', 'user.question.requested', 'run-a'), 10)
+    overlay = applyRunEventToOverlay(overlay, { ...event('a', 'run.completed', 'run-a'), event: { type: 'run.completed', completionReason: 'awaiting_user' } }, 20)
+    expect(overlay.get('a')?.indicator).toBe('reply')
+    overlay = applyRunEventToOverlay(overlay, event('a', 'usage.updated', 'run-a'), 30)
+    expect(overlay.get('a')?.indicator).toBe('reply')
+    overlay = applyRunEventToOverlay(overlay, event('a', 'user.question.responded', 'run-a'), 40)
+    expect(overlay.get('a')?.indicator).toBe('running')
+  })
+  test('late usage events cannot turn a completed conversation back into running', () => {
+    const ended = applyRunEventToOverlay(EMPTY_CONVERSATION_RUN_OVERLAY, event('a', 'run.completed', 'run-a'), 10)
+    expect(applyRunEventToOverlay(ended, event('a', 'usage.updated', 'run-a'), 20)).toBe(ended)
+  })
+})
+
+
+test('awaiting-user completion is waiting even if the question notification arrived late', () => {
+  const notification = { ...event('a', 'run.completed', 'run-a'), event: { type: 'run.completed', completionReason: 'awaiting_user' } }
+  expect(applyRunEventToOverlay(EMPTY_CONVERSATION_RUN_OVERLAY, notification, 10).get('a')?.indicator).toBe('reply')
+})
+
+
+test('ordinary completion closes a question instead of leaving the row waiting', () => {
+  const waiting = applyRunEventToOverlay(EMPTY_CONVERSATION_RUN_OVERLAY, event('a', 'user.question.requested', 'run-a'), 10)
+  const completed = applyRunEventToOverlay(waiting, event('a', 'run.completed', 'run-a'), 20)
+  expect(completed.get('a')?.indicator).toBe('completed')
 })

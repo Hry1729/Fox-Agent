@@ -1970,9 +1970,9 @@ impl Database {
         self.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "SELECT id, name, root_path, permission_mode, status,
-                        created_at, updated_at, last_opened_at
+                        created_at, updated_at, last_opened_at, pinned
                  FROM projects
-                 ORDER BY COALESCE(last_opened_at, updated_at) DESC, name ASC",
+                 ORDER BY pinned DESC, created_at ASC, name ASC, id ASC",
             )?;
             let records = statement
                 .query_map([], |row| {
@@ -1985,6 +1985,7 @@ impl Database {
                         created_at: row.get(5)?,
                         updated_at: row.get(6)?,
                         last_opened_at: row.get(7)?,
+                        pinned: row.get(8)?,
                     })
                 })?
                 .collect();
@@ -2012,7 +2013,7 @@ impl Database {
             connection
                 .query_row(
                     "SELECT id, name, root_path, permission_mode, status,
-                            created_at, updated_at, last_opened_at
+                            created_at, updated_at, last_opened_at, pinned
                      FROM projects WHERE id = ?1",
                     [project_id],
                     |row| {
@@ -2025,10 +2026,38 @@ impl Database {
                             created_at: row.get(5)?,
                             updated_at: row.get(6)?,
                             last_opened_at: row.get(7)?,
+                            pinned: row.get(8)?,
                         })
                     },
                 )
                 .optional()
+        })
+    }
+
+    pub fn set_project_pinned(
+        &self,
+        project_id: &str,
+        pinned: bool,
+    ) -> Result<Option<super::ProjectRecord>, String> {
+        self.with_connection(|connection| {
+            if connection.execute(
+                "UPDATE projects SET pinned = ?2, updated_at = ?3 WHERE id = ?1",
+                params![project_id, pinned, now_ms()],
+            )? == 0 {
+                return Ok(None);
+            }
+            connection.query_row(
+                "SELECT id, name, root_path, permission_mode, status,
+                        created_at, updated_at, last_opened_at, pinned
+                 FROM projects WHERE id = ?1",
+                [project_id],
+                |row| Ok(super::ProjectRecord {
+                    id: row.get(0)?, name: row.get(1)?, root_path: row.get(2)?,
+                    permission_mode: row.get(3)?, status: row.get(4)?,
+                    created_at: row.get(5)?, updated_at: row.get(6)?,
+                    last_opened_at: row.get(7)?, pinned: row.get(8)?,
+                }),
+            ).optional()
         })
     }
 
@@ -6975,14 +7004,16 @@ fn map_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationSum
         active_run_id: None,
         active_run_status: None,
         awaiting_approval: false,
+        last_run_id: None,
+        last_run_status: None,
+        awaiting_reply: false,
     })
 }
 
 /// Projects each conversation's own active Run onto an already-loaded list.
 ///
-/// One query for the whole page: only non-terminal runs are read, so this stays
-/// O(active runs) rather than a correlated subquery per conversation. The status
-/// set matches `conversation_has_active_run`.
+/// Batched queries for active Runs and the listed conversations' latest Runs;
+/// no per-row requests. The active status set matches `conversation_has_active_run`.
 fn apply_active_run_activity(
     connection: &rusqlite::Connection,
     records: &mut [ConversationSummary],
@@ -7011,6 +7042,76 @@ fn apply_active_run_activity(
             record.active_run_id = Some(run_id.clone());
             record.active_run_status = Some(run_status.clone());
             record.awaiting_approval = *awaiting_approval;
+        }
+    }
+    // One batched read of the listed conversations' latest Runs. A requested
+    // question can outlive run.completed, so non-terminal state alone is not
+    // sufficient to distinguish waiting for a choice from successful completion.
+    let ids = json!(records.iter().map(|record| &record.id).collect::<Vec<_>>()).to_string();
+    let mut latest_statement = connection.prepare(
+        "WITH ranked_runs AS (
+             SELECT id, conversation_id, status,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY conversation_id ORDER BY created_at DESC, rowid DESC
+                    ) AS position
+             FROM runs WHERE conversation_id IN (SELECT value FROM json_each(?1))
+         ), latest_runs AS (
+             SELECT id, conversation_id, status FROM ranked_runs WHERE position = 1
+         ), questions AS (
+             SELECT run_id,
+                    MAX(CASE WHEN event_type = 'user.question.requested'
+                      AND CASE WHEN json_valid(event_json)
+                        AND json_type(event_json, '$.questions') = 'array'
+                        THEN EXISTS(SELECT 1 FROM json_each(event_json, '$.questions') q
+                          WHERE CASE WHEN q.type = 'object'
+                            THEN json_type(q.value, '$.question') = 'text'
+                              AND length(trim(json_extract(q.value, '$.question'))) > 0
+                            ELSE 0 END) ELSE 0 END
+                      THEN seq END) AS requested,
+                    MAX(CASE WHEN event_type IN ('user.question.responded', 'run.failed', 'run.cancelled', 'run.interrupted')
+                      OR (event_type = 'run.completed' AND COALESCE(json_extract(
+                        CASE WHEN json_valid(event_json) THEN event_json ELSE '{}' END,
+                        '$.completionReason'), '') <> 'awaiting_user')
+                      THEN seq END) AS responded
+             FROM run_events WHERE run_id IN (SELECT id FROM ranked_runs)
+               AND event_type IN ('user.question.requested', 'user.question.responded',
+                                  'run.completed', 'run.failed', 'run.cancelled', 'run.interrupted')
+             GROUP BY run_id
+         ), pending_questions AS MATERIALIZED (
+             SELECT r.conversation_id FROM questions q
+             JOIN ranked_runs r ON r.id = q.run_id
+             JOIN run_events requested ON requested.run_id = q.run_id AND requested.seq = q.requested
+             WHERE r.status NOT IN ('failed', 'cancelled', 'interrupted')
+               AND COALESCE(q.requested, -1) > COALESCE(q.responded, -1)
+               AND NOT EXISTS (
+                 SELECT 1 FROM messages m WHERE m.conversation_id = r.conversation_id
+                   AND m.role = 'user' AND m.created_at > requested.created_at
+                   AND (m.run_id IS NULL OR m.run_id <> r.id)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM json_each(requested.event_json, '$.questions') question
+                     WHERE CASE WHEN question.type = 'object'
+                       AND json_type(question.value, '$.question') = 'text'
+                       AND length(trim(json_extract(question.value, '$.question'))) > 0
+                       THEN instr(m.content, trim(json_extract(question.value, '$.question')) || '：') = 0
+                         AND instr(m.content, trim(json_extract(question.value, '$.question')) || ':') = 0
+                       ELSE 0 END
+                   )
+               )
+         )
+         SELECT r.conversation_id, r.id, r.status,
+                EXISTS(SELECT 1 FROM pending_questions q WHERE q.conversation_id = r.conversation_id)
+         FROM latest_runs r",
+    )?;
+    let latest = latest_statement.query_map([ids], |row| {
+        Ok((row.get::<_, String>(0)?, (
+            row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, bool>(3)?,
+        )))
+    })?.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+    for record in records.iter_mut() {
+        if let Some((run_id, status, awaiting_reply)) = latest.get(&record.id) {
+            record.last_run_id = Some(run_id.clone());
+            record.last_run_status = Some(status.clone());
+            record.awaiting_reply = *awaiting_reply;
         }
     }
     Ok(())
@@ -9062,6 +9163,84 @@ mod tests {
         assert_eq!(completed.active_run_status, None);
         assert!(!completed.awaiting_approval);
 
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+
+    #[test]
+    fn project_pinning_persists_and_opening_does_not_reorder_projects() {
+        let (database, path) = test_database();
+        let root = path.with_extension("project-pin-folders");
+        let alpha = root.join("Alpha");
+        let beta = root.join("Beta");
+        std::fs::create_dir_all(&alpha).expect("create Alpha folder");
+        std::fs::create_dir_all(&beta).expect("create Beta folder");
+        let alpha_conversation = database.create_conversation("fox-general", Some("Alpha"), alpha.to_str(), None).expect("create Alpha");
+        database.create_conversation("fox-general", Some("Beta"), beta.to_str(), None).expect("create Beta");
+        let initial = database.list_projects().expect("list projects");
+        let order: Vec<_> = initial.iter().map(|p| p.id.clone()).collect();
+        let beta_id = initial.iter().find(|p| p.name == "Beta").expect("Beta").id.clone();
+        assert!(database.set_project_pinned("missing-project", true).expect("missing id").is_none());
+        assert!(database.set_project_pinned(&beta_id, true).expect("pin Beta").expect("Beta exists").pinned);
+        assert_eq!(database.list_projects().expect("pinned list")[0].id, beta_id);
+        database.create_conversation("fox-general", Some("Alpha again"), alpha.to_str(), None).expect("open Alpha again");
+        assert_eq!(database.list_projects().expect("stable pinned list")[0].id, beta_id);
+        assert!(database.load_conversation(&alpha_conversation.id).is_ok());
+        drop(database);
+        let reopened = Database::open(path.clone()).expect("reopen database");
+        assert!(reopened.list_projects().expect("durable pinned list")[0].pinned);
+        assert!(!reopened.set_project_pinned(&beta_id, false).expect("unpin").expect("Beta exists").pinned);
+        let restored: Vec<_> = reopened.list_projects().expect("restored order").iter().map(|p| p.id.clone()).collect();
+        assert_eq!(restored, order);
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(alpha);
+        let _ = std::fs::remove_dir(beta);
+        let _ = std::fs::remove_dir(root);
+    }
+
+    #[test]
+    fn sidebar_latest_run_restores_question_waiting_and_completion() {
+        let (database, path) = test_database();
+        let conversation = database.create_conversation("fox-general", Some("Question state"), None, None).expect("conversation");
+        let run = database.create_run(&conversation.id, "Choose a scope", None).expect("run");
+        database.apply_runtime_event(&run.run.id, 1, &json!({"type":"run.started"})).expect("start");
+        database.apply_runtime_event(&run.run.id, 2, &json!({"type":"user.question.requested","questions":[{"question_id":"scope","question":"Choose scope"}]})).expect("question");
+        database.apply_runtime_event(&run.run.id, 3, &json!({"type":"run.completed","completionReason":"awaiting_user"})).expect("completed question turn");
+        let question = database.list_conversations().expect("list").into_iter().find(|r| r.id == conversation.id).expect("question row");
+        assert_eq!(question.last_run_status.as_deref(), Some("completed"));
+        assert!(question.awaiting_reply);
+        assert!(question.active_run_id.is_none());
+        database.create_resumed_run(&conversation.id, &run.run.id, "Selected scope A").expect("resume question");
+        let resumed = database.list_conversations().expect("list resumed").into_iter().find(|r| r.id == conversation.id).expect("resumed row");
+        assert!(!resumed.awaiting_reply);
+        assert_eq!(resumed.active_run_status.as_deref(), Some("queued"));
+        let resumed_id = resumed.active_run_id.expect("new Run");
+        database.apply_runtime_event(&resumed_id, 1, &json!({"type":"run.completed"})).expect("complete response");
+        drop(database);
+        let reopened = Database::open(path.clone()).expect("reopen database");
+        let done = reopened.list_conversations().expect("list completed").into_iter().find(|r| r.id == conversation.id).expect("completed row");
+        assert_eq!(done.last_run_status.as_deref(), Some("completed"));
+        assert!(!done.awaiting_reply);
+        assert!(done.active_run_id.is_none());
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+
+    #[test]
+    fn sidebar_latest_run_does_not_wait_for_closed_or_empty_questions() {
+        let (database, path) = test_database();
+        for (title, questions) in [("normal completion", json!([{"question":"Choose scope"}])), ("empty question", json!([]))] {
+            let conversation = database.create_conversation("fox-general", Some(title), None, None).expect("conversation");
+            let run = database.create_run(&conversation.id, "Question closure", None).expect("run");
+            database.apply_runtime_event(&run.run.id, 1, &json!({"type":"user.question.requested","questions":questions})).expect("question");
+            database.apply_runtime_event(&run.run.id, 2, &json!({"type":"run.completed"})).expect("normal completion");
+            let completed = database.list_conversations().expect("list").into_iter().find(|r| r.id == conversation.id).expect("row");
+            assert!(!completed.awaiting_reply);
+            assert_eq!(completed.last_run_status.as_deref(), Some("completed"));
+        }
         drop(database);
         let _ = std::fs::remove_file(path);
     }

@@ -6849,6 +6849,8 @@ enum MigrationTarget {
     V85,
     #[cfg(test)]
     V87,
+    #[cfg(test)]
+    V91,
 }
 
 fn run_with_target(connection: &mut Connection, now: i64, target: MigrationTarget) -> Result<()> {
@@ -7256,6 +7258,11 @@ fn run_transaction(connection: &mut Connection, now: i64, _target: MigrationTarg
             [now],
         )?;
     }
+    #[cfg(test)]
+    if matches!(_target, MigrationTarget::V91) {
+        return finish_transaction(transaction);
+    }
+    apply_migration(&transaction, 92, MIGRATION_92, now)?;
     finish_transaction(transaction)
 }
 
@@ -15195,6 +15202,12 @@ CREATE INDEX IF NOT EXISTS idx_delivery_items_run ON delivery_checklist_items(ru
 /// the decision never landed (crash, cancellation, or a superseded round). The
 /// staging tables carry the mark so recovery can finalize only the verdicts whose
 /// decision really committed.
+const MIGRATION_92: &str = r#"
+ALTER TABLE projects ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1));
+CREATE INDEX IF NOT EXISTS idx_projects_pinned_created
+    ON projects(pinned DESC, created_at ASC, name ASC, id ASC);
+"#;
+
 const MIGRATION_89: &str = r#"
 CREATE TABLE IF NOT EXISTS kernel_decision_marks (
     run_id TEXT NOT NULL REFERENCES kernel_runs(run_id) ON DELETE CASCADE,
@@ -15265,3 +15278,27 @@ CREATE TRIGGER IF NOT EXISTS execution_parent_cancel AFTER UPDATE OF status ON r
  INSERT INTO kernel_parent_generations(run_id,generation) VALUES(NEW.id,1) ON CONFLICT(run_id) DO UPDATE SET generation=generation+1;
 END;
 "#;
+
+
+#[cfg(test)]
+mod project_pinning_migration_tests {
+    use super::*;
+
+    #[test]
+    fn upgrades_v91_projects_without_losing_metadata_and_is_idempotent() {
+        let mut connection = Connection::open_in_memory().expect("open database");
+        run_with_target(&mut connection, 100, MigrationTarget::V91).expect("create v91 database");
+        connection.execute("INSERT INTO projects(id,name,root_path,permission_mode,status,created_at,updated_at,last_opened_at) VALUES ('old','Old project','D:/old','read_only','active',10,20,30)", []).expect("old project");
+        run_with_target(&mut connection, 200, MigrationTarget::Latest).expect("upgrade");
+        let result = connection.query_row("SELECT pinned,permission_mode,created_at,last_opened_at FROM projects WHERE id='old'", [], |row| Ok((row.get::<_,bool>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,row.get::<_,i64>(3)?))).expect("read old project");
+        assert_eq!(result, (false,"read_only".to_owned(),10,30));
+        connection.execute("UPDATE projects SET pinned=1 WHERE id='old'", []).expect("pin project");
+        run_with_target(&mut connection, 300, MigrationTarget::Latest).expect("repeat upgrade");
+        let pinned: bool = connection.query_row("SELECT pinned FROM projects WHERE id='old'", [], |row| row.get(0)).expect("pin survives");
+        assert!(pinned);
+        let count: i64 = connection.query_row("SELECT COUNT(*) FROM schema_migrations WHERE version=92", [], |row| row.get(0)).expect("single version record");
+        assert_eq!(count, 1);
+        let version: i64 = connection.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row.get(0)).expect("version");
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+    }
+}

@@ -527,6 +527,7 @@ export const PromptInput = ({
   // Refs
   const inputRef = useRef<HTMLInputElement | null>(null);
   const formRef = useRef<HTMLFormElement | null>(null);
+  const submittingRef = useRef(false);
 
   // ----- Local attachments (only used when no provider)
   const [items, setItems] = useState<AttachmentItem[]>([]);
@@ -855,6 +856,10 @@ export const PromptInput = ({
             return (formData.get("message") as string) || "";
           })();
 
+      if (submittingRef.current || (!text.trim() && files.length === 0)) return;
+      submittingRef.current = true;
+      try {
+
       // Resolve every attachment from the user's original File BEFORE the host
       // renders an optimistic turn or anything is cleared. A failed read must keep
       // the draft and the attachments so the send can simply be retried.
@@ -907,6 +912,9 @@ export const PromptInput = ({
         // Clear only message text. A native form.reset() also resets controlled
         // assistant/model selectors, whose callbacks can switch conversations.
         clearSubmittedPromptText(form);
+      }
+      } finally {
+        submittingRef.current = false;
       }
     },
     [usingProvider, controller, files, onSubmitStart, onSubmit, clear, onError]
