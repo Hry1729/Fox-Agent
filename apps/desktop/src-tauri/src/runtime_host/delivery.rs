@@ -119,6 +119,10 @@ const PRODUCTION_VERBS: &[&str] = &[
     "生成", "产出", "制作", "制备", "导出", "出具", "输出", "保存", "写成", "撰写", "编写",
     "整理成", "汇总成", "打印成", "交付", "create", "generate", "produce", "export", "save",
     "write", "build", "deliver",
+    // Natural variants users actually type. "汇总到 out/summary.md" and
+    // "整理为 out/report.md" promised a deliverable just as plainly as the "成" forms,
+    // and a ledger that only understands one spelling makes trust depend on wording.
+    "汇总到", "整理为", "更新",
 ];
 
 const FILE_EXTENSIONS: &[&str] = &[
@@ -823,7 +827,9 @@ fn classify_mentions(text: &str, mentions: &[Mention]) -> Vec<MentionRole> {
         // No verb of its own: it continues the instruction that introduced the
         // previous path, as far as that instruction reaches.
         roles.push(
-            inherited_role(text, mentions, index, &roles).unwrap_or(MentionRole::Unclassified),
+            inherited_role(text, mentions, index, &roles)
+                .or_else(|| list_introducer_role(text, mention.name_start))
+                .unwrap_or(MentionRole::Unclassified),
         );
     }
     roles
@@ -854,7 +860,13 @@ fn inherited_role(
     }
     let previous_end = mentions[previous].name_start + mentions[previous].name.len();
     let gap = text.get(previous_end..mentions[index].name_start)?;
-    if gap.contains(is_instruction_boundary) {
+    // A line that holds nothing but the path is a list item, not a new instruction, so a
+    // newline between two bare paths continues the same list (2026-10-05: "生成 out/a.md
+    // \n out/b.md \n out/c.md" used to promise only the first one). A newline followed by
+    // prose still ends the inheritance — a name inside a sentence never becomes a
+    // deliverable just because an earlier line asked for something.
+    let bare_list_item = gap.trim().is_empty();
+    if gap.contains(is_instruction_boundary) && !bare_list_item {
         return None;
     }
     if gap_is_prohibited(gap) {
@@ -863,9 +875,69 @@ fn inherited_role(
     match role {
         MentionRole::Output => Some(MentionRole::Output),
         MentionRole::Intermediate => Some(MentionRole::Intermediate),
-        MentionRole::Input if is_list_separator(gap.trim()) => Some(MentionRole::Input),
+        MentionRole::Input if bare_list_item || is_list_separator(gap.trim()) => {
+            Some(MentionRole::Input)
+        }
         _ => None,
     }
+}
+
+/// The role a bare-line path takes from an explicit list introducer.
+///
+/// "读取 inputs/equipment.csv，请生成以下交付文件（每行一个）：\n out/a.md\n out/b.md"
+/// puts the promise on the introducer LINE and the paths on the lines below, so the
+/// mention standing before the first path is INPUT material and cannot carry the role.
+/// The role therefore comes from the nearest verb inside the same sentence, and only
+/// when the path sits alone on its line and nothing but prose stands between that verb
+/// and this path — so a path named in prose is never promoted, and a path named after
+/// another path is not swallowed by an ever-widening scope.
+fn list_introducer_role(text: &str, name_start: usize) -> Option<MentionRole> {
+    let line_start = text[..name_start]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    if !text[line_start..name_start].trim().is_empty() {
+        return None;
+    }
+    // The introducer LINE is part of the scope, so the trailing newline must not be read
+    // as a sentence terminator (it is one for other purposes). Only a real terminator
+    // inside the introducer line ends the scope.
+    let head = text[..line_start].trim_end_matches(['\n', '\r', ' ', '\t', '\u{3000}']);
+    let stop = head
+        .char_indices()
+        .filter(|(_, character)| is_sentence_terminator(*character))
+        .map(|(index, character)| index + character.len_utf8())
+        .next_back()
+        .unwrap_or(0);
+    let scope = &head[stop..];
+    let mut best: Option<(usize, MentionRole)> = None;
+    for (verbs, role) in [
+        (TARGET_OUTPUT_VERBS, MentionRole::Output),
+        (SOURCE_INPUT_VERBS, MentionRole::Input),
+    ] {
+        for verb in verbs {
+            if let Some(position) = scope.rfind(verb) {
+                if best.map(|(current, _)| position > current).unwrap_or(true) {
+                    best = Some((position, role));
+                }
+            }
+        }
+    }
+    let (position, role) = best?;
+    // Only prose may stand between the verb and this path.
+    if names_a_path(&scope[position..]) {
+        return None;
+    }
+    // A whole prohibition marker in front of that verb keeps the path protected.
+    let before = scope[..position].to_lowercase();
+    if NEGATED_VERB_MARKERS
+        .iter()
+        .filter(|marker| marker.chars().count() >= 2)
+        .any(|marker| before.contains(&marker.to_lowercase()))
+    {
+        return Some(MentionRole::Input);
+    }
+    Some(role)
 }
 
 fn mention_is_intermediate(text: &str, mentions: &[Mention], index: usize) -> bool {
@@ -2387,6 +2459,8 @@ const TARGET_OUTPUT_VERBS: &[&str] = &[
     "保存", "另存", "存入", "存成", "写入", "写到", "写回", "回写", "覆盖", "更新", "修改",
     "改动", "编辑", "改写", "填充", "追加", "导出", "输出", "生成", "创建", "新建", "制作",
     "整理成", "汇总成", "撰写", "编写", "制备", "出具", "打印成", "交付",
+    // See PRODUCTION_VERBS: the "到/为" variants are ordinary user phrasings.
+    "汇总到", "整理为",
     "save", "write", "append", "overwrite", "update", "modify", "edit", "export",
     "generate", "create", "produce",
 ];
@@ -2832,7 +2906,12 @@ const NEGATED_VERB_MARKERS: &[&str] = &[
 /// ("……禁止写入") leaves the marker's own tail in front of the verb; that tail
 /// is enough to tell a clipped prohibition from an authorizing verb, because
 /// none of these characters ends an ordinary write instruction.
-const NEGATION_MARKER_TAILS: &[char] = &['不', '禁', '勿', '别', '莫', '准', '许', '得', '免', '要'];
+/// `要` and `得` are deliberately absent: they are ordinary endings of nouns and
+/// verbs the instruction may legitimately be about ("把纪要整理为 report.md",
+/// "把摘要汇总到 summary.md"), and treating them as a clipped prohibition made a
+/// plainly-stated deliverable unverifiable. A real prohibition still matches its
+/// whole marker ("不要"/"请勿"/"不得"), so nothing is authorised by their removal.
+const NEGATION_MARKER_TAILS: &[char] = &['不', '禁', '勿', '别', '莫', '准', '许', '免'];
 
 fn negates_verb(before: &str) -> bool {
     // A negation is scoped to its own sentence: the verb it negates cannot stand
@@ -2956,18 +3035,55 @@ fn has_multichar_negation_near_end(value: &str) -> bool {
     // not be written — so a marker on the far side of the stop is not a negation
     // of this mention.
     let scope = sentence_tail(value);
-    let window: String = scope
-        .chars()
-        .rev()
-        .take(NEAR_END_CHARS)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
+    // The marker's reach is the sentence it stands in — the scope
+    // `is_sentence_terminator` documents, which deliberately spans intra-clause
+    // separators like `，`. Scanning only the last few characters let an
+    // unambiguous prohibition ("不得在本次任务的任何执行阶段生成 out/a.md") through
+    // once the verb sat more than a few characters behind the marker, so the
+    // promised-and-forbidden path was seeded as a deliverable anyway.
+    let _ = NEAR_END_CHARS;
+    let lowered = scope.to_lowercase();
     NEGATED_VERB_MARKERS
         .iter()
         .filter(|marker| marker.chars().count() >= 2)
-        .any(|marker| window.to_lowercase().contains(&marker.to_lowercase()))
+        .any(|marker| {
+            let needle = marker.to_lowercase();
+            let Some(at) = lowered.rfind(&needle) else {
+                return false;
+            };
+            // A clause separator between the marker and this verb means the
+            // prohibition already closed over its own predicate ("不要修改 a.csv，
+            // 生成 b.json"), so it does not reach this verb — that is what keeps a
+            // still-promised deliverable from being swallowed. Merely NAMING a path is
+            // not enough to close it: "不要将 a.csv 转换为 out/b.json" forbids exactly
+            // this verb, and so does a second marker ("……，也不要生成 out/b.json").
+            !clause_separator_between(&scope[at + needle.len()..])
+        })
+}
+
+/// True when the marker already governs its own predicate, so it does not reach this verb.
+///
+/// Punctuation ALONE never closes a negation: `禁止：生成 a`、`不要生成 a、b` and
+/// `不得在本轮执行中，生成 a` all keep their scope (review, 2026-10-05). What closes it is
+/// a separator **together with** a path — i.e. the marker already has a predicate and an
+/// object of its own ("不要修改 a.csv，生成 b.json"). Merely naming a path is not enough
+/// either ("不要将 a.csv 转换为 b.json" forbids that conversion).
+fn clause_separator_between(value: &str) -> bool {
+    let separator = value
+        .chars()
+        .any(|character| matches!(character, '，' | ',' | '、' | '：' | ':'));
+    separator && names_a_path(value)
+}
+
+/// True when the fragment names a filesystem path (a separator or a known extension).
+fn names_a_path(value: &str) -> bool {
+    if value.contains('/') || value.contains('\\') {
+        return true;
+    }
+    let lowered = value.to_lowercase();
+    FILE_EXTENSIONS
+        .iter()
+        .any(|extension| lowered.contains(&format!(".{extension}")))
 }
 
 /// Punctuation that ends a sentence rather than a clause inside one.
@@ -5974,6 +6090,450 @@ mod tests {
             "the same artifact must not appear twice under two spellings"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Independent coverage assertion (review requirement): the expected deliverable
+    /// set is written by hand here and compared against the ledger the Host actually
+    /// seeds — the expectation never comes from the parser under test.
+    ///
+    /// Known remaining gap, measured with a throwaway probe (2026-10-05): the 把-construction
+    /// ("请把纪要整理为 out/report.md") still seeds nothing, while "整理为 out/report.md"
+    /// and "请核对数据后汇总到 out/summary.md" both seed correctly. Fixing the 把 form
+    /// belongs to the classifier, so it is deliberately NOT encoded as expected behaviour here.
+    #[test]
+    fn natural_production_phrasings_seed_exactly_the_declared_deliverables() {
+        for (text, expected) in [
+            (
+                "请读取 inputs/a.txt，生成 out/notes/a.md，全部完成后生成 out/summary.md。",
+                vec!["out/notes/a.md", "out/summary.md"],
+            ),
+            ("请核对数据后汇总到 out/summary.md。", vec!["out/summary.md"]),
+            ("请核对数据后整理为 out/report.md。", vec!["out/report.md"]),
+            ("请更新 out/progress.csv。", vec!["out/progress.csv"]),
+        ] {
+            let mut got: Vec<String> = expectations_from_task(text)
+                .into_iter()
+                .map(|seed| seed.display_name.clone())
+                .collect();
+            got.sort();
+            let mut want: Vec<String> = expected.iter().map(|value| value.to_string()).collect();
+            want.sort();
+            assert_eq!(got, want, "task: {text}");
+        }
+    }
+
+    /// A read-only check names the same kind of path but promises nothing: it must not
+    /// put a deliverable in the ledger, or every analysis task would owe a file.
+    #[test]
+    fn a_read_only_check_seeds_no_deliverable() {
+        for text in [
+            "请核对 out/details/ 和 out/progress.csv 的记录是否完整。",
+            "请检查 out/summary.md 的内容是否正确。",
+            "读取并分析 inputs/a.txt，说明其中的温度是否超标。",
+        ] {
+            let seeds = expectations_from_task(text);
+            assert!(
+                seeds.is_empty(),
+                "a read-only check must seed nothing, got {:?} for: {text}",
+                seeds.iter().map(|seed| seed.display_name.clone()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    /// P1 (2026-10-05): a plainly-stated deliverable must not be read as a
+    /// prohibition. "纪要"/"摘要"/"需要" end in characters the clipped-marker
+    /// heuristic used to treat as a negation tail, so the Run promised a file and
+    /// then refused to verify it.
+    #[test]
+    fn a_noun_ending_in_a_marker_tail_does_not_prohibit_the_deliverable() {
+        for (text, expected) in [
+            ("请把纪要整理为 out/report.md。", vec!["out/report.md"]),
+            ("把三份纪要整理为 out/report.md。", vec!["out/report.md"]),
+            ("请把摘要汇总到 out/summary.md。", vec!["out/summary.md"]),
+            ("把结果汇总到 out/summary.md。", vec!["out/summary.md"]),
+        ] {
+            let mut got: Vec<String> = expectations_from_task(text)
+                .into_iter()
+                .map(|seed| seed.display_name.clone())
+                .collect();
+            got.sort();
+            let mut want: Vec<String> = expected.iter().map(|value| value.to_string()).collect();
+            want.sort();
+            assert_eq!(got, want, "task: {text}");
+        }
+    }
+
+    /// The removal of those two tail characters must not authorise anything a real
+    /// prohibition still forbids: every whole marker keeps working.
+    #[test]
+    fn whole_prohibition_markers_still_forbid_the_deliverable() {
+        for text in [
+            "不要生成 out/forbidden.md。",
+            "请勿生成 out/forbidden.md。",
+            "不得生成 out/forbidden.md。",
+            "禁止生成 out/forbidden.md。",
+            "avoid generating out/forbidden.md.",
+            "do not create out/forbidden.md.",
+        ] {
+            assert!(
+                expectations_from_task(text).is_empty(),
+                "a prohibition must seed nothing: {text}"
+            );
+        }
+    }
+
+    /// Acceptance for the 2026-10-05 business prompt, verbatim: the exact normalized
+    /// path set, not a count and not file names.
+    #[test]
+    fn the_business_prompt_seeds_exactly_its_five_declared_paths() {
+        const PROMPT: &str = "请读取 inputs/equipment.csv，为每台设备生成 out/notes/EQ001.md、out/notes/EQ002.md、out/notes/EQ003.md，然后把汇总结果汇总到 out/summary.md，并更新 out/totals.csv。";
+        let mut got: Vec<String> = expectations_from_task(PROMPT)
+            .into_iter()
+            .map(|seed| seed.target_path.clone().unwrap_or(seed.display_name.clone()))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "out/notes/EQ001.md",
+                "out/notes/EQ002.md",
+                "out/notes/EQ003.md",
+                "out/summary.md",
+                "out/totals.csv",
+            ],
+            "the ledger must name exactly the five declared deliverables"
+        );
+    }
+
+    /// Separator variants: a list is a list of independent paths, and the path's own
+    /// separator is never folded away.
+    #[test]
+    fn list_separators_keep_every_path_independent() {
+        for text in [
+            "生成 out/a.md、out/b.md、out/c.md。",
+            "生成 out/a.md，out/b.md，out/c.md。",
+            "生成 out/a.md, out/b.md, out/c.md。",
+        ] {
+            let mut got: Vec<String> = expectations_from_task(text)
+                .into_iter()
+                .map(|seed| seed.target_path.clone().unwrap_or(seed.display_name.clone()))
+                .collect();
+            got.sort();
+            assert_eq!(
+                got,
+                vec!["out/a.md", "out/b.md", "out/c.md"],
+                "task: {text}"
+            );
+        }
+    }
+
+    /// A path mentioned twice is one deliverable, and quoting it changes nothing.
+    #[test]
+    fn repeated_and_quoted_mentions_keep_one_identity() {
+        for (text, expected) in [
+            ("读取 inputs/a.csv 并生成 out/x.csv，另外再生成 out/x.csv。", vec!["out/x.csv"]),
+            ("生成 `out/quoted.md`。", vec!["out/quoted.md"]),
+        ] {
+            let mut got: Vec<String> = expectations_from_task(text)
+                .into_iter()
+                .map(|seed| seed.target_path.clone().unwrap_or(seed.display_name.clone()))
+                .collect();
+            got.sort();
+            let mut want: Vec<String> = expected.iter().map(|v| v.to_string()).collect();
+            want.sort();
+            assert_eq!(got, want, "task: {text}");
+        }
+    }
+
+    /// Boundary regression (2026-10-05): the prohibition scan is windowed
+    /// (`NAME_WINDOW_CHARS` back from the name, then a ~6-char near-end scan), so where a
+    /// marker sits decides whether it is seen. These cases pin the behaviour on both
+    /// sides of that edge; the far-side case is a documented fail-open, not a promise.
+    #[test]
+    fn prohibition_markers_at_the_parse_window_boundary() {
+        // Seen: the marker stands immediately before the verb.
+        for text in [
+            "不要生成 out/a.md。",
+            "不得生成 out/a.md。",
+            "请勿生成 out/a.md。",
+            "禁止生成 out/a.md。",
+            "不要 生成 out/a.md。",
+            "不得将结果生成 out/a.md。",
+        ] {
+            assert!(
+                expectations_from_task(text).is_empty(),
+                "a visible prohibition must seed nothing: {text}"
+            );
+        }
+        // Correctly scoped: a prohibition in ANOTHER sentence never silences a real
+        // instruction. (A comma is NOT a sentence terminator by design, so a
+        // comma-joined prohibition does silence it — see `is_sentence_terminator`.)
+        for (text, expected) in [
+            ("不要改动输入。生成 out/a.md。", vec!["out/a.md"]),
+            ("不要修改输入文件。请生成 out/a.md。", vec!["out/a.md"]),
+            ("不得改动任何内容；生成 out/a.md。", vec!["out/a.md"]),
+        ] {
+            let got: Vec<String> = expectations_from_task(text)
+                .into_iter()
+                .map(|seed| seed.target_path.unwrap_or(seed.display_name))
+                .collect();
+            assert_eq!(got, expected, "task: {text}");
+        }
+        // KNOWN BOUNDARY (fail-open, reported not hidden): without sentence punctuation a
+        // marker far enough back leaves the near-end window, so the deliverable is seeded.
+        // "不要改动任何内容请生成 out/a.md。" — the marker is 10 characters back.
+        let far = expectations_from_task("不要改动任何内容请生成 out/a.md。");
+        println!(
+            "[boundary] far marker seeded = {:?}",
+            far.iter().map(|s| s.display_name.clone()).collect::<Vec<_>>()
+        );
+        // The common-noun tails this fix removed must stay non-prohibitions.
+        for (text, expected) in [
+            ("请把纪要整理为 out/report.md。", vec!["out/report.md"]),
+            ("请把摘要汇总到 out/summary.md。", vec!["out/summary.md"]),
+        ] {
+            let got: Vec<String> = expectations_from_task(text)
+                .into_iter()
+                .map(|seed| seed.target_path.unwrap_or(seed.display_name))
+                .collect();
+            assert_eq!(got, expected, "task: {text}");
+        }
+    }
+
+    /// Reviewer requirement (2026-10-05): a path appearing after a marker does NOT mean the
+    /// negation is finished. Only a clause separator closes it.
+    #[test]
+    fn a_named_path_does_not_close_a_negation_by_itself() {
+        for text in [
+            // A second marker after the comma still governs this verb.
+            "不要修改 a.csv，也不要生成 out/b.json。",
+            // The negation's object IS the conversion into this path.
+            "不要将 a.csv 转换为 out/b.json。",
+        ] {
+            let seeded: Vec<String> = expectations_from_task(text)
+                .into_iter()
+                .filter_map(|seed| seed.target_path)
+                .collect();
+            assert!(
+                !seeded.iter().any(|path| path == "out/b.json"),
+                "a prohibited target must not be promised: {text} -> {seeded:?}"
+            );
+        }
+        // The comma closes the first prohibition over its own object, so the second
+        // instruction still promises its deliverable — and a.csv stays protected.
+        let task = "读取 a.csv，不要修改 a.csv，生成 out/b.json。";
+        let seeded: Vec<String> = expectations_from_task(task)
+            .into_iter()
+            .filter_map(|seed| seed.target_path)
+            .collect();
+        assert!(
+            seeded.iter().any(|path| path == "out/b.json"),
+            "the promised output survives: {seeded:?}"
+        );
+        assert!(
+            !seeded.iter().any(|path| path == "a.csv"),
+            "the prohibited path is never a deliverable: {seeded:?}"
+        );
+        assert!(
+            read_only_input_paths(task).contains(&path_key("a.csv")),
+            "the prohibited path stays read-only"
+        );
+    }
+
+    /// Reviewer requirement (2026-10-05): punctuation inside a prohibition must not reopen
+    /// the forbidden target. A colon, an enumeration comma or a comma before the verb are all
+    /// still inside the negation's scope.
+    #[test]
+    fn punctuation_inside_a_prohibition_does_not_reopen_the_forbidden_target() {
+        for task in [
+            "禁止：生成 out/a.md。",
+            "不要生成 out/a.md、out/b.md。",
+            "不得在本轮执行中，生成 out/a.md。",
+            "不得改动任何内容，生成 out/a.md。",
+        ] {
+            let seeded: Vec<String> = expectations_from_task(task)
+                .into_iter()
+                .filter_map(|seed| seed.target_path)
+                .collect();
+            assert!(
+                !seeded.iter().any(|path| path.contains("out/a.md") || path.contains("out/b.md")),
+                "a prohibited target stays prohibited: {task} -> {seeded:?}"
+            );
+        }
+        // Legal control (reviewer): the prohibition has its own object, so the second
+        // instruction still promises its deliverable while a.csv stays protected.
+        let task = "不要修改 a.csv，生成 b.json。";
+        let seeded: Vec<String> = expectations_from_task(task)
+            .into_iter()
+            .filter_map(|seed| seed.target_path)
+            .collect();
+        assert_eq!(seeded, vec!["b.json"], "the promised output survives: {seeded:?}");
+        assert!(
+            read_only_input_paths(task).contains(&path_key("a.csv")),
+            "the prohibited path stays read-only"
+        );
+        // Separate sentences remain separate (semicolon is a sentence terminator).
+        let got: Vec<String> = expectations_from_task("不要修改输入文件；请生成 out/a.md。")
+            .into_iter()
+            .filter_map(|seed| seed.target_path)
+            .collect();
+        assert_eq!(got, vec!["out/a.md"], "a separate sentence still promises its file");
+    }
+
+    /// Reviewer requirement (2026-10-05): the repair round must not ask the model for a
+    /// forbidden target. `repair_prompt` is built from the FAILED deliverables only, so the
+    /// chain worth asserting is seed -> checklist rows: a prohibited path must never become
+    /// a row, hence never a finding, hence never a line in the repair prompt.
+    #[test]
+    fn a_forbidden_target_never_reaches_the_checklist_or_a_repair_prompt() {
+        let root = std::env::temp_dir().join(format!(
+            "fox-forbidden-target-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let task = "不得在本次任务的任何执行阶段生成 out/a.md。";
+        let seeds = expectations_from_task(task);
+        assert!(seeds.is_empty(), "no deliverable is promised");
+        let (db, run_id) = conversation_run(&root);
+        db.seed_delivery_checklist(&run_id, &seeds, now_ms()).unwrap();
+        let rows = db.delivery_checklist(&run_id).unwrap();
+        assert!(
+            rows.is_empty(),
+            "a forbidden target must not become a checklist row (rows = {})",
+            rows.len()
+        );
+        // The prompt is generated from findings, and never invents a path of its own.
+        let prompt = repair_prompt(&[]);
+        assert!(!prompt.contains("out/a.md"), "{prompt}");
+        // The fixture keeps its sqlite handle; release it before removing the directory.
+        drop(db);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Reviewer requirement (2026-10-05): a multi-line output list promises every path.
+    /// Each case asserts the exact normalized set written out by hand.
+    #[test]
+    fn a_multi_line_delivery_list_promises_every_path() {
+        // Positive output list across newlines.
+        let got: Vec<String> = expectations_from_task("生成 out/a.md\nout/b.md\nout/c.md")
+            .into_iter()
+            .filter_map(|seed| seed.target_path)
+            .collect();
+        assert_eq!(got, vec!["out/a.md", "out/b.md", "out/c.md"]);
+
+        // The existing single-line form keeps working.
+        let inline: Vec<String> = expectations_from_task("生成 out/a.md、out/b.md、out/c.md。")
+            .into_iter()
+            .filter_map(|seed| seed.target_path)
+            .collect();
+        assert_eq!(inline, vec!["out/a.md", "out/b.md", "out/c.md"]);
+
+        // Inputs and outputs grouped on their own lines: only the outputs are promised.
+        let grouped: Vec<String> =
+            expectations_from_task("读取 in/a.csv、in/b.csv\n生成 out/a.md、out/b.md")
+                .into_iter()
+                .filter_map(|seed| seed.target_path)
+                .collect();
+        assert_eq!(grouped, vec!["out/a.md", "out/b.md"]);
+
+        // A role change ends the previous list's inheritance.
+        let changed: Vec<String> =
+            expectations_from_task("生成 out/a.md\nout/b.md\n读取 in/c.csv")
+                .into_iter()
+                .filter_map(|seed| seed.target_path)
+                .collect();
+        assert_eq!(changed, vec!["out/a.md", "out/b.md"]);
+
+        // A prohibition list never inherits the output role.
+        let forbidden = "不得生成 out/a.md\nout/b.md";
+        let seeded: Vec<String> = expectations_from_task(forbidden)
+            .into_iter()
+            .filter_map(|seed| seed.target_path)
+            .collect();
+        assert!(seeded.is_empty(), "a prohibition list promises nothing: {seeded:?}");
+        for path in ["out/a.md", "out/b.md"] {
+            assert!(
+                read_only_input_paths(forbidden).contains(&path_key(path)),
+                "{path} stays read-only"
+            );
+        }
+
+        // Prose after a newline is not a list item, so it cannot promote a name.
+        let prose: Vec<String> = expectations_from_task("生成 out/a.md\n这是一段说明，提到 report.csv")
+            .into_iter()
+            .filter_map(|seed| seed.target_path)
+            .collect();
+        assert_eq!(prose, vec!["out/a.md"]);
+
+        // Repetition keeps one identity.
+        let deduped: Vec<String> = expectations_from_task("生成 out/a.md\nout/b.md\nout/a.md")
+            .into_iter()
+            .filter_map(|seed| seed.target_path)
+            .collect();
+        let mut sorted = deduped.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(deduped.len(), sorted.len(), "no duplicates: {deduped:?}");
+    }
+
+    /// The exact prompt from the failed Run `9409f37f` (verbatim, straight from the
+    /// database): the promise sits on the introducer line and the paths follow on their
+    /// own lines. It must seed precisely those five deliverables.
+    const FAILED_LIST_PROMPT: &str = "读取 inputs/equipment.csv，请生成以下交付文件（每行一个）：\nout/notes/EQ001.md\nout/notes/EQ002.md\nout/notes/EQ003.md\nout/summary.md\nout/totals.csv";
+
+    fn seeded_paths(text: &str) -> Vec<String> {
+        let mut paths: Vec<String> = expectations_from_task(text)
+            .into_iter()
+            .map(|seed| seed.target_path.unwrap_or(seed.display_name))
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn the_failed_run_prompt_seeds_exactly_its_five_declared_paths() {
+        assert_eq!(
+            seeded_paths(FAILED_LIST_PROMPT),
+            vec![
+                "out/notes/EQ001.md",
+                "out/notes/EQ002.md",
+                "out/notes/EQ003.md",
+                "out/summary.md",
+                "out/totals.csv",
+            ]
+        );
+        // The input file named BEFORE the introducer never pollutes the output list.
+        assert!(
+            !seeded_paths(FAILED_LIST_PROMPT)
+                .iter()
+                .any(|path| path.contains("equipment.csv")),
+            "the input named before the introducer is not a deliverable"
+        );
+    }
+
+    #[test]
+    fn an_input_list_or_a_prohibition_list_never_becomes_a_deliverable() {
+        assert!(seeded_paths("请读取以下文件（每行一个）：\nin/a.csv\nin/b.csv").is_empty());
+        let forbidden = "不得生成以下文件（每行一个）：\nout/a.md\nout/b.md";
+        assert!(seeded_paths(forbidden).is_empty(), "a prohibition list promises nothing");
+        for path in ["out/a.md", "out/b.md"] {
+            assert!(
+                read_only_input_paths(forbidden).contains(&path_key(path)),
+                "{path} stays read-only"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_instruction_after_a_list_neither_inherits_nor_promotes_prose() {
+        assert_eq!(
+            seeded_paths("生成以下文件（每行一个）：\nout/a.md\nout/b.md\n读取 in/c.csv，并概括其内容。"),
+            vec!["out/a.md", "out/b.md"]
+        );
+        assert_eq!(
+            seeded_paths("生成以下文件（每行一个）：\nout/a.md\n这一行是说明，提到 report.csv"),
+            vec!["out/a.md"]
+        );
     }
 
     /// Regression, 2026-10-01 review (R01): an absolute path is an ordinary

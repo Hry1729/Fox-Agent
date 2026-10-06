@@ -4088,6 +4088,74 @@ mod write_gate_tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// Reviewer requirement (2026-10-05): for each prohibition whose punctuation sits
+    /// inside it, the forbidden target must (1) not be a deliverable, (2) stay read-only and
+    /// (3) be refused by the real write entry with the bytes unchanged.
+    #[test]
+    fn punctuation_inside_a_prohibition_still_refuses_the_real_write() {
+        for (task, targets) in [
+            ("禁止：生成 out/a.md。", vec!["out/a.md"]),
+            ("不要生成 out/a.md、out/b.md。", vec!["out/a.md", "out/b.md"]),
+            ("不得在本轮执行中，生成 out/a.md。", vec!["out/a.md"]),
+        ] {
+            let root = fresh_dir();
+            fs::create_dir_all(root.join("out")).unwrap();
+            assert!(
+                crate::runtime_host::delivery::expectations_from_task(task).is_empty(),
+                "no deliverable may be promised: {task}"
+            );
+            for target in targets {
+                let path = root.join(target.replace('/', std::path::MAIN_SEPARATOR_STR));
+                fs::write(&path, "protected content").unwrap();
+                assert!(
+                    crate::runtime_host::delivery::read_only_input_paths(task)
+                        .contains(&crate::runtime_host::delivery::path_key(target)),
+                    "{target} must stay read-only for: {task}"
+                );
+                let before = fs::read(&path).unwrap();
+                let error = ensure_writable_target(Some(task), root.to_str().unwrap(), &path)
+                    .expect_err("the write entry must refuse a prohibited target");
+                assert!(error.contains("tool.read_only_input"), "{target}: {error}");
+                assert_eq!(fs::read(&path).unwrap(), before, "{target} must be unchanged");
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    /// Reviewer requirement (2026-10-05): ONE input, three results on the real execution
+    /// chain. A long-distance prohibition ("不得在本次任务的任何执行阶段生成 out/a.md")
+    /// must promise no deliverable, keep the path read-only, and be refused by the write
+    /// entry itself — an empty deliverable list alone would not prove the write is denied.
+    /// Because the repair prompt is built from the FAILED deliverables, (1) also means no
+    /// repair round can ask the model for the forbidden target.
+    #[test]
+    fn a_long_distance_prohibition_seeds_nothing_protects_the_path_and_refuses_the_write() {
+        let root = fresh_dir();
+        fs::create_dir_all(root.join("out")).unwrap();
+        let target = root.join("out").join("a.md");
+        fs::write(&target, "protected content").unwrap();
+        let task = "不得在本次任务的任何执行阶段生成 out/a.md。";
+
+        // (1) no deliverable is promised.
+        assert!(
+            crate::runtime_host::delivery::expectations_from_task(task).is_empty(),
+            "a prohibited target must not become a deliverable"
+        );
+        // (2) the path stays in the read-only set the write gate derives from the task.
+        assert!(
+            crate::runtime_host::delivery::read_only_input_paths(task)
+                .contains(&crate::runtime_host::delivery::path_key("out/a.md")),
+            "a prohibited path must stay read-only"
+        );
+        // (3) the real write entry refuses, and the bytes on disk are untouched.
+        let before = fs::read(&target).unwrap();
+        let error = ensure_writable_target(Some(task), root.to_str().unwrap(), &target)
+            .expect_err("the write entry must refuse a prohibited target");
+        assert!(error.contains("tool.read_only_input"), "{error}");
+        assert_eq!(fs::read(&target).unwrap(), before, "the file must be unchanged");
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn an_explicit_save_keeps_its_path_writable() {
         let root = fresh_dir();

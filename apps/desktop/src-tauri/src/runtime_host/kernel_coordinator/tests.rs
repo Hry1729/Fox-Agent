@@ -2234,6 +2234,126 @@ fn a_frame_from_an_earlier_attempt_is_refused_by_attempt_identity() {
 }
 
 #[test]
+fn a_cancellation_racing_a_settled_timeout_never_retries() {
+    // Requirement (2026-10-04): the user's cancellation and an evidence-bearing internal
+    // timeout can land together. Cancellation wins, and it is decided BEFORE the retry is
+    // scheduled (kernel_coordinator.rs checks the run token before apply()).
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, _, run_id) = fixture_with_retry_opt(&clock, "test-prompt", None, false, false, (5, 5));
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+
+    let refused = std::cell::RefCell::new(None);
+    let _ = coordinator.dispatch_batch("worker-batch", "cancel-race", &Allow, |binding, frame, _| {
+        // The user cancels while this round is still in flight, and the worker reports a
+        // perfectly valid settled timeout at the same moment.
+        coordinator.cancel().unwrap();
+        let honest = format!(
+            "kernel.settled_model_failure:{}",
+            json!({"schemaVersion":1,"runId":binding.run_id,"turnId":frame.turn_id,
+                   "checkpointSeq":frame.checkpoint_seq,"category":"model_timeout",
+                   "httpStatus":null,"retryAfterMs":null})
+        );
+        *refused.borrow_mut() =
+            coordinator.retry_settled_model("deliver-batch:worker-batch", "cancel-race", frame.checkpoint_seq, honest).err();
+        Ok(fox_engine_protocol::KernelModelResponse {
+            schema_version: 1,
+            run_id: binding.run_id.clone(),
+            turn_id: frame.turn_id.clone(),
+            batch_id: frame.batch_id.clone(),
+            checkpoint_seq: frame.checkpoint_seq,
+            assistant_message: json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"ignored"}]}),
+        })
+    });
+    let refused = refused.borrow().clone();
+    println!("[cancel-race] retry_refusal={refused:?} state={}", coordinator.snapshot().unwrap().state);
+    assert!(refused.is_some(), "cancellation must refuse the retry");
+    let retries: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.retrying'",
+                [&run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(retries, 0, "a cancelled Run must never schedule a retry");
+    assert_ne!(coordinator.snapshot().unwrap().state, "retry_scheduled");
+}
+
+#[test]
+fn a_backstop_that_arrives_after_the_workers_settlement_cannot_terminate_twice() {
+    // Requirement (2026-10-04): the worker frame and the Host's first-response backstop
+    // can be nearly simultaneous. Here the delivery window deliberately advances the clock
+    // PAST the backstop bound before handing the Host the settled failure, so the backstop
+    // would breach on the very next tick. The settlement must win: exactly one retry, no
+    // termination, and no second settlement.
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let config = worker_configuration();
+    let budgets = TimeBudgets {
+        model_request_ms: 30_000,
+        model_first_response_ms: 1_000,
+        model_idle_ms: 30_000,
+        run_execution_ms: 120_000,
+        ..TimeBudgets::default()
+    };
+    let (db, _, run_id) = fixture_with_budgets_opt(
+        &clock, &config.hash().unwrap(), Some(&config), false, false, (5, 5), true, budgets,
+    );
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    settle_worker_batch(&coordinator);
+
+    coordinator
+        .dispatch_batch("worker-batch", "backstop-race", &Allow, |binding, frame, _| {
+            // The round took longer than the backstop bound before it reported its timeout.
+            clock.advance(2_000);
+            Err(format!(
+                "kernel.settled_model_failure:{}",
+                json!({"schemaVersion":1,"runId":binding.run_id,"turnId":frame.turn_id,
+                       "checkpointSeq":frame.checkpoint_seq,"category":"model_timeout",
+                       "httpStatus":null,"retryAfterMs":null})
+            ))
+        })
+        .unwrap();
+    let after_dispatch = coordinator.snapshot().unwrap();
+    println!(
+        "[backstop-race] state={} turn_attempts={}",
+        after_dispatch.state, after_dispatch.retry.turn_attempts
+    );
+    assert_eq!(after_dispatch.state, "retry_scheduled", "the worker's settlement wins");
+    // The backstop now sees the clock past its bound; a settled attempt must not be
+    // terminated a second time.
+    coordinator.tick().unwrap();
+    let after_tick = coordinator.snapshot().unwrap();
+    assert_eq!(
+        after_tick.state, "retry_scheduled",
+        "a settled attempt must survive the backstop tick"
+    );
+    let terminal: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type IN ('run.failed','run.completed','run.cancelled')",
+                [&run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(terminal, 0, "no terminal event may be written for this attempt");
+    let retries: i64 = db
+        .with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM kernel_events WHERE run_id=?1 AND event_type='run.retrying'",
+                [&run_id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(retries, 1, "exactly one retry was scheduled");
+}
+
+#[test]
 fn settled_batch_retry_never_reexecutes_completed_resources() {
     let clock = TestClock::new(1_000);
     let cancellation = CancellationRegistry::default();
