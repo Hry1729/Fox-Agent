@@ -15,17 +15,30 @@
   --fox-status-yellow: #ffd64b;
   --fox-status-green: #64d3a3;
 }
-.fox-status-matrix.is-running .dmx-distance-ripple-3 {
-  animation: foxStatusRipple 1.16s cubic-bezier(.4,0,.2,1) infinite;
-  animation-delay: calc(-1.16s + var(--dmx-distance) * .148s);
+.fox-status-ring-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  width: 100%;
+  height: 100%;
+  flex: none;
+  opacity: .85;
+}
+.fox-status-ring-dot {
+  min-width: 0;
+  min-height: 0;
+  border-radius: 50%;
+  background: currentColor;
+}
+.fox-status-ring-dot.is-center { visibility: hidden; }
+.fox-status-matrix.is-animated .fox-status-ring-grid {
+  animation: foxStatusRingBreathe 3s ease-in-out infinite;
   will-change: opacity;
 }
-@keyframes foxStatusRipple {
-  0%,100% { opacity: .2; }
-  27% { opacity: 1; }
-  56% { opacity: .48; }
-  82% { opacity: .22; }
+@keyframes foxStatusRingBreathe {
+  0%,100% { opacity: .32; }
+  50% { opacity: .95; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .fox-status-matrix.is-running .dmx-distance-ripple-3 { animation: none !important; }
+  .fox-status-matrix.is-animated .fox-status-ring-grid { animation: none !important; }
 }

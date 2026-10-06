@@ -7,17 +7,19 @@ import { ConversationStatusIcon } from '../src/features/chat/conversation-status
 if (typeof document === 'undefined') GlobalRegistrator.register()
 ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
 
-test('idle reserves no painted icon while running and waiting use nine dots', async () => {
+test('idle reserves no painted icon and every active state keeps the nine-cell square', async () => {
+  const original=window.matchMedia
+  window.matchMedia=(()=>({matches:true,addEventListener:()=>{},removeEventListener:()=>{}})) as any
   const host=document.createElement('div'),root=createRoot(host)
   try {
     await act(async()=>root.render(<ConversationStatusIcon state="idle"/>))
     expect(host.childElementCount).toBe(0)
-    for (const state of ['running','waiting'] as const){
+    for (const state of ['running','waiting','complete'] as const){
       await act(async()=>root.render(<ConversationStatusIcon state={state}/>))
-      expect(host.querySelectorAll('.dmx-dot').length).toBe(9)
+      expect(host.querySelectorAll('.dmx-dot, .fox-status-ring-dot').length).toBe(9)
       expect(host.querySelector('[data-icon-state]')?.getAttribute('data-icon-state')).toBe(state)
     }
-  } finally {await act(async()=>root.unmount())}
+  } finally {await act(async()=>root.unmount());window.matchMedia=original}
 })
 
 test('reduced motion stops Glyph Pulse and retains its nine-dot layout', async () => {
@@ -32,7 +34,7 @@ test('reduced motion stops Glyph Pulse and retains its nine-dot layout', async (
   window.matchMedia=(()=>media) as any
   const host=document.createElement('div'),root=createRoot(host)
   try {
-    await act(async()=>root.render(<ConversationStatusIcon state="complete"/>))
+    await act(async()=>root.render(<ConversationStatusIcon state="running"/>))
     expect(host.querySelectorAll('.dmx-dot').length).toBe(9)
     expect(host.querySelector('.fox-status-matrix')?.classList.contains('is-animated')).toBe(true)
     await act(async()=>{media.matches=true;listeners.forEach(listener=>listener())})
@@ -46,14 +48,14 @@ test('reduced motion stops Glyph Pulse and retains its nine-dot layout', async (
   }
 })
 
-test('late completion icons join Glyph Pulse at the same pattern and brightness', async () => {
+test('late running icons join Glyph Pulse at the same pattern and brightness', async () => {
   const frames=new Map<number,FrameRequestCallback>()
   let sequence=0
   const originalRequest=window.requestAnimationFrame,originalCancel=window.cancelAnimationFrame
   window.requestAnimationFrame=callback=>{const id=++sequence;frames.set(id,callback);return id}
   window.cancelAnimationFrame=id=>{frames.delete(id)}
   const host=document.createElement('div'),root=createRoot(host)
-  const render=(late:boolean)=><><div data-copy="first"><ConversationStatusIcon state="complete"/></div>{late&&<div data-copy="late"><ConversationStatusIcon state="complete"/></div>}</>
+  const render=(late:boolean)=><><div data-copy="first"><ConversationStatusIcon state="running"/></div>{late&&<div data-copy="late"><ConversationStatusIcon state="running"/></div>}</>
   const opacities=(copy:string)=>Array.from(host.querySelectorAll<HTMLElement>(`[data-copy="${copy}"] .dmx-dot`)).map(dot=>dot.style.opacity)
   const advance=async(now:number)=>act(async()=>{const pending=Array.from(frames.values());frames.clear();pending.forEach(callback=>callback(now))})
   try {
