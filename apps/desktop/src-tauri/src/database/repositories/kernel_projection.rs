@@ -76,6 +76,7 @@ pub(super) fn project(
     // The binding above decides whether "本次对话允许" is available, so the
     // declaration is written after it.
     declare_kernel_approval_decisions(tx, run_id)?;
+    expire_inactive_approvals(tx, Some(run_id), now)?;
 
     super::kernel_display::activity(tx, run_id, now)?;
     super::kernel_display::artifacts(tx, run_id, previous_seq, now)?;
@@ -211,6 +212,27 @@ pub(super) fn project(
 
 /// Projection only: hook policy was evaluated from this immutable scope before
 /// dispatch. Deterministic audit keys prevent duplicates on any later commit.
+/// Compatibility tickets do not grant authority once their owning work settled.
+/// Includes replacement tickets whose Kernel approval row has already gone away.
+pub(super) fn expire_inactive_approvals(
+    tx: &Transaction<'_>,
+    run_id: Option<&str>,
+    now: i64,
+) -> rusqlite::Result<usize> {
+    tx.execute(
+        "UPDATE approvals SET status='expired',
+            decision_json=json_object('approved',json('false'),'reason','owner_settled','authority','kernel'),
+            resolved_at=COALESCE(resolved_at,?2)
+         WHERE status='pending' AND EXISTS (
+             SELECT 1 FROM tool_calls t JOIN kernel_runs k ON k.run_id=t.run_id
+             JOIN run_control_bindings b ON b.run_id=t.run_id
+             WHERE t.id=approvals.tool_call_id AND (?1 IS NULL OR t.run_id=?1)
+                 AND k.kernel_mode='authoritative' AND b.authority='authoritative'
+                 AND (k.terminal_written=1 OR t.status IN ('completed','failed','cancelled','interrupted','denied','expired')))",
+        params![run_id, now],
+    )
+}
+
 fn project_hooks(tx: &Transaction<'_>, run_id: &str, now: i64) -> rusqlite::Result<()> {
     let scope: Option<String> = tx
         .query_row(
@@ -766,4 +788,3 @@ mod item5_decision_surface_tests {
         );
     }
 }
-

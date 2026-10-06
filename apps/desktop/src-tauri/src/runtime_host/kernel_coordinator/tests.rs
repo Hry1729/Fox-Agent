@@ -302,6 +302,42 @@ fn fixture_with_budgets_notice_opt(clock: &dyn Clock, prompt_hash: &str, model: 
     (db, root, run_id)
 }
 
+#[test]
+fn inactive_compatibility_approval_is_retired_without_consuming_live_kernel_tickets() {
+    let clock = TestClock::new(1_000);
+    let cancellation = CancellationRegistry::default();
+    let (db, _root, run_id) = fixture(&clock);
+    let coordinator = KernelCoordinator::reopen(&db, &clock, &run_id, &cancellation).unwrap();
+    coordinator.propose_tools("batch", calls(), &Ask).unwrap();
+    db.repair_interrupted_runs().unwrap();
+    assert_eq!(db.kernel_recovery_facts(&run_id).unwrap().unwrap().pending_approvals.len(), 2);
+    for id in ["read-a", "read-b"] {
+        coordinator.resolve_approval(id, kernel::ApprovalDecision::AllowOnce).unwrap();
+    }
+    coordinator.dispatch_tool("read-a", "reader-owner", |binding, effect, token| {
+        let payload: Value = serde_json::from_str(&effect.payload_json).unwrap();
+        Ok((true, crate::resource_gateway::execute(binding, "read", &payload["input"], &token)?))
+    }).unwrap();
+    // Reproduce the observed O12 drift: only an obsolete compatibility ticket
+    // remains after its Kernel approval row disappears and its tool settles.
+    let stale = || db.with_connection(|connection| {
+        connection.execute("DELETE FROM kernel_approvals WHERE run_id=?1 AND tool_call_id='read-a'", [&run_id])?;
+        connection.execute("UPDATE approvals SET status='pending',resolved_at=NULL,decision_json=NULL
+            WHERE tool_call_id='kernel-tool:'||?1||':read-a'", [&run_id])?;
+        Ok(())
+    }).unwrap();
+    let status = || db.with_connection(|connection| connection.query_row(
+        "SELECT status FROM approvals WHERE tool_call_id='kernel-tool:'||?1||':read-a'",
+        [&run_id], |row| row.get::<_,String>(0))).unwrap();
+    stale();
+    db.kernel_project_for_test(&run_id).unwrap();
+    assert_eq!(status(), "expired");
+    stale();
+    db.repair_interrupted_runs().unwrap();
+    assert_eq!(status(), "expired");
+    assert_eq!(std::fs::read_to_string(_root.join("proof.txt")).unwrap(), "durable coordinator 中文 😀");
+}
+
 fn calls() -> Vec<ToolCallRequest> {
     ["read-a", "read-b"]
         .iter()

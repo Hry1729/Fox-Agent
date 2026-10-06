@@ -3,17 +3,17 @@ import { flushSync } from 'react-dom'
 import { desktopClient, desktopErrorDetails, desktopRuntimeAvailable, knowledgeReferenceKey, knowledgeReferenceFromLegacyBinding } from '../api/desktop-client'
 import { applyWorkEvent, mergeConversationDetail } from '../model/runtime-event-reducer'
 import { conversationRunFingerprint, conversationRunIsActive, conversationRunState, snapshotForRun } from '../model/kernel-snapshot'
-import { pendingRuntimeQuestion } from '../model/pending-interactions'
+import { pendingRuntimeApprovals, pendingRuntimeQuestion } from '../model/pending-interactions'
 import { extractedAttachmentContext } from '../model/attachment-content'
 import { resolveConversationAgentId } from '../model/agent-initialization'
 import { withWorkspaceInitializationTimeout } from '../model/workspace-initialization'
 import { useRuntimeEventStream } from './use-runtime-event-stream'
 import { useKernelStateStream } from './use-kernel-state-stream'
+import { useConversationCompletionNotices } from '@/features/chat/use-conversation-completion-notices'
 import {
   EMPTY_CONVERSATION_RUN_OVERLAY,
   applyApprovalToOverlay,
   applyRunEventToOverlay,
-  conversationRunIndicators,
   pruneRunOverlay,
   type ConversationRunIndicator,
   type ConversationRunOverlay,
@@ -55,6 +55,7 @@ interface DesktopConversationState {
    * its own Run instead of by whichever conversation happens to be open.
    */
   runIndicators: ReadonlyMap<string, ConversationRunIndicator>
+  acknowledgeCompletion: (conversationId: string) => void
   runtimeStatus: RuntimeStatus | null
   refreshRuntimeStatus: () => Promise<void>
   detail: ConversationDetail | null
@@ -728,6 +729,7 @@ export function useDesktopConversation(): DesktopConversationState {
         const belongsToActiveConversation = approval.conversationId === activeConversationIdRef.current
           || current.childRuns.some((child) => child.childConversationId === approval.conversationId)
         if (!belongsToActiveConversation) return current
+        if (approval.status === 'pending' && current.approvals.some(item => item.id === approval.id && item.status !== 'pending')) return current
         const exists = current.approvals.some((item) => item.id === approval.id)
         return {
           ...current,
@@ -1218,6 +1220,7 @@ export function useDesktopConversation(): DesktopConversationState {
   }, [detail?.conversation.id, detail?.lastRun?.id, refreshList])
 
   const resolveApproval = useCallback(async (approvalId: string, requestedDecision: ApprovalDecision | boolean) => {
+    const conversationId = activeConversationIdRef.current
     const decision: ApprovalDecision = typeof requestedDecision === 'boolean'
       ? requestedDecision ? 'allow_once' : 'deny'
       : requestedDecision
@@ -1244,10 +1247,10 @@ export function useDesktopConversation(): DesktopConversationState {
     try {
       const resolved = await desktopClient.resolveApproval(approvalId, decision)
       if (!resolved) throw new Error('这个审批已经处理或失效')
-      const conversationId = activeConversationIdRef.current
-      if (conversationId) {
+      if (conversationId && activeConversationIdRef.current === conversationId) {
         void desktopClient.loadConversation(conversationId).then((persisted) => {
-          setDetail((current) => mergeConversationDetail(persisted, current))
+          setDetail((current) => activeConversationIdRef.current === conversationId && current?.conversation.id === conversationId
+            ? mergeConversationDetail(persisted, current) : current)
         }).catch(() => undefined)
       }
       return true
@@ -1255,16 +1258,23 @@ export function useDesktopConversation(): DesktopConversationState {
       // The ticket may have expired while the user was looking at it. Reload
       // authority before restoring a local pending card, otherwise a rejected
       // click can make an expired approval appear actionable forever.
-      const conversationId = activeConversationIdRef.current
+      if (activeConversationIdRef.current !== conversationId) return false
       let refreshed = false
       if (conversationId) {
         try {
           const persisted = await desktopClient.loadConversation(conversationId)
+          if (activeConversationIdRef.current !== conversationId) return false
           setDetail((current) => current?.conversation.id === conversationId ? persisted : current)
           void refreshList()
           refreshed = true
+          if (!pendingRuntimeApprovals(persisted).some(approval => approval.id === approvalId)) {
+            setError(null)
+            setErrorDetails(null)
+            return false
+          }
         } catch { /* Keep the error and the prior card when storage is unavailable. */ }
       }
+      if (activeConversationIdRef.current !== conversationId) return false
       if (!refreshed && previous) {
         setDetail((current) => current ? {
           ...current,
@@ -1377,10 +1387,7 @@ export function useDesktopConversation(): DesktopConversationState {
 
   // Derived once per list/overlay change: each conversation is marked by its own
   // Run, so the sidebar no longer needs to know which conversation is selected.
-  const runIndicators = useMemo(
-    () => conversationRunIndicators(conversations, runOverlay, runOverlaySnapshotAt),
-    [conversations, runOverlay, runOverlaySnapshotAt],
-  )
+  const { runIndicators, acknowledgeCompletion } = useConversationCompletionNotices(conversations, runOverlay, runOverlaySnapshotAt)
 
   return useMemo(() => ({
     enabled: desktopRuntimeAvailable,
@@ -1389,6 +1396,7 @@ export function useDesktopConversation(): DesktopConversationState {
     archivedConversations,
     trashedConversations,
     runIndicators,
+    acknowledgeCompletion,
     runtimeStatus,
     refreshRuntimeStatus,
     detail,
@@ -1446,7 +1454,7 @@ export function useDesktopConversation(): DesktopConversationState {
     refreshLifecycleLists,
     searchConversations,
     setKnowledgeBindings,
-  }), [archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
+  }), [acknowledgeCompletion, archiveConversation, archivedConversations, cancel, conversations, createConversation, createConversationForAgent, createConversationForExpert, defaultAgentId, deleteConversation, deleteGoal, detail, draftAgentId, draftExpertId, draftKnowledgeBases, draftKnowledgeReferences, draftPermissionMode, draftProjectRoot, error, errorDetails, forkConversation, loadEarlierMessages, loadingEarlierMessages, openConversation, purgeConversation, ready, refreshLifecycleLists, refreshRuntimeStatus, removeExpert, renameConversation, rerunFromMessage, resolveApproval, resolveExpertWorkflowGate, resolvePlanRevision, resolveWorkModeConfirmation, restoreConversation, resumeQuestion, runIndicators, runtimeStatus, searchConversations, selectedConversationId, send, selectProject, setKnowledgeReferences, setConversationPinned, setDraftPermission, setGoalRunning, setKnowledgeBindings, trashedConversations, unarchiveConversation])
 }
 
 export function latestMessage(messages: ConversationMessage[], role: ConversationMessage['role']) {

@@ -37,20 +37,30 @@ export function RuntimeApprovalPrompt({
   const repairOverride = isRepairOverrideApproval(request)
   const repairDetails = repairOverrideApprovalDetails(request)
   const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const submittingRef = useRef(false)
   const resolve = async (decision: ApprovalDecision) => {
     if (submittingRef.current) return
     submittingRef.current = true
     setSubmitting(true)
-    const resolved = await resolveAllowedApprovalDecision(approval, decision, onResolve)
-    if (!resolved) {
-      submittingRef.current = false
-      setSubmitting(false)
+    setError(null)
+    let resolved = false
+    try {
+      resolved = await resolveAllowedApprovalDecision(approval, decision, onResolve)
+      if (!resolved) setError('审批未处理成功，请重试。')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '审批未处理成功，请重试。')
+    } finally {
+      if (!resolved) {
+        submittingRef.current = false
+        setSubmitting(false)
+      }
     }
   }
   return (
     <Confirmation approval={{ id: approval.id }} state="approval-requested" className="fox-confirmation fox-runtime-confirmation">
       <ConfirmationRequest>
+        <div className="fox-approval-details-scroll" role="region" aria-label="审批详情" tabIndex={0}>
         <div className="fox-confirmation-body">
           <div className="fox-confirmation-content"><ConfirmationTitle>{presentation.title}</ConfirmationTitle><p><code>{presentation.target}</code></p><small>{presentation.summary}</small></div>
         </div>
@@ -60,7 +70,6 @@ export function RuntimeApprovalPrompt({
             : <p><strong>审批详情不完整。</strong>请先拒绝，并让 Fox 带上根因和关联审查问题重新发起。</p>}
         </div>}
         {presentation.command && <div className="fox-approval-command"><Terminal size={13} /><code>{presentation.command}</code></div>}
-        <div className="fox-approval-details-scroll">
         {presentation.wholeFileReplacement && <div className="fox-approval-scope">
           {presentation.wholeFileReplacement.baselineVersion === 'missing'
             ? <p className="fox-approval-scope-note">目标文件尚不存在，本次将新建该文件并写入以下完整内容。新建不覆盖任何已有内容；写入前仍会校验目标版本，若文件已被并发创建，本次写入会被拒绝而不是覆盖它。</p>
@@ -86,10 +95,11 @@ export function RuntimeApprovalPrompt({
             </div>
           </details>
         </div>}
-        </div>
         {allowedDecisions.includes('allow_conversation') && !presentation.officeReuse && <div className="fox-approval-scope">
           <p className="fox-approval-scope-note">“本次对话内允许”只登记本会话内该确切工具与这一个写入目标的授权（不会扩到目录内的其他文件），可随时撤销。撤销之后，或者会话权限模式发生任何变化（含切到更严格的模式）时，该授权立即失效，后续写入必须重新确认。它只覆盖这一项写入，不包含执行任何脚本或命令。</p>
         </div>}
+        {error && <p role="alert" className="fox-approval-error">{error}</p>}
+        </div>
         <ConfirmationActions className="fox-confirmation-actions">
           <ConfirmationAction variant="ghost" disabled={submitting} onClick={() => void resolve('deny')}>拒绝</ConfirmationAction>
           {allowedDecisions.includes('allow_once') && <ConfirmationAction variant={allowedDecisions.includes('allow_conversation') ? 'outline' : 'default'} disabled={submitting} onClick={() => void resolve('allow_once')}>{submitting ? '处理中…' : '只允许这一次'}</ConfirmationAction>}

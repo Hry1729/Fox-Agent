@@ -4167,6 +4167,17 @@ img[src='/avatars/fox-assistant.png'] {
   pointer-events: auto;
 }
 
+.fox-sidebar-tree-row:hover .fox-sidebar-conversation-status,
+.fox-sidebar-tree-row:focus-within .fox-sidebar-conversation-status,
+.fox-sidebar-tree-row:has(.fox-sidebar-row-actions [data-state='open']) .fox-sidebar-conversation-status {
+  width: 0;
+  min-width: 0;
+  flex-basis: 0;
+  margin-right: 0;
+  overflow: hidden;
+  visibility: hidden;
+}
+
 .fox-collapsible-code-actions button {
   min-width: 28px;
   height: 28px;
@@ -5834,13 +5845,14 @@ img[src='/avatars/fox-assistant.png'] {
   width: 100%;
 }
 
-.fox-runtime-confirmation { min-width: 0; justify-content: flex-start; gap: 10px; }
+.fox-runtime-confirmation { min-width: 0; max-height: min(52vh, 440px); justify-content: flex-start; gap: 10px; }
 .fox-runtime-confirmation .fox-confirmation-body,
 .fox-runtime-confirmation .fox-confirmation-actions { flex: 0 0 auto; }
 .fox-runtime-confirmation .fox-confirmation-content { min-height: 0; gap: 4px; }
 .fox-runtime-confirmation .fox-confirmation-content p { margin: 0; }
 .fox-runtime-confirmation .fox-confirmation-body code { overflow-wrap: anywhere; word-break: normal; }
-.fox-approval-details-scroll { min-height: 0; overflow: auto; scrollbar-width: thin; }
+.fox-approval-details-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.fox-approval-error { color: var(--destructive); font-size: 12px; line-height: 1.6; }
 .fox-approval-scope-note { margin: 0 0 8px; color: var(--fox-text); font-size: 13px; line-height: 1.6; }
 .fox-approval-disclosure { border-top: 1px solid var(--fox-border); padding-block: 8px; }
 .fox-approval-disclosure summary { cursor: pointer; color: var(--fox-text); font-size: 13px; line-height: 1.6; }

@@ -1015,6 +1015,7 @@ impl Database {
         self.with_connection(|connection| {
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            kernel_projection::expire_inactive_approvals(&transaction, None, now)?;
             child_runs::reconcile_terminal_graph_children_in_transaction(&transaction, now)?;
             transaction.execute(
                 "UPDATE runs

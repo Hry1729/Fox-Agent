@@ -29,9 +29,10 @@ export interface UseCyclePhaseOptions {
   active: boolean;
   cycleMsBase: number;
   speed?: number;
+  synchronized?: boolean;
 }
 
-export function useCyclePhase({ active, cycleMsBase, speed = 1 }: UseCyclePhaseOptions): number {
+export function useCyclePhase({ active, cycleMsBase, speed = 1, synchronized = false }: UseCyclePhaseOptions): number {
   const [phase, setPhase] = useState(0);
 
   useEffect(() => {
@@ -43,18 +44,16 @@ export function useCyclePhase({ active, cycleMsBase, speed = 1 }: UseCyclePhaseO
     const safeSpeed = speed > 0 ? speed : 1;
     const raw = cycleMsBase / safeSpeed;
     const cycleMs = raw > 0 && Number.isFinite(raw) ? raw : 1000;
-    const start = performance.now();
-    let rafId = 0;
+    // Opt-in loaders share the document timeline origin and one frame source.
+    const start = synchronized ? 0 : performance.now();
 
     const tick = (now: number) => {
       const elapsed = ((now - start) % cycleMs + cycleMs) % cycleMs;
       setPhase(elapsed / cycleMs);
-      rafId = requestAnimationFrame(tick);
     };
 
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-  }, [active, cycleMsBase, speed]);
+    return subscribeFrame(tick);
+  }, [active, cycleMsBase, speed, synchronized]);
 
   return phase;
 }

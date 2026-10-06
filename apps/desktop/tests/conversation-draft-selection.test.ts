@@ -75,6 +75,10 @@ function harness() {
     // they must exist in the sandbox even though its effects never run.
     EMPTY_CONVERSATION_RUN_OVERLAY,
     conversationRunIndicators,
+    useConversationCompletionNotices: (conversations: any, overlay: any, snapshotAt: number) => ({
+      runIndicators: conversationRunIndicators(conversations, overlay, snapshotAt),
+      acknowledgeCompletion: () => {},
+    }),
     pruneRunOverlay,
     applyRunEventToOverlay,
     applyApprovalToOverlay,

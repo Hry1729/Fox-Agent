@@ -98,20 +98,23 @@ export function applyRunEventToOverlay(
  */
 export function applyApprovalToOverlay(
   overlay: ConversationRunOverlay,
-  approval: { conversationId: string; status: string },
+  approval: { conversationId: string; status: string; runId?: string },
   now: number,
 ): ConversationRunOverlay {
   if (!approval.conversationId) return overlay
   const current = overlay.get(approval.conversationId)
+  if (approval.runId && current?.runId === approval.runId
+    && (current.indicator === null || current.indicator === 'completed')) return overlay
   if (approval.status !== 'pending') {
+    if (approval.runId && current?.runId && approval.runId !== current.runId) return overlay
     if (current?.indicator !== 'approval') return overlay
     const next = new Map(overlay)
     next.delete(approval.conversationId)
     return next
   }
-  if (current?.indicator === 'approval') return overlay
+  if (current?.indicator === 'approval' && (!approval.runId || approval.runId === current.runId)) return overlay
   const next = new Map(overlay)
-  next.set(approval.conversationId, { indicator: 'approval', updatedAt: now, runId: current?.runId })
+  next.set(approval.conversationId, { indicator: 'approval', updatedAt: now, runId: approval.runId ?? current?.runId })
   return next
 }
 
@@ -148,6 +151,27 @@ export function pruneRunOverlay(
  * Effective indicator per conversation: live evidence newer than the newest list
  * snapshot wins, otherwise the authoritative snapshot does.
  */
+export function conversationRunActivity(
+  conversation: ConversationSummary,
+  overlay: ConversationRunOverlay,
+  snapshotAt: number,
+) {
+  const live = overlay.get(conversation.id)
+  const terminal = live?.indicator === null || live?.indicator === 'completed'
+  const terminalForListedRun = terminal && live?.runId && live.runId === conversation.activeRunId
+  const listedRun = conversation.activeRunId ?? conversation.lastRunId ?? null
+  if (live?.indicator === 'approval' && live.runId && !conversation.activeRunId
+    && live.runId === conversation.lastRunId && ['completed', 'failed', 'cancelled', 'interrupted'].includes(conversation.lastRunStatus ?? '')) {
+    return { indicator: conversationRunIndicator(conversation), runId: listedRun }
+  }
+  const terminalForOtherRun = terminal && live?.runId && listedRun && live.runId !== listedRun
+  const useLive = live && !terminalForOtherRun && (live.updatedAt > snapshotAt || terminalForListedRun)
+  return {
+    indicator: useLive ? live.indicator : conversationRunIndicator(conversation),
+    runId: useLive ? live.runId ?? listedRun : listedRun,
+  }
+}
+
 export function conversationRunIndicators(
   conversations: readonly ConversationSummary[],
   overlay: ConversationRunOverlay,
@@ -155,16 +179,7 @@ export function conversationRunIndicators(
 ): ReadonlyMap<string, ConversationRunIndicator> {
   const indicators = new Map<string, ConversationRunIndicator>()
   for (const conversation of conversations) {
-    const live = overlay.get(conversation.id)
-    const terminal = live?.indicator === null || live?.indicator === 'completed'
-    const terminalForListedRun = terminal && live?.runId
-      && live.runId === conversation.activeRunId
-    const listedRun = conversation.activeRunId ?? conversation.lastRunId
-    const terminalForOtherRun = terminal && live?.runId
-      && listedRun && live.runId !== listedRun
-    const indicator = live && !terminalForOtherRun && (live.updatedAt > snapshotAt || terminalForListedRun)
-      ? live.indicator
-      : conversationRunIndicator(conversation)
+    const { indicator } = conversationRunActivity(conversation, overlay, snapshotAt)
     if (indicator) indicators.set(conversation.id, indicator)
   }
   return indicators
