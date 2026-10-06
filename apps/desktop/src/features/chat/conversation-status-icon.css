@@ -10,10 +10,10 @@
 }
 /* boxSize already scales the matrix; flex must preserve its square source grid. */
 .fox-status-matrix .dmx-root { flex: none; }
-/* Shrink each painted dot while preserving its grid cell and center. */
+/* Resize each painted dot while preserving its grid cell and center. */
 .fox-status-matrix .dmx-dot,
 .fox-status-matrix .fox-status-ring-dot {
-  transform: scale(.7);
+  transform: scale(.8333333333);
   transform-origin: center;
 }
 .dark .fox-status-matrix, [data-theme="dark"] .fox-status-matrix {
