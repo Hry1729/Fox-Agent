@@ -4,11 +4,15 @@
 //!
 //! * [`check_text_concat`] — source set / order / headers / body / inter-segment
 //!   blank line / final newline are checked *separately*, and the failure is
-//!   located. A v1 envelope keeps the byte-exact v1 comparison unchanged; only a
-//!   v2 envelope that declares `ComparisonMode::TextSegments` may treat "zero or
-//!   one terminating LF" as equivalent, and when it does the equivalence is
-//!   **recorded** on the passing observation rather than implied. No global
-//!   `trim`, no dropping trailing whitespace, no implicit CRLF→LF conversion.
+//!   located. A v1 envelope keeps the byte-exact v1 comparison **in full**: a
+//!   mismatch stays a definite blocking `failed` and is never downgraded to
+//!   `unverified`. Only a v2 envelope that declares
+//!   `ComparisonMode::TextSegments` may treat "zero or one terminating LF" as
+//!   equivalent, and when it does the equivalence is **recorded** on the passing
+//!   observation rather than implied. Declared EOF / line-ending constraints are
+//!   enforced on every candidate, including one that equals the construction byte
+//!   for byte. No global `trim`, no dropping trailing whitespace, no implicit
+//!   CRLF→LF conversion, and no normalisation that could ever produce a pass.
 //! * [`parse_table`] — the single bounded CSV/TSV parser, i.e. the one definition
 //!   of "record" and "field" for the basic check, the content check and row
 //!   counting (F02). It returns each field's value, its position and whether it
@@ -190,23 +194,42 @@ fn diagnose_concat(
                 observation.actual = Some(window(actual, 0));
                 return observation;
             }
+            let frozen_names = segments
+                .iter()
+                .map(|segment| segment.file_name())
+                .collect::<Vec<_>>();
+            // A CRLF-terminated header is the usual reason a frozen `name\n` is not
+            // found. The byte comparison remains the authority; this only names the
+            // cause and supplies a location instead of a generic "source missing".
+            let crlf_header = segments.iter().find_map(|segment| {
+                let mut needle = segment.file_name().as_bytes().to_vec();
+                needle.extend_from_slice(b"\r\n");
+                actual
+                    .windows(needle.len())
+                    .position(|window| window == needle.as_slice())
+                    .map(|offset| (segment.file_name().to_owned(), offset))
+            });
+            let detail = match &crlf_header {
+                Some((name, _)) => format!(
+                    "候选没有按冻结顺序包含标题行「{name}」+LF；该标题在候选里以 CRLF 结尾，而冻结合并格式要求标题行用 LF。冻结顺序：{}",
+                    frozen_names.join("、")
+                ),
+                None => format!(
+                    "候选没有按冻结顺序包含全部来源标题行；冻结顺序：{}",
+                    frozen_names.join("、")
+                ),
+            };
             let mut observation = failed(
                 rule_id,
                 check,
                 reason_code::TEXT_SOURCE_MISSING,
                 binding,
-                format!(
-                    "候选没有按冻结顺序包含全部来源标题行；冻结顺序：{}",
-                    segments
-                        .iter()
-                        .map(|segment| segment.file_name())
-                        .collect::<Vec<_>>()
-                        .join("、")
-                ),
+                detail,
             );
-            observation.expected =
-                Some(segments.iter().map(|s| s.file_name()).collect::<Vec<_>>().join("\n"));
+            observation.expected = Some(frozen_names.join("\n"));
             observation.actual = Some(window(actual, 0));
+            observation.locator =
+                crlf_header.map(|(_, offset)| RecordLocator::default().at_byte(offset as u64));
             return observation;
         }
         Some(_positions) => {
@@ -271,6 +294,12 @@ fn header_present(actual: &[u8], segment: &TextSegment<'_>) -> bool {
 /// already-failing findings to report, so that a separator repair is not asked to
 /// rewrite a body.
 fn only_separators_differ(actual: &[u8], segments: &[TextSegment<'_>]) -> bool {
+    // An empty selection has no separator structure at all, and without this guard
+    // the loop below would be vacuously true and mislabel the difference as an
+    // inter-segment blank-line problem.
+    if segments.is_empty() {
+        return false;
+    }
     let Some(positions) = header_positions(actual, segments) else {
         return false;
     };
@@ -301,67 +330,38 @@ fn only_separators_differ(actual: &[u8], segments: &[TextSegment<'_>]) -> bool {
 /// Returns exactly one observation. The caller folds it into the existing
 /// `passed` / `failed` / `unverified` vocabulary through
 /// [`verdict_from_observation`]; it does not decide repair.
+///
+/// ## Enforced ordering (every step exists because of a review finding)
+///
+/// 1. **v1 is the old comparison, in full.** A v1 record gets exactly
+///    `bytes == expected`; a mismatch is a definite `failed` and is never
+///    downgraded to `unverified` (F-P02-01). `freeze_concat` refuses any source
+///    containing CR (`delivery_content_requirements.rs:309`), so a frozen v1
+///    merge is CR-free and the comparison is fully decidable.
+/// 2. **Declared constraints hold for every candidate**, including one that
+///    equals the construction byte for byte (F-P02-03, F-P02-04).
+/// 3. **A contradictory contract is reported, not waived.** If the frozen sources
+///    themselves contradict the declared line-ending policy then no candidate can
+///    satisfy both "sources verbatim" and the policy, so the result is
+///    `unverified` with an explicit conflict diagnostic.
+/// 4. **A known failure is never demoted.** The line-ending "cannot decide"
+///    verdict is reported only when the bytes do not already prove a difference
+///    that line endings cannot explain (F-P02-02).
+/// 5. **An equivalence is recorded only when the pass relied on it** (F-P02-06).
 pub(crate) fn check_text_concat(request: &TextConcatRequest<'_>) -> CheckObservation {
     let check = check_name::TEXT_CONCAT;
+    let policy = &request.envelope.policy;
+    let declared = policy.table.line_ending;
 
-    // A contract that froze no source cannot be verified against anything. This
-    // is a contract problem, not a candidate problem, so it is `unverified`.
-    if request.segments.is_empty() {
-        return unverified(
-            request.rule_id,
-            check,
-            reason_code::CONTRACT_UNREADABLE,
-            request.binding,
-            "冻结合并未选择任何来源，来源集合与顺序无法核验".to_owned(),
-        );
-    }
-
+    // The expected merge, byte for byte from the v1 writer. An empty selection is
+    // excluded by the freeze precondition: `delivery_content_requirements.rs:284-285`
+    // keeps the selection count inside `1..=64`, and `:313`/`:316` make
+    // `selected.len() == count`. The genuine "not bound" outcome is the separate
+    // `Contract::Unbound` variant (`:626` → `Unverified`), which must not be
+    // conflated with an empty `Concat`. If an empty selection ever did occur, the
+    // construction yields an empty expectation exactly as the old code did.
     let mut expected = Vec::new();
     expected_concat(request.segments, &mut expected);
-
-    // A byte-identical candidate needs no adjudication at all: the frozen merge
-    // format may legitimately carry whatever endings its own sources had.
-    if request.actual == expected.as_slice() {
-        return passed(request.rule_id, check, request.binding);
-    }
-
-    // The declared line-ending discipline. A candidate whose line endings are not
-    // decided by the declaration cannot be compared faithfully, and the plan
-    // forbids converting silently (R05). This runs *after* the equality check, so
-    // a legitimately byte-equal artifact is never demoted to "unverified", and
-    // *before* any equivalence, so an undeclared CRLF/LF mixture never becomes a
-    // pass.
-    match line_ending_verdict(
-        request.actual,
-        request.envelope.policy.table.line_ending,
-        request.envelope.is_v1(),
-    ) {
-        LineEndingVerdict::Ok => {}
-        LineEndingVerdict::Violation(detail) => {
-            let mut observation = failed(
-                request.rule_id,
-                check,
-                reason_code::TEXT_LINE_ENDING_VIOLATION,
-                request.binding,
-                detail,
-            );
-            observation.expected = Some(format!(
-                "行结束符符合声明 {:?}",
-                request.envelope.policy.table.line_ending
-            ));
-            observation.actual = Some(window(request.actual, 0));
-            return observation;
-        }
-        LineEndingVerdict::Unsupported(detail) => {
-            return unverified(
-                request.rule_id,
-                check,
-                reason_code::TEXT_LINE_ENDING_UNSUPPORTED,
-                request.binding,
-                detail,
-            );
-        }
-    }
 
     let diagnose = |expected: &[u8], actual: &[u8]| {
         diagnose_concat(
@@ -374,52 +374,118 @@ pub(crate) fn check_text_concat(request: &TextConcatRequest<'_>) -> CheckObserva
         )
     };
 
-    // A v1 envelope, or a v2 envelope that did not opt into segment comparison,
-    // keeps the byte-exact comparison that exists today. Only the *diagnosis* is
-    // sharper.
-    if request.envelope.is_v1()
-        || request.envelope.policy.comparison != ComparisonMode::TextSegments
-    {
+    // (1) v1: the old byte comparison, and nothing else.
+    if request.envelope.is_v1() {
+        return if request.actual == expected.as_slice() {
+            passed(request.rule_id, check, request.binding)
+        } else {
+            diagnose(&expected, request.actual)
+        };
+    }
+
+    // (3) A contract that contradicts itself cannot be decided for any candidate.
+    if let LineEndingVerdict::Violation(detail) = line_ending_verdict(&expected, declared) {
+        return unverified(
+            request.rule_id,
+            check,
+            reason_code::TEXT_LINE_ENDING_UNSUPPORTED,
+            request.binding,
+            format!(
+                "冻结合同自相矛盾：合并格式要求来源原样（冻结来源已经{detail}），同时声明行结束符为 {declared:?}；两者无法同时满足。不修改来源、不静默放行，本项按未核验处理"
+            ),
+        );
+    }
+
+    // (2) The declared line-ending policy, enforced on the candidate itself and
+    //     therefore *before* any byte-equality shortcut.
+    let candidate_endings = line_ending_verdict(request.actual, declared);
+    if let LineEndingVerdict::Violation(detail) = &candidate_endings {
+        let mut observation = failed(
+            request.rule_id,
+            check,
+            reason_code::TEXT_LINE_ENDING_VIOLATION,
+            request.binding,
+            format!("候选违反冻结合同声明的行结束符政策：{detail}"),
+        );
+        observation.expected = Some(format!("行结束符符合声明 {declared:?}"));
+        observation.actual = Some(window(request.actual, 0));
+        return observation;
+    }
+
+    // (2) A declared final-newline *requirement* also holds for every candidate,
+    //     so it too runs before the byte-equality shortcut: `expected_concat` never
+    //     adds a trailing LF of its own, so a candidate can match the construction
+    //     exactly and still miss the LF the contract demands.
+    let actual_lf = trailing_lf_count(request.actual);
+    let expected_lf = trailing_lf_count(&expected);
+    if policy.eof == EofPolicy::RequireTrailingLf && actual_lf != 1 {
+        let mut observation = failed(
+            request.rule_id,
+            check,
+            reason_code::TEXT_EOF_MISMATCH,
+            request.binding,
+            format!("冻结合同要求恰好一个终止 LF，候选有 {actual_lf} 个"),
+        );
+        observation.expected = Some("末尾 LF 1 个".to_owned());
+        observation.actual = Some(format!("末尾 LF {actual_lf} 个"));
+        return observation;
+    }
+
+    // (4) Byte-identical: nothing was tolerated, so nothing is recorded.
+    if request.actual == expected.as_slice() {
+        return passed(request.rule_id, check, request.binding);
+    }
+
+    // (4) Line endings the declaration does not decide. Reported as undecidable
+    //     *only* when nothing else is already wrong: `differs_beyond_line_endings`
+    //     is used here to choose between `failed` and `unverified`, and can never
+    //     produce a pass.
+    if let LineEndingVerdict::Unsupported(detail) = candidate_endings {
+        if !differs_beyond_line_endings(&expected, request.actual) {
+            return unverified(
+                request.rule_id,
+                check,
+                reason_code::TEXT_LINE_ENDING_UNSUPPORTED,
+                request.binding,
+                detail,
+            );
+        }
+        // Otherwise fall through: the bytes prove a difference that line endings
+        // cannot explain, and that definite failure must keep blocking.
+    }
+
+    // A v2 envelope that did not opt into segment comparison keeps the strict
+    // comparison; only the *diagnosis* is sharper.
+    if policy.comparison != ComparisonMode::TextSegments {
         return diagnose(&expected, request.actual);
     }
 
-    let actual_lf = trailing_lf_count(request.actual);
-    let expected_lf = trailing_lf_count(&expected);
-    // The one tolerated equivalence is narrow: at most one terminating LF on each
-    // side. Two or more is an extra blank line, which is never equivalent.
+    // (5) The one tolerated equivalence: at most one terminating LF on each side.
+    //     Two or more is an extra blank line, which is never equivalent.
     let equivalence_available = actual_lf <= 1 && expected_lf <= 1;
     let bodies_equal = strip_one_trailing_lf(request.actual) == strip_one_trailing_lf(&expected);
 
-    let allow = match request.envelope.policy.eof {
-        EofPolicy::ByteExact | EofPolicy::SourceVerbatim => false,
-        EofPolicy::AllowSingleTrailingLf => equivalence_available && bodies_equal,
-        EofPolicy::RequireTrailingLf => {
-            if actual_lf != 1 {
-                let mut observation = failed(
-                    request.rule_id,
-                    check,
-                    reason_code::TEXT_EOF_MISMATCH,
-                    request.binding,
-                    format!("冻结合同要求恰好一个终止 LF，候选有 {actual_lf} 个"),
-                );
-                observation.expected = Some("末尾 LF 1 个".to_owned());
-                observation.actual = Some(format!("末尾 LF {actual_lf} 个"));
-                return observation;
-            }
-            equivalence_available && bodies_equal
+    match policy.eof {
+        EofPolicy::ByteExact | EofPolicy::SourceVerbatim => {}
+        EofPolicy::AllowSingleTrailingLf if equivalence_available && bodies_equal => {
+            return passed_with_equivalence(
+                request.rule_id,
+                check,
+                request.binding,
+                equivalence::OPTIONAL_FINAL_LF,
+                format!(
+                    "正文与段间结构与冻结合并一致；按冻结合同允许的等价，末尾终止 LF 的有／无视为等价（候选 {actual_lf} 个，期望 {expected_lf} 个）"
+                ),
+            );
         }
-    };
-
-    if allow {
-        return passed_with_equivalence(
-            request.rule_id,
-            check,
-            request.binding,
-            equivalence::OPTIONAL_FINAL_LF,
-            format!(
-                "正文与段间结构与冻结合并一致；按冻结合同允许的等价，末尾终止 LF 的有／无视为等价（候选 {actual_lf} 个，期望 {expected_lf} 个）"
-            ),
-        );
+        // The required LF was already enforced above, so this pass rests on the
+        // contract's own requirement rather than on a tolerated difference.
+        // Recording `optionalFinalLf` here would mislabel a satisfied hard
+        // requirement as an optional equivalence (F-P02-06).
+        EofPolicy::RequireTrailingLf if equivalence_available && bodies_equal => {
+            return passed(request.rule_id, check, request.binding);
+        }
+        EofPolicy::AllowSingleTrailingLf | EofPolicy::RequireTrailingLf => {}
     }
 
     diagnose(&expected, request.actual)
@@ -438,11 +504,18 @@ enum LineEndingVerdict {
     Unsupported(String),
 }
 
-/// Classify the candidate's line endings against the declared policy.
+/// Classify bytes against the declared line-ending policy.
 ///
-/// A v1 envelope declared nothing, so it is read with the v1 tolerance: LF and
-/// CRLF are both accepted and a lone CR is still undecidable.
-fn line_ending_verdict(bytes: &[u8], declared: LineEnding, is_v1: bool) -> LineEndingVerdict {
+/// * `Violation` — the bytes contradict a policy the frozen contract actually
+///   declared. A declared policy is enforced.
+/// * `Unsupported` — nothing the contract declared decides these bytes, so no
+///   faithful comparison exists without converting them, which the plan forbids.
+///   Reported as `unverified`, never as a pass and never as a content error.
+///
+/// A v1 envelope is handled before this is ever called, so this only sees v2.
+/// `LineEnding::Any` permits a byte *kind* to appear; it does not declare that two
+/// different kinds are equal, so a CRLF/LF difference stays undecidable.
+fn line_ending_verdict(bytes: &[u8], declared: LineEnding) -> LineEndingVerdict {
     let mut has_crlf = false;
     let mut has_bare_lf = false;
     let mut lone_cr: Option<usize> = None;
@@ -469,46 +542,67 @@ fn line_ending_verdict(bytes: &[u8], declared: LineEnding, is_v1: bool) -> LineE
         // means a line break would be exactly the silent conversion the plan
         // forbids.
         return LineEndingVerdict::Unsupported(format!(
-            "候选在字节 {offset} 存在孤立的 CR（既不与 LF 组成 CRLF，也不被任何行结束声明覆盖）；不做隐式转换，本项按未核验处理"
+            "字节 {offset} 存在孤立的 CR（既不与 LF 组成 CRLF，也不被任何行结束声明覆盖）；不做隐式转换，本项按未核验处理"
         ));
     }
 
-    // A v1 envelope declared no line-ending policy at all, so it stands in
-    // exactly the same position as an explicit `Any`: nothing decides these
-    // bytes. Refusing to convert and refusing to call it wrong are both required;
-    // the honest answer is "unverified".
-    if is_v1 || declared == LineEnding::Any {
-        if has_crlf {
-            return LineEndingVerdict::Unsupported(
-                "冻结合同没有声明行结束符约定（或声明为任意），候选含 CRLF 而冻结合并的分隔符是 LF；不做隐式转换，本项按未核验处理"
-                    .to_owned(),
-            );
-        }
-        return LineEndingVerdict::Ok;
-    }
-
     match declared {
-        // Handled by the branch above; kept so the match stays exhaustive.
-        LineEnding::Any => LineEndingVerdict::Ok,
+        LineEnding::Any => {
+            if has_crlf {
+                LineEndingVerdict::Unsupported(
+                    "冻结合同声明行结束符为任意：CRLF 允许出现，但“允许出现某种字节”不等于“两种字节相等”，在不得转换字节的前提下无法判定相等"
+                        .to_owned(),
+                )
+            } else {
+                LineEndingVerdict::Ok
+            }
+        }
         LineEnding::Lf => {
             if has_crlf {
-                LineEndingVerdict::Violation(
-                    "冻结合同声明行结束符为 LF，候选含 CRLF".to_owned(),
-                )
+                LineEndingVerdict::Violation("含 CRLF".to_owned())
             } else {
                 LineEndingVerdict::Ok
             }
         }
         LineEnding::Crlf => {
             if has_bare_lf {
-                LineEndingVerdict::Violation(
-                    "冻结合同声明行结束符为 CRLF，候选含单独的 LF".to_owned(),
-                )
+                LineEndingVerdict::Violation("含单独的 LF".to_owned())
             } else {
                 LineEndingVerdict::Ok
             }
         }
     }
+}
+
+/// Line endings mapped to a single LF so that a difference which is *only* the
+/// LF / CRLF / CR convention can be recognised.
+///
+/// **Invariant**: this exists solely to choose between `failed` and `unverified`.
+/// It can never produce a pass — a pass comes either from a byte-equal comparison
+/// or from an equivalence the frozen contract explicitly declares. The artifact is
+/// never rewritten or "fixed" from this result; the plan forbids normalising it.
+fn normalize_line_endings(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' => {
+                if bytes.get(index + 1) == Some(&b'\n') {
+                    index += 1;
+                }
+                out.push(b'\n');
+            }
+            byte => out.push(byte),
+        }
+        index += 1;
+    }
+    out
+}
+
+/// True when the two sides differ in something a line-ending convention cannot
+/// explain, i.e. the difference is a definite content difference.
+fn differs_beyond_line_endings(left: &[u8], right: &[u8]) -> bool {
+    normalize_line_endings(left) != normalize_line_endings(right)
 }
 
 // ---------------------------------------------------------------------------
@@ -1206,17 +1300,22 @@ mod tests {
         );
     }
 
-    #[test]
-    fn r04_a_contract_without_sources_is_unverified_not_failed() {
-        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
-        let observation = check(&envelope, &[], b"anything");
-        assert_eq!(observation.state, CheckState::Unverified);
-        assert_eq!(
-            observation.reason_code.as_deref(),
-            Some(reason_code::CONTRACT_UNREADABLE)
-        );
-        assert!(!observation.blocking);
-    }
+    // 期望变更记录（保留原样本，不静默修改）：
+    //
+    // 原测试 `r04_a_contract_without_sources_is_unverified_not_failed` 断言
+    // `check(&envelope, &[], b"anything")` → `Unverified` / `CONTRACT_UNREADABLE`。
+    // 该期望是我此前自行发明的第三种语义，**没有证据支持**，且偏离了旧 checker 对
+    // 空期望的行为（旧 `Contract::Concat` 只做 `bytes == expected`）。
+    //
+    // 证据（本轮核对）：`delivery_content_requirements.rs:284-285` 把选择数量限制在
+    // `1..=64`，`:313` 保证 `sources.len() >= count`、`:316` 取前 `count` 个，故
+    // `selected.len() == count >= 1`，合法冻结的 `Concat` 不可能没有来源；真正的
+    // "未绑定"是**另一个契约变体** `Contract::Unbound`（`:626` → `Unverified`），
+    // 不能与空 `Concat` 混同。
+    //
+    // 该边界现由 `empty_selection_mirrors_the_old_byte_comparison` 唯一权威地固定，
+    // 它同时覆盖空候选（`Passed`，与旧字节比较一致）与非空候选（`Failed`，且不得
+    // 误报为分隔/顺序问题）。
 
     #[test]
     fn r04_chinese_names_and_size_ties_are_accepted() {
@@ -1527,5 +1626,205 @@ mod tests {
         };
         let error = parse_table(b"a,b,c\nd,e,f\n", &TableDialect::default(), &small).expect_err("bytes");
         assert_eq!(error.limit, Some(LimitKind::Bytes));
+    }
+
+    // -----------------------------------------------------------------------
+    // F-P02 定点反例（先于修正写出，用于在旧 HEAD 暴露控制流顺序缺陷）
+    //
+    // 编号对应 G-P02-review.md 的发现编号，便于独立复验逐条对照。这些期望不是
+    // 从报告照抄的：每条都先自己推导旧 `Contract::Concat` / 冻结前置条件的实际
+    // 行为，再写成断言。
+    // -----------------------------------------------------------------------
+
+    /// **F-P02-01**：v1 记录 + 含 CR 的字节不等候选，不得由确定失败降级为未核验。
+    ///
+    /// 依据（冻结前置条件，非推测）：`freeze_concat` 在
+    /// `delivery_content_requirements.rs:309` 直接拒绝任何 `body.contains('\r')`
+    /// 的来源，所以冻结来源永不含 CR，而**候选**可以。旧 `Concat` 分支只做
+    /// `bytes == expected`，不等即 `Unmet` → 确定的阻断失败。
+    ///
+    /// 同时覆盖 v1/ByteExact 的相同字节与各类不同字节：尾部 LF、CRLF、孤立 CR、
+    /// 真正文变化。
+    #[test]
+    fn f_p02_01_v1_keeps_a_total_byte_comparison() {
+        let segments = [segment("in/a.txt", b"alpha")];
+        let v1 = RuleEnvelope::v1();
+
+        assert_eq!(
+            check(&v1, &segments, b"a.txt\nalpha").state,
+            CheckState::Passed,
+            "the byte-identical candidate still passes"
+        );
+
+        for actual in [
+            &b"a.txt\nalpha\n"[..], // one extra trailing LF
+            &b"a.txt\r\nalpha"[..], // CRLF
+            &b"a.txt\ralpha"[..],   // lone CR
+            &b"a.txt\nalphX"[..],   // a real body change
+        ] {
+            let observation = check(&v1, &segments, actual);
+            assert_eq!(
+                observation.state,
+                CheckState::Failed,
+                "v1 must keep the old definite verdict for {actual:?}"
+            );
+            assert!(
+                observation.blocking,
+                "a v1 mismatch must block, not merely report: {actual:?}"
+            );
+        }
+    }
+
+    /// **F-P02-02 / F-P02-08**：行结束裁决不得抢先返回而吞掉已知正文错误。
+    ///
+    /// 反例是**可达**的：冻结来源 CR-free（同上 :309），候选含 CRLF。旧实现在
+    /// 行结束裁决处直接 `unverified`，后面的正文诊断根本没跑。
+    ///
+    /// 修正后：仅当差异**确实只限行结束**时才允许未核验；否则已知正文差异仍然
+    /// 阻断并保留定位。
+    #[test]
+    fn f_p02_02_a_known_body_error_behind_crlf_still_blocks() {
+        let segments = [segment("in/a.txt", b"alpha")];
+        // Default dialect declares `line_ending: Any`.
+        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
+
+        let body_error = check(&envelope, &segments, b"a.txt\r\nalphX");
+        assert_eq!(
+            body_error.state,
+            CheckState::Failed,
+            "a known body difference must not be demoted to unverified"
+        );
+        assert!(body_error.blocking, "and it must block");
+        assert_ne!(
+            body_error.reason_code.as_deref(),
+            Some(reason_code::TEXT_LINE_ENDING_UNSUPPORTED),
+            "the line-ending code must not stand in for a content finding"
+        );
+        assert!(
+            body_error.locator.is_some() || body_error.actual.is_some(),
+            "the difference must stay locatable"
+        );
+
+        // The genuinely line-ending-only case stays undecidable: `Any` permits the
+        // byte kind, it does not grant byte equality.
+        let only_endings = check(&envelope, &segments, b"a.txt\r\nalpha");
+        assert_eq!(only_endings.state, CheckState::Unverified);
+        assert_eq!(
+            only_endings.reason_code.as_deref(),
+            Some(reason_code::TEXT_LINE_ENDING_UNSUPPORTED)
+        );
+        assert!(!only_endings.blocking);
+    }
+
+    /// **F-P02-03**：`RequireTrailingLf` 不得被"字节相同"早退绕过。
+    ///
+    /// 反例可达的原因在 `expected_concat`：最后一段**不补**终止 LF，所以来源无
+    /// LF 时构造也没有。候选因此可以与构造逐字节相同，却违反"恰好一个终止 LF"。
+    #[test]
+    fn f_p02_03_require_trailing_lf_survives_byte_equality() {
+        let segments = [segment("in/a.txt", b"alpha")];
+        let envelope = v2_text(EofPolicy::RequireTrailingLf);
+
+        let missing = check(&envelope, &segments, b"a.txt\nalpha");
+        assert_eq!(
+            missing.state,
+            CheckState::Failed,
+            "the declared requirement must be enforced even when the bytes match the construction"
+        );
+        assert_eq!(
+            missing.reason_code.as_deref(),
+            Some(reason_code::TEXT_EOF_MISMATCH)
+        );
+        assert!(missing.blocking);
+    }
+
+    /// **F-P02-04**：明确声明的行结束要求不得被"等于构造"豁免。
+    ///
+    /// 反例：冻结来源本身是 CRLF，于是构造（=来源原样）也含 CRLF；合同又声明
+    /// `Lf`。候选与构造逐字节相同 → 旧实现 `Passed`。合同同时要求"来源原样"和
+    /// 一个与来源不符的换行约束，属**自相矛盾**，必须明确报告，既不静默放行也
+    /// 不丢弃来源。
+    #[test]
+    fn f_p02_04_a_contradictory_contract_is_reported_not_waived() {
+        let segments = [segment("in/a.txt", b"alpha\r\n")];
+        let mut envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
+        envelope.policy.table.line_ending = LineEnding::Lf;
+
+        let actual = b"a.txt\nalpha\r\n"; // byte-identical to `expected_concat`
+        let mut expected = Vec::new();
+        expected_concat(&segments, &mut expected);
+        assert_eq!(actual.as_slice(), expected.as_slice(), "the counterexample must be byte-identical");
+
+        let observation = check(&envelope, &segments, actual);
+        assert_ne!(
+            observation.state,
+            CheckState::Passed,
+            "a declared policy must not be waived by byte equality"
+        );
+        assert_eq!(observation.state, CheckState::Unverified);
+        assert_eq!(
+            observation.reason_code.as_deref(),
+            Some(reason_code::TEXT_LINE_ENDING_UNSUPPORTED)
+        );
+        assert!(!observation.blocking, "a contradictory contract is not a candidate error");
+        assert!(
+            observation
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("矛盾")),
+            "the conflict must be named: {:?}",
+            observation.detail
+        );
+    }
+
+    /// **F-P02-06**：`RequireTrailingLf` 的通过不得记成 `optionalFinalLf`。
+    ///
+    /// G 报告原示例（来源自带 LF）实测是字节相同，走不到所谓"不等路径"；这里用
+    /// **可达**反例：来源无终止 LF、候选恰好 1 个。
+    #[test]
+    fn f_p02_06_require_trailing_lf_never_claims_the_optional_equivalence() {
+        let segments = [segment("in/a.txt", b"alpha")]; // no terminating LF in the source
+        let envelope = v2_text(EofPolicy::RequireTrailingLf);
+
+        let satisfied = check(&envelope, &segments, b"a.txt\nalpha\n");
+        assert_eq!(satisfied.state, CheckState::Passed);
+        assert!(
+            !satisfied.blocking,
+            "satisfying a declared requirement never arms a repair"
+        );
+        assert_eq!(
+            satisfied.equivalence, None,
+            "a satisfied hard requirement is not an optional tolerance"
+        );
+    }
+
+    /// 空来源 / 空候选边界。
+    ///
+    /// **证据（说明为何这是防御分支而非可达状态）**：选择数量被限制为 `1..=64`
+    /// （`delivery_content_requirements.rs:284-285` 的 `.filter(|n| *n > 0 && *n <= 64)`），
+    /// 且 `:313` 保证 `sources.len() >= count`、`:316` 取前 `count` 个，所以
+    /// `selected.len() == count >= 1`——**合法冻结的 `Concat` 不可能没有来源**。
+    /// 真正的"未绑定"是**另一个契约变体** `Contract::Unbound`（`:626` →
+    /// `Unverified(reason)`），不能与空 `Concat` 混同。
+    ///
+    /// 万一出现空选择，行为与旧 checker 一致：期望为空字节串，只有空候选通过。
+    #[test]
+    fn empty_selection_mirrors_the_old_byte_comparison() {
+        let envelope = v2_text(EofPolicy::AllowSingleTrailingLf);
+
+        assert_eq!(
+            check(&envelope, &[], b"").state,
+            CheckState::Passed,
+            "an empty expectation is satisfied only by an empty candidate, as before"
+        );
+
+        let non_empty = check(&envelope, &[], b"anything");
+        assert_eq!(non_empty.state, CheckState::Failed);
+        assert!(non_empty.blocking);
+        assert_eq!(
+            non_empty.reason_code.as_deref(),
+            Some(reason_code::TEXT_CONTENT_MISMATCH),
+            "an empty selection must not be reported as a separator or ordering problem"
+        );
     }
 }
