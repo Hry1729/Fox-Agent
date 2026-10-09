@@ -8,7 +8,7 @@
 
 | 文件 | 变更 |
 |---|---|
-| `apps/desktop/src-tauri/src/runtime_host/delivery_checks_v2/text_csv.rs` | 由 C0 占位改为**真实实现**：`check_text_concat`、`parse_table`、`check_table_columns`；随后按 G 审查修正（`f61a288`，见 §4.1）、按 G 独立复验修正 R1/R2/R3（`8b4b063`，见 §4.2）、按 G 第二轮复验修正 R7（`05a92a5`，见 §4.3）。**本文件共 40 项测试** |
+| `apps/desktop/src-tauri/src/runtime_host/delivery_checks_v2/text_csv.rs` | 由 C0 占位改为**真实实现**：`check_text_concat`、`parse_table`、`check_table_columns`；随后按 G 审查修正（`f61a288`，见 §4.1）、按 G 独立复验修正 R1/R2/R3（`8b4b063`，见 §4.2）、按 G 第二轮复验修正 R7（`05a92a5`，见 §4.3）、按 G 第三轮复验修正 R8（`b01de0e`，见 §4.4）。**本文件共 41 项测试** |
 | `apps/desktop/src-tauri/src/runtime_host/delivery_checks_v2/mod.rs` | 接口扩展 3 处（见 §2）：`equivalence` 字段与 `passed_with_equivalence`；2 个行结束 reason code；`TableError.limit` 与 `TableError::budget` |
 
 **未变更**：`delivery.rs`、`delivery_content_requirements.rs`、`data_compute.rs`、`Cargo.*`、数据库、前端。本模块**尚未接入任何生产路径**，因此不可能因为"忘记接线"而改变现有运行行为，也不可能因为占位而误放行。
@@ -92,7 +92,7 @@
 
 **期望变更记录（保留原样本，不静默修改）**
 - **移除** `r04_a_contract_without_sources_is_unverified_not_failed`。其原断言为：`check(&envelope, &[], b"anything")` → `Unverified` / `CONTRACT_UNREADABLE`。该期望是我此前**自行发明、无证据支持**的第三种语义，且偏离旧 checker 对空期望的行为。替代权威：`empty_selection_mirrors_the_old_byte_comparison`。证据：`delivery_content_requirements.rs:284-285`（选择数量被限制在 `1..=64`）、`:313`、`:316`（`selected.len() == count`）、`:626`（真正的"未绑定"是**独立契约变体** `Contract::Unbound` → `Unverified`，不能与空 `Concat` 混同）。原断言的文本与理由已**就地保留在源码注释**中，可审计。
-- **F-P02-11 更正**：本模块过滤器总数在 `f61a288` 时为 **47** = `mod.rs` 14 + `text_csv.rs` 30 + 3 个叶子占位；`8b4b063` 后为 **53** = 14 + **36** + 3；`05a92a5`（见 §4.3）后为 **57** = 14 + **40** + 3。此前交付单写"42 = 本次文本模块新增"**不准确**，已在此更正。
+- **F-P02-11 更正**：本模块过滤器总数在 `f61a288` 时为 **47** = `mod.rs` 14 + `text_csv.rs` 30 + 3 个叶子占位；`8b4b063` 后为 **53** = 14 + **36** + 3；`05a92a5` 后为 **57** = 14 + **40** + 3；`b01de0e`（见 §4.4）后为 **58** = 14 + **41** + 3。此前交付单写"42 = 本次文本模块新增"**不准确**，已在此更正。
 
 ### 4.3 R7 处置（依据 `G-P02-text-reverify-2-result.md`，修正提交 `05a92a5`）
 
@@ -115,6 +115,34 @@
 **修前/修后同一批用例**：`conflict+requireLf/zero-lf` 由 `Unverified, blocking=false` 变为 `Failed, blocking=true`；同组 `two-lf` 由 `content_mismatch` 变为准确的 `eof_mismatch`；`crlfConflict+requireLf/{lf,crlf}-source/zero-lf` 同样由 `Unverified` 变为 `Failed`。
 
 **新增测试**：30 行"强制/可选 EOF"交叉矩阵（来源末尾 0/1 LF × 候选 0/1/2 LF × 无冲突/来源冲突/构造冲突 × Require/Allow），**每行写明预期三态、blocking 与 equivalence，全部执行后一次性汇总**（首条不符不遮蔽其余，并以 `executed == cases.len()` 防静默跳过）；另加"缺失侧"（码/个数/定位/冲突说明）、"满足侧 LF 结尾"与"`RequireTrailingLf` 不是 0/1 任选容忍"三个定点测试。
+
+### 4.4 R8 处置（依据 `G-P02-text-reverify-3-result.md`，修正提交 `b01de0e`）
+
+**缺陷**：冻结来源正文**本身含 CRLF**（逐字节原样保留、未发生任何转换）时，只要候选与构造之差**恰好是合同自己声明/要求的那个末尾 LF**，判定就返回 `Unverified`，**误拒合规产物**（误拒类：不阻断、也不 Passed，不构成误放行）。
+
+**根因**：声明 EOF 等价的**通过路径位于**"候选含 CRLF → 未决约定"裁决**之后**，因此对任何正文含 CRLF 的产物都不可达 —— 即使两侧在那里逐字节相同、根本没发生换行转换。判定键错在"候选是否含某种字节"，而非"两侧是否真的在行结束约定上不同"。
+
+**修法**（与 G 的示意方向一致）：把"授权 EOF 差额"的判定移到该裁决**之前**，并**只用原始字节**：
+- 两侧在扣除被声明/要求的那个末尾 LF 后**逐字节相等** → 按合同通过：`AllowSingleTrailingLf` → `Passed` 并记 `optionalFinalLf`；`RequireTrailingLf` → 普通 `Passed`（该 LF 是**被要求**的、不是被容忍的，故不记等价）；
+- 因此**通过路径不经过** `normalize_line_endings`；
+- 仅在**归一化后**才相等的真实 LF↔CRLF 替换仍走未核验；真正文改动与多出的两个 LF 仍失败。
+
+原位于函数尾部的等价分支随之删除（已冗余），函数文档的顺序清单同步更新。**未改**：v1 语义、`ByteExact`/`SourceVerbatim` 严格性、显式行结束政策检查、合同冲突分支、R7 强制 EOF 检查的相对次序全部保持，故 R1/R2/R3/R7 不会回退；未新增转换等价；`expected_concat` 字节未动。
+
+**修前/修后（独占 target harness）**
+
+| 档 | 修前 | 修后 |
+|---|---|---|
+| 模块基线 | 57 / 0 | **58 / 0** |
+| + 旧 G18 | 75 / 0 | **76 / 0** |
+| + G26 | 83 / 0 | **84 / 0** |
+| + G26 + G3 六项 | **87 / 2**（失败＝G3 的 R8-a/R8-b） | **90 / 0** |
+
+**定点探针对照（证明只放宽了 R8、未收紧或放宽别的）**：`midCRLF/allow/realConversion` 修前修后均为 `Failed/content_mismatch`（**既有行为，非本卡引入**）；`midCRLF/{allow,require}/plus1LF` 由 `Unverified` 变为 `Passed`。日志 `A-P02-logs/19-…`（修前）与 `20-…`（修后）。
+
+**新增回归**：10 行 R8 表（正文中段 CRLF 两侧原样相同、纯 LF 对照、Require/Allow、授权 +1 LF、逐字节相同候选、多两个 LF、真正文改动、以及两个方向的真实 LF↔CRLF 替换），每行写明预期三态/blocking/equivalence/（失败时）码，全部执行后一次性汇总。其中 CRLF→LF 方向那行的期望**经探针实测校正**为既有行为。
+
+**登记为开放（不属本卡）**：CRLF→LF 方向的正文替换为 `Failed`、而反向为 `Unverified` 的**不对称**属既有行为，需"被声明的转换等价"（F-P02-08 剩余）才能统一；本卡未改。
 
 ### 4.2 R1/R2/R3/R6 处置（依据 `G-P02-text-reverify-result.md`，修正提交 `8b4b063`）
 
@@ -183,7 +211,8 @@
 | C0 基点 | `6e0bb5d` |
 | 构建/测试命令 | `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`；`cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml delivery_checks_v2` |
 | 共用 target | `CARGO_TARGET_DIR=D:\python\projects\Fox\Fox\apps\desktop\src-tauri\target` |
-| 本模块测试（`05a92a5`） | 独占 target harness：模块基线 **57 / 0**（`text_csv.rs` **40**、`mod.rs` 14、叶子占位 3）；+ 旧 G18 = **75 / 0**；+ combined G26 = **83 / 0**。**完整 crate 的独立构建本轮未运行**（BLOCKED，见本节 E2 行） |
+| 本模块测试（`b01de0e`） | 独占 target harness 四档：模块基线 **58 / 0**；+ 旧 G18 = **76 / 0**；+ G26 = **84 / 0**；+ G26 + G3 六项 = **90 / 0**（G 的 18、8、6 全绿）。**完整 crate 的独立构建本轮未运行**（BLOCKED，见本节 E2 行） |
+| R8 定点探针 | `19-probe-r8-prefix.log`（修前）与 `20-probe-r8-postfix.log`（修后）：证明 `midCRLF/allow/realConversion` 修前修后同为 `Failed/content_mismatch`，而两条 R8 用例由 `Unverified` 变为 `Passed` |
 | 修正提交 | `f61a288`（F-P02 文本路径）、`8b4b063`（R1/R2/R3/R6），均在 `r16/a-contract` |
 | 精简 harness 证据（独占 target） | **71 passed / 0 failed** = 模块 53 + G overlay 18（G 的 18 条全部通过，含此前失败的 R1/R2 两条）。harness 位于仓库之外 `D:\python\projects\Fox\a-p02-scratch\a-harness`，独占 target `D:\python\projects\Fox\a-p02-harness-target`。经核验：其五个被测文件与 G 复制件**去 CR 后逐字节一致**（G 的副本是 CRLF，哈希对换行敏感），overlay 由 `G-P02-logs/g-overlay.patch` 原样追加 526 行、未改 patch |
 | 正式 crate 状态（E2） | **本轮未运行正式 crate，也不以共享 target 结果替代验收**（按章程 §14/§15）。完整 crate 的**独立**构建仍 **BLOCKED**（E2，本轮未重试、未处理 ACL、未改 build.rs、未扩权限）。上一轮曾在共享 target 下观察到 `cargo check` 通过，那是**辅助证据而非门槛**，本轮刻意不再重复该做法 |
